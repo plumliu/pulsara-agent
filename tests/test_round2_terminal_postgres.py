@@ -6,6 +6,7 @@ from time import monotonic
 from uuid import uuid4
 
 import psycopg
+from psycopg.types.json import Jsonb
 import pytest
 
 from pulsara_agent.conversation_kernel.contracts import InlineContent
@@ -17,6 +18,7 @@ from pulsara_agent.model_input.contracts import STRUCTURED_MODEL_INPUT_LIMITS
 from pulsara_agent.model_input.lowering import lower_canonical_item
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.llm.model_connections import model_call_binding_to_dict
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
@@ -36,6 +38,12 @@ from pulsara_agent.ports.terminal_observation import (
     TerminalObservationKind,
 )
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
+)
 
 
 pytestmark = pytest.mark.postgres
@@ -102,7 +110,8 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -110,7 +119,8 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         deadline_monotonic=monotonic() + 30,
     )
     turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -118,6 +128,7 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"human prompt"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -201,7 +212,8 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -209,7 +221,8 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         deadline_monotonic=monotonic() + 30,
     )
     origin_turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=origin_turn_id,
@@ -217,6 +230,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"origin"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -294,7 +308,8 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, initial_entry_id, terminal_reason, terminal_at,
+                    model_call_binding, status, initial_entry_id,
+                    terminal_reason, terminal_at,
                     permission_snapshot_id, requested_permission_mode,
                     effective_permission_mode, permission_admission_source,
                     permission_overlay, permission_plan_context_ordinal,
@@ -303,7 +318,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                     permission_inherited_from_turn_id, permission_contract_id,
                     permission_contract_fingerprint,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'ROOT', 'INTERRUPTED', %s,
+                ) VALUES (%s, %s, %s, 'ROOT', %s, 'INTERRUPTED', %s,
                           'TEST_INVALID', clock_timestamp(),
                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -311,6 +326,11 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                     _name("turn"),
                     session_id,
                     workspace_id,
+                    Jsonb(
+                        model_call_binding_to_dict(
+                            test_model_binding(test_model_runtime())
+                        )
+                    ),
                     target.initial_entry_id,
                     invalid_permission.snapshot_id,
                     invalid_permission.requested_mode.value,
@@ -333,11 +353,21 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, initial_entry_id, terminal_reason, terminal_at
-                ) VALUES (%s, %s, %s, 'ROOT', 'INTERRUPTED', NULL,
+                    model_call_binding, status, initial_entry_id,
+                    terminal_reason, terminal_at
+                ) VALUES (%s, %s, %s, 'ROOT', %s, 'INTERRUPTED', NULL,
                           'TEST_INVALID', clock_timestamp())
                 """,
-                (_name("turn"), session_id, workspace_id),
+                (
+                    _name("turn"),
+                    session_id,
+                    workspace_id,
+                    Jsonb(
+                        model_call_binding_to_dict(
+                            test_model_binding(test_model_runtime())
+                        )
+                    ),
+                ),
             )
 
     wrong_kind_turn = _name("turn")
@@ -356,7 +386,8 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, initial_entry_id, terminal_reason, terminal_at,
+                    model_call_binding, status, initial_entry_id,
+                    terminal_reason, terminal_at,
                     permission_snapshot_id, requested_permission_mode,
                     effective_permission_mode, permission_admission_source,
                     permission_overlay, permission_plan_context_ordinal,
@@ -365,7 +396,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                     permission_inherited_from_turn_id, permission_contract_id,
                     permission_contract_fingerprint,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'ROOT', 'INTERRUPTED', %s,
+                ) VALUES (%s, %s, %s, 'ROOT', %s, 'INTERRUPTED', %s,
                           'TEST_INVALID', clock_timestamp(),
                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -373,6 +404,11 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                     wrong_kind_turn,
                     session_id,
                     workspace_id,
+                    Jsonb(
+                        model_call_binding_to_dict(
+                            test_model_binding(test_model_runtime())
+                        )
+                    ),
                     wrong_kind_entry,
                     invalid_permission.snapshot_id,
                     invalid_permission.requested_mode.value,
@@ -514,7 +550,8 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    first = repository.acquire_host_writer(
+    first = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -522,7 +559,8 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
         deadline_monotonic=monotonic() + 30,
     )
     turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         first.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -530,6 +568,7 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"run terminal"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -568,7 +607,8 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
             deadline_monotonic=monotonic() + 30,
         )
 
-    second = repository.acquire_host_writer(
+    second = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),

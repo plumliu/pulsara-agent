@@ -70,11 +70,11 @@ from pulsara_agent.primitives.bounded_json import (
     JsonBoundExceeded,
     bounded_json_loads,
 )
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundaryCancelled,
-    ProcessApiKeyBoundaryTimedOut,
-    ProcessApiKeyScrubSet,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundaryCancelled,
+    ProcessCredentialBoundaryTimedOut,
+    ProcessCredentialScrubSet,
 )
 
 
@@ -201,8 +201,8 @@ class PluginPackageTimedOut(TimeoutError):
 class PluginSourceObserver:
     """One held source/root owner shared by validate, install, and Runtime."""
 
-    def __init__(self, api_key_boundary: ProcessApiKeyBoundary) -> None:
-        self._api_key_boundary = api_key_boundary
+    def __init__(self, credential_boundary: ProcessCredentialBoundary) -> None:
+        self._credential_boundary = credential_boundary
 
     def observe(
         self,
@@ -210,7 +210,7 @@ class PluginSourceObserver:
         *,
         deadline_monotonic: float,
         cancellation: PluginCancellationPort | None = None,
-        scrub_set: ProcessApiKeyScrubSet | None = None,
+        scrub_set: ProcessCredentialScrubSet | None = None,
         hook_package_install_id: str = _VALIDATION_INSTALL_ID,
         hook_visibility: HookVisibilityScope = HookVisibilityScope.USER,
         hook_workspace_state_key: str | None = None,
@@ -221,7 +221,7 @@ class PluginSourceObserver:
     ) -> HeldPluginPackageObservation:
         source = prepare_local_source_path(source_path)
         probe = cancellation or NeverCancelPluginOperation()
-        scrub = scrub_set or ProcessApiKeyScrubSet()
+        scrub = scrub_set or ProcessCredentialScrubSet()
         _check_abort(deadline_monotonic, probe)
         descriptor = _open_source_root(source)
         try:
@@ -252,7 +252,12 @@ class PluginSourceObserver:
                 or manifest_entry.kind is not PackageEntryKind.REGULAR_FILE
             ):
                 raise PluginPackageInvalid(
-                    (_diagnostic(PluginDiagnosticCode.MANIFEST_MISSING, source / "plugin.json"),)
+                    (
+                        _diagnostic(
+                            PluginDiagnosticCode.MANIFEST_MISSING,
+                            source / "plugin.json",
+                        ),
+                    )
                 )
             try:
                 manifest_bytes = _read_bounded_entry(
@@ -264,7 +269,12 @@ class PluginSourceObserver:
                 )
             except JsonBoundExceeded as exc:
                 raise PluginPackageInvalid(
-                    (_diagnostic(PluginDiagnosticCode.MANIFEST_OVERBOUND, source / "plugin.json"),)
+                    (
+                        _diagnostic(
+                            PluginDiagnosticCode.MANIFEST_OVERBOUND,
+                            source / "plugin.json",
+                        ),
+                    )
                 ) from exc
             manifest, manifest_diagnostics = _parse_manifest(
                 manifest_bytes, source / "plugin.json"
@@ -312,7 +322,7 @@ class PluginSourceObserver:
                 hook_config = None
             if scan_active_api_key:
                 _stable_secret_scan(
-                    self._api_key_boundary,
+                    self._credential_boundary,
                     descriptor,
                     entries,
                     source_path=os.fsencode(source),
@@ -388,9 +398,7 @@ def _open_source_root(source: Path) -> int:
 def _component_unavailable(path: Path) -> PluginComponentSummary:
     return PluginComponentSummary(
         PluginComponentObservationDisposition.UNAVAILABLE,
-        diagnostics=(
-            _diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE, path),
-        ),
+        diagnostics=(_diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE, path),),
     )
 
 
@@ -582,18 +590,14 @@ def _open_regular_entry(root_fd: int, entry: FrozenPackageEntry) -> int:
         os.close(parent)
 
 
-def _open_relative_parent(
-    root_fd: int, relative: PurePosixPath
-) -> tuple[int, str]:
+def _open_relative_parent(root_fd: int, relative: PurePosixPath) -> tuple[int, str]:
     parts = relative.parts
     if not parts or any(item in {"", ".", ".."} for item in parts):
         raise ValueError("package relative path is invalid")
     current = os.dup(root_fd)
     try:
         for component in parts[:-1]:
-            next_fd = os.open(
-                component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current
-            )
+            next_fd = os.open(component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current)
             os.close(current)
             current = next_fd
         return current, parts[-1]
@@ -827,7 +831,9 @@ def _parse_mcp(
         None,
     )
     if entry is None:
-        return PluginComponentSummary(PluginComponentObservationDisposition.MISSING), None
+        return PluginComponentSummary(
+            PluginComponentObservationDisposition.MISSING
+        ), None
     if entry.kind is not PackageEntryKind.REGULAR_FILE:
         diagnostic = _diagnostic(
             PluginDiagnosticCode.COMPONENT_KIND_INVALID, source / "mcp.json"
@@ -956,10 +962,7 @@ def _normalize_portable_server(
             )
         environment = raw.get("env", {})
         assert isinstance(environment, dict)
-        if any(
-            name in environment
-            for name in ("PLUGIN_ROOT", "PLUGIN_DATA", "PULSARA_API_KEY")
-        ):
+        if any(name in environment for name in ("PLUGIN_ROOT", "PLUGIN_DATA")):
             return _diagnostic(
                 PluginDiagnosticCode.MCP_SERVER_INVALID,
                 source / "mcp.json",
@@ -1000,9 +1003,7 @@ def _normalize_portable_server(
     )
 
 
-def _valid_stdio_command(
-    command: str, entries: tuple[FrozenPackageEntry, ...]
-) -> bool:
+def _valid_stdio_command(command: str, entries: tuple[FrozenPackageEntry, ...]) -> bool:
     if "\x00" in command or not command:
         return False
     if "/" not in command and "\\" not in command:
@@ -1069,7 +1070,9 @@ def _valid_public_headers(value: Mapping[str, object]) -> bool:
             or name.casefold() in folded
             or not isinstance(item, str)
             or item != item.strip(" \t")
-            or any(char not in {9, 32} and not 33 <= char <= 126 for char in encoded_value)
+            or any(
+                char not in {9, 32} and not 33 <= char <= 126 for char in encoded_value
+            )
         ):
             return False
         folded.add(name.casefold())
@@ -1093,7 +1096,9 @@ def _parse_hooks(
     relative = PurePosixPath("dev.pulsara/hooks/hooks.json")
     entry = next((item for item in entries if item.relative_path == relative), None)
     if entry is None:
-        return PluginComponentSummary(PluginComponentObservationDisposition.MISSING), None
+        return PluginComponentSummary(
+            PluginComponentObservationDisposition.MISSING
+        ), None
     if entry.kind is not PackageEntryKind.REGULAR_FILE:
         diagnostic = _diagnostic(
             PluginDiagnosticCode.COMPONENT_KIND_INVALID,
@@ -1123,9 +1128,7 @@ def _parse_hooks(
             workspace_state_key,
             lifetime_anchor,
         )
-        subject = PluginHookTrustSubject(
-            visibility, manifest.name, workspace_state_key
-        )
+        subject = PluginHookTrustSubject(visibility, manifest.name, workspace_state_key)
         provenance = FrozenHookSourceProvenance(
             identity,
             subject,
@@ -1171,14 +1174,14 @@ def _parse_hooks(
 
 
 def _stable_secret_scan(
-    boundary: ProcessApiKeyBoundary,
+    boundary: ProcessCredentialBoundary,
     root_fd: int,
     entries: tuple[FrozenPackageEntry, ...],
     *,
     source_path: bytes,
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
-    scrub_set: ProcessApiKeyScrubSet,
+    scrub_set: ProcessCredentialScrubSet,
 ) -> None:
     while True:
         _check_abort(deadline_monotonic, cancellation)
@@ -1189,9 +1192,9 @@ def _stable_secret_scan(
             ) as guard:
                 expected = guard.value
                 scrub_set.observe(expected)
-        except ProcessApiKeyBoundaryCancelled as exc:
+        except ProcessCredentialBoundaryCancelled as exc:
             raise PluginPackageCancelled from exc
-        except ProcessApiKeyBoundaryTimedOut as exc:
+        except ProcessCredentialBoundaryTimedOut as exc:
             raise PluginPackageTimedOut from exc
         for encoded in scrub_set.values:
             if encoded in source_path or _tree_contains(
@@ -1202,11 +1205,7 @@ def _stable_secret_scan(
                 cancellation,
             ):
                 raise PluginPackageInvalid(
-                    (
-                        _diagnostic(
-                            PluginDiagnosticCode.SOURCE_CONTAINS_ACTIVE_API_KEY
-                        ),
-                    )
+                    (_diagnostic(PluginDiagnosticCode.SOURCE_CONTAINS_ACTIVE_API_KEY),)
                 )
         try:
             with boundary.sync_guard(
@@ -1216,9 +1215,9 @@ def _stable_secret_scan(
                 scrub_set.observe(guard.value)
                 if guard.value == expected:
                     return
-        except ProcessApiKeyBoundaryCancelled as exc:
+        except ProcessCredentialBoundaryCancelled as exc:
             raise PluginPackageCancelled from exc
-        except ProcessApiKeyBoundaryTimedOut as exc:
+        except ProcessCredentialBoundaryTimedOut as exc:
             raise PluginPackageTimedOut from exc
 
 
@@ -1230,9 +1229,7 @@ def tree_contains_secret(
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
 ) -> bool:
-    return _tree_contains(
-        root_fd, entries, secret, deadline_monotonic, cancellation
-    )
+    return _tree_contains(root_fd, entries, secret, deadline_monotonic, cancellation)
 
 
 def _tree_contains(

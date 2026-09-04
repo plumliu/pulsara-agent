@@ -9,10 +9,14 @@ from typing import Any
 
 import httpx
 
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundAsyncClient,
-    admit_process_api_key_http_operation,
+from pulsara_agent.local_credentials import (
+    DashScopeRerankCredential,
+    LocalCredentialStore,
+)
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundAsyncClient,
+    admit_process_credential_http_operation,
 )
 from pulsara_agent.retrieval.errors import RerankServiceError
 
@@ -29,12 +33,11 @@ class DashScopeRerankProvider:
         self,
         *,
         model: str,
-        api_key: str,
         base_url: str,
         timeout_seconds: float,
         max_retries: int,
         maximum_concurrent: int,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credentials: LocalCredentialStore,
     ) -> None:
         if model != "qwen3-rerank":
             raise ValueError("rerank model is outside the V1 contract")
@@ -45,19 +48,11 @@ class DashScopeRerankProvider:
         self._model = model
         self._max_retries = max(0, max_retries)
         self._semaphore = asyncio.Semaphore(1)
-        self._api_key_boundary = api_key_boundary
-        self._client = ProcessApiKeyBoundAsyncClient(
-            api_key_boundary=api_key_boundary,
-            credential_header_names=frozenset({b"authorization"}),
-            timeout=httpx.Timeout(timeout_seconds),
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
+        self._timeout_seconds = timeout_seconds
+        self._credentials = credentials
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        return None
 
     async def rerank(
         self,
@@ -89,40 +84,55 @@ class DashScopeRerankProvider:
         if len(encoded) > 192 * 1024:
             raise RerankServiceError("rerank request exceeds its aggregate bound")
         async with self._semaphore:
+            borrow = self._credentials.borrow(DashScopeRerankCredential())
+            boundary = ProcessCredentialBoundary(borrow.value)
+            client = ProcessCredentialBoundAsyncClient(
+                credential_boundary=boundary,
+                credential_header_names=frozenset({b"authorization"}),
+                timeout=httpx.Timeout(self._timeout_seconds),
+                headers={
+                    "Authorization": f"Bearer {borrow.value}",
+                    "Content-Type": "application/json",
+                },
+            )
             response: httpx.Response | None = None
             body: bytes | None = None
-            for attempt in range(self._max_retries + 1):
-                try:
-                    request = self._client.build_request(
-                        "POST",
-                        self._url,
-                        content=encoded,
-                    )
-                    response = await admit_process_api_key_http_operation(
-                        api_key_boundary=self._api_key_boundary,
-                        guarded_values=(self._url, encoded),
-                        operation=lambda: self._client.send(request, stream=True),
-                    )
-                except ValueError:
-                    raise RerankServiceError("rerank admission rejected") from None
-                except httpx.HTTPError:
-                    if attempt >= self._max_retries:
-                        raise RerankServiceError("rerank transport failed") from None
-                    continue
-                try:
-                    if response.status_code == 200:
-                        body = await _bounded_response_body(response)
-                        break
-                    if response.status_code != 429 and response.status_code < 500:
-                        raise RerankServiceError(
-                            f"rerank request failed with HTTP {response.status_code}"
+            try:
+                for attempt in range(self._max_retries + 1):
+                    try:
+                        request = client.build_request(
+                            "POST",
+                            self._url,
+                            content=encoded,
                         )
-                    if attempt >= self._max_retries:
-                        raise RerankServiceError(
-                            f"rerank request failed with HTTP {response.status_code}"
+                        response = await admit_process_credential_http_operation(
+                            credential_boundary=boundary,
+                            guarded_values=(self._url, encoded),
+                            operation=lambda: client.send(request, stream=True),
                         )
-                finally:
-                    await response.aclose()
+                    except ValueError:
+                        raise RerankServiceError("rerank admission rejected") from None
+                    except httpx.HTTPError:
+                        if attempt >= self._max_retries:
+                            raise RerankServiceError("rerank transport failed") from None
+                        continue
+                    try:
+                        if response.status_code == 200:
+                            body = await _bounded_response_body(response)
+                            break
+                        if response.status_code != 429 and response.status_code < 500:
+                            raise RerankServiceError(
+                                f"rerank request failed with HTTP {response.status_code}"
+                            )
+                        if attempt >= self._max_retries:
+                            raise RerankServiceError(
+                                f"rerank request failed with HTTP {response.status_code}"
+                            )
+                    finally:
+                        await response.aclose()
+            finally:
+                await client.aclose()
+                borrow.close()
             if body is None:
                 raise RerankServiceError("rerank response body is absent")
         try:

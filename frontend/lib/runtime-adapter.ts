@@ -23,15 +23,104 @@ import { protocolPermissionModes } from './pulsara-types';
 export interface RuntimeBootstrap {
   application: { name: string; version: string; transport: string };
   workspace: Workspace;
-  provider: {
-    provider: string;
-    endpoint_origin: string;
-    pro_model: string;
-    flash_model: string;
-    api_key_set: boolean;
-  };
   protocol: { major: number; minor: number };
-  runtime: { status: string; origin: string };
+  runtime: { status: string; origin: string; database_state: DatabaseDataPlaneState };
+  local_settings: LocalSettingsSummary;
+  model_configurations: ModelConfigurationSummary[];
+  database_state: DatabaseDataPlaneState;
+}
+
+export type DatabaseDataPlaneState =
+  | 'database_not_configured'
+  | 'database_configured_unverified'
+  | 'database_unavailable'
+  | 'database_schema_action_required'
+  | 'ready';
+
+export type LocalCredentialState = 'PRESENT' | 'MISSING' | 'DENIED' | 'UNAVAILABLE';
+
+export type ReasoningSelectionPayload =
+  | { kind: 'effort'; value: string | null }
+  | { kind: 'toggle'; enabled: boolean }
+  | { kind: 'budget_tokens'; tokens: number };
+
+export interface ModelCallBindingPayload {
+  connection_id: string;
+  reasoning: ReasoningSelectionPayload | null;
+}
+
+export interface ModelCallBindingUpdate {
+  modelCallBinding: ModelCallBindingPayload;
+  reasoningPreferenceReset: boolean;
+}
+
+export interface ReasoningControlSummary {
+  kind: 'selectable' | 'fixed_on' | 'unavailable' | 'provider_default';
+  effort?: { values: Array<string | null> } | null;
+  toggle?: boolean;
+  budget_tokens?: { minimum: number | null; maximum: number | null } | null;
+}
+
+export interface ModelConfigurationSummary {
+  id: string;
+  route_id: string;
+  wire_api: 'openai_chat_completions' | 'openai_responses';
+  model_id: string;
+  base_url: string;
+  status: 'ready' | 'unavailable';
+  credential_state: LocalCredentialState;
+  route_name?: string;
+  display_name?: string;
+  context_tokens?: number;
+  reasoning: ReasoningControlSummary;
+  default_reasoning?: ReasoningSelectionPayload | null;
+}
+
+export interface ModelCatalogWireApi {
+  wire_api: 'openai_chat_completions' | 'openai_responses';
+  executable: boolean;
+  reason: string | null;
+  endpoint: string | null;
+  reasoning?: ReasoningControlSummary;
+  recommended?: boolean;
+}
+
+export interface ModelCatalogModel {
+  model_id: string;
+  display_name: string;
+  wire_dialect: 'openai_compatible' | 'provider_native' | 'unknown';
+  context_tokens: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  tool_call: boolean | null;
+  wire_shape_hint: 'responses' | 'completions' | null;
+  wire_apis: ModelCatalogWireApi[];
+}
+
+export interface ModelCatalogRoute {
+  route_id: string;
+  display_name: string;
+  models: ModelCatalogModel[];
+}
+
+export interface ModelCatalogReadModel {
+  status: 'ready' | 'unavailable';
+  routes: ModelCatalogRoute[];
+}
+
+export interface LocalSettingsSummary {
+  state?: 'ready' | 'unavailable';
+  postgres: { runtime_dsn: string; admin_dsn: string | null } | null;
+  dashscope_credentials: {
+    embedding: LocalCredentialState;
+    rerank: LocalCredentialState;
+  };
+}
+
+export interface LocalSettingsReadModel {
+  local_settings: LocalSettingsSummary;
+  model_configurations: ModelConfigurationSummary[];
+  database_state: DatabaseDataPlaneState;
 }
 
 export interface RuntimeProjection {
@@ -110,6 +199,20 @@ export type RuntimeInteractionResolution =
 /** Browser boundary for the local Pulsara application. */
 export interface RuntimeAdapter {
   bootstrap(): Promise<RuntimeBootstrap>;
+  modelCatalog(refresh?: boolean): Promise<ModelCatalogReadModel>;
+  localSettings(): Promise<LocalSettingsReadModel>;
+  addModelConfiguration(input: {
+    route_id: string;
+    model_id: string;
+    wire_api: 'openai_chat_completions' | 'openai_responses';
+    api_key: string;
+  }): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
+  savePostgres(runtimeDsn: string, adminDsn: string | null): Promise<LocalSettingsReadModel & { restart_required: boolean }>;
+  checkPostgres(): Promise<Record<string, unknown>>;
+  migratePostgres(): Promise<Record<string, unknown>>;
+  putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<LocalCredentialState>;
+  deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<LocalCredentialState>;
+  updateModelCallBinding(sessionId: string, binding: ModelCallBindingPayload): Promise<ModelCallBindingUpdate>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection>;
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
   listSessions(): Promise<SessionSummary[]>;
@@ -555,6 +658,83 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
           ? 'quick'
           : 'project',
       },
+    };
+  }
+
+  async modelCatalog(refresh = false): Promise<ModelCatalogReadModel> {
+    return apiRequest<ModelCatalogReadModel>(
+      refresh ? '/api/model-catalog/refresh' : '/api/model-catalog',
+      refresh ? { method: 'POST' } : undefined,
+    );
+  }
+
+  async localSettings(): Promise<LocalSettingsReadModel> {
+    return apiRequest<LocalSettingsReadModel>('/api/local-settings');
+  }
+
+  async addModelConfiguration(input: {
+    route_id: string;
+    model_id: string;
+    wire_api: 'openai_chat_completions' | 'openai_responses';
+    api_key: string;
+  }) {
+    return apiRequest<{
+      model_configuration: ModelConfigurationSummary;
+      wire_shape_warning: boolean;
+    }>('/api/model-configurations', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  }
+
+  async savePostgres(runtimeDsn: string, adminDsn: string | null) {
+    return apiRequest<LocalSettingsReadModel & { restart_required: boolean }>(
+      '/api/local-settings/postgres',
+      {
+        method: 'PUT',
+        body: JSON.stringify({ runtime_dsn: runtimeDsn, admin_dsn: adminDsn }),
+      },
+    );
+  }
+
+  async checkPostgres(): Promise<Record<string, unknown>> {
+    return apiRequest<Record<string, unknown>>('/api/local-settings/postgres/check', { method: 'POST' });
+  }
+
+  async migratePostgres(): Promise<Record<string, unknown>> {
+    return apiRequest<Record<string, unknown>>('/api/local-settings/postgres/migrate', { method: 'POST' });
+  }
+
+  async putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<LocalCredentialState> {
+    const value = await apiRequest<{ credential_state: LocalCredentialState }>(
+      `/api/local-settings/dashscope-credentials/${kind}`,
+      { method: 'PUT', body: JSON.stringify({ api_key: apiKey }) },
+    );
+    return value.credential_state;
+  }
+
+  async deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<LocalCredentialState> {
+    const value = await apiRequest<{ credential_state: LocalCredentialState }>(
+      `/api/local-settings/dashscope-credentials/${kind}`,
+      { method: 'DELETE' },
+    );
+    return value.credential_state;
+  }
+
+  async updateModelCallBinding(
+    sessionId: string,
+    binding: ModelCallBindingPayload,
+  ): Promise<ModelCallBindingUpdate> {
+    const value = await apiRequest<{
+      model_call_binding: ModelCallBindingPayload;
+      reasoning_preference_reset: boolean;
+    }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/model-call-binding`,
+      { method: 'PUT', body: JSON.stringify(binding) },
+    );
+    return {
+      modelCallBinding: value.model_call_binding,
+      reasoningPreferenceReset: value.reasoning_preference_reset,
     };
   }
 
@@ -1882,6 +2062,29 @@ function projectSkillInstallResult(value: Record<string, unknown>): SkillInstall
   };
 }
 
+function projectModelCallBinding(value: unknown): SessionSummary['modelCallBinding'] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const binding = value as Record<string, unknown>;
+  if (typeof binding.connection_id !== 'string') return null;
+  const raw = binding.reasoning;
+  let reasoning: ModelCallBindingPayload['reasoning'] = null;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    const selection = raw as Record<string, unknown>;
+    if (selection.kind === 'effort' && (selection.value === null || typeof selection.value === 'string')) {
+      reasoning = { kind: 'effort', value: selection.value as string | null };
+    } else if (selection.kind === 'toggle' && typeof selection.enabled === 'boolean') {
+      reasoning = { kind: 'toggle', enabled: selection.enabled };
+    } else if (selection.kind === 'budget_tokens' && typeof selection.tokens === 'number') {
+      reasoning = { kind: 'budget_tokens', tokens: selection.tokens };
+    } else {
+      return null;
+    }
+  } else if (raw !== null) {
+    return null;
+  }
+  return { connection_id: binding.connection_id, reasoning };
+}
+
 function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
   const lifecycle = String(value.lifecycle ?? 'OPEN');
   const rawWorkspace = value.workspace as Record<string, unknown> | undefined;
@@ -1901,6 +2104,7 @@ function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
     status: Boolean(value.live) ? 'waiting' : 'completed',
     updatedAt: formatRelativeTime(String(value.updated_at ?? '')),
     live: Boolean(value.live),
+    modelCallBinding: projectModelCallBinding(value.model_call_binding),
     taskCounts: rawTaskCounts ? {
       total: numeric(rawTaskCounts.total),
       active: numeric(rawTaskCounts.active),

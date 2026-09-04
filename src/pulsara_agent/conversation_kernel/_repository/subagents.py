@@ -7,6 +7,7 @@ import json
 from typing import Mapping
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from pulsara_agent.conversation_kernel.contracts import (
     CanonicalContent,
     CommittedEventDraft,
@@ -1812,7 +1813,7 @@ class _SubagentOperations:
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    scope_subagent_task_id, status, initial_entry_id,
+                    scope_subagent_task_id, model_call_binding, status, initial_entry_id,
                     current_context_binding_revision_id,
                     permission_snapshot_id, requested_permission_mode,
                     effective_permission_mode, permission_admission_source,
@@ -1822,7 +1823,7 @@ class _SubagentOperations:
                     permission_inherited_from_turn_id, permission_contract_id,
                     permission_contract_fingerprint,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'SUBAGENT_TASK', %s,
+                ) VALUES (%s, %s, %s, 'SUBAGENT_TASK', %s, %s,
                           'RUNNING', %s, %s,
                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -1831,6 +1832,7 @@ class _SubagentOperations:
                     guard.session_id,
                     task["workspace_id"],
                     task_id,
+                    Jsonb(parent["model_call_binding"]),
                     entry_id,
                     context_binding_revision_id,
                     *self._permission_columns(permission),

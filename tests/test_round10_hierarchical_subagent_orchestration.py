@@ -73,6 +73,12 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
+)
 from tests.support.round3 import prepare_test_direct_tool_surface
 from tests.support.subagents import (
     StaticSubagentLaunchPreparationPort,
@@ -103,7 +109,7 @@ def _manager_launch_kwargs(
             repository=repository,
             guard=guard,
             io_owner=KernelSessionIO(),
-            configured_model_identity="test-pro",
+            model_runtime=test_model_runtime(),
             deadline_factory=KernelExecutionDeadlineFactory(),
         )
     return {
@@ -524,7 +530,8 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
     repository = ConversationKernelRepository(provider)
     session_id = _id("session")
     workspace_id = _id("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -532,7 +539,8 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         deadline_monotonic=monotonic() + 30,
     )
     parent_turn_id = _id("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_id("command"),
         turn_id=parent_turn_id,
@@ -540,6 +548,7 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         context_binding_revision_id=_id("revision"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"delegate exact seed"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -1079,7 +1088,8 @@ def _prepare_root_tool_attempt(
     tool_name: str,
     arguments: dict[str, object],
 ):
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -1087,7 +1097,8 @@ def _prepare_root_tool_attempt(
         deadline_monotonic=monotonic() + 30,
     )
     turn_id = _id("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_id("command"),
         turn_id=turn_id,
@@ -1095,6 +1106,7 @@ def _prepare_root_tool_attempt(
         context_binding_revision_id=_id("revision"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"delegate bounded work"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -1177,7 +1189,8 @@ def _prepare_root_tool_batch(
 ):
     """Freeze one real ROOT assistant batch and its accepted attempts."""
 
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -1185,7 +1198,8 @@ def _prepare_root_tool_batch(
         deadline_monotonic=monotonic() + 30,
     )
     turn_id = _id("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_id("command"),
         turn_id=turn_id,
@@ -1193,6 +1207,7 @@ def _prepare_root_tool_batch(
         context_binding_revision_id=_id("revision"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"orchestrate and send exact messages"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,

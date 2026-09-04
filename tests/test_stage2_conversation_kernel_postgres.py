@@ -60,9 +60,16 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     StaleHostWriter,
     ToolRemoteIdentityConfirmationKind,
+    build_prepared_root_turn_intent,
     build_prepared_tool_remote_identity_publication,
     build_prepared_tool_result_acceptance,
 )
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    ModelConnectionId,
+    model_call_binding_from_dict,
+)
+from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.conversation_kernel.steer import (
     PromptIngressConfirmationKind,
     QueuedRootTurnAdmissionConfirmationKind,
@@ -103,9 +110,299 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    enqueue_test_prompt,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
+)
 
 
 pytestmark = pytest.mark.postgres
+
+
+def _two_connection_resolution_cut():
+    first_id = ModelConnectionId("model-connection:" + "1" * 32)
+    second_id = ModelConnectionId("model-connection:" + "2" * 32)
+    first = test_model_runtime(connection_id=first_id, model_id="model-first")
+    second = test_model_runtime(connection_id=second_id, model_id="model-second")
+    first_cut = first.freeze_resolution_snapshot()
+    second_cut = second.freeze_resolution_snapshot()
+    return (
+        FrozenModelResolutionSnapshot(
+            {**first_cut.resolved, **second_cut.resolved},
+            {**first_cut.unavailable, **second_cut.unavailable},
+        ),
+        ModelCallBinding(first_id, None),
+        ModelCallBinding(second_id, None),
+    )
+
+
+def _enqueue_binding_candidate(
+    repository,
+    guard,
+    *,
+    cut,
+    command_id: str,
+    queue_item_id: str,
+    text: bytes,
+):
+    permission_snapshot_id = _name("permission")
+    permission = repository.prepare_root_permission_snapshot(
+        guard,
+        snapshot_id=permission_snapshot_id,
+        requested_mode=DEFAULT_PERMISSION_MODE,
+        deadline_monotonic=monotonic() + 30,
+    )
+    candidate = build_prompt_ingress_command(
+        session_id=guard.session_id,
+        command_id=command_id,
+        queue_item_id=queue_item_id,
+        client_submission_id=_name("submission"),
+        delivery_mode=PromptDeliveryMode.NEW_TURN,
+        target_turn_id=None,
+        permission_snapshot_id=permission_snapshot_id,
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        content_utf8=text,
+    )
+    accepted = repository.enqueue_prompt(
+        guard,
+        candidate=candidate,
+        model_resolution_snapshot=cut,
+        content=InlineContent.from_bytes(text),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="test",
+        deadline_monotonic=monotonic() + 30,
+        _expected_permission_snapshot=permission,
+    )
+    return candidate, accepted
+
+
+def test_model_binding_freezes_per_queue_command_and_idempotent_retry(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    lease = repository.acquire_host_writer(
+        session_id=_name("session"),
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    cut, first_binding, second_binding = _two_connection_resolution_cut()
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=first_binding,
+        deadline_monotonic=monotonic() + 30,
+    )
+    first, first_accepted = _enqueue_binding_candidate(
+        repository,
+        lease.guard,
+        cut=cut,
+        command_id=_name("command"),
+        queue_item_id=_name("queue"),
+        text=b"first binding",
+    )
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=second_binding,
+        deadline_monotonic=monotonic() + 30,
+    )
+    second, second_accepted = _enqueue_binding_candidate(
+        repository,
+        lease.guard,
+        cut=cut,
+        command_id=_name("command"),
+        queue_item_id=_name("queue"),
+        text=b"second binding",
+    )
+
+    assert first_accepted.model_call_binding == first_binding
+    assert second_accepted.model_call_binding == second_binding
+    replay_permission = repository.prepare_root_permission_snapshot(
+        lease.guard,
+        snapshot_id=first.permission_snapshot_id,
+        requested_mode=DEFAULT_PERMISSION_MODE,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert (
+        repository.enqueue_prompt(
+            lease.guard,
+            candidate=first,
+            model_resolution_snapshot=cut,
+            content=InlineContent.from_bytes(b"first binding"),
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="test",
+            deadline_monotonic=monotonic() + 30,
+            _expected_permission_snapshot=replay_permission,
+        ).model_call_binding
+        == first_binding
+    )
+    assert (
+        repository.confirm_prompt_ingress(
+            candidate=first,
+            deadline_monotonic=monotonic() + 30,
+        ).kind
+        is PromptIngressConfirmationKind.FULL_COMPATIBLE
+    )
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        rows = connection.execute(
+            "SELECT id, model_call_binding FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id=%s ORDER BY queue_sequence",
+            (lease.guard.session_id,),
+        ).fetchall()
+    assert [model_call_binding_from_dict(row[1]) for row in rows] == [
+        first_binding,
+        second_binding,
+    ]
+    assert (
+        repository.read_session_model_call_binding(
+            lease.guard,
+            deadline_monotonic=monotonic() + 30,
+        )
+        == second_binding
+    )
+
+
+def test_direct_root_retry_confirms_turn_binding_not_later_session_choice(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    lease = repository.acquire_host_writer(
+        session_id=_name("session"),
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    cut, first_binding, second_binding = _two_connection_resolution_cut()
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=first_binding,
+        deadline_monotonic=monotonic() + 30,
+    )
+    intent = build_prepared_root_turn_intent(
+        session_id=lease.guard.session_id,
+        command_id=_name("command"),
+        turn_id=_name("turn"),
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("context"),
+        permission_snapshot_id=_name("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        content=InlineContent.from_bytes(b"direct binding"),
+        occurred_at=datetime.now(timezone.utc),
+    )
+    accepted = repository.accept_root_turn_intent(
+        lease.guard,
+        intent=intent,
+        model_resolution_snapshot=cut,
+        deadline_monotonic=monotonic() + 30,
+    )
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=second_binding,
+        deadline_monotonic=monotonic() + 30,
+    )
+    confirmation = repository.confirm_root_turn_intent(
+        intent=intent,
+        guard=lease.guard,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert confirmation.kind.value == "FULL"
+    assert (
+        repository.accept_root_turn_intent(
+            lease.guard,
+            intent=intent,
+            model_resolution_snapshot=cut,
+            deadline_monotonic=monotonic() + 30,
+        ).accepted
+        == accepted.accepted
+    )
+    assert (
+        repository.read_turn_model_call_binding(
+            lease.guard,
+            turn_id=intent.turn_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+        == first_binding
+    )
+    assert (
+        repository.read_session_model_call_binding(
+            lease.guard,
+            deadline_monotonic=monotonic() + 30,
+        )
+        == second_binding
+    )
+
+
+def test_permanently_invalid_queued_binding_rejects_without_turn(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    lease = repository.acquire_host_writer(
+        session_id=_name("session"),
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    cut, first_binding, _second_binding = _two_connection_resolution_cut()
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=first_binding,
+        deadline_monotonic=monotonic() + 30,
+    )
+    _command, _accepted = _enqueue_binding_candidate(
+        repository,
+        lease.guard,
+        cut=cut,
+        command_id=_name("command"),
+        queue_item_id=_name("queue"),
+        text=b"removed target",
+    )
+    candidate = repository.prepare_prompt_head_consumption(
+        session_id=lease.guard.session_id,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="host:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert candidate is not None
+    unavailable = FrozenModelResolutionSnapshot(
+        {}, {first_binding.connection_id: "catalog target was removed"}
+    )
+    with pytest.raises(ValueError):
+        unavailable.validate(candidate.model_call_binding)
+    assert repository.reject_prepared_prompt_head_model_unavailable(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert repository.reject_prepared_prompt_head_model_unavailable(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        queue = connection.execute(
+            "SELECT status, terminal_reason FROM pulsara_v3.prompt_queue_items "
+            "WHERE id=%s",
+            (candidate.queue_item_id,),
+        ).fetchone()
+        turn = connection.execute(
+            "SELECT 1 FROM pulsara_v3.turns WHERE id=%s",
+            (candidate.exact_turn_id,),
+        ).fetchone()
+    assert queue == (
+        "REJECTED",
+        "MODEL_CONFIGURATION_UNAVAILABLE_BEFORE_DELIVERY",
+    )
+    assert turn is None
 
 
 def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
@@ -124,7 +421,14 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
     )
     queue_item_id = f"queue:{uuid4().hex}"
     command_id = f"command:{uuid4().hex}"
-    repository.enqueue_prompt(
+    model_call_binding = test_model_binding(test_model_runtime())
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=model_call_binding,
+        deadline_monotonic=monotonic() + 30,
+    )
+    enqueue_test_prompt(
+        repository,
         lease.guard,
         command_id=command_id,
         queue_item_id=queue_item_id,
@@ -133,6 +437,7 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
         target_turn_id=None,
         permission_snapshot_id=f"permission:{uuid4().hex}",
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=model_call_binding,
         content=InlineContent.from_bytes(b"queued TODO run"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="test",
@@ -188,19 +493,34 @@ class _FailingSteerRejectionRepository(ConversationKernelRepository):
 def _start_root_turn(repository: ConversationKernelRepository, *args, **kwargs):
     """Retained Stage 2 fixture expressed through the Round 4 admission API."""
 
+    model_call_binding = test_model_binding(test_model_runtime())
+    repository.update_session_model_call_binding(
+        args[0],
+        binding=model_call_binding,
+        deadline_monotonic=kwargs["deadline_monotonic"],
+    )
     kwargs.setdefault("permission_snapshot_id", _name("permission-snapshot"))
     kwargs.setdefault("requested_permission_mode", DEFAULT_PERMISSION_MODE)
-    return repository.start_root_turn(*args, **kwargs)
+    kwargs.setdefault("model_call_binding", model_call_binding)
+    return start_test_root_turn(repository, *args, **kwargs)
 
 
 def _enqueue_prompt(repository: ConversationKernelRepository, *args, **kwargs):
     if kwargs["delivery_mode"] is PromptDeliveryMode.NEW_TURN:
+        model_call_binding = test_model_binding(test_model_runtime())
+        repository.update_session_model_call_binding(
+            args[0],
+            binding=model_call_binding,
+            deadline_monotonic=kwargs["deadline_monotonic"],
+        )
         kwargs.setdefault("permission_snapshot_id", _name("permission-snapshot"))
         kwargs.setdefault("requested_permission_mode", DEFAULT_PERMISSION_MODE)
+        kwargs.setdefault("model_call_binding", model_call_binding)
     else:
         kwargs.setdefault("permission_snapshot_id", None)
         kwargs.setdefault("requested_permission_mode", None)
-    return repository.enqueue_prompt(*args, **kwargs)
+        kwargs.setdefault("model_call_binding", None)
+    return enqueue_test_prompt(repository, *args, **kwargs)
 
 
 def _assistant_permission_fingerprint(
@@ -811,6 +1131,7 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
             + sha256(remote_identity.encode("utf-8")).hexdigest(),
         }
 
+
 @pytest.mark.parametrize("decision", ["ALLOW", "DENY"])
 def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
     stage2_migrated_postgres_database,
@@ -998,6 +1319,7 @@ def test_stage2_unqualified_product_sql_cannot_resolve_a_product_relation(
 
 # Round 5B removes the entire durable job family; its canonical successor is
 # the Host-owned compaction settlement coverage in the Round 5B suite.
+
 
 def test_stage2_memory_governance_is_async_and_postgres_only(
     stage2_migrated_postgres_database,
@@ -1556,9 +1878,7 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         allow_terminal=False,
         deadline_monotonic=deadline,
     )
-    compaction_read = CanonicalProviderInputReader(
-        provider
-    ).read_frozen_compaction_cut(
+    compaction_read = CanonicalProviderInputReader(provider).read_frozen_compaction_cut(
         compaction_cut,
         deadline_monotonic=deadline,
     )
@@ -1575,9 +1895,7 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
             target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
             expected_turn_status="RUNNING",
             predecessor=ExpectedCompactionPredecessorRevision(
-                binding_revision_id=(
-                    compaction_read.lineage_base.binding_revision_id
-                ),
+                binding_revision_id=(compaction_read.lineage_base.binding_revision_id),
                 revision_ordinal=(
                     compaction_read.lineage_base.binding_revision_ordinal
                 ),
@@ -1685,16 +2003,22 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=deadline,
     ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.context_snapshots "
-            "WHERE session_id = %s",
-            (session_id,),
-        ).fetchone()[0] == 1
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.turn_context_binding_revisions "
-            "WHERE session_id = %s AND turn_id = %s",
-            (session_id, turn_id),
-        ).fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM pulsara_v3.context_snapshots "
+                "WHERE session_id = %s",
+                (session_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM pulsara_v3.turn_context_binding_revisions "
+                "WHERE session_id = %s AND turn_id = %s",
+                (session_id, turn_id),
+            ).fetchone()[0]
+            == 2
+        )
         assert connection.execute(
             "SELECT status, consumed_entry_id FROM pulsara_v3.prompt_queue_items "
             "WHERE session_id = %s AND id = %s",
@@ -1814,9 +2138,7 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
             binding_revision_id=_name("replacement-revision"),
             event_id=_name("compaction-event"),
             source_through_sequence=boundary,
-            source_digest=canonical_compaction_range_digest(
-                lineage, canonical_range
-            ),
+            source_digest=canonical_compaction_range_digest(lineage, canonical_range),
             snapshot_content=InlineContent.from_bytes(b"summary"),
             compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
             prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
@@ -1831,17 +2153,19 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
         preconditions=CompactionCanonicalWritePreconditions(
             scope=current_read.scope,
             expected_turn_status="RUNNING",
-            expected_safe_head=(
-                current_read.safe_head_range.source_through_sequence
-            ),
+            expected_safe_head=(current_read.safe_head_range.source_through_sequence),
             provider_safe=True,
         ),
         deadline_monotonic=deadline,
     )
     assert winner.kind is CompactionConfirmationKind.FULL
-    assert repository.confirm_context_snapshot_adoption(
-        candidate=candidate, deadline_monotonic=deadline
-    ) == winner
+    assert (
+        repository.confirm_context_snapshot_adoption(
+            candidate=candidate, deadline_monotonic=deadline
+        )
+        == winner
+    )
+
 
 def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
     stage2_migrated_postgres_database,
@@ -1965,9 +2289,7 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
         scope_subagent_task_id=None,
     )
     snapshot_body = build_compaction_snapshot_carrier(
-        summary=freeze_compaction_summary_output(
-            "old summary", maximum_utf8_bytes=100
-        ),
+        summary=freeze_compaction_summary_output("old summary", maximum_utf8_bytes=100),
         recent_user_messages=(),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request=FrozenCompactionActiveRequest(
@@ -2056,7 +2378,10 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
         deadline_monotonic=deadline,
     )
     assert second.context_binding_fact.base_kind is ContextBindingBaseKind.SNAPSHOT
-    assert second.context_binding_fact.context_snapshot_id == candidate.snapshot.snapshot_id
+    assert (
+        second.context_binding_fact.context_snapshot_id
+        == candidate.snapshot.snapshot_id
+    )
     assert second.canonical_input.items[0].item_kind is (
         FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
     )

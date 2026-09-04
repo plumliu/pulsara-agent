@@ -15,30 +15,26 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pulsara_agent.llm.adapters.openai.chat_completions import (
-    OpenAIChatCompletionsTransport,
     chat_semantic_wire_group,
     materialize_chat_context_bearing_wire_projection,
 )
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.adapters.openai.responses import (
-    OpenAIResponsesTransport,
     materialize_responses_context_bearing_wire_projection,
     responses_semantic_wire_group,
 )
-from pulsara_agent.llm.config import LLMConfig, ModelSlotConfig
 from pulsara_agent.llm.estimator import estimate_model_context_for_call
 from pulsara_agent.llm.input import LLMMessage, MessageRole
-from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.llm.normalized_transport import (
-    NormalizedLLMTransport,
-    NormalizedLLMTransportRegistry,
-)
+from pulsara_agent.llm.model_connections import ModelCallBinding
+from pulsara_agent.llm.model_target import default_reasoning_selection
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import (
     ResolvedModelCall,
+    ResolvedModelTarget,
     resolve_model_call,
-    resolve_model_target,
+    with_call_output_cap,
 )
+from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.llm.validation import validate_model_context_shape_for_call
 from pulsara_agent.memory.product_contract import (
     MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,
@@ -55,9 +51,8 @@ from pulsara_agent.ports.provider_stream import (
     ProviderPhysicalCompletionStatus,
     ProviderStreamTerminal,
 )
-from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelContextLimits
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.context import canonical_json_bytes
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +75,7 @@ class AuxiliaryJsonModelPort(Protocol):
         maximum_input_bytes: int,
         maximum_output_tokens: int,
         timeout_policy: OpenAITransportTimeoutPolicy,
+        origin_binding: ModelCallBinding,
         maximum_result_bytes: int = 256 << 10,
     ) -> PreparedAuxiliaryJsonModelCall: ...
 
@@ -92,6 +88,7 @@ class AuxiliaryJsonModelPort(Protocol):
         maximum_input_bytes: int,
         maximum_output_tokens: int,
         timeout_policy: OpenAITransportTimeoutPolicy,
+        origin_binding: ModelCallBinding,
         maximum_result_bytes: int = 256 << 10,
     ) -> tuple[PreparedAuxiliaryJsonModelCall, int] | None: ...
 
@@ -105,18 +102,14 @@ class DirectKernelAuxiliaryJsonModel:
 
     def __init__(
         self,
-        config: LLMConfig,
+        model_runtime: ModelRuntime,
         *,
-        api_key_boundary: ProcessApiKeyBoundary,
-        target_resolver: Callable[..., object] = resolve_model_target,
         call_resolver: Callable[..., object] = resolve_model_call,
         context_shape_validator: Callable[..., object] = (
             validate_model_context_shape_for_call
         ),
     ) -> None:
-        self._config = config
-        self._api_key_boundary = api_key_boundary
-        self._target_resolver = target_resolver
+        self._model_runtime = model_runtime
         self._call_resolver = call_resolver
         self._context_shape_validator = context_shape_validator
 
@@ -129,6 +122,7 @@ class DirectKernelAuxiliaryJsonModel:
         maximum_input_bytes: int,
         maximum_output_tokens: int,
         timeout_policy: OpenAITransportTimeoutPolicy,
+        origin_binding: ModelCallBinding,
         maximum_result_bytes: int = 256 << 10,
     ) -> PreparedAuxiliaryJsonModelCall:
         selected = self.prepare_first_fitting_json_call(
@@ -138,6 +132,7 @@ class DirectKernelAuxiliaryJsonModel:
             maximum_input_bytes=maximum_input_bytes,
             maximum_output_tokens=maximum_output_tokens,
             timeout_policy=timeout_policy,
+            origin_binding=origin_binding,
             maximum_result_bytes=maximum_result_bytes,
         )
         if selected is None:
@@ -153,6 +148,7 @@ class DirectKernelAuxiliaryJsonModel:
         maximum_input_bytes: int,
         maximum_output_tokens: int,
         timeout_policy: OpenAITransportTimeoutPolicy,
+        origin_binding: ModelCallBinding,
         maximum_result_bytes: int = 256 << 10,
     ) -> tuple[PreparedAuxiliaryJsonModelCall, int] | None:
         """Resolve once and return the first exact-final-wire fitting variant.
@@ -175,38 +171,24 @@ class DirectKernelAuxiliaryJsonModel:
             raise ValueError("auxiliary provider input byte cap must be positive")
         if not message_variants:
             raise ValueError("auxiliary provider requires at least one message variant")
-        config = _with_output_cap(self._config, maximum_output_tokens)
-        registry = NormalizedLLMTransportRegistry()
-        registry.register(
-            NormalizedLLMTransport(
-                OpenAIResponsesTransport(
-                    api_key=config.api_key,
-                    timeout_policy=timeout_policy,
-                    api_key_boundary=self._api_key_boundary,
-                    retry_config=config.retry,
-                    openai_sdk_max_retries=config.openai_sdk_max_retries,
-                )
-            )
+        base_target = self._model_runtime.resolve_target(
+            origin_binding,
+            timeout_policy=timeout_policy,
         )
-        registry.register(
-            NormalizedLLMTransport(
-                OpenAIChatCompletionsTransport(
-                    api_key=config.api_key,
-                    timeout_policy=timeout_policy,
-                    api_key_boundary=self._api_key_boundary,
-                    retry_config=config.retry,
-                    openai_sdk_max_retries=config.openai_sdk_max_retries,
-                )
-            )
+        binding = ModelCallBinding(
+            origin_binding.connection_id,
+            default_reasoning_selection(base_target.contract.reasoning),
         )
-        target = self._target_resolver(
-            config=config,
-            registry=registry,
-            role=ModelRole.FLASH,
-            requested_options=None,
+        target = with_call_output_cap(
+            self._model_runtime.resolve_target(
+                binding,
+                timeout_policy=timeout_policy,
+            ),
+            maximum_output_tokens,
         )
         call = self._call_resolver(
             target=target,
+            binding=binding,
             purpose=purpose,
             resolved_model_call_id=f"model_call:{uuid4().hex}",
         )
@@ -376,14 +358,14 @@ def _materialize_auxiliary_final_wire(
 ) -> tuple[dict[str, object], dict[str, object], tuple[object, ...]]:
     """Lower once through the selected adapter's exact context materializer."""
 
-    profile = call.target.model_profile.provider_profile
+    profile = call.target.model_profile.route_wire_profile
     if profile.wire_api == "openai_chat_completions":
         ordered = tuple(
             item
             for message in context.messages
             for item in chat_semantic_wire_group(
                 message,
-                provider_profile=profile,
+                route_wire_profile=profile,
             )
         )
         fixed = materialize_chat_context_bearing_wire_projection(
@@ -425,29 +407,10 @@ def _materialize_auxiliary_final_wire(
     raise ValueError("auxiliary provider wire API is unsupported")
 
 
-def _with_output_cap(config: LLMConfig, maximum_output_tokens: int) -> LLMConfig:
-    if maximum_output_tokens < 1:
-        raise ValueError("auxiliary provider output cap must be positive")
-    slot = config.flash
-    limits = slot.limits
-    cap = min(maximum_output_tokens, limits.max_output_tokens)
-    bounded = ModelContextLimits(
-        total_context_tokens=limits.total_context_tokens,
-        max_input_tokens=min(limits.max_input_tokens, limits.total_context_tokens - cap),
-        max_output_tokens=limits.max_output_tokens,
-        default_output_tokens=cap,
-        input_safety_margin_tokens=min(
-            limits.input_safety_margin_tokens,
-            max(0, limits.total_context_tokens - cap - 1),
-        ),
-    )
-    return replace(config, flash=ModelSlotConfig(slot.model_id, bounded))
-
-
-def provider_trust_domain_identity(config: LLMConfig) -> str:
+def provider_trust_domain_identity(target: ResolvedModelTarget) -> str:
     """Freeze a non-secret identity for same-provider auxiliary data egress."""
 
-    parsed = urlsplit(config.base_url)
+    parsed = urlsplit(target.contract.canonical_endpoint_base_url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
         raise ValueError("provider endpoint is not a valid HTTP origin")
     host = parsed.hostname.encode("idna").decode("ascii").lower()
@@ -459,14 +422,10 @@ def provider_trust_domain_identity(config: LLMConfig) -> str:
         origin += f":{port}"
     payload = canonical_json_bytes(
         {
-            "provider": config.provider,
-            "wire_api": config.api,
+            "route_id": target.contract.key.route_id,
+            "wire_api": target.contract.key.wire_api.value,
             "origin": origin,
             "base_path": parsed.path.rstrip("/") or "/",
-            # A credential-slot digest prevents two tenants at one endpoint
-            # from silently becoming one trust domain; the secret itself is
-            # never exposed or persisted.
-            "credential_slot": sha256(config.api_key.encode("utf-8")).hexdigest(),
         }
     )
     return "provider-trust-domain:sha256:" + sha256(payload).hexdigest()

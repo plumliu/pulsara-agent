@@ -1,4 +1,4 @@
-"""Provider-profile configuration for OpenAI-compatible LLM APIs."""
+"""Output replay and static request fields owned by one route/wire adapter."""
 
 from __future__ import annotations
 
@@ -77,9 +77,8 @@ class ModelIdentityPolicy(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ThinkingProfile:
-    """Provider-neutral description of thinking/reasoning wire fields."""
+    """Chat output-carrier and replay behavior; never request-side support."""
 
-    enabled: bool = False
     delta_fields: tuple[str, ...] = ("reasoning_content", "reasoning")
     message_field: str | None = "reasoning_content"
     replay_policy: ThinkingReplayPolicy = ThinkingReplayPolicy.NEVER
@@ -97,16 +96,13 @@ class ThinkingProfile:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderProfile:
-    """Custom provider behavior without making vendor names first-class code paths."""
+class RouteWireProfile:
+    """Frozen fields consumed by materialization and replay for one adapter."""
 
     id: str = "custom"
     wire_api: str = "openai_responses"
     request_defaults: Mapping[str, Any] = field(default_factory=dict)
     request_extra_body: Mapping[str, Any] = field(default_factory=dict)
-    omit_params_when_thinking: tuple[str, ...] = field(default_factory=tuple)
-    supports_tools: bool = True
-    supports_reasoning: bool = True
     model_identity_policy: ModelIdentityPolicy = ModelIdentityPolicy.ACCEPT_REPORTED
     thinking: ThinkingProfile = field(default_factory=ThinkingProfile)
     configured_chat_replay_fields: tuple[
@@ -122,6 +118,16 @@ class ProviderProfile:
             "request_extra_body",
             _freeze_provider_value(self.request_extra_body),
         )
+        reserved = {"reasoning", "reasoning_effort", "thinking"}
+        conflicts = sorted(
+            reserved.intersection(self.request_defaults)
+            | reserved.intersection(self.request_extra_body)
+        )
+        if conflicts:
+            raise ValueError(
+                "route/wire static request fields conflict with reasoning owner: "
+                + ", ".join(conflicts)
+            )
         configured_names = tuple(
             item.field_name for item in self.configured_chat_replay_fields
         )
@@ -189,21 +195,6 @@ class ProviderProfile:
                 "pulsara.provider-replay-contract:unsupported:v1", self.wire_api
             )
         return provider_replay_contract_fingerprint(codec)
-
-    def copy_for_api(self, api: str) -> "ProviderProfile":
-        return ProviderProfile(
-            id=self.id,
-            wire_api=api,
-            request_defaults=self.request_defaults,
-            request_extra_body=self.request_extra_body,
-            omit_params_when_thinking=tuple(self.omit_params_when_thinking),
-            supports_tools=self.supports_tools,
-            supports_reasoning=self.supports_reasoning,
-            model_identity_policy=self.model_identity_policy,
-            thinking=self.thinking,
-            configured_chat_replay_fields=self.configured_chat_replay_fields,
-        )
-
 
 def _freeze_provider_value(value: Any) -> Any:
     if isinstance(value, Mapping):

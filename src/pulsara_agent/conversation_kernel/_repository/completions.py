@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Mapping
 
 from psycopg import Connection
+from psycopg.types.json import Jsonb
 
 from pulsara_agent.conversation_kernel.contracts import (
     CommittedEventDraft,
@@ -467,11 +468,18 @@ class _SubagentCompletionOperations:
             requested_mode=requested_permission_mode,
             admission_source=RunPermissionAdmissionSource.SUBAGENT_COMPLETION_COMMAND,
         )
+        session = self._require_writer(connection, guard, lock=False)
+        model_call_binding = session["model_call_binding"]
+        if model_call_binding is None:
+            raise ConversationKernelConflict(
+                "session has no model binding for the new ROOT turn"
+            )
         connection.execute(
             """
             INSERT INTO pulsara_v3.turns (
                 id, session_id, workspace_id, conversation_scope_kind,
-                status, initial_entry_id, current_context_binding_revision_id,
+                model_call_binding, status, initial_entry_id,
+                current_context_binding_revision_id,
                 permission_snapshot_id, requested_permission_mode,
                 effective_permission_mode, permission_admission_source,
                 permission_overlay, permission_plan_context_ordinal,
@@ -480,13 +488,14 @@ class _SubagentCompletionOperations:
                 permission_inherited_from_turn_id, permission_contract_id,
                 permission_contract_fingerprint,
                 permission_snapshot_fingerprint
-            ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s,
+            ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 turn_id,
                 guard.session_id,
                 workspace_id,
+                Jsonb(model_call_binding),
                 entry_id,
                 new_context_binding_revision_id,
                 *self._permission_columns(permission),

@@ -80,6 +80,14 @@ from pulsara_agent.storage.postgres_connection_provider import PostgresConnectio
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    enqueue_test_prompt,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_resolution_snapshot,
+    test_model_runtime,
+)
 from tests.support.round3 import (
     ScriptedKernelModel,
     StaticContextSourceCollector,
@@ -99,11 +107,14 @@ def _now() -> datetime:
 
 
 def _repository(database) -> ConversationKernelRepository:
-    return ConversationKernelRepository(verified_postgres_provider(database.runtime_dsn))
+    return ConversationKernelRepository(
+        verified_postgres_provider(database.runtime_dsn)
+    )
 
 
 def _lease(repository: ConversationKernelRepository):
-    return repository.acquire_host_writer(
+    return acquire_bound_test_writer(
+        repository,
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -120,7 +131,8 @@ def _start_root(
     text: bytes = b"plan this change",
 ):
     turn_id = _id("turn")
-    accepted = repository.start_root_turn(
+    accepted = start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_id("command"),
         turn_id=turn_id,
@@ -128,6 +140,7 @@ def _start_root(
         context_binding_revision_id=_id("context-revision"),
         permission_snapshot_id=_id("permission-snapshot"),
         requested_permission_mode=mode,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(text),
         occurred_at=_now(),
         deadline_monotonic=monotonic() + 30,
@@ -232,9 +245,7 @@ def _commit_plan_batch(
                 tool_call_id=block.tool_call_id,
                 tool_name=block.tool_name,
                 arguments=block.arguments,
-                result_id=(
-                    None if is_selected_question else _id("tool-result")
-                ),
+                result_id=(None if is_selected_question else _id("tool-result")),
                 result_entry_id=(
                     None if is_selected_question else _id("tool-result-entry")
                 ),
@@ -242,9 +253,7 @@ def _commit_plan_batch(
         )
     binding = builtin_tool_catalog_entry(selected_tool_name).binding_contract.base
     fresh_enter = control_kind is PlanToolControlKind.ENTER
-    interaction_id = (
-        None if fresh_enter else _id("plan-interaction")
-    )
+    interaction_id = None if fresh_enter else _id("plan-interaction")
     continuation_turn_id = _id("turn") if fresh_enter else None
     continuation_entry_id = _id("entry") if fresh_enter else None
     continuation_revision_id = _id("context-revision") if fresh_enter else None
@@ -382,9 +391,7 @@ def test_round4_user_plan_freezes_permission_and_cancel_handoff_once(
     lease = _lease(repository)
     workflow_id, entered = _open_user_plan(repository, lease)
     assert entered.workflow_status is PlanWorkflowStatus.ACTIVE
-    turn_id, _ = _start_root(
-        repository, lease, mode=PermissionMode.BYPASS_PERMISSIONS
-    )
+    turn_id, _ = _start_root(repository, lease, mode=PermissionMode.BYPASS_PERMISSIONS)
     permission = _permission(repository, lease, turn_id)
     assert permission.requested_mode is PermissionMode.BYPASS_PERMISSIONS
     assert permission.effective_mode is PermissionMode.READ_ONLY
@@ -516,7 +523,8 @@ def test_round4_database_rejects_permission_mutation_and_wrong_initial_entry(
     )
 
     queue_item_id = _id("queue")
-    repository.enqueue_prompt(
+    enqueue_test_prompt(
+        repository,
         lease.guard,
         command_id=_id("command"),
         queue_item_id=queue_item_id,
@@ -525,6 +533,7 @@ def test_round4_database_rejects_permission_mutation_and_wrong_initial_entry(
         target_turn_id=None,
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.READ_ONLY,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"queued read-only request"),
         occurred_at=_now(),
         actor_id="user:test",
@@ -786,9 +795,7 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
     seal_test_direct_tool_port(tools)
     model = ScriptedKernelModel([_runner_plan_batch_stream()])
 
-    async def accept_automatic_plan(
-        candidate: PreparedPlanToolBatch, deadline: float
-    ):
+    async def accept_automatic_plan(candidate: PreparedPlanToolBatch, deadline: float):
         return repository.accept_plan_tool_batch(
             lease.guard,
             candidate=candidate,
@@ -796,6 +803,7 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
         )
 
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -894,6 +902,7 @@ def test_round4_rejected_plan_call_owns_batch_and_continues_without_dispatch(
         ]
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -1001,10 +1010,13 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         candidate=question_batch.candidate,
         deadline_monotonic=monotonic() + 30,
     )
-    assert repository.confirm_plan_tool_batch_winner(
-        candidate=question_batch.candidate,
-        deadline_monotonic=monotonic() + 30,
-    ) == opened_question
+    assert (
+        repository.confirm_plan_tool_batch_winner(
+            candidate=question_batch.candidate,
+            deadline_monotonic=monotonic() + 30,
+        )
+        == opened_question
+    )
     assert opened_question.question is not None
     assert opened_question.workflow_revision == 2
     with pytest.raises(ConversationKernelConflict, match="option answer is absent"):
@@ -1056,10 +1068,13 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         candidate=draft_batch.candidate,
         deadline_monotonic=monotonic() + 30,
     )
-    assert repository.confirm_plan_tool_batch_winner(
-        candidate=draft_batch.candidate,
-        deadline_monotonic=monotonic() + 30,
-    ) == opened_draft
+    assert (
+        repository.confirm_plan_tool_batch_winner(
+            candidate=draft_batch.candidate,
+            deadline_monotonic=monotonic() + 30,
+        )
+        == opened_draft
+    )
     assert opened_draft.draft is not None
     assert opened_draft.origin_turn_completed
     chunk = repository.read_plan_draft_text_chunk(
@@ -1113,10 +1128,13 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         candidate=second_draft_batch.candidate,
         deadline_monotonic=monotonic() + 30,
     )
-    assert repository.confirm_plan_tool_batch_winner(
-        candidate=second_draft_batch.candidate,
-        deadline_monotonic=monotonic() + 30,
-    ) == second_draft
+    assert (
+        repository.confirm_plan_tool_batch_winner(
+            candidate=second_draft_batch.candidate,
+            deadline_monotonic=monotonic() + 30,
+        )
+        == second_draft
+    )
     implementation_turn = _id("turn")
     implementation_entry = _id("entry")
     implementation_revision = _id("context-revision")
@@ -1153,7 +1171,9 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     assert facts.plan_handoff_fact is not None
     assert facts.plan_handoff_fact.handoff_kind is PlanHandoffKind.APPROVED_PLAN
     assert facts.approved_plan_materialization_fact is not None
-    assert facts.approved_plan_materialization_fact.exact_plan_utf8 == second_plan.encode()
+    assert (
+        facts.approved_plan_materialization_fact.exact_plan_utf8 == second_plan.encode()
+    )
     assert facts.approved_plan_materialization_fact.disposition is (
         PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
     )
@@ -1233,9 +1253,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
             target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
             expected_turn_status="RUNNING",
             predecessor=ExpectedCompactionPredecessorRevision(
-                binding_revision_id=(
-                    compaction_read.lineage_base.binding_revision_id
-                ),
+                binding_revision_id=(compaction_read.lineage_base.binding_revision_id),
                 revision_ordinal=(
                     compaction_read.lineage_base.binding_revision_ordinal
                 ),
@@ -1402,7 +1420,8 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
     )
     assert cancelled.handoff_created_at_commit
     first_queue_id = _id("queue")
-    repository.enqueue_prompt(
+    enqueue_test_prompt(
+        repository,
         lease.guard,
         command_id=_id("command"),
         queue_item_id=first_queue_id,
@@ -1411,6 +1430,7 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         target_turn_id=None,
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.READ_ONLY,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"first real prompt"),
         occurred_at=_now(),
         actor_id="user:test",
@@ -1479,7 +1499,8 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         )
 
     second_queue_id = _id("queue")
-    repository.enqueue_prompt(
+    enqueue_test_prompt(
+        repository,
         lease.guard,
         command_id=_id("command"),
         queue_item_id=second_queue_id,
@@ -1488,6 +1509,7 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         target_turn_id=None,
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.ACCEPT_EDITS,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"second real prompt"),
         occurred_at=_now(),
         actor_id="user:test",
@@ -1552,12 +1574,16 @@ def test_round4_aborted_plan_question_lowers_without_effect_unknown(
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
     )
-    control = CanonicalProtocolReader(repository.connection_provider).snapshot(
-        session_id=lease.guard.session_id,
-        maximum_entries=64,
-        maximum_control_items=64,
-        deadline_monotonic=monotonic() + 30,
-    ).control
+    control = (
+        CanonicalProtocolReader(repository.connection_provider)
+        .snapshot(
+            session_id=lease.guard.session_id,
+            maximum_entries=64,
+            maximum_control_items=64,
+            deadline_monotonic=monotonic() + 30,
+        )
+        .control
+    )
     assert control.latest_plan_handoff.handoff_kind == "FORCE_EXITED_PLAN"
     assert control.latest_plan_handoff.interaction_id == (
         question_batch.candidate.interaction_id

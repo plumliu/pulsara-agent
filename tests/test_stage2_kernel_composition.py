@@ -50,6 +50,7 @@ from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.hooks.contracts import FrozenHookDefinitionView
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.workspace_identity import HostWorkspaceInput
+from tests.support.model_config import test_model_runtime
 
 
 class _SkillProjectionProvider:
@@ -309,7 +310,7 @@ def test_enabled_mcp_enters_kernel_resource_activation(
         lambda **_: (SimpleNamespace(server_id="mcp:test", enabled=True),),
     )
     monkeypatch.setattr(KernelHostCore, "_ensure_resources", observed_activation)
-    core = KernelHostCore(settings=SimpleNamespace())  # type: ignore[arg-type]
+    core = KernelHostCore(model_runtime=test_model_runtime())
 
     async def exercise() -> None:
         try:
@@ -378,7 +379,7 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
     monkeypatch.setattr(kernel_host, "KernelHostSession", BlockingSession)
     monkeypatch.setattr(kernel_host, "resolve_user_home", observed_user_home)
     monkeypatch.setattr(KernelHostCore, "_ensure_resources", fake_resources)
-    core = KernelHostCore(settings=SimpleNamespace())  # type: ignore[arg-type]
+    core = KernelHostCore(model_runtime=test_model_runtime())
 
     async def exercise() -> None:
         opening = asyncio.create_task(

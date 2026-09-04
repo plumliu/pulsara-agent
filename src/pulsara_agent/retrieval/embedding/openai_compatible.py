@@ -14,10 +14,14 @@ import httpx
 import openai
 
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundAsyncClient,
-    admit_process_api_key_http_operation,
+from pulsara_agent.local_credentials import (
+    DashScopeEmbeddingCredential,
+    LocalCredentialStore,
+)
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundAsyncClient,
+    admit_process_credential_http_operation,
 )
 from pulsara_agent.retrieval.errors import EmbeddingServiceError
 from pulsara_agent.retrieval.embedding.validation import (
@@ -35,14 +39,13 @@ class OpenAICompatibleEmbeddingProvider:
         self,
         *,
         model: str,
-        api_key: str,
         base_url: str,
         dimensions: int = 1024,
         timeout_seconds: float = 30.0,
         max_retries: int = 3,
         batch_size: int = 10,
         max_concurrent: int = 5,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credentials: LocalCredentialStore,
     ) -> None:
         if model != "text-embedding-v4" or dimensions != 1024:
             raise ValueError("embedding configuration is outside the V1 vector space")
@@ -53,21 +56,13 @@ class OpenAICompatibleEmbeddingProvider:
         self._model = model
         self._batch_size = batch_size
         self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._api_key_boundary = api_key_boundary
-        self._client = openai.AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=timeout_seconds,
-            max_retries=max_retries,
-            http_client=ProcessApiKeyBoundAsyncClient(
-                api_key_boundary=api_key_boundary,
-                credential_header_names=frozenset({b"authorization"}),
-                timeout=httpx.Timeout(timeout_seconds),
-            ),
-        )
+        self._base_url = base_url
+        self._timeout_seconds = timeout_seconds
+        self._max_retries = max_retries
+        self._credentials = credentials
 
     async def aclose(self) -> None:
-        await self._client.close()
+        return None
 
     async def embed(self, text: str) -> list[float]:
         _validate_embedding_inputs((text,))
@@ -92,6 +87,19 @@ class OpenAICompatibleEmbeddingProvider:
             texts=texts,
         )
         async with self._semaphore:
+            borrow = self._credentials.borrow(DashScopeEmbeddingCredential())
+            boundary = ProcessCredentialBoundary(borrow.value)
+            client = openai.AsyncOpenAI(
+                api_key=borrow.value,
+                base_url=self._base_url,
+                timeout=self._timeout_seconds,
+                max_retries=self._max_retries,
+                http_client=ProcessCredentialBoundAsyncClient(
+                    credential_boundary=boundary,
+                    credential_header_names=frozenset({b"authorization"}),
+                    timeout=httpx.Timeout(self._timeout_seconds),
+                ),
+            )
             try:
                 payload = {
                     "model": self._model,
@@ -105,10 +113,10 @@ class OpenAICompatibleEmbeddingProvider:
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode("utf-8")
-                response = await admit_process_api_key_http_operation(
-                    api_key_boundary=self._api_key_boundary,
+                response = await admit_process_credential_http_operation(
+                    credential_boundary=boundary,
                     guarded_values=(encoded,),
-                    operation=lambda: self._client.embeddings.create(
+                    operation=lambda: client.embeddings.create(
                             model=self._model,
                             input=texts,
                             dimensions=self.dimensions,
@@ -119,6 +127,9 @@ class OpenAICompatibleEmbeddingProvider:
                 raise EmbeddingServiceError("embedding admission rejected") from None
             except openai.OpenAIError:
                 raise EmbeddingServiceError("embedding transport failed") from None
+            finally:
+                await client.close()
+                borrow.close()
         if getattr(response, "model", None) != self._model:
             raise EmbeddingServiceError(
                 "Embedding response model violates the sealed V1 contract."

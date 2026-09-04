@@ -41,12 +41,33 @@ from pulsara_agent.primitives.context import (
     freeze_json,
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
-from tools.run_round5a2_durable_replay_dogfood import _scrub_exact_api_key
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION = ROOT / "src/pulsara_agent"
 KERNEL = PRODUCTION / "conversation_kernel"
+_API_KEY_REDACTION = "<redacted:PULSARA_API_KEY>"
+
+
+def _scrub_exact_api_key(value: object, *, api_key: str) -> object:
+    if not api_key:
+        return value
+    if isinstance(value, str):
+        return value.replace(api_key, _API_KEY_REDACTION)
+    if isinstance(value, list):
+        return [_scrub_exact_api_key(item, api_key=api_key) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub_exact_api_key(item, api_key=api_key) for item in value)
+    if isinstance(value, dict):
+        return {
+            (
+                key.replace(api_key, _API_KEY_REDACTION)
+                if isinstance(key, str)
+                else key
+            ): _scrub_exact_api_key(item, api_key=api_key)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _target(

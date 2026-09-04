@@ -176,7 +176,7 @@ def bounded_terminal_public_detail(value: str, *, secret: str | None = None) -> 
         raise TypeError("terminal public detail must be text")
     detail = value.strip() or "The delegated task ended without additional detail."
     if secret:
-        detail = detail.replace(secret, "[PULSARA_API_KEY]")
+        detail = detail.replace(secret, "[REDACTED_CREDENTIAL]")
     raw = detail.encode("utf-8")
     if len(raw) <= MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES:
         return detail

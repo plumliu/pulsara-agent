@@ -1,0 +1,489 @@
+"""Exact route + wire API + model target resolution."""
+
+from __future__ import annotations
+
+import math
+import re
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Literal
+from urllib.parse import unquote, urlsplit
+
+from pulsara_agent.llm.model_catalog import (
+    ModelCatalogEntry,
+    ModelCatalogEntryKey,
+    ModelTargetKey,
+    ReasoningControlContract,
+    ReasoningProviderDefault,
+    ReasoningSelectableControls,
+    RouteWireDialect,
+    SelectableModelCatalog,
+    WireApi,
+)
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    ModelConnectionConfig,
+    ModelConnectionId,
+    ReasoningBudgetSelection,
+    ReasoningEffortSelection,
+    ReasoningSelection,
+    ReasoningToggleSelection,
+)
+from pulsara_agent.llm.provider import ModelIdentityPolicy
+from pulsara_agent.llm.provider import RouteWireProfile
+from pulsara_agent.primitives.model_call import ModelContextLimits
+
+
+DEFAULT_OUTPUT_TOKEN_TARGET = 8_192
+INPUT_SAFETY_MARGIN_TARGET = 8_192
+
+_PERCENT_ESCAPE_RE = re.compile(r"%([0-9a-fA-F]{2})")
+_INVALID_PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9a-fA-F]{2})")
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningWireFields:
+    root: Mapping[str, object]
+    extra_body: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        root = MappingProxyType(dict(self.root))
+        extra_body = MappingProxyType(dict(self.extra_body))
+        if set(root).intersection(extra_body):
+            raise ValueError("reasoning wire fields have duplicate owners")
+        object.__setattr__(self, "root", root)
+        object.__setattr__(self, "extra_body", extra_body)
+
+
+ReasoningLowerer = Callable[
+    [ReasoningSelection, ReasoningControlContract], ReasoningWireFields
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RouteWireContract:
+    transport_binding_id: str
+    transport_contract_version: str
+    model_identity_policy: ModelIdentityPolicy
+    assistant_replay_contract: str
+    profile: RouteWireProfile
+    supported_reasoning_families: frozenset[
+        Literal["effort", "toggle", "budget_tokens"]
+    ]
+    lower_reasoning: ReasoningLowerer
+
+    def __post_init__(self) -> None:
+        if not self.transport_binding_id or not self.transport_contract_version:
+            raise ValueError("route/wire transport identity is incomplete")
+        if not self.assistant_replay_contract:
+            raise ValueError("route/wire replay contract is incomplete")
+        if self.profile.model_identity_policy is not self.model_identity_policy:
+            raise ValueError("route/wire model identity policy drifted")
+
+
+@dataclass(slots=True)
+class RouteWireRegistry:
+    _dialect_contracts: dict[tuple[RouteWireDialect, WireApi], RouteWireContract]
+    _route_endpoint_defaults: dict[str, str]
+
+    def __init__(self) -> None:
+        self._dialect_contracts = {}
+        self._route_endpoint_defaults = {}
+
+    def register_endpoint_default(self, route_id: str, base_url: str) -> None:
+        if not route_id or route_id != route_id.strip():
+            raise ValueError("route endpoint default has an invalid route id")
+        if route_id in self._route_endpoint_defaults:
+            raise ValueError("route endpoint default is already registered")
+        self._route_endpoint_defaults[route_id] = canonicalize_endpoint(base_url)
+
+    def register_dialect(
+        self,
+        dialect: RouteWireDialect,
+        wire_api: WireApi,
+        contract: RouteWireContract,
+    ) -> None:
+        key = (dialect, wire_api)
+        if key in self._dialect_contracts:
+            raise ValueError("dialect/wire contract is already registered")
+        self._dialect_contracts[key] = contract
+
+    def contract_for(
+        self, entry: ModelCatalogEntry, wire_api: WireApi
+    ) -> RouteWireContract:
+        try:
+            return self._dialect_contracts[(entry.wire_dialect, wire_api)]
+        except KeyError as exc:
+            raise KeyError(
+                "route/wire adapter is unavailable: "
+                f"{entry.key.route_id}/{wire_api.value}"
+            ) from exc
+
+    def supports(self, entry: ModelCatalogEntry, wire_api: WireApi) -> bool:
+        return (entry.wire_dialect, wire_api) in self._dialect_contracts
+
+    def endpoint_for(self, entry: ModelCatalogEntry) -> str | None:
+        return entry.endpoint or self._route_endpoint_defaults.get(entry.key.route_id)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCatalogFacts:
+    display_name: str
+    route_name: str
+    tool_call: bool | None
+    limits: ModelContextLimits
+    wire_shape_hint: Literal["responses", "completions"] | None
+
+
+@dataclass(frozen=True, slots=True)
+class ModelTargetContract:
+    key: ModelTargetKey
+    catalog_facts: ModelCatalogFacts
+    reasoning: ReasoningControlContract
+    route_wire: RouteWireContract
+    canonical_endpoint_base_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedModelConnection:
+    config: ModelConnectionConfig
+    target: ModelTargetContract
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenModelResolutionSnapshot:
+    """Database-independent connection/target cut for one admission attempt."""
+
+    resolved: Mapping[ModelConnectionId, ResolvedModelConnection]
+    unavailable: Mapping[ModelConnectionId, str]
+
+    def __post_init__(self) -> None:
+        resolved = MappingProxyType(dict(self.resolved))
+        unavailable = MappingProxyType(dict(self.unavailable))
+        if set(resolved).intersection(unavailable):
+            raise ValueError("model resolution snapshot has overlapping outcomes")
+        object.__setattr__(self, "resolved", resolved)
+        object.__setattr__(self, "unavailable", unavailable)
+
+    def connection(self, connection_id: ModelConnectionId) -> ResolvedModelConnection:
+        resolved = self.resolved.get(connection_id)
+        if resolved is not None:
+            return resolved
+        unavailable = self.unavailable.get(connection_id)
+        if unavailable is not None:
+            raise ModelTargetNotExecutable(unavailable)
+        raise ModelTargetNotExecutable("model connection metadata is unavailable")
+
+    def validate(self, binding: ModelCallBinding) -> ResolvedModelConnection:
+        resolved = self.connection(binding.connection_id)
+        validate_reasoning_selection(resolved.target.reasoning, binding.reasoning)
+        return resolved
+
+    def reconcile(
+        self, binding: ModelCallBinding
+    ) -> tuple[ModelCallBinding, ResolvedModelConnection, bool]:
+        resolved = self.connection(binding.connection_id)
+        reconciled, changed = reconcile_model_call_binding(
+            current=binding,
+            connection=resolved.config,
+            target=resolved.target,
+        )
+        return reconciled, resolved, changed
+
+
+class ModelTargetNotExecutable(ValueError):
+    pass
+
+
+class ModelReasoningSelectionInvalid(ValueError):
+    pass
+
+
+def derive_model_context_limits(entry: ModelCatalogEntry) -> ModelContextLimits:
+    hard = entry.limits
+    if hard is None:
+        raise ModelTargetNotExecutable("model hard limits are unavailable")
+    default_output = min(
+        DEFAULT_OUTPUT_TOKEN_TARGET,
+        hard.max_output_tokens,
+        hard.total_context_tokens - 1,
+    )
+    pre_margin_input = min(
+        hard.max_input_tokens,
+        hard.total_context_tokens - default_output,
+    )
+    margin = min(INPUT_SAFETY_MARGIN_TARGET, pre_margin_input - 1)
+    if min(default_output, pre_margin_input, pre_margin_input - margin) < 1:
+        raise ModelTargetNotExecutable("model context budget is non-positive")
+    return ModelContextLimits(
+        total_context_tokens=hard.total_context_tokens,
+        max_input_tokens=hard.max_input_tokens,
+        max_output_tokens=hard.max_output_tokens,
+        default_output_tokens=default_output,
+        input_safety_margin_tokens=margin,
+    )
+
+
+def controls_supported_by_adapter(
+    reasoning: ReasoningControlContract,
+    contract: RouteWireContract,
+) -> ReasoningControlContract:
+    if not isinstance(reasoning, ReasoningSelectableControls):
+        return reasoning
+    effort = (
+        reasoning.effort
+        if "effort" in contract.supported_reasoning_families
+        else None
+    )
+    toggle = (
+        reasoning.toggle
+        if "toggle" in contract.supported_reasoning_families
+        else None
+    )
+    budget = (
+        reasoning.budget
+        if "budget_tokens" in contract.supported_reasoning_families
+        else None
+    )
+    if effort is None and toggle is None and budget is None:
+        return ReasoningProviderDefault()
+    return ReasoningSelectableControls(effort, toggle, budget)
+
+
+def resolve_model_target_contract(
+    *,
+    catalog: SelectableModelCatalog,
+    connection: ModelConnectionConfig,
+    route_wires: RouteWireRegistry,
+) -> ModelTargetContract:
+    try:
+        entry = catalog.require(connection.target.catalog_key)
+    except KeyError as exc:
+        raise ModelTargetNotExecutable(str(exc)) from exc
+    try:
+        route_wire = route_wires.contract_for(entry, connection.target.wire_api)
+    except KeyError as exc:
+        raise ModelTargetNotExecutable(str(exc)) from exc
+    limits = derive_model_context_limits(entry)
+    canonical_endpoint = canonicalize_endpoint(connection.base_url)
+    return ModelTargetContract(
+        key=connection.target,
+        catalog_facts=ModelCatalogFacts(
+            display_name=entry.display_name,
+            route_name=entry.route_name,
+            tool_call=entry.tool_call,
+            limits=limits,
+            wire_shape_hint=entry.wire_shape_hint,
+        ),
+        reasoning=controls_supported_by_adapter(entry.reasoning, route_wire),
+        route_wire=route_wire,
+        canonical_endpoint_base_url=canonical_endpoint,
+    )
+
+
+def create_model_connection(
+    *,
+    catalog: SelectableModelCatalog,
+    target: ModelTargetKey,
+    route_wires: RouteWireRegistry,
+    connection_id: ModelConnectionId | None = None,
+) -> ResolvedModelConnection:
+    try:
+        entry = catalog.require(ModelCatalogEntryKey(target.route_id, target.model_id))
+    except KeyError as exc:
+        raise ModelTargetNotExecutable(str(exc)) from exc
+    endpoint = route_wires.endpoint_for(entry)
+    if endpoint is None:
+        raise ModelTargetNotExecutable("model endpoint is unknown")
+    config = ModelConnectionConfig(connection_id or ModelConnectionId.new(), target, endpoint)
+    return ResolvedModelConnection(
+        config=config,
+        target=resolve_model_target_contract(
+            catalog=catalog, connection=config, route_wires=route_wires
+        ),
+    )
+
+
+def default_reasoning_selection(
+    reasoning: ReasoningControlContract,
+) -> ReasoningSelection | None:
+    if not isinstance(reasoning, ReasoningSelectableControls):
+        return None
+    disabled: list[str | None] = []
+    positive: list[str] = []
+    if reasoning.effort is not None:
+        for value in reasoning.effort.values:
+            if value is None or value == "none":
+                disabled.append(value)
+            else:
+                positive.append(value)
+    if positive:
+        return ReasoningEffortSelection(positive[len(positive) // 2])
+    if reasoning.budget is not None and reasoning.budget.closed:
+        assert reasoning.budget.minimum_tokens is not None
+        assert reasoning.budget.maximum_tokens is not None
+        return ReasoningBudgetSelection(
+            math.ceil(
+                (reasoning.budget.minimum_tokens + reasoning.budget.maximum_tokens)
+                / 2
+            )
+        )
+    if reasoning.toggle is not None:
+        return ReasoningToggleSelection(True)
+    if disabled:
+        return ReasoningEffortSelection(disabled[len(disabled) // 2])
+    return None
+
+
+def validate_reasoning_selection(
+    reasoning: ReasoningControlContract,
+    selection: ReasoningSelection | None,
+) -> None:
+    if selection is None:
+        if isinstance(reasoning, ReasoningSelectableControls) and (
+            reasoning.effort is not None
+            or reasoning.toggle is not None
+            or (reasoning.budget is not None and reasoning.budget.closed)
+        ):
+            raise ModelReasoningSelectionInvalid(
+                "selectable target requires an explicit reasoning selection"
+            )
+        return
+    if not isinstance(reasoning, ReasoningSelectableControls):
+        raise ModelReasoningSelectionInvalid("target has no caller reasoning control")
+    if isinstance(selection, ReasoningEffortSelection):
+        if reasoning.effort is None or selection.value not in reasoning.effort.values:
+            raise ModelReasoningSelectionInvalid(
+                "reasoning effort is not an exact target choice"
+            )
+        return
+    if isinstance(selection, ReasoningToggleSelection):
+        if reasoning.toggle is None:
+            raise ModelReasoningSelectionInvalid("target has no reasoning toggle")
+        return
+    if isinstance(selection, ReasoningBudgetSelection):
+        budget = reasoning.budget
+        if budget is None or not budget.closed:
+            raise ModelReasoningSelectionInvalid(
+                "target has no closed reasoning budget range"
+            )
+        assert budget.minimum_tokens is not None
+        assert budget.maximum_tokens is not None
+        if not budget.minimum_tokens <= selection.tokens <= budget.maximum_tokens:
+            raise ModelReasoningSelectionInvalid(
+                "reasoning token budget is outside the target range"
+            )
+        return
+    raise TypeError(type(selection).__name__)
+
+
+def reconcile_model_call_binding(
+    *,
+    current: ModelCallBinding | None,
+    connection: ModelConnectionConfig,
+    target: ModelTargetContract,
+) -> tuple[ModelCallBinding, bool]:
+    if current is None or current.connection_id != connection.id:
+        return ModelCallBinding(
+            connection.id, default_reasoning_selection(target.reasoning)
+        ), True
+    try:
+        validate_reasoning_selection(target.reasoning, current.reasoning)
+    except ModelReasoningSelectionInvalid:
+        return ModelCallBinding(
+            connection.id, default_reasoning_selection(target.reasoning)
+        ), True
+    return current, False
+
+
+def with_output_cap(
+    target: ModelTargetContract, maximum_output_tokens: int
+) -> ModelTargetContract:
+    if maximum_output_tokens < 1:
+        raise ValueError("model output cap must be positive")
+    limits = target.catalog_facts.limits
+    cap = min(maximum_output_tokens, limits.max_output_tokens)
+    pre_margin = min(
+        limits.max_input_tokens, limits.total_context_tokens - cap
+    )
+    margin = min(limits.input_safety_margin_tokens, pre_margin - 1)
+    bounded = ModelContextLimits(
+        total_context_tokens=limits.total_context_tokens,
+        max_input_tokens=limits.max_input_tokens,
+        max_output_tokens=limits.max_output_tokens,
+        default_output_tokens=cap,
+        input_safety_margin_tokens=margin,
+    )
+    return replace(
+        target,
+        catalog_facts=replace(target.catalog_facts, limits=bounded),
+    )
+
+
+def canonicalize_endpoint(base_url: str) -> str:
+    parsed = urlsplit(base_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError("model endpoint scheme must be http or https")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("model endpoint cannot contain userinfo")
+    if parsed.query or parsed.fragment:
+        raise ValueError("model endpoint cannot contain query or fragment")
+    if not parsed.hostname:
+        raise ValueError("model endpoint hostname is required")
+    hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("model endpoint port is invalid") from exc
+    if port == (80 if scheme == "http" else 443):
+        port = None
+    rendered_hostname = f"[{hostname}]" if ":" in hostname else hostname
+    authority = rendered_hostname if port is None else f"{rendered_hostname}:{port}"
+    path = parsed.path or "/"
+    if _INVALID_PERCENT_ESCAPE_RE.search(path):
+        raise ValueError("model endpoint path contains an invalid percent escape")
+    path = _PERCENT_ESCAPE_RE.sub(lambda match: f"%{match.group(1).upper()}", path)
+    if any(segment in {".", ".."} for segment in unquote(path).split("/")):
+        raise ValueError("model endpoint path cannot contain dot segments")
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if path != "/":
+        path = path.rstrip("/")
+    return f"{scheme}://{authority}{'' if path == '/' else path}"
+
+
+def reasoning_wire_fields(
+    target: ModelTargetContract,
+    selection: ReasoningSelection | None,
+) -> ReasoningWireFields:
+    validate_reasoning_selection(target.reasoning, selection)
+    if selection is None:
+        return ReasoningWireFields({}, {})
+    return target.route_wire.lower_reasoning(selection, target.reasoning)
+
+
+__all__ = [
+    "FrozenModelResolutionSnapshot",
+    "DEFAULT_OUTPUT_TOKEN_TARGET",
+    "INPUT_SAFETY_MARGIN_TARGET",
+    "ModelCatalogFacts",
+    "ModelReasoningSelectionInvalid",
+    "ModelTargetContract",
+    "ModelTargetNotExecutable",
+    "ReasoningWireFields",
+    "ResolvedModelConnection",
+    "RouteWireContract",
+    "RouteWireRegistry",
+    "canonicalize_endpoint",
+    "controls_supported_by_adapter",
+    "create_model_connection",
+    "default_reasoning_selection",
+    "derive_model_context_limits",
+    "reasoning_wire_fields",
+    "reconcile_model_call_binding",
+    "resolve_model_target_contract",
+    "validate_reasoning_selection",
+    "with_output_cap",
+]

@@ -256,6 +256,14 @@ export interface SessionSummary {
   live: boolean;
   pinned?: boolean;
   unread?: boolean;
+  modelCallBinding?: {
+    connection_id: string;
+    reasoning:
+      | { kind: 'effort'; value: string | null }
+      | { kind: 'toggle'; enabled: boolean }
+      | { kind: 'budget_tokens'; tokens: number }
+      | null;
+  } | null;
   taskCounts?: {
     total: number;
     active: number;

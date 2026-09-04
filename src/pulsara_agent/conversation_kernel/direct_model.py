@@ -28,7 +28,6 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     OpenAITransportTimeoutPolicy,
 )
 from pulsara_agent.llm.adapters.openai.chat_completions import (
-    OpenAIChatCompletionsTransport,
     chat_semantic_wire_group,
     materialize_chat_context_bearing_wire_projection,
 )
@@ -38,15 +37,15 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
     openai_native_function_tool_contract_fingerprint,
 )
 from pulsara_agent.llm.adapters.openai.responses import (
-    OpenAIResponsesTransport,
     materialize_responses_context_bearing_wire_projection,
     responses_semantic_wire_group,
 )
-from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.input import LLMToolCall, ToolSpec
-from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.llm.model_connections import ModelCallBinding
+from pulsara_agent.llm.model_target import default_reasoning_selection
+from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.llm.provider import ProviderAssistantReplayCodecKind
+from pulsara_agent.llm.provider import mutable_provider_value
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
     ProviderAssistantReplayFragment,
@@ -55,17 +54,12 @@ from pulsara_agent.llm.provider_replay import (
     build_prepared_durable_provider_assistant_replay,
     build_provider_replay_target_compatibility,
 )
-from pulsara_agent.llm.normalized_transport import (
-    NormalizedLLMTransport,
-    NormalizedLLMTransportRegistry,
-)
 from pulsara_agent.llm.request import (
     FrozenProviderWireInputPlan,
     FrozenProviderWireInputQuote,
     FrozenProviderWireMaterialization,
     FrozenProviderWireReplacementIdentity,
     LLMContext,
-    LLMOptions,
     provider_assistant_public_projection_fingerprint,
     provider_assistant_message_public_projection_fingerprint,
 )
@@ -73,7 +67,6 @@ from pulsara_agent.llm.resolution import (
     ResolvedModelCall,
     ResolvedModelTarget,
     resolve_model_call,
-    resolve_model_target,
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.user_carrier import compose_provider_root_policy
@@ -130,6 +123,7 @@ class KernelModelTargetPreparationRequest:
     purpose: ModelCallPurpose
     maximum_input_tokens: int | None
     maximum_output_tokens: int
+    binding: ModelCallBinding = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +153,7 @@ class PreparedKernelModelTarget:
         ):
             raise ValueError("prepared model target facts do not exact-join")
         expected_contract = openai_native_function_tool_contract_fingerprint(
-            self.target.model_profile.provider_profile.wire_api
+            self.target.model_profile.route_wire_profile.wire_api
         )
         if self.native_function_tool_wire_contract_fingerprint != expected_contract:
             raise ValueError("prepared model target native contract drifted")
@@ -167,12 +161,10 @@ class PreparedKernelModelTarget:
 
 @dataclass(frozen=True, slots=True)
 class KernelModelPreparationRequest:
-    """Retained source-compatible request for direct component callers.
+    """Direct component-test request carrying the same exact model binding.
 
-    Production dispatch uses ``prepare_target`` followed by
-    ``bind_tool_surface`` so native eligibility is frozen before the parent
-    capability cut.  This value remains a convenience at the adapter unit-test
-    boundary only.
+    Production dispatch uses ``prepare_target`` followed by ``bind_tool_surface``
+    so native eligibility is frozen before the parent capability cut.
     """
 
     session_id: str
@@ -181,6 +173,7 @@ class KernelModelPreparationRequest:
     purpose: ModelCallPurpose
     maximum_input_tokens: int
     maximum_output_tokens: int
+    binding: ModelCallBinding = field(repr=False)
     tool_surface: PreparedKernelToolSurface = field(repr=False)
 
 
@@ -490,7 +483,7 @@ class PreparedKernelModelExecution:
                         except Exception:
                             pass
                     if item.terminal_kind is ProviderNormalizedTerminalKind.COMPLETED:
-                        profile = call.target.model_profile.provider_profile
+                        profile = call.target.model_profile.route_wire_profile
                         if (
                             profile.assistant_replay_codec_kind
                             is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS
@@ -557,15 +550,12 @@ class DirectKernelModelPort:
     def __init__(
         self,
         *,
-        config: LLMConfig,
-        role: ModelRole = ModelRole.PRO,
-        options: LLMOptions | None = None,
+        model_runtime: ModelRuntime,
         usage_observer: Callable[
             [KernelModelExecutionRequest, TransportUsageReport], None
         ]
         | None = None,
         timeout_policy: OpenAITransportTimeoutPolicy | None = None,
-        api_key_boundary: ProcessApiKeyBoundary,
     ) -> None:
         transport_timeout = (
             timeout_policy or DEFAULT_KERNEL_WATCHDOG_POLICY.foreground_transport
@@ -574,33 +564,8 @@ class DirectKernelModelPort:
             raise ValueError(
                 "foreground provider transport must not have a total response timeout"
             )
-        registry = NormalizedLLMTransportRegistry()
-        registry.register(
-            NormalizedLLMTransport(
-                OpenAIResponsesTransport(
-                    api_key=config.api_key,
-                    timeout_policy=transport_timeout,
-                    api_key_boundary=api_key_boundary,
-                    retry_config=config.retry,
-                    openai_sdk_max_retries=config.openai_sdk_max_retries,
-                )
-            )
-        )
-        registry.register(
-            NormalizedLLMTransport(
-                OpenAIChatCompletionsTransport(
-                    api_key=config.api_key,
-                    timeout_policy=transport_timeout,
-                    api_key_boundary=api_key_boundary,
-                    retry_config=config.retry,
-                    openai_sdk_max_retries=config.openai_sdk_max_retries,
-                )
-            )
-        )
-        self._config = config
-        self._registry = registry
-        self._role = role
-        self._options = options
+        self._model_runtime = model_runtime
+        self._transport_timeout = transport_timeout
         self._usage_observer = usage_observer
         self._transport_timeout_policy_fingerprint = (
             transport_timeout.policy_fingerprint
@@ -620,14 +585,13 @@ class DirectKernelModelPort:
             )
         ):
             raise ValueError("foreground model preparation bounds are invalid")
-        target = resolve_model_target(
-            config=self._config,
-            registry=self._registry,
-            role=self._role,
-            requested_options=self._options,
+        target = self._model_runtime.resolve_target(
+            request.binding,
+            timeout_policy=self._transport_timeout,
         )
         call = resolve_model_call(
             target=target,
+            binding=request.binding,
             purpose=request.purpose,
             resolved_model_call_id=f"model_call:{uuid4().hex}",
         )
@@ -642,7 +606,7 @@ class DirectKernelModelPort:
         if request.maximum_input_tokens is not None:
             input_budget = min(request.maximum_input_tokens, input_budget)
         native_contract = openai_native_function_tool_contract_fingerprint(
-            target.model_profile.provider_profile.wire_api
+            target.model_profile.route_wire_profile.wire_api
         )
         return PreparedKernelModelTarget(
             session_id=request.session_id,
@@ -671,15 +635,19 @@ class DirectKernelModelPort:
 
         if active_prepared_call is not None:
             target = active_prepared_call.call.target
-        else:
-            target = resolve_model_target(
-                config=self._config,
-                registry=self._registry,
-                role=self._role,
-                requested_options=self._options,
+            binding = ModelCallBinding(
+                active_prepared_call.call.binding.connection_id,
+                None,
             )
+            binding = ModelCallBinding(
+                binding.connection_id,
+                default_reasoning_selection(target.contract.reasoning),
+            )
+        else:
+            raise ValueError("compaction summary requires an origin model call")
         return resolve_model_call(
             target=target,
+            binding=binding,
             purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
             resolved_model_call_id=f"model_call:{uuid4().hex}",
         )
@@ -699,7 +667,7 @@ class DirectKernelModelPort:
         return freeze_openai_native_tool_eligibility(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
-            wire_api=(prepared_target.target.model_profile.provider_profile.wire_api),
+            wire_api=(prepared_target.target.model_profile.route_wire_profile.wire_api),
             tool_facts=tool_facts,
             retained_direct_inputs=retained_direct_inputs,
             deadline_monotonic=deadline_monotonic,
@@ -719,7 +687,7 @@ class DirectKernelModelPort:
         return materialize_openai_native_tool_projection_set(
             conversation_scope_kind=conversation_scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
-            wire_api=(prepared_target.target.model_profile.provider_profile.wire_api),
+            wire_api=(prepared_target.target.model_profile.route_wire_profile.wire_api),
             tool_versions=tool_versions,
             tool_specs=tool_specs,
             eligibility=eligibility,
@@ -739,7 +707,10 @@ class DirectKernelModelPort:
         ):
             raise ValueError("prepared model target belongs to another adapter")
         surface = tool_surface.model_surface
-        if surface.tool_specs and not prepared_target.target.fact.supports_tools:
+        if (
+            surface.tool_specs
+            and prepared_target.target.contract.catalog_facts.tool_call is False
+        ):
             raise ValueError("resolved model target does not support prepared tools")
         if (
             native_projection_set.native_function_tool_wire_contract_fingerprint
@@ -797,7 +768,10 @@ class DirectKernelModelPort:
             != self._transport_timeout_policy_fingerprint
         ):
             raise ValueError("prepared model target belongs to another adapter")
-        if tool_surface.tool_specs and not prepared_target.target.fact.supports_tools:
+        if (
+            tool_surface.tool_specs
+            and prepared_target.target.contract.catalog_facts.tool_call is False
+        ):
             raise ValueError("resolved model target does not support prepared tools")
         if (
             native_projection_set.native_function_tool_wire_contract_fingerprint
@@ -880,7 +854,7 @@ class DirectKernelModelPort:
             != compiled_message_placements_fingerprint(compiled.message_placements)
             or plan.resolved_target_semantic_fingerprint
             != prepared.call.target.fact.target_fingerprint
-            or plan.provider_profile_fingerprint
+            or plan.route_wire_profile_fingerprint
             != provider_wire_profile_fingerprint(prepared.call)
             or plan.materialization.tool_items
             != tuple(
@@ -1000,7 +974,7 @@ class DirectKernelModelPort:
     def replay_target_for_resolved_call(
         call: ResolvedModelCall,
     ) -> ProviderReplayTargetCompatibilityFact:
-        profile = call.target.model_profile.provider_profile
+        profile = call.target.model_profile.route_wire_profile
         return build_provider_replay_target_compatibility(
             wire_api=profile.wire_api,
             endpoint_identity_fingerprint=call.target.fact.endpoint_fingerprint,
@@ -1010,14 +984,24 @@ class DirectKernelModelPort:
 
 
 def provider_wire_profile_fingerprint(call: ResolvedModelCall) -> str:
-    profile = call.target.model_profile.provider_profile
+    profile = call.target.model_profile.route_wire_profile
     return context_fingerprint(
         "pulsara.provider-wire-profile:v1",
         {
             "profile_id": profile.id,
             "wire_api": profile.wire_api,
-            "target_request_shape": (
-                call.target.fact.provider_request_shape_fingerprint
+            "request_defaults": mutable_provider_value(profile.request_defaults),
+            "request_extra_body": mutable_provider_value(
+                profile.request_extra_body
+            ),
+            "chat_replay_fields": tuple(
+                (
+                    item.field_name,
+                    item.accumulation_mode.value,
+                    item.required_on_selected_response,
+                    item.final_value_required,
+                )
+                for item in profile.chat_replay_fields
             ),
             "assistant_replay": profile.assistant_replay_contract_fingerprint,
             "function_tools": openai_native_function_tool_contract_fingerprint(
@@ -1148,10 +1132,10 @@ def _semantic_wire_groups(
     semantic_input: ProviderWireSemanticInput,
     native_projection_set: FrozenNativeToolProjectionSet,
 ) -> tuple[tuple[tuple[dict[str, object], ...], ...], tuple[dict[str, object], ...]]:
-    profile = call.target.model_profile.provider_profile
+    profile = call.target.model_profile.route_wire_profile
     if profile.wire_api == "openai_chat_completions":
         groups = tuple(
-            tuple(chat_semantic_wire_group(item, provider_profile=profile))
+            tuple(chat_semantic_wire_group(item, route_wire_profile=profile))
             for item in semantic_input.messages
         )
     elif profile.wire_api == "openai_responses":
@@ -1189,7 +1173,7 @@ class ProviderWireMeasurement:
         *,
         semantic_input: ProviderWireSemanticInput,
         wire_api: str,
-        provider_profile_fingerprint: str,
+        route_wire_profile_fingerprint: str,
         resolved_target_semantic_fingerprint: str,
         materialization: FrozenProviderWireMaterialization,
         replacements: tuple[FrozenProviderWireReplacementIdentity, ...],
@@ -1201,7 +1185,7 @@ class ProviderWireMeasurement:
     ) -> None:
         self._semantic_input = semantic_input
         self._wire_api = wire_api
-        self._provider_profile_fingerprint = provider_profile_fingerprint
+        self._route_wire_profile_fingerprint = route_wire_profile_fingerprint
         self._resolved_target_semantic_fingerprint = (
             resolved_target_semantic_fingerprint
         )
@@ -1263,7 +1247,7 @@ class ProviderWireMeasurement:
                 )
             ),
             wire_api=self._wire_api,
-            provider_profile_fingerprint=self._provider_profile_fingerprint,
+            route_wire_profile_fingerprint=self._route_wire_profile_fingerprint,
             resolved_target_semantic_fingerprint=(
                 self._resolved_target_semantic_fingerprint
             ),
@@ -1306,7 +1290,7 @@ def freeze_provider_wire_measurement(
         semantic_input=semantic_input,
         native_projection_set=native_projection_set,
     )
-    profile = call.target.model_profile.provider_profile
+    profile = call.target.model_profile.route_wire_profile
     profile_fingerprint = provider_wire_profile_fingerprint(call)
     replay_target = DirectKernelModelPort.replay_target_for_resolved_call(call)
     fragments = () if replay_hydration is None else replay_hydration.fragments
@@ -1483,7 +1467,7 @@ def freeze_provider_wire_measurement(
     return ProviderWireMeasurement(
         semantic_input=semantic_input,
         wire_api=profile.wire_api,
-        provider_profile_fingerprint=profile_fingerprint,
+        route_wire_profile_fingerprint=profile_fingerprint,
         resolved_target_semantic_fingerprint=call.target.fact.target_fingerprint,
         materialization=materialization,
         replacements=tuple(replacements),
@@ -1557,7 +1541,7 @@ def _materialize_context_bearing_projection(
         raise TypeError("provider tool item is not an object")
     if any(not isinstance(item, dict) for item in ordered_input_items):
         raise TypeError("provider input item is not an object")
-    profile = call.target.model_profile.provider_profile
+    profile = call.target.model_profile.route_wire_profile
     if profile.wire_api == "openai_chat_completions":
         return materialize_chat_context_bearing_wire_projection(
             call=call,

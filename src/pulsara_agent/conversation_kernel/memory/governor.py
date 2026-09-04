@@ -296,6 +296,7 @@ class AdvisoryMemoryGovernor:
                     maximum_input_bytes=MAXIMUM_GOVERNANCE_FINAL_WIRE_BYTES,
                     maximum_output_tokens=MAXIMUM_GOVERNANCE_OUTPUT_TOKENS,
                     timeout_policy=policy,
+                    origin_binding=candidate.origin_model_call_binding,
                     maximum_result_bytes=MAXIMUM_GOVERNANCE_OUTPUT_BYTES,
                 )
                 if selected is None:

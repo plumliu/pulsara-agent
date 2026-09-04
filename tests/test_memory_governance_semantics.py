@@ -96,10 +96,13 @@ from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.primitives.model_call import ModelCallPurpose
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import (
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
+)
 from tests.support.postgres import verified_postgres_provider
 
 
@@ -135,15 +138,17 @@ def _target() -> FrozenMemoryPublicFactProjection:
 
 def _auxiliary(api: str) -> DirectKernelAuxiliaryJsonModel:
     return DirectKernelAuxiliaryJsonModel(
-        test_llm_config(
+        test_model_runtime(
             api_key="test-only",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api=api,
+            model_id="test-pro",
+            wire_api=api,
         ),
-        api_key_boundary=ProcessApiKeyBoundary(),
     )
+
+
+def _origin_binding():
+    return test_model_binding(test_model_runtime())
 
 
 def _timeout() -> OpenAITransportTimeoutPolicy:
@@ -161,13 +166,19 @@ def _repository(database) -> ConversationKernelRepository:
 
 
 def _lease(repository: ConversationKernelRepository):
-    return repository.acquire_host_writer(
+    lease = repository.acquire_host_writer(
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=_origin_binding(),
+        deadline_monotonic=monotonic() + 30,
+    )
+    return lease
 
 
 def _start_human_turn(
@@ -177,7 +188,8 @@ def _start_human_turn(
 ) -> tuple[str, str]:
     turn_id = _id("turn")
     entry_id = _id("entry")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_id("command"),
         turn_id=turn_id,
@@ -185,6 +197,7 @@ def _start_human_turn(
         context_binding_revision_id=_id("revision"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=_origin_binding(),
         content=InlineContent.from_bytes(text.encode()),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -263,9 +276,7 @@ def _install_running_main_candidate(
         lease.guard,
         cut=cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(
-            (public_text + public_data).encode()
-        ),
+        parent_content=InlineContent.from_bytes((public_text + public_data).encode()),
         blocks=(
             AssistantTextBlock(
                 _id("block"), InlineContent.from_bytes(public_text.encode())
@@ -277,9 +288,7 @@ def _install_running_main_candidate(
                 _id("block"),
                 tool_call_id,
                 "remember",
-                freeze_json(
-                    {"statement": statement, "context_target": "GLOBAL"}
-                ),
+                freeze_json({"statement": statement, "context_target": "GLOBAL"}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -525,7 +534,9 @@ def test_legal_final_kinds_reuse_the_closed_shape_validator() -> None:
 
 
 @pytest.mark.parametrize("reason", sorted(MODEL_GOVERNANCE_SKIP_REASON_CODES))
-def test_parser_accepts_each_model_skip_reason(reason: MemoryDecisionReasonCode) -> None:
+def test_parser_accepts_each_model_skip_reason(
+    reason: MemoryDecisionReasonCode,
+) -> None:
     decision = _parse_governance_decision(
         {"decision": "SKIP", "reason_code": reason.value},
         {},
@@ -538,7 +549,9 @@ def test_parser_accepts_each_model_skip_reason(reason: MemoryDecisionReasonCode)
     "reason",
     sorted(set(MemoryDecisionReasonCode) - MODEL_GOVERNANCE_SKIP_REASON_CODES),
 )
-def test_parser_rejects_host_only_skip_reasons(reason: MemoryDecisionReasonCode) -> None:
+def test_parser_rejects_host_only_skip_reasons(
+    reason: MemoryDecisionReasonCode,
+) -> None:
     with pytest.raises(ValueError, match="reason is invalid"):
         _parse_governance_decision(
             {"decision": "SKIP", "reason_code": reason.value},
@@ -639,7 +652,9 @@ def test_public_summary_allows_natural_lowercase_kind_words() -> None:
     )
 
 
-def test_relation_parser_requires_exact_allowlist_and_target_independent_summary() -> None:
+def test_relation_parser_requires_exact_allowlist_and_target_independent_summary() -> (
+    None
+):
     target = _target()
     output = {
         "decision": "ACCEPT_AND_SUPERSEDE",
@@ -673,9 +688,7 @@ def test_only_the_relation_target_selected_by_the_model_reaches_settlement() -> 
         {target.fact_id: target},
         legal_final_kinds=legal_memory_final_kinds(_proposal()),
     )
-    assert _selected_governance_relation_targets(
-        plain, {target.fact_id: target}
-    ) == ()
+    assert _selected_governance_relation_targets(plain, {target.fact_id: target}) == ()
 
     related = _parse_governance_decision(
         {
@@ -688,9 +701,9 @@ def test_only_the_relation_target_selected_by_the_model_reaches_settlement() -> 
         {target.fact_id: target},
         legal_final_kinds=legal_memory_final_kinds(_proposal()),
     )
-    assert _selected_governance_relation_targets(
-        related, {target.fact_id: target}
-    ) == (target,)
+    assert _selected_governance_relation_targets(related, {target.fact_id: target}) == (
+        target,
+    )
 
 
 def test_optional_skip_summary_uses_the_same_public_product_validator() -> None:
@@ -707,7 +720,9 @@ def test_optional_skip_summary_uses_the_same_public_product_validator() -> None:
 
 
 @pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
-def test_auxiliary_governance_uses_exact_system_user_shape_and_final_wire(api: str) -> None:
+def test_auxiliary_governance_uses_exact_system_user_shape_and_final_wire(
+    api: str,
+) -> None:
     auxiliary = _auxiliary(api)
     prepared = auxiliary.prepare_json_call(
         purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
@@ -719,6 +734,7 @@ def test_auxiliary_governance_uses_exact_system_user_shape_and_final_wire(api: s
         maximum_input_bytes=128 * 1024,
         maximum_output_tokens=2_048,
         timeout_policy=_timeout(),
+        origin_binding=_origin_binding(),
         maximum_result_bytes=8 * 1024,
     )
     assert prepared.context.system_prompt == MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
@@ -750,6 +766,7 @@ def test_auxiliary_governance_rejects_user_only_or_noncanonical_system() -> None
         "maximum_input_bytes": 128 * 1024,
         "maximum_output_tokens": 2_048,
         "timeout_policy": _timeout(),
+        "origin_binding": _origin_binding(),
     }
     with pytest.raises(ValueError, match="exact stable SYSTEM"):
         auxiliary.prepare_json_call(
@@ -776,6 +793,7 @@ def test_auxiliary_variant_admission_selects_first_exact_final_wire_fit() -> Non
         maximum_input_bytes=256 * 1024,
         maximum_output_tokens=2_048,
         timeout_policy=_timeout(),
+        origin_binding=_origin_binding(),
     )
     selected = auxiliary.prepare_first_fitting_json_call(
         purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
@@ -790,6 +808,7 @@ def test_auxiliary_variant_admission_selects_first_exact_final_wire_fit() -> Non
         maximum_input_bytes=small.final_wire_utf8_bytes,
         maximum_output_tokens=2_048,
         timeout_policy=_timeout(),
+        origin_binding=_origin_binding(),
     )
     assert selected is not None
     prepared, ordinal = selected
@@ -857,9 +876,7 @@ def test_packet_shedding_preserves_human_anchors_and_orders_optional_removal() -
         legal_final_kinds=("FACT", "DECISION"),
     )
     payloads = tuple(json.loads(item.packet) for item in variants)
-    assert payloads[0]["allowed_relation_targets"] == [
-        {"memory_id": target.fact_id}
-    ]
+    assert payloads[0]["allowed_relation_targets"] == [{"memory_id": target.fact_id}]
     assert payloads[1]["allowed_relation_targets"] == []
     assert payloads[1]["source_coverage"]["relation_authority"] is False
     assert payloads[0]["output_schema"]["field_constraints"]["decision"][
@@ -881,9 +898,7 @@ def test_packet_shedding_preserves_human_anchors_and_orders_optional_removal() -
     )
     assert payloads[-1]["cited_tool_evidence"][0]["body"] == ""
     assert payloads[-1]["cited_tool_evidence"][0]["truncated"] is True
-    assert payloads[-1]["all_model_visible_memory"] == [
-        {"memory_id": "memory:visible"}
-    ]
+    assert payloads[-1]["all_model_visible_memory"] == [{"memory_id": "memory:visible"}]
 
 
 @pytest.mark.parametrize("source_gap", ("truncated_producer", "omitted_suffix"))
@@ -1058,11 +1073,19 @@ def test_output_schema_is_a_flat_constraint_not_an_example_object() -> None:
     assert "skip" not in schema
     assert "one flat top-level object" in schema["shape"]
     assert "one flat JSON object" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
-    assert "Formal replacement wording is not required" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
-    assert "keeps both exact same-context endpoints ACTIVE" in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
+    assert (
+        "Formal replacement wording is not required"
+        in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
+    )
+    assert (
+        "keeps both exact same-context endpoints ACTIVE"
+        in MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
+    )
 
 
-def test_no_v1_builder_provider_token_counter_or_provider_business_branch_exists() -> None:
+def test_no_v1_builder_provider_token_counter_or_provider_business_branch_exists() -> (
+    None
+):
     root = __import__("pathlib").Path(__file__).resolve().parents[1] / "src"
     production = "\n".join(path.read_text() for path in root.rglob("*.py"))
     assert "advisory-memory-governance.v1" not in production
@@ -1070,20 +1093,14 @@ def test_no_v1_builder_provider_token_counter_or_provider_business_branch_exists
     assert "offer_candidate_wake" not in production
     assert "provider_token_count" not in production
     governor = (
-        root
-        / "pulsara_agent"
-        / "conversation_kernel"
-        / "memory"
-        / "governor.py"
+        root / "pulsara_agent" / "conversation_kernel" / "memory" / "governor.py"
     ).read_text()
     assert "config.provider" not in governor
     assert "config.api" not in governor
     tool_execution = (
         root / "pulsara_agent" / "conversation_kernel" / "tool_execution.py"
     ).read_text()
-    runner = (
-        root / "pulsara_agent" / "conversation_kernel" / "runner.py"
-    ).read_text()
+    runner = (root / "pulsara_agent" / "conversation_kernel" / "runner.py").read_text()
     assert "offer_governance_wake" not in tool_execution
     assert "offer_governance_wake" in runner
 
@@ -1123,9 +1140,7 @@ def test_canonical_plan_and_runtime_user_shapes_never_become_human_evidence(
     )
     projected = _causal_source_item(item)
     assert projected is not None
-    assert projected.evidence_role is (
-        MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT
-    )
+    assert projected.evidence_role is (MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT)
     assert "用户原话" not in projected.source_product_label
     assert projected.public_kind == public_kind
 
@@ -1512,8 +1527,7 @@ def test_main_candidate_source_is_exact_block_preserving_exhaustive_and_terminal
     assert evidence.producer_cut is not None
     assert evidence.producer_cut.provider_input_through_sequence == 1
     assert tuple(
-        block.block_kind
-        for block in evidence.producer_public_output[0].blocks
+        block.block_kind for block in evidence.producer_public_output[0].blocks
     ) == (
         MemoryGovernanceSourceBlockKind.TEXT,
         MemoryGovernanceSourceBlockKind.DATA,
@@ -1651,9 +1665,7 @@ def test_incomplete_post_proposal_human_source_fails_closed_before_model_semanti
             host_workspace_id=workspace_id,
         ),
         model=model,
-        input_reader=CanonicalProviderInputReader(
-            repository.connection_provider
-        ),
+        input_reader=CanonicalProviderInputReader(repository.connection_provider),
         io_owner=io_owner,
         deadline_factory=KernelExecutionDeadlineFactory(),
     )

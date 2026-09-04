@@ -37,7 +37,22 @@ from pulsara_agent.capability.pulsara_home import (
     resolve_user_home,
 )
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.conversation_kernel.execution_watchdogs import (
+    DEFAULT_KERNEL_WATCHDOG_POLICY,
+)
+from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
+from pulsara_agent.llm.model_connections import ModelCallBinding
+from pulsara_agent.llm.model_target import (
+    default_reasoning_selection,
+    resolve_model_target_contract,
+)
+from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.local_credentials import (
+    DashScopeEmbeddingCredential,
+    DashScopeRerankCredential,
+    MacOSKeychainCredentialStore,
+    ModelProviderCredential,
+)
 from pulsara_agent.mcp_config import (
     McpServerConfig,
     StdioTransportConfig,
@@ -53,7 +68,11 @@ from pulsara_agent.primitives.permission import (
 )
 from pulsara_agent.repl import ReplPrompt, build_repl_prompt
 from pulsara_agent.tool_permission import preset_to_policy
-from pulsara_agent.settings import PulsaraSettings, load_env_file
+from pulsara_agent.settings import (
+    LocalSettings,
+    LocalSettingsStore,
+    LocalSettingsUnavailable,
+)
 from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     normalize_workspace_kind,
@@ -91,9 +110,9 @@ from pulsara_agent.plugins.management import (
 from pulsara_agent.plugins.package_store import ManagedPluginStore
 from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
 from pulsara_agent.plugins.view import EnabledPluginViewOwner, FrozenEnabledPluginView
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyScrubSet,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialScrubSet,
 )
 
 
@@ -128,16 +147,16 @@ def build_parser() -> argparse.ArgumentParser:
     repl.add_argument("--list-sessions", action="store_true")
     skills = commands.add_parser("skills")
     skill_commands = skills.add_subparsers(dest="skills_command")
-    validate = _add_env_args(skill_commands.add_parser("validate"))
+    validate = skill_commands.add_parser("validate")
     validate.add_argument("path")
     validate.add_argument("--json", action="store_true")
-    install = _add_env_args(skill_commands.add_parser("install"))
+    install = skill_commands.add_parser("install")
     install.add_argument("path")
     install.add_argument("--scope", choices=("workspace", "user"), required=True)
     install.add_argument("--workspace", default=None)
     install.add_argument("--json", action="store_true")
     for name in ("list", "doctor"):
-        command = _add_env_args(skill_commands.add_parser(name))
+        command = skill_commands.add_parser(name)
         command.add_argument("--workspace", default=None)
         command.add_argument("--json", action="store_true")
 
@@ -145,40 +164,34 @@ def build_parser() -> argparse.ArgumentParser:
         "plugins", help="Manage local Agent Plugins 1.0 packages."
     )
     plugin_commands = plugins.add_subparsers(dest="plugins_command")
-    plugin_validate = _add_env_args(plugin_commands.add_parser("validate"))
+    plugin_validate = plugin_commands.add_parser("validate")
     plugin_validate.add_argument("path")
     plugin_validate.add_argument("--json", action="store_true")
-    plugin_add = _add_plugin_scope_args(
-        _add_env_args(plugin_commands.add_parser("add"))
-    )
+    plugin_add = _add_plugin_scope_args(plugin_commands.add_parser("add"))
     plugin_add.add_argument("--replace", action="store_true")
     plugin_add.add_argument("path")
     plugin_add.add_argument("--json", action="store_true")
-    plugin_enable = _add_plugin_scope_args(
-        _add_env_args(plugin_commands.add_parser("enable"))
-    )
+    plugin_enable = _add_plugin_scope_args(plugin_commands.add_parser("enable"))
     plugin_enable.add_argument("--yes", action="store_true")
     plugin_enable.add_argument("plugin_id")
     plugin_enable.add_argument("--json", action="store_true")
     for name in ("disable", "remove"):
-        command = _add_plugin_scope_args(
-            _add_env_args(plugin_commands.add_parser(name))
-        )
+        command = _add_plugin_scope_args(plugin_commands.add_parser(name))
         command.add_argument("plugin_id")
         command.add_argument("--json", action="store_true")
     for name in ("list", "doctor", "gc"):
-        command = _add_env_args(plugin_commands.add_parser(name))
+        command = plugin_commands.add_parser(name)
         command.add_argument("--workspace", default=None)
         command.add_argument("--json", action="store_true")
 
     mcp = commands.add_parser("mcp", help="Manage MCP server configuration.")
     mcp_commands = mcp.add_subparsers(dest="mcp_command")
     for name in ("list", "doctor"):
-        command = _add_env_args(mcp_commands.add_parser(name))
+        command = mcp_commands.add_parser(name)
         command.add_argument("--workspace", default=None)
         if name == "doctor":
             command.add_argument("server_id", nargs="?")
-    add = _add_env_args(mcp_commands.add_parser("add"))
+    add = mcp_commands.add_parser("add")
     add.add_argument("server_id")
     add.add_argument("--workspace", default=None)
     transport = add.add_mutually_exclusive_group(required=True)
@@ -201,14 +214,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="AUTO",
     )
     for name in ("remove", "enable", "disable", "reconnect"):
-        command = _add_env_args(mcp_commands.add_parser(name))
+        command = mcp_commands.add_parser(name)
         command.add_argument("server_id")
         command.add_argument("--workspace", default=None)
 
     hooks = commands.add_parser("hooks", help="Inspect and trust command Hooks.")
     hook_commands = hooks.add_subparsers(dest="hooks_command")
     for name in ("list", "inspect", "trust", "revoke", "enable", "disable", "doctor"):
-        command = _add_env_args(hook_commands.add_parser(name))
+        command = hook_commands.add_parser(name)
         command.add_argument("--workspace", default=None)
         command.add_argument(
             "--scope",
@@ -230,15 +243,7 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "verify":
             command.add_argument("--deep", action="store_true")
 
-    config = _add_env_args(commands.add_parser("config-check"))
-    config.set_defaults(prefix="PULSARA")
-    return parser
-
-
-def _add_env_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--env-file", default=None)
-    parser.add_argument("--override-env", action="store_true")
-    parser.add_argument("--prefix", default="PULSARA")
+    commands.add_parser("config-check")
     return parser
 
 
@@ -253,13 +258,11 @@ def _add_plugin_scope_args(
 def _add_database_args(
     parser: argparse.ArgumentParser, deadline: float
 ) -> argparse.ArgumentParser:
-    _add_env_args(parser)
     parser.add_argument("--deadline-seconds", type=float, default=deadline)
     return parser
 
 
 def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    _add_env_args(parser)
     parser.add_argument("--workspace", default=None)
     parser.add_argument("--workspace-kind", choices=("project", "transient"))
     parser.add_argument("--display-label", default=None)
@@ -273,11 +276,6 @@ def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
             "open. Disabled by default because workspace MCP may launch code "
             "or resolve secret references."
         ),
-    )
-    parser.add_argument(
-        "--model-role",
-        choices=(ModelRole.PRO.value, ModelRole.FLASH.value),
-        default=ModelRole.PRO.value,
     )
     parser.add_argument(
         "--permission-mode",
@@ -323,18 +321,18 @@ def main() -> None:
             raise SystemExit(exit_status)
         return
     if args.command == "plugins":
-        api_key_boundary = ProcessApiKeyBoundary()
+        credential_boundary = ProcessCredentialBoundary()
         try:
             output, exit_status = _plugins_command(
-                args, api_key_boundary=api_key_boundary
+                args, credential_boundary=credential_boundary
             )
         except _PluginCliUsageError as exc:
-            _plugin_cli_parser_error(parser, str(exc), api_key_boundary)
+            _plugin_cli_parser_error(parser, str(exc), credential_boundary)
         except ValueError as exc:
             _plugin_cli_parser_error(
-                parser, _public_error(exc), api_key_boundary
+                parser, _public_error(exc), credential_boundary
             )
-        _plugin_cli_print(output, api_key_boundary)
+        _plugin_cli_print(output, credential_boundary)
         if exit_status:
             raise SystemExit(exit_status)
         return
@@ -356,10 +354,10 @@ def main() -> None:
         return
     if args.command == "config-check":
         try:
-            settings = _settings_from_args(args)
-        except ValueError as exc:
+            report = asyncio.run(_config_check())
+        except (ValueError, RuntimeError) as exc:
             parser.error(str(exc))
-        print(json.dumps(settings.redacted_dict(), indent=2, ensure_ascii=False))
+        print(json.dumps(report, indent=2, ensure_ascii=False))
         return
     if args.command == "db":
         try:
@@ -388,13 +386,13 @@ def main() -> None:
 
 
 async def _kernel_host_run(args) -> object:
-    settings = _settings_from_args(args)
-    core = KernelHostCore.production(settings=settings)
+    _settings, catalog, _credentials, runtime = _runtime_services()
+    await catalog.refresh()
+    core = KernelHostCore.production(model_runtime=runtime)
     session = None
     try:
         session = await core.open_session(
             _workspace_input_from_args(args),
-            model_role=ModelRole(args.model_role),
             permission_policy=_permission_policy(args),
             active_skill_names=_active_skill_names_from_args(args),
         )
@@ -411,11 +409,13 @@ async def _local_web_app(args) -> None:
         run_local_web_application,
     )
 
-    settings = _settings_from_args(args)
+    settings, catalog, credentials, runtime = _runtime_services()
     application = LocalWebApplication(
         settings=settings,
+        catalog=catalog,
+        credentials=credentials,
+        model_runtime=runtime,
         workspace_input=_workspace_input_from_args(args),
-        model_role=ModelRole(args.model_role),
         permission_policy=_permission_policy(args),
         active_skill_names=_active_skill_names_from_args(args),
         port=args.port,
@@ -431,7 +431,6 @@ async def _local_web_app(args) -> None:
 
 async def _open_initial_session(core: KernelHostCore, args):
     common = {
-        "model_role": ModelRole(args.model_role),
         "permission_policy": _permission_policy(args),
         "active_skill_names": _active_skill_names_from_args(args),
     }
@@ -446,8 +445,9 @@ async def _open_initial_session(core: KernelHostCore, args):
 
 
 async def _kernel_host_repl(args) -> None:
-    settings = _settings_from_args(args)
-    core = KernelHostCore.production(settings=settings)
+    _settings, catalog, _credentials, runtime = _runtime_services()
+    await catalog.refresh()
+    core = KernelHostCore.production(model_runtime=runtime)
     repl_prompt: ReplPrompt = build_repl_prompt(
         history_path=require_pulsara_home() / "repl_history"
     )
@@ -499,7 +499,6 @@ async def _kernel_host_repl(args) -> None:
                 next_session = await core.resume_session(
                     command.removeprefix(":resume ").strip(),
                     workspace_input=workspace,
-                    model_role=ModelRole(args.model_role),
                     permission_policy=_permission_policy(args),
                     active_skill_names=_active_skill_names_from_args(args),
                 )
@@ -511,7 +510,6 @@ async def _kernel_host_repl(args) -> None:
             if command == ":continue":
                 next_session = await core.resume_most_recent_session(
                     workspace,
-                    model_role=ModelRole(args.model_role),
                     permission_policy=_permission_policy(args),
                     active_skill_names=_active_skill_names_from_args(args),
                 )
@@ -531,7 +529,6 @@ class _SkillCliUsageError(ValueError):
 
 
 def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
-    _load_env_file_from_args(args)
     command = args.skills_command
     if command is None:
         raise _SkillCliUsageError("skills requires a subcommand")
@@ -619,7 +616,7 @@ def _resolved_skill_workspace(raw: str | None) -> Path:
 def _cli_plugin_skill_definitions(
     workspace: Path,
 ):
-    boundary = ProcessApiKeyBoundary()
+    boundary = ProcessCredentialBoundary()
     user_home = resolve_user_home()
     home = resolve_pulsara_home(user_home_resolution=user_home)
     if home.disposition is not PulsaraHomeDisposition.RESOLVED:
@@ -635,9 +632,9 @@ def _cli_plugin_skill_definitions(
     else:
         view = EnabledPluginViewOwner(
             store=ManagedPluginStore(
-                pulsara_home=home, api_key_boundary=boundary
+                pulsara_home=home, credential_boundary=boundary
             ),
-            api_key_boundary=boundary,
+            credential_boundary=boundary,
         ).observe(
             workspace_root=workspace,
             deadline_monotonic=float("inf"),
@@ -954,14 +951,13 @@ class _PluginCliUsageError(ValueError):
 def _plugins_command(
     args: argparse.Namespace,
     *,
-    api_key_boundary: ProcessApiKeyBoundary | None = None,
+    credential_boundary: ProcessCredentialBoundary | None = None,
 ) -> tuple[str, int]:
-    _load_env_file_from_args(args)
     command = args.plugins_command
     if command is None:
         raise _PluginCliUsageError("plugins requires a subcommand")
-    boundary = api_key_boundary or ProcessApiKeyBoundary()
-    service = PluginManagementService(api_key_boundary=boundary)
+    boundary = credential_boundary or ProcessCredentialBoundary()
+    service = PluginManagementService(credential_boundary=boundary)
     cancellation = EventPluginCancellationPort()
     deadline = float("inf")
 
@@ -1557,26 +1553,26 @@ def _render_plugin_payload(payload: dict[str, object], json_output: bool) -> str
 
 
 def _plugin_cli_print(
-    output: str, api_key_boundary: ProcessApiKeyBoundary
+    output: str, credential_boundary: ProcessCredentialBoundary
 ) -> None:
     """Scrub and emit while supported rotation is excluded from stdout."""
 
-    with api_key_boundary.sync_guard() as guard:
-        scrub_set = ProcessApiKeyScrubSet()
+    with credential_boundary.sync_guard() as guard:
+        scrub_set = ProcessCredentialScrubSet()
         scrub_set.observe(guard.value)
         print(scrub_set.scrub_text(output))
 
 
 def _plugin_cli_stderr(
     output: str,
-    api_key_boundary: ProcessApiKeyBoundary,
+    credential_boundary: ProcessCredentialBoundary,
     *,
     end: str = "\n",
 ) -> None:
     """Keep preflight review/prompt off JSON stdout and inside the sink gate."""
 
-    with api_key_boundary.sync_guard() as guard:
-        scrub_set = ProcessApiKeyScrubSet()
+    with credential_boundary.sync_guard() as guard:
+        scrub_set = ProcessCredentialScrubSet()
         scrub_set.observe(guard.value)
         print(scrub_set.scrub_text(output), end=end, file=sys.stderr, flush=True)
 
@@ -1584,12 +1580,12 @@ def _plugin_cli_stderr(
 def _plugin_cli_parser_error(
     parser: argparse.ArgumentParser,
     message: str,
-    api_key_boundary: ProcessApiKeyBoundary,
+    credential_boundary: ProcessCredentialBoundary,
 ) -> None:
     """Keep argparse's irreversible stderr write inside the shared gate."""
 
-    with api_key_boundary.sync_guard() as guard:
-        scrub_set = ProcessApiKeyScrubSet()
+    with credential_boundary.sync_guard() as guard:
+        scrub_set = ProcessCredentialScrubSet()
         scrub_set.observe(guard.value)
         parser.error(scrub_set.scrub_text(message))
 
@@ -1624,10 +1620,9 @@ def _plugin_exit_status(disposition) -> int:
 async def _mcp_command(
     args: argparse.Namespace,
     *,
-    api_key_boundary: ProcessApiKeyBoundary | None = None,
+    credential_boundary: ProcessCredentialBoundary | None = None,
 ) -> dict[str, object]:
-    _load_env_file_from_args(args)
-    boundary = api_key_boundary or ProcessApiKeyBoundary()
+    boundary = credential_boundary or ProcessCredentialBoundary()
     workspace_root = (
         Path(args.workspace).expanduser().resolve()
         if getattr(args, "workspace", None)
@@ -1715,7 +1710,7 @@ async def _mcp_command(
                 session_id=f"mcp-doctor:{config.server_id}",
                 workspace_root=workspace_root or Path.cwd(),
                 configs=(config,),
-                api_key_boundary=boundary,
+                credential_boundary=boundary,
             )
             try:
                 await supervisor.start()
@@ -1759,7 +1754,6 @@ async def _mcp_command(
 
 
 def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
-    _load_env_file_from_args(args)
     workspace_root = Path(args.workspace or Path.cwd()).expanduser().resolve()
     workspace = resolve_workspace(
         HostWorkspaceInput(workspace_kind="project", workspace_root=workspace_root)
@@ -1769,7 +1763,7 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
         workspace_kind=workspace.workspace_kind,
         workspace_state_key=workspace.workspace_key,
     )
-    boundary = ProcessApiKeyBoundary()
+    boundary = ProcessCredentialBoundary()
     user_home = resolve_user_home()
     home = resolve_pulsara_home(user_home_resolution=user_home)
 
@@ -1788,9 +1782,9 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
         else:
             plugin_view = EnabledPluginViewOwner(
                 store=ManagedPluginStore(
-                    pulsara_home=home, api_key_boundary=boundary
+                    pulsara_home=home, credential_boundary=boundary
                 ),
-                api_key_boundary=boundary,
+                credential_boundary=boundary,
             ).observe(
                 workspace_root=workspace.workspace_root,
                 deadline_monotonic=float("inf"),
@@ -1986,10 +1980,10 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError("db requires a subcommand")
     if not 1 <= args.deadline_seconds <= 3600:
         raise ValueError("--deadline-seconds must be between 1 and 3600")
-    _load_env_file_from_args(args)
-    runtime_dsn = os.getenv(f"{args.prefix}_POSTGRES_DSN", "").strip()
-    if not runtime_dsn:
-        raise ValueError(f"{args.prefix}_POSTGRES_DSN is required")
+    postgres = LocalSettingsStore().read().postgres
+    if postgres is None:
+        raise ValueError("PostgreSQL is not configured in local settings")
+    runtime_dsn = postgres.runtime_dsn
     deadline = monotonic() + args.deadline_seconds
     from pulsara_agent.storage.migrations.registry import POSTGRES_MIGRATION_REGISTRY
     from pulsara_agent.storage.migrations.runner import (
@@ -2027,9 +2021,9 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
             ),
         }
     if args.db_command == "migrate":
-        admin_dsn = os.getenv(f"{args.prefix}_POSTGRES_ADMIN_DSN", "").strip()
-        if not admin_dsn:
-            raise ValueError(f"{args.prefix}_POSTGRES_ADMIN_DSN is required")
+        admin_dsn = postgres.admin_dsn
+        if admin_dsn is None:
+            raise ValueError("PostgreSQL admin DSN is not configured")
         report = PostgresMigrationRunner(
             admin_dsn=admin_dsn,
             runtime_dsn=runtime_dsn,
@@ -2052,17 +2046,106 @@ def _print_agent_run_result(result) -> None:
         print(result.final_text)
 
 
-def _settings_from_args(args) -> PulsaraSettings:
-    if args.env_file:
-        return PulsaraSettings.from_env_file(
-            args.env_file, prefix=args.prefix, override=args.override_env
+def _runtime_services():
+    settings = LocalSettingsStore()
+    catalog = ModelCatalogOwner(ModelsDevCatalogClient())
+    credentials = MacOSKeychainCredentialStore()
+    runtime = ModelRuntime.production(
+        settings=settings,
+        catalog=catalog,
+        credentials=credentials,
+    )
+    return settings, catalog, credentials, runtime
+
+
+async def _config_check() -> dict[str, object]:
+    settings_store, catalog, credentials, runtime = _runtime_services()
+    settings_status = "ready"
+    settings_error: str | None = None
+    try:
+        settings = settings_store.read()
+    except LocalSettingsUnavailable as exc:
+        settings = LocalSettings()
+        settings_status = "unavailable"
+        settings_error = str(exc)
+    catalog_status = "ready"
+    catalog_error: str | None = None
+    try:
+        await catalog.refresh()
+    except Exception as exc:
+        catalog_status = "unavailable"
+        catalog_error = type(exc).__name__
+    connections: list[dict[str, object]] = []
+    for connection in settings.model_connections:
+        status = "ready"
+        detail: str | None = None
+        if catalog_status != "ready":
+            status = "catalog_unavailable"
+        else:
+            try:
+                contract = resolve_model_target_contract(
+                    catalog=runtime.selectable_catalog(),
+                    connection=connection,
+                    route_wires=runtime.route_wires,
+                )
+                runtime.resolve_target(
+                    ModelCallBinding(
+                        connection.id,
+                        default_reasoning_selection(contract.reasoning),
+                    ),
+                    timeout_policy=(
+                        DEFAULT_KERNEL_WATCHDOG_POLICY.foreground_transport
+                    ),
+                )
+            except Exception as exc:
+                status = "unavailable"
+                detail = str(exc)
+        connections.append(
+            {
+                "id": connection.id.value,
+                "route_id": connection.target.route_id,
+                "wire_api": connection.target.wire_api.value,
+                "model_id": connection.target.model_id,
+                "base_url": connection.base_url,
+                "credential_state": credentials.state(
+                    ModelProviderCredential(connection.id)
+                ).value,
+                "status": status,
+                "detail": detail,
+            }
         )
-    return PulsaraSettings.from_env(prefix=args.prefix)
+    database: dict[str, object]
+    if settings.postgres is None:
+        database = {"status": "database_not_configured"}
+    else:
+        from pulsara_agent.storage.postgres_connection_provider import (
+            PostgresRuntimeConnectionFactory,
+        )
 
-
-def _load_env_file_from_args(args) -> None:
-    if getattr(args, "env_file", None):
-        load_env_file(args.env_file, override=bool(args.override_env))
+        try:
+            bundle = await asyncio.to_thread(
+                PostgresRuntimeConnectionFactory(settings.postgres.runtime_dsn).verify,
+                deadline_monotonic=monotonic() + 30.0,
+            )
+        except Exception as exc:
+            database = {"status": "unavailable", "detail": str(exc)}
+        else:
+            database = {
+                "status": "ready",
+                "database_name": bundle.binding.database_name,
+                "runtime_role": bundle.binding.runtime_role,
+                "migration_head_version": bundle.binding.migration_head_version,
+            }
+    return {
+        "local_settings": {"status": settings_status, "detail": settings_error},
+        "catalog": {"status": catalog_status, "detail": catalog_error},
+        "database": database,
+        "dashscope_credentials": {
+            "embedding": credentials.state(DashScopeEmbeddingCredential()).value,
+            "rerank": credentials.state(DashScopeRerankCredential()).value,
+        },
+        "model_connections": connections,
+    }
 
 
 def _workspace_input_from_args(args) -> HostWorkspaceInput:
@@ -2080,7 +2163,7 @@ def _active_skill_names_from_args(args) -> frozenset[str]:
 
 
 def _permission_policy(args):
-    raw = args.permission_mode or os.getenv(f"{args.prefix}_PERMISSION_MODE")
+    raw = args.permission_mode
     if raw:
         return preset_to_policy(parse_permission_mode(raw.strip()))
     return preset_to_policy(DEFAULT_PERMISSION_MODE)

@@ -33,7 +33,7 @@ from pulsara_agent.llm.adapters.openai.responses import (
 )
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall
-from pulsara_agent.llm.provider import ProviderProfile
+from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.request import MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
@@ -65,13 +65,12 @@ from pulsara_agent.ports.provider_stream import (
     ProviderStreamFailure,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     context_fingerprint,
     thaw_json,
 )
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import (
     StaticContextSourceCollector,
     StructuredToolPort,
@@ -84,13 +83,11 @@ from tests.support.round3 import (
 def test_round5_foreground_model_rejects_a_total_transport_timeout() -> None:
     with pytest.raises(ValueError, match="must not have a total"):
         DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
             ),
             timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, 30),
         )
@@ -100,12 +97,10 @@ def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128
     None
 ):
     port = DirectKernelModelPort(
-        api_key_boundary=ProcessApiKeyBoundary(),
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
+            model_id="test-pro",
         ),
     )
     prepared = port.prepare_target(
@@ -116,6 +111,7 @@ def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128
             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             maximum_input_tokens=None,
             maximum_output_tokens=16_384,
+            binding=test_model_binding(port._model_runtime),  # noqa: SLF001
         )
     )
 
@@ -126,21 +122,18 @@ def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128
 
 
 def test_round5_preflight_rejects_a_foreign_transport_timeout_binding() -> None:
-    config = test_llm_config(
-        api_key="test",
+    model_runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
         base_url="https://example.invalid/v1",
-        pro_model="test-pro",
-        flash_model="test-flash",
-        api="openai_chat_completions",
+        model_id="test-pro",
+        wire_api="openai_chat_completions",
     )
     first = DirectKernelModelPort(
-        api_key_boundary=ProcessApiKeyBoundary(),
-        config=config,
+        model_runtime=model_runtime,
         timeout_policy=OpenAITransportTimeoutPolicy(120, 120, 120, 600, None),
     )
     second = DirectKernelModelPort(
-        api_key_boundary=ProcessApiKeyBoundary(),
-        config=config,
+        model_runtime=model_runtime,
         timeout_policy=OpenAITransportTimeoutPolicy(120, 120, 120, 601, None),
     )
     request, _tool_port = _prepared_execution(first)
@@ -255,9 +248,8 @@ def test_round5_provider_retries_before_semantic_output(
         semantic_output_before_failure=False,
     )
     transport = transport_type(
-        api_key="test",
+        credentials=port._model_runtime.credentials,  # noqa: SLF001
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
-        api_key_boundary=ProcessApiKeyBoundary(),
         retry_config=LLMRetryConfig(
             attempts=2,
             base_delay_seconds=0.001,
@@ -308,9 +300,8 @@ def test_round5_provider_never_retries_after_semantic_output(
         semantic_output_before_failure=True,
     )
     transport = transport_type(
-        api_key="test",
+        credentials=port._model_runtime.credentials,  # noqa: SLF001
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
-        api_key_boundary=ProcessApiKeyBoundary(),
         retry_config=LLMRetryConfig(
             attempts=2,
             base_delay_seconds=0.001,
@@ -352,11 +343,12 @@ def _prepared_execution(
     revision_id = "binding:test"
     sequence = 0
     tool_port = StructuredToolPort(object(), tool_names=("read_file",))
+    binding = test_model_binding(port._model_runtime)  # noqa: SLF001
     surface = prepare_test_direct_tool_surface(
         tool_port,
         conversation_scope_kind=scope_kind,
         scope_subagent_task_id=scope_subagent_task_id,
-        wire_api=port._config.api,  # noqa: SLF001 - exact test target profile
+        wire_api=port._model_runtime.connection(binding).target.wire_api.value,  # noqa: SLF001
     )
     prepared = prepare_test_model_call(
         port,
@@ -367,6 +359,7 @@ def _prepared_execution(
             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             maximum_input_tokens=maximum_input_tokens,
             maximum_output_tokens=16_384,
+            binding=binding,
             tool_surface=surface,
         ),
     )
@@ -442,17 +435,17 @@ def _port(
     *,
     usage_observer=None,
     api: str = "openai_chat_completions",
-    provider_profile: ProviderProfile | None = None,
+    route_wire_profile: RouteWireProfile | None = None,
+    tool_call: bool | None = True,
 ) -> DirectKernelModelPort:
     return DirectKernelModelPort(
-        api_key_boundary=ProcessApiKeyBoundary(),
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api=api,
-            provider_profile=provider_profile,
+            model_id="test-pro",
+            wire_api=api,
+            route_wire_profile=route_wire_profile,
+            tool_call=tool_call,
         ),
         usage_observer=usage_observer,
     )
@@ -673,20 +666,20 @@ def test_final_wire_projection_measures_sdk_merged_extra_body(
     payload_builder,
     payload_projection,
 ) -> None:
-    thinking = {"type": "enabled", "budget_tokens": 4096}
+    vendor_context = {"fixture": "preserved"}
     port = _port(
         api=api,
-        provider_profile=ProviderProfile(
+        route_wire_profile=RouteWireProfile(
             id="test:extra-body",
             wire_api=api,
-            request_extra_body={"thinking": thinking},
+            request_extra_body={"vendor_context": vendor_context},
         ),
     )
     request, _tool_port = _prepared_execution(port)
     plan = request.wire_input_plan
     projection = thaw_json(plan.materialization.context_bearing_projection)
     assert isinstance(projection, dict)
-    assert projection["thinking"] == thinking
+    assert projection["vendor_context"] == vendor_context
     assert "extra_body" not in projection
     assert plan.quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
 
@@ -700,8 +693,8 @@ def test_final_wire_projection_measures_sdk_merged_extra_body(
         call=request.prepared_call.call,
         context=execution.final_context,
     )
-    assert payload["extra_body"] == {"thinking": thinking}
-    assert "thinking" not in payload
+    assert payload["extra_body"] == {"vendor_context": vendor_context}
+    assert "vendor_context" not in payload
     assert payload_projection(payload) == projection
     request.surface_borrow.close()
 
@@ -1052,7 +1045,9 @@ def test_round3_direct_model_rejects_final_estimate_drift_before_transport_open(
 def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> None:
     usage_reports = []
     port = _port(usage_observer=lambda _request, report: usage_reports.append(report))
-    binding = port._registry.get("openai_chat_completions")
+    binding = port._model_runtime.transport_registry(  # noqa: SLF001
+        port._transport_timeout  # noqa: SLF001
+    ).get("openai_chat_completions")
     binding._adapter._mock_chunks = [
         {"choices": [{"delta": {"content": "hello"}}]},
         {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
@@ -1087,6 +1082,37 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
     request.surface_borrow.close()
 
 
+def test_unknown_catalog_tool_support_sends_once_with_diagnostic() -> None:
+    usage_reports = []
+    port = _port(
+        usage_observer=lambda _request, report: usage_reports.append(report),
+        tool_call=None,
+    )
+    binding = port._model_runtime.transport_registry(  # noqa: SLF001
+        port._transport_timeout  # noqa: SLF001
+    ).get("openai_chat_completions")
+    binding._adapter._mock_chunks = [
+        {"choices": [{"delta": {"content": "hello"}}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    request, _tool_port = _prepared_execution(port)
+
+    async def collect() -> list[object]:
+        return await _collect_preflighted(port, request)
+
+    values = asyncio.run(collect())
+    assert [type(value) for value in values] == [
+        TextStartPayload,
+        TextDeltaPayload,
+        TextEndPayload,
+    ]
+    assert len(usage_reports) == 1
+    assert [item.code for item in usage_reports[0].provider_diagnostics] == [
+        "catalog_tool_call_support_unknown"
+    ]
+    request.surface_borrow.close()
+
+
 @pytest.mark.parametrize(
     ("api", "reason"),
     (
@@ -1105,7 +1131,9 @@ def test_round5a1_direct_model_never_promotes_incomplete_adapter_output(
     reason: ProviderOutputIncompleteReason,
 ) -> None:
     port = _port(api=api)
-    binding = port._registry.get(api)
+    binding = port._model_runtime.transport_registry(  # noqa: SLF001
+        port._transport_timeout  # noqa: SLF001
+    ).get(api)
     if api == "openai_chat_completions":
         binding._adapter._mock_chunks = [
             {

@@ -62,9 +62,9 @@ from pulsara_agent.plugins.view import (
     FrozenEnabledPluginView,
     freeze_enabled_plugin_instance,
 )
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyScrubSet,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialScrubSet,
 )
 
 
@@ -75,13 +75,13 @@ class PluginInspectionService:
         self,
         *,
         store: ManagedPluginStore,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         pulsara_home_resolution: PulsaraHomeResolution,
     ) -> None:
         if pulsara_home_resolution.path is None:
             raise ValueError("Plugin inspection requires a resolved Pulsara home")
         self._store = store
-        self._observer = PluginSourceObserver(api_key_boundary)
+        self._observer = PluginSourceObserver(credential_boundary)
         self._home_resolution = pulsara_home_resolution
         self._home = pulsara_home_resolution.path
 
@@ -91,7 +91,7 @@ class PluginInspectionService:
         workspace_root: Path | None,
         deadline_monotonic: float,
         cancellation: PluginCancellationPort,
-        scrub_set: ProcessApiKeyScrubSet,
+        scrub_set: ProcessCredentialScrubSet,
     ) -> PluginInspectionOutcome:
         current_anchors: list[PhysicalLifetimeAnchor] = []
         hook_anchors: list[object] = []

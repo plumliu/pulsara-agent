@@ -4,6 +4,7 @@ import {
   ArrowDown,
   BookOpenText,
   Bot,
+  BrainCircuit,
   Braces,
   Check,
   ChevronDown,
@@ -35,6 +36,9 @@ import {
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ContextCompactionBoundary,
+  ModelCallBindingPayload,
+  ModelConfigurationSummary,
+  ReasoningSelectionPayload,
   RuntimeInteractionContent,
   RuntimeInteractionResolution,
   RuntimeInteractionSummary,
@@ -55,7 +59,8 @@ interface WorkbenchViewProps {
   queuedCount: number;
   runtimeStatus: RuntimeStatus;
   runtimeError?: string;
-  modelName?: string;
+  modelConfigurations: ModelConfigurationSummary[];
+  modelCallBinding?: ModelCallBindingPayload | null;
   interaction?: RuntimeInteractionSummary;
   canControl: boolean;
   isObserver: boolean;
@@ -67,7 +72,10 @@ interface WorkbenchViewProps {
   onReconnect: () => void;
   onTakeControl: () => void;
   onOpenSidebar: () => void;
+  onNewSession: () => void;
   onToggleInspector: () => void;
+  onOpenModelSettings: () => void;
+  onModelCallBindingChange: (binding: ModelCallBindingPayload) => Promise<void>;
   onSend: (
     text: string,
     steer: boolean,
@@ -979,6 +987,25 @@ function ContextCompactionDivider() {
   );
 }
 
+function modelConnectionLabel(connection?: ModelConfigurationSummary): string {
+  if (!connection) return '选择模型';
+  const protocol = connection.wire_api === 'openai_responses' ? 'Responses' : 'Chat';
+  return `${connection.route_name ?? connection.route_id} · ${connection.display_name ?? connection.model_id} · ${protocol}`;
+}
+
+function reasoningSelectionLabel(
+  connection: ModelConfigurationSummary | undefined,
+  selection: ReasoningSelectionPayload | null | undefined,
+): string {
+  if (!connection) return '推理不可用';
+  if (selection?.kind === 'effort') return selection.value === null || selection.value === 'none' ? '推理关闭' : `推理 ${selection.value}`;
+  if (selection?.kind === 'toggle') return selection.enabled ? '推理开启' : '推理关闭';
+  if (selection?.kind === 'budget_tokens') return `推理 ${selection.tokens.toLocaleString('zh-CN')} tokens`;
+  if (connection.reasoning.kind === 'fixed_on') return '推理固定开启';
+  if (connection.reasoning.kind === 'provider_default') return '推理由提供方决定';
+  return '无推理选项';
+}
+
 export function WorkbenchView({
   workspace,
   session,
@@ -991,7 +1018,8 @@ export function WorkbenchView({
   queuedCount,
   runtimeStatus,
   runtimeError,
-  modelName,
+  modelConfigurations,
+  modelCallBinding,
   interaction,
   canControl,
   isObserver,
@@ -1003,7 +1031,10 @@ export function WorkbenchView({
   onReconnect,
   onTakeControl,
   onOpenSidebar,
+  onNewSession,
   onToggleInspector,
+  onOpenModelSettings,
+  onModelCallBindingChange,
   onSend,
   onStop,
   onCompact,
@@ -1018,6 +1049,9 @@ export function WorkbenchView({
   const [compacting, setCompacting] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [modelBindingBusy, setModelBindingBusy] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [jumpBottom, setJumpBottom] = useState(126);
   const followLatestRef = useRef(true);
@@ -1026,8 +1060,11 @@ export function WorkbenchView({
   const threadRef = useRef<HTMLDivElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const budgetInputRef = useRef<HTMLInputElement>(null);
   const composerComposingRef = useRef(false);
   const wordCount = draft.trim().length;
+  const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
+  const modelReady = Boolean(modelCallBinding && selectedModel?.status === 'ready');
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
   const contextCompactionIndex = useMemo(() => {
     if (!contextCompaction) return -1;
@@ -1087,6 +1124,11 @@ export function WorkbenchView({
   const submit = async (steer: boolean) => {
     const value = draft.trim();
     if (!value || submitting) return;
+    if (!steer && !modelReady) {
+      onNotify('请先选择模型配置', '模型会固定到这个会话，直到你再次更改。');
+      setModelOpen(true);
+      return;
+    }
     setSubmitting(true);
     const accepted = await onSend(
       value,
@@ -1099,6 +1141,20 @@ export function WorkbenchView({
     setDraft((current) => current.trim() === value ? '' : current);
     setRequestPlan(false);
     onPermissionChange('bypass-permissions');
+  };
+
+  const changeBinding = async (binding: ModelCallBindingPayload) => {
+    if (modelBindingBusy) return;
+    setModelBindingBusy(true);
+    try {
+      await onModelCallBindingChange(binding);
+      setModelOpen(false);
+      setReasoningOpen(false);
+    } catch (error) {
+      onNotify('模型选择未保存', error instanceof Error ? error.message : '请稍后重试。');
+    } finally {
+      setModelBindingBusy(false);
+    }
   };
 
   useEffect(() => {
@@ -1299,7 +1355,25 @@ export function WorkbenchView({
         </button>
       )}
 
-      {!isObserver ? <div className="composer-wrap" ref={composerWrapRef}>
+      {!session.id ? (
+        <div className="composer-wrap composer-wrap--session-required">
+          <div className="composer-frame">
+            <div className="composer composer--session-required">
+              <div className="session-required-composer">
+                <span className="session-required-composer__icon" aria-hidden="true"><Sparkles size={15} /></span>
+                <span className="session-required-composer__copy">
+                  <strong>创建或选择会话后开始</strong>
+                  <small>模型、推理、规划和本轮权限都会跟随当前会话。</small>
+                </span>
+                <button className="secondary-action" type="button" onClick={onNewSession}>
+                  <MessageSquarePlus size={13} /> 创建会话
+                </button>
+              </div>
+            </div>
+          </div>
+          <p className="composer-note">当前没有活动会话</p>
+        </div>
+      ) : !isObserver ? <div className="composer-wrap" ref={composerWrapRef}>
         {queuedCount > 0 && (
           <div className="queued-input">
             <MessageSquarePlus size={12} /><span>{queuedCount} 条输入正在等待处理</span>
@@ -1349,7 +1423,35 @@ export function WorkbenchView({
           </div>
           <div className="composer-actions">
             <div>
-              <span className="mode-chip model-chip" title="由本机启动配置提供"><Bot size={12} /> {modelName || '当前模型'}</span>
+              <div className="popover-anchor">
+                <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}`} onClick={() => { setModelOpen((value) => !value); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
+                  <Bot size={12} /> {modelConnectionLabel(selectedModel)} <ChevronDown size={10} />
+                </button>
+                {modelOpen && <div className="menu-popover model-menu">
+                  <span className="menu-label">此会话的模型</span>
+                  {modelConfigurations.length ? modelConfigurations.map((connection) => <button key={connection.id} className={connection.id === modelCallBinding?.connection_id ? 'is-selected' : ''} disabled={connection.status !== 'ready' || modelBindingBusy} onClick={() => void changeBinding({ connection_id: connection.id, reasoning: connection.default_reasoning ?? null })}>
+                    <span><strong>{connection.route_name ?? connection.route_id} · {connection.display_name ?? connection.model_id}</strong><small>{connection.wire_api === 'openai_responses' ? 'Responses' : 'Chat Completions'} · {connection.credential_state === 'PRESENT' ? '密钥已配置' : '密钥未就绪'}</small></span>
+                    {connection.id === modelCallBinding?.connection_id && <Check size={13} />}
+                  </button>) : <div className="model-menu__empty"><span>还没有模型配置。</span><button onClick={onOpenModelSettings}>前往设置添加</button></div>}
+                  {modelConfigurations.length > 0 && <button className="model-menu__settings" onClick={onOpenModelSettings}>管理模型配置</button>}
+                </div>}
+              </div>
+              <div className="popover-anchor">
+                <button className={`mode-chip${reasoningOpen ? ' is-active' : ''}`} onClick={() => { setReasoningOpen((value) => !value); setModelOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={reasoningOpen} disabled={!selectedModel || selectedModel.reasoning.kind !== 'selectable' || modelBindingBusy}>
+                  <BrainCircuit size={12} /> {reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)} {selectedModel?.reasoning.kind === 'selectable' && <ChevronDown size={10} />}
+                </button>
+                {reasoningOpen && selectedModel?.reasoning.kind === 'selectable' && modelCallBinding && <div className="menu-popover reasoning-menu">
+                  {selectedModel.reasoning.effort && <><span className="menu-label">推理档位</span>{selectedModel.reasoning.effort.values.map((effort) => {
+                    const selected = modelCallBinding.reasoning?.kind === 'effort' && modelCallBinding.reasoning.value === effort;
+                    return <button key={effort ?? 'provider-none'} className={selected ? 'is-selected' : ''} onClick={() => void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'effort', value: effort } })}><span><strong>{effort === null || effort === 'none' ? '关闭' : effort}</strong></span>{selected && <Check size={13} />}</button>;
+                  })}</>}
+                  {selectedModel.reasoning.toggle && <><span className="menu-label">推理开关</span>{[true, false].map((enabled) => {
+                    const selected = modelCallBinding.reasoning?.kind === 'toggle' && modelCallBinding.reasoning.enabled === enabled;
+                    return <button key={enabled ? 'enabled' : 'disabled'} className={selected ? 'is-selected' : ''} onClick={() => void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'toggle', enabled } })}><span><strong>{enabled ? '开启' : '关闭'}</strong></span>{selected && <Check size={13} />}</button>;
+                  })}</>}
+                  {selectedModel.reasoning.budget_tokens?.minimum != null && selectedModel.reasoning.budget_tokens.maximum != null && <div className="reasoning-budget"><span className="menu-label">Token 预算</span><div><input ref={budgetInputRef} type="number" min={selectedModel.reasoning.budget_tokens.minimum} max={selectedModel.reasoning.budget_tokens.maximum} defaultValue={modelCallBinding.reasoning?.kind === 'budget_tokens' ? modelCallBinding.reasoning.tokens : Math.ceil((selectedModel.reasoning.budget_tokens.minimum + selectedModel.reasoning.budget_tokens.maximum) / 2)} /><button onClick={() => { const tokens = Number(budgetInputRef.current?.value); if (Number.isInteger(tokens)) void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'budget_tokens', tokens } }); }}>应用</button></div><small>{selectedModel.reasoning.budget_tokens.minimum.toLocaleString('zh-CN')}–{selectedModel.reasoning.budget_tokens.maximum.toLocaleString('zh-CN')}</small></div>}
+                </div>}
+              </div>
               {skills.length > 0 && (
                 <div className="popover-anchor">
                   <button
@@ -1409,7 +1511,7 @@ export function WorkbenchView({
               {isRunning && !draft ? (
                 <button className="send-button is-stop" onClick={onStop} aria-label="停止当前运行"><CircleStop size={15} /></button>
               ) : (
-                <button className="send-button" onClick={() => void submit(false)} disabled={!draft.trim() || submitting || runtimeStatus !== 'online' || !session.id} aria-label={isRunning ? '排队发送' : '发送'}>
+                <button className="send-button" onClick={() => void submit(false)} disabled={!draft.trim() || submitting || runtimeStatus !== 'online' || !session.id || !modelReady} aria-label={isRunning ? '排队发送' : '发送'}>
                   {isRunning ? <Play size={14} fill="currentColor" /> : <Send size={14} />}
                 </button>
               )}
@@ -1417,7 +1519,7 @@ export function WorkbenchView({
           </div>
           </div>
         </div>
-        <p className="composer-note">{composerHint} · 规划与权限只作用于本轮</p>
+        <p className={`composer-note${!modelReady ? ' composer-note--attention' : ''}`}>{!modelReady ? '请先为此会话选择模型配置' : composerHint} · 规划与权限只作用于本轮</p>
       </div> : (
         <div className="observer-wrap">
           <div className="observer-dock">

@@ -948,9 +948,9 @@ def _install_compaction_trigger_recorder(
                         "target_fact_equal": (
                             source_call.target.fact == successor_call.target.fact
                         ),
-                        "provider_profile_equal": (
-                            source_call.target.model_profile.provider_profile
-                            == successor_call.target.model_profile.provider_profile
+                        "route_wire_profile_equal": (
+                            source_call.target.model_profile.route_wire_profile
+                            == successor_call.target.model_profile.route_wire_profile
                         ),
                         "native_projection_equal": (
                             source_candidate.native_projection_set

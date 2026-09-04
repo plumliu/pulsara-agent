@@ -113,9 +113,7 @@ def test_todo_complete_snapshot_contract_and_byte_truth() -> None:
 
 @pytest.mark.parametrize("text", ["x" * 192, "界" * 64, "😀" * 48])
 def test_todo_text_accepts_exact_utf8_boundaries(text: str) -> None:
-    candidate = parse_todo_replacement(
-        {"items": [{"text": text, "status": "pending"}]}
-    )
+    candidate = parse_todo_replacement({"items": [{"text": text, "status": "pending"}]})
     assert candidate.ordered_items[0].text == text
 
 
@@ -127,10 +125,7 @@ def test_todo_item_and_aggregate_bounds_are_independent() -> None:
     assert len(parse_todo_replacement({"items": sixteen}).ordered_items) == 16
     with pytest.raises(TodoValidationError, match="at most 16"):
         parse_todo_replacement(
-            {
-                "items": sixteen
-                + [{"text": "one too many", "status": "pending"}]
-            }
+            {"items": sixteen + [{"text": "one too many", "status": "pending"}]}
         )
     oversized = [
         {"text": f"{index:02d}" + "\\" * 190, "status": "pending"}
@@ -619,9 +614,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
             permission_snapshot=permission,
         )
         assert invalid.kind is KernelToolAuthorizationKind.INVALID_ARGUMENTS
-        arguments = {
-            "items": [{"text": "Advisory local state", "status": "pending"}]
-        }
+        arguments = {"items": [{"text": "Advisory local state", "status": "pending"}]}
         authorization = await authorize_direct_tool(
             port,
             session_id="session:1",
@@ -755,7 +748,9 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
 ):
     class _ImmediateAdmissionIO:
         async def run(self, *_args, **_kwargs):
-            return AcceptedEntry("entry:turn:1", "turn:1", 1, 1)
+            return SimpleNamespace(
+                accepted=AcceptedEntry("entry:turn:1", "turn:1", 1, 1)
+            )
 
     async def exercise() -> None:
         started = asyncio.Event()
@@ -771,26 +766,27 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
 
         coordinator = object.__new__(TurnAdmissionCoordinator)
         coordinator._io = _ImmediateAdmissionIO()
-        coordinator._deadlines = SimpleNamespace(
-            deadline=lambda _owner: 999_999_999.0
-        )
+        coordinator._deadlines = SimpleNamespace(deadline=lambda _owner: 999_999_999.0)
         coordinator._repository = SimpleNamespace(
-            accept_root_turn=object(),
+            accept_root_turn_intent=object(),
             accept_subagent_turn=object(),
         )
         coordinator._writer_lease = SimpleNamespace(guard=object())
         coordinator._todo_finalizer = finalizer
         coordinator.interrupt_turn = terminalize
-        intent = ActiveTurnCancellationIntent(
-            "turn:1", ModelInputScopeKind.ROOT, None
+        intent = ActiveTurnCancellationIntent("turn:1", ModelInputScopeKind.ROOT, None)
+        candidate = SimpleNamespace(
+            session_id="session:1",
+            command_id="command:1",
+            turn_id="turn:1",
+            entry_id="entry:turn:1",
+            context_binding_revision_id="context:turn:1",
         )
-        candidate = SimpleNamespace(turn_id="turn:1")
         task = asyncio.create_task(
-            coordinator._accept(
-                candidate=candidate,
-                root=True,
+            coordinator.accept_root_intent(
+                candidate,
+                model_resolution_snapshot=object(),
                 cancellation_intent=intent,
-                todo_activation=_root_activation(),
             )
         )
         await started.wait()

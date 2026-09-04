@@ -63,11 +63,11 @@ from pulsara_agent.plugins.package_core import (
     tree_contains_secret,
 )
 from pulsara_agent.primitives.bounded_json import bounded_json_loads
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundaryCancelled,
-    ProcessApiKeyBoundaryTimedOut,
-    ProcessApiKeyScrubSet,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundaryCancelled,
+    ProcessCredentialBoundaryTimedOut,
+    ProcessCredentialScrubSet,
 )
 
 try:  # pragma: no cover - platform import branch
@@ -300,13 +300,13 @@ class ManagedPluginStore:
         self,
         *,
         pulsara_home: PulsaraHomeResolution,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
     ) -> None:
         if pulsara_home.path is None:
             raise ValueError("managed Plugin store requires a resolved home")
         self._home = prepare_local_source_path(pulsara_home.path)
-        self._boundary = api_key_boundary
-        self._observer = PluginSourceObserver(api_key_boundary)
+        self._boundary = credential_boundary
+        self._observer = PluginSourceObserver(credential_boundary)
         self._publisher = PlatformExclusiveDirectoryPublisher()
 
     @property
@@ -341,7 +341,7 @@ class ManagedPluginStore:
         replace: bool,
         deadline_monotonic: float,
         cancellation: PluginCancellationPort,
-        scrub_set: ProcessApiKeyScrubSet,
+        scrub_set: ProcessCredentialScrubSet,
     ) -> StoreInstallOutcome:
         identity = self.identity(
             scope=scope,
@@ -407,7 +407,7 @@ class ManagedPluginStore:
         replacing: bool,
         deadline_monotonic: float,
         cancellation: PluginCancellationPort,
-        scrub_set: ProcessApiKeyScrubSet,
+        scrub_set: ProcessCredentialScrubSet,
     ) -> StoreInstallOutcome:
         try:
             package_parent_fd = _open_or_create_absolute_directory(
@@ -499,9 +499,9 @@ class ManagedPluginStore:
                     ) as guard:
                         expected = guard.value
                         scrub_set.observe(expected)
-                except ProcessApiKeyBoundaryCancelled as exc:
+                except ProcessCredentialBoundaryCancelled as exc:
                     raise PluginPackageCancelled from exc
-                except ProcessApiKeyBoundaryTimedOut as exc:
+                except ProcessCredentialBoundaryTimedOut as exc:
                     raise PluginPackageTimedOut from exc
                 encoded_expected = os.fsencode(expected)
                 contains = bool(expected) and (
@@ -549,9 +549,9 @@ class ManagedPluginStore:
                             if sys.platform == "darwin":
                                 os.fchmod(stage_fd, 0o500)
                         break
-                except ProcessApiKeyBoundaryCancelled as exc:
+                except ProcessCredentialBoundaryCancelled as exc:
                     raise PluginPackageCancelled from exc
-                except ProcessApiKeyBoundaryTimedOut as exc:
+                except ProcessCredentialBoundaryTimedOut as exc:
                     raise PluginPackageTimedOut from exc
                 except ExclusivePublishPrimitiveUnavailable as exc:
                     raise OSError("exclusive publish unavailable") from exc
@@ -882,7 +882,7 @@ class ManagedPluginStore:
         *,
         deadline_monotonic: float,
         cancellation: PluginCancellationPort,
-        scrub_set: ProcessApiKeyScrubSet,
+        scrub_set: ProcessCredentialScrubSet,
     ) -> PluginValidationSummary:
         package_root = layout.plugin_package_parent / package_install_id
         anchor = self.acquire_package_anchor(

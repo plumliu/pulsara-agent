@@ -59,10 +59,10 @@ import pulsara_agent.plugins.package_store as package_store_module
 from pulsara_agent.plugins.package_store import ManagedPluginStore
 from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
 from pulsara_agent.plugins.view import EnabledPluginViewOwner
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundAsyncClient,
-    admit_process_api_key_http_operation,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundAsyncClient,
+    admit_process_credential_http_operation,
 )
 from pulsara_agent.llm.adapters.openai.client import admit_provider_request
 
@@ -156,14 +156,14 @@ def _make_package(
     return root
 
 
-def _owners(tmp_path: Path):
+def _owners(tmp_path: Path, *, credential: str = ""):
     home = resolve_pulsara_home(str(tmp_path / "home"))
-    boundary = ProcessApiKeyBoundary()
+    boundary = ProcessCredentialBoundary(credential)
     service = PluginManagementService(
-        api_key_boundary=boundary,
+        credential_boundary=boundary,
         pulsara_home_resolution=home,
     )
-    store = ManagedPluginStore(pulsara_home=home, api_key_boundary=boundary)
+    store = ManagedPluginStore(pulsara_home=home, credential_boundary=boundary)
     return home, boundary, service, store
 
 
@@ -288,7 +288,7 @@ def test_round9_3_managed_runtime_narrows_resource_and_skill_symlinks(
     document.symlink_to(outside)
     (managed / "unrelated-link").symlink_to(outside)
 
-    view = EnabledPluginViewOwner(store=store, api_key_boundary=boundary).observe(
+    view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
         cancellation=NeverCancelPluginOperation(),
@@ -361,7 +361,7 @@ def test_round9_3_physical_anchor_blocks_gc_until_native_mcp_drain(
         InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
     )
     _enable(service, installed, "physical-plugin", deadline)
-    view = EnabledPluginViewOwner(store=store, api_key_boundary=boundary).observe(
+    view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
         cancellation=NeverCancelPluginOperation(),
@@ -401,7 +401,7 @@ def test_round9_3_replace_changes_mcp_lifetime_and_hook_trust_subject_state(
         InstallLocalPluginRequest(first_source, PluginScopeKind.USER, deadline)
     )
     _enable(service, first, "physical-plugin", deadline)
-    first_view = EnabledPluginViewOwner(store=store, api_key_boundary=boundary).observe(
+    first_view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
         cancellation=NeverCancelPluginOperation(),
@@ -434,7 +434,7 @@ def test_round9_3_replace_changes_mcp_lifetime_and_hook_trust_subject_state(
     )
     assert second.enabled is False
     _enable(service, second, "physical-plugin", deadline)
-    second_view = EnabledPluginViewOwner(store=store, api_key_boundary=boundary).observe(
+    second_view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
         cancellation=NeverCancelPluginOperation(),
@@ -499,7 +499,7 @@ def test_round9_3_same_tier_plugin_skill_conflict_falls_through_to_bundled(
             InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
         )
         _enable(service, installed, plugin_id, deadline)
-    view = EnabledPluginViewOwner(store=store, api_key_boundary=boundary).observe(
+    view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
         cancellation=NeverCancelPluginOperation(),
@@ -537,15 +537,14 @@ def test_round9_3_same_tier_plugin_skill_conflict_falls_through_to_bundled(
 
 
 def test_round9_3_cross_chunk_secret_and_closed_abort_outcomes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     secret = "round-9-3-boundary-secret"
     source = _make_package(tmp_path / "source", mcp_kind="none")
     (source / "large.bin").write_bytes(
         b"x" * (COPY_CHUNK_BYTES - 3) + secret.encode("utf-8") + b"tail"
     )
-    monkeypatch.setenv("PULSARA_API_KEY", secret)
-    _home, _boundary, service, _store = _owners(tmp_path)
+    _home, _boundary, service, _store = _owners(tmp_path, credential=secret)
     result = service.validate_local_plugin_source(
         ValidateLocalPluginSourceRequest(source, monotonic() + 30)
     )
@@ -577,7 +576,7 @@ def test_round9_3_async_gate_cancel_joins_waiter_and_json_preflight_uses_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    boundary = ProcessApiKeyBoundary()
+    boundary = ProcessCredentialBoundary()
     entered = Event()
     release = Event()
 
@@ -608,7 +607,7 @@ def test_round9_3_async_gate_cancel_joins_waiter_and_json_preflight_uses_stderr(
     source = _make_package(tmp_path / "source", mcp_kind="none")
     home = tmp_path / "cli-home"
     monkeypatch.setenv("PULSARA_HOME", str(home))
-    service = PluginManagementService(api_key_boundary=boundary)
+    service = PluginManagementService(credential_boundary=boundary)
     installed = service.install_local_plugin(
         InstallLocalPluginRequest(
             source, PluginScopeKind.USER, monotonic() + 30
@@ -626,7 +625,7 @@ def test_round9_3_async_gate_cancel_joins_waiter_and_json_preflight_uses_stderr(
             "physical-plugin",
         ]
     )
-    rendered, status = _plugins_command(args, api_key_boundary=boundary)
+    rendered, status = _plugins_command(args, credential_boundary=boundary)
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "Exact package review" in captured.err
@@ -763,18 +762,11 @@ def test_round9_3_reload_settlement_lock_obeys_absolute_deadline() -> None:
     asyncio.run(run())
 
 
-def test_round9_3_provider_admission_blocks_rotation_until_sink(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(
-        "PULSARA_API_KEY", "synthetic-old-provider-boundary-key"
-    )
-
+def test_round9_3_provider_admission_blocks_rotation_until_sink() -> None:
     async def run() -> None:
-        name = "PULSARA_API_KEY"
         old = "synthetic-old-provider-boundary-key"
         future = "synthetic-future-provider-boundary-key"
-        boundary = ProcessApiKeyBoundary()
+        boundary = ProcessCredentialBoundary(old)
         started = asyncio.Event()
         proceed = asyncio.Event()
         sink_values: list[str | None] = []
@@ -782,12 +774,12 @@ def test_round9_3_provider_admission_blocks_rotation_until_sink(
         async def operation() -> str:
             started.set()
             await proceed.wait()
-            sink_values.append(os.environ.get(name))
+            sink_values.append(boundary.last_boundary_snapshot)
             return "ok"
 
         request = asyncio.create_task(
             admit_provider_request(
-                api_key_boundary=boundary,
+                credential_boundary=boundary,
                 payload={"prompt": future},
                 operation=operation,
             )
@@ -804,11 +796,7 @@ def test_round9_3_provider_admission_blocks_rotation_until_sink(
     asyncio.run(run())
 
 
-def test_round9_3_http_gate_releases_after_body_before_response_headers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PULSARA_API_KEY", "synthetic-old-http-boundary-key")
-
+def test_round9_3_http_gate_releases_after_body_before_response_headers() -> None:
     async def run() -> None:
         body_received = asyncio.Event()
         allow_response = asyncio.Event()
@@ -840,13 +828,13 @@ def test_round9_3_http_gate_releases_after_body_before_response_headers(
         server = await asyncio.start_server(handler, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         future = "synthetic-future-http-boundary-key"
-        boundary = ProcessApiKeyBoundary()
-        client = ProcessApiKeyBoundAsyncClient(api_key_boundary=boundary)
+        boundary = ProcessCredentialBoundary("synthetic-old-http-boundary-key")
+        client = ProcessCredentialBoundAsyncClient(credential_boundary=boundary)
         payload = future.encode()
         try:
             request = asyncio.create_task(
-                admit_process_api_key_http_operation(
-                    api_key_boundary=boundary,
+                admit_process_credential_http_operation(
+                    credential_boundary=boundary,
                     guarded_values=(payload,),
                     operation=lambda: client.post(
                         f"http://127.0.0.1:{port}/", content=payload
@@ -871,19 +859,16 @@ def test_round9_3_http_gate_releases_after_body_before_response_headers(
     asyncio.run(run())
 
 
-def test_round9_3_http_boundary_only_exempts_frozen_credential_header(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_round9_3_http_boundary_only_exempts_frozen_credential_header() -> None:
     active = "synthetic-provider-credential-key"
-    monkeypatch.setenv("PULSARA_API_KEY", active)
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == f"Bearer {active}"
         return httpx.Response(200, content=b"ok")
 
     async def run() -> None:
-        client = ProcessApiKeyBoundAsyncClient(
-            api_key_boundary=ProcessApiKeyBoundary(),
+        client = ProcessCredentialBoundAsyncClient(
+            credential_boundary=ProcessCredentialBoundary(active),
             credential_header_names=frozenset({b"authorization"}),
             transport=httpx.MockTransport(handler),
         )
@@ -894,7 +879,7 @@ def test_round9_3_http_boundary_only_exempts_frozen_credential_header(
                 content=b"safe model payload",
             )
             assert accepted.status_code == 200
-            with pytest.raises(ValueError, match="contains PULSARA_API_KEY"):
+            with pytest.raises(ValueError, match="protected credential"):
                 await client.post(
                     "https://example.invalid/provider",
                     headers={"Authorization": f"Bearer {active}"},

@@ -140,13 +140,12 @@ from pulsara_agent.ports.provider_stream import (
     ProviderStreamTerminal,
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.primitives.run_permission import (
     FrozenRunPermissionSnapshot,
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import test_model_runtime
 
 
 class ScriptedKernelModel:
@@ -154,16 +153,11 @@ class ScriptedKernelModel:
         self._calls = calls
         self.requests: list[KernelModelExecutionRequest] = []
         self.preparation_requests: list[KernelModelPreparationRequest] = []
-        self._preparer = DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
-                base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
-            ),
+        self._model_runtime = test_model_runtime(
+            model_id="test-pro",
+            wire_api="openai_chat_completions",
         )
+        self._preparer = DirectKernelModelPort(model_runtime=self._model_runtime)
 
     def prepare_target(
         self, request: KernelModelTargetPreparationRequest
@@ -230,16 +224,11 @@ class CallbackScriptedKernelModel:
     ) -> None:
         self._stream_factory = stream_factory
         self.requests: list[KernelModelExecutionRequest] = []
-        self._preparer = DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
-                base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
-            ),
+        self._model_runtime = test_model_runtime(
+            model_id="test-pro",
+            wire_api="openai_chat_completions",
         )
+        self._preparer = DirectKernelModelPort(model_runtime=self._model_runtime)
 
     def prepare_target(self, request):
         return self._preparer.prepare_target(request)
@@ -1129,6 +1118,7 @@ def prepare_test_model_call(
             purpose=request.purpose,
             maximum_input_tokens=request.maximum_input_tokens,
             maximum_output_tokens=request.maximum_output_tokens,
+            binding=request.binding,
         )
     )
     exposure_plan = request.tool_surface.capability_exposure_plan
@@ -1156,7 +1146,7 @@ def prepare_test_model_call(
                 request.tool_surface.model_surface.conversation_scope_kind
             ),
             scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
-            wire_api=target.target.model_profile.provider_profile.wire_api,
+            wire_api=target.target.model_profile.route_wire_profile.wire_api,
             tool_facts=facts,
         )
         ordered = tuple(sorted(facts, key=lambda item: item.canonical_tool_spec.name))
@@ -1165,7 +1155,7 @@ def prepare_test_model_call(
                 request.tool_surface.model_surface.conversation_scope_kind
             ),
             scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
-            wire_api=target.target.model_profile.provider_profile.wire_api,
+            wire_api=target.target.model_profile.route_wire_profile.wire_api,
             tool_versions=tuple(tool_capability_version_ref(item) for item in ordered),
             tool_specs=tuple(item.canonical_tool_spec for item in ordered),
             eligibility=eligibility,

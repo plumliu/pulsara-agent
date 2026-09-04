@@ -60,7 +60,7 @@ from pulsara_agent.primitives.context import (
     freeze_json,
     thaw_json,
 )
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 from ..tool_surface import (
     McpEffectKind,
@@ -1186,7 +1186,7 @@ class McpHostSupervisor:
         session_id: str,
         workspace_root: Path,
         configs: tuple[McpServerConfig, ...],
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         client_factory: type[BoundedMcpSdkClient] = BoundedMcpSdkClient,
         required_startup_timeout_seconds: float = 120.0,
         optional_fast_start_seconds: float = 3.0,
@@ -1199,7 +1199,7 @@ class McpHostSupervisor:
         self.configs = tuple(sorted(configs, key=lambda item: item.server_id))
         self._config_by_id = {item.server_id: item for item in self.configs}
         self._client_factory = client_factory
-        self._api_key_boundary = api_key_boundary
+        self._credential_boundary = credential_boundary
         if min(
             required_startup_timeout_seconds,
             optional_fast_start_seconds,
@@ -1590,7 +1590,7 @@ class McpHostSupervisor:
                 config,
                 workspace_root=self.workspace_root,
                 notification_callback=notification,
-                api_key_boundary=self._api_key_boundary,
+                credential_boundary=self._credential_boundary,
             )
             # Start serial while the handshake determines whether an HTTP peer
             # installed session state.  Only an operator assertion *and* a

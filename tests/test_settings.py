@@ -1,233 +1,349 @@
+from __future__ import annotations
+
+import asyncio
 import os
+from pathlib import Path
 
 import pytest
 
-from pulsara_agent.settings import PulsaraSettings, StorageConfig, load_env_file
+import pulsara_agent.settings as settings_module
+
+from pulsara_agent.llm.model_catalog import ModelTargetKey, WireApi
+from pulsara_agent.llm.model_connections import (
+    ModelConnectionConfig,
+    ModelConnectionId,
+)
+from pulsara_agent.local_credentials import (
+    CredentialState,
+    InMemoryCredentialStore,
+    ModelProviderCredential,
+)
+from pulsara_agent.settings import (
+    LocalPostgresConfig,
+    LocalSettings,
+    LocalSettingsStore,
+    LocalSettingsUnavailable,
+    local_settings_from_dict,
+    local_settings_to_dict,
+    read_local_settings,
+    write_local_settings,
+)
 
 
-_MODEL_LIMIT_ENV_LINES = [
-    "PULSARA_PRO_TOTAL_CONTEXT_TOKENS=4096",
-    "PULSARA_PRO_MAX_INPUT_TOKENS=3584",
-    "PULSARA_PRO_MAX_OUTPUT_TOKENS=1024",
-    "PULSARA_PRO_DEFAULT_OUTPUT_TOKENS=512",
-    "PULSARA_PRO_INPUT_SAFETY_MARGIN_TOKENS=128",
-    "PULSARA_FLASH_TOTAL_CONTEXT_TOKENS=4096",
-    "PULSARA_FLASH_MAX_INPUT_TOKENS=3584",
-    "PULSARA_FLASH_MAX_OUTPUT_TOKENS=1024",
-    "PULSARA_FLASH_DEFAULT_OUTPUT_TOKENS=512",
-    "PULSARA_FLASH_INPUT_SAFETY_MARGIN_TOKENS=128",
-]
-_MODEL_LIMIT_ENV_KEYS = tuple(line.split("=", 1)[0] for line in _MODEL_LIMIT_ENV_LINES)
+def _connection(suffix: str, *, model: str = "glm-5.3") -> ModelConnectionConfig:
+    return ModelConnectionConfig(
+        ModelConnectionId(f"model-connection:{suffix * 32}"),
+        ModelTargetKey("zhipuai", WireApi.OPENAI_CHAT_COMPLETIONS, model),
+        "https://open.bigmodel.cn/api/paas/v4",
+    )
 
 
-def test_storage_config_rejects_empty_postgres_dsn() -> None:
-    with pytest.raises(ValueError, match="postgres_dsn is required"):
-        StorageConfig(postgres_dsn="   ")
-
-
-def test_settings_can_load_env_file(tmp_path, monkeypatch):
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "PULSARA_API_KEY='dummy-key'",
-                "PULSARA_API=openai_chat_completions",
-                "PULSARA_BASE_URL=https://example.test/v1 # comment",
-                "export PULSARA_PRO_MODEL=gpt-5",
-                'PULSARA_FLASH_MODEL="gpt-5-mini"',
-                *_MODEL_LIMIT_ENV_LINES,
-                "PULSARA_POSTGRES_DSN=postgresql://pulsara:pulsara@localhost:5432/pulsara",
-            ]
+def test_local_settings_closed_codec_round_trip() -> None:
+    value = LocalSettings(
+        postgres=LocalPostgresConfig(
+            "postgresql://pulsara@localhost:5432/pulsara",
+            "postgresql://admin@localhost:5432/postgres",
         ),
-        encoding="utf-8",
+        model_connections=(_connection("a"), _connection("b", model="glm-5")),
     )
-    for key in (
-        "PULSARA_API_KEY",
-        "PULSARA_API",
-        "PULSARA_BASE_URL",
-        "PULSARA_PRO_MODEL",
-        "PULSARA_FLASH_MODEL",
-        *_MODEL_LIMIT_ENV_KEYS,
-        "PULSARA_POSTGRES_DSN",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
-    settings = PulsaraSettings.from_env_file(env_file)
-
-    assert settings.llm.api_key == "dummy-key"
-    assert settings.llm.api == "openai_chat_completions"
-    assert settings.llm.base_url == "https://example.test/v1"
-    assert settings.llm.pro_model == "gpt-5"
-    assert settings.llm.flash_model == "gpt-5-mini"
-    assert (
-        settings.storage.postgres_dsn
-        == "postgresql://pulsara:pulsara@localhost:5432/pulsara"
-    )
-    assert settings.redacted_dict()["storage"] == {"postgres_dsn_set": True}
-    assert settings.redacted_dict()["llm"]["api"] == "openai_chat_completions"
-    assert settings.redacted_dict()["llm"]["endpoint_origin"] == "https://example.test"
-    assert "base_url" not in settings.redacted_dict()["llm"]
+    assert local_settings_from_dict(local_settings_to_dict(value)) == value
 
 
-def test_settings_redacted_llm_endpoint_never_exposes_userinfo_path_or_query(
-    tmp_path,
-    monkeypatch,
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"extra": True},
+        {"schema": "old"},
+        {"postgres": {}},
+        {"model_connections": {}},
+    ],
+)
+def test_local_settings_rejects_open_or_invalid_shape(mutation: dict[str, object]) -> None:
+    payload = local_settings_to_dict(LocalSettings())
+    payload.update(mutation)
+    with pytest.raises(ValueError):
+        local_settings_from_dict(payload)
+
+
+def test_local_settings_file_permissions_and_absent_default(tmp_path: Path) -> None:
+    path = tmp_path / "private" / "local-settings.yaml"
+    assert read_local_settings(path) == LocalSettings()
+    write_local_settings(path, LocalSettings(model_connections=(_connection("a"),)))
+    assert read_local_settings(path).model_connections == (_connection("a"),)
+    assert os.stat(path).st_mode & 0o777 == 0o600
+    assert os.stat(path.parent).st_mode & 0o777 == 0o700
+
+
+def test_local_settings_rejects_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "target.yaml"
+    target.write_text("schema: anything\n", encoding="utf-8")
+    path = tmp_path / "local-settings.yaml"
+    path.symlink_to(target)
+    with pytest.raises(LocalSettingsUnavailable):
+        read_local_settings(path)
+
+
+def test_local_settings_invalid_document_is_typed_unavailable(tmp_path: Path) -> None:
+    path = tmp_path / "local-settings.yaml"
+    path.write_text("schema: [\n", encoding="utf-8")
+    with pytest.raises(LocalSettingsUnavailable):
+        read_local_settings(path)
+
+
+def test_postgres_dsn_is_closed_and_direct() -> None:
+    assert LocalPostgresConfig(
+        "postgresql://pulsara@localhost:5432/pulsara"
+    ).admin_dsn is None
+    for value in ("", "sqlite:///tmp/x", "postgresql://localhost"):
+        with pytest.raises(ValueError):
+            LocalPostgresConfig(value)
+
+
+def test_settings_document_never_contains_reasoning_or_fingerprint(
+    tmp_path: Path,
 ) -> None:
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "PULSARA_API_KEY=dummy-key",
-                "PULSARA_BASE_URL=https://user:secret@example.test/private?token=secret",
-                "PULSARA_PRO_MODEL=gpt-5",
-                "PULSARA_FLASH_MODEL=gpt-5-mini",
-                *_MODEL_LIMIT_ENV_LINES,
-            ]
-        ),
-        encoding="utf-8",
-    )
-    for key in (
-        "PULSARA_API_KEY",
-        "PULSARA_BASE_URL",
-        "PULSARA_PRO_MODEL",
-        "PULSARA_FLASH_MODEL",
-        *_MODEL_LIMIT_ENV_KEYS,
-    ):
-        monkeypatch.delenv(key, raising=False)
-
-    settings = PulsaraSettings.from_env_file(env_file)
-    rendered = str(settings.redacted_dict()["llm"])
-
-    assert settings.redacted_dict()["llm"]["endpoint_origin"] == "https://example.test"
-    assert "user" not in rendered
-    assert "secret" not in rendered
-    assert "private" not in rendered
-    assert "token=secret" not in rendered
+    path = tmp_path / "local-settings.yaml"
+    write_local_settings(path, LocalSettings(model_connections=(_connection("a"),)))
+    raw = path.read_text(encoding="utf-8")
+    assert "reasoning" not in raw
+    assert "fingerprint" not in raw
+    assert "revision" not in raw
 
 
-def test_settings_default_llm_api_is_openai_responses(tmp_path, monkeypatch):
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "PULSARA_API_KEY=dummy-key",
-                "PULSARA_PRO_MODEL=gpt-5",
-                "PULSARA_FLASH_MODEL=gpt-5-mini",
-                *_MODEL_LIMIT_ENV_LINES,
-            ]
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.delenv("PULSARA_API", raising=False)
-    monkeypatch.delenv("PULSARA_API_KEY", raising=False)
-    monkeypatch.delenv("PULSARA_PRO_MODEL", raising=False)
-    monkeypatch.delenv("PULSARA_FLASH_MODEL", raising=False)
-    for key in _MODEL_LIMIT_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
+def test_store_serializes_add_add_without_lost_update(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "local-settings.yaml"
+        store = LocalSettingsStore(path)
+        credentials = InMemoryCredentialStore()
+        first, second = _connection("a"), _connection("b")
+        await asyncio.gather(
+            store.add_model_connection(
+                connection=first, api_key="first-secret", credentials=credentials
+            ),
+            store.add_model_connection(
+                connection=second, api_key="second-secret", credentials=credentials
+            ),
+        )
+        observed = store.read()
+        assert observed.model_connections == (first, second)
+        assert credentials.state(ModelProviderCredential(first.id)) is CredentialState.PRESENT
+        assert credentials.state(ModelProviderCredential(second.id)) is CredentialState.PRESENT
 
-    settings = PulsaraSettings.from_env_file(env_file)
-
-    assert settings.llm.api == "openai_responses"
+    asyncio.run(scenario())
 
 
-def test_settings_loads_custom_provider_profile(tmp_path, monkeypatch):
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "PULSARA_API_KEY=dummy-key",
-                "PULSARA_API=openai_chat_completions",
-                "PULSARA_PROVIDER=custom-deepseek",
-                "PULSARA_PRO_MODEL=deepseek-reasoner",
-                "PULSARA_FLASH_MODEL=deepseek-chat",
-                *_MODEL_LIMIT_ENV_LINES,
-                "PULSARA_THINKING_TYPE=enabled",
-                "PULSARA_THINKING_REPLAY_POLICY=when_tool_calls",
-                "PULSARA_OMIT_PARAMS_WHEN_THINKING=temperature,top_p",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    for key in (
-        "PULSARA_API_KEY",
-        "PULSARA_API",
-        "PULSARA_PROVIDER",
-        "PULSARA_PRO_MODEL",
-        "PULSARA_FLASH_MODEL",
-        *_MODEL_LIMIT_ENV_KEYS,
-        "PULSARA_THINKING_TYPE",
-        "PULSARA_THINKING_REPLAY_POLICY",
-        "PULSARA_OMIT_PARAMS_WHEN_THINKING",
-    ):
-        monkeypatch.delenv(key, raising=False)
+def test_store_serializes_model_add_and_postgres_save(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = LocalSettingsStore(tmp_path / "local-settings.yaml")
+        credentials = InMemoryCredentialStore()
+        connection = _connection("a")
+        postgres = LocalPostgresConfig(
+            "postgresql://pulsara@localhost:5432/pulsara"
+        )
+        await asyncio.gather(
+            store.add_model_connection(
+                connection=connection,
+                api_key="secret",
+                credentials=credentials,
+            ),
+            store.save_postgres(postgres),
+        )
+        assert store.read() == LocalSettings(postgres, (connection,))
 
-    settings = PulsaraSettings.from_env_file(env_file)
-
-    profile = settings.llm.provider_profile
-    assert profile is not None
-    assert settings.llm.provider == "custom-deepseek"
-    assert profile.request_extra_body == {"thinking": {"type": "enabled"}}
-    assert profile.thinking.enabled is True
-    assert profile.thinking.replay_policy == "when_tool_calls"
-    assert profile.omit_params_when_thinking == ("temperature", "top_p")
+    asyncio.run(scenario())
 
 
-def test_settings_chat_completions_defaults_to_thinking_profile(tmp_path, monkeypatch):
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "PULSARA_API_KEY=dummy-key",
-                "PULSARA_API=openai_chat_completions",
-                "PULSARA_PRO_MODEL=custom-pro",
-                "PULSARA_FLASH_MODEL=custom-flash",
-                *_MODEL_LIMIT_ENV_LINES,
-            ]
-        ),
-        encoding="utf-8",
-    )
-    for key in (
-        "PULSARA_API_KEY",
-        "PULSARA_API",
-        "PULSARA_PRO_MODEL",
-        "PULSARA_FLASH_MODEL",
-        *_MODEL_LIMIT_ENV_KEYS,
-        "PULSARA_THINKING_TYPE",
-        "PULSARA_THINKING_REPLAY_POLICY",
-        "PULSARA_OMIT_PARAMS_WHEN_THINKING",
-        "PULSARA_EXTRA_BODY_JSON",
-    ):
-        monkeypatch.delenv(key, raising=False)
+def test_explicit_postgres_save_repairs_an_invalid_settings_document(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "local-settings.yaml"
+        path.write_text("schema: [\n", encoding="utf-8")
+        store = LocalSettingsStore(path)
+        postgres = LocalPostgresConfig(
+            "postgresql://pulsara@localhost:5432/pulsara"
+        )
 
-    settings = PulsaraSettings.from_env_file(env_file)
+        assert await store.save_postgres(postgres) == LocalSettings(postgres)
+        assert store.read() == LocalSettings(postgres)
 
-    profile = settings.llm.provider_profile
-    assert profile is not None
-    assert profile.thinking.enabled is True
-    assert profile.thinking.replay_policy == "when_tool_calls"
-    assert profile.thinking.delta_fields == ("reasoning_content", "reasoning")
-    assert tuple(item.field_name for item in profile.chat_replay_fields) == (
-        "reasoning_content",
-        "reasoning",
-        "reasoning_details",
-    )
-    assert profile.request_extra_body == {"thinking": {"type": "enabled"}}
-    assert profile.omit_params_when_thinking == (
-        "temperature",
-        "top_p",
-        "presence_penalty",
-        "frequency_penalty",
-    )
+    asyncio.run(scenario())
 
 
-def test_env_file_does_not_override_existing_environment_by_default(
-    tmp_path, monkeypatch
-):
-    env_file = tmp_path / ".env"
-    env_file.write_text("PULSARA_PRO_MODEL=from-file\n", encoding="utf-8")
-    monkeypatch.setenv("PULSARA_PRO_MODEL", "from-env")
+def test_explicit_model_add_repairs_an_invalid_settings_document(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        path = tmp_path / "local-settings.yaml"
+        path.write_text("schema: [\n", encoding="utf-8")
+        store = LocalSettingsStore(path)
+        credentials = InMemoryCredentialStore()
+        connection = _connection("a")
 
-    loaded = load_env_file(env_file)
+        observed = await store.add_model_connection(
+            connection=connection,
+            api_key="secret",
+            credentials=credentials,
+        )
+        assert observed == LocalSettings(model_connections=(connection,))
+        assert store.read() == observed
+        assert credentials.state(ModelProviderCredential(connection.id)) is (
+            CredentialState.PRESENT
+        )
 
-    assert loaded["PULSARA_PRO_MODEL"] == "from-file"
-    assert os.environ["PULSARA_PRO_MODEL"] == "from-env"
+    asyncio.run(scenario())
+
+
+def test_failed_metadata_publish_removes_new_secret(tmp_path: Path) -> None:
+    def fail_before_replace(_path: Path, _settings: LocalSettings) -> None:
+        raise OSError("before replace")
+
+    async def scenario() -> None:
+        connection = _connection("a")
+        credentials = InMemoryCredentialStore()
+        store = LocalSettingsStore(
+            tmp_path / "local-settings.yaml", writer=fail_before_replace
+        )
+        with pytest.raises(OSError, match="before replace"):
+            await store.add_model_connection(
+                connection=connection,
+                api_key="secret",
+                credentials=credentials,
+            )
+        assert credentials.state(ModelProviderCredential(connection.id)) is CredentialState.MISSING
+
+    asyncio.run(scenario())
+
+
+def test_after_replace_parent_fsync_failure_rereads_published_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_fsync = settings_module.os.fsync
+    calls = 0
+
+    def fail_parent_fsync(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("parent fsync failed")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(settings_module.os, "fsync", fail_parent_fsync)
+
+    async def scenario() -> None:
+        connection = _connection("a")
+        credentials = InMemoryCredentialStore()
+        store = LocalSettingsStore(tmp_path / "local-settings.yaml")
+
+        observed = await store.add_model_connection(
+            connection=connection,
+            api_key="secret",
+            credentials=credentials,
+        )
+
+        assert observed.connection(connection.id) == connection
+        assert store.read().connection(connection.id) == connection
+        assert credentials.state(ModelProviderCredential(connection.id)) is (
+            CredentialState.PRESENT
+        )
+
+    asyncio.run(scenario())
+
+
+def test_commit_unknown_and_unreadable_publication_keeps_possible_orphan_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "local-settings.yaml"
+
+    def publish_then_unknown(target: Path, settings: LocalSettings) -> None:
+        write_local_settings(target, settings)
+        raise settings_module._LocalSettingsCommitUnknown("unknown")
+
+    async def scenario() -> None:
+        connection = _connection("a")
+        credentials = InMemoryCredentialStore()
+        store = LocalSettingsStore(path, writer=publish_then_unknown)
+        reads = 0
+        real_read = store.read
+
+        def become_unreadable() -> LocalSettings:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return real_read()
+            raise LocalSettingsUnavailable("read unavailable")
+
+        monkeypatch.setattr(store, "read", become_unreadable)
+        with pytest.raises(
+            settings_module.LocalSettingsPublishIndeterminate,
+            match="indeterminate",
+        ):
+            await store.add_model_connection(
+                connection=connection,
+                api_key="secret",
+                credentials=credentials,
+            )
+        assert credentials.state(ModelProviderCredential(connection.id)) is (
+            CredentialState.PRESENT
+        )
+
+    asyncio.run(scenario())
+
+
+def test_commit_unknown_confirmed_absent_removes_new_secret(tmp_path: Path) -> None:
+    def fail_unknown(_path: Path, _settings: LocalSettings) -> None:
+        raise settings_module._LocalSettingsCommitUnknown("unknown")
+
+    async def scenario() -> None:
+        connection = _connection("a")
+        credentials = InMemoryCredentialStore()
+        store = LocalSettingsStore(
+            tmp_path / "local-settings.yaml", writer=fail_unknown
+        )
+        with pytest.raises(LocalSettingsUnavailable, match="was not published"):
+            await store.add_model_connection(
+                connection=connection,
+                api_key="secret",
+                credentials=credentials,
+            )
+        assert credentials.state(ModelProviderCredential(connection.id)) is (
+            CredentialState.MISSING
+        )
+
+    asyncio.run(scenario())
+
+
+def test_cancellation_joins_metadata_settlement(tmp_path: Path) -> None:
+    loop: asyncio.AbstractEventLoop
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def scenario() -> None:
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        path = tmp_path / "local-settings.yaml"
+
+        def delayed_writer(target: Path, settings: LocalSettings) -> None:
+            loop.call_soon_threadsafe(entered.set)
+            asyncio.run_coroutine_threadsafe(release.wait(), loop).result()
+            write_local_settings(target, settings)
+
+        connection = _connection("a")
+        credentials = InMemoryCredentialStore()
+        store = LocalSettingsStore(path, writer=delayed_writer)
+        task = asyncio.create_task(
+            store.add_model_connection(
+                connection=connection,
+                api_key="secret",
+                credentials=credentials,
+            )
+        )
+        await entered.wait()
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert store.read().connection(connection.id) == connection
+        assert credentials.state(ModelProviderCredential(connection.id)) is CredentialState.PRESENT
+
+    asyncio.run(scenario())

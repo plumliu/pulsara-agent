@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from psycopg.types.json import Jsonb
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, WriterLease
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    model_call_binding_from_dict,
+    model_call_binding_to_dict,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
@@ -14,6 +20,42 @@ from .contracts import (
 )
 
 class _AuthorityOperations:
+    def read_session_model_call_binding(
+        self,
+        guard: HostWriterGuard,
+        *,
+        deadline_monotonic: float,
+    ) -> ModelCallBinding | None:
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = self._require_writer(connection, guard, lock=False)
+            return model_call_binding_from_dict(row["model_call_binding"])
+
+    def update_session_model_call_binding(
+        self,
+        guard: HostWriterGuard,
+        *,
+        binding: ModelCallBinding,
+        deadline_monotonic: float,
+    ) -> ModelCallBinding:
+        """Replace the next-NEW_TURN choice under the canonical session lock."""
+
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            connection.execute(
+                """
+                UPDATE pulsara_v3.sessions
+                SET model_call_binding=%s, updated_at=clock_timestamp()
+                WHERE id=%s
+                """,
+                (Jsonb(model_call_binding_to_dict(binding)), guard.session_id),
+            )
+        return binding
+
     def read_session_workspace_id(
         self,
         guard: HostWriterGuard,

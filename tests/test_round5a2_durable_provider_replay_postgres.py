@@ -27,6 +27,12 @@ from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
+)
 
 
 pytestmark = pytest.mark.postgres
@@ -38,7 +44,8 @@ def _name(prefix: str) -> str:
 
 def _open_turn(repository: ConversationKernelRepository, lease):
     turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -46,6 +53,7 @@ def _open_turn(repository: ConversationKernelRepository, lease):
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"prompt"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -118,7 +126,8 @@ def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -126,11 +135,14 @@ def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
         deadline_monotonic=monotonic() + 30,
     )
     arguments = _commit_arguments(repository, lease, workspace_id=workspace_id)
-    assert repository.confirm_assistant_message_winner(
-        lease.guard,
-        **arguments,
-        deadline_monotonic=monotonic() + 30,
-    ) is None
+    assert (
+        repository.confirm_assistant_message_winner(
+            lease.guard,
+            **arguments,
+            deadline_monotonic=monotonic() + 30,
+        )
+        is None
+    )
     accepted = repository.commit_assistant_message(
         lease.guard,
         **arguments,
@@ -242,7 +254,8 @@ def test_round5a2_transaction_failure_rolls_back_assistant_blocks_and_replay(
     repository = _FailAfterReplayRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),

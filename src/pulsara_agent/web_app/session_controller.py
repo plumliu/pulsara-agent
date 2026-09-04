@@ -54,7 +54,10 @@ from pulsara_agent.conversation_kernel.host import (
     KernelHostSession,
     KernelSessionSummary,
 )
-from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    model_call_binding_to_dict,
+)
 from pulsara_agent.mcp_config import (
     DEFAULT_USER_MCP_CONFIG,
     McpLocalConfigSourceKind,
@@ -137,13 +140,11 @@ class LocalSessionController:
         *,
         core: KernelHostCore,
         workspace_input: HostWorkspaceInput,
-        model_role: ModelRole,
         permission_policy: EffectivePermissionPolicy,
         active_skill_names: frozenset[str],
     ) -> None:
         self.core = core
         self.workspace_input = workspace_input
-        self.model_role = model_role
         self.permission_policy = permission_policy
         self.active_skill_names = active_skill_names
         self._by_session: dict[str, HostSessionHandle] = {}
@@ -174,8 +175,6 @@ class LocalSessionController:
                 "path": str(workspace.workspace_root),
                 "kind": workspace.workspace_kind,
             },
-            "provider": self.core.settings.redacted_dict()["llm"],
-            "storage": self.core.settings.redacted_dict()["storage"],
             "protocol": {"major": 3, "minor": 0},
         }
 
@@ -887,7 +886,6 @@ class LocalSessionController:
             )
         session = await self.core.open_session(
             workspace_input,
-            model_role=self.model_role,
             permission_policy=self.permission_policy,
             active_skill_names=self.active_skill_names,
         )
@@ -958,7 +956,6 @@ class LocalSessionController:
             session = await self.core.resume_session(
                 session_id,
                 workspace_input=workspace_input,
-                model_role=self.model_role,
                 permission_policy=self.permission_policy,
                 active_skill_names=self.active_skill_names,
             )
@@ -1052,6 +1049,16 @@ class LocalSessionController:
             raise KeyError(host_session_id)
         return handle.session
 
+    async def update_model_call_binding(
+        self, session_id: str, binding: ModelCallBinding
+    ) -> dict[str, object]:
+        handle = await self.resume_session(session_id)
+        accepted = await handle.session.update_model_call_binding(binding)
+        return {
+            "model_call_binding": model_call_binding_to_dict(accepted),
+            "reasoning_preference_reset": accepted != binding,
+        }
+
     async def close_session(self, session_id: str, *, close_conversation: bool) -> None:
         async with self._lock:
             handle = self._by_session.pop(session_id, None)
@@ -1113,6 +1120,9 @@ class LocalSessionController:
             "status": "waiting" if live else "completed",
             "updated_at": updated_value,
             "latest_entry_sequence": summary.latest_entry_sequence,
+            "model_call_binding": model_call_binding_to_dict(
+                summary.model_call_binding
+            ),
             "writer_generation": summary.writer_generation,
             "live": live,
             "task_counts": {

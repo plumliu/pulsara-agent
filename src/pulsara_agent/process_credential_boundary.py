@@ -1,4 +1,4 @@
-"""One process-local linearization gate for the exact Pulsara API key.
+"""One process-local linearization gate for one caller-owned credential value.
 
 The boundary is deliberately narrow: it is neither a credential store nor a
 service locator.  Application bootstrap constructs one instance and injects it
@@ -20,26 +20,25 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Protocol
 import httpx
 
 
-PULSARA_API_KEY_ENVIRONMENT_NAME = "PULSARA_API_KEY"
-PULSARA_API_KEY_REPLACEMENT = b"[REDACTED_PULSARA_API_KEY]"
+PROCESS_CREDENTIAL_REPLACEMENT = b"[REDACTED_CREDENTIAL]"
 
 
-class ApiKeyCancellationPort(Protocol):
+class CredentialCancellationPort(Protocol):
     def cancellation_requested(self) -> bool: ...
 
 
-class ProcessApiKeyBoundaryCancelled(RuntimeError):
+class ProcessCredentialBoundaryCancelled(RuntimeError):
     pass
 
 
-class ProcessApiKeyBoundaryTimedOut(TimeoutError):
+class ProcessCredentialBoundaryTimedOut(TimeoutError):
     pass
 
 
 @dataclass(slots=True)
 class _HttpAdmissionAttempt:
-    boundary: "ProcessApiKeyBoundary"
-    guard: "ProcessApiKeyGuard"
+    boundary: "ProcessCredentialBoundary"
+    guard: "ProcessCredentialGuard"
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     claimed: bool = False
 
@@ -57,8 +56,8 @@ _ORIGINAL_HTTP_TRACE_EXTENSION = "pulsara_original_http_trace"
 
 
 @dataclass(frozen=True, slots=True)
-class ProcessApiKeyGuard:
-    """Gate-owned current raw environment observation."""
+class ProcessCredentialGuard:
+    """Gate-owned current value observation."""
 
     value: str
 
@@ -74,7 +73,7 @@ class ProcessApiKeyGuard:
 
 
 @dataclass(slots=True)
-class ProcessApiKeyScrubSet:
+class ProcessCredentialScrubSet:
     """Attempt-local exact values observed across rotations."""
 
     _values: set[bytes] = field(default_factory=set, repr=False)
@@ -95,14 +94,14 @@ class ProcessApiKeyScrubSet:
         return any(secret in encoded for secret in self.values)
 
     def scrub_bytes(self, raw: bytes) -> bytes:
-        replacement = PULSARA_API_KEY_REPLACEMENT
+        replacement = PROCESS_CREDENTIAL_REPLACEMENT
         if any(secret in replacement for secret in self.values):
             replacement = b""
         value = raw
         for secret in self.values:
             value = value.replace(secret, replacement)
         if any(secret in value for secret in self.values):
-            raise ValueError("PULSARA_API_KEY scrub postcondition failed")
+            raise ValueError("credential scrub postcondition failed")
         return value
 
     def scrub_text(self, raw: str) -> str:
@@ -120,18 +119,21 @@ class ProcessApiKeyScrubSet:
             for key, item in root.items():
                 safe_key: object = self.scrub_text(key) if isinstance(key, str) else key
                 if safe_key != key or safe_key in scrubbed:
-                    raise ValueError("PULSARA_API_KEY scrub changed an object key")
+                    raise ValueError("credential scrub changed an object key")
                 scrubbed[safe_key] = self.scrub_json(item)
             return scrubbed
         return root
 
 
-class ProcessApiKeyBoundary:
+class ProcessCredentialBoundary:
     """One non-reentrant threading gate shared by sync and async sinks."""
 
-    def __init__(self) -> None:
+    def __init__(self, value: str = "") -> None:
+        if not isinstance(value, str):
+            raise TypeError("credential boundary value must be text")
         self._gate = Lock()
-        self._snapshot = _raw_current_value()
+        self._value = value
+        self._snapshot = value
 
     @property
     def last_boundary_snapshot(self) -> str:
@@ -143,11 +145,11 @@ class ProcessApiKeyBoundary:
         self,
         *,
         deadline_monotonic: float | None = None,
-        cancellation: ApiKeyCancellationPort | None = None,
-    ) -> ProcessApiKeyScrubSet:
-        """Observe the current exact value under the shared linearization gate."""
+        cancellation: CredentialCancellationPort | None = None,
+    ) -> ProcessCredentialScrubSet:
+        """Observe the caller-provided exact value under the shared gate."""
 
-        scrub = ProcessApiKeyScrubSet()
+        scrub = ProcessCredentialScrubSet()
         with self.sync_guard(
             deadline_monotonic=deadline_monotonic,
             cancellation=cancellation,
@@ -160,16 +162,16 @@ class ProcessApiKeyBoundary:
         self,
         *,
         deadline_monotonic: float | None = None,
-        cancellation: ApiKeyCancellationPort | None = None,
-    ) -> Iterator[ProcessApiKeyGuard]:
+        cancellation: CredentialCancellationPort | None = None,
+    ) -> Iterator[ProcessCredentialGuard]:
         self._acquire(
             deadline_monotonic=deadline_monotonic,
             cancellation=cancellation,
         )
         try:
-            value = _raw_current_value()
+            value = self._value
             self._snapshot = value
-            yield ProcessApiKeyGuard(value)
+            yield ProcessCredentialGuard(value)
         finally:
             self._gate.release()
 
@@ -178,8 +180,8 @@ class ProcessApiKeyBoundary:
         self,
         *,
         deadline_monotonic: float | None = None,
-        cancellation: ApiKeyCancellationPort | None = None,
-    ) -> AsyncIterator[ProcessApiKeyGuard]:
+        cancellation: CredentialCancellationPort | None = None,
+    ) -> AsyncIterator[ProcessCredentialGuard]:
         # The worker may already be queued in ``threading.Lock.acquire`` when
         # its caller is cancelled.  Shield and join it, then immediately
         # release an acquired token before propagating cancellation.
@@ -189,7 +191,7 @@ class ProcessApiKeyBoundary:
                 deadline_monotonic=deadline_monotonic,
                 cancellation=cancellation,
             ),
-            name="pulsara-api-key-gate-acquire",
+            name="pulsara-credential-gate-acquire",
         )
         try:
             await asyncio.shield(task)
@@ -203,23 +205,23 @@ class ProcessApiKeyBoundary:
                     await asyncio.shield(task)
                 except asyncio.CancelledError:
                     continue
-                except (ProcessApiKeyBoundaryCancelled, ProcessApiKeyBoundaryTimedOut):
+                except (ProcessCredentialBoundaryCancelled, ProcessCredentialBoundaryTimedOut):
                     break
             if task.done() and not task.cancelled():
                 try:
                     task.result()
                 except (
-                    ProcessApiKeyBoundaryCancelled,
-                    ProcessApiKeyBoundaryTimedOut,
+                    ProcessCredentialBoundaryCancelled,
+                    ProcessCredentialBoundaryTimedOut,
                 ):
                     pass
                 else:
                     self._gate.release()
             raise
         try:
-            value = _raw_current_value()
+            value = self._value
             self._snapshot = value
-            yield ProcessApiKeyGuard(value)
+            yield ProcessCredentialGuard(value)
         finally:
             self._gate.release()
 
@@ -228,42 +230,42 @@ class ProcessApiKeyBoundary:
         value: str | None,
         *,
         deadline_monotonic: float | None = None,
-        cancellation: ApiKeyCancellationPort | None = None,
+        cancellation: CredentialCancellationPort | None = None,
     ) -> None:
         with self.sync_guard(
             deadline_monotonic=deadline_monotonic,
             cancellation=cancellation,
         ):
-            _write_raw_value(value)
-            self._snapshot = value or ""
+            self._value = value or ""
+            self._snapshot = self._value
 
     async def rotate_async(
         self,
         value: str | None,
         *,
         deadline_monotonic: float | None = None,
-        cancellation: ApiKeyCancellationPort | None = None,
+        cancellation: CredentialCancellationPort | None = None,
     ) -> None:
         async with self.async_guard(
             deadline_monotonic=deadline_monotonic,
             cancellation=cancellation,
         ):
-            _write_raw_value(value)
-            self._snapshot = value or ""
+            self._value = value or ""
+            self._snapshot = self._value
 
     def _acquire(
         self,
         *,
         deadline_monotonic: float | None,
-        cancellation: ApiKeyCancellationPort | None,
+        cancellation: CredentialCancellationPort | None,
     ) -> None:
         while True:
             if cancellation is not None and cancellation.cancellation_requested():
-                raise ProcessApiKeyBoundaryCancelled
+                raise ProcessCredentialBoundaryCancelled
             if deadline_monotonic is not None:
                 remaining = deadline_monotonic - monotonic()
                 if remaining <= 0:
-                    raise ProcessApiKeyBoundaryTimedOut
+                    raise ProcessCredentialBoundaryTimedOut
                 wait = min(remaining, 0.05)
             else:
                 wait = 0.05
@@ -272,28 +274,28 @@ class ProcessApiKeyBoundary:
                 # not retain the token or enter an irreversible sink.
                 if cancellation is not None and cancellation.cancellation_requested():
                     self._gate.release()
-                    raise ProcessApiKeyBoundaryCancelled
+                    raise ProcessCredentialBoundaryCancelled
                 if (
                     deadline_monotonic is not None
                     and monotonic() >= deadline_monotonic
                 ):
                     self._gate.release()
-                    raise ProcessApiKeyBoundaryTimedOut
+                    raise ProcessCredentialBoundaryTimedOut
                 return
 
 
-class ProcessApiKeyBoundAsyncClient(httpx.AsyncClient):
+class ProcessCredentialBoundAsyncClient(httpx.AsyncClient):
     """HTTPX client whose every physical request crosses the shared key gate."""
 
     def __init__(
         self,
         *,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         credential_header_names: frozenset[bytes] = frozenset(),
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self._api_key_boundary = api_key_boundary
+        self._credential_boundary = credential_boundary
         self._credential_header_names = frozenset(
             item.lower() for item in credential_header_names
         )
@@ -304,7 +306,7 @@ class ProcessApiKeyBoundAsyncClient(httpx.AsyncClient):
         inherited = _CURRENT_HTTP_ADMISSION.get()
         use_inherited = (
             inherited is not None
-            and inherited.boundary is self._api_key_boundary
+            and inherited.boundary is self._credential_boundary
             and inherited.claim_first_physical_request()
         )
         guard_context = None
@@ -313,7 +315,7 @@ class ProcessApiKeyBoundAsyncClient(httpx.AsyncClient):
             assert inherited is not None
             guard = inherited.guard
         else:
-            guard_context = self._api_key_boundary.async_guard()
+            guard_context = self._credential_boundary.async_guard()
             guard = await guard_context.__aenter__()
 
         async def settle_admission() -> None:
@@ -358,27 +360,27 @@ class ProcessApiKeyBoundAsyncClient(httpx.AsyncClient):
             await settle_admission()
 
 
-async def admit_process_api_key_http_operation(
+async def admit_process_credential_http_operation(
     *,
-    api_key_boundary: ProcessApiKeyBoundary,
+    credential_boundary: ProcessCredentialBoundary,
     guarded_values: tuple[bytes | str, ...],
     operation: Callable[[], Awaitable[Any]],
 ) -> Any:
     """Hold the gate until one bound physical HTTP request settles admission."""
 
-    async with api_key_boundary.async_guard() as guard:
+    async with credential_boundary.async_guard() as guard:
         if any(guard.contains(value) for value in guarded_values):
-            raise ValueError("HTTP admission contains PULSARA_API_KEY")
-        attempt = _HttpAdmissionAttempt(api_key_boundary, guard)
+            raise ValueError("HTTP admission contains the protected credential")
+        attempt = _HttpAdmissionAttempt(credential_boundary, guard)
         token = _CURRENT_HTTP_ADMISSION.set(attempt)
         try:
             operation_task = asyncio.create_task(
-                operation(), name="process-api-key-http-operation"
+                operation(), name="process-credential-http-operation"
             )
         finally:
             _CURRENT_HTTP_ADMISSION.reset(token)
         settled_task = asyncio.create_task(
-            attempt.settled.wait(), name="process-api-key-http-admission-settled"
+            attempt.settled.wait(), name="process-credential-http-admission-settled"
         )
         try:
             done, _pending = await asyncio.wait(
@@ -411,7 +413,7 @@ async def admit_process_api_key_http_operation(
 
 def _validate_http_request_secret_boundary(
     request: httpx.Request,
-    guard: ProcessApiKeyGuard,
+    guard: ProcessCredentialGuard,
     *,
     credential_header_names: frozenset[bytes],
 ) -> None:
@@ -431,29 +433,17 @@ def _validate_http_request_secret_boundary(
             for name, value in request.headers.raw
         )
     ):
-        raise ValueError("HTTP request contains PULSARA_API_KEY")
-
-
-def _raw_current_value() -> str:
-    return os.environ.get(PULSARA_API_KEY_ENVIRONMENT_NAME, "")
-
-
-def _write_raw_value(value: str | None) -> None:
-    if value:
-        os.environ[PULSARA_API_KEY_ENVIRONMENT_NAME] = value
-    else:
-        os.environ.pop(PULSARA_API_KEY_ENVIRONMENT_NAME, None)
+        raise ValueError("HTTP request contains the protected credential")
 
 
 __all__ = [
-    "ApiKeyCancellationPort",
-    "PULSARA_API_KEY_ENVIRONMENT_NAME",
-    "PULSARA_API_KEY_REPLACEMENT",
-    "ProcessApiKeyBoundary",
-    "ProcessApiKeyBoundaryCancelled",
-    "ProcessApiKeyBoundaryTimedOut",
-    "ProcessApiKeyBoundAsyncClient",
-    "ProcessApiKeyGuard",
-    "ProcessApiKeyScrubSet",
-    "admit_process_api_key_http_operation",
+    "CredentialCancellationPort",
+    "PROCESS_CREDENTIAL_REPLACEMENT",
+    "ProcessCredentialBoundary",
+    "ProcessCredentialBoundaryCancelled",
+    "ProcessCredentialBoundaryTimedOut",
+    "ProcessCredentialBoundAsyncClient",
+    "ProcessCredentialGuard",
+    "ProcessCredentialScrubSet",
+    "admit_process_credential_http_operation",
 ]

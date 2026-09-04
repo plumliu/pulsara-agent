@@ -103,7 +103,7 @@ from pulsara_agent.hooks.output_parser import (
     ValidHandlerContribution,
     parse_handler_output,
 )
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.hooks.source import LocalHookSourceProvider
 from pulsara_agent.hooks.trust import normalized_definition_digest
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
@@ -1013,7 +1013,7 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
         dispatcher = KernelHookDispatcher(
             initial_view=_view(tmp_path, definitions),
             workspace_root=tmp_path,
-            api_key_boundary=ProcessApiKeyBoundary(),
+            credential_boundary=ProcessCredentialBoundary(),
             executor=executor,  # type: ignore[arg-type]
             diagnostic_adapter=diagnostics,
         )
@@ -1117,7 +1117,6 @@ def test_round9_2_real_command_executor_secret_environment_stdin_output_and_dead
     async def exercise() -> None:
         secret = "round92-secret-value"
         future_secret = "round92-future-secret"
-        monkeypatch.setenv("PULSARA_API_KEY", secret)
         monkeypatch.setenv("HOOK_SECRET_COPY", secret)
         secret_file = tmp_path / "secret.txt"
         secret_file.write_text(secret, encoding="utf-8")
@@ -1130,10 +1129,8 @@ secret = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
 print(json.dumps({'hookSpecificOutput': {
     'hookEventName': 'UserPromptSubmit',
     'additionalContext': 'prompt=' + value['prompt']
-        + '|ambient=' + os.environ.get('HOOK_SECRET_COPY', '<missing>')
-        + '|api=' + str('PULSARA_API_KEY' in os.environ)
+        + '|ambient=' + str('HOOK_SECRET_COPY' in os.environ)
         + '|file=' + secret
-        + '|future=round92-future-secret'
 }}))
 print('visible stderr ' + secret, file=sys.stderr)
 """.strip(),
@@ -1170,7 +1167,8 @@ print('visible stderr ' + secret, file=sys.stderr)
             tmp_path,
             monotonic() + 10,
         )
-        executor = HookCommandExecutor(api_key_boundary=ProcessApiKeyBoundary())
+        boundary = ProcessCredentialBoundary(secret)
+        executor = HookCommandExecutor(credential_boundary=boundary)
         execution = await executor.execute(request)
         assert execution.failure_code is None and execution.exit_code == 0
         parsed = parse_handler_output(execution)
@@ -1178,7 +1176,7 @@ print('visible stderr ' + secret, file=sys.stderr)
         assert parsed.context_text is not None
         assert secret not in parsed.context_text
         assert API_KEY_REPLACEMENT.decode() in parsed.context_text
-        assert "api=False" in parsed.context_text
+        assert "ambient=False" in parsed.context_text
         assert any(item.code == "HOOK_STDERR" for item in parsed.diagnostics)
         assert all(secret not in item.message for item in parsed.diagnostics)
 
@@ -1199,13 +1197,11 @@ print('visible stderr ' + secret, file=sys.stderr)
             causal_ref=DirectPromptRef("command:1", "turn:1", "entry:1", "revision:1"),
             entries=outcome.context_entries,
         )
-        monkeypatch.setenv("PULSARA_API_KEY", future_secret)
         prepared = owner.freeze_for_target(
             scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
         )
         assert prepared is not None
         assert secret not in prepared.full_text
-        assert future_secret not in prepared.full_text
         assert "HOOK_CONTEXT" in prepared.full_text
         prepared.reservation.retire()
         assert (
@@ -1216,6 +1212,7 @@ print('visible stderr ' + secret, file=sys.stderr)
         )
 
         marker = tmp_path / "must-not-spawn"
+        boundary.rotate_sync(future_secret)
         rejected = replace(
             definition,
             command=f"touch {shlex.quote(str(marker))} {future_secret}",
@@ -1392,7 +1389,7 @@ def test_round9_2_reload_publishes_future_view_and_old_attempt_keeps_reference(
             initial_view=old_view,
             workspace_root=tmp_path,
             source_provider=_Provider(),  # type: ignore[arg-type]
-            api_key_boundary=ProcessApiKeyBoundary(),
+            credential_boundary=ProcessCredentialBoundary(),
             executor=executor,  # type: ignore[arg-type]
         )
         scope = _scope()
@@ -1551,12 +1548,10 @@ def test_round9_2_normalized_digest_has_no_recursive_script_or_description_input
     assert len(first) == 64
 
 
-def test_round9_2_api_key_replacement_collision_drops_exact_secret(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_round9_2_api_key_replacement_collision_drops_exact_secret() -> None:
     marker = API_KEY_REPLACEMENT.decode()
-    monkeypatch.setenv("PULSARA_API_KEY", marker)
     scrub = HookSecretScrubSet.capture()
+    scrub.observe(marker)
     assert marker not in scrub.scrub_text("before " + marker + " after")
 
 
@@ -1617,7 +1612,7 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
     selected_for_b.reservation.retire()
 
 
-def test_round9_2_api_key_rotation_is_rejected_at_exact_spawn_sink(
+def test_round9_2_borrowed_credential_rotation_is_rejected_at_exact_spawn_sink(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1645,17 +1640,17 @@ def test_round9_2_api_key_rotation_is_rejected_at_exact_spawn_sink(
         monotonic() + 5,
     )
     original = executor_module._spawn_environment
-    monkeypatch.setenv("PULSARA_API_KEY", "initial-key-before-environment")
+    boundary = ProcessCredentialBoundary("initial-key-before-environment")
 
     def rotate_after_environment(scrub, overlay):
         environment = original(scrub, overlay)
-        monkeypatch.setenv("PULSARA_API_KEY", rotated_secret)
+        boundary.rotate_sync(rotated_secret)
         return environment
 
     monkeypatch.setattr(executor_module, "_spawn_environment", rotate_after_environment)
 
     async def exercise() -> None:
-        executor = HookCommandExecutor(api_key_boundary=ProcessApiKeyBoundary())
+        executor = HookCommandExecutor(credential_boundary=boundary)
         outcome = await executor.execute(request)
         assert outcome.failure_code == "API_KEY_VALUE_PRESENT"
         assert outcome.exit_code is None

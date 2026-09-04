@@ -23,9 +23,8 @@ from pulsara_agent.ports.live_agent_event import (
     ToolCallStartPayload,
     live_digest,
 )
-from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from pulsara_agent.workspace_identity import HostWorkspaceInput
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
 
 
@@ -164,27 +163,23 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
     monkeypatch.setenv("PULSARA_TERMINAL_SHELL_SNAPSHOT", "0")
-    settings = PulsaraSettings(
-        llm=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        storage=StorageConfig(
-            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
-        ),
+    model_runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api="openai_chat_completions",
+        postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
     )
 
     async def scenario() -> None:
-        core = KernelHostCore.production(settings=settings)
+        core = KernelHostCore.production(model_runtime=model_runtime)
         session = await core.open_session(
             HostWorkspaceInput(
                 workspace_kind="project",
                 workspace_root=tmp_path,
             )
         )
+        await session.update_model_call_binding(test_model_binding(model_runtime))
         first = await session.run_turn("run and monitor the process")
         assert first.final_text == "MONITOR_REGISTERED_WAITING"
         await asyncio.wait_for(model.autonomous_seen.wait(), timeout=8)

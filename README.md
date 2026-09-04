@@ -110,8 +110,8 @@ The current Kernel supports:
   cold direct tools, late/native-incompatible meta inspection and invocation,
   typed unavailable gates, catalog/resource/prompt reads, local authorization,
   and CLI lifecycle management;
-- advisory PostgreSQL memory with one-candidate `remember`, five closed item
-  kinds, USER/domain and exact WORKSPACE scope isolation, best-effort
+- advisory PostgreSQL memory with one-candidate `remember`, four closed item
+  kinds, global and exact workspace applicability, best-effort
   governance, multilingual sparse recall, optional 1024-dimensional dense
   recall and explicit rerank, direct/reverse relation reads, and at most
   two-hop traversal;
@@ -161,34 +161,28 @@ can never execute its stdio command or resolve its HTTP secret references.
 uv sync
 ```
 
-Create an environment file with at least:
+Pulsara no longer reads product configuration from `.env` or product-specific
+environment variables. Start the local app and use **Settings** to:
 
-```dotenv
-PULSARA_API_KEY=...
-PULSARA_BASE_URL=https://api.openai.com/v1
-PULSARA_API=openai_responses
-PULSARA_PRO_MODEL=...
-PULSARA_FLASH_MODEL=...
+- save the local PostgreSQL runtime DSN and optional admin DSN;
+- explicitly check the runtime database or initialize/migrate it with the
+  admin DSN;
+- choose a provider and a models.dev-backed model, select Chat Completions or
+  Responses, and add the API key;
+- optionally add the two independent DashScope keys for embedding and rerank.
 
-# Optional advisory-memory data egress. Sparse recall remains available when
-# these are absent or disabled.
-PULSARA_EMBEDDING_API_KEY=...
-PULSARA_RERANK_API_KEY=...
-
-PULSARA_POSTGRES_DSN=postgresql://pulsara_runtime:...@localhost:5432/pulsara
-PULSARA_POSTGRES_ADMIN_DSN=postgresql://pulsara_admin:...@localhost:5432/pulsara
-```
-
-The admin DSN is used only by `db migrate`. Runtime Hosts verify the clean
-schema and borrow the runtime role.
+Non-secret metadata is stored in `${PULSARA_HOME}/local-settings.yaml` (or the
+default Pulsara home). API keys are write-only and live in macOS Keychain. The
+app and Settings shell start with zero configuration; sparse memory recall
+continues when either DashScope credential is absent.
 
 ```sh
-uv run pulsara db migrate --env-file .env
-uv run pulsara db verify --deep --env-file .env
-uv run pulsara app --env-file .env
+uv run pulsara app
+uv run pulsara config-check
+uv run pulsara db verify --deep
 ```
 
-The last command starts the loopback-only Web application and opens it in a
+The first command starts the loopback-only Web application and opens it in a
 browser. Pass `--no-open` to start the service without opening a page. Durable
 sessions resume with their exact workspace after the page or service restarts.
 
@@ -328,9 +322,9 @@ remains. Verification is recorded in
 [`production_code_cleanup_and_runner_decomposition_activation.json`](benchmarks/suites/core/v1/production_code_cleanup_and_runner_decomposition_activation.json).
 Round 8 replaces the old memory durability/recovery graph with an advisory
 dataset. `remember` atomically accepts one candidate with its ToolResult, while
-governance, cheap-hint reflection, embedding, and reranking remain lossy
+governance, cheap-hint prompting, embedding, and reranking remain lossy
 process-local work. Accepted items use the closed FACT, USER_PROFILE,
-RESPONSE_PREFERENCE, ACTION_RULE, and DECISION taxonomy. Sparse recall is
+RESPONSE_PREFERENCE, and DECISION taxonomy. Sparse recall is
 always local; automatic dense recall and explicit rerank are optional remote
 data egress. Memory enters model input only through bounded append-only
 `MEMORY_RECALL` and `MEMORY_RESPONSE_PREFERENCE_HEAD` observations, never by
@@ -360,28 +354,17 @@ reset a real endpoint without explicit operator authorization.
 
 ## Run
 
-One prompt:
+The local Web app is the primary configuration and conversation surface:
 
 ```sh
-uv run pulsara host run \
-  --env-file .env \
-  --workspace /path/to/project \
-  "Explain this repository"
+uv run pulsara app --workspace /path/to/project
 ```
 
-Interactive REPL:
+After a session has an explicit model connection selected, the headless REPL
+can resume that canonical session without any environment-file path:
 
 ```sh
 uv run pulsara host repl \
-  --env-file .env \
-  --workspace /path/to/project
-```
-
-Resume the newest conversation for a workspace:
-
-```sh
-uv run pulsara host repl \
-  --env-file .env \
   --workspace /path/to/project \
   --continue
 ```

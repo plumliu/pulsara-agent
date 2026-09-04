@@ -15,11 +15,15 @@ from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
 from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
 from pulsara_agent.llm.provider import (
-    ProviderProfile,
+    RouteWireProfile,
     ThinkingProfile,
     ThinkingReplayPolicy,
 )
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import (
+    test_model_binding,
+    test_model_resolution_snapshot,
+    test_model_runtime,
+)
 from tests.support.postgres import verified_postgres_provider
 from tests.support.round3 import StaticContextSourceCollector, StructuredToolPort
 from tests.test_stage2_conversation_runner import (
@@ -31,12 +35,11 @@ from tests.test_stage2_conversation_runner import (
 
 
 def _model(api: str) -> _SequencedDirectKernelModel:
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id=f"test:{api}:fresh-process",
         wire_api=api,
         thinking=(
             ThinkingProfile(
-                enabled=True,
                 message_field="reasoning_content",
                 replay_policy=ThinkingReplayPolicy.ALWAYS,
             )
@@ -50,13 +53,12 @@ def _model(api: str) -> _SequencedDirectKernelModel:
         else _round5a1_responses_scripts()[1]
     )
     return _SequencedDirectKernelModel(
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api=api,
-            provider_profile=profile,
+            model_id="test-pro",
+            wire_api=api,
+            route_wire_profile=profile,
         ),
         scripts=(script,),
     )
@@ -72,8 +74,14 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         lease_seconds=30,
         deadline_monotonic=asyncio.get_running_loop().time() + 30,
     )
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=test_model_binding(test_model_runtime()),
+        deadline_monotonic=asyncio.get_running_loop().time() + 30,
+    )
     model = _model(args.api)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -100,9 +108,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("create", "continue"))
-    parser.add_argument(
-        "api", choices=("openai_chat_completions", "openai_responses")
-    )
+    parser.add_argument("api", choices=("openai_chat_completions", "openai_responses"))
     parser.add_argument("session_id")
     parser.add_argument("workspace_id")
     parser.add_argument("--abrupt", action="store_true")

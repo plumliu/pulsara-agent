@@ -474,8 +474,8 @@ def promote_compaction_summary_call(
         raise ValueError("summary wire decision is not executable")
     if (
         plan.quote is not decision.quote
-        or plan.wire_api != semantic.call.target.model_profile.provider_profile.wire_api
-        or plan.provider_profile_fingerprint
+        or plan.wire_api != semantic.call.target.model_profile.route_wire_profile.wire_api
+        or plan.route_wire_profile_fingerprint
         != provider_wire_profile_fingerprint(semantic.call)
         or decision.quote.estimator_fingerprint
         != semantic.compile_binding.estimator_fingerprint

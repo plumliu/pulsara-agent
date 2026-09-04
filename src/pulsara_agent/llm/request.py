@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
+from pulsara_agent.llm.model_connections import ReasoningSelection
 from pulsara_agent.llm.user_carrier import compose_provider_root_policy
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -137,7 +138,7 @@ class FrozenProviderWireInputPlan:
     compiled_semantic_fingerprint: str
     message_placements_fingerprint: str
     wire_api: str
-    provider_profile_fingerprint: str
+    route_wire_profile_fingerprint: str
     resolved_target_semantic_fingerprint: str
     materialization: FrozenProviderWireMaterialization = field(repr=False)
     replacements: tuple[FrozenProviderWireReplacementIdentity, ...]
@@ -167,7 +168,7 @@ class FrozenProviderWireInputPlan:
         for value in (
             self.compiled_semantic_fingerprint,
             self.message_placements_fingerprint,
-            self.provider_profile_fingerprint,
+            self.route_wire_profile_fingerprint,
             self.resolved_target_semantic_fingerprint,
             self.wire_system_fingerprint,
             self.wire_tools_fingerprint,
@@ -211,7 +212,7 @@ class FrozenProviderWireInputPlan:
             "pulsara.provider-wire-input-prefix:v2-final-context-projection",
             {
                 "api": self.wire_api,
-                "profile": self.provider_profile_fingerprint,
+                "profile": self.route_wire_profile_fingerprint,
                 "projection": projection,
             },
         )
@@ -247,7 +248,7 @@ def provider_wire_input_plan_identity_fingerprint(
             "compiled": plan.compiled_semantic_fingerprint,
             "placements": plan.message_placements_fingerprint,
             "api": plan.wire_api,
-            "profile": plan.provider_profile_fingerprint,
+            "profile": plan.route_wire_profile_fingerprint,
             "target": plan.resolved_target_semantic_fingerprint,
             "materialization": provider_wire_materialization_identity_fingerprint(
                 plan.materialization
@@ -288,7 +289,7 @@ def provider_wire_input_plan_identity_fingerprint(
 
 @dataclass(frozen=True, slots=True)
 class LLMOptions:
-    reasoning_effort: str | None = None
+    reasoning: ReasoningSelection | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -33,11 +33,10 @@ from pulsara_agent.mcp_config import (
     StreamableHttpTransportConfig,
     WorkspaceRelativeMcpCwd,
 )
-from pulsara_agent.process_api_key_boundary import (
-    PULSARA_API_KEY_ENVIRONMENT_NAME,
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundAsyncClient,
-    admit_process_api_key_http_operation,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundAsyncClient,
+    admit_process_credential_http_operation,
 )
 
 from .wire import (
@@ -216,12 +215,8 @@ class _BoundedTransport:
     async def aclose(self) -> None:
         raise NotImplementedError
 
-    def _decode(
-        self, data: bytes | bytearray, *, maximum_bytes: int
-    ) -> SessionMessage:
-        return self._decode_parsed(
-            self._parse(data, maximum_bytes=maximum_bytes)
-        )
+    def _decode(self, data: bytes | bytearray, *, maximum_bytes: int) -> SessionMessage:
+        return self._decode_parsed(self._parse(data, maximum_bytes=maximum_bytes))
 
     def _parse(self, data: bytes | bytearray, *, maximum_bytes: int) -> object:
         try:
@@ -237,9 +232,7 @@ class _BoundedTransport:
             # A peer frame is already physically present.  Malformed JSON,
             # shape overflow and SDK carrier validation are therefore exact
             # protocol failures, never evidence of an unknown remote effect.
-            raise McpProtocolConformanceError(
-                "MCP_RESPONSE_CARRIER_INVALID"
-            ) from exc
+            raise McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID") from exc
 
     def _decode_parsed(self, raw: object) -> SessionMessage:
         try:
@@ -266,14 +259,12 @@ class _BoundedTransport:
         except BaseException as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            raise McpProtocolConformanceError(
-                "MCP_RESPONSE_CARRIER_INVALID"
-            ) from exc
+            raise McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID") from exc
 
     def _encode(self, value: SessionMessage) -> bytes:
-        data = value.message.model_dump_json(
-            by_alias=True, exclude_none=True
-        ).encode("utf-8")
+        data = value.message.model_dump_json(by_alias=True, exclude_none=True).encode(
+            "utf-8"
+        )
         if len(data) > self.bounds.maximum_stdio_frame_bytes:
             raise McpWireBoundExceeded("outbound MCP frame exceeds the byte bound")
         return data
@@ -292,13 +283,13 @@ class _BoundedStdioTransport(_BoundedTransport):
         config: StdioTransportConfig,
         *,
         workspace_root: Path,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         bounds: McpWireBounds,
     ) -> None:
         super().__init__(bounds)
         self._config = config
         self._workspace_root = workspace_root
-        self._api_key_boundary = api_key_boundary
+        self._credential_boundary = credential_boundary
         self._process: asyncio.subprocess.Process | None = None
         self._tasks: tuple[asyncio.Task[object], ...] = ()
         self._closed = False
@@ -326,19 +317,23 @@ class _BoundedStdioTransport(_BoundedTransport):
         for target, reference in self._config.secret_environment_refs:
             value = os.environ.get(reference)
             if value is None:
-                raise ValueError("MCP stdio secret environment reference is unavailable")
+                raise ValueError(
+                    "MCP stdio secret environment reference is unavailable"
+                )
             environment[target] = value
-        environment.pop(PULSARA_API_KEY_ENVIRONMENT_NAME, None)
         process: asyncio.subprocess.Process | None = None
         cancelled: asyncio.CancelledError | None = None
-        async with self._api_key_boundary.async_guard() as guard:
-            if guard.contains(self._config.command) or any(
-                guard.contains(item) for item in self._config.args
-            ) or guard.contains(str(cwd)) or any(
-                guard.contains(name) or guard.contains(value)
-                for name, value in environment.items()
+        async with self._credential_boundary.async_guard() as guard:
+            if (
+                guard.contains(self._config.command)
+                or any(guard.contains(item) for item in self._config.args)
+                or guard.contains(str(cwd))
+                or any(
+                    guard.contains(name) or guard.contains(value)
+                    for name, value in environment.items()
+                )
             ):
-                raise ValueError("MCP stdio admission contains PULSARA_API_KEY")
+                raise ValueError("MCP stdio admission contains a caller credential")
             spawn = asyncio.create_task(
                 asyncio.create_subprocess_exec(
                     self._config.command,
@@ -388,17 +383,13 @@ class _BoundedStdioTransport(_BoundedTransport):
                         # wakes ClientSession and lets the supervisor fence and
                         # reconnect this slot generation.
                         await self._offer_failure(
-                            McpTransportOperationError(
-                                may_have_reached_server=True
-                            ),
+                            McpTransportOperationError(may_have_reached_server=True),
                             "MCP stdio peer closed stdout",
                         )
                         await self.read_writer.aclose()
                     return
                 if len(frame) > self.bounds.maximum_stdio_frame_bytes:
-                    raise McpProtocolConformanceError(
-                        "MCP_RESPONSE_CARRIER_INVALID"
-                    )
+                    raise McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID")
                 await self.read_writer.send(
                     self._decode(
                         frame.rstrip(b"\r\n"),
@@ -416,9 +407,7 @@ class _BoundedStdioTransport(_BoundedTransport):
                     payload = self._encode(message) + b"\n"
                 except BaseException:
                     await self._offer_failure(
-                        McpTransportOperationError(
-                            may_have_reached_server=False
-                        ),
+                        McpTransportOperationError(may_have_reached_server=False),
                         "MCP stdio encode failed",
                     )
                     return
@@ -427,9 +416,7 @@ class _BoundedStdioTransport(_BoundedTransport):
                     await self._process.stdin.drain()
                 except BaseException:
                     await self._offer_failure(
-                        McpTransportOperationError(
-                            may_have_reached_server=True
-                        ),
+                        McpTransportOperationError(may_have_reached_server=True),
                         "MCP stdio write failed",
                     )
                     return
@@ -496,13 +483,13 @@ class _BoundedHttpTransport(_BoundedTransport):
         config: McpServerConfig,
         transport: StreamableHttpTransportConfig,
         *,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         bounds: McpWireBounds,
     ) -> None:
         super().__init__(bounds)
         self._config = config
         self._transport = transport
-        self._api_key_boundary = api_key_boundary
+        self._credential_boundary = credential_boundary
         self._client: httpx.AsyncClient | None = None
         self._writer_task: asyncio.Task[object] | None = None
         self._listener_task: asyncio.Task[object] | None = None
@@ -528,8 +515,8 @@ class _BoundedHttpTransport(_BoundedTransport):
     async def start(self) -> None:
         self._endpoint = await _enforce_http_network_policy(self._transport)
         headers = self._config.resolved_headers()
-        self._client = ProcessApiKeyBoundAsyncClient(
-            api_key_boundary=self._api_key_boundary,
+        self._client = ProcessCredentialBoundAsyncClient(
+            credential_boundary=self._credential_boundary,
             headers=headers,
             follow_redirects=False,
             trust_env=False,
@@ -608,8 +595,8 @@ class _BoundedHttpTransport(_BoundedTransport):
                 )
                 return await response_context.__aenter__()
 
-            response = await admit_process_api_key_http_operation(
-                api_key_boundary=self._api_key_boundary,
+            response = await admit_process_credential_http_operation(
+                credential_boundary=self._credential_boundary,
                 guarded_values=(
                     self._endpoint.url,
                     payload,
@@ -659,9 +646,7 @@ class _BoundedHttpTransport(_BoundedTransport):
                 exc, httpx.ConnectError | httpx.PoolTimeout
             )
             await self._offer_failure(
-                McpTransportOperationError(
-                    may_have_reached_server=may_have_reached
-                ),
+                McpTransportOperationError(may_have_reached_server=may_have_reached),
                 "MCP HTTP request failed",
             )
         finally:
@@ -784,7 +769,9 @@ class _BoundedHttpTransport(_BoundedTransport):
         self._closed = True
         await self.write_stream.aclose()
         tasks = tuple(
-            task for task in (self._writer_task, self._listener_task) if task is not None
+            task
+            for task in (self._writer_task, self._listener_task)
+            if task is not None
         )
         tasks += tuple(self._request_tasks)
         for task in tasks:
@@ -870,9 +857,7 @@ async def _enforce_http_network_policy(
     )
     logical_host = f"[{host}]" if ":" in host else host
     host_header = (
-        f"{logical_host}:{explicit_port}"
-        if explicit_port is not None
-        else logical_host
+        f"{logical_host}:{explicit_port}" if explicit_port is not None else logical_host
     )
     return _PinnedHttpEndpoint(
         url=urlunsplit(
@@ -892,13 +877,13 @@ class BoundedMcpSdkClient:
         *,
         workspace_root: Path,
         notification_callback: NotificationCallback,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         bounds: McpWireBounds = DEFAULT_MCP_WIRE_BOUNDS,
     ) -> None:
         self.config = config
         self._workspace_root = workspace_root
         self._notification_callback = notification_callback
-        self._api_key_boundary = api_key_boundary
+        self._credential_boundary = credential_boundary
         self._bounds = bounds
         self._transport: _BoundedTransport | None = None
         self._session: ClientSession | None = None
@@ -953,14 +938,14 @@ class BoundedMcpSdkClient:
             transport: _BoundedTransport = _BoundedStdioTransport(
                 transport_config,
                 workspace_root=self._workspace_root,
-                api_key_boundary=self._api_key_boundary,
+                credential_boundary=self._credential_boundary,
                 bounds=self._bounds,
             )
         else:
             transport = _BoundedHttpTransport(
                 self.config,
                 transport_config,
-                api_key_boundary=self._api_key_boundary,
+                credential_boundary=self._credential_boundary,
                 bounds=self._bounds,
             )
         self._transport = transport
@@ -999,9 +984,7 @@ class BoundedMcpSdkClient:
                 transport.enforce_closed_result_type = True
             capabilities = self._session.server_capabilities
             if capabilities is None:
-                raise McpProtocolConformanceError(
-                    "MCP_SERVER_CAPABILITIES_MISSING"
-                )
+                raise McpProtocolConformanceError("MCP_SERVER_CAPABILITIES_MISSING")
             self.advertised_capabilities = McpAdvertisedCapabilities(
                 tools=capabilities.tools is not None,
                 resources=capabilities.resources is not None,
@@ -1051,13 +1034,11 @@ class BoundedMcpSdkClient:
                     "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
                 )
             effective_value = "complete"
-        elif (
-            not presence.present
-            or presence.value not in {"complete", "input_required"}
-        ):
-            raise McpProtocolConformanceError(
-                "MCP_RESULT_TYPE_CONFORMANCE_FAILED"
-            )
+        elif not presence.present or presence.value not in {
+            "complete",
+            "input_required",
+        }:
+            raise McpProtocolConformanceError("MCP_RESULT_TYPE_CONFORMANCE_FAILED")
         else:
             effective_value = presence.value
         result_value = getattr(result, "result_type", None)
@@ -1066,9 +1047,7 @@ class BoundedMcpSdkClient:
             and not implicit_complete
             and result_value != effective_value
         ):
-            raise McpProtocolConformanceError(
-                "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
-            )
+            raise McpProtocolConformanceError("MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION")
         if (
             effective_value == "input_required"
             and result is not None
@@ -1077,9 +1056,7 @@ class BoundedMcpSdkClient:
             effective_value == "complete"
             and isinstance(result, types.InputRequiredResult)
         ):
-            raise McpProtocolConformanceError(
-                "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
-            )
+            raise McpProtocolConformanceError("MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION")
         return effective_value
 
     async def aclose(self) -> None:

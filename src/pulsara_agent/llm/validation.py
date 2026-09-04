@@ -75,7 +75,7 @@ def validate_model_context_shape_for_call(
         raise ModelContextIdentityMismatch(
             "compiled model context requires model_call_index"
         )
-    if context.tools and not target_fact.supports_tools:
+    if context.tools and call.target.contract.catalog_facts.tool_call is False:
         raise ModelTargetCapabilityMismatch("model target does not support tools")
     if any(message.role is MessageRole.SYSTEM for message in context.messages):
         raise ModelContextIdentityMismatch(
@@ -101,9 +101,7 @@ def validate_model_context_shape_for_call(
         raise ModelTargetBindingMismatch(
             "transport binding changed after target resolution"
         )
-    effective_options = call.target.effective_options
-    options_fact = target_fact.effective_options
-    if effective_options.reasoning_effort != options_fact.reasoning_effort:
+    if call.binding != call.fact.binding:
         raise ModelTargetBindingMismatch(
-            "effective options changed after target resolution"
+            "model call binding changed after target resolution"
         )

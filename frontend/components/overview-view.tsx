@@ -15,7 +15,9 @@ import type {
   RuntimeStatus,
   SessionSummary,
 } from '../lib/pulsara-types';
+import type { DatabaseDataPlaneState } from '../lib/runtime-adapter';
 import { BrandMark } from './brand-mark';
+import { DatabaseSetupGuide } from './database-setup-guide';
 import {
   getSessionPresence,
   SessionPresenceGlyph,
@@ -26,6 +28,7 @@ interface OverviewViewProps {
   sessions: SessionSummary[];
   activeSessionId: string;
   runtimeStatus: RuntimeStatus;
+  databaseState?: DatabaseDataPlaneState;
   agentTasks: AgentTask[];
   onNavigate: (view: AppView) => void;
   onOpenSession: (id: string) => void;
@@ -52,6 +55,7 @@ export function OverviewView({
   sessions,
   activeSessionId,
   runtimeStatus,
+  databaseState,
   agentTasks,
   onNavigate,
   onOpenSession,
@@ -63,6 +67,7 @@ export function OverviewView({
     ?? sessions[0];
   const activePresence = active ? getSessionPresence(active, activeSessionId) : undefined;
   const connected = runtimeStatus === 'online';
+  const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
 
   return (
     <section className="surface-view overview-view">
@@ -76,12 +81,18 @@ export function OverviewView({
       <div className="surface-scroll overview-scroll">
         <section className="overview-hero">
           <div>
-            <span className="page-kicker">你的本地智能工作台</span>
-            <h1>准备好继续<br /><em>航行</em>了吗？</h1>
-            <p>从一个清晰目标开始，Pulsara 会在这里整理会话、任务进度与需要你处理的事项。</p>
+            <span className="page-kicker">{databaseBlocked ? '完成本机设置' : '你的本地智能工作台'}</span>
+            <h1>{databaseBlocked ? <>先准备好<br /><em>本地数据</em></> : <>准备好继续<br /><em>航行</em>了吗？</>}</h1>
+            <p>{databaseBlocked ? '连接 PostgreSQL 后，Pulsara 才能安全保存会话、任务进度和记忆。' : '从一个清晰目标开始，Pulsara 会在这里整理会话、任务进度与需要你处理的事项。'}</p>
             <div className="hero-actions">
-              <button className="primary-action" onClick={onNewSession}><Plus size={15} /> 开始新任务</button>
-              <button className="secondary-action" onClick={() => onNavigate('workbench')}><MessageCircle size={14} /> 打开工作台</button>
+              {databaseBlocked ? (
+                <button className="primary-action" onClick={() => onNavigate('settings')}><Database size={15} /> 配置 PostgreSQL</button>
+              ) : (
+                <>
+                  <button className="primary-action" onClick={onNewSession}><Plus size={15} /> 开始新任务</button>
+                  <button className="secondary-action" onClick={() => onNavigate('workbench')}><MessageCircle size={14} /> 打开工作台</button>
+                </>
+              )}
             </div>
           </div>
           <div className="hero-orbit" aria-hidden="true">
@@ -92,6 +103,13 @@ export function OverviewView({
           </div>
         </section>
 
+        {databaseBlocked ? (
+          <DatabaseSetupGuide
+            state={databaseState}
+            variant="overview"
+            onOpenSettings={() => onNavigate('settings')}
+          />
+        ) : <>
         <section className="metric-grid">
           <article><div className="metric-icon amber"><Radio size={15} /></div><div><strong>{sessions.filter((session) => session.status === 'running').length}</strong><span>活动会话</span></div><small>共 {sessions.length} 个会话</small></article>
           <article><div className="metric-icon blue"><Bot size={15} /></div><div><strong>{runningTasks}</strong><span>进行中任务</span></div><small>共 {agentTasks.length} 个子任务</small></article>
@@ -151,6 +169,7 @@ export function OverviewView({
             <footer><code>仅限这台设备</code></footer>
           </section>
         </div>
+        </>}
       </div>
     </section>
   );

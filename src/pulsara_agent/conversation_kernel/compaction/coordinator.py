@@ -245,15 +245,15 @@ def validate_compaction_wire_transition(
         or source_call.target.fact != successor_call.target.fact
         or source_binding.target_fact != source_call.target.fact
         or successor_binding.target_fact != successor_call.target.fact
-        or source_call.target.model_profile.provider_profile
-        != successor_call.target.model_profile.provider_profile
+        or source_call.target.model_profile.route_wire_profile
+        != successor_call.target.model_profile.route_wire_profile
         or type(source_binding.estimator) is not type(successor_binding.estimator)
         or source_binding.estimator.fact != successor_binding.estimator.fact
         or source_quote.wire_api != successor_quote.wire_api
         or source_quote.wire_api
-        != source_call.target.model_profile.provider_profile.wire_api
+        != source_call.target.model_profile.route_wire_profile.wire_api
         or successor_quote.wire_api
-        != successor_call.target.model_profile.provider_profile.wire_api
+        != successor_call.target.model_profile.route_wire_profile.wire_api
         or source_binding.estimator_fingerprint != source_quote.estimator_fingerprint
         or successor_binding.estimator_fingerprint
         != successor_quote.estimator_fingerprint
@@ -876,7 +876,7 @@ class CompactionCoordinator:
                 predecessor_epoch_view=dispatch.planning.predecessor_view,
                 provider_wire_quote=dispatch.wire_quote,
                 producer_wire_api=(
-                    dispatch.prepared_call.call.target.model_profile.provider_profile.wire_api
+                    dispatch.prepared_call.call.target.model_profile.route_wire_profile.wire_api
                 ),
             )
             if not should_trigger_compaction(
@@ -1264,7 +1264,7 @@ class CompactionCoordinator:
                 predecessor_epoch_view=dispatch.planning.predecessor_view,
                 provider_wire_quote=source_quote,
                 producer_wire_api=(
-                    dispatch.prepared_call.call.target.model_profile.provider_profile.wire_api
+                    dispatch.prepared_call.call.target.model_profile.route_wire_profile.wire_api
                 ),
             )
         except BaseException:

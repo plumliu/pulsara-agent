@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from time import monotonic
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.assembler import (
@@ -137,9 +137,10 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelRepository,
     ConversationKernelConflict,
-    build_prepared_root_turn_admission,
+    build_prepared_root_turn_intent,
     build_prepared_subagent_turn_admission,
 )
+from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.conversation_kernel.plan_runtime import (
     AutomaticPlanContinuationPort,
     KernelPlanInteractionCoordinator,
@@ -426,6 +427,9 @@ class ConversationKernelRunner:
         content_publisher: CanonicalContentPublisher | None = None,
         io_owner: KernelSessionIO | None = None,
         context_source_collector: ContextSourceCollectorPort,
+        model_resolution_snapshot_provider: (
+            Callable[[], FrozenModelResolutionSnapshot] | None
+        ) = None,
         compiler: StructuredModelInputCompiler | None = None,
         continuity_owner: HostProviderInputContinuityOwner | None = None,
         extensions: KernelExtensionHost | None = None,
@@ -446,16 +450,17 @@ class ConversationKernelRunner:
         hook_context_owner: HookContextOwner | None = None,
         hook_scope: HookDispatchScopeRef | None = None,
         session_start_source: str = "startup",
-        configured_model_identity: str = "pulsara-model",
     ) -> None:
         if maximum_output_tokens_per_call < 1 or (
             maximum_input_tokens_per_call is not None
             and maximum_input_tokens_per_call < 1
         ):
             raise ValueError("runner limits must be finite and positive")
+        self._repository = repository
         self._writer_lease = writer_lease
         self._live_bus = live_bus
         self._tools = tools
+        self._model_resolution_snapshot_provider = model_resolution_snapshot_provider
         resolved_input_reader = input_reader or CanonicalProviderInputReader(
             repository.connection_provider,
             blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
@@ -535,7 +540,6 @@ class ConversationKernelRunner:
         self._session_start_boundary = _SessionStartColdBoundaryOwner(
             session_start_source
         )
-        self._configured_model_identity = configured_model_identity
         self._provider_dispatch = ProviderDispatchCoordinator(
             repository=repository,
             writer_lease=writer_lease,
@@ -671,6 +675,7 @@ class ConversationKernelRunner:
         expected_permission_snapshot: FrozenRunPermissionSnapshot | None = None,
         hook_context_reservation: PendingHookContextReservation | None = None,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
+        model_resolution_snapshot: FrozenModelResolutionSnapshot | None = None,
     ) -> KernelRunResult:
         return await self._run_turn(
             text,
@@ -681,6 +686,7 @@ class ConversationKernelRunner:
             expected_permission_snapshot=expected_permission_snapshot,
             hook_context_reservation=hook_context_reservation,
             cancellation_intent=cancellation_intent,
+            model_resolution_snapshot=model_resolution_snapshot,
         )
 
     async def admit_subagent_turn(
@@ -757,6 +763,7 @@ class ConversationKernelRunner:
         expected_permission_snapshot: FrozenRunPermissionSnapshot | None,
         hook_context_reservation: PendingHookContextReservation | None,
         cancellation_intent: ActiveTurnCancellationIntent | None,
+        model_resolution_snapshot: FrozenModelResolutionSnapshot | None,
     ) -> KernelRunResult:
         if not text:
             raise ValueError("user message must be non-empty")
@@ -768,8 +775,16 @@ class ConversationKernelRunner:
         content = await self._content(
             text.encode("utf-8"), deadline=self._canonical_deadline()
         )
+        frozen_model_resolution = model_resolution_snapshot
+        if frozen_model_resolution is None:
+            provider = self._model_resolution_snapshot_provider
+            if provider is None:
+                raise RuntimeError(
+                    "ROOT turn admission requires a frozen model resolution snapshot"
+                )
+            frozen_model_resolution = provider()
         occurred_at = datetime.now(timezone.utc)
-        candidate = build_prepared_root_turn_admission(
+        candidate = build_prepared_root_turn_intent(
             session_id=self._writer_lease.guard.session_id,
             command_id=stable_command_id,
             turn_id=turn_id,
@@ -792,8 +807,10 @@ class ConversationKernelRunner:
             scope_subagent_task_id=None,
         )
         try:
-            await self._turn_admission.accept_root(
-                candidate, cancellation_intent=intent
+            await self._turn_admission.accept_root_intent(
+                candidate,
+                model_resolution_snapshot=frozen_model_resolution,
+                cancellation_intent=intent,
             )
         except BaseException:
             if hook_context_reservation is not None:

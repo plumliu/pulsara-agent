@@ -14,8 +14,20 @@ from typing import Callable
 import webbrowser
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.llm.models import ModelRole
-from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.llm.model_catalog import (
+    ModelCatalogOwner,
+    ModelsDevCatalogClient,
+)
+from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.local_credentials import (
+    LocalCredentialStore,
+    MacOSKeychainCredentialStore,
+)
+from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
+from pulsara_agent.storage.migrations.errors import (
+    PostgresSchemaError,
+    PostgresSchemaFailureCode,
+)
 from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
 from pulsara_agent.tool_permission import EffectivePermissionPolicy
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
@@ -33,6 +45,14 @@ class LocalWebApplicationState(StrEnum):
     FAILED = "FAILED"
 
 
+class DatabaseDataPlaneState(StrEnum):
+    NOT_CONFIGURED = "database_not_configured"
+    CONFIGURED_UNVERIFIED = "database_configured_unverified"
+    UNAVAILABLE = "database_unavailable"
+    SCHEMA_ACTION_REQUIRED = "database_schema_action_required"
+    READY = "ready"
+
+
 def packaged_static_root() -> Path:
     return Path(__file__).resolve().parent / "static"
 
@@ -43,29 +63,36 @@ class LocalWebApplication:
     def __init__(
         self,
         *,
-        settings: PulsaraSettings,
+        settings: LocalSettingsStore | None = None,
         workspace_input: HostWorkspaceInput,
-        model_role: ModelRole,
         permission_policy: EffectivePermissionPolicy,
         active_skill_names: frozenset[str] = frozenset(),
         port: int = 0,
         static_root: Path | None = None,
+        catalog: ModelCatalogOwner | None = None,
+        credentials: LocalCredentialStore | None = None,
+        model_runtime: ModelRuntime | None = None,
         core: KernelHostCore | None = None,
     ) -> None:
         if not 0 <= port <= 65535:
             raise ValueError("local Web port is out of bounds")
-        self.settings = settings
+        self.settings = settings or LocalSettingsStore()
+        self.catalog = catalog or ModelCatalogOwner(ModelsDevCatalogClient())
+        self.credentials = credentials or MacOSKeychainCredentialStore()
+        self.model_runtime = model_runtime or ModelRuntime.production(
+            settings=self.settings,
+            catalog=self.catalog,
+            credentials=self.credentials,
+        )
         self.workspace_input = workspace_input
-        self.model_role = model_role
         self.permission_policy = permission_policy
         self.active_skill_names = active_skill_names
         self.requested_port = port
         self.static_root = (static_root or packaged_static_root()).resolve()
-        self.core = core or KernelHostCore.production(settings=settings)
+        self.core = core or KernelHostCore.production(model_runtime=self.model_runtime)
         self.sessions = LocalSessionController(
             core=self.core,
             workspace_input=workspace_input,
-            model_role=model_role,
             permission_policy=permission_policy,
             active_skill_names=active_skill_names,
         )
@@ -73,6 +100,7 @@ class LocalWebApplication:
         self.bridge: LocalBrowserBridge | None = None
         self.http: LocalHttpServer | None = None
         self.state = LocalWebApplicationState.NEW
+        self.database_state = DatabaseDataPlaneState.NOT_CONFIGURED
         self._runtime_directory: Path | None = None
         self._start_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -106,9 +134,6 @@ class LocalWebApplication:
                         "Pulsara local frontend assets are missing; run "
                         "`cd frontend && npm run build:local`."
                     )
-                # This cold read verifies PostgreSQL/schema access without
-                # publishing or resuming a HostSession.
-                await self.sessions.prepare()
                 runtime_directory = Path(tempfile.mkdtemp(prefix="pulsara-local-web-"))
                 os.chmod(runtime_directory, 0o700)
                 self._runtime_directory = runtime_directory
@@ -129,16 +154,64 @@ class LocalWebApplication:
                     requested_port=self.requested_port,
                     is_ready=lambda: self.ready,
                     is_draining=lambda: self.draining,
+                    settings=self.settings,
+                    catalog=self.catalog,
+                    credentials=self.credentials,
+                    model_runtime=self.model_runtime,
+                    database_state=lambda: self.database_state.value,
+                    refresh_database_state=self.refresh_database_state,
+                    postgres_settings_saved=self.postgres_settings_saved,
                 )
                 await http.start()
                 self.http = http
-                # The URL becomes observable only after the complete owner tree
-                # above has settled.
                 self.state = LocalWebApplicationState.READY
+                try:
+                    await self.catalog.refresh()
+                except Exception:
+                    pass
+                await self.refresh_database_state()
             except BaseException:
                 self.state = LocalWebApplicationState.FAILED
                 await self.aclose()
                 raise
+
+    async def refresh_database_state(self) -> DatabaseDataPlaneState:
+        try:
+            configured = self.settings.read().postgres
+        except LocalSettingsUnavailable:
+            self.database_state = DatabaseDataPlaneState.NOT_CONFIGURED
+            return self.database_state
+        if configured is None:
+            self.database_state = DatabaseDataPlaneState.NOT_CONFIGURED
+            return self.database_state
+        try:
+            await self.sessions.prepare()
+        except PostgresSchemaError as exc:
+            action_codes = {
+                PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED,
+                PostgresSchemaFailureCode.UNMANAGED_DATABASE,
+                PostgresSchemaFailureCode.CATALOG_DRIFT,
+                PostgresSchemaFailureCode.EXTENSION_MISSING,
+                PostgresSchemaFailureCode.EXTENSION_TOO_OLD,
+                PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+            }
+            self.database_state = (
+                DatabaseDataPlaneState.SCHEMA_ACTION_REQUIRED
+                if exc.code in action_codes
+                else DatabaseDataPlaneState.UNAVAILABLE
+            )
+        except Exception:
+            self.database_state = DatabaseDataPlaneState.UNAVAILABLE
+        else:
+            self.database_state = DatabaseDataPlaneState.READY
+        return self.database_state
+
+    def postgres_settings_saved(self) -> DatabaseDataPlaneState:
+        """Observe a new DSN without connecting or replacing a live data plane."""
+
+        if self.database_state is not DatabaseDataPlaneState.READY:
+            self.database_state = DatabaseDataPlaneState.CONFIGURED_UNVERIFIED
+        return self.database_state
 
     async def aclose(self) -> None:
         task = self._close_task

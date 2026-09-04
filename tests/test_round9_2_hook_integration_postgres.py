@@ -46,7 +46,6 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import PlanQuestionAnswerKind
-from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
 )
@@ -54,7 +53,7 @@ from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
     resolve_workspace,
 )
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel, ScriptedKernelModel
 
 
@@ -398,16 +397,13 @@ def _install_trusted_sources(
     )
 
 
-def _settings(postgres_dsn: str) -> PulsaraSettings:
-    return PulsaraSettings(
-        llm=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        storage=StorageConfig(postgres_dsn=postgres_dsn),
+def _runtime(postgres_dsn: str):
+    return test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api="openai_chat_completions",
+        postgres_dsn=postgres_dsn,
     )
 
 
@@ -481,10 +477,13 @@ def test_round9_2_host_sources_stop_and_prefix_continuity(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await session.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         result = await session.run_turn(
             "exercise source ordering and Stop",
@@ -558,10 +557,13 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await session.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         running = asyncio.create_task(
             session.run_turn(
@@ -642,10 +644,13 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await session.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         result = await session.run_turn(
             "exercise tool Hooks",
@@ -794,10 +799,13 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await session.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         captured_views: list[tuple[str, object]] = []
         predecessor = session._hooks.current_view  # noqa: SLF001
@@ -934,10 +942,13 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await session.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         entered = await session.enter_plan(
             command_id="command:round9-2-enter-plan",
@@ -1074,10 +1085,13 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await session.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         try:
             result = await session.run_turn(
@@ -1178,10 +1192,13 @@ def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await session.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         for index in range(3):
             result = await session.run_turn(
@@ -1288,10 +1305,13 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         first = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await first.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         session_id = first.session_id
         for index in range(6):
@@ -1384,7 +1404,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=_settings(stage2_migrated_postgres_database.runtime_dsn)
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
         )
         session = None
         running = None
@@ -1392,6 +1412,9 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
         try:
             session = await core.open_session(
                 HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+            )
+            await session.update_model_call_binding(
+                test_model_binding(core._model_runtime)  # noqa: SLF001
             )
             for index in range(3):
                 await session.run_turn(

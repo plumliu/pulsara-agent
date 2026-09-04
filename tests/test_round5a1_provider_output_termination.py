@@ -44,8 +44,6 @@ from pulsara_agent.llm.adapters.openai.client import (
 )
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.normalized_transport import (
-    NormalizedLLMTransport,
-    NormalizedLLMTransportRegistry,
     NormalizedProviderTransportExecution,
 )
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, ToolSpec
@@ -53,7 +51,7 @@ from pulsara_agent.llm.provider import (
     ProviderAssistantReplayCodecKind,
     ProviderChatFieldAccumulationMode,
     ProviderChatReplayFieldContract,
-    ProviderProfile,
+    RouteWireProfile,
     ThinkingProfile,
     ThinkingReplayPolicy,
 )
@@ -83,7 +81,6 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.context import thaw_json
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     PreparedProviderInputCut,
@@ -91,11 +88,9 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.llm.request import (
     LLMContext,
-    LLMOptions,
     provider_assistant_public_projection_fingerprint,
 )
-from pulsara_agent.llm.resolution import resolve_model_call, resolve_model_target
-from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.llm.resolution import resolve_model_call
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.stream_limits import (
@@ -107,7 +102,7 @@ from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ProviderModelStreamErrorCode,
 )
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import test_model_binding, test_model_runtime
 
 
 def _chat_profile(
@@ -115,12 +110,11 @@ def _chat_profile(
     message_field: str = "reasoning_content",
     fields: tuple[ProviderChatReplayFieldContract, ...] = (),
     replay_policy: ThinkingReplayPolicy = ThinkingReplayPolicy.ALWAYS,
-) -> ProviderProfile:
-    return ProviderProfile(
+) -> RouteWireProfile:
+    return RouteWireProfile(
         id=f"test:{message_field}",
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             message_field=message_field,
             replay_policy=replay_policy,
         ),
@@ -318,7 +312,7 @@ def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
 
 def test_chat_completed_text_reasoning_replay_is_explicit_and_exact() -> None:
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
     accumulator.apply(_chat_chunk({"role": "assistant"}))
     accumulator.apply(_chat_chunk({"reasoning_content": "rea"}))
@@ -341,7 +335,7 @@ def test_chat_completed_text_reasoning_replay_is_explicit_and_exact() -> None:
 
 def test_chat_null_reasoning_deltas_do_not_erase_or_forge_a_replay_carrier() -> None:
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
     assert accumulator.apply(_chat_chunk({"reasoning_content": None})) == []
     accumulator.apply(_chat_chunk({"reasoning_content": "exact"}))
@@ -364,18 +358,17 @@ def test_chat_null_reasoning_deltas_do_not_erase_or_forge_a_replay_carrier() -> 
 
 
 def test_chat_observed_known_reasoning_is_retained_despite_legacy_policy() -> None:
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id="test:live-thinking-only",
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             delta_fields=("reasoning_content",),
             message_field="reasoning_content",
             replay_policy=ThinkingReplayPolicy.NEVER,
         ),
     )
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     events = accumulator.apply(_chat_chunk({"reasoning_content": "private"}))
     events.extend(accumulator.apply(_chat_chunk({"content": "public"}, "stop")))
@@ -415,7 +408,7 @@ def test_chat_reasoning_registry_is_closed_and_provider_neutral() -> None:
 def test_chat_closed_field_accumulation_and_final_reconciliation() -> None:
     profile = _chat_profile()
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     accumulator.apply(
         _chat_chunk(
@@ -472,7 +465,7 @@ def test_chat_opaque_replay_item_limit_fails_before_terminal(
         1_000,
     )
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
     for index in range(1_000):
         assert (
@@ -498,7 +491,7 @@ def test_chat_reasoning_replay_bounds_are_physical_headroom() -> None:
 
 def test_chat_text_reasoning_accumulates_chunks_without_repeated_concat() -> None:
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
     for _index in range(128):
         accumulator.apply(_chat_chunk({"reasoning_content": "x"}))
@@ -548,33 +541,27 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
         def __init__(self, completions: FakeCompletions) -> None:
             self.chat = FakeChat(completions)
 
+    profile = _chat_profile()
+    runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-model",
+        wire_api=OPENAI_CHAT_COMPLETIONS_API,
+        route_wire_profile=profile,
+    )
+    binding = test_model_binding(runtime)
+    timeout = OpenAITransportTimeoutPolicy(1, 1, 1, 1, None)
     completions = FakeCompletions()
     adapter = OpenAIChatCompletionsTransport(
-        api_key="test",
-        timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
-        api_key_boundary=ProcessApiKeyBoundary(),
+        credentials=runtime.credentials,
+        timeout_policy=timeout,
         retry_config=LLMRetryConfig(enabled=True, attempts=3),
     )
     adapter._client = FakeClient(completions)
-    registry = NormalizedLLMTransportRegistry()
-    registry.register(NormalizedLLMTransport(adapter))
-    profile = _chat_profile()
-    config = test_llm_config(
-        api_key="test",
-        base_url="https://example.invalid/v1",
-        pro_model="test-model",
-        flash_model="test-model",
-        api=OPENAI_CHAT_COMPLETIONS_API,
-        provider_profile=profile,
-    )
-    target = resolve_model_target(
-        config=config,
-        registry=registry,
-        role=ModelRole.PRO,
-        requested_options=LLMOptions(),
-    )
+    target = runtime.resolve_target(binding, timeout_policy=timeout)
     call = resolve_model_call(
         target=target,
+        binding=binding,
         purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
     )
     context = LLMContext(
@@ -602,7 +589,7 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
 def test_chat_conflicting_array_final_and_incomplete_never_complete() -> None:
     profile = _chat_profile()
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     accumulator.apply(_chat_chunk({"reasoning_details": [{"v": 1}]}))
     with pytest.raises(LLMTransportContractError):
@@ -619,7 +606,7 @@ def test_chat_conflicting_array_final_and_incomplete_never_complete() -> None:
         )
 
     incomplete = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     incomplete.apply(
         _chat_chunk(
@@ -645,15 +632,14 @@ def test_chat_conflicting_array_final_and_incomplete_never_complete() -> None:
 
 
 def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
         ),
     )
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     accumulator.apply(
         _chat_chunk(
@@ -698,15 +684,14 @@ def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
 
 
 def test_chat_structured_reasoning_tool_response_and_terminal_echo_round_trip() -> None:
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
         ),
     )
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     accumulator.apply(
         _chat_chunk(
@@ -756,7 +741,7 @@ def test_chat_structured_reasoning_tool_response_and_terminal_echo_round_trip() 
 
 def test_chat_unknown_empty_carriers_are_ignorable() -> None:
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
     accumulator.apply(
         _chat_chunk(
@@ -776,15 +761,14 @@ def test_chat_unknown_empty_carriers_are_ignorable() -> None:
 
 
 def test_chat_unknown_nonempty_final_carrier_is_not_replayed() -> None:
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
         ),
     )
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     accumulator.apply(
         _chat_chunk(
@@ -802,15 +786,14 @@ def test_chat_unknown_nonempty_final_carrier_is_not_replayed() -> None:
 
 
 def test_chat_unknown_nonempty_tool_carrier_fails_before_terminal() -> None:
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
         ),
     )
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     with pytest.raises(LLMTransportContractError) as captured:
         accumulator.apply(
@@ -835,7 +818,7 @@ def test_chat_unknown_nonempty_tool_carrier_fails_before_terminal() -> None:
 
 def test_chat_unknown_nonempty_carrier_cannot_be_the_only_output() -> None:
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
     with pytest.raises(LLMTransportContractError) as captured:
         accumulator.apply(
@@ -849,15 +832,15 @@ def test_chat_unknown_nonempty_carrier_cannot_be_the_only_output() -> None:
 
 
 def test_chat_eof_and_terminal_followed_by_semantic_chunk_fail_closed() -> None:
-    profile = ProviderProfile(wire_api="openai_chat_completions")
+    profile = RouteWireProfile(wire_api="openai_chat_completions")
     eof = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     eof.apply(_chat_chunk({"content": "partial"}))
     assert isinstance(eof.finish(), ProviderStreamFailure)
 
     ended = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     ended.apply(_chat_chunk({"content": "done"}, "stop"))
     with pytest.raises(LLMTransportContractError):
@@ -867,7 +850,7 @@ def test_chat_eof_and_terminal_followed_by_semantic_chunk_fail_closed() -> None:
 def test_chat_exact_empty_terminal_echo_is_idempotent_usage_metadata() -> None:
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(),
-        provider_profile=ProviderProfile(wire_api="openai_chat_completions"),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
     )
     accumulator.apply(_chat_chunk({"content": "done"}, "stop"))
     echo = {
@@ -895,9 +878,9 @@ def test_chat_exact_empty_terminal_echo_is_idempotent_usage_metadata() -> None:
 
 
 def test_chat_terminal_echo_must_not_change_reason_or_carry_semantics() -> None:
-    profile = ProviderProfile(wire_api="openai_chat_completions")
+    profile = RouteWireProfile(wire_api="openai_chat_completions")
     changed_reason = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     changed_reason.apply(_chat_chunk({"content": "done"}, "stop"))
     with pytest.raises(
@@ -907,7 +890,7 @@ def test_chat_terminal_echo_must_not_change_reason_or_carry_semantics() -> None:
         changed_reason.apply(_chat_chunk({}, "tool_calls"))
 
     changed_body = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     changed_body.apply(_chat_chunk({"content": "done"}, "stop"))
     with pytest.raises(
@@ -920,7 +903,7 @@ def test_chat_terminal_echo_must_not_change_reason_or_carry_semantics() -> None:
 def test_chat_tool_terminal_usage_echo_does_not_duplicate_tool_semantics() -> None:
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(),
-        provider_profile=ProviderProfile(wire_api="openai_chat_completions"),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
     )
     events = accumulator.apply(
         _chat_chunk(
@@ -966,7 +949,7 @@ def test_chat_tool_terminal_usage_echo_does_not_duplicate_tool_semantics() -> No
 def test_chat_one_based_tool_call_indexes_are_normalized_at_wire_boundary() -> None:
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(),
-        provider_profile=ProviderProfile(wire_api="openai_chat_completions"),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
     )
     events = []
     for tool_call in (
@@ -1024,10 +1007,285 @@ def test_chat_one_based_tool_call_indexes_are_normalized_at_wire_boundary() -> N
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
 
 
+@pytest.mark.parametrize("first_index,second_index", [(0, 1), (7, 8), (1, 3)])
+def test_chat_tool_call_indexes_are_hints_not_dense_positions(
+    first_index: int, second_index: int
+) -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    events = []
+    for tool_call in (
+        {
+            "index": first_index,
+            "id": "call:first",
+            "function": {"name": "virtual", "arguments": '{"x":'},
+        },
+        {"index": first_index, "function": {"arguments": "1}"}},
+        {
+            "index": second_index,
+            "id": "call:second",
+            "function": {"name": "virtual", "arguments": '{"x":'},
+        },
+        {"id": "call:second", "function": {"arguments": "2}"}},
+    ):
+        events.extend(accumulator.apply(_chat_chunk({"tool_calls": [tool_call]})))
+
+    assert not any(isinstance(item, ToolCallEndPayload) for item in events)
+    events.extend(accumulator.apply(_chat_chunk({}, "tool_calls")))
+    assert [
+        (item.tool_call_id, item.arguments_json)
+        for item in events
+        if isinstance(item, ToolCallEndPayload)
+    ] == [("call:first", '{"x":1}'), ("call:second", '{"x":2}')]
+
+
+def test_chat_reused_index_is_disambiguated_only_by_exact_call_id() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    for tool_call in (
+        {
+            "index": 4,
+            "id": "call:first",
+            "function": {"name": "virtual", "arguments": '{"x":'},
+        },
+        {
+            "index": 4,
+            "id": "call:second",
+            "function": {"name": "virtual", "arguments": '{"x":'},
+        },
+        {"id": "call:first", "function": {"arguments": "1}"}},
+        {"id": "call:second", "function": {"arguments": "2}"}},
+    ):
+        accumulator.apply(_chat_chunk({"tool_calls": [tool_call]}))
+    accumulator.apply(_chat_chunk({}, "tool_calls"))
+    assert [
+        item["function"]["arguments"]
+        for item in accumulator.tool_calls.completed_calls
+    ] == ['{"x":1}', '{"x":2}']
+
+    ambiguous = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    for call_id in ("call:first", "call:second"):
+        ambiguous.apply(
+            _chat_chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 4,
+                            "id": call_id,
+                            "function": {"name": "virtual"},
+                        }
+                    ]
+                }
+            )
+        )
+    with pytest.raises(LLMTransportContractError) as exc_info:
+        ambiguous.apply(
+            _chat_chunk(
+                {"tool_calls": [{"index": 4, "function": {"arguments": "{}"}}]}
+            )
+        )
+    assert exc_info.value.reason_code == "transport_tool_call_correlation_ambiguous"
+
+
+def test_chat_delayed_identity_and_name_bind_one_provisional_call() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    assert (
+        accumulator.apply(
+            _chat_chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 91,
+                            "id": "",
+                            "function": {"arguments": '{"delayed":'},
+                        }
+                    ]
+                }
+            )
+        )
+        == []
+    )
+    events = accumulator.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 91,
+                        "id": "call:delayed",
+                        "function": {"name": "virtual"},
+                    }
+                ]
+            }
+        )
+    )
+    assert [type(item) for item in events] == [
+        ToolCallStartPayload,
+        ToolCallDeltaPayload,
+    ]
+    accumulator.apply(
+        _chat_chunk(
+            {"tool_calls": [{"index": 91, "function": {"arguments": "true}"}}]}
+        )
+    )
+    accumulator.apply(_chat_chunk({}, "tool_calls"))
+    assert accumulator.tool_calls.completed_calls[0]["function"]["arguments"] == (
+        '{"delayed":true}'
+    )
+
+
+def test_chat_missing_tool_call_hints_require_one_unique_active_call() -> None:
+    unique = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    unique.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 12,
+                        "id": "call:unique",
+                        "function": {"name": "virtual", "arguments": '{"x":'},
+                    }
+                ]
+            }
+        )
+    )
+    unique.apply(_chat_chunk({"tool_calls": [{"function": {"arguments": "1}"}}]}))
+    unique.apply(_chat_chunk({}, "tool_calls"))
+    assert unique.tool_calls.completed_calls[0]["function"]["arguments"] == '{"x":1}'
+
+    multiple = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    for index, call_id in ((12, "call:first"), (15, "call:second")):
+        multiple.apply(
+            _chat_chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": index,
+                            "id": call_id,
+                            "function": {"name": "virtual"},
+                        }
+                    ]
+                }
+            )
+        )
+    with pytest.raises(LLMTransportContractError) as exc_info:
+        multiple.apply(_chat_chunk({"tool_calls": [{"function": {"arguments": "{}"}}]}))
+    assert exc_info.value.reason_code == "transport_tool_call_correlation_ambiguous"
+
+
+def test_chat_call_id_and_reported_index_conflict_fails_closed() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    for index, call_id in ((2, "call:first"), (9, "call:second")):
+        accumulator.apply(
+            _chat_chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": index,
+                            "id": call_id,
+                            "function": {"name": "virtual"},
+                        }
+                    ]
+                }
+            )
+        )
+    with pytest.raises(LLMTransportContractError) as exc_info:
+        accumulator.apply(
+            _chat_chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 9,
+                            "id": "call:first",
+                            "function": {"arguments": "{}"},
+                        }
+                    ]
+                }
+            )
+        )
+    assert exc_info.value.reason_code == "transport_tool_call_correlation_ambiguous"
+
+
+def test_chat_tool_arguments_are_not_completed_until_explicit_terminal() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    events = accumulator.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 2,
+                        "id": "call:test",
+                        "function": {"name": "virtual", "arguments": '{"x":1}'},
+                    }
+                ]
+            }
+        )
+    )
+    events.extend(
+        accumulator.apply(
+            _chat_chunk(
+                {"tool_calls": [{"id": "call:test", "function": {"arguments": " "}}]}
+            )
+        )
+    )
+    assert not any(isinstance(item, ToolCallEndPayload) for item in events)
+    terminal_events = accumulator.apply(_chat_chunk({}, "tool_calls"))
+    end = next(item for item in terminal_events if isinstance(item, ToolCallEndPayload))
+    assert end.arguments_json == '{"x":1} '
+
+
+@pytest.mark.parametrize(
+    "tool_call,error_match",
+    [
+        ({"index": 2, "function": {"name": "virtual"}}, "named tool-call start"),
+        ({"index": 2, "id": "call:test", "function": {}}, "named tool-call start"),
+        (
+            {
+                "index": 2,
+                "id": "call:test",
+                "function": {"name": "virtual", "arguments": "[]"},
+            },
+            "JSON object",
+        ),
+    ],
+)
+def test_chat_incomplete_identity_or_non_object_arguments_fail_at_terminal(
+    tool_call: dict[str, object], error_match: str
+) -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
+    )
+    accumulator.apply(_chat_chunk({"tool_calls": [tool_call]}))
+    with pytest.raises(LLMTransportContractError, match=error_match):
+        accumulator.apply(_chat_chunk({}, "tool_calls"))
+
+
 def test_chat_empty_tool_arguments_emit_exact_synthetic_json_delta() -> None:
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(),
-        provider_profile=ProviderProfile(wire_api="openai_chat_completions"),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
     )
     events = accumulator.apply(
         _chat_chunk(
@@ -1091,7 +1349,7 @@ def test_chat_incomplete_finish_reason_matrix_is_closed(
 ) -> None:
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(),
-        provider_profile=ProviderProfile(wire_api="openai_chat_completions"),
+        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
     )
     accumulator.apply(_chat_chunk({"content": "partial"}))
     final_events = accumulator.apply(_chat_chunk({}, finish_reason))
@@ -1104,9 +1362,9 @@ def test_chat_incomplete_finish_reason_matrix_is_closed(
 
 
 def test_chat_choice_and_completed_tool_argument_contracts_fail_closed() -> None:
-    profile = ProviderProfile(wire_api="openai_chat_completions")
+    profile = RouteWireProfile(wire_api="openai_chat_completions")
     multiple = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     with pytest.raises(LLMTransportContractError, match="exactly one choice"):
         multiple.apply(
@@ -1119,7 +1377,7 @@ def test_chat_choice_and_completed_tool_argument_contracts_fail_closed() -> None
         )
 
     partial_tool = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     partial_tool.apply(
         _chat_chunk(
@@ -1150,13 +1408,13 @@ def test_chat_replay_field_absence_empty_and_final_contract_are_distinct() -> No
         )
     )
     missing = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     with pytest.raises(LLMTransportContractError, match="required final message"):
         missing.apply(_chat_chunk({"content": "answer"}, "stop"))
 
     present_empty = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     present_empty.apply(_chat_chunk({"reasoning_content": ""}))
     present_empty.apply(
@@ -1180,7 +1438,7 @@ def test_chat_replay_field_absence_empty_and_final_contract_are_distinct() -> No
     )
 
     mismatch = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     mismatch.apply(_chat_chunk({"reasoning_content": "first"}))
     with pytest.raises(LLMTransportContractError, match="differs from its deltas"):
@@ -1209,7 +1467,7 @@ def test_chat_final_value_required_is_independent_of_legacy_replay_policy() -> N
         ),
     )
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     accumulator.apply(_chat_chunk({"reasoning_content": "sealed carrier"}))
     accumulator.apply(
@@ -2374,7 +2632,7 @@ def test_completed_replay_and_live_payload_share_one_aggregate_bound(
 ) -> None:
     profile = _chat_profile()
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=profile
+        builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
     live_items = accumulator.apply(_chat_chunk({"content": "public"}))
     accumulator.apply(_chat_chunk({"reasoning_content": "opaque"}))
@@ -2433,7 +2691,7 @@ def test_sdk_normalization_preserves_wire_presence_not_model_defaults() -> None:
 
 def test_completed_replay_must_exactly_match_public_projection() -> None:
     accumulator = ChatCompletionAccumulator(
-        builder=ProviderLiveItemBuilder(), provider_profile=_chat_profile()
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
     accumulator.apply(_chat_chunk({"reasoning_content": "opaque"}))
     accumulator.apply(_chat_chunk({"content": "actual"}, "stop"))
@@ -2560,16 +2818,13 @@ def test_responses_accepts_message_before_ordered_function_calls() -> None:
 
 
 def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
-    auxiliary = DirectKernelAuxiliaryJsonModel(
-        test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        api_key_boundary=ProcessApiKeyBoundary(),
+    runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api="openai_chat_completions",
     )
+    auxiliary = DirectKernelAuxiliaryJsonModel(runtime)
     prepared = auxiliary.prepare_json_call(
         purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
         messages=(LLMMessage.user("return a bounded JSON object"),),
@@ -2577,6 +2832,7 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
         maximum_input_bytes=4096,
         maximum_output_tokens=32,
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, 5),
+        origin_binding=test_model_binding(runtime),
     )
     prepared.call.target.transport._adapter._mock_chunks = [  # type: ignore[attr-defined]
         {
@@ -2663,45 +2919,37 @@ def _local_response(
 
 async def _consume_provider_shaped_sse(*, api: str, base_url: str) -> list[object]:
     timeout = OpenAITransportTimeoutPolicy(1, 1, 1, 1, None)
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id="test:provider-shaped-sse",
         wire_api=api,
         thinking=ThinkingProfile(
-            enabled=False,
             replay_policy=ThinkingReplayPolicy.NEVER,
         ),
     )
+    runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url=base_url,
+        model_id="test-model",
+        wire_api=api,
+        route_wire_profile=profile,
+    )
+    binding = test_model_binding(runtime)
     adapter = (
         OpenAIChatCompletionsTransport(
-            api_key="test",
+            credentials=runtime.credentials,
             timeout_policy=timeout,
-            api_key_boundary=ProcessApiKeyBoundary(),
         )
         if api == OPENAI_CHAT_COMPLETIONS_API
         else OpenAIResponsesTransport(
-            api_key="test",
+            credentials=runtime.credentials,
             timeout_policy=timeout,
-            api_key_boundary=ProcessApiKeyBoundary(),
         )
     )
-    registry = NormalizedLLMTransportRegistry()
-    registry.register(NormalizedLLMTransport(adapter))
-    config = test_llm_config(
-        api_key="test",
-        base_url=base_url,
-        pro_model="test-model",
-        flash_model="test-model",
-        api=api,
-        provider_profile=profile,
-    )
-    target = resolve_model_target(
-        config=config,
-        registry=registry,
-        role=ModelRole.PRO,
-        requested_options=LLMOptions(),
-    )
+    target = runtime.resolve_target(binding, timeout_policy=timeout)
     call = resolve_model_call(
-        target=target, purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
+        target=target,
+        binding=binding,
+        purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
     )
     context = LLMContext(
         messages=(LLMMessage.user("bounded local fixture"),),

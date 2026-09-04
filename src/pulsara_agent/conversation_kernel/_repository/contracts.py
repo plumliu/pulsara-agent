@@ -10,16 +10,36 @@ import json
 from types import MappingProxyType
 from typing import Mapping
 from uuid import uuid4
-from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, CommittedEventDraft, CommittedEventSubject, EntryKind, HostWriterGuard, InlineContent, canonical_digest
+from pulsara_agent.conversation_kernel.contracts import (
+    BlobContent,
+    CanonicalContent,
+    CommittedEventDraft,
+    CommittedEventSubject,
+    EntryKind,
+    HostWriterGuard,
+    InlineContent,
+    canonical_digest,
+)
 from pulsara_agent.conversation_kernel.memory.contracts import (
     PreparedMemoryCandidateAcceptance,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    model_call_binding_to_dict,
+)
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
-from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition, ToolOutputArtifactUnavailabilityReason, ToolResultDisplayKind
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage, ToolOutputSourceCoverageReason
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolOutputArtifactUnavailabilityReason,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import (
+    ToolOutputSourceCoverage,
+    ToolOutputSourceCoverageReason,
+)
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
@@ -36,7 +56,18 @@ from pulsara_agent.primitives.tool_result_projection import (
     MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS,
     MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES,
 )
-from pulsara_agent.primitives.plan_workflow import PLAN_ENTRY_CONTRACT, ExtractedPlanDraft, PlanDraftDecision, PlanHandoffKind, PlanInteractionBinding, PlanInteractionKind, PlanQuestionAnswerKind, PlanQuestionContent, PlanWorkflowStatus, require_plan_interaction_contract
+from pulsara_agent.primitives.plan_workflow import (
+    PLAN_ENTRY_CONTRACT,
+    ExtractedPlanDraft,
+    PlanDraftDecision,
+    PlanHandoffKind,
+    PlanInteractionBinding,
+    PlanInteractionKind,
+    PlanQuestionAnswerKind,
+    PlanQuestionContent,
+    PlanWorkflowStatus,
+    require_plan_interaction_contract,
+)
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection
 from pulsara_agent.conversation_kernel.tool_contracts import (
@@ -46,6 +77,7 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
 
 class _ObservedActiveMemoryDuplicate(Exception):
     """Internal control-flow signal for the ACTIVE partial-unique winner."""
+
 
 INLINE_CONTENT_LIMIT = STAGE2_LIMITS.inline_content_hard_bytes
 
@@ -139,9 +171,9 @@ class AcceptedSubagentCompletion:
     entry: AcceptedEntry | None = None
 
     def __post_init__(self) -> None:
-        if (
-            self.disposition is SubagentCompletionDisposition.TARGET_STALE
-        ) != (self.entry is None):
+        if (self.disposition is SubagentCompletionDisposition.TARGET_STALE) != (
+            self.entry is None
+        ):
             raise ValueError("subagent completion disposition is inconsistent")
 
 
@@ -160,6 +192,7 @@ class PreparedRootTurnAdmission:
     context_binding_revision_id: str
     permission_snapshot_id: str
     requested_permission_mode: PermissionMode
+    model_call_binding: ModelCallBinding
     content: CanonicalContent
     occurred_at: datetime
     actor_kind: str
@@ -178,16 +211,15 @@ class PreparedRootTurnAdmission:
             context_binding_revision_id=self.context_binding_revision_id,
             permission_snapshot_id=self.permission_snapshot_id,
             requested_permission_mode=self.requested_permission_mode,
+            model_call_binding=self.model_call_binding,
             content=self.content,
             occurred_at=self.occurred_at,
             actor_kind=self.actor_kind,
             actor_id=self.actor_id,
         )
-        expected_digest = canonical_digest(
-            "pulsara:submit-prompt-command:v2", payload
-        )
+        expected_digest = canonical_digest("pulsara:submit-prompt-command:v3", payload)
         expected_fingerprint = canonical_digest(
-            "pulsara:prepared-root-turn-admission:v1",
+            "pulsara:prepared-root-turn-admission:v2",
             {**payload, "semantic_digest": expected_digest},
         )
         if (
@@ -200,9 +232,7 @@ class PreparedRootTurnAdmission:
             or self.semantic_digest != expected_digest
             or self.candidate_fingerprint != expected_fingerprint
             or self.event.event_id
-            != _stable_identity(
-                "event", expected_fingerprint, "UserMessageAccepted"
-            )
+            != _stable_identity("event", expected_fingerprint, "UserMessageAccepted")
             or self.event.event_type is not CommittedEventType.USER_MESSAGE_ACCEPTED
             or self.event.subject
             != CommittedEventSubject(SubjectSlot.ENTRY, self.entry_id)
@@ -220,10 +250,56 @@ class PreparedRootTurnAdmission:
                     is not self.requested_permission_mode
                 )
             )
-            or dict(self.event.payload)
-            != {"entry_kind": EntryKind.USER_MESSAGE.value}
+            or dict(self.event.payload) != {"entry_kind": EntryKind.USER_MESSAGE.value}
         ):
             raise ValueError("prepared ROOT turn admission is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRootTurnIntent:
+    """Direct ROOT admission facts whose model binding is read under row lock."""
+
+    session_id: str
+    command_id: str
+    turn_id: str
+    entry_id: str
+    context_binding_revision_id: str
+    permission_snapshot_id: str
+    requested_permission_mode: PermissionMode
+    content: CanonicalContent
+    occurred_at: datetime
+    actor_kind: str
+    actor_id: str
+    expected_permission_snapshot: FrozenRunPermissionSnapshot | None = None
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.session_id,
+                self.command_id,
+                self.turn_id,
+                self.entry_id,
+                self.context_binding_revision_id,
+                self.permission_snapshot_id,
+                self.actor_kind,
+                self.actor_id,
+            )
+        ):
+            raise ValueError("ROOT turn intent identity is incomplete")
+        if self.content.size < 1:
+            raise ValueError("ROOT turn intent content is empty")
+        if self.expected_permission_snapshot is not None and (
+            self.expected_permission_snapshot.snapshot_id != self.permission_snapshot_id
+            or self.expected_permission_snapshot.requested_mode
+            is not self.requested_permission_mode
+        ):
+            raise ValueError("ROOT turn intent permission precondition is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedRootTurnAdmission:
+    accepted: AcceptedEntry
+    reasoning_preference_reset: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,9 +311,7 @@ class PreparedSubagentTurnAdmission:
     context_binding_revision_id: str
     permission_snapshot_id: str
     task_start_event_id: str
-    expected_parent_permission_snapshot: FrozenRunPermissionSnapshot = field(
-        repr=False
-    )
+    expected_parent_permission_snapshot: FrozenRunPermissionSnapshot = field(repr=False)
     content: CanonicalContent
     occurred_at: datetime
     actor_id: str
@@ -790,14 +864,10 @@ class AcceptedPlanToolBatch:
     continuation_turn_id: str | None
     continuation_entry_id: str | None
     origin_turn_completed: bool
-    tool_result_settlements: tuple[
-        AcceptedCanonicalToolResultSettlement, ...
-    ] = ()
+    tool_result_settlements: tuple[AcceptedCanonicalToolResultSettlement, ...] = ()
 
     def __post_init__(self) -> None:
-        if tuple(
-            item.call_ordinal for item in self.tool_result_settlements
-        ) != tuple(
+        if tuple(item.call_ordinal for item in self.tool_result_settlements) != tuple(
             sorted(item.call_ordinal for item in self.tool_result_settlements)
         ):
             raise ValueError("accepted Plan settlements are not in call order")
@@ -962,9 +1032,7 @@ def _canonical_content_identity(content: CanonicalContent) -> Mapping[str, objec
     }
 
 
-def _canonical_content_matches_utf8_text(
-    content: CanonicalContent, value: str
-) -> bool:
+def _canonical_content_matches_utf8_text(content: CanonicalContent, value: str) -> bool:
     encoded = value.encode("utf-8")
     return (
         content.media_type == "text/plain"
@@ -972,8 +1040,7 @@ def _canonical_content_matches_utf8_text(
         and content.size == len(encoded)
         and content.digest == "sha256:" + sha256(encoded).hexdigest()
         and (
-            not isinstance(content, InlineContent)
-            or content.canonical_bytes == encoded
+            not isinstance(content, InlineContent) or content.canonical_bytes == encoded
         )
     )
 
@@ -987,6 +1054,7 @@ def _root_turn_admission_payload(
     context_binding_revision_id: str,
     permission_snapshot_id: str,
     requested_permission_mode: PermissionMode,
+    model_call_binding: ModelCallBinding,
     content: CanonicalContent,
     occurred_at: datetime,
     actor_kind: str,
@@ -1000,6 +1068,7 @@ def _root_turn_admission_payload(
         "context_binding_revision_id": context_binding_revision_id,
         "permission_snapshot_id": permission_snapshot_id,
         "requested_permission_mode": requested_permission_mode.value,
+        "model_call_binding": model_call_binding_to_dict(model_call_binding),
         "content": _canonical_content_identity(content),
         "occurred_at": occurred_at.isoformat(),
         "actor_kind": actor_kind,
@@ -1016,6 +1085,7 @@ def build_prepared_root_turn_admission(
     context_binding_revision_id: str,
     permission_snapshot_id: str,
     requested_permission_mode: PermissionMode,
+    model_call_binding: ModelCallBinding,
     content: CanonicalContent,
     occurred_at: datetime,
     actor_kind: str = "human",
@@ -1030,16 +1100,15 @@ def build_prepared_root_turn_admission(
         context_binding_revision_id=context_binding_revision_id,
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=requested_permission_mode,
+        model_call_binding=model_call_binding,
         content=content,
         occurred_at=occurred_at,
         actor_kind=actor_kind,
         actor_id=actor_id,
     )
-    semantic_digest = canonical_digest(
-        "pulsara:submit-prompt-command:v2", payload
-    )
+    semantic_digest = canonical_digest("pulsara:submit-prompt-command:v3", payload)
     candidate_fingerprint = canonical_digest(
-        "pulsara:prepared-root-turn-admission:v1",
+        "pulsara:prepared-root-turn-admission:v2",
         {**payload, "semantic_digest": semantic_digest},
     )
     event = CommittedEventDraft(
@@ -1053,11 +1122,44 @@ def build_prepared_root_turn_admission(
         sensitivity_class="PUBLIC",
         projection_profile="DEFAULT",
         occurred_at=occurred_at,
-        payload=MappingProxyType(
-            {"entry_kind": EntryKind.USER_MESSAGE.value}
-        ),
+        payload=MappingProxyType({"entry_kind": EntryKind.USER_MESSAGE.value}),
     )
     return PreparedRootTurnAdmission(
+        session_id=session_id,
+        command_id=command_id,
+        turn_id=turn_id,
+        entry_id=entry_id,
+        context_binding_revision_id=context_binding_revision_id,
+        permission_snapshot_id=permission_snapshot_id,
+        requested_permission_mode=requested_permission_mode,
+        model_call_binding=model_call_binding,
+        content=content,
+        occurred_at=occurred_at,
+        actor_kind=actor_kind,
+        actor_id=actor_id,
+        semantic_digest=semantic_digest,
+        event=event,
+        candidate_fingerprint=candidate_fingerprint,
+        expected_permission_snapshot=expected_permission_snapshot,
+    )
+
+
+def build_prepared_root_turn_intent(
+    *,
+    session_id: str,
+    command_id: str,
+    turn_id: str,
+    entry_id: str,
+    context_binding_revision_id: str,
+    permission_snapshot_id: str,
+    requested_permission_mode: PermissionMode,
+    content: CanonicalContent,
+    occurred_at: datetime,
+    actor_kind: str = "human",
+    actor_id: str = "user",
+    expected_permission_snapshot: FrozenRunPermissionSnapshot | None = None,
+) -> PreparedRootTurnIntent:
+    return PreparedRootTurnIntent(
         session_id=session_id,
         command_id=command_id,
         turn_id=turn_id,
@@ -1069,9 +1171,6 @@ def build_prepared_root_turn_admission(
         occurred_at=occurred_at,
         actor_kind=actor_kind,
         actor_id=actor_id,
-        semantic_digest=semantic_digest,
-        event=event,
-        candidate_fingerprint=candidate_fingerprint,
         expected_permission_snapshot=expected_permission_snapshot,
     )
 
@@ -1379,9 +1478,7 @@ def _prepared_tool_result_manifest(
     else:
         side_payload = {
             "branch_kind": side.branch_kind.value,
-            "candidate_acceptance_digest": (
-                side.candidate.candidate_acceptance_digest
-            ),
+            "candidate_acceptance_digest": (side.candidate.candidate_acceptance_digest),
         }
     return {
         "session_id": candidate.session_id,

@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Mapping
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from pulsara_agent.conversation_kernel.contracts import CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, canonical_digest
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, canonical_json_bytes, freeze_json, thaw_json
 from pulsara_agent.primitives.permission import PERMISSION_PRESET_CONTRACT_FINGERPRINT, PERMISSION_PRESET_CONTRACT_ID, PermissionMode
@@ -2125,11 +2126,21 @@ class _PlanOperations:
         assert candidate.continuation_turn_id is not None
         assert candidate.continuation_entry_id is not None
         assert candidate.continuation_context_binding_revision_id is not None
+        origin = connection.execute(
+            "SELECT model_call_binding FROM pulsara_v3.turns "
+            "WHERE session_id=%s AND id=%s",
+            (candidate.session_id, candidate.origin_turn_id),
+        ).fetchone()
+        if origin is None or origin["model_call_binding"] is None:
+            raise ConversationKernelConflict(
+                "Plan continuation origin lacks a model binding"
+            )
         connection.execute(
             """
             INSERT INTO pulsara_v3.turns (
                 id, session_id, workspace_id, conversation_scope_kind,
-                status, initial_entry_id, current_context_binding_revision_id,
+                model_call_binding, status, initial_entry_id,
+                current_context_binding_revision_id,
                 permission_snapshot_id, requested_permission_mode,
                 effective_permission_mode, permission_admission_source,
                 permission_overlay, permission_plan_context_ordinal,
@@ -2137,13 +2148,14 @@ class _PlanOperations:
                 permission_plan_revision_at_admission,
                 permission_inherited_from_turn_id, permission_contract_id,
                 permission_contract_fingerprint, permission_snapshot_fingerprint
-            ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s,
+            ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 candidate.continuation_turn_id,
                 candidate.session_id,
                 candidate.workspace_id,
+                Jsonb(origin["model_call_binding"]),
                 candidate.continuation_entry_id,
                 candidate.continuation_context_binding_revision_id,
                 *_RepositoryKernel._permission_columns(permission),
@@ -2869,11 +2881,21 @@ class _PlanOperations:
         handoff_kind: PlanHandoffKind,
         body: InlineContent,
     ) -> None:
+        origin = connection.execute(
+            "SELECT model_call_binding FROM pulsara_v3.turns "
+            "WHERE session_id=%s AND id=%s",
+            (session_id, origin_turn_id),
+        ).fetchone()
+        if origin is None or origin["model_call_binding"] is None:
+            raise ConversationKernelConflict(
+                "Plan continuation origin lacks a model binding"
+            )
         connection.execute(
             """
             INSERT INTO pulsara_v3.turns (
                 id, session_id, workspace_id, conversation_scope_kind,
-                status, initial_entry_id, current_context_binding_revision_id,
+                model_call_binding, status, initial_entry_id,
+                current_context_binding_revision_id,
                 permission_snapshot_id, requested_permission_mode,
                 effective_permission_mode, permission_admission_source,
                 permission_overlay, permission_plan_context_ordinal,
@@ -2881,13 +2903,14 @@ class _PlanOperations:
                 permission_plan_revision_at_admission,
                 permission_inherited_from_turn_id, permission_contract_id,
                 permission_contract_fingerprint, permission_snapshot_fingerprint
-            ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s,
+            ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 turn_id,
                 session_id,
                 workspace_id,
+                Jsonb(origin["model_call_binding"]),
                 entry_id,
                 context_binding_revision_id,
                 *_RepositoryKernel._permission_columns(permission),

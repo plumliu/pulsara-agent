@@ -91,7 +91,7 @@ class PostgresMigrationRunner:
         if not admin_dsn.strip():
             raise PostgresSchemaError(
                 PostgresSchemaFailureCode.ADMIN_DSN_REQUIRED,
-                "PULSARA_POSTGRES_ADMIN_DSN is required for db migrate",
+                "an admin PostgreSQL DSN is required for db migrate",
             )
         self._admin = ResolvedPostgresConnectionFactory(
             admin_dsn, application_name="pulsara-clean-schema-admin"

@@ -130,6 +130,109 @@
 .runtime-health strong { color: var(--ink); font-weight: 650; }
 .surface-scroll { height: calc(100dvh - 58px); overflow-y: auto; }
 
+.database-workbench-mask {
+  position: fixed;
+  inset: 0 0 0 62px;
+  z-index: 75;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 28px;
+  overflow: auto;
+  background:
+    radial-gradient(color-mix(in srgb, var(--ink) 6%, transparent) .65px, transparent .65px),
+    color-mix(in srgb, var(--paper) 97%, transparent);
+  background-size: 19px 19px, auto;
+  backdrop-filter: blur(9px) saturate(.7);
+}
+.database-setup-guide {
+  display: grid;
+  justify-items: start;
+  border: 1px solid var(--line-strong);
+  background: color-mix(in srgb, var(--paper-solid) 96%, transparent);
+  box-shadow: var(--shadow-lg);
+}
+.database-setup-guide--overlay {
+  width: min(510px, 100%);
+  padding: 29px;
+  border-radius: 18px;
+}
+.database-setup-guide--overview {
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  column-gap: 15px;
+  width: min(1188px, 100%);
+  margin: 16px auto 0;
+  padding: 22px;
+  border-radius: 14px;
+}
+.database-setup-guide__icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+.database-setup-guide--overlay .database-setup-guide__icon { margin-bottom: 18px; }
+.database-setup-guide__copy { min-width: 0; }
+.database-setup-guide__copy h2 {
+  margin: 5px 0 7px;
+  font-family: var(--serif);
+  font-size: var(--type-display-small);
+  font-weight: 600;
+  letter-spacing: -.025em;
+}
+.database-setup-guide__copy p {
+  max-width: 650px;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--type-control);
+  line-height: 1.65;
+}
+.database-setup-guide__steps {
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+  margin: 18px 0 0;
+  padding: 15px 0 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+.database-setup-guide__steps li { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; }
+.database-setup-guide__steps li > span {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--type-micro);
+}
+.database-setup-guide__steps strong,
+.database-setup-guide__steps small { display: block; }
+.database-setup-guide__steps strong { font-size: var(--type-label); }
+.database-setup-guide__steps small { margin-top: 3px; color: var(--faint); font-size: var(--type-caption); line-height: 1.45; }
+.database-setup-guide .primary-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 20px;
+}
+.database-setup-guide--overview .primary-action {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: center;
+  margin-top: 0;
+  white-space: nowrap;
+}
+
 .page-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 30px; padding: 32px 36px 23px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--paper-raised) 72%, transparent); }
 .page-header h1 { margin: 5px 0 4px; font-family: var(--serif); font-size: var(--type-display-page); font-weight: 550; letter-spacing: -.035em; }
 .page-header p { max-width: 720px; margin: 0; color: var(--muted); font-size: var(--type-control); line-height: 1.5; }

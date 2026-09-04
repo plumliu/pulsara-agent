@@ -16,7 +16,6 @@ import hmac
 import json
 from hashlib import sha256
 import math
-import os
 from pathlib import Path
 import re
 import secrets
@@ -382,9 +381,7 @@ class KernelSubagentManager:
             self._root_completion_delivery_open = False
             self._notify_state_changed_locked()
 
-    async def snapshot_pending_root_completions(
-        self, turn_id: str
-    ) -> tuple[str, ...]:
+    async def snapshot_pending_root_completions(self, turn_id: str) -> tuple[str, ...]:
         async with self._lock:
             if (
                 self._root_completion_turn_id != turn_id
@@ -1293,7 +1290,6 @@ class KernelSubagentManager:
                     )
                     public_detail = bounded_terminal_public_detail(
                         f"{type(admission_error).__name__}: {admission_error}",
-                        secret=os.environ.get("PULSARA_API_KEY"),
                     )
                     try:
                         if admission_full:
@@ -1651,7 +1647,6 @@ class KernelSubagentManager:
             code = "CHILD_EXECUTION_FAILED"
             public_detail = bounded_terminal_public_detail(
                 f"{type(exc).__name__}: {exc}",
-                secret=os.environ.get("PULSARA_API_KEY"),
             )
             await self._settle_task_terminal_exact(
                 task_id,
@@ -1732,8 +1727,7 @@ class KernelSubagentManager:
                 if (
                     observed is status
                     and durable.get("terminal_reason") == reason
-                    and durable.get("terminal_public_detail")
-                    == exact_public_detail
+                    and durable.get("terminal_public_detail") == exact_public_detail
                 ):
                     confirmed_terminal = True
                     return
@@ -1814,8 +1808,7 @@ class KernelSubagentManager:
         terminal_public_detail: str | None = None,
     ) -> AcceptedEntry | None:
         exact_public_detail = (
-            terminal_public_detail
-            or build_default_terminal_public_detail(task_reason)
+            terminal_public_detail or build_default_terminal_public_detail(task_reason)
         )
         occurred_at = datetime.now(timezone.utc)
         while True:
@@ -2196,11 +2189,14 @@ class KernelSubagentManager:
                     session_id=self._guard.session_id,
                     deadline_monotonic=self._canonical_deadline(),
                 )
-                if sum(
-                    total
-                    for status, total in totals
-                    if not SubagentTaskStatus(str(status)).terminal
-                ) == 0:
+                if (
+                    sum(
+                        total
+                        for status, total in totals
+                        if not SubagentTaskStatus(str(status)).terminal
+                    )
+                    == 0
+                ):
                     return _result(
                         "SUCCESS",
                         {
@@ -2795,9 +2791,7 @@ class KernelSubagentManager:
                 # A committed first attempt may lose its return rows.  The
                 # retry then observes an empty frontier, so confirm only the
                 # descendant closure causally reachable from this settlement.
-                await self._retire_canonical_terminal_dormant_tasks(
-                    causal_candidates
-                )
+                await self._retire_canonical_terminal_dormant_tasks(causal_candidates)
             async with self._state_changed:
                 self._notify_state_changed_locked()
             # TODO child ownership is the same four-slot physical resource as

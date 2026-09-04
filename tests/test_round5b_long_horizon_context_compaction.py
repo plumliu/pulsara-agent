@@ -863,10 +863,10 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
     estimator = PulsaraHeuristicTokenEstimatorV1()
     estimator_fingerprint = estimator.fact.estimator_fingerprint
     source_profile = SimpleNamespace(
-        provider_profile=SimpleNamespace(wire_api="openai_chat_completions")
+        route_wire_profile=SimpleNamespace(wire_api="openai_chat_completions")
     )
     successor_profile = (
-        SimpleNamespace(provider_profile=SimpleNamespace(wire_api="openai_responses"))
+        SimpleNamespace(route_wire_profile=SimpleNamespace(wire_api="openai_responses"))
         if drift == "profile"
         else source_profile
     )

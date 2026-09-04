@@ -14,7 +14,12 @@ from pulsara_agent.llm.adapters.openai.client import (
     admit_provider_request,
     build_async_openai_client,
 )
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
+from pulsara_agent.local_credentials import (
+    CredentialBorrow,
+    LocalCredentialStore,
+    ModelProviderCredential,
+)
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     ProviderLiveItemBuilder,
@@ -49,6 +54,7 @@ from pulsara_agent.llm.provider_replay import (
     RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.model_target import reasoning_wire_fields
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.provider_stream import (
     ProviderAdapterStreamItem,
@@ -83,14 +89,12 @@ from pulsara_agent.llm.retry import (
 class OpenAIResponsesTransport:
     """Adapter for OpenAI Responses-compatible APIs."""
 
-    api_key: str
+    credentials: LocalCredentialStore = field(repr=False)
     timeout_policy: OpenAITransportTimeoutPolicy
-    api_key_boundary: ProcessApiKeyBoundary = field(repr=False)
     api: str = OPENAI_RESPONSES_API
     binding_id: str = "pulsara.openai.responses"
-    contract_version: str = "v5-explicit-terminal-operational-elision"
+    contract_version: str = "v6-route-target-reasoning"
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
-    openai_sdk_max_retries: int | None = None
     retry_sleep: Callable[[float], Awaitable[None]] = field(
         default=asyncio.sleep, repr=False
     )
@@ -107,7 +111,7 @@ class OpenAIResponsesTransport:
         if self._mock_events:
             model_identity = ReportedModelIdentityObserver(
                 requested_model_id=model.id,
-                policy=model.provider_profile.model_identity_policy,
+                policy=model.route_wire_profile.model_identity_policy,
             )
             accumulator = ResponsesCompletionAccumulator(
                 builder=ProviderLiveItemBuilder()
@@ -126,16 +130,24 @@ class OpenAIResponsesTransport:
 
         payload = build_responses_payload(call=call, context=context)
         should_close_client = self._client is None
-        client = self._client or build_async_openai_client(
-            api_key=self.api_key,
-            base_url=model.base_url,
-            timeout_policy=self.timeout_policy,
-            api_key_boundary=self.api_key_boundary,
-            max_retries=sdk_max_retries_for_transport(
-                retry_config=self.retry_config,
-                explicit_max_retries=self.openai_sdk_max_retries,
-            ),
-        )
+        borrow: CredentialBorrow | None = None
+        if self._client is None:
+            borrow = self.credentials.borrow(
+                ModelProviderCredential(call.binding.connection_id)
+            )
+            credential_boundary = ProcessCredentialBoundary(borrow.value)
+            client = build_async_openai_client(
+                api_key=borrow.value,
+                base_url=model.base_url,
+                timeout_policy=self.timeout_policy,
+                credential_boundary=credential_boundary,
+                max_retries=sdk_max_retries_for_transport(
+                    retry_config=self.retry_config,
+                ),
+            )
+        else:
+            credential_boundary = ProcessCredentialBoundary()
+            client = self._client
         retry_traces: list[RetryAttemptTrace] = []
         completed_report: TransportUsageReport | None = None
         try:
@@ -146,14 +158,14 @@ class OpenAIResponsesTransport:
             while True:
                 model_identity = ReportedModelIdentityObserver(
                     requested_model_id=model.id,
-                    policy=model.provider_profile.model_identity_policy,
+                    policy=model.route_wire_profile.model_identity_policy,
                 )
                 accumulator = ResponsesCompletionAccumulator(
                     builder=ProviderLiveItemBuilder()
                 )
                 try:
                     stream = await admit_provider_request(
-                        api_key_boundary=self.api_key_boundary,
+                        credential_boundary=credential_boundary,
                         payload=payload,
                         operation=lambda: client.responses.create(
                             **payload, stream=True
@@ -243,6 +255,8 @@ class OpenAIResponsesTransport:
         finally:
             if should_close_client:
                 await client.close()
+            if borrow is not None:
+                borrow.close()
 
         if completed_report is not None:
             yield completed_report
@@ -286,7 +300,6 @@ def build_responses_payload(
     context: LLMContext,
 ) -> dict[str, Any]:
     model = call.target.model_profile
-    options = call.target.effective_options
     plan = context.provider_wire_input_plan
     if plan is not None:
         if plan.wire_api != OPENAI_RESPONSES_API:
@@ -310,10 +323,10 @@ def build_responses_payload(
     # Responses stateless also makes encrypted reasoning carriers observable
     # on providers that support zero-retention/manual-history operation; a
     # remote response ID is never needed or accepted by the Kernel.
-    provider_profile = model.provider_profile
+    route_wire_profile = model.route_wire_profile
     payload: dict[str, Any] = dict(context_fields)
     extra_body: dict[str, Any] = {}
-    for key, value in provider_profile.request_extra_body.items():
+    for key, value in route_wire_profile.request_extra_body.items():
         materialized_value = mutable_provider_value(value)
         if context_fields.get(key) != materialized_value:
             raise ValueError("Responses extra-body context changed after wire planning")
@@ -325,11 +338,20 @@ def build_responses_payload(
             "store": False,
         }
     )
-    for key, value in provider_profile.request_defaults.items():
+    for key, value in route_wire_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
     payload["max_output_tokens"] = call.target.context_budget.effective_output_tokens
-    if options.reasoning_effort is not None:
-        payload["reasoning"] = {"effort": options.reasoning_effort}
+    reasoning = reasoning_wire_fields(
+        call.target.contract, call.selected_reasoning
+    )
+    for key, value in reasoning.root.items():
+        if key in payload:
+            raise ValueError("Responses reasoning root field has another owner")
+        payload[key] = mutable_provider_value(value)
+    for key, value in reasoning.extra_body.items():
+        if key in extra_body or key in payload:
+            raise ValueError("Responses reasoning extra-body field has another owner")
+        extra_body[key] = mutable_provider_value(value)
     if extra_body:
         payload["extra_body"] = extra_body
     return payload
@@ -344,6 +366,8 @@ _RESPONSES_NON_CONTEXT_BEARING_FIELDS = frozenset(
         "max_completion_tokens",
         "max_output_tokens",
         "reasoning",
+        "reasoning_effort",
+        "thinking",
         "timeout",
         "service_tier",
         "temperature",
@@ -362,14 +386,14 @@ def materialize_responses_context_bearing_wire_projection(
 ) -> dict[str, Any]:
     """Materialize the exact Responses fields carrying provider input context."""
 
-    profile = call.target.model_profile.provider_profile
+    profile = call.target.model_profile.route_wire_profile
     projection: dict[str, Any] = {"input": [dict(item) for item in ordered_input_items]}
     for key, value in profile.request_defaults.items():
         if key not in _RESPONSES_NON_CONTEXT_BEARING_FIELDS:
             projection.setdefault(key, mutable_provider_value(value))
     if root_policy:
         projection["instructions"] = root_policy
-    if tool_items and profile.supports_tools:
+    if tool_items:
         projection["tools"] = [dict(item) for item in tool_items]
     if tool_choice is not None:
         projection["tool_choice"] = tool_choice

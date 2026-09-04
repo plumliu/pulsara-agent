@@ -30,9 +30,9 @@ from pulsara_agent.plugins.package_store import (
     PhysicalLifetimeAnchor,
 )
 from pulsara_agent.capability.types import SkillDiagnostic
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyScrubSet,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialScrubSet,
 )
 
 
@@ -141,10 +141,10 @@ class EnabledPluginViewOwner:
         self,
         *,
         store: ManagedPluginStore,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
     ) -> None:
         self._store = store
-        self._observer = PluginSourceObserver(api_key_boundary)
+        self._observer = PluginSourceObserver(credential_boundary)
 
     def observe(
         self,
@@ -187,7 +187,7 @@ class EnabledPluginViewOwner:
                     package_root,
                     deadline_monotonic=deadline_monotonic,
                     cancellation=cancellation,
-                    scrub_set=ProcessApiKeyScrubSet(),
+                    scrub_set=ProcessCredentialScrubSet(),
                     hook_package_install_id=state.current_package_install_id,
                     hook_visibility=(
                         HookVisibilityScope.USER

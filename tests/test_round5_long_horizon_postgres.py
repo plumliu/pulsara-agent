@@ -53,6 +53,14 @@ from pulsara_agent.ports.live_agent_event import (
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    enqueue_test_prompt,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_resolution_snapshot,
+    test_model_runtime,
+)
 from tests.support.subagents import (
     ActiveSubagentFixtureId,
     accept_active_subagent_fixture,
@@ -132,9 +140,9 @@ class _LostRootAdmissionAckRepository(ConversationKernelRepository):
         super().__init__(provider)
         self.calls = 0
 
-    def accept_root_turn(self, *args, **kwargs):
+    def accept_root_turn_intent(self, *args, **kwargs):
         self.calls += 1
-        accepted = super().accept_root_turn(*args, **kwargs)
+        accepted = super().accept_root_turn_intent(*args, **kwargs)
         if self.calls == 1:
             raise OSError("injected lost ROOT admission acknowledgement")
         return accepted
@@ -145,19 +153,19 @@ class _RootNoneThenFullRepository(ConversationKernelRepository):
         super().__init__(provider)
         self.calls = 0
 
-    def accept_root_turn(self, *args, **kwargs):
+    def accept_root_turn_intent(self, *args, **kwargs):
         self.calls += 1
         if self.calls == 1:
             raise OSError("injected pre-commit ROOT failure")
-        return super().accept_root_turn(*args, **kwargs)
+        return super().accept_root_turn_intent(*args, **kwargs)
 
 
 class _RootConflictRepository(ConversationKernelRepository):
-    def accept_root_turn(self, *args, **kwargs):
+    def accept_root_turn_intent(self, *args, **kwargs):
         del args, kwargs
         raise OSError("injected ROOT admission conflict window")
 
-    def confirm_root_turn_admission(self, **kwargs):
+    def confirm_root_turn_intent(self, **kwargs):
         del kwargs
         return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
 
@@ -170,10 +178,10 @@ class _CancelledRootAdmissionRepository(ConversationKernelRepository):
         self.release = Event()
         self.calls = 0
 
-    def accept_root_turn(self, *args, **kwargs):
+    def accept_root_turn_intent(self, *args, **kwargs):
         self.calls += 1
         accepted = (
-            super().accept_root_turn(*args, **kwargs)
+            super().accept_root_turn_intent(*args, **kwargs)
             if self.commit_before_block
             else None
         )
@@ -185,18 +193,16 @@ class _CancelledRootAdmissionRepository(ConversationKernelRepository):
         return accepted
 
 
-class _FlakyCancelledRootConfirmationRepository(
-    _CancelledRootAdmissionRepository
-):
+class _FlakyCancelledRootConfirmationRepository(_CancelledRootAdmissionRepository):
     def __init__(self, provider) -> None:
         super().__init__(provider, commit_before_block=True)
         self.confirmation_calls = 0
 
-    def confirm_root_turn_admission(self, **kwargs):
+    def confirm_root_turn_intent(self, **kwargs):
         self.confirmation_calls += 1
         if self.confirmation_calls <= 2:
             raise OSError("injected transient ROOT confirmation failure")
-        return super().confirm_root_turn_admission(**kwargs)
+        return super().confirm_root_turn_intent(**kwargs)
 
 
 class _LostSubagentAdmissionAckRepository(ConversationKernelRepository):
@@ -212,9 +218,7 @@ class _LostSubagentAdmissionAckRepository(ConversationKernelRepository):
         return accepted
 
 
-class _FlakyLostSubagentAdmissionAckRepository(
-    _LostSubagentAdmissionAckRepository
-):
+class _FlakyLostSubagentAdmissionAckRepository(_LostSubagentAdmissionAckRepository):
     def __init__(self, provider) -> None:
         super().__init__(provider)
         self.confirmation_calls = 0
@@ -439,6 +443,7 @@ def _runner(
     subagent_runtime: Round10TestSubagentRuntime | None = None,
 ):
     return ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -456,7 +461,8 @@ def _runner(
 def _lease(repository: ConversationKernelRepository) -> tuple[str, str, object]:
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -468,7 +474,8 @@ def _lease(repository: ConversationKernelRepository) -> tuple[str, str, object]:
 
 def _prepare_subagent_task(repository, lease) -> ActiveSubagentFixtureId:
     parent_turn_id = _name("parent-turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("parent-command"),
         turn_id=parent_turn_id,
@@ -476,6 +483,7 @@ def _prepare_subagent_task(repository, lease) -> ActiveSubagentFixtureId:
         context_binding_revision_id=_name("parent-revision"),
         permission_snapshot_id=_name("parent-permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"delegate"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -522,11 +530,14 @@ def test_round5_sixty_four_model_calls_finalize_without_a_turn_cap(
     assert tool.invocations == 63
     assert len(model.requests) == 64
     for previous, current in zip(model.requests, model.requests[1:], strict=False):
-        assert current.compiled_input.system_prompt == previous.compiled_input.system_prompt
-        assert current.compiled_input.tools == previous.compiled_input.tools
-        assert current.compiled_input.messages[: len(previous.compiled_input.messages)] == (
-            previous.compiled_input.messages
+        assert (
+            current.compiled_input.system_prompt
+            == previous.compiled_input.system_prompt
         )
+        assert current.compiled_input.tools == previous.compiled_input.tools
+        assert current.compiled_input.messages[
+            : len(previous.compiled_input.messages)
+        ] == (previous.compiled_input.messages)
 
 
 def test_round5_each_operation_gets_a_fresh_owner_deadline_without_turn_budget(
@@ -704,7 +715,8 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
     steer_queue_item_id = _name("steer-queue")
 
     def enqueue(request: KernelModelExecutionRequest) -> None:
-        repository.enqueue_prompt(
+        enqueue_test_prompt(
+            repository,
             lease.guard,
             command_id=steer_command_id,
             queue_item_id=steer_queue_item_id,
@@ -713,6 +725,7 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
             target_turn_id=request.turn_id,
             permission_snapshot_id=None,
             requested_permission_mode=None,
+            model_call_binding=None,
             content=InlineContent.from_bytes(b"late steer"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
@@ -731,15 +744,11 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
 
     assert result.model_call_count == 64
     assert result.tool_call_count == 63
-    assert (
-        deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING)
-        == 64
-    )
+    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 64
     assert result.final_text == "after-steer"
     appended = model.requests[25].compiled_input.messages
     assert any(
-        message.role is MessageRole.USER
-        and message.content == ("late steer",)
+        message.role is MessageRole.USER and message.content == ("late steer",)
         for message in appended
     )
     with provider.connection(
@@ -911,11 +920,11 @@ def test_round5_subagent_turn_lost_ack_confirms_exact_winner_once(
     model = ScriptedKernelModel(streams)
 
     runner = _runner(
-            repository,
-            lease,
-            model,
-            subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
-        )
+        repository,
+        lease,
+        model,
+        subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
+    )
     result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
 
     assert result.final_text == "child"
@@ -936,11 +945,11 @@ def test_round5_subagent_lost_ack_joins_transient_confirmation_failures(
     model = ScriptedKernelModel([_text_stream("child", block_id="child-answer")])
 
     runner = _runner(
-            repository,
-            lease,
-            model,
-            subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
-        )
+        repository,
+        lease,
+        model,
+        subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
+    )
     result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
 
     assert result.final_text == "child"
@@ -965,9 +974,7 @@ def test_round5_subagent_admission_exact_joins_immutable_objective(
         context_binding_revision_id=_name("mismatched-revision"),
         permission_snapshot_id=_name("mismatched-permission"),
         task_start_event_id=task_id.launch.task_start.event_id,
-        expected_parent_permission_snapshot=(
-            task_id.launch.parent_permission_snapshot
-        ),
+        expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(b"different objective"),
         occurred_at=occurred_at,
         actor_id="subagent-manager",
@@ -995,9 +1002,7 @@ def test_round5_subagent_admission_exact_joins_immutable_objective(
         context_binding_revision_id=_name("accepted-revision"),
         permission_snapshot_id=_name("accepted-permission"),
         task_start_event_id=task_id.launch.task_start.event_id,
-        expected_parent_permission_snapshot=(
-            task_id.launch.parent_permission_snapshot
-        ),
+        expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(b"answer once"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="subagent-manager",
@@ -1066,9 +1071,7 @@ def test_round5_subagent_turn_admission_none_conflict_matrix(
         assert len(model.requests) == 1
     else:
         with pytest.raises(Exception, match="conflicting winner"):
-            asyncio.run(
-                run_admitted_subagent_fixture(runner, task_id)
-            )
+            asyncio.run(run_admitted_subagent_fixture(runner, task_id))
         assert model.requests == []
     assert repository.calls == expected_calls
 
@@ -1089,9 +1092,7 @@ def test_round5_cancelled_subagent_admission_none_never_reissues(
     )
 
     async def scenario() -> None:
-        operation = asyncio.create_task(
-            run_admitted_subagent_fixture(runner, task_id)
-        )
+        operation = asyncio.create_task(run_admitted_subagent_fixture(runner, task_id))
         assert await asyncio.to_thread(repository.started.wait, 5)
         operation.cancel()
         await asyncio.sleep(0)

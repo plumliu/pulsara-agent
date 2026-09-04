@@ -94,7 +94,12 @@ from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.local_credentials import (
+    CredentialState,
+    DashScopeEmbeddingCredential,
+    DashScopeRerankCredential,
+    InMemoryCredentialStore,
+)
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
@@ -113,6 +118,12 @@ from pulsara_agent.retrieval.embedding.validation import (
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
+)
 
 
 pytestmark = pytest.mark.postgres
@@ -129,7 +140,8 @@ def _repository(database) -> ConversationKernelRepository:
 
 
 def _lease(repository, *, workspace_id: str, domain: str = "u_local"):
-    return repository.acquire_host_writer(
+    return acquire_bound_test_writer(
+        repository,
         session_id=_name("session"),
         workspace_id=workspace_id,
         memory_domain_id=domain,
@@ -157,7 +169,8 @@ def _start_human_turn(repository, lease, text: str) -> tuple[str, str]:
     now = datetime.now(timezone.utc)
     turn_id = _name("turn")
     entry_id = _name("entry")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -165,6 +178,7 @@ def _start_human_turn(repository, lease, text: str) -> tuple[str, str]:
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(text.encode()),
         occurred_at=now,
         deadline_monotonic=monotonic() + 30,
@@ -309,9 +323,7 @@ def _claim_candidate(
         cut=final_cut,
         entry_id=_name("entry"),
         parent_content=InlineContent.from_bytes(b"ack"),
-        blocks=(
-            AssistantTextBlock(_name("block"), InlineContent.from_bytes(b"ack")),
-        ),
+        blocks=(AssistantTextBlock(_name("block"), InlineContent.from_bytes(b"ack")),),
         complete_turn=True,
         occurred_at=datetime.now(timezone.utc),
         actor_id="model:test",
@@ -540,9 +552,7 @@ def test_round8_clean_v0_memory_schema_is_the_closed_context_hard_cut(
             "embedded_at",
         },
     }
-    provider = verified_postgres_provider(
-        stage2_migrated_postgres_database.runtime_dsn
-    )
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 30,
@@ -619,7 +629,7 @@ def test_round8_clean_v0_memory_schema_is_the_closed_context_hard_cut(
             )
 
 
-def test_round8_memory_remote_credentials_never_fallback_to_main_model(
+def test_round8_memory_remote_credentials_are_typed_and_ignore_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
@@ -630,13 +640,22 @@ def test_round8_memory_remote_credentials_never_fallback_to_main_model(
     monkeypatch.setenv("PULSARA_API_KEY", "main-model-secret")
     monkeypatch.setenv("PULSARA_DASHSCOPE_API_KEY", "generic-dashscope-secret")
 
-    assert EmbeddingBackendConfig.from_env().api_key == ""
-    assert RerankBackendConfig.from_env().api_key == ""
-
     monkeypatch.setenv("PULSARA_EMBEDDING_API_KEY", "embedding-only")
     monkeypatch.setenv("PULSARA_RERANK_API_KEY", "rerank-only")
-    assert EmbeddingBackendConfig.from_env().api_key == "embedding-only"
-    assert RerankBackendConfig.from_env().api_key == "rerank-only"
+    assert EmbeddingBackendConfig() == EmbeddingBackendConfig()
+    assert RerankBackendConfig() == RerankBackendConfig()
+
+    credentials = InMemoryCredentialStore()
+    embedding_key = DashScopeEmbeddingCredential()
+    rerank_key = DashScopeRerankCredential()
+    assert credentials.state(embedding_key) is CredentialState.MISSING
+    assert credentials.state(rerank_key) is CredentialState.MISSING
+    credentials.put(embedding_key, "typed-embedding-secret")
+    credentials.put(rerank_key, "typed-rerank-secret")
+    with credentials.borrow(embedding_key) as borrowed:
+        assert borrowed.value == "typed-embedding-secret"
+    with credentials.borrow(rerank_key) as borrowed:
+        assert borrowed.value == "typed-rerank-secret"
 
 
 def test_round8_opt_out_and_hint_matchers_are_closed() -> None:
@@ -1536,7 +1555,7 @@ def test_round8_response_preference_capacity_and_atomic_replacement(
             FrozenMemoryGovernanceDecision(
                 MemoryDecisionKind.ACCEPT,
                 final_kind=MemoryFactKind.RESPONSE_PREFERENCE,
-            public_summary="Based on the exact test source.",
+                public_summary="Based on the exact test source.",
             ),
         )
         assert accepted.fact_id is not None
@@ -1874,13 +1893,13 @@ def test_round8_preference_head_and_automatic_recall_are_separate_advisory_sourc
         repository=repository,
         session_id=lease.guard.session_id,
         read_binding=binding,
-        embedding_config=EmbeddingBackendConfig(api_key=""),
+        embedding_config=EmbeddingBackendConfig(),
         feature_config=AdvisoryMemoryFeatureConfig(
             automatic_dense=False,
             explicit_rerank=False,
         ),
         io_owner=io_owner,
-        api_key_boundary=ProcessApiKeyBoundary(),
+        credentials=InMemoryCredentialStore(),
     )
 
     async def exercise() -> tuple[object, object, object]:
@@ -2002,6 +2021,9 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
         fail_provider,
     )
     io_owner = KernelSessionIO()
+    credentials = InMemoryCredentialStore()
+    credentials.put(DashScopeEmbeddingCredential(), "embedding-only")
+    credentials.put(DashScopeRerankCredential(), "rerank-only")
     port = KernelMemoryToolPort(
         repository=repository,
         session_id=lease.guard.session_id,
@@ -2009,14 +2031,14 @@ def test_round8_optional_provider_and_relation_failures_remain_advisory(
             domain=MemoryDomainContext(domain, "transient"),
             host_workspace_id=workspace_id,
         ),
-        embedding_config=EmbeddingBackendConfig(api_key="embedding-only"),
-        rerank_config=RerankBackendConfig(api_key="rerank-only"),
+        embedding_config=EmbeddingBackendConfig(),
+        rerank_config=RerankBackendConfig(),
         feature_config=AdvisoryMemoryFeatureConfig(
             automatic_dense=True,
             explicit_rerank=True,
         ),
         io_owner=io_owner,
-        api_key_boundary=ProcessApiKeyBoundary(),
+        credentials=credentials,
     )
 
     def fail_relation_enrichment(**_kwargs):

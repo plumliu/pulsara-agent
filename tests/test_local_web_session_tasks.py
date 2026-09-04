@@ -9,7 +9,6 @@ from typing import cast
 import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.llm.models import ModelRole
 from pulsara_agent.tool_permission import EffectivePermissionPolicy
 from pulsara_agent.web_app.session_controller import (
     LocalSessionController,
@@ -117,7 +116,6 @@ def _controller(tmp_path: Path, core: _TaskCore) -> LocalSessionController:
             workspace_root=tmp_path,
             memory_domain_id="u_local",
         ),
-        model_role=ModelRole.PRO,
         permission_policy=cast(EffectivePermissionPolicy, object()),
         active_skill_names=frozenset(),
     )

@@ -12,8 +12,9 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from pulsara_agent.settings import load_env_file
 from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
+
+
 @dataclass(frozen=True, slots=True)
 class MigratedPostgresTestDatabase:
     database_name: str
@@ -93,9 +94,23 @@ def dsn_with_database(dsn: str, database_name: str) -> str:
 
 
 def _load_local_env_if_present() -> None:
+    """Load only the test harness DSNs; production has no dotenv reader."""
+
     path = Path.cwd() / ".env"
     if path.is_file():
-        load_env_file(path, override=False)
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            name = name.removeprefix("export ").strip()
+            if name not in {
+                "PULSARA_POSTGRES_ADMIN_DSN",
+                "PULSARA_BENCHMARK_POSTGRES_ADMIN_DSN",
+                "PULSARA_POSTGRES_DSN",
+            }:
+                continue
+            os.environ.setdefault(name, value.strip().strip("'\""))
 
 
 __all__ = [

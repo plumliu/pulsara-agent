@@ -10,6 +10,7 @@ from typing import Mapping, Sequence
 from psycopg import Connection
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionAdoptionConfirmation,
@@ -42,9 +43,23 @@ from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
     ProviderReplayDisposition,
 )
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    model_call_binding_from_dict,
+    model_call_binding_to_dict,
+)
+from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
-from pulsara_agent.ports.terminal_observation import ExistingTurnInstallation, NewTurnInstallation, TerminalObservationInstallationAttempt
-from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json, thaw_json
+from pulsara_agent.ports.terminal_observation import (
+    ExistingTurnInstallation,
+    NewTurnInstallation,
+    TerminalObservationInstallationAttempt,
+)
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact,
+    freeze_json,
+    thaw_json,
+)
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     FrozenSubagentResultPublicFact,
     SubagentResultSource,
@@ -58,13 +73,14 @@ from pulsara_agent.primitives.run_permission import (
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
+    AcceptedRootTurnAdmission,
     AcceptedEntry,
     AssistantBlock,
     AssistantDataBlock,
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelConflict,
-    PreparedRootTurnAdmission,
+    PreparedRootTurnIntent,
     StaleHostWriter,
     TurnAdmissionConfirmation,
     TurnAdmissionConfirmationKind,
@@ -90,6 +106,33 @@ def _manual_compaction_turn_matches(
 
 
 class _ConversationOperations:
+    def read_turn_model_call_binding(
+        self,
+        guard: HostWriterGuard,
+        *,
+        turn_id: str,
+        deadline_monotonic: float,
+    ) -> ModelCallBinding:
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            row = connection.execute(
+                "SELECT model_call_binding FROM pulsara_v3.turns "
+                "WHERE session_id=%s AND id=%s",
+                (guard.session_id, turn_id),
+            ).fetchone()
+            binding = (
+                None
+                if row is None
+                else model_call_binding_from_dict(row["model_call_binding"])
+            )
+            if binding is None:
+                raise ConversationKernelConflict("turn model binding is absent")
+            return binding
+
     def prepare_root_permission_snapshot(
         self,
         guard: HostWriterGuard,
@@ -115,84 +158,115 @@ class _ConversationOperations:
                 admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
             )
 
-    def start_root_turn(
+    def accept_root_turn_intent(
         self,
         guard: HostWriterGuard,
         *,
-        command_id: str,
-        turn_id: str,
-        entry_id: str,
-        context_binding_revision_id: str,
-        permission_snapshot_id: str,
-        requested_permission_mode: PermissionMode,
-        content: CanonicalContent,
-        occurred_at: datetime,
-        actor_kind: str = "human",
-        actor_id: str = "user",
+        intent: PreparedRootTurnIntent,
+        model_resolution_snapshot: FrozenModelResolutionSnapshot,
         deadline_monotonic: float,
-        _prepared_candidate: PreparedRootTurnAdmission | None = None,
-    ) -> AcceptedEntry:
-        prepared = _prepared_candidate or build_prepared_root_turn_admission(
-            session_id=guard.session_id,
-            command_id=command_id,
-            turn_id=turn_id,
-            entry_id=entry_id,
-            context_binding_revision_id=context_binding_revision_id,
-            permission_snapshot_id=permission_snapshot_id,
-            requested_permission_mode=requested_permission_mode,
-            content=content,
-            occurred_at=occurred_at,
-            actor_kind=actor_kind,
-            actor_id=actor_id,
-        )
-        if (
-            prepared.session_id != guard.session_id
-            or prepared.command_id != command_id
-            or prepared.turn_id != turn_id
-            or prepared.entry_id != entry_id
-            or prepared.context_binding_revision_id
-            != context_binding_revision_id
-            or prepared.permission_snapshot_id != permission_snapshot_id
-            or prepared.requested_permission_mode is not requested_permission_mode
-            or prepared.content != content
-            or prepared.occurred_at != occurred_at
-            or prepared.actor_kind != actor_kind
-            or prepared.actor_id != actor_id
-        ):
-            raise ValueError("prepared ROOT admission does not exact-join arguments")
-        semantic_digest = prepared.semantic_digest
+    ) -> AcceptedRootTurnAdmission:
+        """Freeze the canonical Session binding under the admission row lock."""
+
+        if intent.session_id != guard.session_id:
+            raise ValueError("ROOT turn intent belongs to another session")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
+            session = self._require_writer(connection, guard, lock=False)
             existing = connection.execute(
                 """
-                SELECT command_kind, semantic_digest, target_turn_id
+                SELECT command_kind, request_schema_version, semantic_digest,
+                       target_turn_id
                 FROM pulsara_v3.session_commands
                 WHERE session_id = %s AND command_id = %s
                 """,
-                (guard.session_id, command_id),
+                (guard.session_id, intent.command_id),
             ).fetchone()
             if existing is not None:
+                turn = connection.execute(
+                    """
+                    SELECT model_call_binding FROM pulsara_v3.turns
+                    WHERE session_id = %s AND id = %s
+                    """,
+                    (guard.session_id, intent.turn_id),
+                ).fetchone()
+                binding = (
+                    None
+                    if turn is None
+                    else model_call_binding_from_dict(turn["model_call_binding"])
+                )
+                if binding is None:
+                    raise ConversationKernelConflict("command identity conflict")
+                prepared = build_prepared_root_turn_admission(
+                    session_id=intent.session_id,
+                    command_id=intent.command_id,
+                    turn_id=intent.turn_id,
+                    entry_id=intent.entry_id,
+                    context_binding_revision_id=intent.context_binding_revision_id,
+                    permission_snapshot_id=intent.permission_snapshot_id,
+                    requested_permission_mode=intent.requested_permission_mode,
+                    model_call_binding=binding,
+                    content=intent.content,
+                    occurred_at=intent.occurred_at,
+                    actor_kind=intent.actor_kind,
+                    actor_id=intent.actor_id,
+                    expected_permission_snapshot=intent.expected_permission_snapshot,
+                )
                 if (
                     existing["command_kind"] != "SUBMIT_PROMPT"
-                    or existing["semantic_digest"] != semantic_digest
-                    or existing["target_turn_id"] != turn_id
+                    or existing["request_schema_version"] != "submit_prompt.v2"
+                    or existing["semantic_digest"] != prepared.semantic_digest
+                    or existing["target_turn_id"] != intent.turn_id
                 ):
                     raise ConversationKernelConflict("command identity conflict")
-                return self._accepted_entry(connection, guard.session_id, entry_id)
+                return AcceptedRootTurnAdmission(
+                    self._accepted_entry(connection, guard.session_id, intent.entry_id),
+                )
+
+            binding = model_call_binding_from_dict(session["model_call_binding"])
+            if binding is None:
+                raise ValueError("session has no model configuration")
+            binding, _resolved, preference_reset = model_resolution_snapshot.reconcile(
+                binding
+            )
+            if preference_reset:
+                connection.execute(
+                    """
+                    UPDATE pulsara_v3.sessions
+                    SET model_call_binding=%s, updated_at=clock_timestamp()
+                    WHERE id=%s
+                    """,
+                    (Jsonb(model_call_binding_to_dict(binding)), guard.session_id),
+                )
+            prepared = build_prepared_root_turn_admission(
+                session_id=intent.session_id,
+                command_id=intent.command_id,
+                turn_id=intent.turn_id,
+                entry_id=intent.entry_id,
+                context_binding_revision_id=intent.context_binding_revision_id,
+                permission_snapshot_id=intent.permission_snapshot_id,
+                requested_permission_mode=intent.requested_permission_mode,
+                model_call_binding=binding,
+                content=intent.content,
+                occurred_at=intent.occurred_at,
+                actor_kind=intent.actor_kind,
+                actor_id=intent.actor_id,
+                expected_permission_snapshot=intent.expected_permission_snapshot,
+            )
             self._require_root_admission_open(connection, session_id=guard.session_id)
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
-            workspace_id = self._workspace_id(connection, guard.session_id)
+            workspace_id = str(session["workspace_id"])
             permission = self._freeze_root_permission_snapshot(
                 connection,
                 session_id=guard.session_id,
-                snapshot_id=permission_snapshot_id,
-                requested_mode=requested_permission_mode,
+                snapshot_id=intent.permission_snapshot_id,
+                requested_mode=intent.requested_permission_mode,
                 admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
             )
             if (
-                prepared.expected_permission_snapshot is not None
-                and permission != prepared.expected_permission_snapshot
+                intent.expected_permission_snapshot is not None
+                and permission != intent.expected_permission_snapshot
             ):
                 raise ConversationKernelConflict("INGRESS_PRECONDITION_CHANGED")
             handoff = self._eligible_plan_handoff(
@@ -202,7 +276,8 @@ class _ConversationOperations:
                 """
                 INSERT INTO pulsara_v3.turns (
                     id, session_id, workspace_id, conversation_scope_kind,
-                    status, initial_entry_id, current_context_binding_revision_id,
+                    model_call_binding, status, initial_entry_id,
+                    current_context_binding_revision_id,
                     permission_snapshot_id, requested_permission_mode,
                     effective_permission_mode, permission_admission_source,
                     permission_overlay, permission_plan_context_ordinal,
@@ -211,23 +286,24 @@ class _ConversationOperations:
                     permission_inherited_from_turn_id, permission_contract_id,
                     permission_contract_fingerprint,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s,
+                ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
-                    turn_id,
+                    intent.turn_id,
                     guard.session_id,
                     workspace_id,
-                    entry_id,
-                    context_binding_revision_id,
+                    Jsonb(model_call_binding_to_dict(binding)),
+                    intent.entry_id,
+                    intent.context_binding_revision_id,
                     *self._permission_columns(permission),
                 ),
             )
             self._insert_initial_context_binding_revision(
                 connection,
                 session_id=guard.session_id,
-                turn_id=turn_id,
-                revision_id=context_binding_revision_id,
+                turn_id=intent.turn_id,
+                revision_id=intent.context_binding_revision_id,
                 initial_entry_sequence=entry_sequence,
                 scope_kind=ConversationScopeKind.ROOT,
                 scope_subagent_task_id=None,
@@ -236,13 +312,13 @@ class _ConversationOperations:
                 connection,
                 session_id=guard.session_id,
                 workspace_id=workspace_id,
-                turn_id=turn_id,
-                entry_id=entry_id,
+                turn_id=intent.turn_id,
+                entry_id=intent.entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.USER_MESSAGE,
                 scope_kind=ConversationScopeKind.ROOT,
                 scope_task_id=None,
-                content=content,
+                content=intent.content,
                 source_plan_workflow_id=(
                     None if handoff is None else handoff.workflow_id
                 ),
@@ -258,9 +334,14 @@ class _ConversationOperations:
                     request_schema_version, semantic_digest,
                     target_kind, target_turn_id
                 ) VALUES (%s, %s, 'SUBMIT_PROMPT',
-                          'submit_prompt.v1', %s, 'TURN', %s)
+                          'submit_prompt.v2', %s, 'TURN', %s)
                 """,
-                (guard.session_id, command_id, semantic_digest, turn_id),
+                (
+                    guard.session_id,
+                    intent.command_id,
+                    prepared.semantic_digest,
+                    intent.turn_id,
+                ),
             )
             event = self._append_events(
                 connection,
@@ -268,75 +349,85 @@ class _ConversationOperations:
                 workspace_id=workspace_id,
                 drafts=(prepared.event,),
             )[0]
-            return AcceptedEntry(
-                entry_id=entry_id,
-                turn_id=turn_id,
-                entry_sequence=entry_sequence,
-                event_sequence=event.event_sequence,
+            return AcceptedRootTurnAdmission(
+                AcceptedEntry(
+                    entry_id=intent.entry_id,
+                    turn_id=intent.turn_id,
+                    entry_sequence=entry_sequence,
+                    event_sequence=event.event_sequence,
+                ),
+                preference_reset,
             )
 
-    def accept_root_turn(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedRootTurnAdmission,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry:
-        if candidate.session_id != guard.session_id:
-            raise ValueError("prepared ROOT admission belongs to another session")
-        return self.start_root_turn(
-            guard,
-            command_id=candidate.command_id,
-            turn_id=candidate.turn_id,
-            entry_id=candidate.entry_id,
-            context_binding_revision_id=candidate.context_binding_revision_id,
-            permission_snapshot_id=candidate.permission_snapshot_id,
-            requested_permission_mode=candidate.requested_permission_mode,
-            content=candidate.content,
-            occurred_at=candidate.occurred_at,
-            actor_kind=candidate.actor_kind,
-            actor_id=candidate.actor_id,
-            deadline_monotonic=deadline_monotonic,
-            _prepared_candidate=candidate,
-        )
-
-    def confirm_root_turn_admission(
+    def confirm_root_turn_intent(
         self,
         *,
-        candidate: PreparedRootTurnAdmission,
+        intent: PreparedRootTurnIntent,
         guard: HostWriterGuard | None = None,
         deadline_monotonic: float,
     ) -> TurnAdmissionConfirmation:
+        """Confirm a direct admission by its stored binding, never Session current."""
+
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
             isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
         ) as connection:
             if guard is not None:
-                if guard.session_id != candidate.session_id:
+                if guard.session_id != intent.session_id:
                     raise ValueError("ROOT admission guard belongs to another session")
                 self._require_writer(connection, guard, lock=False)
             command = connection.execute(
-                """SELECT * FROM pulsara_v3.session_commands
-                   WHERE session_id = %s AND command_id = %s""",
-                (candidate.session_id, candidate.command_id),
+                """
+                SELECT * FROM pulsara_v3.session_commands
+                WHERE session_id=%s AND command_id=%s
+                """,
+                (intent.session_id, intent.command_id),
             ).fetchone()
             turn = connection.execute(
-                """SELECT * FROM pulsara_v3.turns
-                   WHERE session_id = %s AND id = %s""",
-                (candidate.session_id, candidate.turn_id),
+                """
+                SELECT * FROM pulsara_v3.turns
+                WHERE session_id=%s AND id=%s
+                """,
+                (intent.session_id, intent.turn_id),
             ).fetchone()
             revision = connection.execute(
                 """SELECT * FROM pulsara_v3.turn_context_binding_revisions
                    WHERE session_id = %s AND id = %s""",
-                (candidate.session_id, candidate.context_binding_revision_id),
+                (intent.session_id, intent.context_binding_revision_id),
             ).fetchone()
             entry = connection.execute(
                 """SELECT * FROM pulsara_v3.transcript_entries
                    WHERE session_id = %s AND id = %s""",
-                (candidate.session_id, candidate.entry_id),
+                (intent.session_id, intent.entry_id),
             ).fetchone()
+            if all(row is None for row in (command, turn, revision, entry)):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
+            if any(row is None for row in (command, turn, revision, entry)):
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            assert turn is not None
+            try:
+                binding = model_call_binding_from_dict(turn["model_call_binding"])
+            except (TypeError, ValueError):
+                binding = None
+            if binding is None:
+                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
+            candidate = build_prepared_root_turn_admission(
+                session_id=intent.session_id,
+                command_id=intent.command_id,
+                turn_id=intent.turn_id,
+                entry_id=intent.entry_id,
+                context_binding_revision_id=intent.context_binding_revision_id,
+                permission_snapshot_id=intent.permission_snapshot_id,
+                requested_permission_mode=intent.requested_permission_mode,
+                model_call_binding=binding,
+                content=intent.content,
+                occurred_at=intent.occurred_at,
+                actor_kind=intent.actor_kind,
+                actor_id=intent.actor_id,
+                expected_permission_snapshot=intent.expected_permission_snapshot,
+            )
             event = connection.execute(
                 """SELECT * FROM pulsara_v3.agent_events
                    WHERE session_id = %s AND event_id = %s""",
@@ -355,6 +446,7 @@ class _ConversationOperations:
                 return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
             matches = (
                 str(command["command_kind"]) == "SUBMIT_PROMPT"
+                and str(command["request_schema_version"]) == "submit_prompt.v2"
                 and str(command["semantic_digest"]) == candidate.semantic_digest
                 and str(command["target_kind"]) == "TURN"
                 and str(command["target_turn_id"]) == candidate.turn_id
@@ -363,6 +455,8 @@ class _ConversationOperations:
                 and str(turn["initial_entry_id"]) == candidate.entry_id
                 and str(turn["current_context_binding_revision_id"])
                 == candidate.context_binding_revision_id
+                and model_call_binding_from_dict(turn["model_call_binding"])
+                == candidate.model_call_binding
                 and permission.snapshot_id == candidate.permission_snapshot_id
                 and permission.requested_mode is candidate.requested_permission_mode
                 and self._initial_context_binding_revision_matches(
@@ -386,7 +480,9 @@ class _ConversationOperations:
                 return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
             return TurnAdmissionConfirmation(
                 TurnAdmissionConfirmationKind.FULL,
-                self._accepted_entry(connection, candidate.session_id, candidate.entry_id),
+                self._accepted_entry(
+                    connection, candidate.session_id, candidate.entry_id
+                ),
             )
 
     def prepare_provider_input_cut(
@@ -434,7 +530,9 @@ class _ConversationOperations:
     ) -> PreparedProviderInputCut:
         """Prepare the exact active/idle compaction cut under the current writer."""
 
-        statuses = ("RUNNING", "COMPLETED", "INTERRUPTED") if allow_terminal else ("RUNNING",)
+        statuses = (
+            ("RUNNING", "COMPLETED", "INTERRUPTED") if allow_terminal else ("RUNNING",)
+        )
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
@@ -619,7 +717,7 @@ class _ConversationOperations:
                     """
                     INSERT INTO pulsara_v3.turns (
                         id, session_id, workspace_id, conversation_scope_kind,
-                        status, initial_entry_id,
+                        model_call_binding, status, initial_entry_id,
                         current_context_binding_revision_id,
                         permission_snapshot_id, requested_permission_mode,
                         effective_permission_mode, permission_admission_source,
@@ -629,13 +727,14 @@ class _ConversationOperations:
                         permission_inherited_from_turn_id, permission_contract_id,
                         permission_contract_fingerprint,
                         permission_snapshot_fingerprint
-                    ) VALUES (%s, %s, %s, 'ROOT', 'RUNNING', %s, %s,
+                    ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
                               %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         turn_id,
                         guard.session_id,
                         workspace_id,
+                        Jsonb(origin_turn["model_call_binding"]),
                         entry_id,
                         target.context_binding_revision_id,
                         *self._permission_columns(permission),
@@ -818,9 +917,7 @@ class _ConversationOperations:
                 (candidate.session_id, candidate.target_turn_id),
             ).fetchone()
             if command is None:
-                if turn is None or not _manual_compaction_turn_matches(
-                    turn, candidate
-                ):
+                if turn is None or not _manual_compaction_turn_matches(turn, candidate):
                     return CompactionConfirmationKind.CONFLICT
                 return CompactionConfirmationKind.NONE
             if turn is None or not _manual_compaction_turn_matches(turn, candidate):
@@ -866,13 +963,10 @@ class _ConversationOperations:
             if existing is not None:
                 if (
                     str(existing["command_kind"]) != "COMPACT_CONTEXT"
-                    or str(existing["request_schema_version"])
-                    != "compact_context.v1"
-                    or str(existing["semantic_digest"])
-                    != candidate.semantic_digest
+                    or str(existing["request_schema_version"]) != "compact_context.v1"
+                    or str(existing["semantic_digest"]) != candidate.semantic_digest
                     or str(existing["target_kind"]) != "TURN"
-                    or str(existing["target_turn_id"])
-                    != candidate.target_turn_id
+                    or str(existing["target_turn_id"]) != candidate.target_turn_id
                 ):
                     raise ConversationKernelConflict(
                         "manual compaction command identity conflict"
@@ -1061,9 +1155,7 @@ class _ConversationOperations:
                     and predecessor is not None
                     and str(turn["current_context_binding_revision_id"])
                     == candidate.predecessor.binding_revision_id
-                    and self._compaction_predecessor_row_matches(
-                        predecessor, candidate
-                    )
+                    and self._compaction_predecessor_row_matches(predecessor, candidate)
                 ):
                     return CompactionAdoptionConfirmation(
                         CompactionConfirmationKind.NONE
@@ -1079,9 +1171,7 @@ class _ConversationOperations:
                 != candidate.binding.binding_revision_id
                 or not self._compaction_snapshot_row_matches(snapshot, candidate)
                 or not self._compaction_binding_row_matches(revision, candidate)
-                or not self._compaction_predecessor_row_matches(
-                    predecessor, candidate
-                )
+                or not self._compaction_predecessor_row_matches(predecessor, candidate)
                 or not _event_row_matches_draft(event, candidate.event)
             ):
                 return CompactionAdoptionConfirmation(
@@ -1105,8 +1195,7 @@ class _ConversationOperations:
         predecessor = candidate.predecessor
         if (
             str(turn["workspace_id"]) != candidate.scope.workspace_id
-            or str(turn["conversation_scope_kind"])
-            != candidate.scope.scope_kind.value
+            or str(turn["conversation_scope_kind"]) != candidate.scope.scope_kind.value
             or (
                 None
                 if turn["scope_subagent_task_id"] is None
@@ -1116,8 +1205,7 @@ class _ConversationOperations:
             or str(turn["status"]) != candidate.expected_turn_status
             or str(turn["current_context_binding_revision_id"])
             != predecessor.binding_revision_id
-            or int(turn["current_revision_ordinal"])
-            != predecessor.revision_ordinal
+            or int(turn["current_revision_ordinal"]) != predecessor.revision_ordinal
             or str(turn["current_base_kind"]) != predecessor.base_kind
             or (
                 None
@@ -1125,8 +1213,7 @@ class _ConversationOperations:
                 else str(turn["current_snapshot_id"])
             )
             != predecessor.context_snapshot_id
-            or int(turn["current_source_cut"])
-            != predecessor.source_through_sequence
+            or int(turn["current_source_cut"]) != predecessor.source_through_sequence
         ):
             raise ConversationKernelConflict(
                 "compaction target or predecessor identity drifted"
@@ -1225,9 +1312,7 @@ class _ConversationOperations:
                 scope=candidate.scope,
                 binding_revision_id=predecessor.binding_revision_id,
                 binding_revision_ordinal=predecessor.revision_ordinal,
-                persisted_revision_genesis_marker=(
-                    predecessor.source_through_sequence
-                ),
+                persisted_revision_genesis_marker=(predecessor.source_through_sequence),
                 effective_materialization_lineage_floor=0,
             )
         else:
@@ -1253,9 +1338,7 @@ class _ConversationOperations:
                 scope=candidate.scope,
                 binding_revision_id=predecessor.binding_revision_id,
                 binding_revision_ordinal=predecessor.revision_ordinal,
-                persisted_revision_genesis_marker=(
-                    predecessor.source_through_sequence
-                ),
+                persisted_revision_genesis_marker=(predecessor.source_through_sequence),
                 effective_materialization_lineage_floor=(
                     predecessor.source_through_sequence
                 ),
@@ -1284,9 +1367,7 @@ class _ConversationOperations:
                     (blob_id,),
                 ).fetchone()
                 if row is None:
-                    raise ConversationKernelConflict(
-                        "compaction source blob is absent"
-                    )
+                    raise ConversationKernelConflict("compaction source blob is absent")
                 body = bytes(row["body"])
                 if (
                     str(row["logical_digest"]) != expected_digest
@@ -1307,20 +1388,15 @@ class _ConversationOperations:
             PreparedProviderInputCut(
                 session_id=candidate.scope.session_id,
                 turn_id=candidate.scope.turn_id,
-                context_binding_revision_id=(
-                    predecessor.binding_revision_id
-                ),
-                provider_input_through_sequence=(
-                    safe_head
-                ),
+                context_binding_revision_id=(predecessor.binding_revision_id),
+                provider_input_through_sequence=(safe_head),
             ),
             deadline_monotonic=deadline_monotonic,
             _connection=connection,
         )
         canonical = dispatch.compile_snapshot.canonical_input
         if (
-            canonical.identity.provider_input_through_sequence
-            != safe_head
+            canonical.identity.provider_input_through_sequence != safe_head
             or safe_head < candidate.snapshot.source_through_sequence
         ):
             raise ConversationKernelConflict(
@@ -1331,9 +1407,7 @@ class _ConversationOperations:
             effective_materialization_lineage_floor=(
                 lineage.effective_materialization_lineage_floor
             ),
-            source_through_sequence=(
-                candidate.snapshot.source_through_sequence
-            ),
+            source_through_sequence=(candidate.snapshot.source_through_sequence),
             ordered_items=canonical.items,
             closures=canonical.closures,
             late_outcomes=canonical.late_outcomes,
@@ -1342,9 +1416,7 @@ class _ConversationOperations:
             canonical_compaction_range_digest(lineage, canonical_range)
             != candidate.snapshot.source_digest
         ):
-            raise ConversationKernelConflict(
-                "compaction source lineage digest drifted"
-            )
+            raise ConversationKernelConflict("compaction source lineage digest drifted")
 
     def _compaction_snapshot_row_matches(
         self,
@@ -1362,8 +1434,7 @@ class _ConversationOperations:
             str(row["id"]) == snapshot.snapshot_id
             and str(row["session_id"]) == snapshot.session_id
             and str(row["workspace_id"]) == snapshot.workspace_id
-            and int(row["source_through_sequence"])
-            == snapshot.source_through_sequence
+            and int(row["source_through_sequence"]) == snapshot.source_through_sequence
             and str(row["source_digest"]) == snapshot.source_digest
             and str(row["compiler_contract"]) == snapshot.compiler_contract
             and str(row["prompt_contract"]) == snapshot.prompt_contract
@@ -1385,10 +1456,8 @@ class _ConversationOperations:
             and str(row["turn_id"]) == binding.turn_id
             and int(row["revision_ordinal"]) == binding.revision_ordinal
             and str(row["base_kind"]) == binding.base_kind
-            and str(row["context_snapshot_id"])
-            == binding.context_snapshot_id
-            and int(row["source_through_sequence"])
-            == binding.source_through_sequence
+            and str(row["context_snapshot_id"]) == binding.context_snapshot_id
+            and int(row["source_through_sequence"]) == binding.source_through_sequence
         )
 
     @staticmethod
@@ -1449,8 +1518,7 @@ class _ConversationOperations:
         if (
             (provider_replay is not None)
             != (provider_replay_disposition is ProviderReplayDisposition.NATIVE_REPLAY)
-            or provider_wire_api
-            not in {"openai_chat_completions", "openai_responses"}
+            or provider_wire_api not in {"openai_chat_completions", "openai_responses"}
             or (
                 provider_wire_api == "openai_responses"
                 and provider_replay_disposition
@@ -1835,9 +1903,7 @@ class _ConversationOperations:
                 or str(row["provider_replay_disposition"])
                 != provider_replay_disposition.value
                 or row["provider_replay_fragment_id"]
-                != (
-                    None if provider_replay is None else provider_replay.replay_id
-                )
+                != (None if provider_replay is None else provider_replay.replay_id)
                 or self._content_from_row(row) != parent_content
                 or str(row["event_type"]) != expected_event_type.value
                 or str(row["actor_kind"]) != "model"
@@ -1863,14 +1929,10 @@ class _ConversationOperations:
             elif (
                 len(replay_rows) != 1
                 or str(replay_rows[0]["id"]) != provider_replay.replay_id
-                or str(replay_rows[0]["workspace_id"])
-                != provider_replay.workspace_id
+                or str(replay_rows[0]["workspace_id"]) != provider_replay.workspace_id
                 or str(replay_rows[0]["wire_api"]) != provider_replay.wire_api
-                or str(replay_rows[0]["codec_kind"])
-                != provider_replay.codec_kind.value
-                or str(
-                    replay_rows[0]["provider_replay_contract_fingerprint"]
-                )
+                or str(replay_rows[0]["codec_kind"]) != provider_replay.codec_kind.value
+                or str(replay_rows[0]["provider_replay_contract_fingerprint"])
                 != provider_replay.provider_replay_contract_fingerprint
                 or str(replay_rows[0]["replay_target_fingerprint"])
                 != provider_replay.replay_target_fingerprint
@@ -1880,10 +1942,8 @@ class _ConversationOperations:
                 != provider_replay.payload_bytes
                 or str(replay_rows[0]["payload_digest"])
                 != provider_replay.payload_digest
-                or int(replay_rows[0]["payload_size"])
-                != provider_replay.payload_size
-                or int(replay_rows[0]["item_count"])
-                != provider_replay.item_count
+                or int(replay_rows[0]["payload_size"]) != provider_replay.payload_size
+                or int(replay_rows[0]["item_count"]) != provider_replay.item_count
                 or str(replay_rows[0]["fragment_fingerprint"])
                 != provider_replay.fragment_fingerprint
             ):
@@ -2005,8 +2065,7 @@ class _ConversationOperations:
                 or str(result_rows[0]["result_fingerprint"])
                 != subagent_result.result_fingerprint
                 or str(result_rows[0]["status"]) != "COMPLETED"
-                or str(result_rows[0]["result_event_type"])
-                != "SubagentResultAccepted"
+                or str(result_rows[0]["result_event_type"]) != "SubagentResultAccepted"
                 or str(result_rows[0]["status_event_type"])
                 != "SubagentTaskStatusAccepted"
             ):

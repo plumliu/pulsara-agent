@@ -167,7 +167,7 @@ Pulsara exposed or outer name differs from the compatibility primary name.
 
 `transcript_path` and `agent_transcript_path` are deliberately null. Hook stdin
 does not contain Plugin identity, install paths, private replay, raw artifacts, or
-the Pulsara API key. A vendor Hook that requires a transcript file, Plugin
+any model or retrieval credential. A vendor Hook that requires a transcript file, Plugin
 provenance in stdin, hidden reasoning, or a different tool-input schema has no
 exact mapping.
 
@@ -184,7 +184,8 @@ Pulsara does not interpolate either placeholder into the reviewed command.
 Reference them using the command shell's own syntax and preserve the resulting
 behavior exactly. The generic executor also supplies `PULSARA_HOOK_SOURCE_DIR`
 and, when applicable, `PULSARA_PROJECT_DIR`. It inherits the ordinary sanitized
-host environment but always removes `PULSARA_API_KEY`.
+host environment; inherited variables containing a caller-bound credential are
+omitted at the process boundary.
 
 Do not rewrite a reviewed command, guess a PATH executable, install a dependency,
 or add a launcher merely to make conversion pass. If relocation into the managed

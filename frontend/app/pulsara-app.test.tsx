@@ -29,15 +29,28 @@ const bootstrap: RuntimeBootstrap = {
     path: '/tmp/pulsara_agent',
     kind: 'project',
   },
-  provider: {
-    provider: 'local-test',
-    endpoint_origin: 'http://localhost',
-    pro_model: 'test-model',
-    flash_model: 'test-mini',
-    api_key_set: true,
-  },
   protocol: { major: 3, minor: 0 },
-  runtime: { status: 'ready', origin: 'http://localhost' },
+  runtime: { status: 'ready', origin: 'http://localhost', database_state: 'ready' },
+  database_state: 'ready',
+  local_settings: {
+    state: 'ready',
+    postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },
+    dashscope_credentials: { embedding: 'MISSING', rerank: 'MISSING' },
+  },
+  model_configurations: [{
+    id: 'model-connection:00000000000000000000000000000000',
+    route_id: 'test',
+    route_name: 'Local Test',
+    wire_api: 'openai_responses',
+    model_id: 'test-model',
+    display_name: 'test-model',
+    base_url: 'http://localhost',
+    status: 'ready',
+    credential_state: 'PRESENT',
+    context_tokens: 256000,
+    reasoning: { kind: 'selectable', effort: { values: ['low', 'medium', 'high'] }, toggle: false, budget_tokens: null },
+    default_reasoning: { kind: 'effort', value: 'medium' },
+  }],
 };
 
 const initialSession: SessionSummary = {
@@ -47,6 +60,10 @@ const initialSession: SessionSummary = {
   status: 'running',
   updatedAt: '刚刚',
   live: false,
+  modelCallBinding: {
+    connection_id: 'model-connection:00000000000000000000000000000000',
+    reasoning: { kind: 'effort', value: 'medium' },
+  },
 };
 
 const capabilitySnapshot: CapabilitySnapshot = {
@@ -310,6 +327,62 @@ class FakeAdapter implements RuntimeAdapter {
 
   async bootstrap() {
     return bootstrap;
+  }
+
+  async modelCatalog() {
+    return {
+      status: 'ready' as const,
+      routes: [{
+        route_id: 'test',
+        display_name: 'Local Test',
+        models: [{
+          model_id: 'test-model',
+          display_name: 'test-model',
+          wire_dialect: 'openai_compatible' as const,
+          context_tokens: 256000,
+          input_tokens: 256000,
+          output_tokens: 8192,
+          tool_call: true,
+          wire_shape_hint: 'responses' as const,
+          wire_apis: [{
+            wire_api: 'openai_responses' as const,
+            executable: true,
+            reason: null,
+            endpoint: 'http://localhost',
+            recommended: true,
+            reasoning: bootstrap.model_configurations[0].reasoning,
+          }],
+        }],
+      }],
+    };
+  }
+
+  async localSettings() {
+    return {
+      local_settings: bootstrap.local_settings,
+      model_configurations: bootstrap.model_configurations,
+      database_state: bootstrap.database_state,
+    };
+  }
+
+  async addModelConfiguration() {
+    return { model_configuration: bootstrap.model_configurations[0], wire_shape_warning: false };
+  }
+
+  async savePostgres() {
+    return { ...(await this.localSettings()), restart_required: false };
+  }
+
+  async checkPostgres() { return { database_name: 'pulsara' }; }
+  async migratePostgres() { return { database_name: 'pulsara' }; }
+  async putDashScopeCredential() { return 'PRESENT' as const; }
+  async deleteDashScopeCredential() { return 'MISSING' as const; }
+
+  async updateModelCallBinding(sessionId: string, binding: NonNullable<SessionSummary['modelCallBinding']>) {
+    this.sessions = this.sessions.map((session) => session.id === sessionId
+      ? { ...session, modelCallBinding: binding }
+      : session);
+    return { modelCallBinding: binding, reasoningPreferenceReset: false };
   }
 
   listSessions = vi.fn(async () => this.sessions.map((session) => ({ ...session })));
@@ -1410,6 +1483,282 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy();
   });
 
+  it('replaces the entire composer until an active session exists', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [];
+    render(<PulsaraApp adapter={adapter} />);
+
+    await screen.findByText(/准备好继续/);
+    fireEvent.click(screen.getByRole('button', { name: '会话' }));
+
+    expect(await screen.findByText('创建或选择会话后开始')).toBeTruthy();
+    expect(screen.getByText('当前没有活动会话')).toBeTruthy();
+    expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
+    expect(screen.queryByRole('button', { name: '选择模型' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '先规划' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /完全访问/ })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '创建会话' }));
+    expect(screen.getByRole('heading', { name: '新建会话' })).toBeTruthy();
+  });
+
+  it('blocks the workbench and guides setup without touching session data in zero configuration', async () => {
+    class ZeroConfigAdapter extends FakeAdapter {
+      override listSessions = vi.fn(async (): Promise<SessionSummary[]> => {
+        throw new Error('session data plane must not be called');
+      });
+
+      override async bootstrap(): Promise<RuntimeBootstrap> {
+        return {
+          ...bootstrap,
+          runtime: {
+            ...bootstrap.runtime,
+            database_state: 'database_not_configured',
+          },
+          database_state: 'database_not_configured',
+          local_settings: {
+            state: 'ready',
+            postgres: null,
+            dashscope_credentials: { embedding: 'MISSING', rerank: 'MISSING' },
+          },
+          model_configurations: [],
+        };
+      }
+
+      override async localSettings() {
+        return {
+          local_settings: {
+            state: 'ready' as const,
+            postgres: null,
+            dashscope_credentials: { embedding: 'MISSING' as const, rerank: 'MISSING' as const },
+          },
+          model_configurations: [],
+          database_state: 'database_not_configured' as const,
+        };
+      }
+    }
+
+    const adapter = new ZeroConfigAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+
+    expect(await screen.findByRole('heading', { name: '先连接 PostgreSQL，再开始会话' })).toBeTruthy();
+    expect(screen.getByLabelText('PostgreSQL 配置引导')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /新建会话/ })).toBeNull();
+    expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
+    expect(adapter.listSessions).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /前往本地服务设置/ }));
+    expect(await screen.findByRole('heading', { name: 'PostgreSQL' })).toBeTruthy();
+    expect(screen.getByText('尚未配置 PostgreSQL')).toBeTruthy();
+  });
+
+  it('replaces overview session content with PostgreSQL setup guidance while unavailable', async () => {
+    class UnavailableDatabaseAdapter extends FakeAdapter {
+      override listSessions = vi.fn(async (): Promise<SessionSummary[]> => {
+        throw new Error('session data plane must not be called');
+      });
+
+      override async bootstrap(): Promise<RuntimeBootstrap> {
+        return {
+          ...bootstrap,
+          runtime: { ...bootstrap.runtime, database_state: 'database_unavailable' },
+          database_state: 'database_unavailable',
+        };
+      }
+    }
+
+    const adapter = new UnavailableDatabaseAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: 'PostgreSQL 当前无法连接' });
+    fireEvent.click(screen.getByRole('button', { name: '总览' }));
+
+    expect(await screen.findByText(/先准备好/)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'PostgreSQL 当前无法连接' })).toBeTruthy();
+    expect(screen.getByText('保存连接')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '最近会话' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '开始新任务' })).toBeNull();
+    expect(adapter.listSessions).not.toHaveBeenCalled();
+  });
+
+  it('adds a catalog-backed model configuration without retaining the typed API key', async () => {
+    const adapter = new FakeAdapter();
+    const add = vi.spyOn(adapter, 'addModelConfiguration');
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '模型' }));
+    fireEvent.click(screen.getByRole('button', { name: /添加配置/ }));
+
+    await screen.findByRole('option', { name: 'Local Test' });
+    fireEvent.change(screen.getByLabelText('提供方'), { target: { value: 'test' } });
+    await screen.findByRole('option', { name: /test-model · test-model/ });
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'test-model' } });
+    await screen.findByRole('option', { name: 'Responses · models.dev 建议' });
+    fireEvent.change(screen.getByLabelText('API 协议'), { target: { value: 'openai_responses' } });
+    const secret = 'front-end-secret-sentinel';
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: secret } });
+    expect(screen.getByText('确认连接')).toBeTruthy();
+    expect(container.textContent).toContain('只支持与 OpenAI Chat Completions 或 Responses 兼容的接口');
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => expect(add).toHaveBeenCalledWith({
+      route_id: 'test',
+      model_id: 'test-model',
+      wire_api: 'openai_responses',
+      api_key: secret,
+    }));
+    await waitFor(() => expect(screen.queryByLabelText('API key')).toBeNull());
+    expect(container.textContent).not.toContain(secret);
+  });
+
+  it('sorts provider names and model IDs alphabetically in their selectors', async () => {
+    const adapter = new FakeAdapter();
+    const originalCatalog = adapter.modelCatalog.bind(adapter);
+    vi.spyOn(adapter, 'modelCatalog').mockImplementation(async () => {
+      const catalog = await originalCatalog();
+      const baseModel = catalog.routes[0].models[0];
+      return {
+        ...catalog,
+        routes: [{
+          route_id: 'zulu',
+          display_name: 'Zulu Provider',
+          models: [],
+        }, {
+          route_id: 'alpha',
+          display_name: 'alpha Provider',
+          models: [
+            { ...baseModel, model_id: 'zeta-model', display_name: 'Zeta Model' },
+            { ...baseModel, model_id: 'Alpha-model', display_name: 'Alpha Model' },
+            { ...baseModel, model_id: 'middle-model', display_name: 'Middle Model' },
+          ],
+        }, {
+          route_id: 'bravo',
+          display_name: 'Bravo Provider',
+          models: [],
+        }],
+      };
+    });
+
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '模型' }));
+    fireEvent.click(screen.getByRole('button', { name: /添加配置/ }));
+
+    const providerSelect = await screen.findByLabelText('提供方') as HTMLSelectElement;
+    expect([...providerSelect.options].slice(1).map((option) => option.value)).toEqual([
+      'alpha', 'bravo', 'zulu',
+    ]);
+
+    fireEvent.change(providerSelect, { target: { value: 'alpha' } });
+    const modelSelect = screen.getByLabelText('模型') as HTMLSelectElement;
+    expect([...modelSelect.options].slice(1).map((option) => option.value)).toEqual([
+      'Alpha-model', 'middle-model', 'zeta-model',
+    ]);
+  });
+
+  it('keeps catalog routes visible when their wire adapters are not executable', async () => {
+    const adapter = new FakeAdapter();
+    const originalCatalog = adapter.modelCatalog.bind(adapter);
+    vi.spyOn(adapter, 'modelCatalog').mockImplementation(async () => {
+      const catalog = await originalCatalog();
+      return {
+        ...catalog,
+        routes: [...catalog.routes, {
+          route_id: 'catalog-only',
+          display_name: 'Catalog Only Provider',
+          models: [{
+            model_id: 'catalog-only-model',
+            display_name: 'Catalog Only Model',
+            wire_dialect: 'provider_native' as const,
+            context_tokens: 256000,
+            input_tokens: 256000,
+            output_tokens: 8192,
+            tool_call: null,
+            wire_shape_hint: null,
+            wire_apis: [
+              {
+                wire_api: 'openai_chat_completions' as const,
+                executable: false,
+                reason: 'route_wire_adapter_unavailable',
+                endpoint: null,
+              },
+              {
+                wire_api: 'openai_responses' as const,
+                executable: false,
+                reason: 'route_wire_adapter_unavailable',
+                endpoint: null,
+              },
+            ],
+          }],
+        }],
+      };
+    });
+
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '模型' }));
+    fireEvent.click(screen.getByRole('button', { name: /添加配置/ }));
+
+    await screen.findByRole('option', { name: 'Catalog Only Provider' });
+    fireEvent.change(screen.getByLabelText('提供方'), { target: { value: 'catalog-only' } });
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'catalog-only-model' } });
+
+    expect(screen.getByText(/尚未为这个提供方注册可执行/)).toBeTruthy();
+    expect((screen.getByLabelText('API 协议') as HTMLSelectElement).disabled).toBe(true);
+    expect(screen.getByRole('option', { name: 'Chat Completions · 暂不支持' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Responses · 暂不支持' })).toBeTruthy();
+  });
+
+  it('keeps an exact reasoning selection until the user changes it again', async () => {
+    const adapter = new FakeAdapter();
+    const update = vi.spyOn(adapter, 'updateModelCallBinding');
+    const first = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+
+    fireEvent.click(screen.getByRole('button', { name: /推理 medium/ }));
+    expect(screen.queryByText('Token 预算')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'high' }));
+    await waitFor(() => expect(update).toHaveBeenCalledWith(
+      'session-1',
+      {
+        connection_id: 'model-connection:00000000000000000000000000000000',
+        reasoning: { kind: 'effort', value: 'high' },
+      },
+    ));
+    expect(await screen.findByRole('button', { name: /推理 high/ })).toBeTruthy();
+
+    first.unmount();
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    expect(screen.getByRole('button', { name: /推理 high/ })).toBeTruthy();
+    expect(update).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a warning and adopts the kernel default when a reasoning choice is stale', async () => {
+    const adapter = new FakeAdapter();
+    adapter.updateModelCallBinding = vi.fn(async (sessionId, binding) => {
+      const accepted = {
+        ...binding,
+        reasoning: { kind: 'effort' as const, value: 'medium' },
+      };
+      adapter.sessions = adapter.sessions.map((session) => session.id === sessionId
+        ? { ...session, modelCallBinding: accepted }
+        : session);
+      return { modelCallBinding: accepted, reasoningPreferenceReset: true };
+    });
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+
+    fireEvent.click(screen.getByRole('button', { name: /推理 medium/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'high' }));
+
+    expect(await screen.findByText('推理选项已更新')).toBeTruthy();
+    expect(screen.getByText(/原选择已不再适用于该模型/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /推理 medium/ })).toBeTruthy();
+  });
+
   it('uses shared session presence and the simplified local overview chrome', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [
@@ -1553,6 +1902,12 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
     await screen.findByText('这个会话还没有消息');
+
+    fireEvent.click(screen.getByRole('button', { name: /选择模型/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Local Test · test-model/ }));
+    await waitFor(() => expect(adapter.sessions[0].modelCallBinding?.connection_id).toBe(
+      'model-connection:00000000000000000000000000000000',
+    ));
 
     fireEvent.click(screen.getByRole('button', { name: '先规划' }));
     const permissionTrigger = screen.getByRole('button', { name: /完全访问/ });

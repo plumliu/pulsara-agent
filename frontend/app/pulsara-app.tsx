@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityRail } from '../components/activity-rail';
 import { CapabilityView } from '../components/capability-view';
+import { DatabaseSetupGuide } from '../components/database-setup-guide';
 import { InspectorPanel } from '../components/inspector-panel';
 import { CommandPalette, NewSessionDialog, ToastStack } from '../components/overlays';
 import { OverviewView } from '../components/overview-view';
@@ -16,6 +17,7 @@ import {
   type RuntimeAdapter,
   type RuntimeBootstrap,
   type RuntimeConnection,
+  type ModelCallBindingPayload,
   type RuntimeInteractionResolution,
   type RuntimeInteractionSummary,
   type RuntimeProjection,
@@ -158,6 +160,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [theme, setTheme] = useState<'light' | 'dark'>(readSavedTheme);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [turnPermission, setTurnPermission] = useState<PermissionMode>('bypass-permissions');
+  const databaseState = bootstrap?.database_state;
+  const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
 
   useEffect(() => () => {
     if (focusTaskTimerRef.current !== undefined) window.clearTimeout(focusTaskTimerRef.current);
@@ -377,16 +381,32 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     void openRuntimeSession(active.sessionId, true);
   }, [openRuntimeSession]);
 
+  const refreshConfiguration = useCallback(async () => {
+    const boot = await adapter.bootstrap();
+    setBootstrap(boot);
+    if (boot.database_state !== 'ready') {
+      if (!connectionRef.current) {
+        setSessionList([]);
+        setActiveSessionId('');
+      }
+      return;
+    }
+    setSessionList(await adapter.listSessions());
+  }, [adapter]);
+
   useEffect(() => {
     let disposed = false;
     void (async () => {
       try {
-        const [boot, sessions] = await Promise.all([
-          adapter.bootstrap(),
-          adapter.listSessions(),
-        ]);
+        const boot = await adapter.bootstrap();
         if (disposed) return;
         setBootstrap(boot);
+        setRuntimeStatus('online');
+        if (boot.database_state !== 'ready') {
+          return;
+        }
+        const sessions = await adapter.listSessions();
+        if (disposed) return;
         setSessionList(sessions);
         const savedSessionId = readSavedSessionId();
         const initialSession = sessions.find((session) => session.id === savedSessionId) ?? sessions[0];
@@ -540,7 +560,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
         event.preventDefault();
-        setNewSessionOpen(true);
+        if (databaseBlocked) {
+          setActiveView('settings');
+          setSidebarOpen(false);
+        } else {
+          setNewSessionOpen(true);
+        }
       }
       if (event.key === 'Escape') {
         setCommandOpen(false);
@@ -550,7 +575,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, []);
+  }, [databaseBlocked]);
 
   const workspace = bootstrap?.workspace ?? emptyWorkspace;
   const activeSession = useMemo(
@@ -572,6 +597,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const navigate = (view: AppView) => {
     setActiveView(view);
     setSidebarOpen(false);
+  };
+
+  const openNewSession = () => {
+    if (databaseBlocked) {
+      navigate('settings');
+      return;
+    }
+    setNewSessionOpen(true);
   };
 
   const openSession = (id: string) => {
@@ -597,6 +630,24 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       notify('无法创建会话', productMessage(error instanceof Error ? error.message : undefined, '请检查工作目录后重试。'), 'warning');
       return false;
     }
+  };
+
+  const updateModelCallBinding = async (binding: ModelCallBindingPayload): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || connectionRef.current?.role !== 'controller') {
+      throw new Error('当前窗口没有修改这个会话的权限。');
+    }
+    const accepted = await adapter.updateModelCallBinding(sessionId, binding);
+    setSessionList((current) => current.map((session) => session.id === sessionId
+      ? { ...session, modelCallBinding: accepted.modelCallBinding }
+      : session));
+    notify(
+      accepted.reasoningPreferenceReset ? '推理选项已更新' : '会话模型已更新',
+      accepted.reasoningPreferenceReset
+        ? '原选择已不再适用于该模型，已改用这个模型当前的默认选项。'
+        : '新选择只作用于下一条尚未接纳的新输入。',
+      accepted.reasoningPreferenceReset ? 'warning' : 'success',
+    );
   };
 
   const sendPrompt = async (
@@ -1022,10 +1073,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [adapter, adoptCapabilityMutation, notify]);
 
   return (
-    <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen ? ' has-inspector' : ''}`}>
+    <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} onOpenCommand={() => setCommandOpen(true)} />
 
-      {activeView === 'workbench' && (
+      {activeView === 'workbench' && !databaseBlocked && (
         <SessionSidebar
           workspace={activeWorkspace}
           sessions={sessionList}
@@ -1035,7 +1086,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
           onSelectSession={openSession}
-          onNewSession={() => setNewSessionOpen(true)}
+          onNewSession={openNewSession}
           onOpenCommand={() => setCommandOpen(true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
         />
@@ -1046,13 +1097,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           sessions={sessionList}
           activeSessionId={activeSessionId}
           runtimeStatus={runtimeStatus}
+          databaseState={databaseState}
           agentTasks={mergedProjection.agentTasks}
           onNavigate={navigate}
           onOpenSession={openSession}
-          onNewSession={() => setNewSessionOpen(true)}
+          onNewSession={openNewSession}
         />
       )}
-      {activeView === 'workbench' && (
+      {activeView === 'workbench' && !databaseBlocked && (
         <WorkbenchView
           workspace={activeWorkspace}
           session={activeSession}
@@ -1065,7 +1117,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           queuedCount={projection.queuedCount}
           runtimeStatus={runtimeStatus}
           runtimeError={runtimeError}
-          modelName={bootstrap?.provider.pro_model}
+          modelConfigurations={bootstrap?.model_configurations ?? []}
+          modelCallBinding={activeSession.modelCallBinding}
           interaction={projection.interaction}
           canControl={canControl}
           isObserver={isObserver}
@@ -1078,7 +1131,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onReconnect={() => activeSessionId && void openRuntimeSession(activeSessionId, true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
           onOpenSidebar={() => setSidebarOpen(true)}
+          onNewSession={openNewSession}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
+          onOpenModelSettings={() => setActiveView('settings')}
+          onModelCallBindingChange={updateModelCallBinding}
           onSend={sendPrompt}
           onStop={() => void stopRun()}
           onCompact={compact}
@@ -1089,7 +1145,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onPermissionChange={setTurnPermission}
         />
       )}
-      {activeView === 'workbench' && (
+      {activeView === 'workbench' && !databaseBlocked && (
         <InspectorPanel
           session={activeSession}
           isOpen={inspectorOpen}
@@ -1118,6 +1174,15 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onClose={() => setInspectorOpen(false)}
         />
       )}
+      {activeView === 'workbench' && databaseBlocked && databaseState && (
+        <div className="database-workbench-mask">
+          <DatabaseSetupGuide
+            state={databaseState}
+            variant="overlay"
+            onOpenSettings={() => navigate('settings')}
+          />
+        </div>
+      )}
       {activeView === 'capabilities' && (
         <CapabilityView
           snapshot={userCapabilities}
@@ -1139,7 +1204,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           theme={theme}
           bootstrap={bootstrap}
           runtimeStatus={runtimeStatus}
+          adapter={adapter}
           onThemeChange={setTheme}
+          onConfigurationChanged={refreshConfiguration}
+          onNotify={notify}
         />
       )}
 
@@ -1148,7 +1216,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         theme={theme}
         onClose={() => setCommandOpen(false)}
         onNavigate={navigate}
-        onNewSession={() => setNewSessionOpen(true)}
+        onNewSession={openNewSession}
         onThemeChange={setTheme}
       />
       <NewSessionDialog

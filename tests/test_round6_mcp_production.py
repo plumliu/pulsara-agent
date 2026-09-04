@@ -65,7 +65,7 @@ from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
     _has_legacy_discovery_fallback_evidence,
     _normalize_legacy_discovery_http_error,
 )
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import _BoundedTransport
 from pulsara_agent.conversation_kernel.mcp.supervisor import (
     McpHostSupervisor as _McpHostSupervisor,
@@ -147,6 +147,10 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    test_model_resolution_snapshot,
+)
 from tests.support.round3 import (
     CallbackScriptedKernelModel,
     ScriptedKernelModel,
@@ -155,18 +159,16 @@ from tests.support.round3 import (
 )
 
 
-_TEST_API_KEY_BOUNDARY = ProcessApiKeyBoundary()
+_TEST_API_KEY_BOUNDARY = ProcessCredentialBoundary()
 
 
 def McpHostSupervisor(*args, **kwargs):
-    kwargs["api_key_boundary"] = _TEST_API_KEY_BOUNDARY
+    kwargs["credential_boundary"] = _TEST_API_KEY_BOUNDARY
     return _McpHostSupervisor(*args, **kwargs)
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "round6_mcp_server.py"
-LEGACY_FIXTURE = (
-    Path(__file__).parent / "fixtures" / "round6_legacy_mcp_server.py"
-)
+LEGACY_FIXTURE = Path(__file__).parent / "fixtures" / "round6_legacy_mcp_server.py"
 
 
 def _enabled_memory_context() -> FrozenModelCallMemoryContext:
@@ -537,7 +539,7 @@ def test_round6_legacy_only_http_prevalidation_falls_back_to_initialize(
             config,
             workspace_root=tmp_path,
             notification_callback=lambda _method: asyncio.sleep(0),
-            api_key_boundary=_TEST_API_KEY_BOUNDARY,
+            credential_boundary=_TEST_API_KEY_BOUNDARY,
         )
         await client.open()
         try:
@@ -705,7 +707,7 @@ def test_round6_transport_exception_notification_is_typed(tmp_path: Path) -> Non
             config,
             workspace_root=Path.cwd(),
             notification_callback=callback,
-            api_key_boundary=_TEST_API_KEY_BOUNDARY,
+            credential_boundary=_TEST_API_KEY_BOUNDARY,
         )
         await client._handle_notification(  # noqa: SLF001
             McpProtocolConformanceError("bad carrier")
@@ -816,7 +818,8 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = f"session:round9-meta:{uuid4().hex}"
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=f"workspace:{uuid4().hex}",
         writer_owner_id=f"host:{uuid4().hex}",
@@ -881,6 +884,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
         hook_scope = HookDispatchScopeRef(object(), object(), HookScopeKind.ROOT)
         hook_context.register_scope(hook_scope)
         runner = ConversationKernelRunner(
+            model_resolution_snapshot_provider=test_model_resolution_snapshot,
             repository=repository,
             writer_lease=lease,
             model=model,
@@ -1170,9 +1174,9 @@ class _FakeMcpClient:
         *,
         workspace_root: Path,
         notification_callback,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
     ) -> None:
-        del workspace_root, api_key_boundary
+        del workspace_root, credential_boundary
         self.config = config
         self.notification_callback = notification_callback
         self.session = _FakeMcpSession()
@@ -1651,8 +1655,7 @@ def test_round6_stdio_legacy_initialize_normalizes_implicit_complete(
             )
             assert runtime.candidates["legacy"].discovery_snapshot.resources == ()
             assert (
-                runtime.candidates["legacy"].discovery_snapshot.resource_templates
-                == ()
+                runtime.candidates["legacy"].discovery_snapshot.resource_templates == ()
             )
             assert runtime.candidates["legacy"].discovery_snapshot.prompts == ()
             (echo,) = runtime.root_tool_specs
@@ -1750,9 +1753,7 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
                 discovered_replacement.configured_servers[0].resolved_config_identity
                 == second_config.resolved_config_identity
             )
-            assert discovered_replacement.configured_servers[
-                0
-            ].status_matches_config
+            assert discovered_replacement.configured_servers[0].status_matches_config
             second = supervisor.install_pending_at_safe_point()
             assert second is not None
             try:
@@ -1970,9 +1971,9 @@ def test_round9_late_optional_mcp_discovery_is_visible_without_surface_publicati
             assert inspection.catalog_snapshot.servers[0].status is McpServerState.READY
             assert inspection.catalog_snapshot.servers[0].discovered_tool_count == 1
             assert inspection.catalog_snapshot.servers[0].exposed_tool_count == 1
-            assert tuple(item.semantic.remote_tool_name for item in inspection.tools) == (
-                "fake_echo",
-            )
+            assert tuple(
+                item.semantic.remote_tool_name for item in inspection.tools
+            ) == ("fake_echo",)
             assert len(inspection.configured_servers) == 1
             assert (
                 inspection.configured_servers[0].resolved_config_identity
@@ -1986,7 +1987,10 @@ def test_round9_late_optional_mcp_discovery_is_visible_without_surface_publicati
 
             # Management inspection must not publish or mutate the provider surface.
             effective_after = supervisor.catalog_snapshot()
-            assert effective_after.semantic_fingerprint == effective_before.semantic_fingerprint
+            assert (
+                effective_after.semantic_fingerprint
+                == effective_before.semantic_fingerprint
+            )
             assert effective_after.servers[0].discovered_tool_count == 0
 
             successor = supervisor.install_pending_at_safe_point()
@@ -2765,7 +2769,8 @@ def test_round6_postgres_runner_commits_attempt_before_real_mcp_effect(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = f"session:round6:{uuid4().hex}"
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=f"workspace:{uuid4().hex}",
         writer_owner_id=f"host:{uuid4().hex}",
@@ -2808,6 +2813,7 @@ def test_round6_postgres_runner_commits_attempt_before_real_mcp_effect(
             ]
         )
         runner = ConversationKernelRunner(
+            model_resolution_snapshot_provider=test_model_resolution_snapshot,
             repository=repository,
             writer_lease=lease,
             model=model,
@@ -2885,7 +2891,8 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = f"session:round6-long:{uuid4().hex}"
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=f"workspace:{uuid4().hex}",
         writer_owner_id=f"host:{uuid4().hex}",
@@ -2922,6 +2929,7 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
             if item.name.startswith("mcp__")
         )
         runner = ConversationKernelRunner(
+            model_resolution_snapshot_provider=test_model_resolution_snapshot,
             repository=repository,
             writer_lease=lease,
             model=ScriptedKernelModel(
@@ -3749,15 +3757,12 @@ def test_round9_3_provider_name_collision_is_one_closed_group() -> None:
         input_schema=schema,
         descriptor_fingerprint="sha256:other:unique",
     )
-    selected, collisions = _provider_projection_from_semantics(
-        (*semantics, survivor)
-    )
+    selected, collisions = _provider_projection_from_semantics((*semantics, survivor))
     assert selected == (survivor,)
     assert len(collisions) == 1
     assert collisions[0].provider_name == "mcp__same__normalized"
     assert tuple(
-        (item.server_id, item.remote_tool_name)
-        for item in collisions[0].members
+        (item.server_id, item.remote_tool_name) for item in collisions[0].members
     ) == (
         ("same", "normalized"),
         ("same", "normalized-"),
@@ -3796,7 +3801,7 @@ def test_round6_streamable_http_fixture(tmp_path: Path) -> None:
                 config,
                 workspace_root=tmp_path,
                 notification_callback=lambda _method: asyncio.sleep(0),
-                api_key_boundary=_TEST_API_KEY_BOUNDARY,
+                credential_boundary=_TEST_API_KEY_BOUNDARY,
             )
             await client.open()
             try:
@@ -3960,10 +3965,7 @@ def test_round6_config_is_closed_whole_entry_and_secret_safe(
     )
     assert resolved.server_id == "shared"
     assert isinstance(resolved.runtime_source, LocalConfiguredMcpRuntimeSource)
-    assert (
-        resolved.runtime_source.source_kind
-        is McpLocalConfigSourceKind.WORKSPACE
-    )
+    assert resolved.runtime_source.source_kind is McpLocalConfigSourceKind.WORKSPACE
     assert resolved.effect_policy.default_effect is McpConfiguredEffect.READ_ONLY
     assert "must-not-appear" not in repr(resolved)
     assert "must-not-appear" not in resolved.runtime_config_fingerprint
@@ -3987,10 +3989,7 @@ def test_round6_config_is_closed_whole_entry_and_secret_safe(
     assert untrusted.server_id == "repository_owned"
     assert not untrusted.enabled
     assert isinstance(untrusted.runtime_source, LocalConfiguredMcpRuntimeSource)
-    assert (
-        untrusted.runtime_source.source_kind
-        is McpLocalConfigSourceKind.WORKSPACE
-    )
+    assert untrusted.runtime_source.source_kind is McpLocalConfigSourceKind.WORKSPACE
     (explicitly_trusted,) = load_mcp_server_configs(
         workspace_root=untrusted_workspace,
         user_config_path=tmp_path / "missing-user-mcp.yaml",
@@ -4093,7 +4092,7 @@ def test_round6_wire_bounds_and_result_type_presence_fail_closed(
         _config(tmp_path),
         workspace_root=tmp_path,
         notification_callback=lambda _method: asyncio.sleep(0),
-        api_key_boundary=_TEST_API_KEY_BOUNDARY,
+        credential_boundary=_TEST_API_KEY_BOUNDARY,
     )
     client._transport = transport  # noqa: SLF001
     complete_results = (

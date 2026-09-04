@@ -64,6 +64,7 @@ from pulsara_agent.conversation_kernel.memory.recall import (
 )
 from pulsara_agent.memory.scope import CTX_GLOBAL, FrozenMemoryReadContextBinding
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.llm.model_connections import model_call_binding_from_dict
 from pulsara_agent.retrieval.embedding.validation import (
     freeze_v1_embedding_vector,
 )
@@ -162,7 +163,8 @@ class _MemoryOperations:
                                 THEN turn.final_entry_id ELSE turn.terminal_reason END
                                AS terminal_outcome,
                            terminal_event.event_id AS terminal_event_id,
-                           terminal_event.event_sequence AS terminal_event_sequence
+                           terminal_event.event_sequence AS terminal_event_sequence,
+                           turn.model_call_binding
                     FROM pulsara_v3.memory_candidates AS c
                     JOIN pulsara_v3.transcript_entries AS source
                       ON source.session_id=c.origin_session_id
@@ -253,12 +255,20 @@ class _MemoryOperations:
                         return None
                     continue
                 fence = _memory_governance_terminal_fence(row)
+                origin_binding = model_call_binding_from_dict(
+                    row["model_call_binding"]
+                )
+                if origin_binding is None:
+                    raise ConversationKernelConflict(
+                        "memory governance origin turn lacks a model binding"
+                    )
                 break
         return FrozenMemoryCandidateForGovernance(
             prepared=prepared,
             status=MemoryCandidateStatus.PROCESSING,
             processing_started_at=processing_started_at,
             terminal_fence=fence,
+            origin_model_call_binding=origin_binding,
         )
 
     def read_memory_candidate_for_governance(
@@ -292,11 +302,19 @@ class _MemoryOperations:
             ):
                 return None
             prepared = self._read_prepared_memory_candidate(connection, candidate_id)
+            origin_binding = model_call_binding_from_dict(
+                head["model_call_binding"]
+            )
+            if origin_binding is None:
+                raise ConversationKernelConflict(
+                    "memory governance origin turn lacks a model binding"
+                )
             return FrozenMemoryCandidateForGovernance(
                 prepared=prepared,
                 status=MemoryCandidateStatus.PROCESSING,
                 processing_started_at=head["processing_started_at"],
                 terminal_fence=_memory_governance_terminal_fence(head),
+                origin_model_call_binding=origin_binding,
             )
 
     def read_memory_governance_evidence(
@@ -2580,7 +2598,8 @@ def _read_memory_governance_terminal_candidate(
                     THEN turn.final_entry_id ELSE turn.terminal_reason END
                    AS terminal_outcome,
                terminal_event.event_id AS terminal_event_id,
-               terminal_event.event_sequence AS terminal_event_sequence
+               terminal_event.event_sequence AS terminal_event_sequence,
+               turn.model_call_binding
         FROM pulsara_v3.memory_candidates AS c
         JOIN pulsara_v3.transcript_entries AS source
           ON source.session_id=c.origin_session_id

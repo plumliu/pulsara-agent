@@ -25,16 +25,14 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
 from pulsara_agent.primitives.plan_workflow import (
     PlanDraftDecision,
     PlanQuestionAnswerKind,
 )
-from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.workspace_identity import HostWorkspaceInput
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import completed_provider_execution_for_test
 
 
@@ -154,13 +152,11 @@ class _PlanHostModel(_PreflightModel):
         self.question_opened = asyncio.Event()
         self.implementation_seen = asyncio.Event()
         self._preparer = DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
             ),
         )
 
@@ -242,13 +238,11 @@ class _EnterPlanThenTextModel(_PreflightModel):
         self.requests: list[object] = []
         self.completed = asyncio.Event()
         self._preparer = DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
             ),
         )
 
@@ -277,13 +271,11 @@ class _DetachedDraftModel(_PreflightModel):
         self.implementation_seen = asyncio.Event()
         self.requests: list[object] = []
         self._preparer = DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
             ),
         )
 
@@ -313,13 +305,11 @@ class _ForceExitRaceModel(_PreflightModel):
     def __init__(self) -> None:
         self.requests: list[object] = []
         self._preparer = DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
             ),
         )
 
@@ -341,13 +331,11 @@ class _BlockingPlanTextModel(_PreflightModel):
         self.started = asyncio.Event()
         self.release = asyncio.Event()
         self._preparer = DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
             ),
         )
 
@@ -362,16 +350,13 @@ class _BlockingPlanTextModel(_PreflightModel):
             yield payload
 
 
-def _settings(postgres_dsn: str) -> PulsaraSettings:
-    return PulsaraSettings(
-        llm=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        storage=StorageConfig(postgres_dsn=postgres_dsn),
+def _runtime(postgres_dsn: str):
+    return test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api="openai_chat_completions",
+        postgres_dsn=postgres_dsn,
     )
 
 
@@ -386,9 +371,12 @@ async def _open_test_session(
 
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
-    core = KernelHostCore.production(settings=_settings(postgres_dsn))
+    core = KernelHostCore.production(model_runtime=_runtime(postgres_dsn))
     session = await core.open_session(
         HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path)
+    )
+    await session.update_model_call_binding(
+        test_model_binding(core._model_runtime)  # noqa: SLF001
     )
     return core, session
 
@@ -403,27 +391,23 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
     model = _PlanHostModel()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
-    settings = PulsaraSettings(
-        llm=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        storage=StorageConfig(
-            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
-        ),
+    model_runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api="openai_chat_completions",
+        postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
     )
 
     async def scenario() -> None:
-        core = KernelHostCore.production(settings=settings)
+        core = KernelHostCore.production(model_runtime=model_runtime)
         session = await core.open_session(
             HostWorkspaceInput(
                 workspace_kind="project",
                 workspace_root=tmp_path,
             )
         )
+        await session.update_model_call_binding(test_model_binding(model_runtime))
         running = asyncio.create_task(
             session.run_turn(
                 "Make a plan before editing.",

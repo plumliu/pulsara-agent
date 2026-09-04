@@ -90,11 +90,11 @@ from pulsara_agent.plugins.package_store import (
     StoreSourceInvalid,
     StoreStateCutUnknown,
 )
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundaryCancelled,
-    ProcessApiKeyBoundaryTimedOut,
-    ProcessApiKeyScrubSet,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundaryCancelled,
+    ProcessCredentialBoundaryTimedOut,
+    ProcessCredentialScrubSet,
 )
 
 
@@ -104,10 +104,10 @@ class PluginManagementService:
     def __init__(
         self,
         *,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
     ) -> None:
-        self._api_key_boundary = api_key_boundary
+        self._credential_boundary = credential_boundary
         self._home_resolution = pulsara_home_resolution
 
     def validate_local_plugin_source(
@@ -115,15 +115,15 @@ class PluginManagementService:
     ):
         try:
             scrub_set = self._capture_scrub_set(request)
-        except ProcessApiKeyBoundaryCancelled:
+        except ProcessCredentialBoundaryCancelled:
             return AbortedPluginValidationOutcome(
                 _withheld_source_path(), PluginValidationDisposition.CANCELLED
             )
-        except ProcessApiKeyBoundaryTimedOut:
+        except ProcessCredentialBoundaryTimedOut:
             return AbortedPluginValidationOutcome(
                 _withheld_source_path(), PluginValidationDisposition.TIMED_OUT
             )
-        observer = PluginSourceObserver(self._api_key_boundary)
+        observer = PluginSourceObserver(self._credential_boundary)
         try:
             observation = observer.observe(
                 request.source_path,
@@ -173,11 +173,11 @@ class PluginManagementService:
     def install_local_plugin(self, request: InstallLocalPluginRequest):
         try:
             scrub_set = self._capture_scrub_set(request)
-        except ProcessApiKeyBoundaryCancelled:
+        except ProcessCredentialBoundaryCancelled:
             return FailedPluginInstallOutcome(
                 PluginInstallDisposition.CANCELLED, _withheld_source_path()
             )
-        except ProcessApiKeyBoundaryTimedOut:
+        except ProcessCredentialBoundaryTimedOut:
             return FailedPluginInstallOutcome(
                 PluginInstallDisposition.TIMED_OUT, _withheld_source_path()
             )
@@ -200,7 +200,7 @@ class PluginManagementService:
                 safe_source_path,
                 diagnostics=(workspace_diagnostic,),
             )
-        observer = PluginSourceObserver(self._api_key_boundary)
+        observer = PluginSourceObserver(self._credential_boundary)
         try:
             observation = observer.observe(
                 request.source_path,
@@ -278,13 +278,13 @@ class PluginManagementService:
         )
         try:
             scrub_set = self._capture_scrub_set(request)
-        except ProcessApiKeyBoundaryCancelled:
+        except ProcessCredentialBoundaryCancelled:
             return _enablement_failure(
                 request,
                 _withheld_identity(request.scope),
                 PluginEnablementDisposition.CANCELLED,
             )
-        except ProcessApiKeyBoundaryTimedOut:
+        except ProcessCredentialBoundaryTimedOut:
             return _enablement_failure(
                 request,
                 _withheld_identity(request.scope),
@@ -409,12 +409,12 @@ class PluginManagementService:
         )
         try:
             scrub_set = self._capture_scrub_set(request)
-        except ProcessApiKeyBoundaryCancelled:
+        except ProcessCredentialBoundaryCancelled:
             return FailedPluginRemovalOutcome(
                 PluginRemovalDisposition.CANCELLED,
                 _withheld_identity(request.scope),
             )
-        except ProcessApiKeyBoundaryTimedOut:
+        except ProcessCredentialBoundaryTimedOut:
             return FailedPluginRemovalOutcome(
                 PluginRemovalDisposition.TIMED_OUT,
                 _withheld_identity(request.scope),
@@ -508,9 +508,9 @@ class PluginManagementService:
     def inspect_local_plugins(self, request: InspectLocalPluginsRequest):
         try:
             scrub_set = self._capture_scrub_set(request)
-        except ProcessApiKeyBoundaryCancelled:
+        except ProcessCredentialBoundaryCancelled:
             return PluginInspectionAbort(PluginInspectionAbortReason.CANCELLED)
-        except ProcessApiKeyBoundaryTimedOut:
+        except ProcessCredentialBoundaryTimedOut:
             return PluginInspectionAbort(PluginInspectionAbortReason.TIMED_OUT)
         resolution = self._home_resolution or resolve_pulsara_home()
         if resolution.disposition is not PulsaraHomeDisposition.RESOLVED:
@@ -531,12 +531,12 @@ class PluginManagementService:
             )
         store = ManagedPluginStore(
             pulsara_home=resolution,
-            api_key_boundary=self._api_key_boundary,
+            credential_boundary=self._credential_boundary,
         )
         try:
             outcome = PluginInspectionService(
                 store=store,
-                api_key_boundary=self._api_key_boundary,
+                credential_boundary=self._credential_boundary,
                 pulsara_home_resolution=resolution,
             ).inspect(
                 workspace_root=request.workspace_root,
@@ -553,12 +553,12 @@ class PluginManagementService:
     def gc_local_plugin_packages(self, request: GcLocalPluginPackagesRequest):
         try:
             scrub_set = self._capture_scrub_set(request)
-        except ProcessApiKeyBoundaryCancelled:
+        except ProcessCredentialBoundaryCancelled:
             return PluginGcOutcome(
                 PluginGcDisposition.CANCELLED,
                 PluginGcProgress(unvisited_suffix=True),
             )
-        except ProcessApiKeyBoundaryTimedOut:
+        except ProcessCredentialBoundaryTimedOut:
             return PluginGcOutcome(
                 PluginGcDisposition.TIMED_OUT,
                 PluginGcProgress(unvisited_suffix=True),
@@ -593,11 +593,11 @@ class PluginManagementService:
             return None
         return ManagedPluginStore(
             pulsara_home=resolution,
-            api_key_boundary=self._api_key_boundary,
+            credential_boundary=self._credential_boundary,
         )
 
-    def _capture_scrub_set(self, request) -> ProcessApiKeyScrubSet:
-        return self._api_key_boundary.capture_scrub_set(
+    def _capture_scrub_set(self, request) -> ProcessCredentialScrubSet:
+        return self._credential_boundary.capture_scrub_set(
             deadline_monotonic=request.deadline_monotonic,
             cancellation=request.cancellation,
         )
@@ -622,7 +622,7 @@ def _install_outcome(
     source_path: Path,
     identity: PluginInstanceIdentity,
     diagnostics: tuple[object, ...],
-    scrub_set: ProcessApiKeyScrubSet,
+    scrub_set: ProcessCredentialScrubSet,
 ):
     if isinstance(value, StoreInstallResult):
         return SuccessfulPluginInstallOutcome(
@@ -749,7 +749,7 @@ def _enablement_failure(
 
 
 def _safe_summary(
-    summary: PluginValidationSummary, scrub_set: ProcessApiKeyScrubSet
+    summary: PluginValidationSummary, scrub_set: ProcessCredentialScrubSet
 ) -> PluginValidationSummary:
     manifest = summary.manifest
     author = manifest.author
@@ -827,7 +827,7 @@ def _safe_summary(
     )
 
 
-def _safe_enablement_outcome(value, scrub_set: ProcessApiKeyScrubSet):
+def _safe_enablement_outcome(value, scrub_set: ProcessCredentialScrubSet):
     if isinstance(value, SettledPluginEnablementOutcome):
         return SettledPluginEnablementOutcome(
             value.disposition,
@@ -852,7 +852,7 @@ def _safe_enablement_outcome(value, scrub_set: ProcessApiKeyScrubSet):
     raise TypeError("Plugin enablement outcome union is open")
 
 
-def _safe_removal_outcome(value, scrub_set: ProcessApiKeyScrubSet):
+def _safe_removal_outcome(value, scrub_set: ProcessCredentialScrubSet):
     if isinstance(value, RemovedPluginOutcome):
         return RemovedPluginOutcome(
             _safe_identity(value.identity, scrub_set),
@@ -872,7 +872,7 @@ def _safe_removal_outcome(value, scrub_set: ProcessApiKeyScrubSet):
 
 
 def _safe_inspection_outcome(
-    value: PluginInspectionOutcome, scrub_set: ProcessApiKeyScrubSet
+    value: PluginInspectionOutcome, scrub_set: ProcessCredentialScrubSet
 ) -> PluginInspectionOutcome:
     instances = tuple(
         PluginInstanceInspection(
@@ -935,7 +935,7 @@ def _safe_inspection_outcome(
 
 
 def _safe_gc_outcome(
-    value: PluginGcOutcome, scrub_set: ProcessApiKeyScrubSet
+    value: PluginGcOutcome, scrub_set: ProcessCredentialScrubSet
 ) -> PluginGcOutcome:
     progress = value.progress
     return PluginGcOutcome(
@@ -960,7 +960,7 @@ def _safe_gc_outcome(
 
 
 def _safe_gc_ref(
-    value: PluginGcRef, scrub_set: ProcessApiKeyScrubSet
+    value: PluginGcRef, scrub_set: ProcessCredentialScrubSet
 ) -> PluginGcRef:
     return PluginGcRef(
         value.kind,
@@ -969,7 +969,7 @@ def _safe_gc_ref(
     )
 
 
-def _safe_mcp_summary(value, scrub_set: ProcessApiKeyScrubSet):
+def _safe_mcp_summary(value, scrub_set: ProcessCredentialScrubSet):
     if isinstance(value, PluginMcpStdioSummary):
         return PluginMcpStdioSummary(
             _safe_text(value.local_server_id, scrub_set),
@@ -1018,7 +1018,7 @@ def _safe_mcp_summary(value, scrub_set: ProcessApiKeyScrubSet):
 
 
 def _safe_diagnostics(
-    diagnostics: tuple[object, ...], scrub_set: ProcessApiKeyScrubSet
+    diagnostics: tuple[object, ...], scrub_set: ProcessCredentialScrubSet
 ) -> tuple[object, ...]:
     safe: list[object] = []
     for diagnostic in diagnostics:
@@ -1109,7 +1109,7 @@ def _safe_diagnostics(
 
 
 def _skill_issue_identity_contains_secret(
-    issue: object, scrub_set: ProcessApiKeyScrubSet
+    issue: object, scrub_set: ProcessCredentialScrubSet
 ) -> bool:
     values: list[str] = []
     if isinstance(issue, InvalidSkillCandidateIssue):
@@ -1149,12 +1149,12 @@ def _withheld_skill_inspection_diagnostic() -> PluginDiagnostic:
     )
 
 
-def _safe_path(path: Path, scrub_set: ProcessApiKeyScrubSet) -> Path:
+def _safe_path(path: Path, scrub_set: ProcessCredentialScrubSet) -> Path:
     return Path(scrub_set.scrub_text(os.fspath(path)))
 
 
 def _safe_identity(
-    identity: PluginInstanceIdentity, scrub_set: ProcessApiKeyScrubSet
+    identity: PluginInstanceIdentity, scrub_set: ProcessCredentialScrubSet
 ) -> PluginInstanceIdentity:
     return PluginInstanceIdentity(
         identity.scope,
@@ -1172,7 +1172,7 @@ def _withheld_identity(scope: PluginScopeKind) -> PluginInstanceIdentity:
 
 
 def _safe_package_install_id(
-    value: str, scrub_set: ProcessApiKeyScrubSet
+    value: str, scrub_set: ProcessCredentialScrubSet
 ) -> str:
     if scrub_set.contains(value):
         return "pkg_00000000000000000000000000000000"
@@ -1180,18 +1180,18 @@ def _safe_package_install_id(
 
 
 def _safe_optional_package_install_id(
-    value: str | None, scrub_set: ProcessApiKeyScrubSet
+    value: str | None, scrub_set: ProcessCredentialScrubSet
 ) -> str | None:
     return None if value is None else _safe_package_install_id(value, scrub_set)
 
 
 def _safe_optional_text(
-    value: str | None, scrub_set: ProcessApiKeyScrubSet
+    value: str | None, scrub_set: ProcessCredentialScrubSet
 ) -> str | None:
     return None if value is None else _safe_text(value, scrub_set)
 
 
-def _safe_text(value: str, scrub_set: ProcessApiKeyScrubSet) -> str:
+def _safe_text(value: str, scrub_set: ProcessCredentialScrubSet) -> str:
     return scrub_set.scrub_text(value)
 
 

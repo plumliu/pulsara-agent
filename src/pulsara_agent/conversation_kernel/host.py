@@ -176,7 +176,13 @@ from pulsara_agent.workspace_identity import (
     ResolvedWorkspace,
     resolve_workspace,
 )
-from pulsara_agent.llm.models import ModelRole
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    model_call_binding_from_dict,
+    model_call_binding_to_dict,
+)
+from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
+from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.tool_permission import (
@@ -198,7 +204,7 @@ from pulsara_agent.conversation_kernel.mcp.contracts import (
     McpCatalogSnapshot,
     McpConfiguredServerInspection,
 )
-from pulsara_agent.settings import PulsaraSettings
+from pulsara_agent.retrieval.config import RetrievalConfig
 from pulsara_agent.hooks.context import (
     HookContextOwner,
     PendingHookContextReservation,
@@ -254,7 +260,7 @@ from pulsara_agent.plugins.view import (
     EnabledPluginViewOwner,
     FrozenEnabledPluginView,
 )
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 
 MAXIMUM_PROMPT_BYTES = STAGE2_LIMITS.prompt_hard_bytes
@@ -296,6 +302,7 @@ class KernelSessionSummary:
     writer_generation: int
     latest_entry_sequence: int
     updated_at: datetime
+    model_call_binding: ModelCallBinding | None = None
     subagent_task_total: int = 0
     subagent_task_active: int = 0
     subagent_task_waiting: int = 0
@@ -317,6 +324,7 @@ class KernelSessionSummary:
             "writer_generation": self.writer_generation,
             "latest_entry_sequence": self.latest_entry_sequence,
             "updated_at": self.updated_at.isoformat(),
+            "model_call_binding": model_call_binding_to_dict(self.model_call_binding),
         }
 
 
@@ -457,7 +465,7 @@ class KernelHostSession:
     def __init__(
         self,
         *,
-        settings: PulsaraSettings,
+        model_runtime: ModelRuntime,
         workspace: ResolvedWorkspace,
         repository: ConversationKernelRepository,
         writer_lease: WriterLease,
@@ -465,7 +473,6 @@ class KernelHostSession:
         session_id: str,
         host_session_id: str,
         permission_policy: EffectivePermissionPolicy,
-        model_role: ModelRole,
         system_prompt: str | None,
         active_skill_names: frozenset[str],
         authenticated_first_party_extension_ids: frozenset[str],
@@ -478,11 +485,11 @@ class KernelHostSession:
         user_home_resolution: UserHomeResolution,
         plugin_view_owner: EnabledPluginViewOwner,
         initial_plugin_view: FrozenEnabledPluginView,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         local_mcp_configs: tuple[McpServerConfig, ...] = (),
         mcp_configs: tuple[McpServerConfig, ...] = (),
     ) -> None:
-        self.settings = settings
+        self._model_runtime = model_runtime
         self.workspace = workspace
         self.repository = repository
         self.runtime_session_id = session_id
@@ -537,11 +544,6 @@ class KernelHostSession:
             )
         self._launch_permission_mode = launch_permission_mode
         self._monitor_wake = asyncio.Event()
-        self._configured_root_model_identity = (
-            settings.llm.pro_model
-            if model_role is ModelRole.PRO
-            else settings.llm.flash_model
-        )
         self._hook_diagnostics = LoggingHookDiagnosticAdapter()
         self._hook_context = HookContextOwner(self._hook_diagnostics)
         self._hook_root_scope = HookDispatchScopeRef(
@@ -555,7 +557,7 @@ class KernelHostSession:
             initial_view=initial_hook_view,
             workspace_root=workspace.workspace_root,
             source_provider=self._hook_source_provider,
-            api_key_boundary=api_key_boundary,
+            credential_boundary=credential_boundary,
             diagnostic_adapter=self._hook_diagnostics,
             background_context=self._hook_context,
         )
@@ -599,7 +601,7 @@ class KernelHostSession:
                 repository=repository,
                 guard=self._lease.guard,
                 io_owner=self._io,
-                configured_model_identity=self._configured_root_model_identity,
+                model_runtime=model_runtime,
                 deadline_factory=self._deadlines,
             ),
             terminal_cwd=self._tools.snapshot_terminal_cwd,
@@ -614,29 +616,26 @@ class KernelHostSession:
             domain=workspace.memory_domain,
             host_workspace_id=workspace.workspace_key,
         )
+        retrieval = RetrievalConfig()
         self._memory_tools = KernelMemoryToolPort(
             repository=repository,
             session_id=session_id,
             read_binding=memory_read_binding,
-            embedding_config=settings.retrieval.embedding,
-            rerank_config=settings.retrieval.rerank,
-            feature_config=settings.retrieval.memory,
+            embedding_config=retrieval.embedding,
+            rerank_config=retrieval.rerank,
+            feature_config=retrieval.memory,
             io_owner=self._io,
-            api_key_boundary=api_key_boundary,
+            credentials=model_runtime.credentials,
         )
         self._memory_tools.bind_deadline_factory(self._deadlines)
         self._memory_governor = AdvisoryMemoryGovernor(
             repository=repository,
             guard=self._lease.guard,
             read_binding=memory_read_binding,
-            model=DirectKernelAuxiliaryJsonModel(
-                settings.llm, api_key_boundary=api_key_boundary
-            ),
+            model=DirectKernelAuxiliaryJsonModel(model_runtime),
             input_reader=CanonicalProviderInputReader(
                 repository.connection_provider,
-                blob_reader=PostgresCanonicalBlobStore(
-                    repository.connection_provider
-                ),
+                blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
             ),
             io_owner=self._io,
             deadline_factory=self._deadlines,
@@ -648,7 +647,7 @@ class KernelHostSession:
             session_id=session_id,
             workspace_root=workspace.workspace_root,
             configs=mcp_configs,
-            api_key_boundary=api_key_boundary,
+            credential_boundary=credential_boundary,
         )
         self._tools.bind_mcp_supervisor(self._mcp_supervisor)
         self._tools.seal_builtin_composition()
@@ -673,9 +672,7 @@ class KernelHostSession:
             ),
         )
         self._model = DirectKernelModelPort(
-            config=settings.llm,
-            role=model_role,
-            api_key_boundary=api_key_boundary,
+            model_runtime=model_runtime,
             usage_observer=self._observe_provider_usage,
             timeout_policy=self._deadlines.policy.foreground_transport,
         )
@@ -700,6 +697,9 @@ class KernelHostSession:
             live_bus=self.live_bus,
             io_owner=self._io,
             context_source_collector=self._context_sources,
+            model_resolution_snapshot_provider=(
+                self._model_runtime.freeze_resolution_snapshot
+            ),
             continuity_owner=self._input_continuity,
             extensions=self.extensions,
             workspace_id=workspace.workspace_key,
@@ -716,7 +716,6 @@ class KernelHostSession:
             hook_context_owner=self._hook_context,
             hook_scope=self._hook_root_scope,
             session_start_source=session_start_source,
-            configured_model_identity=self._configured_root_model_identity,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -989,7 +988,9 @@ class KernelHostSession:
             self._project_capability_refresh_attention = attention
         return True
 
-    async def _reload_capabilities_serialized(self, deadline: float) -> dict[str, object]:
+    async def _reload_capabilities_serialized(
+        self, deadline: float
+    ) -> dict[str, object]:
         predecessor = self._plugin_view
         replacement = await _shielded_plugin_filesystem_call(
             self._plugin_view_owner.observe,
@@ -1184,6 +1185,35 @@ class KernelHostSession:
 
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
+    async def model_call_binding(self) -> ModelCallBinding | None:
+        """Read the canonical choice for the next NEW_TURN."""
+
+        self._require_open()
+        return await self._io.run(
+            self.repository.read_session_model_call_binding,
+            self._lease.guard,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def update_model_call_binding(
+        self, binding: ModelCallBinding
+    ) -> ModelCallBinding:
+        """Reconcile and replace only the next-NEW_TURN model choice."""
+
+        self._require_open()
+        accepted, _resolved, _changed = (
+            self._model_runtime.freeze_resolution_snapshot().reconcile(binding)
+        )
+        return await self._io.run(
+            self.repository.update_session_model_call_binding,
+            self._lease.guard,
+            binding=accepted,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+
+    def _model_identity(self, binding: ModelCallBinding) -> str:
+        return self._model_runtime.connection(binding).target.model_id
+
     async def _claim_ingress_hook_attempt(
         self, key: _IngressHookReservationKey
     ) -> tuple[_IngressHookAttempt, bool]:
@@ -1233,13 +1263,14 @@ class KernelHostSession:
         key: _IngressHookReservationKey,
         identity: PreparedRootTurnIdentity,
         permission: FrozenRunPermissionSnapshot,
+        model_call_binding: ModelCallBinding,
     ) -> tuple[str | None, PendingHookContextReservation | None]:
         view = self._hooks.capture_view()
         cwd = self._tools.snapshot_terminal_cwd()
         public_input = UserPromptSubmitInput(
             session_id=self.session_id,
             cwd=str(cwd),
-            model=self._configured_root_model_identity,
+            model=self._model_identity(model_call_binding),
             turn_id=identity.turn_id,
             prompt=key.prompt_utf8.decode("utf-8"),
             permission_mode=external_permission_mode(
@@ -1353,10 +1384,18 @@ class KernelHostSession:
                 requested_mode=requested,
                 deadline_monotonic=self._canonical_deadline(),
             )
+            model_resolution_snapshot = self._model_runtime.freeze_resolution_snapshot()
+            model_call_binding = await self.model_call_binding()
+            if model_call_binding is None:
+                raise ValueError("session has no model configuration")
+            model_call_binding, _resolved, _changed = (
+                model_resolution_snapshot.reconcile(model_call_binding)
+            )
             block_reason, context_reservation = await self._dispatch_user_prompt_hook(
                 key=key,
                 identity=identity,
                 permission=permission,
+                model_call_binding=model_call_binding,
             )
             if block_reason is not None:
                 raise PromptBlockedByHook(block_reason)
@@ -1387,6 +1426,7 @@ class KernelHostSession:
                         expected_permission_snapshot=permission,
                         hook_context_reservation=context_reservation,
                         cancellation_intent=intent,
+                        model_resolution_snapshot=model_resolution_snapshot,
                     ),
                 )
             result = await asyncio.shield(task)
@@ -1679,6 +1719,7 @@ class KernelHostSession:
         expected_permission_snapshot: FrozenRunPermissionSnapshot,
         hook_context_reservation: PendingHookContextReservation | None,
         cancellation_intent: ActiveTurnCancellationIntent,
+        model_resolution_snapshot: FrozenModelResolutionSnapshot,
     ) -> KernelRunResult:
         result = await self._runner.run_turn(
             text,
@@ -1687,6 +1728,7 @@ class KernelHostSession:
             expected_permission_snapshot=expected_permission_snapshot,
             hook_context_reservation=hook_context_reservation,
             cancellation_intent=cancellation_intent,
+            model_resolution_snapshot=model_resolution_snapshot,
         )
         return await self._finish_root_chain(result, cancellation_intent)
 
@@ -2262,6 +2304,33 @@ class KernelHostSession:
             if existing is None:
                 raise RuntimeError("compatible prompt command has no canonical outcome")
             return existing
+        model_resolution_snapshot: FrozenModelResolutionSnapshot | None = None
+        model_call_binding: ModelCallBinding | None = None
+        if delivery_mode is PromptDeliveryMode.NEW_TURN:
+            model_call_binding = await self.model_call_binding()
+            if model_call_binding is None:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "MODEL_CONFIGURATION_REQUIRED",
+                    "Select a model configuration before sending.",
+                )
+            try:
+                model_resolution_snapshot = (
+                    self._model_runtime.freeze_resolution_snapshot()
+                )
+                model_call_binding, _resolved, _changed = (
+                    model_resolution_snapshot.reconcile(model_call_binding)
+                )
+            except (KeyError, ValueError, ModelRuntimeUnavailable) as exc:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "MODEL_CONFIGURATION_UNAVAILABLE",
+                    str(exc),
+                )
         permission_projection: FrozenRunPermissionSnapshot | None = None
         hook_context_reservation: PendingHookContextReservation | None = None
         if delivery_mode is PromptDeliveryMode.NEW_TURN:
@@ -2285,6 +2354,7 @@ class KernelHostSession:
                 key=hook_attempt.key,
                 identity=identity,
                 permission=permission_projection,
+                model_call_binding=model_call_binding,
             )
             if block_reason is not None:
                 return KernelCommandOutcome(
@@ -2338,6 +2408,7 @@ class KernelHostSession:
                     effective_requested_permission=effective_requested_permission,
                     content_utf8=content_utf8,
                     ingress=ingress,
+                    model_resolution_snapshot=model_resolution_snapshot,
                     expected_permission_snapshot=permission_projection,
                     hook_context_reservation=hook_context_reservation,
                 )
@@ -2359,6 +2430,7 @@ class KernelHostSession:
         effective_requested_permission: PermissionMode | None,
         content_utf8: bytes,
         ingress: PreparedPromptIngressCommand,
+        model_resolution_snapshot: FrozenModelResolutionSnapshot | None,
         expected_permission_snapshot: FrozenRunPermissionSnapshot | None,
         hook_context_reservation: PendingHookContextReservation | None,
     ) -> KernelCommandOutcome:
@@ -2371,16 +2443,11 @@ class KernelHostSession:
             deadline_monotonic=self._canonical_deadline(),
         )
         try:
-            queue_sequence = await self._io.run(
+            accepted = await self._io.run(
                 self.repository.enqueue_prompt,
                 self._lease.guard,
-                command_id=command_id,
-                queue_item_id=queue_item_id,
-                client_submission_id=command_id,
-                delivery_mode=delivery_mode,
-                target_turn_id=target_turn_id,
-                permission_snapshot_id=permission_snapshot_id,
-                requested_permission_mode=effective_requested_permission,
+                candidate=ingress,
+                model_resolution_snapshot=model_resolution_snapshot,
                 content=content,
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
@@ -2413,6 +2480,25 @@ class KernelHostSession:
                     queue_item_id,
                     "INGRESS_PRECONDITION_CHANGED",
                     "The Plan or permission cut changed while the Hook ran.",
+                )
+            if exc.reason is PromptIngressWriteRejection.MODEL_CONFIGURATION_REQUIRED:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "MODEL_CONFIGURATION_REQUIRED",
+                    "Select a model configuration before sending.",
+                )
+            if (
+                exc.reason
+                is PromptIngressWriteRejection.MODEL_CONFIGURATION_UNAVAILABLE
+            ):
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    queue_item_id,
+                    "MODEL_CONFIGURATION_UNAVAILABLE",
+                    "The selected model configuration is no longer executable.",
                 )
             if exc.reason is (
                 PromptIngressWriteRejection.TARGET_STALE_OR_NON_STEERABLE
@@ -2463,8 +2549,16 @@ class KernelHostSession:
             command_id,
             "PENDING",
             queue_item_id,
-            "PROMPT_QUEUED",
-            f"Prompt accepted at queue sequence {queue_sequence}.",
+            (
+                "PROMPT_QUEUED_REASONING_UPDATED"
+                if accepted.reasoning_preference_reset
+                else "PROMPT_QUEUED"
+            ),
+            (
+                "Reasoning options changed; the new target default was selected."
+                if accepted.reasoning_preference_reset
+                else f"Prompt accepted at queue sequence {accepted.queue_sequence}."
+            ),
         )
 
     async def steer_active_turn(
@@ -3204,6 +3298,27 @@ class KernelHostSession:
                     if head_mode is PromptDeliveryMode.NEW_TURN:
                         continue
                     break
+                try:
+                    model_resolution_snapshot = (
+                        self._model_runtime.freeze_resolution_snapshot()
+                    )
+                except ModelRuntimeUnavailable:
+                    # No trustworthy process-local catalog/settings cut exists.
+                    # The canonical queue row stays pending until an ordinary
+                    # refresh or settings repair wakes delivery again.
+                    await asyncio.sleep(0.1)
+                    self._queue_wake.set()
+                    break
+                try:
+                    model_resolution_snapshot.validate(candidate.model_call_binding)
+                except (KeyError, ValueError):
+                    rejected = await self._settle_queued_model_rejection(
+                        candidate
+                    )
+                    if rejected:
+                        self._queue_wake.set()
+                        continue
+                    break
                 if not await self._adopt_project_capabilities_if_requested():
                     await asyncio.sleep(0.1)
                     self._queue_wake.set()
@@ -3244,6 +3359,30 @@ class KernelHostSession:
                     pass
                 finally:
                     await self._settle_active_root_task(task)
+
+    async def _settle_queued_model_rejection(
+        self,
+        candidate: PreparedQueuedRootTurnAdmission,
+    ) -> bool:
+        """Settle one permanent pre-delivery failure without detaching its ACK."""
+
+        delay_seconds = 0.05
+        while not self._closing:
+            try:
+                return await self._io.run(
+                    self.repository.reject_prepared_prompt_head_model_unavailable,
+                    self._lease.guard,
+                    candidate=candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except StaleHostWriter:
+                return False
+            except Exception:
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(delay_seconds * 2, 0.5)
+        return False
 
     async def _settle_queued_root_admission_reserved(
         self,
@@ -4195,10 +4334,19 @@ class KernelHostSession:
                 close_error = close_error or exc
             try:
                 terminal_view = await self._hooks.fence_ordinary()
+                current_binding = await self._io.run(
+                    self.repository.read_session_model_call_binding,
+                    self._lease.guard,
+                    deadline_monotonic=deadline,
+                )
                 terminal_input = SessionEndInput(
                     session_id=self.session_id,
                     cwd=str(session_end_cwd),
-                    model=self._configured_root_model_identity,
+                    model=(
+                        "unconfigured"
+                        if current_binding is None
+                        else self._model_identity(current_binding)
+                    ),
                     reason="other",
                 )
                 await self._hooks.dispatch_terminal(
@@ -4303,6 +4451,9 @@ class KernelHostSession:
             live_bus=self.live_bus,
             io_owner=self._io,
             context_source_collector=self._context_sources,
+            model_resolution_snapshot_provider=(
+                self._model_runtime.freeze_resolution_snapshot
+            ),
             continuity_owner=self._input_continuity,
             extensions=self.extensions,
             workspace_id=self.workspace.workspace_key,
@@ -4315,7 +4466,6 @@ class KernelHostSession:
             hook_dispatcher=self._hooks,
             hook_context_owner=self._hook_context,
             hook_scope=hook_scope,
-            configured_model_identity=self._configured_root_model_identity,
         )
 
     def _observe_provider_usage(
@@ -4458,7 +4608,15 @@ def _list_resumable_session_rows(
             """
             SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
                    s.workspace_label, s.memory_domain_id, s.lifecycle,
-                   s.writer_generation, s.latest_entry_sequence, s.updated_at,
+                   s.writer_generation, s.latest_entry_sequence,
+                   COALESCE((
+                       SELECT e.accepted_at
+                       FROM pulsara_v3.transcript_entries AS e
+                       WHERE e.session_id = s.id
+                       ORDER BY e.entry_sequence DESC
+                       LIMIT 1
+                   ), s.created_at) AS updated_at,
+                   s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
                        AS subagent_task_active,
@@ -4473,7 +4631,9 @@ def _list_resumable_session_rows(
             WHERE s.workspace_id = %s AND s.memory_domain_id = %s
               AND (%s OR s.lifecycle = 'OPEN')
             GROUP BY s.id
-            ORDER BY s.updated_at DESC, s.id LIMIT %s
+            -- sessions.updated_at includes writer-lease maintenance.  Order the
+            -- user-facing list by canonical conversation activity instead.
+            ORDER BY updated_at DESC, s.id LIMIT %s
             """,
             (workspace_id, memory_domain_id, include_closed, limit),
         ).fetchall()
@@ -4495,7 +4655,15 @@ def _list_resumable_session_rows_across_workspaces(
             """
             SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
                    s.workspace_label, s.memory_domain_id, s.lifecycle,
-                   s.writer_generation, s.latest_entry_sequence, s.updated_at,
+                   s.writer_generation, s.latest_entry_sequence,
+                   COALESCE((
+                       SELECT e.accepted_at
+                       FROM pulsara_v3.transcript_entries AS e
+                       WHERE e.session_id = s.id
+                       ORDER BY e.entry_sequence DESC
+                       LIMIT 1
+                   ), s.created_at) AS updated_at,
+                   s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
                        AS subagent_task_active,
@@ -4509,7 +4677,9 @@ def _list_resumable_session_rows_across_workspaces(
             LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
             WHERE s.memory_domain_id = %s AND (%s OR s.lifecycle = 'OPEN')
             GROUP BY s.id
-            ORDER BY s.updated_at DESC, s.id
+            -- sessions.updated_at includes writer-lease maintenance.  Order the
+            -- user-facing list by canonical conversation activity instead.
+            ORDER BY updated_at DESC, s.id
             """,
             (memory_domain_id, include_closed),
         ).fetchall()
@@ -4533,6 +4703,7 @@ def _read_resumable_session_row(
             SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
                    s.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence, s.updated_at,
+                   s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
                        AS subagent_task_active,
@@ -4564,6 +4735,7 @@ def _kernel_session_summary(row) -> KernelSessionSummary:
         writer_generation=int(row["writer_generation"]),
         latest_entry_sequence=int(row["latest_entry_sequence"]),
         updated_at=row["updated_at"],
+        model_call_binding=model_call_binding_from_dict(row["model_call_binding"]),
         subagent_task_total=int(row.get("subagent_task_total") or 0),
         subagent_task_active=int(row.get("subagent_task_active") or 0),
         subagent_task_waiting=int(row.get("subagent_task_waiting") or 0),
@@ -4577,12 +4749,12 @@ class KernelHostCore:
     def __init__(
         self,
         *,
-        settings: PulsaraSettings,
+        model_runtime: ModelRuntime,
         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
         watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
-        api_key_boundary: ProcessApiKeyBoundary | None = None,
+        credential_boundary: ProcessCredentialBoundary | None = None,
     ) -> None:
-        self.settings = settings
+        self._model_runtime = model_runtime
         self._deadlines = KernelExecutionDeadlineFactory(
             watchdog_policy or DEFAULT_KERNEL_WATCHDOG_POLICY
         )
@@ -4604,13 +4776,13 @@ class KernelHostCore:
             authenticated_first_party_extension_ids
         )
         self._bundled_skill_binding = BundledSkillDistributionBindingOwner()
-        self._api_key_boundary = api_key_boundary or ProcessApiKeyBoundary()
+        self._credential_boundary = credential_boundary or ProcessCredentialBoundary()
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
     def _plugin_management(self) -> PluginManagementService:
-        return PluginManagementService(api_key_boundary=self._api_key_boundary)
+        return PluginManagementService(credential_boundary=self._credential_boundary)
 
     async def inspect_user_plugins(self) -> PluginInspectionResult:
         """Inspect only the process-wide user Plugin store."""
@@ -4675,25 +4847,33 @@ class KernelHostCore:
     def production(
         cls,
         *,
-        settings: PulsaraSettings,
+        model_runtime: ModelRuntime,
         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
         watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
-        api_key_boundary: ProcessApiKeyBoundary | None = None,
+        credential_boundary: ProcessCredentialBoundary | None = None,
     ) -> "KernelHostCore":
         return cls(
-            settings=settings,
+            model_runtime=model_runtime,
             authenticated_first_party_extension_ids=(
                 authenticated_first_party_extension_ids
             ),
             watchdog_policy=watchdog_policy,
-            api_key_boundary=api_key_boundary,
+            credential_boundary=credential_boundary,
         )
 
     async def _ensure_resources(self) -> ConversationKernelRepository:
         if self._repository is None:
+            try:
+                postgres = self._model_runtime.settings.read().postgres
+            except Exception as exc:
+                raise KernelCompositionUnavailable(
+                    "local PostgreSQL settings are unavailable"
+                ) from exc
+            if postgres is None:
+                raise KernelCompositionUnavailable("PostgreSQL is not configured")
             self._event_loop = asyncio.get_running_loop()
             self._access = await process_postgres_schema_verification_service().acquire(
-                self.settings.storage.postgres_dsn,
+                postgres.runtime_dsn,
                 deadline_monotonic=self._canonical_deadline(),
             )
             try:
@@ -4723,7 +4903,6 @@ class KernelHostCore:
         self,
         workspace_input: HostWorkspaceInput,
         *,
-        model_role: ModelRole = ModelRole.PRO,
         permission_policy: EffectivePermissionPolicy | None = None,
         system_prompt: str | None = None,
         active_skill_names: frozenset[str] = frozenset(),
@@ -4731,7 +4910,6 @@ class KernelHostCore:
         return await self._open(
             workspace_input,
             session_id=f"session:{uuid4().hex}",
-            model_role=model_role,
             permission_policy=permission_policy,
             system_prompt=system_prompt,
             active_skill_names=active_skill_names,
@@ -4743,7 +4921,6 @@ class KernelHostCore:
         session_id: str,
         *,
         workspace_input: HostWorkspaceInput,
-        model_role: ModelRole = ModelRole.PRO,
         permission_policy: EffectivePermissionPolicy | None = None,
         system_prompt: str | None = None,
         active_skill_names: frozenset[str] = frozenset(),
@@ -4751,7 +4928,6 @@ class KernelHostCore:
         return await self._open(
             workspace_input,
             session_id=session_id,
-            model_role=model_role,
             permission_policy=permission_policy,
             system_prompt=system_prompt,
             active_skill_names=active_skill_names,
@@ -4777,7 +4953,6 @@ class KernelHostCore:
         workspace_input: HostWorkspaceInput,
         *,
         session_id: str,
-        model_role: ModelRole,
         permission_policy: EffectivePermissionPolicy | None,
         system_prompt: str | None,
         active_skill_names: frozenset[str],
@@ -4788,7 +4963,6 @@ class KernelHostCore:
             return await self._open_admitted(
                 workspace_input,
                 session_id=session_id,
-                model_role=model_role,
                 permission_policy=permission_policy,
                 system_prompt=system_prompt,
                 active_skill_names=active_skill_names,
@@ -4816,7 +4990,6 @@ class KernelHostCore:
         workspace_input: HostWorkspaceInput,
         *,
         session_id: str,
-        model_role: ModelRole,
         permission_policy: EffectivePermissionPolicy | None,
         system_prompt: str | None,
         active_skill_names: frozenset[str],
@@ -4832,11 +5005,11 @@ class KernelHostCore:
             raise PulsaraHomeResolutionError(pulsara_home_resolution)
         plugin_store = ManagedPluginStore(
             pulsara_home=pulsara_home_resolution,
-            api_key_boundary=self._api_key_boundary,
+            credential_boundary=self._credential_boundary,
         )
         plugin_view_owner = EnabledPluginViewOwner(
             store=plugin_store,
-            api_key_boundary=self._api_key_boundary,
+            credential_boundary=self._credential_boundary,
         )
         initial_plugin_view = await _shielded_plugin_filesystem_call(
             plugin_view_owner.observe,
@@ -4897,7 +5070,7 @@ class KernelHostCore:
                 deadline_monotonic=deadline,
             )
             session = KernelHostSession(
-                settings=self.settings,
+                model_runtime=self._model_runtime,
                 workspace=workspace,
                 repository=repository,
                 writer_lease=writer_lease,
@@ -4905,7 +5078,6 @@ class KernelHostCore:
                 session_id=session_id,
                 host_session_id=host_id,
                 permission_policy=permission_policy or default_permission_policy(),
-                model_role=model_role,
                 system_prompt=system_prompt,
                 active_skill_names=active_skill_names,
                 authenticated_first_party_extension_ids=(
@@ -4920,7 +5092,7 @@ class KernelHostCore:
                 user_home_resolution=user_home_resolution,
                 plugin_view_owner=plugin_view_owner,
                 initial_plugin_view=initial_plugin_view,
-                api_key_boundary=self._api_key_boundary,
+                credential_boundary=self._credential_boundary,
                 local_mcp_configs=local_mcp_configs,
                 mcp_configs=mcp_configs,
             )

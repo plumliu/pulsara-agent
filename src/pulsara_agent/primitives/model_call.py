@@ -10,6 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pulsara_agent.llm.model_connections import ModelCallBinding
+
 
 class ModelCallPurpose(StrEnum):
     AGENT_MODEL_LOOP = "agent_model_loop"
@@ -69,28 +71,6 @@ class ModelContextLimits(BaseModel):
         if default_input < 1:
             raise ValueError("default model input budget is non-positive")
         return self
-
-
-class ResolvedModelOptionsFact(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    reasoning_effort: str | None
-    options_fingerprint: str
-
-    @model_validator(mode="after")
-    def _validate_options(self) -> "ResolvedModelOptionsFact":
-        expected = resolved_model_options_fingerprint(
-            reasoning_effort=self.reasoning_effort
-        )
-        if self.options_fingerprint != expected:
-            raise ValueError("options_fingerprint does not match effective options")
-        return self
-
-
-def resolved_model_options_fingerprint(*, reasoning_effort: str | None) -> str:
-    return sha256_fingerprint(
-        "resolved-model-options:v2", {"reasoning_effort": reasoning_effort}
-    )
 
 
 class TokenEstimatorFact(BaseModel):
@@ -163,23 +143,17 @@ class ModelTokenUsageFact(BaseModel):
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-target:v4"] = "resolved-model-target:v4"
+    contract_version: Literal["resolved-model-target:v5"] = "resolved-model-target:v5"
     target_fingerprint: str
+    route_id: str = Field(min_length=1)
+    wire_api: Literal["openai_chat_completions", "openai_responses"]
     model_id: str = Field(min_length=1)
-    model_role: Literal["pro", "flash"]
-    provider: str = Field(min_length=1)
-    api: str = Field(min_length=1)
-    endpoint_origin: str = Field(min_length=1)
+    canonical_endpoint_base_url: str = Field(min_length=1)
     endpoint_fingerprint: str = Field(min_length=1)
-    provider_profile_id: str = Field(min_length=1)
-    provider_request_shape_fingerprint: str = Field(min_length=1)
     transport_binding_id: str = Field(min_length=1)
     transport_contract_version: str = Field(min_length=1)
     model_identity_policy: Literal["accept_reported", "exact"]
-    supports_tools: bool
-    supports_reasoning: bool
     limits: ModelContextLimits
-    effective_options: ResolvedModelOptionsFact
     context_budget: ResolvedModelContextBudgetFact
     token_estimator: TokenEstimatorFact
 
@@ -207,26 +181,24 @@ class ResolvedModelTargetFact(BaseModel):
         expected_input = expected_pre_margin - self.limits.input_safety_margin_tokens
         if self.context_budget.input_budget_tokens != expected_input:
             raise ValueError("input budget is inconsistent with model limits")
-        expected_fingerprint = resolved_model_target_fingerprint(
-            self.model_dump(mode="json", exclude={"target_fingerprint"})
-        )
-        if self.target_fingerprint != expected_fingerprint:
-            raise ValueError("target_fingerprint does not match target contract")
         return self
 
 
 def resolved_model_target_fingerprint(payload_without_fingerprint: dict[str, Any]) -> str:
-    return sha256_fingerprint("resolved-model-target:v4", payload_without_fingerprint)
+    return sha256_fingerprint(
+        "resolved-model-target-compatibility:v5", payload_without_fingerprint
+    )
 
 
 class ResolvedModelCallFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-call:v1"] = "resolved-model-call:v1"
+    contract_version: Literal["resolved-model-call:v2"] = "resolved-model-call:v2"
     resolved_model_call_id: str = Field(pattern=r"^model_call:[0-9a-f]{32}$")
     purpose: ModelCallPurpose
     context_mode: ModelContextMode
     target: ResolvedModelTargetFact
+    binding: ModelCallBinding
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "ResolvedModelCallFact":
@@ -492,11 +464,9 @@ __all__ = [
     "ProviderSanitizedErrorFact",
     "ResolvedModelCallFact",
     "ResolvedModelContextBudgetFact",
-    "ResolvedModelOptionsFact",
     "ResolvedModelTargetFact",
     "TokenEstimatorFact",
     "canonical_json_bytes",
-    "resolved_model_options_fingerprint",
     "resolved_model_target_fingerprint",
     "provider_sanitized_error_identity_fingerprint",
     "sha256_fingerprint",

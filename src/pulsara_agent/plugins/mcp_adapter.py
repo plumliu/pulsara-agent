@@ -108,9 +108,7 @@ def normalize_plugin_mcp_configs(
         except (MemoryError, OSError):
             for item in candidates:
                 _close_anchor(item.physical_lifetime_anchor)
-            diagnostics.append(
-                _diagnostic(PluginDiagnosticCode.VIEW_UNAVAILABLE)
-            )
+            diagnostics.append(_diagnostic(PluginDiagnosticCode.VIEW_UNAVAILABLE))
             return PluginMcpNormalizationResult(
                 tuple(sorted(existing_configs, key=lambda item: item.server_id)),
                 (),
@@ -137,7 +135,9 @@ def normalize_plugin_mcp_configs(
             continue
         accepted.append(group[0])
 
-    merged = tuple(sorted((*existing_configs, *accepted), key=lambda item: item.server_id))
+    merged = tuple(
+        sorted((*existing_configs, *accepted), key=lambda item: item.server_id)
+    )
     if len(merged) > MAXIMUM_MCP_CONFIGURED_SERVERS:
         for item in accepted:
             _close_anchor(item.physical_lifetime_anchor)
@@ -166,7 +166,9 @@ def framed_plugin_mcp_server_id(plugin_id: str, local_server_id: str) -> str:
 
 def _selected_servers(
     view: FrozenEnabledPluginView,
-) -> Iterable[tuple[FrozenEnabledPluginInstance, PluginMcpStdioSummary | PluginMcpHttpSummary]]:
+) -> Iterable[
+    tuple[FrozenEnabledPluginInstance, PluginMcpStdioSummary | PluginMcpHttpSummary]
+]:
     user = {item.identity.plugin_id: item for item in view.user_instances}
     workspace = {item.identity.plugin_id: item for item in view.workspace_instances}
     for plugin_id in sorted(set(user) | set(workspace)):
@@ -183,7 +185,10 @@ def _selected_servers(
             # The higher-scope set is unknown, so it owns the whole component
             # boundary and no lower-scope process is guessed into existence.
             continue
-        if workspace_component.disposition is PluginComponentObservationDisposition.MISSING:
+        if (
+            workspace_component.disposition
+            is PluginComponentObservationDisposition.MISSING
+        ):
             yield from _valid_servers(user_instance)
             continue
         assert workspace_component.parsed is not None
@@ -197,7 +202,9 @@ def _selected_servers(
 
 def _valid_servers(
     instance: FrozenEnabledPluginInstance | None,
-) -> Iterable[tuple[FrozenEnabledPluginInstance, PluginMcpStdioSummary | PluginMcpHttpSummary]]:
+) -> Iterable[
+    tuple[FrozenEnabledPluginInstance, PluginMcpStdioSummary | PluginMcpHttpSummary]
+]:
     if instance is None or instance.mcp.parsed is None:
         return
     for server in instance.mcp.parsed.valid_servers:
@@ -223,10 +230,7 @@ def _normalize_server(
                 key: _expand(value, package_root=package_root, data_root=data_root)
                 for key, value in server.environment
             }
-            if any(
-                key in environment
-                for key in ("PLUGIN_ROOT", "PLUGIN_DATA", "PULSARA_API_KEY")
-            ):
+            if any(key in environment for key in ("PLUGIN_ROOT", "PLUGIN_DATA")):
                 raise ValueError("Plugin MCP environment uses a reserved key")
             environment["PLUGIN_ROOT"] = str(package_root)
             environment["PLUGIN_DATA"] = str(data_root)
@@ -276,7 +280,11 @@ def _normalize_server(
             default_tool_timeout_ms=DEFAULT_MCP_TOOL_TIMEOUT_MS,
             per_tool_timeout_ms=(),
             runtime_source=source,
-            public_headers=(server.public_headers if isinstance(server, PluginMcpHttpSummary) else ()),
+            public_headers=(
+                server.public_headers
+                if isinstance(server, PluginMcpHttpSummary)
+                else ()
+            ),
             physical_lifetime_anchor=anchor,
         )
     except BaseException:
@@ -311,7 +319,9 @@ def _resolve_cwd(
 
 def _contained(root: Path, suffix: str) -> Path:
     relative = PurePosixPath(suffix)
-    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+    if relative.is_absolute() or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
         raise ValueError("Plugin MCP path escapes its authority")
     result = root.joinpath(*relative.parts)
     result.relative_to(root)

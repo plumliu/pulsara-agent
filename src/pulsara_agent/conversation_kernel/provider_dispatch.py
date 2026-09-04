@@ -412,7 +412,7 @@ class PreparedWireMeasurementDecision:
             raise ValueError("wire measurement decision has invalid admission union")
         if (
             self.quote.wire_api
-            != candidate.call.target.model_profile.provider_profile.wire_api
+            != candidate.call.target.model_profile.route_wire_profile.wire_api
             or self.quote.estimator_fingerprint
             != candidate.compile_binding.estimator_fingerprint
             or self.quote.effective_input_budget_tokens
@@ -432,7 +432,7 @@ class PreparedWireMeasurementDecision:
             )
             or plan.resolved_target_semantic_fingerprint
             != candidate.call.target.fact.target_fingerprint
-            or plan.provider_profile_fingerprint
+            or plan.route_wire_profile_fingerprint
             != provider_wire_profile_fingerprint(candidate.call)
             or plan.materialization.tool_items
             != tuple(
@@ -1005,6 +1005,12 @@ class ProviderDispatchCoordinator:
             deadline_monotonic=deadline,
         )
         try:
+            binding = await self._io.run(
+                self._repository.read_turn_model_call_binding,
+                self._writer_lease.guard,
+                turn_id=turn_id,
+                deadline_monotonic=deadline,
+            )
             prepared_target = self._model.prepare_target(
                 KernelModelTargetPreparationRequest(
                     session_id=self._writer_lease.guard.session_id,
@@ -1013,6 +1019,7 @@ class ProviderDispatchCoordinator:
                     purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
                     maximum_input_tokens=self._maximum_input_tokens_per_call,
                     maximum_output_tokens=self._maximum_output_tokens_per_call,
+                    binding=binding,
                 )
             )
             _require_dispatch_planning_deadline(deadline)
@@ -1172,6 +1179,12 @@ class ProviderDispatchCoordinator:
             base_facts = base_read.compile_snapshot
             base_input = base_facts.canonical_input
             identity = base_input.identity
+            turn_binding = await self._io.run(
+                self._repository.read_turn_model_call_binding,
+                self._writer_lease.guard,
+                turn_id=turn_id,
+                deadline_monotonic=deadline,
+            )
             subagent_seed: SubagentInitialSeed | None = None
             subagent_profile_kind: SubagentProfileKind | None = None
             subagent_source_replacements: tuple[
@@ -1266,6 +1279,7 @@ class ProviderDispatchCoordinator:
                             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
                             maximum_input_tokens=self._maximum_input_tokens_per_call,
                             maximum_output_tokens=self._maximum_output_tokens_per_call,
+                            binding=turn_binding,
                         )
                     )
                 elif (
@@ -3350,7 +3364,7 @@ def provider_input_compatibility(
             canonical_facts.context_binding_fact.context_base_semantic_identity
         ),
         provider_assistant_replay_contract_fingerprint=(
-            prepared_call.call.target.model_profile.provider_profile.assistant_replay_contract_fingerprint
+            prepared_call.call.target.model_profile.route_wire_profile.assistant_replay_contract_fingerprint
         ),
     )
 
@@ -3358,7 +3372,7 @@ def provider_input_compatibility(
 def provider_replay_target(
     prepared_call: PreparedKernelModelCall,
 ):
-    profile = prepared_call.call.target.model_profile.provider_profile
+    profile = prepared_call.call.target.model_profile.route_wire_profile
     return build_provider_replay_target_compatibility(
         wire_api=profile.wire_api,
         endpoint_identity_fingerprint=(

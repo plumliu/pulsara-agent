@@ -1,175 +1,363 @@
-"""Application-level configuration for Pulsara."""
+"""Database-independent closed local settings for Pulsara."""
 
 from __future__ import annotations
 
+import asyncio
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
+from typing import Callable
+from uuid import uuid4
 
-from pulsara_agent.llm.config import LLMConfig
-from pulsara_agent.retrieval.config import RetrievalConfig
+import yaml
+
+from pulsara_agent.capability.pulsara_home import require_pulsara_home
+from pulsara_agent.llm.model_connections import (
+    ModelConnectionConfig,
+    model_connection_from_dict,
+    model_connection_to_dict,
+)
+from pulsara_agent.local_credentials import LocalCredentialStore, ModelProviderCredential
+from pulsara_agent.local_source_binding import (
+    open_absolute_directory_nofollow,
+    open_or_create_absolute_directory_nofollow,
+)
 
 
-DEFAULT_POSTGRES_DSN = (
-    "postgresql://pulsara_runtime:pulsara_runtime@localhost:5432/pulsara"
+LOCAL_SETTINGS_SCHEMA = "pulsara-local-settings:v1"
+LOCAL_SETTINGS_FILE_NAME = "local-settings.yaml"
+MAXIMUM_LOCAL_SETTINGS_BYTES = 1 << 20
+_READ_FLAGS = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+_WRITE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
 )
 
 
 @dataclass(frozen=True, slots=True)
-class StorageConfig:
-    postgres_dsn: str = DEFAULT_POSTGRES_DSN
+class LocalPostgresConfig:
+    runtime_dsn: str
+    admin_dsn: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.postgres_dsn.strip():
-            raise ValueError("postgres_dsn is required for production storage wiring")
-
-    @classmethod
-    def from_env(cls, prefix: str = "PULSARA") -> "StorageConfig":
-        return cls(
-            postgres_dsn=os.getenv(
-                f"{prefix}_POSTGRES_DSN", DEFAULT_POSTGRES_DSN
-            ).strip(),
-        )
-
-    def redacted_dict(self) -> dict:
-        return {
-            "postgres_dsn_set": bool(self.postgres_dsn),
-        }
+        if not self.runtime_dsn or self.runtime_dsn != self.runtime_dsn.strip():
+            raise ValueError("runtime PostgreSQL DSN must be non-empty")
+        if self.admin_dsn is not None and (
+            not self.admin_dsn or self.admin_dsn != self.admin_dsn.strip()
+        ):
+            raise ValueError("admin PostgreSQL DSN must be non-empty when present")
+        _validate_postgres_dsn(self.runtime_dsn)
+        if self.admin_dsn is not None:
+            _validate_postgres_dsn(self.admin_dsn)
 
 
 @dataclass(frozen=True, slots=True)
-class PulsaraSettings:
-    """Runtime settings loaded by application bootstrap code."""
+class LocalSettings:
+    postgres: LocalPostgresConfig | None = None
+    model_connections: tuple[ModelConnectionConfig, ...] = ()
 
-    llm: LLMConfig
-    storage: StorageConfig
-    retrieval: RetrievalConfig = RetrievalConfig()
+    def __post_init__(self) -> None:
+        ids = tuple(item.id for item in self.model_connections)
+        if len(ids) != len(set(ids)):
+            raise ValueError("local settings contain duplicate model connection IDs")
 
-    @classmethod
-    def from_env(cls, prefix: str = "PULSARA") -> "PulsaraSettings":
-        return cls(
-            llm=LLMConfig.from_env(prefix=prefix),
-            storage=StorageConfig.from_env(prefix=prefix),
-            retrieval=RetrievalConfig.from_env(prefix=prefix),
+    def connection(self, connection_id) -> ModelConnectionConfig | None:
+        return next(
+            (item for item in self.model_connections if item.id == connection_id),
+            None,
         )
 
-    @classmethod
-    def from_env_file(
-        cls,
-        path: str | Path = ".env",
+
+class LocalSettingsUnavailable(RuntimeError):
+    pass
+
+
+class LocalSettingsPublishIndeterminate(RuntimeError):
+    pass
+
+
+class _LocalSettingsCommitUnknown(OSError):
+    pass
+
+
+def default_local_settings_path() -> Path:
+    return require_pulsara_home() / LOCAL_SETTINGS_FILE_NAME
+
+
+def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
+    return {
+        "schema": LOCAL_SETTINGS_SCHEMA,
+        "postgres": (
+            None
+            if settings.postgres is None
+            else {
+                "runtime_dsn": settings.postgres.runtime_dsn,
+                "admin_dsn": settings.postgres.admin_dsn,
+            }
+        ),
+        "model_connections": [
+            model_connection_to_dict(item) for item in settings.model_connections
+        ],
+    }
+
+
+def local_settings_from_dict(value: object) -> LocalSettings:
+    if not isinstance(value, dict) or set(value) != {
+        "schema",
+        "postgres",
+        "model_connections",
+    }:
+        raise ValueError("local settings have an invalid closed shape")
+    if value["schema"] != LOCAL_SETTINGS_SCHEMA:
+        raise ValueError("local settings schema is unsupported")
+    raw_postgres = value["postgres"]
+    postgres: LocalPostgresConfig | None
+    if raw_postgres is None:
+        postgres = None
+    elif isinstance(raw_postgres, dict) and set(raw_postgres) == {
+        "runtime_dsn",
+        "admin_dsn",
+    }:
+        runtime_dsn = raw_postgres["runtime_dsn"]
+        admin_dsn = raw_postgres["admin_dsn"]
+        if not isinstance(runtime_dsn, str) or (
+            admin_dsn is not None and not isinstance(admin_dsn, str)
+        ):
+            raise ValueError("PostgreSQL settings fields are invalid")
+        postgres = LocalPostgresConfig(runtime_dsn, admin_dsn)
+    else:
+        raise ValueError("PostgreSQL settings have an invalid closed shape")
+    raw_connections = value["model_connections"]
+    if not isinstance(raw_connections, list):
+        raise ValueError("model_connections must be an array")
+    return LocalSettings(
+        postgres=postgres,
+        model_connections=tuple(
+            model_connection_from_dict(item) for item in raw_connections
+        ),
+    )
+
+
+def read_local_settings(path: Path | None = None) -> LocalSettings:
+    settings_path = path or default_local_settings_path()
+    if not settings_path.is_absolute():
+        raise ValueError("local settings path must be absolute")
+    try:
+        parent = open_absolute_directory_nofollow(settings_path.parent)
+    except FileNotFoundError:
+        return LocalSettings()
+    descriptor: int | None = None
+    try:
+        try:
+            descriptor = os.open(settings_path.name, _READ_FLAGS, dir_fd=parent)
+        except FileNotFoundError:
+            return LocalSettings()
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise LocalSettingsUnavailable("local settings are not a regular file")
+        if metadata.st_size > MAXIMUM_LOCAL_SETTINGS_BYTES:
+            raise LocalSettingsUnavailable("local settings exceed their byte bound")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = None
+            raw = stream.read(MAXIMUM_LOCAL_SETTINGS_BYTES + 1)
+        if len(raw) > MAXIMUM_LOCAL_SETTINGS_BYTES:
+            raise LocalSettingsUnavailable("local settings exceed their byte bound")
+    except (OSError, UnicodeError, yaml.YAMLError, ValueError) as exc:
+        if isinstance(exc, LocalSettingsUnavailable):
+            raise
+        raise LocalSettingsUnavailable("local settings cannot be read") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+    try:
+        decoded = yaml.safe_load(raw.decode("utf-8"))
+        return local_settings_from_dict(decoded)
+    except (UnicodeError, yaml.YAMLError, ValueError) as exc:
+        raise LocalSettingsUnavailable("local settings are invalid") from exc
+
+
+def write_local_settings(path: Path, settings: LocalSettings) -> None:
+    if not path.is_absolute():
+        raise ValueError("local settings path must be absolute")
+    payload = yaml.safe_dump(
+        local_settings_to_dict(settings),
+        allow_unicode=True,
+        sort_keys=False,
+    ).encode("utf-8")
+    if len(payload) > MAXIMUM_LOCAL_SETTINGS_BYTES:
+        raise ValueError("local settings exceed their byte bound")
+    parent = open_or_create_absolute_directory_nofollow(path.parent, mode=0o700)
+    temporary = f".{path.name}.{uuid4().hex}.tmp"
+    descriptor: int | None = None
+    replaced = False
+    try:
+        os.fchmod(parent, 0o700)
+        descriptor = os.open(temporary, _WRITE_FLAGS, 0o600, dir_fd=parent)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            descriptor = None
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
+        replaced = True
+        os.fsync(parent)
+    except BaseException as exc:
+        if replaced:
+            raise _LocalSettingsCommitUnknown(
+                "local settings publication result is unknown"
+            ) from exc
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
+
+
+SettingsWriter = Callable[[Path, LocalSettings], None]
+
+
+class LocalSettingsStore:
+    """The sole process-local read/modify/write owner for the closed document."""
+
+    def __init__(
+        self,
+        path: Path | None = None,
         *,
-        prefix: str = "PULSARA",
-        override: bool = False,
-    ) -> "PulsaraSettings":
-        load_env_file(path, override=override)
-        return cls.from_env(prefix=prefix)
+        writer: SettingsWriter = write_local_settings,
+    ) -> None:
+        self.path = path or default_local_settings_path()
+        if not self.path.is_absolute():
+            raise ValueError("local settings path must be absolute")
+        self._writer = writer
+        self._lock = asyncio.Lock()
 
-    def redacted_dict(self) -> dict:
-        return {
-            "llm": {
-                "api": self.llm.api,
-                "provider": self.llm.provider,
-                "endpoint_origin": _redacted_endpoint_origin(self.llm.base_url),
-                "pro_model": self.llm.pro_model,
-                "flash_model": self.llm.flash_model,
-                "pro_limits": self.llm.pro.limits.model_dump(mode="json"),
-                "flash_limits": self.llm.flash.limits.model_dump(mode="json"),
-                "api_key_set": bool(self.llm.api_key),
-            },
-            "storage": self.storage.redacted_dict(),
-            "retrieval": {
-                "embedding": {
-                    "provider": self.retrieval.embedding.provider,
-                    "base_url": self.retrieval.embedding.base_url,
-                    "model": self.retrieval.embedding.model,
-                    "dimensions": self.retrieval.embedding.dimensions,
-                    "api_key_set": bool(self.retrieval.embedding.api_key),
-                },
-                "rerank": {
-                    "provider": self.retrieval.rerank.provider,
-                    "base_url": self.retrieval.rerank.base_url,
-                    "model": self.retrieval.rerank.model,
-                    "api_key_set": bool(self.retrieval.rerank.api_key),
-                },
-                "memory": {
-                    "automatic_dense": self.retrieval.memory.automatic_dense,
-                    "explicit_rerank": self.retrieval.memory.explicit_rerank,
-                },
-            },
-        }
+    def read(self) -> LocalSettings:
+        return read_local_settings(self.path)
+
+    def _read_for_explicit_repair(self) -> LocalSettings:
+        """Read the latest document or start a user-requested replacement.
+
+        A malformed document remains unavailable to ordinary readers.  An
+        explicit settings mutation is the only repair boundary: the user has
+        supplied the replacement value, so the closed document can be rebuilt
+        without introducing a legacy parser or hidden recovery authority.
+        """
+
+        try:
+            return self.read()
+        except LocalSettingsUnavailable:
+            return LocalSettings()
+
+    async def save_postgres(
+        self, postgres: LocalPostgresConfig | None
+    ) -> LocalSettings:
+        async with self._lock:
+            current = await asyncio.to_thread(self._read_for_explicit_repair)
+            updated = LocalSettings(postgres, current.model_connections)
+            await asyncio.to_thread(self._writer, self.path, updated)
+            return updated
+
+    async def add_model_connection(
+        self,
+        *,
+        connection: ModelConnectionConfig,
+        api_key: str,
+        credentials: LocalCredentialStore,
+    ) -> LocalSettings:
+        key = ModelProviderCredential(connection.id)
+        credentials.put(key, api_key)
+        settlement = asyncio.create_task(
+            self._settle_model_connection_add(
+                connection=connection,
+                credentials=credentials,
+            ),
+            name="publish-model-connection-metadata",
+        )
+        cancelled: asyncio.CancelledError | None = None
+        while not settlement.done():
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError as exc:
+                cancelled = cancelled or exc
+                continue
+        result = settlement.result()
+        if cancelled is not None:
+            raise cancelled
+        return result
+
+    async def _settle_model_connection_add(
+        self,
+        *,
+        connection: ModelConnectionConfig,
+        credentials: LocalCredentialStore,
+    ) -> LocalSettings:
+        key = ModelProviderCredential(connection.id)
+        async with self._lock:
+            try:
+                current = await asyncio.to_thread(self._read_for_explicit_repair)
+                if current.connection(connection.id) is not None:
+                    raise ValueError("model connection ID already exists")
+                updated = LocalSettings(
+                    current.postgres,
+                    (*current.model_connections, connection),
+                )
+                await asyncio.to_thread(self._writer, self.path, updated)
+                return updated
+            except _LocalSettingsCommitUnknown as exc:
+                try:
+                    observed = await asyncio.to_thread(self.read)
+                except LocalSettingsUnavailable as read_exc:
+                    raise LocalSettingsPublishIndeterminate(
+                        "model connection metadata publication is indeterminate"
+                    ) from read_exc
+                published = observed.connection(connection.id)
+                if published == connection:
+                    return observed
+                if published is None:
+                    credentials.delete(key)
+                    raise LocalSettingsUnavailable(
+                        "model connection metadata was not published"
+                    ) from exc
+                raise LocalSettingsPublishIndeterminate(
+                    "model connection ID resolved to different metadata"
+                ) from exc
+            except BaseException:
+                credentials.delete(key)
+                raise
 
 
-def _redacted_endpoint_origin(value: str) -> str:
-    """Return a display-safe endpoint identity without path/query/userinfo."""
+def _validate_postgres_dsn(value: str) -> None:
+    from psycopg.conninfo import conninfo_to_dict
 
     try:
-        parsed = urlsplit(value)
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
-            return "<invalid>"
-        host = parsed.hostname.encode("idna").decode("ascii").lower()
-        port = parsed.port
-        if port == (80 if parsed.scheme.lower() == "http" else 443):
-            port = None
-        rendered_host = f"[{host}]" if ":" in host else host
-        authority = rendered_host if port is None else f"{rendered_host}:{port}"
-        return f"{parsed.scheme.lower()}://{authority}"
-    except (UnicodeError, ValueError):
-        return "<invalid>"
+        parsed = conninfo_to_dict(value)
+    except Exception as exc:
+        raise ValueError("PostgreSQL DSN syntax is invalid") from exc
+    if not parsed.get("dbname"):
+        raise ValueError("PostgreSQL DSN must name a database")
 
 
-def load_env_file(
-    path: str | Path = ".env", *, override: bool = False
-) -> dict[str, str]:
-    env_path = Path(path)
-    if not env_path.exists():
-        raise ValueError(f"Environment file not found: {env_path}")
-    if not env_path.is_file():
-        raise ValueError(f"Environment path is not a file: {env_path}")
-
-    loaded: dict[str, str] = {}
-    for line_number, raw_line in enumerate(
-        env_path.read_text(encoding="utf-8").splitlines(), start=1
-    ):
-        parsed = _parse_env_line(raw_line)
-        if parsed is None:
-            continue
-        key, value = parsed
-        if not key:
-            raise ValueError(
-                f"Invalid empty environment key in {env_path}:{line_number}"
-            )
-        if override or key not in os.environ:
-            os.environ[key] = value
-        loaded[key] = value
-    return loaded
-
-
-def _parse_env_line(line: str) -> tuple[str, str] | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#"):
-        return None
-    if stripped.startswith("export "):
-        stripped = stripped[len("export ") :].strip()
-    if "=" not in stripped:
-        raise ValueError(f"Invalid .env line without '=': {line}")
-    key, value = stripped.split("=", 1)
-    key = key.strip()
-    value = _strip_inline_comment(value.strip())
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        value = value[1:-1]
-    return key, value
-
-
-def _strip_inline_comment(value: str) -> str:
-    in_single = False
-    in_double = False
-    for index, char in enumerate(value):
-        if char == "'" and not in_double:
-            in_single = not in_single
-        elif char == '"' and not in_single:
-            in_double = not in_double
-        elif char == "#" and not in_single and not in_double:
-            if index == 0 or value[index - 1].isspace():
-                return value[:index].rstrip()
-    return value
+__all__ = [
+    "LOCAL_SETTINGS_FILE_NAME",
+    "LOCAL_SETTINGS_SCHEMA",
+    "LocalPostgresConfig",
+    "LocalSettings",
+    "LocalSettingsPublishIndeterminate",
+    "LocalSettingsStore",
+    "LocalSettingsUnavailable",
+    "default_local_settings_path",
+    "local_settings_from_dict",
+    "local_settings_to_dict",
+    "read_local_settings",
+    "write_local_settings",
+]

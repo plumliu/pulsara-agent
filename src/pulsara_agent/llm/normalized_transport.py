@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 import json
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
 
 from pulsara_agent.llm.provider_sanitization import (
     DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT,
@@ -13,7 +13,6 @@ from pulsara_agent.llm.provider_sanitization import (
 )
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.live_agent_event import (
     DataDeltaPayload,
@@ -48,6 +47,10 @@ from pulsara_agent.llm.stream_limits import (
     MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL,
 )
 from pulsara_agent.primitives.model_call import sha256_fingerprint
+from pulsara_agent.primitives.model_call import ModelCallDiagnosticFact
+
+if TYPE_CHECKING:
+    from pulsara_agent.llm.resolution import ResolvedModelCall
 
 
 _MAX_SINGLE_PAYLOAD_BYTES = 256 << 10
@@ -63,8 +66,14 @@ class _OpenBlock:
 class NormalizedProviderTransportExecution:
     """One physical provider operation with a single typed stream boundary."""
 
-    def __init__(self, stream: AsyncIterator[object]) -> None:
+    def __init__(
+        self,
+        stream: AsyncIterator[object],
+        *,
+        local_diagnostics: tuple[ModelCallDiagnosticFact, ...] = (),
+    ) -> None:
         self._stream = stream
+        self._local_diagnostics = local_diagnostics
         self._open: dict[str, _OpenBlock] = {}
         self._seen: set[str] = set()
         self._usage: TransportUsageReport | None = None
@@ -164,8 +173,7 @@ class NormalizedProviderTransportExecution:
                         if item.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
                         else ProviderNormalizedTerminalKind.OUTPUT_INCOMPLETE
                     ),
-                    usage=self._usage
-                    or TransportUsageReport(usage_status="missing", usage=None),
+                    usage=self._effective_usage(),
                     incomplete_reason=item.incomplete_reason,
                     completed_replay_payload=item.completed_replay_payload,
                 )
@@ -251,13 +259,28 @@ class NormalizedProviderTransportExecution:
         self._terminal_delivered = True
         return ProviderStreamTerminal(
             terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
-            usage=self._usage
-            or TransportUsageReport(usage_status="missing", usage=None),
+            usage=self._effective_usage(),
             error=sanitize_provider_failure(
                 message=message,
                 code_hint=code_hint,
                 retry_summary=retry_summary,
             ),
+        )
+
+    def _effective_usage(self) -> TransportUsageReport:
+        report = self._usage or TransportUsageReport(
+            usage_status="missing", usage=None
+        )
+        if not self._local_diagnostics:
+            return report
+        return TransportUsageReport(
+            usage_status=report.usage_status,
+            usage=report.usage,
+            provider_diagnostics=(
+                *self._local_diagnostics,
+                *report.provider_diagnostics,
+            ),
+            reported_model_id=report.reported_model_id,
         )
 
     def _apply(self, item: ProviderStreamPayload) -> None:
@@ -359,7 +382,20 @@ class NormalizedLLMTransport:
                 yield ProviderStreamFailure(message=failure_message)
 
             stream = failed()
-        return NormalizedProviderTransportExecution(stream)
+        diagnostics = (
+            (
+                ModelCallDiagnosticFact(
+                    code="catalog_tool_call_support_unknown",
+                    message="The model catalog does not confirm tool-call support.",
+                ),
+            )
+            if context.tools and call.target.contract.catalog_facts.tool_call is None
+            else ()
+        )
+        return NormalizedProviderTransportExecution(
+            stream,
+            local_diagnostics=diagnostics,
+        )
 
 
 @dataclass(slots=True)

@@ -103,6 +103,13 @@ from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATI
 from pulsara_agent.terminal_process.output import TerminalOutputOwner
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_resolution_snapshot,
+    test_model_runtime,
+)
 
 
 def _name(prefix: str) -> str:
@@ -287,8 +294,8 @@ def test_round1_preview_threshold_matrix(
         ("🙂" * 9_999, ToolResultDisplayKind.COMPLETE),
         ("🙂" * 10_000, ToolResultDisplayKind.COMPLETE),
         (("🙂" * 10_000) + "a", ToolResultDisplayKind.HEAD_TAIL),
-        (("\\\"" * 20_000), ToolResultDisplayKind.COMPLETE),
-        (("\\\"" * 20_000) + "a", ToolResultDisplayKind.HEAD_TAIL),
+        (('\\"' * 20_000), ToolResultDisplayKind.COMPLETE),
+        (('\\"' * 20_000) + "a", ToolResultDisplayKind.HEAD_TAIL),
     ),
 )
 def test_round7_1_canonical_complete_uses_candidate_utf8_bytes(
@@ -740,7 +747,8 @@ def test_round1_runner_accepts_known_outcome_when_publication_fails_and_confirms
     repository = _LostToolResultAckRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -755,6 +763,7 @@ def test_round1_runner_accepts_known_outcome_when_publication_fails_and_confirms
         ),
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_tool_stream(), _text_stream("done")]),
@@ -935,7 +944,8 @@ def test_round1_missing_artifact_edge_fails_before_canonical_acceptance(
 
 def _install_tool_call(repository: ConversationKernelRepository, workspace_id: str):
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -944,7 +954,8 @@ def _install_tool_call(repository: ConversationKernelRepository, workspace_id: s
     )
     turn_id = _name("turn")
     permission_snapshot_id = _name("permission-snapshot")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -952,6 +963,7 @@ def _install_tool_call(repository: ConversationKernelRepository, workspace_id: s
         context_binding_revision_id=_name("binding"),
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"run"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -1121,7 +1133,8 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         offset = page.next_offset_chars
     assert "".join(pieces) == source
 
-    other_session = repository.acquire_host_writer(
+    other_session = acquire_bound_test_writer(
+        repository,
         session_id=_name("session"),
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1198,9 +1211,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         extended["text"] += next_character
         extended["returned_chars"] += 1
         extended["next_offset_chars"] += 1
-        extended["has_more"] = (
-            extended["next_offset_chars"] < extended["total_chars"]
-        )
+        extended["has_more"] = extended["next_offset_chars"] < extended["total_chars"]
         if not extended["has_more"]:
             extended["next_offset_chars"] = None
         extended_body = json.dumps(
@@ -1458,9 +1469,7 @@ def test_round1_retained_snapshot_artifact_offset_zero_is_retained_body_start(
     ).read_text(projection.artifact_id, offset_chars=0, max_chars=32_000)
     assert page.text == retained.text
     assert page.text.startswith("RETAINED-BODY-START")
-    assert page.record.source_coverage is (
-        ToolOutputSourceCoverage.RETAINED_SNAPSHOT
-    )
+    assert page.record.source_coverage is (ToolOutputSourceCoverage.RETAINED_SNAPSHOT)
     assert page.record.source_coverage_reason is (
         ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP
     )
@@ -1691,9 +1700,9 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     assert entry.descriptor.is_concurrency_safe
     assert entry.descriptor.permission_category == "artifact_read"
     assert binding.executor_identity.endswith("ArtifactReadTool#artifact_read")
-    assert production_builtin_executor_binding_identity_fingerprint(
-        binding
-    ).startswith("sha256:")
+    assert production_builtin_executor_binding_identity_fingerprint(binding).startswith(
+        "sha256:"
+    )
     schema = thaw_json(specs["artifact_read"].parameters)
     assert isinstance(schema, dict)
     assert schema["additionalProperties"] is False

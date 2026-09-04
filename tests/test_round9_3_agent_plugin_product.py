@@ -46,7 +46,7 @@ from pulsara_agent.plugins.mcp_adapter import (
 from pulsara_agent.plugins.package_store import ManagedPluginStore
 from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
 from pulsara_agent.plugins.view import EnabledPluginViewOwner
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 
 def _package(root: Path, *, marker: str = "one") -> Path:
@@ -128,16 +128,16 @@ def _package(root: Path, *, marker: str = "one") -> Path:
     return root
 
 
-def _owners(tmp_path: Path):
+def _owners(tmp_path: Path, *, credential: str = ""):
     home = resolve_pulsara_home(str(tmp_path / "home"))
-    boundary = ProcessApiKeyBoundary()
+    boundary = ProcessCredentialBoundary(credential)
     service = PluginManagementService(
-        api_key_boundary=boundary,
+        credential_boundary=boundary,
         pulsara_home_resolution=home,
     )
     store = ManagedPluginStore(
         pulsara_home=home,
-        api_key_boundary=boundary,
+        credential_boundary=boundary,
     )
     return boundary, service, store
 
@@ -221,7 +221,7 @@ def test_round9_3_one_view_feeds_skill_mcp_and_hook_native_owners(
     )
     assert enabled.disposition is PluginEnablementDisposition.ENABLED
     view = EnabledPluginViewOwner(
-        store=store, api_key_boundary=boundary
+        store=store, credential_boundary=boundary
     ).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
@@ -290,13 +290,12 @@ def test_round9_3_one_view_feeds_skill_mcp_and_hook_native_owners(
         view.close()
 
 
-def test_round9_3_current_api_key_is_rejected_from_name_and_bytes(
-    tmp_path: Path, monkeypatch
+def test_round9_3_current_borrowed_credential_is_rejected_from_name_and_bytes(
+    tmp_path: Path,
 ) -> None:
     secret = "round-9-3-exact-secret"
-    monkeypatch.setenv("PULSARA_API_KEY", secret)
     source = _package(tmp_path / f"source-{secret}")
-    boundary, service, _store = _owners(tmp_path)
+    boundary, service, _store = _owners(tmp_path, credential=secret)
     assert boundary.last_boundary_snapshot == secret
     outcome = service.validate_local_plugin_source(
         ValidateLocalPluginSourceRequest(source, monotonic() + 30)
@@ -334,4 +333,4 @@ def test_round9_3_cli_and_dependency_direction_are_single_path() -> None:
         name in os.environ
         for name in ("PULSARA_PLUGIN_PROFILE", "PULSARA_PLUGIN_LAYOUT")
     )
-    assert "api_key_boundary" in signature(KernelHostCore.production).parameters
+    assert "credential_boundary" in signature(KernelHostCore.production).parameters

@@ -2,13 +2,48 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from time import monotonic
 from typing import Awaitable, Callable, cast
 from uuid import UUID
 
 from aiohttp import web
 
 from pulsara_agent.conversation_kernel.host import KernelHostCoreClosing
+from pulsara_agent.llm.model_catalog import (
+    ModelCatalogEntry,
+    ModelCatalogInvalid,
+    ModelCatalogOwner,
+    ModelCatalogUnavailable,
+    ModelTargetKey,
+    ReasoningFixedOn,
+    ReasoningProviderDefault,
+    ReasoningSelectableControls,
+    ReasoningUnavailable,
+    WireApi,
+)
+from pulsara_agent.llm.model_connections import (
+    ModelConnectionConfig,
+    model_call_binding_from_dict,
+    model_connection_to_dict,
+    reasoning_selection_to_dict,
+)
+from pulsara_agent.llm.model_target import (
+    controls_supported_by_adapter,
+    create_model_connection,
+    default_reasoning_selection,
+    resolve_model_target_contract,
+)
+from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
+from pulsara_agent.local_credentials import (
+    CredentialStoreError,
+    CredentialState,
+    DashScopeEmbeddingCredential,
+    DashScopeRerankCredential,
+    LocalCredentialStore,
+    ModelProviderCredential,
+)
 from pulsara_agent.mcp_config import (
     McpConfiguredServerBoundExceeded,
     WorkspaceMcpConfigStaleError,
@@ -19,9 +54,123 @@ from pulsara_agent.web_app.session_controller import (
     LocalSessionController,
     SessionWorkspaceKind,
 )
+from pulsara_agent.settings import (
+    LocalPostgresConfig,
+    LocalSettings,
+    LocalSettingsStore,
+    LocalSettingsUnavailable,
+)
+from pulsara_agent.storage.migrations.errors import (
+    PostgresSchemaError,
+    PostgresSchemaFailureCode,
+)
 
 
 LOOPBACK_HOST = "127.0.0.1"
+
+
+def _reasoning_payload(value) -> dict[str, object]:
+    if isinstance(value, ReasoningSelectableControls):
+        return {
+            "kind": "selectable",
+            "effort": (
+                None
+                if value.effort is None
+                else {"values": list(value.effort.values)}
+            ),
+            "toggle": value.toggle is not None,
+            "budget_tokens": (
+                None
+                if value.budget is None
+                else {
+                    "minimum": value.budget.minimum_tokens,
+                    "maximum": value.budget.maximum_tokens,
+                }
+            ),
+        }
+    if isinstance(value, ReasoningFixedOn):
+        return {"kind": "fixed_on"}
+    if isinstance(value, ReasoningUnavailable):
+        return {"kind": "unavailable"}
+    if isinstance(value, ReasoningProviderDefault):
+        return {"kind": "provider_default"}
+    raise TypeError(type(value).__name__)
+
+
+def _catalog_entry_payload(
+    entry: ModelCatalogEntry, *, model_runtime: ModelRuntime
+) -> dict[str, object]:
+    wires: list[dict[str, object]] = []
+    for wire_api in WireApi:
+        if not model_runtime.route_wires.supports(entry, wire_api):
+            wires.append(
+                {
+                    "wire_api": wire_api.value,
+                    "executable": False,
+                    "reason": "route_wire_adapter_unavailable",
+                    "endpoint": None,
+                }
+            )
+            continue
+        route_wire = model_runtime.route_wires.contract_for(entry, wire_api)
+        endpoint = model_runtime.route_wires.endpoint_for(entry)
+        executable = entry.limits is not None and endpoint is not None
+        wires.append(
+            {
+                "wire_api": wire_api.value,
+                "executable": executable,
+                "endpoint": endpoint,
+                "reason": (
+                    None
+                    if executable
+                    else (
+                        "model_hard_limits_unavailable"
+                        if entry.limits is None
+                        else "model_endpoint_unknown"
+                    )
+                ),
+                "reasoning": _reasoning_payload(
+                    controls_supported_by_adapter(entry.reasoning, route_wire)
+                ),
+                "recommended": (
+                    (entry.wire_shape_hint == "responses" and wire_api is WireApi.OPENAI_RESPONSES)
+                    or (
+                        entry.wire_shape_hint == "completions"
+                        and wire_api is WireApi.OPENAI_CHAT_COMPLETIONS
+                    )
+                ),
+            }
+        )
+    return {
+        "model_id": entry.key.model_id,
+        "display_name": entry.display_name,
+        "wire_dialect": entry.wire_dialect.value,
+        "context_tokens": entry.total_context_tokens,
+        "input_tokens": None if entry.limits is None else entry.limits.max_input_tokens,
+        "output_tokens": None if entry.limits is None else entry.limits.max_output_tokens,
+        "tool_call": entry.tool_call,
+        "wire_shape_hint": entry.wire_shape_hint,
+        "wire_apis": wires,
+    }
+
+
+def _wire_shape_warning(hint: str | None, wire_api: WireApi) -> bool:
+    if hint is None:
+        return False
+    expected = (
+        WireApi.OPENAI_RESPONSES
+        if hint == "responses"
+        else WireApi.OPENAI_CHAT_COMPLETIONS
+    )
+    return wire_api is not expected
+
+
+def _dashscope_credential(kind: str):
+    if kind == "embedding":
+        return DashScopeEmbeddingCredential()
+    if kind == "rerank":
+        return DashScopeRerankCredential()
+    raise ValueError("unknown DashScope credential kind")
 
 
 def _optional_body_string(body: dict[str, object], key: str) -> str | None:
@@ -61,6 +210,13 @@ class LocalHttpServer:
         requested_port: int,
         is_ready: Callable[[], bool],
         is_draining: Callable[[], bool],
+        settings: LocalSettingsStore,
+        catalog: ModelCatalogOwner,
+        credentials: LocalCredentialStore,
+        model_runtime: ModelRuntime,
+        database_state: Callable[[], str],
+        refresh_database_state: Callable[[], Awaitable[object]],
+        postgres_settings_saved: Callable[[], object],
     ) -> None:
         self.sessions = sessions
         self.bridge = bridge
@@ -68,6 +224,13 @@ class LocalHttpServer:
         self.requested_port = requested_port
         self._is_ready = is_ready
         self._is_draining = is_draining
+        self.settings = settings
+        self.catalog = catalog
+        self.credentials = credentials
+        self.model_runtime = model_runtime
+        self._database_state = database_state
+        self._refresh_database_state = refresh_database_state
+        self._postgres_settings_saved = postgres_settings_saved
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._port: int | None = None
@@ -132,6 +295,32 @@ class LocalHttpServer:
         self._app.router.add_get("/og.png", self._public_file)
         self._app.router.add_get("/assets/{tail:.*}", self._public_file)
         self._app.router.add_get("/api/app/bootstrap", self._bootstrap)
+        self._app.router.add_get("/api/model-catalog", self._model_catalog)
+        self._app.router.add_post("/api/model-catalog/refresh", self._refresh_model_catalog)
+        self._app.router.add_get(
+            "/api/model-configurations", self._model_configurations
+        )
+        self._app.router.add_post(
+            "/api/model-configurations", self._add_model_configuration
+        )
+        self._app.router.add_get("/api/local-settings", self._local_settings)
+        self._app.router.add_put(
+            "/api/local-settings/postgres", self._save_postgres_settings
+        )
+        self._app.router.add_post(
+            "/api/local-settings/postgres/check", self._check_postgres
+        )
+        self._app.router.add_post(
+            "/api/local-settings/postgres/migrate", self._migrate_postgres
+        )
+        self._app.router.add_put(
+            "/api/local-settings/dashscope-credentials/{kind}",
+            self._put_dashscope_credential,
+        )
+        self._app.router.add_delete(
+            "/api/local-settings/dashscope-credentials/{kind}",
+            self._delete_dashscope_credential,
+        )
         self._app.router.add_get("/api/capabilities", self._inspect_user_capabilities)
         self._app.router.add_post(
             "/api/capabilities/refresh", self._refresh_user_capabilities
@@ -169,6 +358,10 @@ class LocalHttpServer:
             self._inspect_session_capabilities,
         )
         self._app.router.add_post("/api/sessions", self._create_session)
+        self._app.router.add_put(
+            "/api/sessions/{session_id}/model-call-binding",
+            self._update_model_call_binding,
+        )
         self._app.router.add_post(
             "/api/sessions/{session_id}/capabilities/mcp/{server_id}/reconnect",
             self._reconnect_session_mcp,
@@ -253,6 +446,86 @@ class LocalHttpServer:
                 status=409,
                 retryable=False,
             )
+        except CredentialStoreError as exc:
+            if exc.state is CredentialState.DENIED:
+                return self._error_response(
+                    "secure_credential_store_denied",
+                    "系统钥匙串拒绝了这次访问。",
+                    status=403,
+                    retryable=True,
+                )
+            if exc.state is CredentialState.UNAVAILABLE:
+                return self._error_response(
+                    "secure_credential_store_unavailable",
+                    "系统钥匙串当前不可用。",
+                    status=503,
+                    retryable=True,
+                )
+            return self._error_response(
+                "secure_credential_missing",
+                "需要的访问密钥尚未保存。",
+                status=409,
+                retryable=False,
+            )
+        except LocalSettingsUnavailable:
+            return self._error_response(
+                "local_settings_unavailable",
+                "本机设置文件无法读取；请在设置页保存新配置以修复。",
+                status=409,
+                retryable=False,
+            )
+        except ModelCatalogUnavailable:
+            return self._error_response(
+                "model_catalog_unavailable",
+                "models.dev 模型目录当前不可用，请稍后重试。",
+                status=503,
+                retryable=True,
+            )
+        except ModelCatalogInvalid:
+            return self._error_response(
+                "model_catalog_invalid",
+                "models.dev 模型目录返回了无法识别的内容。",
+                status=502,
+                retryable=True,
+            )
+        except ModelRuntimeUnavailable:
+            return self._error_response(
+                "model_configuration_unavailable",
+                "模型配置当前不可用，请检查设置或刷新模型目录。",
+                status=409,
+                retryable=True,
+            )
+        except PostgresSchemaError as exc:
+            if exc.code in {
+                PostgresSchemaFailureCode.CONNECTION_FAILED,
+                PostgresSchemaFailureCode.DEADLINE_EXCEEDED,
+            }:
+                return self._error_response(
+                    "DATABASE_CONNECTION_FAILED",
+                    "无法连接已保存的 PostgreSQL，请检查地址、账号与本机服务。",
+                    status=409,
+                    retryable=exc.retryable,
+                )
+            if exc.code in {
+                PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED,
+                PostgresSchemaFailureCode.UNMANAGED_DATABASE,
+                PostgresSchemaFailureCode.CATALOG_DRIFT,
+                PostgresSchemaFailureCode.EXTENSION_MISSING,
+                PostgresSchemaFailureCode.EXTENSION_TOO_OLD,
+                PostgresSchemaFailureCode.PRIVILEGE_MISSING,
+            }:
+                return self._error_response(
+                    "DATABASE_SCHEMA_ACTION_REQUIRED",
+                    "数据库尚未完成 Pulsara 初始化，或需要升级后才能使用。",
+                    status=409,
+                    retryable=False,
+                )
+            return self._error_response(
+                "DATABASE_OPERATION_FAILED",
+                "PostgreSQL 检查或初始化没有完成，请核对连接后重试。",
+                status=409,
+                retryable=exc.retryable,
+            )
         except KeyError:
             return self._error_response(
                 "LOCAL_RESOURCE_NOT_FOUND",
@@ -301,6 +574,16 @@ class LocalHttpServer:
                     status=421,
                 )
         if request.path.startswith("/api/") and request.path != "/api/healthz":
+            if (
+                request.path.startswith(("/api/sessions", "/api/connections"))
+                and self._database_state() != "ready"
+            ):
+                raise HttpPublicError(
+                    "DATABASE_DATA_PLANE_UNAVAILABLE",
+                    "请先在设置中完成本机 PostgreSQL 配置。",
+                    status=503,
+                    retryable=True,
+                )
             if request.method not in {"GET", "HEAD", "OPTIONS"}:
                 origin = request.headers.get("Origin")
                 if origin is not None and origin != self.origin:
@@ -346,11 +629,261 @@ class LocalHttpServer:
 
     async def _bootstrap(self, _request: web.Request) -> web.Response:
         payload = self.sessions.bootstrap_payload()
+        payload.update(await self._settings_read_model())
         payload["runtime"] = {
             "status": "ready" if self._is_ready() else "starting",
             "origin": self.origin,
+            "database_state": self._database_state(),
         }
         return web.json_response(payload)
+
+    async def _model_catalog(self, _request: web.Request) -> web.Response:
+        catalog = self.catalog.selectable()
+        if catalog is None:
+            return web.json_response({"status": "unavailable", "routes": []})
+        return web.json_response(
+            {
+                "status": "ready",
+                "routes": [
+                    {
+                        "route_id": route.route_id,
+                        "display_name": route.display_name,
+                        "models": [
+                            _catalog_entry_payload(
+                                entry,
+                                model_runtime=self.model_runtime,
+                            )
+                            for entry in route.entries
+                        ],
+                    }
+                    for route in catalog.routes
+                ],
+            }
+        )
+
+    async def _refresh_model_catalog(self, _request: web.Request) -> web.Response:
+        await self.catalog.refresh()
+        return await self._model_catalog(_request)
+
+    async def _model_configurations(self, _request: web.Request) -> web.Response:
+        return web.json_response(
+            {"model_configurations": await self._connection_summaries()}
+        )
+
+    async def _add_model_configuration(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"route_id", "model_id", "wire_api", "api_key"}:
+            raise ValueError("model configuration has an invalid closed shape")
+        if not all(isinstance(body[key], str) and body[key] for key in body):
+            raise ValueError("model configuration fields must be non-empty text")
+        target = ModelTargetKey(
+            route_id=cast(str, body["route_id"]),
+            wire_api=WireApi(cast(str, body["wire_api"])),
+            model_id=cast(str, body["model_id"]),
+        )
+        selectable = self.model_runtime.selectable_catalog()
+        resolved = create_model_connection(
+            catalog=selectable,
+            target=target,
+            route_wires=self.model_runtime.route_wires,
+        )
+        await self.settings.add_model_connection(
+            connection=resolved.config,
+            api_key=cast(str, body["api_key"]),
+            credentials=self.credentials,
+        )
+        return web.json_response(
+            {
+                "model_configuration": await self._connection_summary(
+                    resolved.config
+                ),
+                "wire_shape_warning": _wire_shape_warning(
+                    resolved.target.catalog_facts.wire_shape_hint,
+                    target.wire_api,
+                ),
+            },
+            status=201,
+        )
+
+    async def _local_settings(self, _request: web.Request) -> web.Response:
+        return web.json_response(await self._settings_read_model())
+
+    async def _save_postgres_settings(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"runtime_dsn", "admin_dsn"}:
+            raise ValueError("PostgreSQL settings have an invalid closed shape")
+        runtime_dsn = body["runtime_dsn"]
+        admin_dsn = body["admin_dsn"]
+        if not isinstance(runtime_dsn, str) or (
+            admin_dsn is not None and not isinstance(admin_dsn, str)
+        ):
+            raise ValueError("PostgreSQL settings fields are invalid")
+        before = self._database_state()
+        await self.settings.save_postgres(LocalPostgresConfig(runtime_dsn, admin_dsn))
+        restart_required = before == "ready"
+        self._postgres_settings_saved()
+        payload = await self._settings_read_model()
+        payload["restart_required"] = restart_required
+        return web.json_response(payload)
+
+    async def _check_postgres(self, _request: web.Request) -> web.Response:
+        postgres = self.settings.read().postgres
+        if postgres is None:
+            raise HttpPublicError(
+                "DATABASE_NOT_CONFIGURED",
+                "请先保存 PostgreSQL 连接信息。",
+                status=409,
+            )
+        from pulsara_agent.storage.postgres_connection_provider import (
+            PostgresRuntimeConnectionFactory,
+        )
+
+        result = await asyncio.to_thread(
+            PostgresRuntimeConnectionFactory(postgres.runtime_dsn).verify,
+            deadline_monotonic=monotonic() + 30.0,
+        )
+        if self._database_state() != "ready":
+            await self._refresh_database_state()
+        return web.json_response(
+            {
+                "status": "verified",
+                "database_name": result.binding.database_name,
+                "runtime_role": result.binding.runtime_role,
+                "migration_head_version": result.binding.migration_head_version,
+            }
+        )
+
+    async def _migrate_postgres(self, _request: web.Request) -> web.Response:
+        postgres = self.settings.read().postgres
+        if postgres is None or postgres.admin_dsn is None:
+            raise HttpPublicError(
+                "DATABASE_ADMIN_DSN_REQUIRED",
+                "初始化或升级数据库需要管理员 DSN。",
+                status=409,
+            )
+        from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
+
+        report = await asyncio.to_thread(
+            PostgresMigrationRunner(
+                admin_dsn=postgres.admin_dsn,
+                runtime_dsn=postgres.runtime_dsn,
+            ).migrate,
+            deadline_monotonic=monotonic() + 300.0,
+        )
+        await self._refresh_database_state()
+        return web.json_response(report.to_dict())
+
+    async def _put_dashscope_credential(self, request: web.Request) -> web.Response:
+        key = _dashscope_credential(request.match_info["kind"])
+        body = await self._json_body(request)
+        if set(body) != {"api_key"} or not isinstance(body["api_key"], str):
+            raise ValueError("DashScope credential has an invalid closed shape")
+        state = await asyncio.to_thread(
+            self.credentials.put, key, body["api_key"]
+        )
+        return web.json_response({"credential_state": state.value})
+
+    async def _delete_dashscope_credential(self, request: web.Request) -> web.Response:
+        key = _dashscope_credential(request.match_info["kind"])
+        outcome = await asyncio.to_thread(self.credentials.delete, key)
+        state = (
+            CredentialState.MISSING.value
+            if outcome.value in {"DELETED", "MISSING"}
+            else outcome.value
+        )
+        return web.json_response({"credential_state": state})
+
+    async def _update_model_call_binding(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        binding = model_call_binding_from_dict(body)
+        if binding is None:
+            raise ValueError("session model binding cannot be null")
+        return web.json_response(
+            await self.sessions.update_model_call_binding(
+                request.match_info["session_id"], binding
+            )
+        )
+
+    async def _settings_read_model(self) -> dict[str, object]:
+        try:
+            settings = self.settings.read()
+            settings_state = "ready"
+        except LocalSettingsUnavailable:
+            settings = LocalSettings()
+            settings_state = "unavailable"
+        embedding, rerank = await asyncio.gather(
+            asyncio.to_thread(
+                self.credentials.state, DashScopeEmbeddingCredential()
+            ),
+            asyncio.to_thread(
+                self.credentials.state, DashScopeRerankCredential()
+            ),
+        )
+        return {
+            "local_settings": {
+                "state": settings_state,
+                "postgres": (
+                    None
+                    if settings.postgres is None
+                    else {
+                        "runtime_dsn": settings.postgres.runtime_dsn,
+                        "admin_dsn": settings.postgres.admin_dsn,
+                    }
+                ),
+                "dashscope_credentials": {
+                    "embedding": embedding.value,
+                    "rerank": rerank.value,
+                },
+            },
+            "model_configurations": await self._connection_summaries(settings),
+            "database_state": self._database_state(),
+        }
+
+    async def _connection_summaries(
+        self, settings: LocalSettings | None = None
+    ) -> list[dict[str, object]]:
+        settings = settings or self.settings.read()
+        return [
+            await self._connection_summary(connection)
+            for connection in settings.model_connections
+        ]
+
+    async def _connection_summary(
+        self, connection: ModelConnectionConfig
+    ) -> dict[str, object]:
+        state = await asyncio.to_thread(
+            self.credentials.state, ModelProviderCredential(connection.id)
+        )
+        payload = model_connection_to_dict(connection)
+        try:
+            contract = resolve_model_target_contract(
+                catalog=self.model_runtime.selectable_catalog(),
+                connection=connection,
+                route_wires=self.model_runtime.route_wires,
+            )
+        except (KeyError, ValueError, ModelRuntimeUnavailable):
+            payload.update(
+                {
+                    "status": "unavailable",
+                    "credential_state": state.value,
+                    "reasoning": {"kind": "unavailable"},
+                }
+            )
+            return payload
+        payload.update(
+            {
+                "status": "ready",
+                "credential_state": state.value,
+                "route_name": contract.catalog_facts.route_name,
+                "display_name": contract.catalog_facts.display_name,
+                "context_tokens": contract.catalog_facts.limits.total_context_tokens,
+                "reasoning": _reasoning_payload(contract.reasoning),
+                "default_reasoning": reasoning_selection_to_dict(
+                    default_reasoning_selection(contract.reasoning)
+                ),
+            }
+        )
+        return payload
 
     async def _list_sessions(self, _request: web.Request) -> web.Response:
         return web.json_response({"sessions": await self.sessions.list_sessions()})

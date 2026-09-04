@@ -8,15 +8,14 @@ from pulsara_agent.llm.adapters.openai.errors import (
 )
 from pulsara_agent.llm.adapters.openai import client as openai_client
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
-from pulsara_agent.llm.config import LLMConfig
 from pulsara_agent.llm.retry import (
     LLMRetryConfig,
     RetryDecisionKind,
     apply_retry_after_cap,
     compute_retry_delay,
-    retry_config_from_env,
 )
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
+from tests.support.model_config import test_model_runtime
 
 
 class FakeResponse:
@@ -50,7 +49,7 @@ class FakeProviderError(Exception):
         self.code = code
 
 
-def test_retry_config_from_env_and_validation(monkeypatch) -> None:
+def test_removed_retry_environment_cannot_change_runtime_defaults(monkeypatch) -> None:
     monkeypatch.setenv("PULSARA_LLM_RETRY_ENABLED", "false")
     monkeypatch.setenv("PULSARA_LLM_RETRY_ATTEMPTS", "0")
     monkeypatch.setenv("PULSARA_LLM_RETRY_BASE_DELAY_SECONDS", "0.25")
@@ -58,17 +57,6 @@ def test_retry_config_from_env_and_validation(monkeypatch) -> None:
     monkeypatch.setenv("PULSARA_LLM_RETRY_JITTER", "1.5")
     monkeypatch.setenv("PULSARA_LLM_RETRY_MAX_RETRY_AFTER_SECONDS", "15")
 
-    config = retry_config_from_env()
-
-    assert config.enabled is False
-    assert config.attempts == 1
-    assert config.base_delay_seconds == 0.25
-    assert config.max_delay_seconds == 2.0
-    assert config.jitter_ratio == 1.0
-    assert config.max_retry_after_seconds == 15.0
-
-
-def test_llm_config_reads_retry_and_sdk_retry_env(monkeypatch) -> None:
     monkeypatch.setenv("PULSARA_API_KEY", "sk-test")
     monkeypatch.setenv("PULSARA_PRO_MODEL", "pro")
     monkeypatch.setenv("PULSARA_FLASH_MODEL", "flash")
@@ -81,10 +69,9 @@ def test_llm_config_reads_retry_and_sdk_retry_env(monkeypatch) -> None:
     monkeypatch.setenv("PULSARA_LLM_RETRY_ATTEMPTS", "4")
     monkeypatch.setenv("PULSARA_OPENAI_SDK_MAX_RETRIES", "0")
 
-    config = LLMConfig.from_env()
+    runtime = test_model_runtime()
 
-    assert config.retry.attempts == 4
-    assert config.openai_sdk_max_retries == 0
+    assert runtime.retry == LLMRetryConfig()
 
 
 def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
@@ -100,13 +87,13 @@ def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
         api_key="sk-test",
         base_url="https://example.test/v1/",
         timeout_policy=OpenAITransportTimeoutPolicy(7, 7, 7, 7, 7),
-        api_key_boundary=ProcessApiKeyBoundary(),
+        credential_boundary=ProcessCredentialBoundary(),
     )
     openai_client.build_async_openai_client(
         api_key="sk-test",
         base_url="https://example.test/v1/",
         timeout_policy=OpenAITransportTimeoutPolicy(7, 7, 7, 7, 7),
-        api_key_boundary=ProcessApiKeyBoundary(),
+        credential_boundary=ProcessCredentialBoundary(),
         max_retries=0,
     )
 

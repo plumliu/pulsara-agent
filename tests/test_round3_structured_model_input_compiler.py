@@ -126,7 +126,7 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
     materialize_openai_native_tool_projection_set,
 )
 from pulsara_agent.llm.provider import (
-    ProviderProfile,
+    RouteWireProfile,
     ThinkingProfile,
     ThinkingReplayPolicy,
 )
@@ -244,7 +244,6 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
     PlanHandoffKind,
@@ -265,7 +264,7 @@ from pulsara_agent.primitives.tool_observation import (
     tool_observation_timing_fingerprint,
 )
 from pulsara_agent.terminal_process.models import TerminalRequest, TerminalStatus
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import (
     StructuredToolPort,
     prepare_test_direct_tool_surface,
@@ -949,7 +948,7 @@ def _prepared_request(
     budget: int = 100_000,
     tool_names: tuple[str, ...] = (),
     canonical_facts: FrozenCanonicalCompileSnapshot | None = None,
-    provider_profile: ProviderProfile | None = None,
+    route_wire_profile: RouteWireProfile | None = None,
 ) -> StructuredModelInputCompileRequest:
     tools = StructuredToolPort(object(), tool_names=tool_names)
     prepared_surface = tools.snapshot_tool_surface(
@@ -992,29 +991,26 @@ def _prepared_request(
         scope_subagent_task_id=snapshot.identity.scope_subagent_task_id,
         wire_api=(
             "openai_chat_completions"
-            if provider_profile is None
-            else provider_profile.wire_api
+            if route_wire_profile is None
+            else route_wire_profile.wire_api
         ),
     )
     prepared_surface = replace(
         prepared_surface,
         capability_exposure_plan=tool_plan,
     )
-    model = DirectKernelModelPort(
-        api_key_boundary=ProcessApiKeyBoundary(),
-        config=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api=(
-                "openai_chat_completions"
-                if provider_profile is None
-                else provider_profile.wire_api
-            ),
-            provider_profile=provider_profile,
+    model_runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api=(
+            "openai_chat_completions"
+            if route_wire_profile is None
+            else route_wire_profile.wire_api
         ),
+        route_wire_profile=route_wire_profile,
     )
+    model = DirectKernelModelPort(model_runtime=model_runtime)
     prepared = prepare_test_model_call(
         model,
         KernelModelPreparationRequest(
@@ -1024,6 +1020,7 @@ def _prepared_request(
             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             maximum_input_tokens=max(budget, 1),
             maximum_output_tokens=16_384,
+            binding=test_model_binding(model_runtime),
             tool_surface=prepared_surface,
         ),
     )
@@ -1144,7 +1141,7 @@ def _append_compatibility(
             request.canonical_facts.context_binding_fact.context_base_semantic_identity
         ),
         provider_assistant_replay_contract_fingerprint=(
-            prepared.call.target.model_profile.provider_profile.assistant_replay_contract_fingerprint
+            prepared.call.target.model_profile.route_wire_profile.assistant_replay_contract_fingerprint
         ),
     )
 
@@ -3612,7 +3609,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:0e32b06a3ef189d9e2d11ebf90421084c2bcd8ad976211ba985164076045070a"
+            "sha256:c176eb3889288bbba79d7edca8ab78910a6de909e6c3275f40c821d425eed5be"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3754,12 +3751,12 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
 def test_memory_write_hint_is_the_only_final_wire_difference_before_anchor(
     wire_api: str,
 ) -> None:
-    profile = ProviderProfile(id=f"test:memory-write-hint:{wire_api}", wire_api=wire_api)
+    profile = RouteWireProfile(id=f"test:memory-write-hint:{wire_api}", wire_api=wire_api)
     snapshot = _snapshot(_user("Please remember that I like concise answers"))
     no_hint_request = _prepared_request(
         snapshot,
         _sources(),
-        provider_profile=profile,
+        route_wire_profile=profile,
     )
     hint_request = _prepared_request(
         snapshot,
@@ -3769,7 +3766,7 @@ def test_memory_write_hint_is_the_only_final_wire_difference_before_anchor(
                 (MEMORY_WRITE_HINT_BODY,),
             )
         ),
-        provider_profile=profile,
+        route_wire_profile=profile,
     )
     no_hint, no_hint_view = _compile_and_install_append(
         compiler=StructuredModelInputCompiler(),
@@ -3932,11 +3929,10 @@ def _assert_replay_final_wire_projection(*, result, view, prepared_call) -> None
 def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefix() -> (
     None
 ):
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id="test:chat-replay",
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             message_field="reasoning_content",
             replay_policy=ThinkingReplayPolicy.ALWAYS,
         ),
@@ -3945,7 +3941,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
     owner = HostProviderInputContinuityOwner(session_id="session:test")
     initial = _user("first", sequence=1)
     first_request = _prepared_request(
-        _snapshot(initial), _sources(), provider_profile=profile
+        _snapshot(initial), _sources(), route_wire_profile=profile
     )
     _first, installed = _compile_and_install_append(
         compiler=compiler,
@@ -4005,7 +4001,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
         _prepared_request(
             _snapshot(initial, assistant),
             _sources(),
-            provider_profile=profile,
+            route_wire_profile=profile,
         ),
         context_id="context:second",
         model_call_index=2,
@@ -4041,7 +4037,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
         _prepared_request(
             _snapshot(initial, assistant, follow_up),
             _sources(),
-            provider_profile=profile,
+            route_wire_profile=profile,
         ),
         context_id="context:third",
         model_call_index=3,
@@ -4065,12 +4061,12 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
 
 
 def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -> None:
-    profile = ProviderProfile(id="test:responses-replay", wire_api="openai_responses")
+    profile = RouteWireProfile(id="test:responses-replay", wire_api="openai_responses")
     compiler = StructuredModelInputCompiler()
     owner = HostProviderInputContinuityOwner(session_id="session:test")
     initial = _user("first", sequence=1)
     first_request = _prepared_request(
-        _snapshot(initial), _sources(), provider_profile=profile
+        _snapshot(initial), _sources(), route_wire_profile=profile
     )
     _first, installed = _compile_and_install_append(
         compiler=compiler,
@@ -4140,7 +4136,7 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
         _prepared_request(
             _snapshot(initial, assistant),
             _sources(),
-            provider_profile=profile,
+            route_wire_profile=profile,
         ),
         context_id="context:responses:second",
         model_call_index=2,

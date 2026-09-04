@@ -26,6 +26,7 @@ CREATE TABLE pulsara_v3.sessions (
     memory_domain_id text NOT NULL CHECK (
         memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
     ),
+    model_call_binding jsonb,
     lifecycle text NOT NULL CHECK (lifecycle IN ('OPEN', 'CLOSED')),
     writer_generation bigint NOT NULL CHECK (writer_generation >= 1),
     writer_lease_owner_id text,
@@ -37,7 +38,16 @@ CREATE TABLE pulsara_v3.sessions (
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (id, workspace_id),
     UNIQUE (id, workspace_id, memory_domain_id),
-    CHECK ((writer_lease_owner_id IS NULL) = (writer_lease_expires_at IS NULL))
+    CHECK ((writer_lease_owner_id IS NULL) = (writer_lease_expires_at IS NULL)),
+    CHECK (
+        model_call_binding IS NULL OR (
+            jsonb_typeof(model_call_binding) = 'object'
+            AND model_call_binding ? 'connection_id'
+            AND model_call_binding ? 'reasoning'
+            AND model_call_binding - ARRAY['connection_id', 'reasoning']::text[] = '{}'::jsonb
+            AND jsonb_typeof(model_call_binding->'connection_id') = 'string'
+        )
+    )
 );
 
 CREATE TABLE pulsara_v3.blobs (
@@ -166,6 +176,7 @@ CREATE TABLE pulsara_v3.turns (
     workspace_id text NOT NULL,
     conversation_scope_kind text NOT NULL CHECK (conversation_scope_kind IN ('ROOT', 'SUBAGENT_TASK')),
     scope_subagent_task_id text,
+    model_call_binding jsonb NOT NULL,
     status text NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED', 'INTERRUPTED')),
     initial_entry_id text NOT NULL,
     final_entry_id text,
@@ -205,6 +216,13 @@ CREATE TABLE pulsara_v3.turns (
         REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
     CHECK ((conversation_scope_kind = 'ROOT') = (scope_subagent_task_id IS NULL)),
+    CHECK (
+        jsonb_typeof(model_call_binding) = 'object'
+        AND model_call_binding ? 'connection_id'
+        AND model_call_binding ? 'reasoning'
+        AND model_call_binding - ARRAY['connection_id', 'reasoning']::text[] = '{}'::jsonb
+        AND jsonb_typeof(model_call_binding->'connection_id') = 'string'
+    ),
     CHECK ((status = 'RUNNING') = (terminal_at IS NULL)),
     CONSTRAINT ck_turn_permission_overlay_exact CHECK (
         (permission_overlay = 'NONE'
@@ -752,6 +770,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     command_id text NOT NULL,
     client_submission_id text NOT NULL,
     delivery_mode text NOT NULL CHECK (delivery_mode IN ('NEW_TURN', 'STEER_ACTIVE_TURN')),
+    model_call_binding jsonb,
     target_turn_id text,
     permission_snapshot_id text,
     requested_permission_mode text CHECK (requested_permission_mode IN (
@@ -810,6 +829,16 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     CHECK ((inline_content IS NULL) <> (blob_id IS NULL)),
     CHECK ((status = 'PENDING') = (terminal_at IS NULL)),
     CHECK ((status = 'CONSUMED') = (consumed_entry_id IS NOT NULL)),
+    CHECK ((delivery_mode = 'NEW_TURN') = (model_call_binding IS NOT NULL)),
+    CHECK (
+        model_call_binding IS NULL OR (
+            jsonb_typeof(model_call_binding) = 'object'
+            AND model_call_binding ? 'connection_id'
+            AND model_call_binding ? 'reasoning'
+            AND model_call_binding - ARRAY['connection_id', 'reasoning']::text[] = '{}'::jsonb
+            AND jsonb_typeof(model_call_binding->'connection_id') = 'string'
+        )
+    ),
     CHECK (
         (delivery_mode = 'STEER_ACTIVE_TURN'
             AND permission_snapshot_id IS NULL

@@ -11,10 +11,10 @@ import httpx
 from openai import AsyncOpenAI
 
 from pulsara_agent.primitives.context import context_fingerprint
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundAsyncClient,
-    admit_process_api_key_http_operation,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundAsyncClient,
+    admit_process_credential_http_operation,
 )
 
 
@@ -78,7 +78,7 @@ def build_async_openai_client(
     api_key: str,
     base_url: str,
     timeout_policy: OpenAITransportTimeoutPolicy,
-    api_key_boundary: ProcessApiKeyBoundary,
+    credential_boundary: ProcessCredentialBoundary,
     max_retries: int | None = None,
 ) -> AsyncOpenAI:
     """Create an AsyncOpenAI client for a model profile."""
@@ -94,8 +94,8 @@ def build_async_openai_client(
         "api_key": api_key,
         "base_url": base_url.rstrip("/"),
         "timeout": timeout,
-        "http_client": ProcessApiKeyBoundAsyncClient(
-            api_key_boundary=api_key_boundary,
+        "http_client": ProcessCredentialBoundAsyncClient(
+            credential_boundary=credential_boundary,
             credential_header_names=frozenset({b"authorization"}),
             timeout=timeout,
             follow_redirects=True,
@@ -110,7 +110,7 @@ def build_async_openai_client(
 
 async def admit_provider_request(
     *,
-    api_key_boundary: ProcessApiKeyBoundary,
+    credential_boundary: ProcessCredentialBoundary,
     payload: object,
     operation: Callable[[], Awaitable[Any]],
 ) -> Any:
@@ -124,8 +124,8 @@ async def admit_provider_request(
         allow_nan=False,
         default=str,
     ).encode("utf-8")
-    return await admit_process_api_key_http_operation(
-        api_key_boundary=api_key_boundary,
+    return await admit_process_credential_http_operation(
+        credential_boundary=credential_boundary,
         guarded_values=(encoded,),
         operation=operation,
     )

@@ -47,7 +47,7 @@ from pulsara_agent.hooks.output_parser import (
 )
 from pulsara_agent.hooks.source import LocalHookSourceProvider
 from pulsara_agent.hooks.trust import normalized_definition_digest
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 
 class HookDiagnosticAdapter(Protocol):
@@ -153,7 +153,7 @@ class KernelHookDispatcher:
         initial_view: FrozenHookDefinitionView,
         workspace_root: Path,
         source_provider: LocalHookSourceProvider | None = None,
-        api_key_boundary: ProcessApiKeyBoundary,
+        credential_boundary: ProcessCredentialBoundary,
         executor: HookCommandExecutor | None = None,
         diagnostic_adapter: HookDiagnosticAdapter | None = None,
         background_context: HookBackgroundContextPort | None = None,
@@ -162,7 +162,7 @@ class KernelHookDispatcher:
         self._workspace_root = workspace_root.expanduser().resolve()
         self._source_provider = source_provider
         self._executor = executor or HookCommandExecutor(
-            api_key_boundary=api_key_boundary
+            credential_boundary=credential_boundary
         )
         self._diagnostics = diagnostic_adapter or _NullDiagnosticAdapter()
         self._background_context = background_context

@@ -24,6 +24,10 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     SubjectSlot,
 )
 from pulsara_agent.llm.estimator import TokenEstimate
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    model_call_binding_to_dict,
+)
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendPlanningInput,
     ProviderInputContinuityScope,
@@ -153,21 +157,36 @@ class PreparedPromptIngressCommand:
     requested_permission_mode: PermissionMode | None
     content_digest: str
     content_size: int
-    semantic_digest: str
 
     def __post_init__(self) -> None:
         if not all((self.session_id, self.command_id, self.queue_item_id)):
             raise ValueError("prompt ingress identity is incomplete")
         if self.content_size < 1 or not self.content_digest.startswith("sha256:"):
             raise ValueError("prompt ingress content identity is invalid")
-        if (self.delivery_mode is PromptDeliveryMode.NEW_TURN) != (
+        new_turn = self.delivery_mode is PromptDeliveryMode.NEW_TURN
+        new_turn_shape = (
             self.target_turn_id is None
             and self.permission_snapshot_id is not None
             and self.requested_permission_mode is not None
-        ):
+        )
+        steer_shape = (
+            self.target_turn_id is not None
+            and self.permission_snapshot_id is None
+            and self.requested_permission_mode is None
+        )
+        if (new_turn and not new_turn_shape) or (not new_turn and not steer_shape):
             raise ValueError("prompt ingress delivery union is invalid")
-        if not self.semantic_digest.startswith("sha256:"):
-            raise ValueError("prompt ingress semantic digest is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class PromptIngressAccepted:
+    queue_sequence: int
+    model_call_binding: ModelCallBinding | None
+    reasoning_preference_reset: bool = False
+
+    def __post_init__(self) -> None:
+        if self.queue_sequence < 1:
+            raise ValueError("prompt ingress sequence must be positive")
 
 
 class PromptIngressConfirmationKind(StrEnum):
@@ -181,6 +200,8 @@ class PromptIngressWriteRejection(StrEnum):
     TARGET_STALE_OR_NON_STEERABLE = "TARGET_STALE_OR_NON_STEERABLE"
     CAPACITY_EXHAUSTED = "CAPACITY_EXHAUSTED"
     INGRESS_PRECONDITION_CHANGED = "INGRESS_PRECONDITION_CHANGED"
+    MODEL_CONFIGURATION_REQUIRED = "MODEL_CONFIGURATION_REQUIRED"
+    MODEL_CONFIGURATION_UNAVAILABLE = "MODEL_CONFIGURATION_UNAVAILABLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +236,7 @@ class PreparedQueuedRootTurnAdmission:
     client_submission_id: str
     content: CanonicalContent = field(repr=False)
     permission_snapshot: FrozenRunPermissionSnapshot
+    model_call_binding: ModelCallBinding
     pending_plan_handoff_workflow_id: str | None
     pending_plan_handoff_interaction_id: str | None
     pending_plan_handoff_kind: str | None
@@ -244,6 +266,8 @@ class PreparedQueuedRootTurnAdmission:
             or self.queue_sequence < 1
         ):
             raise ValueError("queued ROOT admission identity is incomplete")
+        if not isinstance(self.model_call_binding, ModelCallBinding):
+            raise ValueError("queued ROOT admission lacks a model binding")
         handoff_values = (
             self.pending_plan_handoff_workflow_id,
             self.pending_plan_handoff_interaction_id,
@@ -265,6 +289,7 @@ def build_queued_root_turn_admission(
     client_submission_id: str,
     content: CanonicalContent,
     permission_snapshot: FrozenRunPermissionSnapshot,
+    model_call_binding: ModelCallBinding,
     pending_plan_handoff_workflow_id: str | None,
     pending_plan_handoff_interaction_id: str | None,
     pending_plan_handoff_kind: str | None,
@@ -310,6 +335,7 @@ def build_queued_root_turn_admission(
         client_submission_id=client_submission_id,
         content=content,
         permission_snapshot=permission_snapshot,
+        model_call_binding=model_call_binding,
         pending_plan_handoff_workflow_id=pending_plan_handoff_workflow_id,
         pending_plan_handoff_interaction_id=pending_plan_handoff_interaction_id,
         pending_plan_handoff_kind=pending_plan_handoff_kind,
@@ -362,22 +388,7 @@ def build_prompt_ingress_command(
     content_utf8: bytes,
 ) -> PreparedPromptIngressCommand:
     digest = "sha256:" + sha256(content_utf8).hexdigest()
-    semantic = context_fingerprint(
-        "pulsara:queue-prompt-command:v1",
-        {
-            "queue_item_id": queue_item_id,
-            "client_submission_id": client_submission_id,
-            "delivery_mode": delivery_mode.value,
-            "target_turn_id": target_turn_id,
-            "content_digest": digest,
-            "permission_snapshot_id": permission_snapshot_id,
-            "requested_permission_mode": (
-                None
-                if requested_permission_mode is None
-                else requested_permission_mode.value
-            ),
-        },
-    )
+
     return PreparedPromptIngressCommand(
         session_id=session_id,
         command_id=command_id,
@@ -389,7 +400,33 @@ def build_prompt_ingress_command(
         requested_permission_mode=requested_permission_mode,
         content_digest=digest,
         content_size=len(content_utf8),
-        semantic_digest=semantic,
+    )
+
+
+def prompt_ingress_semantic_digest(
+    candidate: PreparedPromptIngressCommand,
+    model_call_binding: ModelCallBinding | None,
+) -> str:
+    if (candidate.delivery_mode is PromptDeliveryMode.NEW_TURN) != (
+        model_call_binding is not None
+    ):
+        raise ValueError("prompt ingress model binding union is invalid")
+    return context_fingerprint(
+        "pulsara:queue-prompt-command:v2",
+        {
+            "queue_item_id": candidate.queue_item_id,
+            "client_submission_id": candidate.client_submission_id,
+            "delivery_mode": candidate.delivery_mode.value,
+            "target_turn_id": candidate.target_turn_id,
+            "content_digest": candidate.content_digest,
+            "permission_snapshot_id": candidate.permission_snapshot_id,
+            "requested_permission_mode": (
+                None
+                if candidate.requested_permission_mode is None
+                else candidate.requested_permission_mode.value
+            ),
+            "model_call_binding": model_call_binding_to_dict(model_call_binding),
+        },
     )
 
 
@@ -1269,6 +1306,7 @@ __all__ = [
     "PreparedSteerResourceRejection",
     "PreparedSteerSuffixAdmissionPlan",
     "PromptIngressConfirmation",
+    "PromptIngressAccepted",
     "PromptIngressConfirmationKind",
     "PromptIngressWriteRejection",
     "QueuedRootTurnAdmissionAccepted",
@@ -1282,6 +1320,7 @@ __all__ = [
     "SteerResourceRejectionConfirmationKind",
     "SteerSuffixAdmissionQuote",
     "build_prompt_ingress_command",
+    "prompt_ingress_semantic_digest",
     "build_direct_root_turn_identity",
     "build_queued_root_turn_identity",
     "build_queued_root_turn_admission",

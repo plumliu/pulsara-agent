@@ -81,6 +81,7 @@ from pulsara_agent.primitives.tool_result_projection import (
     ToolResultFullDeliveryReason,
 )
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import bind_test_session, start_test_root_turn
 from tests.support.subagents import accept_active_subagent_fixture
 
 
@@ -93,7 +94,9 @@ def _id(prefix: str) -> str:
 
 def _start_turn(repository, lease, text: bytes):
     turn_id = _id("turn")
-    repository.start_root_turn(
+    model_call_binding = bind_test_session(repository, lease)
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_id("command"),
         turn_id=turn_id,
@@ -101,6 +104,7 @@ def _start_turn(repository, lease, text: bytes):
         context_binding_revision_id=_id("revision"),
         permission_snapshot_id=_id("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=model_call_binding,
         content=InlineContent.from_bytes(text),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -516,7 +520,9 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
     assert page.tool_result_delivery.requirement is (
         ToolResultDeliveryRequirement.FULL_REQUIRED
     )
-    assert page.tool_result_delivery.reason is ToolResultFullDeliveryReason.ARTIFACT_PAGE
+    assert (
+        page.tool_result_delivery.reason is ToolResultFullDeliveryReason.ARTIFACT_PAGE
+    )
 
 
 def test_reader_rejects_declared_bytes_before_loading_any_payload(
@@ -980,9 +986,7 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         entry_id=_id("entry"),
         context_binding_revision_id=_id("revision"),
         task_start_event_id=task_id.launch.task_start.event_id,
-        expected_parent_permission_snapshot=(
-            task_id.launch.parent_permission_snapshot
-        ),
+        expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(b"return one exact result"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="subagent:test",
@@ -1203,9 +1207,7 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
         snapshot = CanonicalProviderInputReader(provider).read_frozen_snapshot(
             rotated.cut, deadline_monotonic=monotonic() + 30
         )
-        envelope = json.loads(snapshot.items[-1].text)[
-            "pulsara_inter_agent_message"
-        ]
+        envelope = json.loads(snapshot.items[-1].text)["pulsara_inter_agent_message"]
         completion = envelope["content"]
         assert envelope["message_type"] == "FINAL_ANSWER"
         assert completion["status"] == "FAILED"
@@ -1226,10 +1228,7 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
             actor_id="runtime:test",
             deadline_monotonic=monotonic() + 30,
         )
-        assert (
-            duplicate.disposition
-            is SubagentCompletionDisposition.ALREADY_DELIVERED
-        )
+        assert duplicate.disposition is SubagentCompletionDisposition.ALREADY_DELIVERED
         assert duplicate.entry == automatic.entry
     finally:
         rotated.close()
@@ -1253,18 +1252,18 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
     )
-    assert (
-        manual_loser.disposition
-        is SubagentCompletionDisposition.ALREADY_DELIVERED
-    )
+    assert manual_loser.disposition is SubagentCompletionDisposition.ALREADY_DELIVERED
     assert manual_loser.entry == automatic.entry
-    assert safe_point.accept_subagent_completion(
-        turn_id=root_turn,
-        task_id=task_id,
-        command_id=command_id,
-        actor_id="user:test",
-        deadline_monotonic=monotonic() + 30,
-    ) == manual_loser
+    assert (
+        safe_point.accept_subagent_completion(
+            turn_id=root_turn,
+            task_id=task_id,
+            command_id=command_id,
+            actor_id="user:test",
+            deadline_monotonic=monotonic() + 30,
+        )
+        == manual_loser
+    )
 
     with pytest.raises(ConversationKernelConflict, match="command conflicts"):
         safe_point.accept_subagent_completion(
@@ -1333,8 +1332,9 @@ def test_inspector_reads_canonical_rows_and_selective_events_from_one_kernel(
             host_session_close_join_seconds=41.0
         ),
     ).inspect_health(deadline_monotonic=monotonic() + 30)
-    assert injected_health["execution_watchdogs"][
-        "host_session_close_join_seconds"
-    ] == 41.0
+    assert (
+        injected_health["execution_watchdogs"]["host_session_close_join_seconds"]
+        == 41.0
+    )
     assert "legacy_event_replay" not in health
     assert "oxigraph_enabled" not in health

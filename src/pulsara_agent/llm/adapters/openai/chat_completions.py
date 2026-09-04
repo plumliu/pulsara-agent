@@ -14,7 +14,12 @@ from pulsara_agent.llm.adapters.openai.client import (
     admit_provider_request,
     build_async_openai_client,
 )
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
+from pulsara_agent.local_credentials import (
+    CredentialBorrow,
+    LocalCredentialStore,
+    ModelProviderCredential,
+)
 from pulsara_agent.llm.adapters.openai.errors import classify_llm_error
 from pulsara_agent.llm.adapters.openai.events import (
     ProviderLiveItemBuilder,
@@ -38,12 +43,13 @@ from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSp
 from pulsara_agent.llm.provider import (
     CHAT_CLOSED_REASONING_FIELD_CONTRACTS,
     ProviderChatFieldAccumulationMode,
-    ProviderProfile,
+    RouteWireProfile,
     ThinkingReplayPolicy,
     mutable_provider_value,
 )
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.model_target import reasoning_wire_fields
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.stream_limits import (
     MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES,
@@ -79,14 +85,12 @@ from pulsara_agent.llm.retry import (
 class OpenAIChatCompletionsTransport:
     """Adapter for OpenAI Chat Completions-compatible APIs."""
 
-    api_key: str
+    credentials: LocalCredentialStore = field(repr=False)
     timeout_policy: OpenAITransportTimeoutPolicy
-    api_key_boundary: ProcessApiKeyBoundary = field(repr=False)
     api: str = OPENAI_CHAT_COMPLETIONS_API
     binding_id: str = "pulsara.openai.chat_completions"
-    contract_version: str = "v5-explicit-terminal-bounded-reasoning-carriers"
+    contract_version: str = "v6-route-target-reasoning-and-tool-correlation"
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
-    openai_sdk_max_retries: int | None = None
     retry_sleep: Callable[[float], Awaitable[None]] = field(
         default=asyncio.sleep, repr=False
     )
@@ -103,11 +107,11 @@ class OpenAIChatCompletionsTransport:
         if self._mock_chunks:
             model_identity = ReportedModelIdentityObserver(
                 requested_model_id=model.id,
-                policy=model.provider_profile.model_identity_policy,
+                policy=model.route_wire_profile.model_identity_policy,
             )
             accumulator = ChatCompletionAccumulator(
                 builder=ProviderLiveItemBuilder(),
-                provider_profile=model.provider_profile,
+                route_wire_profile=model.route_wire_profile,
             )
             for raw_chunk in self._mock_chunks:
                 model_identity.observe(chat_completion_reported_model(raw_chunk))
@@ -124,16 +128,24 @@ class OpenAIChatCompletionsTransport:
 
         payload = build_chat_completions_payload(call=call, context=context)
         should_close_client = self._client is None
-        client = self._client or build_async_openai_client(
-            api_key=self.api_key,
-            base_url=model.base_url,
-            timeout_policy=self.timeout_policy,
-            api_key_boundary=self.api_key_boundary,
-            max_retries=sdk_max_retries_for_transport(
-                retry_config=self.retry_config,
-                explicit_max_retries=self.openai_sdk_max_retries,
-            ),
-        )
+        borrow: CredentialBorrow | None = None
+        if self._client is None:
+            borrow = self.credentials.borrow(
+                ModelProviderCredential(call.binding.connection_id)
+            )
+            credential_boundary = ProcessCredentialBoundary(borrow.value)
+            client = build_async_openai_client(
+                api_key=borrow.value,
+                base_url=model.base_url,
+                timeout_policy=self.timeout_policy,
+                credential_boundary=credential_boundary,
+                max_retries=sdk_max_retries_for_transport(
+                    retry_config=self.retry_config,
+                ),
+            )
+        else:
+            credential_boundary = ProcessCredentialBoundary()
+            client = self._client
         retry_traces: list[RetryAttemptTrace] = []
         completed_model_identity: str | None = None
         try:
@@ -144,15 +156,15 @@ class OpenAIChatCompletionsTransport:
             while True:
                 model_identity = ReportedModelIdentityObserver(
                     requested_model_id=model.id,
-                    policy=model.provider_profile.model_identity_policy,
+                    policy=model.route_wire_profile.model_identity_policy,
                 )
                 accumulator = ChatCompletionAccumulator(
                     builder=ProviderLiveItemBuilder(),
-                    provider_profile=model.provider_profile,
+                    route_wire_profile=model.route_wire_profile,
                 )
                 try:
                     stream = await admit_provider_request(
-                        api_key_boundary=self.api_key_boundary,
+                        credential_boundary=credential_boundary,
                         payload=payload,
                         operation=lambda: client.chat.completions.create(
                             **payload, stream=True
@@ -245,6 +257,8 @@ class OpenAIChatCompletionsTransport:
         finally:
             if should_close_client:
                 await client.close()
+            if borrow is not None:
+                borrow.close()
 
         report = accumulator.usage_report
         if report is not None or completed_model_identity is not None:
@@ -280,8 +294,7 @@ def build_chat_completions_payload(
     context: LLMContext,
 ) -> dict[str, Any]:
     model = call.target.model_profile
-    options = call.target.effective_options
-    provider_profile = model.provider_profile
+    route_wire_profile = model.route_wire_profile
     plan = context.provider_wire_input_plan
     if plan is not None:
         if plan.wire_api != OPENAI_CHAT_COMPLETIONS_API:
@@ -298,7 +311,7 @@ def build_chat_completions_payload(
             ordered_input_items=tuple(
                 _messages_to_chat_messages(
                     context.messages,
-                    provider_profile=provider_profile,
+                    route_wire_profile=route_wire_profile,
                 )
             ),
             tool_items=tuple(_tool_to_chat_tool(tool) for tool in context.tools),
@@ -307,7 +320,7 @@ def build_chat_completions_payload(
 
     payload: dict[str, Any] = dict(context_fields)
     extra_body: dict[str, Any] = {}
-    for key, value in provider_profile.request_extra_body.items():
+    for key, value in route_wire_profile.request_extra_body.items():
         materialized_value = mutable_provider_value(value)
         if context_fields.get(key) != materialized_value:
             raise ValueError("Chat extra-body context changed after wire planning")
@@ -320,13 +333,22 @@ def build_chat_completions_payload(
             "stream_options": {"include_usage": True},
         }
     )
-    for key, value in provider_profile.request_defaults.items():
+    for key, value in route_wire_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
     payload["max_completion_tokens"] = (
         call.target.context_budget.effective_output_tokens
     )
-    if options.reasoning_effort is not None:
-        payload["reasoning_effort"] = options.reasoning_effort
+    reasoning = reasoning_wire_fields(
+        call.target.contract, call.selected_reasoning
+    )
+    for key, value in reasoning.root.items():
+        if key in payload:
+            raise ValueError("Chat reasoning root field has another owner")
+        payload[key] = mutable_provider_value(value)
+    for key, value in reasoning.extra_body.items():
+        if key in extra_body or key in payload:
+            raise ValueError("Chat reasoning extra-body field has another owner")
+        extra_body[key] = mutable_provider_value(value)
     if extra_body:
         payload["extra_body"] = extra_body
     return payload
@@ -341,7 +363,9 @@ _CHAT_NON_CONTEXT_BEARING_FIELDS = frozenset(
         "max_tokens",
         "max_completion_tokens",
         "max_output_tokens",
+        "reasoning",
         "reasoning_effort",
+        "thinking",
         "timeout",
         "service_tier",
         "seed",
@@ -363,7 +387,7 @@ def materialize_chat_context_bearing_wire_projection(
 ) -> dict[str, Any]:
     """Materialize the exact Chat fields that carry provider input context."""
 
-    profile = call.target.model_profile.provider_profile
+    profile = call.target.model_profile.route_wire_profile
     messages: list[dict[str, Any]] = []
     if root_policy:
         messages.append({"role": "system", "content": root_policy})
@@ -372,7 +396,7 @@ def materialize_chat_context_bearing_wire_projection(
     for key, value in profile.request_defaults.items():
         if key not in _CHAT_NON_CONTEXT_BEARING_FIELDS:
             projection.setdefault(key, mutable_provider_value(value))
-    if tool_items and profile.supports_tools:
+    if tool_items:
         projection["tools"] = [dict(item) for item in tool_items]
     if tool_choice is not None:
         projection["tool_choice"] = tool_choice
@@ -405,12 +429,12 @@ def project_chat_context_bearing_payload_fields(
 def chat_semantic_wire_group(
     message: LLMMessage,
     *,
-    provider_profile: ProviderProfile,
+    route_wire_profile: RouteWireProfile,
 ) -> tuple[dict[str, Any], ...]:
     """Return the exact generic wire group for one compiled message."""
 
     return tuple(
-        _messages_to_chat_messages((message,), provider_profile=provider_profile)
+        _messages_to_chat_messages((message,), route_wire_profile=route_wire_profile)
     )
 
 
@@ -433,9 +457,9 @@ def _thaw_wire_objects(
 def _messages_to_chat_messages(
     messages: tuple[LLMMessage, ...],
     *,
-    provider_profile: ProviderProfile | None = None,
+    route_wire_profile: RouteWireProfile | None = None,
 ) -> list[dict[str, Any]]:
-    provider_profile = provider_profile or ProviderProfile(
+    route_wire_profile = route_wire_profile or RouteWireProfile(
         wire_api=OPENAI_CHAT_COMPLETIONS_API
     )
     chat_messages: list[dict[str, Any]] = []
@@ -456,7 +480,7 @@ def _messages_to_chat_messages(
         chat_messages.append(
             _message_to_chat_message(
                 message,
-                provider_profile=provider_profile,
+                route_wire_profile=route_wire_profile,
             )
         )
     if pending_tool_calls:
@@ -479,7 +503,7 @@ class ChatCompletionAccumulator:
     """Closed one-choice Chat response state; EOF is never acceptance."""
 
     builder: ProviderLiveItemBuilder
-    provider_profile: ProviderProfile
+    route_wire_profile: RouteWireProfile
     tool_calls: "ChatToolCallAccumulator" = field(init=False)
     usage_report: TransportUsageReport | None = None
     terminal: ProviderAdapterTerminal | None = None
@@ -547,7 +571,7 @@ class ChatCompletionAccumulator:
                 item.field_name: item for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
             }
             live_thinking_fields = frozenset(
-                self.provider_profile.thinking.delta_fields
+                self.route_wire_profile.thinking.delta_fields
             )
             allowed = {
                 "role",
@@ -684,7 +708,7 @@ class ChatCompletionAccumulator:
     def _reconcile_final_message(self, raw_message: object) -> None:
         known_contracts = CHAT_CLOSED_REASONING_FIELD_CONTRACTS
         replay_contracts = {
-            item.field_name: item for item in self.provider_profile.chat_replay_fields
+            item.field_name: item for item in self.route_wire_profile.chat_replay_fields
         }
         if raw_message is None:
             if any(item.final_value_required for item in replay_contracts.values()):
@@ -967,7 +991,7 @@ class ChatCompletionAccumulator:
         self._replay_item_count = 0
 
     def _freeze_completed_replay(self):
-        contracts = self.provider_profile.chat_replay_fields
+        contracts = self.route_wire_profile.chat_replay_fields
         for contract in contracts:
             if contract.required_on_selected_response and (
                 not self._field_observed(contract.field_name)
@@ -1005,7 +1029,7 @@ class ChatCompletionAccumulator:
         if not isinstance(frozen, FrozenJsonObjectFact):
             raise AssertionError("chat replay message did not freeze as an object")
         return freeze_provider_adapter_completed_replay_payload(
-            codec_kind=self.provider_profile.assistant_replay_codec_kind,
+            codec_kind=self.route_wire_profile.assistant_replay_codec_kind,
             ordered_items=(frozen,),
         )
 
@@ -1038,13 +1062,17 @@ class _ChatToolCallState:
     name: str = ""
     pending_arguments: list[str] = field(default_factory=list)
     started: bool = False
+    reported_indexes: set[int] = field(default_factory=set)
 
 
 @dataclass(slots=True)
 class ChatToolCallAccumulator:
     builder: ProviderLiveItemBuilder
-    _states: dict[str, _ChatToolCallState] = field(default_factory=dict)
-    _index_origin: int | None = None
+    _ordered_states: list[_ChatToolCallState] = field(default_factory=list)
+    _states_by_id: dict[str, _ChatToolCallState] = field(default_factory=dict)
+    _states_by_index: dict[int, list[_ChatToolCallState]] = field(
+        default_factory=dict
+    )
     completed_calls: tuple[dict[str, object], ...] = ()
 
     def apply_tool_call_delta(
@@ -1055,51 +1083,34 @@ class ChatToolCallAccumulator:
                 "chat tool-call delta contains unsupported fields",
                 reason_code="transport_tool_call_contract_invalid",
             )
-        raw_index = raw_tool_call.get("index", len(self._states))
-        if (
+        raw_index = raw_tool_call.get("index")
+        if raw_index is not None and (
             not isinstance(raw_index, int)
             or isinstance(raw_index, bool)
             or raw_index < 0
-            or raw_index > 4095
         ):
             raise LLMTransportContractError(
                 "chat tool-call index is invalid",
                 reason_code="transport_tool_call_contract_invalid",
             )
-        if self._index_origin is None:
-            if raw_index not in {0, 1}:
-                raise LLMTransportContractError(
-                    "chat tool-call indexes are not contiguous",
-                    reason_code="transport_tool_call_contract_invalid",
-                )
-            self._index_origin = raw_index
-        normalized_index = raw_index - self._index_origin
-        key = str(normalized_index)
-        if (
-            normalized_index < 0
-            or key not in self._states
-            and normalized_index != len(self._states)
-        ):
+
+        raw_call_id = raw_tool_call.get("id")
+        if raw_call_id is not None and not isinstance(raw_call_id, str):
             raise LLMTransportContractError(
-                "chat tool-call indexes are not contiguous",
+                "chat tool-call ID is invalid",
                 reason_code="transport_tool_call_contract_invalid",
             )
-        state = self._states.setdefault(key, _ChatToolCallState())
+        tool_call_id = raw_call_id if raw_call_id else None
+        state = self._resolve_state(
+            tool_call_id=tool_call_id,
+            reported_index=raw_index,
+        )
         raw_type = raw_tool_call.get("type")
         if raw_type is not None and raw_type != "function":
             raise LLMTransportContractError(
                 "chat tool-call type is unsupported",
                 reason_code="transport_tool_call_contract_invalid",
             )
-        tool_call_id = raw_tool_call.get("id")
-        if isinstance(tool_call_id, str) and tool_call_id:
-            if state.tool_call_id is not None and state.tool_call_id != tool_call_id:
-                raise LLMTransportContractError(
-                    "chat tool-call stream changed its frozen call ID",
-                    reason_code="transport_tool_call_identity_mismatch",
-                )
-            state.tool_call_id = tool_call_id
-
         function = raw_tool_call.get("function")
         arguments_delta = ""
         if function is not None and not isinstance(function, dict):
@@ -1114,16 +1125,24 @@ class ChatToolCallAccumulator:
                     reason_code="transport_tool_call_contract_invalid",
                 )
             name = function.get("name")
+            if name is not None and not isinstance(name, str):
+                raise LLMTransportContractError(
+                    "chat tool-call name is invalid",
+                    reason_code="transport_tool_call_contract_invalid",
+                )
             if isinstance(name, str) and name:
-                if state.started:
-                    if name != state.name:
-                        raise LLMTransportContractError(
-                            "chat tool-call stream changed its frozen tool name",
-                            reason_code="transport_tool_call_name_mismatch",
-                        )
-                else:
-                    state.name += name
+                if state.name and name != state.name:
+                    raise LLMTransportContractError(
+                        "chat tool-call stream changed its frozen tool name",
+                        reason_code="transport_tool_call_name_mismatch",
+                    )
+                state.name = name
             arguments = function.get("arguments")
+            if arguments is not None and not isinstance(arguments, str):
+                raise LLMTransportContractError(
+                    "chat tool-call arguments delta is invalid",
+                    reason_code="transport_tool_call_contract_invalid",
+                )
             if isinstance(arguments, str) and arguments:
                 arguments_delta = arguments
 
@@ -1157,10 +1176,105 @@ class ChatToolCallAccumulator:
                 state.pending_arguments.append(arguments_delta)
         return events
 
+    def _resolve_state(
+        self,
+        *,
+        tool_call_id: str | None,
+        reported_index: int | None,
+    ) -> _ChatToolCallState:
+        if tool_call_id is not None:
+            exact = self._states_by_id.get(tool_call_id)
+            if exact is not None:
+                self._associate_index(exact, reported_index, require_compatible=True)
+                return exact
+
+            indexed = (
+                self._states_by_index.get(reported_index, [])
+                if reported_index is not None
+                else []
+            )
+            provisional = [item for item in indexed if item.tool_call_id is None]
+            if len(indexed) == 1 and len(provisional) == 1:
+                state = provisional[0]
+                self._bind_call_id(state, tool_call_id)
+                return state
+            if provisional:
+                raise LLMTransportContractError(
+                    "chat tool-call ID cannot be correlated with a reused index",
+                    reason_code="transport_tool_call_correlation_ambiguous",
+                )
+            state = self._new_state(tool_call_id=tool_call_id)
+            self._associate_index(state, reported_index, require_compatible=False)
+            return state
+
+        if reported_index is not None:
+            indexed = self._states_by_index.get(reported_index, [])
+            if len(indexed) == 1:
+                return indexed[0]
+            if len(indexed) > 1:
+                raise LLMTransportContractError(
+                    "chat tool-call index identifies more than one active call",
+                    reason_code="transport_tool_call_correlation_ambiguous",
+                )
+            state = self._new_state(tool_call_id=None)
+            self._associate_index(state, reported_index, require_compatible=False)
+            return state
+
+        if len(self._ordered_states) == 1:
+            return self._ordered_states[0]
+        raise LLMTransportContractError(
+            "chat tool-call delta has no unambiguous call identity",
+            reason_code="transport_tool_call_correlation_ambiguous",
+        )
+
+    def _new_state(self, *, tool_call_id: str | None) -> _ChatToolCallState:
+        state = _ChatToolCallState(tool_call_id=tool_call_id)
+        self._ordered_states.append(state)
+        if tool_call_id is not None:
+            self._bind_call_id(state, tool_call_id)
+        return state
+
+    def _bind_call_id(
+        self, state: _ChatToolCallState, tool_call_id: str
+    ) -> None:
+        existing = self._states_by_id.get(tool_call_id)
+        if existing is not None and existing is not state:
+            raise LLMTransportContractError(
+                "chat tool-call ID was reused for another call",
+                reason_code="transport_tool_call_identity_mismatch",
+            )
+        if state.tool_call_id is not None and state.tool_call_id != tool_call_id:
+            raise LLMTransportContractError(
+                "chat tool-call stream changed its frozen call ID",
+                reason_code="transport_tool_call_identity_mismatch",
+            )
+        state.tool_call_id = tool_call_id
+        self._states_by_id[tool_call_id] = state
+
+    def _associate_index(
+        self,
+        state: _ChatToolCallState,
+        reported_index: int | None,
+        *,
+        require_compatible: bool,
+    ) -> None:
+        if reported_index is None:
+            return
+        indexed = self._states_by_index.setdefault(reported_index, [])
+        if any(item is state for item in indexed):
+            return
+        if require_compatible and indexed:
+            raise LLMTransportContractError(
+                "chat tool-call ID conflicts with its reported index",
+                reason_code="transport_tool_call_correlation_ambiguous",
+            )
+        indexed.append(state)
+        state.reported_indexes.add(reported_index)
+
     def close_active_tool_calls(self) -> list[ProviderStreamPayload]:
         if any(
             not state.started or not state.tool_call_id
-            for state in self._states.values()
+            for state in self._ordered_states
         ):
             raise LLMTransportContractError(
                 "tool-call stream ended before a named tool-call start",
@@ -1168,7 +1282,7 @@ class ChatToolCallAccumulator:
             )
         events: list[ProviderStreamPayload] = []
         completed: list[dict[str, object]] = []
-        for state in self._states.values():
+        for state in self._ordered_states:
             assert state.tool_call_id is not None
             arguments = (
                 "".join(
@@ -1200,14 +1314,16 @@ class ChatToolCallAccumulator:
                 }
             )
         self.completed_calls = tuple(completed)
-        self._states.clear()
+        self._ordered_states.clear()
+        self._states_by_id.clear()
+        self._states_by_index.clear()
         return events
 
 
 def _message_to_chat_message(
     message: LLMMessage,
     *,
-    provider_profile: ProviderProfile,
+    route_wire_profile: RouteWireProfile,
 ) -> dict[str, Any]:
     if message.role is MessageRole.TOOL_CALL:
         return {
@@ -1228,8 +1344,8 @@ def _message_to_chat_message(
             "role": "assistant",
             "content": "\n".join(message.content),
         }
-        if _should_replay_thinking(message, provider_profile=provider_profile):
-            message_field = provider_profile.thinking.message_field
+        if _should_replay_thinking(message, route_wire_profile=route_wire_profile):
+            message_field = route_wire_profile.thinking.message_field
             if message_field:
                 payload[message_field] = "\n".join(message.thinking)
         if message.tool_calls:
@@ -1275,11 +1391,11 @@ def _tool_call_to_chat_tool_call(tool_call: LLMToolCall) -> dict[str, Any]:
 
 
 def _should_replay_thinking(
-    message: LLMMessage, *, provider_profile: ProviderProfile
+    message: LLMMessage, *, route_wire_profile: RouteWireProfile
 ) -> bool:
     if not message.thinking:
         return False
-    policy = provider_profile.thinking.replay_policy
+    policy = route_wire_profile.thinking.replay_policy
     if policy is ThinkingReplayPolicy.NEVER:
         return False
     if policy is ThinkingReplayPolicy.ALWAYS:

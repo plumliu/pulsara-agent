@@ -206,7 +206,10 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         # Round 9.3's one injected API-key boundary owns the final HTTP
         # admission and lock-acquisition tasks. Provider/retrieval callers no
         # longer create parallel sink tasks of their own.
-        "src/pulsara_agent/process_api_key_boundary.py",
+        "src/pulsara_agent/process_credential_boundary.py",
+        # The local-settings owner shields the post-Keychain metadata
+        # settlement so cancellation cannot strand a known-unpublished key.
+        "src/pulsara_agent/settings.py",
         # The local application owns four process-local task sites: its HTTP
         # server, one protocol connection pump, one browser bridge request,
         # and the session controller's running-turn observation. None is a

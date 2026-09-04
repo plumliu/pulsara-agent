@@ -1,6 +1,6 @@
 # Pulsara Route + Wire API + Model Universe、GUI Local Configuration 与 Wire Adapter Hard-cut 实施规范
 
-> 状态：**IMPLEMENTATION-READY / 尚未激活**
+> 状态：**ACTIVATED — 2026-09-04**
 >
 > 冻结日期：2026-09-04
 >
@@ -353,18 +353,22 @@ ModelTargetKey = CatalogEntryKey + user_selected_wire_api
 ```
 
 因此 universe 不是 checked-in allowlist，也不是预先物化的笛卡尔积。它是一个当前
-`SelectableModelCatalog`、用户配置与本地 adapter registry 之上的 exact 投影：
+`SelectableModelCatalog`、用户配置与本地 wire-dialect adapter 之上的 exact 投影：
 
 ```text
 resolve_target(snapshot, route_id, model_id, wire_api)
     = exact eligible catalog entry
-    + exact registered wire adapter
-    + exact route/wire adapter contract
+    + catalog-declared wire dialect
+    + user-selected generic Chat/Responses adapter
 ```
 
 models.dev 不声称某 model 必然同时支持 Chat 和 Responses；Pulsara 也不作这种推断。
-`wire_api` 是用户对实际 endpoint contract 的显式配置。没有对应本地 adapter 就在
-provider open 前拒绝；resolver 不做近似匹配、family fallback 或自动换 wire API。
+`wire_api` 是用户对实际 endpoint contract 的显式配置。models.dev route 若以
+`@ai-sdk/openai-compatible`（以及 Pulsara 已知等价的 OpenAI/OpenRouter package）声明
+OpenAI-compatible dialect，Chat 与 Responses 均接入 Pulsara 已有通用 adapter；`shape` 只提供
+推荐。若调用端点实际不支持用户选择的 API，则保留具体 provider/protocol error，不自动换 API。
+catalog dialect 为 provider-native/unknown 时在 provider open 前拒绝。要支持新的 native wire，必须
+显式增加并测试一个 wire dialect adapter；resolver 不按 route、model 名、family 或 HTTP 试错猜 dialect。
 
 ### 4.2 Selectable catalog 的唯一产品过滤
 
@@ -394,13 +398,14 @@ Claude/Gemini 过滤是明确的当前产品范围，而不是 wire support 推�
 - 因而 `claude-*`、`gemini-*`、`anthropic/claude-*`、`google/gemini-*`、
   `~anthropic/claude-*` 都被排除；
 - 不读取 `family`、display name、provider/route name、`npm` 或 `provider.shape` 扩大过滤；
+  `npm` 仍必须独立解析为 wire-dialect hint，`provider.shape` 仍必须独立解析为 API 推荐；
 - 其他模型即使来自 Anthropic、Google、Vertex 或 gateway，也不因 provider 名被排除；
 - 未来若 Pulsara 正式支持这些模型族，必须修改这一条产品 predicate 与 golden tests，不能
   在 adapter 中暗开例外。
 
 这里的“唯一过滤”只指产品把可解析 row 从目录选择面排除的 predicate。通过该 predicate 的 row
 不会再因为 reasoning option、adapter或 endpoint validation而被静默删掉：局部 reasoning
-metadata异常按 §4.6降级；缺少整个 route/wire adapter、endpoint或 hard limits时，kernel在同一
+metadata异常按 §4.6降级；缺少可用 wire-dialect adapter、endpoint或 hard limits时，kernel在同一
 read model返回 typed non-executable reason，UI保留 row并禁止确认该 wire组合。这样 catalog
 drift可见但不被过度放大，也不会让根本无法发送的 target获得 execution authority。
 
@@ -447,15 +452,16 @@ class ModelTargetKey:
 ```python
 @dataclass(frozen=True, slots=True)
 class RouteWireContract:
-    default_base_url: str | None
     transport_binding_id: str
     transport_contract_version: str
     model_identity_policy: ModelIdentityPolicy
     assistant_replay_contract: ProviderAssistantReplayContract
 ```
 
-它由现有 adapter registry 以普通 `(route_id, wire_api)` typed tuple作为 key查找，不在 value里
-重复保存这两个字段。它回答：
+现有 registry 只以 `(wire_dialect, wire_api)` 查找通用 contract；request、stream、terminal与 replay
+均不按 route或 model分支。Route不是allowlist：一个新的
+`@ai-sdk/openai-compatible` models.dev route无需Pulsara发版或手工注册即可使用现有 Chat /
+Responses transport。Contract回答：
 
 - 请求发往哪类 route；
 - 采用哪个 wire API 与 transport；
@@ -465,14 +471,15 @@ class RouteWireContract:
 API key 不进入 contract。Route 是直连 provider 还是 gateway 可作为 UI 描述，但不得驱动
 Agent core 的不同正确性规则。OpenRouter 和 OpenAI 都是可被用户选择的 route。
 
-`RouteWireContract` 是 Pulsara 需要自己维护的小而明确的部分。reasoning lowering 是该
-contract 所绑定 adapter 的普通 typed 方法，不再另造 `request_codec_id`、
+`RouteWireContract` 是 Pulsara 需要自己维护的小而明确的 **wire dialect** 部分，不是 provider
+目录。reasoning lowering 是该 contract 所绑定 adapter 的普通 typed 方法，不再另造 `request_codec_id`、
 `reasoning_codec_ids` 或 codec registry；`transport_binding_id + transport_contract_version`
-已经是现有运行时选择和复现 adapter 的边界。models.dev 的 `npm` 只是
-AI SDK 生态的 adapter hint，不能定义 Pulsara 的 request、SSE、terminal 或 replay
-contract。同样是 Chat Completions，OpenAI 直连与 OpenRouter 的 reasoning request field
-也可能不同；该差异留在 `route_id + wire_api` adapter lowering，不落到 Agent core，也不
-要求 Pulsara 复制每个 model row。
+已经是现有运行时选择和复现 adapter 的边界。models.dev 的 `npm` 可以把 route解析到通用
+OpenAI-compatible dialect；Pulsara 的通用 Chat/Responses adapters拥有 request主干、SSE、terminal、
+tool correlation与closed observed-field replay，也分别统一拥有 Chat 的 `reasoning_effort` 与
+Responses 的 `reasoning.effort` request lowering。Pulsara不为 provider或 model复制这些 contract。
+OpenAI route在models.dev缺少 `api` 时所需的默认 endpoint属于独立的 route endpoint fallback，
+不得伪装成另一份 wire contract。
 
 ### 4.5 ModelTargetContract 的最小字段
 
@@ -500,12 +507,13 @@ Identity只存在于 `ModelCatalogEntryKey` / `ModelTargetKey`；display、limit
 消费一次，解析后的 `reasoning` 是 target唯一 execution/UI事实，不把 raw与 normalized副本一起
 塞进 target；`route_wire` 是本地 adapter binding。
 
-首轮从 models.dev entry 直接投影的 model-specific facts 只有：
+首轮从 models.dev entry 直接投影的 execution facts 只有：
 
 1. exact target identity；
 2. context/input/output hard limits；
 3. reasoning behavior/control 的真实形状、选项和默认；
 4. `tool_call` 的 bool/unknown事实。
+5. provider `npm` 解析出的 `openai_compatible | provider_native | unknown` wire dialect。
 
 Pulsara 不再为这些字段维护一份 built-in per-model override table。若上游 entry 缺少
 非预算性字段，按 §4.6 的 typed unknown/provider-default 语义局部降级；不用名称 heuristic
@@ -670,9 +678,10 @@ class ReasoningSelectableControls:
     budget: ReasoningTokenBudgetRange | None
 ```
 
-三种 option 的存在与值从 models.dev entry 原样投影；exact lowering直接调用
-`RouteWireContract` 已绑定的 adapter，不再把同一 adapter拆成可任意拼接的 codec ID。
-不得由 catalog 的 `npm` 值猜 request path。
+三种 option 的存在与值从 models.dev entry 原样投影；exact lowering直接调用最终解析出的
+`RouteWireContract`，不再把同一 adapter拆成可任意拼接的 codec ID。`npm` 只将已明确声明
+`@ai-sdk/openai-compatible` 的 provider映射到 Pulsara通用 OpenAI-compatible dialect，不从任意
+package名猜 request path或字段形状。
 
 #### `ReasoningEffortChoices`
 
@@ -792,7 +801,7 @@ Validator至少保证：
   一个，不能因此猜测二者 wire bytes相同；
 - budget 的 min/max 同时存在时次序合法；
 - `effort`、`toggle`、closed/open `budget` 及其全部合法组合都能被 typed parser表示；每个可执行
-  selection kind必须被 exact route/wire adapter明确支持；adapter暂未实现的 family不进入可选
+  selection kind必须被已解析的通用 dialect contract明确支持；adapter暂未实现的 family不进入可选
   菜单，但不阻止同 target通过其他已实现 family或 provider-default omission正常执行；
 - unavailable/provider-default永远不生成 reasoning request字段。
 
@@ -999,8 +1008,8 @@ selection或用当前 catalog的同名 choice猜测。
    Zhipu AI、DeepSeek、Moonshot；
 4. 用户选 route 后，model selector 只展示该 provider entry 的 selectable models；
 5. 用户显式选择 Chat Completions 或 Responses 并填写 API key；普通“添加配置”不要求用户
-   理解或填写 base URL；endpoint 按 model-level `provider.api`、provider-level `api`、对应
-   `RouteWireContract.default_base_url` 的顺序 exact 解析；三者都没有时返回 typed
+   理解或填写 base URL；endpoint 按 model-level `provider.api`、provider-level `api`、Pulsara明确维护的
+   route endpoint fallback 的顺序 exact 解析；三者都没有时返回 typed
    `model_endpoint_unknown`，不能猜 endpoint；
 6. 确认页固定说明：“Pulsara 当前只支持与 OpenAI Chat Completions 或 Responses 兼容的
    接口；模型出现在目录中不代表所选提供方一定支持你选择的 API 协议。”；
@@ -1021,8 +1030,9 @@ selection或用当前 catalog的同名 choice猜测。
 ### 6.2 Gateway target 的语义
 
 对 gateway，`model_id` 是 models.dev 在该 gateway provider entry 下公布的 model identity。
-Pulsara 不复制 gateway-level model row；它只维护该 gateway 对已选 wire API 的
-route/wire adapter contract。
+Pulsara 不复制 gateway-level model row。若 gateway 遵循通用 OpenAI-compatible dialect，直接复用
+通用 adapter。不同 request/stream/terminal/replay协议必须成为新的 dialect adapter，不能在
+gateway或 model名下暗中替换通用 transport。
 
 如果 gateway 可能把请求送到不同 deployment，Pulsara 不能把一次 HTTP 200 当作隐藏 upstream
 support 的证明，也不能在 user turn 中逐 deployment 试错。但 gateway 本身就是用户选择的
@@ -1032,16 +1042,18 @@ pinning或 fallback control（若有），并诚实说明无法观察的 upstrea
 semantic output后换 target或重放。若用户选的 wire API实际不可用，本次 call以具体
 provider/protocol error终止，UI提供“修改连接配置”入口，不自动改用另一个 wire API。
 
-### 6.3 OpenRouter 的特殊知识只能留在 OpenRouter route
+### 6.3 OpenRouter 仍使用同一通用 wire contract
 
 OpenRouter 在 models.dev 中与 direct provider 平级；Pulsara 的默认选择器不需再另调
 OpenRouter `/models` 来填 model 表。若未来引入 OpenRouter 实时 availability，它只能影响
 “当前 credential 可见”的 UI 过滤，不覆盖 models.dev reasoning options，也不热改
 active target。
 
-OpenRouter 的 `require_parameters`、fallback policy、reasoning request shape 与 replay fields
-属于 OpenRouter `RouteWireContract` / adapter。Agent core、memory、tool executor、compaction
-不得出现 `if route == "openrouter"`。
+OpenRouter 不取得独立 reasoning request lowerer；用户选择 Chat 或 Responses 后使用对应通用
+request shape。`reasoning_details`由通用 Chat adapter的closed observed-field parser与exact replay处理。
+`require_parameters`、fallback policy若以后成为产品控制，必须另行定义明确的 request owner；当前
+不得仅因 route名称注入。Agent core、memory、tool executor、compaction不得出现
+`if route == "openrouter"`。
 
 ---
 
@@ -1049,9 +1061,8 @@ OpenRouter 的 `require_parameters`、fallback policy、reasoning request shape 
 
 ### 7.1 Model contract 说“可选什么”，adapter 说“怎样发送”
 
-models.dev entry 只回答“有哪些 control”，不定义 exact
-JSON path。Resolver 将它与 exact `route_id + wire_api` 的 registered adapter join；route/wire
-adapter 唯一拥有：
+models.dev entry 回答“有哪些 control”；Resolver 将它与 `wire_dialect + wire_api` 通用 adapter join。最终选中的
+adapter contract唯一拥有：
 
 - reasoning 字段名、嵌套位置与 exact JSON type；
 - request defaults 与冲突规则；
@@ -1067,15 +1078,12 @@ adapter 唯一拥有：
 |---|---|
 | OpenAI Responses effort `high` | `reasoning={"effort":"high"}` |
 | OpenAI Chat effort `high` | root `reasoning_effort="high"` |
-| OpenRouter Chat effort `xhigh` | `reasoning={"effort":"xhigh"}` |
 | effort `none`（若 target 定义为关闭） | adapter-owned exact disable value |
-| thinking toggle | adapter-owned exact enabled/disabled objects |
 | fixed-on / no caller control | exact omission |
 | unavailable / provider-default | 不发送 reasoning selector |
 
-表中只说明责任边界；每个 `route_id + wire_api` adapter 的实际 shape 必须由
-official evidence 与 request golden 冻结，不能靠这张示意表或 models.dev `shape` hint
-自动生成。
+表中只说明责任边界；通用 Chat/Responses dialect的实际 shape由既有 adapter与request golden冻结，
+不能靠models.dev `shape` hint改写。
 
 ### 7.2 Hard-cut 删除重复 request owner
 
@@ -1553,7 +1561,7 @@ borrow。Queue binding已知，因而可在事务外完成 non-secret pure resol
 
 1. 在事务外 decode queue payload的 non-secret binding，并从冻结 snapshots
    取得 immutable connection/target value；
-2. connection metadata缺失、target hard limits非法、route/wire adapter不存在，或 queue已冻结的
+2. connection metadata缺失、target hard limits非法、wire dialect adapter不存在，或 queue已冻结的
    explicit selection现在无法 membership/lower，属于永久 admission failure，
    复用现有 queue `REJECTED` + `PROMPT_REJECTED` settlement，写精确 terminal reason，不创建 turn；
    未被该 binding选择的 reasoning family异常按 §4.6/§5.2局部降级，不能把无关 catalog
@@ -1673,7 +1681,7 @@ Kernel 一次取得完整 response，一次性 parse 为 immutable `ModelCatalog
 构造 `SelectableModelCatalog`。Raw parser 只投影：
 
 ```text
-provider: id, name, api
+provider: id, name, npm, api
 model: id, name, reasoning, reasoning_options, tool_call,
        limit.context, limit.input?, limit.output,
        provider.api?, provider.shape?
@@ -1681,7 +1689,8 @@ model: id, name, reasoning, reasoning_options, tool_call,
 
 model-level `provider.api` 若存在，作为该 exact model 比 provider-level `api` 更具体的
 endpoint 预填值。`provider.shape` 只接受 `responses|completions`，并只作 UI hint。
-`npm`、pricing、marketing description、benchmark、modalities 等即使存在，也不进入首轮
+`npm` 只解析为 `openai_compatible | provider_native | unknown` dialect；它不生成 reasoning path、
+stream状态机或 replay规则。Pricing、marketing description、benchmark、modalities等不进入首轮
 execution contract。Outer provider/model key 是 catalog canonical identity；inner `id` 一致时作为
 冗余确认，不一致时记录 row diagnostic但不推翻可由 outer key明确定位的其余数据。Parser不对
 ID做 lower-case、alias、family或 substring normalization，也不因未知 optional字段拒绝整个
@@ -1745,13 +1754,15 @@ watchdog，不为 Host/turn增加 total wall-clock lifetime cap。
 | DashScope embedding/reranker key durable value | 同一 macOS Keychain service中的两个 fixed typed items |
 | endpoint、non-secret connection metadata 与本机 PostgreSQL DSN | `${PULSARA_HOME}/local-settings.yaml` |
 | embedding/reranker provider、model、endpoint与执行参数 | 现有 fixed DashScope code contracts；不是 GUI/provider universe |
-| request field、SSE、terminal、tool correlation、replay | Pulsara route/wire adapter |
+| provider `npm` 到通用 wire dialect 的解析 | models.dev metadata + Pulsara 的小型 dialect classifier |
+| request主干、SSE、terminal、tool correlation、closed observed-field replay | Pulsara 通用 Chat/Responses adapter |
+| models.dev缺失的已知 route endpoint | 独立 route endpoint fallback；不影响 adapter选择 |
 | 当前会话 model-call binding | 会话页的模型/推理控件；session 保存，NEW_TURN admission 冻结 |
 | local-settings 与 database-not-ready UI | PostgreSQL-independent local Web settings shell |
 
-这个边界意味着 Pulsara 不再调研并手工录入每个 provider/model。它仍需维护少量
-`route_id + wire_api` adapter lowering：例如 Zhipu Chat 的 `thinking.type` +
-`reasoning_effort`，与 OpenRouter Chat 的 reasoning body 形状可能不同。
+这个边界意味着 Pulsara 不再调研并手工录入每个 provider/model，也不维护 route allowlist。
+全部 `@ai-sdk/openai-compatible` route 自动复用通用 Chat/Responses transport及其 reasoning
+request/replay逻辑；provider与 model不会成为另一层 wire lowering owner。
 
 ### 10.4 Zhipu AI / GLM-5.3 的端到端示例
 
@@ -1796,13 +1807,12 @@ Endpoint        https://open.bigmodel.cn/api/paas/v4  # 自动解析，只读
 [模型：Zhipu AI · GLM-5.3 · Chat ▾] [推理：High ▾] [发送]
 ```
 
-用户若不修改，选 Chat 发送时，Zhipu Chat route/wire adapter 产生的关键 request material 为：
+用户若不修改，选 Chat 发送时，通用 Chat adapter 产生的关键 request material 为：
 
 ```json
 {
   "model": "glm-5.3",
   "messages": ["...canonical lowered messages..."],
-  "thinking": {"type": "enabled"},
   "reasoning_effort": "high",
   "stream": true
 }
@@ -1950,8 +1960,8 @@ tests/test_llm_model_target.py
 - `ModelCatalogSnapshot`、`SelectableModelCatalog`、`ModelCatalogEntryKey`、`ModelTargetKey`、
   `ModelTargetContract`；
 - §4.2 的 exact 256k + model-ID leaf filter，以及过滤后空 provider 删除；
-- 完整保留组合 reasoning options 与 optional `provider.shape` hint；
-- exact catalog lookup、route/wire adapter join 与 validation；
+- 完整保留组合 reasoning options、provider `npm` dialect与 optional `provider.shape` hint；
+- exact catalog lookup、generic dialect adapter join与 validation；
 - top-level fetch/JSON结构失败使 snapshot unavailable；row/option局部异常按 §4.6 诊断并降级；
   invalid hard limits只拒绝该 row；
 - 不实现未暴露的 custom target第二来源。
@@ -1967,7 +1977,9 @@ tests/test_llm_model_target.py
 - 保留并明确 output-side Chat replay field contract；
 - request defaults只能包含 adapter allowlist 中的非 reasoning keys；
 - adapter-owned reasoning key发生冲突时构造阶段拒绝；
-- OpenRouter 等 gateway以独立 route注册。
+- OpenRouter 等 gateway继续保留 models.dev route identity，并与其他 OpenAI-compatible route共享
+  generic Chat/Responses transport及reasoning lowering；
+- OpenAI缺失的默认 endpoint以独立 endpoint fallback提供，不复制 Chat/Responses contract。
 
 文件名是否继续叫 `provider.py` 不影响语义；类型名与 public contract 不得继续使用
 `ModelCapability*`。
@@ -2202,8 +2214,8 @@ README.zh-CN.md
 15. 更新 config-check、db CLI、README与架构说明，删除 `.env.example`，只描述新路径。
 16. 运行 PostgreSQL schema/replay regression，确认 event/subject/guard/relation/job oracle
     类别没有增加。
-17. 对每个有可用 credential的已实现 route/wire adapter选取代表 target运行 real-provider
-    dogfood；无凭据的 route精确报告环境阻塞。
+17. 对通用 Chat/Responses dialect选取有可用 credential的代表 target运行 real-provider dogfood；
+    无凭据的代表 route精确报告环境阻塞。
 
 不得保留旧的 local model table等待以后切换。Production首轮只有 models.dev-backed这一条
 target source与一条 resolved path。
@@ -2231,8 +2243,8 @@ target source与一条 resolved path。
 - route相同但 wire不同不误命中；
 - model相同但 route不同不误命中；
 - unknown model不做 substring/family fallback；
-- route/wire缺少 registered adapter时该 target non-executable且添加 connection拒绝，catalog row
-  仍可见；
+- 新的 `@ai-sdk/openai-compatible` route不经手工注册即可分别选择通用 Chat/Responses；provider-native/
+  unknown dialect始终 target non-executable、添加 connection拒绝，catalog row仍可见；
 - catalog option kind未知或某 family缺少 route/wire lowering时只不暴露该 family，不拒绝其他
   controls/provider-default；
 - invalid/contradictory limits只拒绝对应 row；
@@ -2266,7 +2278,8 @@ target source与一条 resolved path。
   wire control，不使 target不可执行；
 - explicit choice必须 exact membership；
 - `{low, high}` target 收到 `medium` 必须拒绝，不能投影到任一档；
-- OpenRouter GLM fixture保留 toggle + `high/xhigh`；direct Z.AI fixture只接受 `high/max`；
+- OpenRouter GLM catalog fixture保留 toggle + `high/xhigh` + budget原始事实；通用 adapter解析后的
+  可执行选择只保留其支持的 `high/xhigh` effort；direct Z.AI fixture只接受 `high/max`；
 - 同名 choice不能跨 target复用旧 selection；
 - `[low, high, max]` 默认 `high`，`[high, max]` 默认 `max`，五个正向档默认正中；
 - disabled choice不参与正向 effort 的中位计算，只有 disabled 时默认 disabled；
@@ -2276,7 +2289,8 @@ target source与一条 resolved path。
   limit推导，仍可使用同 row的 effort/toggle，只有开放 budget时用 provider-default；
 - target切换清除不适用 choice并计算新 target自己的上中位默认，不迁移同名值；
 - 同 target preference仍合法时不因 catalog顺序变化而重算；
-- toggle的 enabled/disabled均生成各自 exact control；
+- catalog parser保留toggle/budget事实；当前通用Chat/Responses adapter不发明其wire shape，因而
+  不把未实现的control加入可执行菜单；
 - fixed-on exact omission；
 - unavailable正常执行且不发送 selector；
 - provider-default正常执行、不发送 selector且不宣称实际 reasoning state；
@@ -2299,8 +2313,7 @@ target source与一条 resolved path。
 
 - OpenAI Chat effort exact root field；
 - OpenAI Responses effort exact nested field；
-- OpenRouter Chat effort exact nested field；
-- toggle enabled/disabled shape均 exact；
+- 不同OpenAI-compatible route在同一Chat/Responses选择下使用相同effort request shape；
 - fixed-on / no caller control 的 omission exact；
 - unavailable/provider-default exact omission；
 - effort disabled choice发送 contract声明的 exact value；
@@ -2507,9 +2520,10 @@ Real-provider dogfood 至少覆盖：
    exact加入一组 connection；
 2. 一个 direct Responses target：exact reasoning choice、正文、tool call、terminal、下一轮 replay；
 3. 一个 direct Chat target：exact displayed choice、tool call、下一轮 replay；
-4. 一个 gateway target（优先 OpenRouter）：models.dev choice 与 outbound control exact一致；
+4. 一个 gateway target（优先 OpenRouter）：models.dev effort choice经用户所选通用 wire API形成
+   对应Chat/Responses request；
 5. 同一 model family经 direct/gateway暴露不同 choices时，两条请求各自只发送所选真实值；
-6. 至少覆盖 fixed-on/unavailable/provider-default/toggle中的一个 no-effort-list target；无
+6. 至少覆盖 fixed-on/unavailable/provider-default中的一个 no-effort-list target；无
    credential时精确报告该 target环境阻塞；
 7. provider返回 usage/reasoning telemetry不改变 selection；
 8. 同一 session connection下至少实际触发一个 main call 与一个 auxiliary call，证实二者使用
@@ -2527,8 +2541,8 @@ Real-provider dogfood 至少覆盖：
     exact item；sentinel value不输出。若 Keychain被拒绝或不可用，精确报告 `DENIED/UNAVAILABLE`
     环境阻塞，不伪称通过，也不回落文件。
 
-每个 production route/wire adapter必须有 official wire evidence、request golden与 recorded
-stream fixture/normalized contract。Live dogfood覆盖当前可用 credential，并至少尽力覆盖一个
+每个 production wire dialect必须有 official wire evidence、request golden与 recorded stream
+fixture/normalized contract。Live dogfood覆盖当前可用 credential，并至少尽力覆盖一个
 direct Chat、一个 direct Responses与一个 gateway target；没有某 route凭据时精确报告环境阻塞，
 不伪称该 route live通过，但也不把“测试者没有所有厂商 key”提升为代码 activation gate。
 models.dev新增 model不要求 Pulsara为每条 row重跑 conformance；用户所选 target的实际 protocol
@@ -2661,7 +2675,7 @@ models.dev新增 model不要求 Pulsara为每条 row重跑 conformance；用户�
 28. target只有 models.dev-backed单一 typed validation/resolution路径，不预建未暴露的 custom
     source；
 29. focused、full、PostgreSQL与可用 real-provider dogfood通过；
-30. 每个 production-supported route/wire adapter都有 official evidence与 golden/fixture；所有
+30. 每个 production-supported wire dialect都有 official evidence与 golden/fixture；所有
     可用 credential执行代表 live smoke，缺失凭据逐 route报告而不伪称通过；
 31. 外部阻塞逐 target精确报告，API key从未输出或落入非 credential-vault persistence；
 32. production、tests、README与 config-check只描述新路径，无 compatibility alias、feature flag

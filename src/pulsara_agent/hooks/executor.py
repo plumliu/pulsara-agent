@@ -23,9 +23,9 @@ from pulsara_agent.hooks.contracts import (
 from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
 )
-from pulsara_agent.process_api_key_boundary import (
-    ProcessApiKeyBoundary,
-    ProcessApiKeyBoundaryTimedOut,
+from pulsara_agent.process_credential_boundary import (
+    ProcessCredentialBoundary,
+    ProcessCredentialBoundaryTimedOut,
 )
 
 
@@ -33,8 +33,7 @@ MAXIMUM_HOOK_CAPTURE_BYTES = 1024 * 1024
 HOOK_PROCESS_GROUP_ABORT_GRACE_SECONDS = 5.0
 SYNCHRONOUS_COMMAND_SLOTS = 16
 BACKGROUND_COMMAND_SLOTS = 8
-API_KEY_ENVIRONMENT_NAME = "PULSARA_API_KEY"
-API_KEY_REPLACEMENT = b"[REDACTED_PULSARA_API_KEY]"
+API_KEY_REPLACEMENT = b"[REDACTED_CREDENTIAL]"
 
 
 @dataclass(slots=True)
@@ -43,14 +42,7 @@ class HookSecretScrubSet:
 
     @classmethod
     def capture(cls) -> "HookSecretScrubSet":
-        scrub = cls()
-        scrub.snapshot_current()
-        return scrub
-
-    def snapshot_current(self) -> None:
-        raw = os.getenv(API_KEY_ENVIRONMENT_NAME)
-        if raw:
-            self._values.add(raw.encode("utf-8"))
+        return cls()
 
     def observe(self, value: str | bytes | None) -> None:
         if not value:
@@ -68,7 +60,6 @@ class HookSecretScrubSet:
         return any(secret in encoded for secret in self.values)
 
     def scrub_bytes(self, raw: bytes) -> bytes:
-        self.snapshot_current()
         replacement = API_KEY_REPLACEMENT
         if any(secret in replacement for secret in self.values):
             replacement = b""
@@ -121,12 +112,14 @@ class HookCommandExecution:
     stderr: bytes = field(repr=False)
     failure_code: str | None = None
     diagnostics: tuple[HookDiagnostic, ...] = ()
-    scrub_set: HookSecretScrubSet = field(repr=False, compare=False, default_factory=HookSecretScrubSet)
+    scrub_set: HookSecretScrubSet = field(
+        repr=False, compare=False, default_factory=HookSecretScrubSet
+    )
 
 
 class HookCommandExecutor:
-    def __init__(self, *, api_key_boundary: ProcessApiKeyBoundary) -> None:
-        self._api_key_boundary = api_key_boundary
+    def __init__(self, *, credential_boundary: ProcessCredentialBoundary) -> None:
+        self._credential_boundary = credential_boundary
         self._sync_slots = asyncio.Semaphore(SYNCHRONOUS_COMMAND_SLOTS)
         self._background_slots = asyncio.Semaphore(BACKGROUND_COMMAND_SLOTS)
         self._processes: set[asyncio.subprocess.Process] = set()
@@ -140,9 +133,7 @@ class HookCommandExecutor:
 
         current = self._host_close_deadline
         self._host_close_deadline = (
-            deadline_monotonic
-            if current is None
-            else min(current, deadline_monotonic)
+            deadline_monotonic if current is None else min(current, deadline_monotonic)
         )
         self._host_close_signal.set()
 
@@ -179,7 +170,10 @@ class HookCommandExecutor:
                 or (not terminal and self._host_close_signal.is_set())
             ):
                 return _failure(request, scrub, "HOOK_CANCELLED")
-            scrub.snapshot_current()
+            async with self._credential_boundary.async_guard(
+                deadline_monotonic=effective_deadline
+            ) as guard:
+                scrub.observe(guard.value)
             command = definition.selected_command(windows=sys.platform == "win32")
             overlay = dict(definition.provenance.declaration_environment)
             overlay["PULSARA_HOOK_SOURCE_DIR"] = str(
@@ -216,6 +210,8 @@ class HookCommandExecutor:
             )
         except asyncio.CancelledError:
             raise
+        except ProcessCredentialBoundaryTimedOut:
+            return _failure(request, scrub, "HOOK_TIMEOUT")
         except Exception:
             return _failure(request, scrub, "HOOK_EXECUTOR_FAILURE")
         finally:
@@ -238,21 +234,19 @@ class HookCommandExecutor:
             creation["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             creation["start_new_session"] = True
-        # Environment construction is not the process-creation boundary: the
-        # sole secret may rotate while this attempt waits for scheduling.  The
-        # final sink therefore re-snapshots and rejects the exact reviewed
-        # command rather than rewriting it.  The copied environment/stdin must
-        # also satisfy the same current-value postcondition.
+        # Environment construction is not the process-creation boundary: a
+        # caller-owned credential may rotate while this attempt waits for
+        # scheduling.  The final sink therefore observes the boundary value and
+        # rejects the exact reviewed command rather than rewriting it.
         process: asyncio.subprocess.Process | None = None
         cancelled: asyncio.CancelledError | None = None
         try:
-            async with self._api_key_boundary.async_guard(
+            async with self._credential_boundary.async_guard(
                 deadline_monotonic=effective_deadline
             ) as guard:
                 scrub.observe(guard.value)
                 if (
-                    API_KEY_ENVIRONMENT_NAME in environment
-                    or guard.contains(command)
+                    guard.contains(command)
                     or guard.contains(stdin)
                     or any(
                         guard.contains(key) or guard.contains(value)
@@ -277,15 +271,13 @@ class HookCommandExecutor:
                 except asyncio.CancelledError as exc:
                     cancelled = exc
                     process = await asyncio.shield(spawn)
-        except ProcessApiKeyBoundaryTimedOut:
+        except ProcessCredentialBoundaryTimedOut:
             return _failure(request, scrub, "HOOK_TIMEOUT")
         except Exception:
             return _failure(request, scrub, "HOOK_SPAWN_FAILED")
         assert process is not None
         if cancelled is not None:
-            await _abort_process_group(
-                process, physical_deadline=effective_deadline
-            )
+            await _abort_process_group(process, physical_deadline=effective_deadline)
             raise cancelled
         async with self._lock:
             if self._closed:
@@ -348,16 +340,19 @@ class HookCommandExecutor:
                         break
             if failure_code is not None:
                 inherited = request.inherited_deadline_monotonic
-                physical_deadline = effective_deadline + HOOK_PROCESS_GROUP_ABORT_GRACE_SECONDS
+                physical_deadline = (
+                    effective_deadline + HOOK_PROCESS_GROUP_ABORT_GRACE_SECONDS
+                )
                 if inherited is not None:
                     physical_deadline = min(physical_deadline, inherited)
-                if host_close_signal is not None and self._host_close_deadline is not None:
+                if (
+                    host_close_signal is not None
+                    and self._host_close_deadline is not None
+                ):
                     physical_deadline = min(
                         physical_deadline, self._host_close_deadline
                     )
-                await _abort_process_group(
-                    process, physical_deadline=physical_deadline
-                )
+                await _abort_process_group(process, physical_deadline=physical_deadline)
             else:
                 await wait_task
             if not stdin_task.done():
@@ -366,7 +361,6 @@ class HookCommandExecutor:
             stdout, stderr = await asyncio.gather(stdout_task, stderr_task)
             if overflow.is_set() and failure_code is None:
                 failure_code = "HOOK_CAPTURE_BOUND_EXCEEDED"
-            scrub.snapshot_current()
             return HookCommandExecution(
                 request.definition,
                 request.event_dispatch_ordinal,
@@ -436,9 +430,7 @@ async def _bounded_drain(
             overflow.set()
 
 
-async def _write_stdin(
-    process: asyncio.subprocess.Process, stdin: bytes
-) -> None:
+async def _write_stdin(process: asyncio.subprocess.Process, stdin: bytes) -> None:
     assert process.stdin is not None
     try:
         process.stdin.write(stdin)
@@ -513,9 +505,7 @@ def _signal_process_group(
         if sys.platform == "win32":  # pragma: no cover - Windows branch
             process.terminate() if terminate else process.kill()
         else:
-            os.killpg(
-                process.pid, signal.SIGTERM if terminate else signal.SIGKILL
-            )
+            os.killpg(process.pid, signal.SIGTERM if terminate else signal.SIGKILL)
     except ProcessLookupError:
         pass
 
@@ -525,14 +515,14 @@ def _spawn_environment(
 ) -> dict[str, str]:
     environment: dict[str, str] = {}
     for key, value in os.environ.items():
-        if key == API_KEY_ENVIRONMENT_NAME:
-            continue
         safe_key = scrub.scrub_text(key)
         if safe_key != key:
             continue
-        environment[key] = scrub.scrub_text(value)
+        safe_value = scrub.scrub_text(value)
+        if safe_value != value:
+            continue
+        environment[key] = safe_value
     environment.update(overlay)
-    environment.pop(API_KEY_ENVIRONMENT_NAME, None)
     return environment
 
 

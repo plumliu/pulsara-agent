@@ -16,7 +16,6 @@ import pytest
 import psycopg
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     PromptDeliveryMode,
@@ -112,7 +111,7 @@ from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.llm.input import MessageRole
 from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
 from pulsara_agent.llm.provider import (
-    ProviderProfile,
+    RouteWireProfile,
     ThinkingProfile,
     ThinkingReplayPolicy,
 )
@@ -150,7 +149,14 @@ from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
-from tests.support.model_config import test_llm_config, test_model_limits
+from tests.support.model_config import (
+    enqueue_test_prompt,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_limits,
+    test_model_resolution_snapshot,
+    test_model_runtime,
+)
 from tests.support.round3 import (
     CallbackScriptedKernelModel,
     Round10TestSubagentRuntime,
@@ -171,6 +177,21 @@ pytestmark = pytest.mark.postgres
 
 def _name(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"
+
+
+def _acquire_bound_host_writer(repository, **kwargs):
+    """Create/reacquire a session with the one production-shaped test binding."""
+
+    lease = repository.acquire_host_writer(**kwargs)
+    measured_before = getattr(repository, "host_write_transactions", None)
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=test_model_binding(test_model_runtime()),
+        deadline_monotonic=monotonic() + 30,
+    )
+    if measured_before is not None:
+        repository.host_write_transactions = measured_before
+    return lease
 
 
 def _turn_permission_fingerprint(
@@ -201,7 +222,8 @@ def _seed_artifact_result_with_memory_provenance(
 ) -> str:
     guard = lease.guard
     turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         guard,
         command_id=_name("command"),
         turn_id=turn_id,
@@ -209,6 +231,7 @@ def _seed_artifact_result_with_memory_provenance(
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"read an artifact page"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -473,22 +496,19 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
     def __init__(self, calls: list[list[object]], summary: str) -> None:
         super().__init__(calls, summary)
         limits = test_model_limits(
-            total_context_tokens=40_000,
-            max_input_tokens=40_000,
+            total_context_tokens=256_000,
+            max_input_tokens=47_192,
             max_output_tokens=1_000,
             default_output_tokens=1_000,
             input_safety_margin_tokens=0,
         )
         self._preparer = DirectKernelModelPort(
-            api_key_boundary=ProcessApiKeyBoundary(),
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
-                pro_limits=limits,
-                flash_limits=limits,
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
+                limits=limits,
             ),
         )
 
@@ -1084,8 +1104,13 @@ class _HeadroomOrderingReader(CanonicalProviderInputReader):
 
 
 class _SequencedDirectKernelModel(DirectKernelModelPort):
-    def __init__(self, *, config, scripts: tuple[tuple[dict[str, object], ...], ...]):
-        super().__init__(config=config, api_key_boundary=ProcessApiKeyBoundary())
+    def __init__(
+        self,
+        *,
+        model_runtime,
+        scripts: tuple[tuple[dict[str, object], ...], ...],
+    ):
+        super().__init__(model_runtime=model_runtime)
         self._scripts = scripts
         self.requests = []
 
@@ -1097,11 +1122,9 @@ class _SequencedDirectKernelModel(DirectKernelModelPort):
         install_authority,
     ):
         self.requests.append(request)
-        adapter = self._registry.get(
-            request.prepared_call.call.target.model_profile.api
-        )._adapter
+        adapter = request.prepared_call.call.target.transport._adapter
         script = list(self._scripts[request.model_call_index - 1])
-        if request.prepared_call.call.target.model_profile.api == (
+        if request.prepared_call.call.target.model_profile.wire_api.value == (
             "openai_chat_completions"
         ):
             adapter._mock_chunks = script
@@ -1118,11 +1141,11 @@ class _CompactionSequencedDirectKernelModel(_SequencedDirectKernelModel):
     def __init__(
         self,
         *,
-        config,
+        model_runtime,
         scripts: tuple[tuple[dict[str, object], ...], ...],
         summary: str,
     ) -> None:
-        super().__init__(config=config, scripts=scripts)
+        super().__init__(model_runtime=model_runtime, scripts=scripts)
         self.summary_transport = _CompactionSummaryTransport(summary)
         self._next_script = 0
 
@@ -1134,12 +1157,10 @@ class _CompactionSequencedDirectKernelModel(_SequencedDirectKernelModel):
         install_authority,
     ):
         self.requests.append(request)
-        adapter = self._registry.get(
-            request.prepared_call.call.target.model_profile.api
-        )._adapter
+        adapter = request.prepared_call.call.target.transport._adapter
         script = list(self._scripts[self._next_script])
         self._next_script += 1
-        if request.prepared_call.call.target.model_profile.api == (
+        if request.prepared_call.call.target.model_profile.wire_api.value == (
             "openai_chat_completions"
         ):
             adapter._mock_chunks = script
@@ -1516,7 +1537,8 @@ def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _MeasuredRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -1525,6 +1547,7 @@ def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
     )
     model = _ScriptedModel([_text_stream("answer")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -1563,7 +1586,8 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -1572,6 +1596,7 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
     )
     model = _ScriptedModel([_text_stream("answer")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -1605,7 +1630,8 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     )
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1627,6 +1653,7 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -1725,7 +1752,8 @@ def test_final_wire_compaction_trigger_and_adoption_ignore_provider_usage(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1744,6 +1772,7 @@ def test_final_wire_compaction_trigger_and_adoption_ignore_provider_usage(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -1803,7 +1832,8 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1811,18 +1841,17 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
         deadline_monotonic=monotonic() + 30,
     )
     limits = test_model_limits(
-        total_context_tokens=40_000,
-        max_input_tokens=40_000,
+        total_context_tokens=256_000,
+        max_input_tokens=47_192,
         max_output_tokens=1_000,
         default_output_tokens=1_000,
         input_safety_margin_tokens=0,
     )
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id=f"test:{api}:compaction-prefix-wire-search",
         wire_api=api,
         thinking=(
             ThinkingProfile(
-                enabled=True,
                 message_field="reasoning_content",
                 replay_policy=ThinkingReplayPolicy.ALWAYS,
             )
@@ -1831,15 +1860,13 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
         ),
     )
     model = _CompactionSequencedDirectKernelModel(
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api=api,
-            provider_profile=profile,
-            pro_limits=limits,
-            flash_limits=limits,
+            model_id="test-pro",
+            wire_api=api,
+            route_wire_profile=profile,
+            limits=limits,
         ),
         scripts=(
             _large_native_replay_script(api, ordinal=1),
@@ -1854,6 +1881,7 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -1934,7 +1962,8 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1942,31 +1971,28 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
         deadline_monotonic=monotonic() + 30,
     )
     limits = test_model_limits(
-        total_context_tokens=40_000,
-        max_input_tokens=40_000,
+        total_context_tokens=256_000,
+        max_input_tokens=47_192,
         max_output_tokens=1_000,
         default_output_tokens=1_000,
         input_safety_margin_tokens=0,
     )
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id="test:chat:compaction-semantic-overbudget-wire-fit",
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             message_field="reasoning_content",
             replay_policy=ThinkingReplayPolicy.ALWAYS,
         ),
     )
     model = _CompactionSequencedDirectKernelModel(
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-            provider_profile=profile,
-            pro_limits=limits,
-            flash_limits=limits,
+            model_id="test-pro",
+            wire_api="openai_chat_completions",
+            route_wire_profile=profile,
+            limits=limits,
         ),
         scripts=(
             _large_native_replay_script("openai_chat_completions", ordinal=1),
@@ -1981,6 +2007,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2121,7 +2148,8 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2129,8 +2157,8 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
         deadline_monotonic=monotonic() + 30,
     )
     limits = test_model_limits(
-        total_context_tokens=1_200,
-        max_input_tokens=1_200,
+        total_context_tokens=256_000,
+        max_input_tokens=9_192,
         max_output_tokens=200,
         default_output_tokens=200,
         input_safety_margin_tokens=0,
@@ -2151,14 +2179,12 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
         _round5a1_chat_scripts()[1],
     )
     model = _CompactionSequencedDirectKernelModel(
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-            pro_limits=limits,
-            flash_limits=limits,
+            model_id="test-pro",
+            wire_api="openai_chat_completions",
+            limits=limits,
         ),
         scripts=scripts,
         summary="This summary transport must never open.",
@@ -2171,6 +2197,7 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2238,7 +2265,8 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2270,6 +2298,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
         _AssertingTool(provider, session_id), tool_names=("terminal",)
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2410,7 +2439,8 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2439,6 +2469,7 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
         tool_names=("terminal",) if retained_group_count else (),
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2539,7 +2570,8 @@ def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2560,6 +2592,7 @@ def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2611,7 +2644,8 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2632,6 +2666,7 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2710,7 +2745,8 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2733,6 +2769,7 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
     )
     physical_tool = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2794,7 +2831,8 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2819,6 +2857,7 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
     )
     physical_tool = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2874,7 +2913,8 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2894,6 +2934,7 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -2940,7 +2981,8 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2962,6 +3004,7 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     )
     tool = _ThirtyKiBTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3013,7 +3056,8 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -3025,6 +3069,7 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
         policy=ResolvedCompactionPolicy(minimum_reclaim_tokens=1)
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3102,7 +3147,8 @@ def test_final_wire_successful_install_is_not_rejected_by_post_cas_clock_expiry(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -3111,6 +3157,7 @@ def test_final_wire_successful_install_is_not_rejected_by_post_cas_clock_expiry(
     )
     model = _ScriptedModel([_text_stream("installed before the clock crossed")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3147,7 +3194,8 @@ def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -3166,6 +3214,7 @@ def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3235,7 +3284,8 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -3258,6 +3308,7 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3341,7 +3392,8 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -3365,6 +3417,7 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3450,7 +3503,8 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -3471,6 +3525,7 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3542,7 +3597,8 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -3569,6 +3625,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3669,7 +3726,8 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -3687,6 +3745,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3734,7 +3793,8 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     # A fresh Host has no process-local continuation state. The durable snapshot
     # must still wait silently and then guide the first user-driven cold open.
     replacement_repository = ConversationKernelRepository(provider)
-    replacement_lease = replacement_repository.acquire_host_writer(
+    replacement_lease = _acquire_bound_host_writer(
+        replacement_repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("replacement-host"),
@@ -3743,6 +3803,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     )
     replacement_model = _ScriptedModel([_text_stream("answer after restart")])
     replacement_runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=replacement_repository,
         writer_lease=replacement_lease,
         model=replacement_model,
@@ -3778,7 +3839,8 @@ def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -3796,6 +3858,7 @@ def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
         )
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3839,7 +3902,8 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -3851,6 +3915,7 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
     collector = _BlockingSourceCollector()
     model = _ScriptedModel([_text_stream("one call")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3864,7 +3929,8 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
         assert await asyncio.to_thread(collector.started.wait, 5)
         for index, text in enumerate(("steer one", "steer two"), start=1):
             steer_command = _name(f"steer-command-{index}")
-            repository.enqueue_prompt(
+            enqueue_test_prompt(
+                repository,
                 lease.guard,
                 command_id=steer_command,
                 queue_item_id=_name(f"steer-queue-{index}"),
@@ -3873,6 +3939,7 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
                 target_turn_id=turn_id,
                 permission_snapshot_id=None,
                 requested_permission_mode=None,
+                model_call_binding=None,
                 content=InlineContent.from_bytes(text.encode("utf-8")),
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="test",
@@ -3902,7 +3969,8 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -3919,6 +3987,7 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         ]
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -3952,7 +4021,8 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         )
         assert await asyncio.to_thread(collector.started.wait, 5)
         steer_command = _name("steer-command")
-        repository.enqueue_prompt(
+        enqueue_test_prompt(
+            repository,
             lease.guard,
             command_id=steer_command,
             queue_item_id=_name("steer-queue"),
@@ -3961,6 +4031,7 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
             target_turn_id=second_turn,
             permission_snapshot_id=None,
             requested_permission_mode=None,
+            model_call_binding=None,
             content=InlineContent.from_bytes(b"continue normally"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
@@ -4025,7 +4096,8 @@ def test_round8_memory_write_hint_is_gated_before_the_real_provider_wire(
     ) -> tuple[object, tuple[str, ...]]:
         repository = ConversationKernelRepository(provider)
         session_id = _name("session")
-        lease = repository.acquire_host_writer(
+        lease = _acquire_bound_host_writer(
+            repository,
             session_id=session_id,
             workspace_id=_name("workspace"),
             writer_owner_id=_name("host"),
@@ -4034,6 +4106,7 @@ def test_round8_memory_write_hint_is_gated_before_the_real_provider_wire(
         )
         model = _ScriptedModel([_text_stream("done")])
         runner = ConversationKernelRunner(
+            model_resolution_snapshot_provider=test_model_resolution_snapshot,
             repository=repository,
             writer_lease=lease,
             model=model,
@@ -4116,7 +4189,8 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4134,6 +4208,7 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
     )
     tool = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4149,7 +4224,8 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
         )
         await asyncio.wait_for(model.started.wait(), timeout=5)
         steer_command = _name("steer-command")
-        repository.enqueue_prompt(
+        enqueue_test_prompt(
+            repository,
             lease.guard,
             command_id=steer_command,
             queue_item_id=_name("steer-queue"),
@@ -4158,6 +4234,7 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
             target_turn_id=turn_id,
             permission_snapshot_id=None,
             requested_permission_mode=None,
+            model_call_binding=None,
             content=InlineContent.from_bytes(
                 b"Please remember that I prefer concise answers"
             ),
@@ -4217,7 +4294,8 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4230,6 +4308,7 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
     model = _BlockingFirstCallModel([_text_stream("one call")])
     compiler = _OnlyOneSteerCompiler()
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4251,7 +4330,8 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
         assert await asyncio.to_thread(collector.started.wait, 5)
         for index, queue_id in enumerate(queue_ids, start=1):
             steer_command = _name(f"steer-command-{index}")
-            repository.enqueue_prompt(
+            enqueue_test_prompt(
+                repository,
                 lease.guard,
                 command_id=steer_command,
                 queue_item_id=queue_id,
@@ -4260,6 +4340,7 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
                 target_turn_id=turn_id,
                 permission_snapshot_id=None,
                 requested_permission_mode=None,
+                model_call_binding=None,
                 content=InlineContent.from_bytes(body),
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="test",
@@ -4308,7 +4389,8 @@ def test_round3_1_expired_steer_planning_consumes_nothing_and_io_closes(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4323,6 +4405,7 @@ def test_round3_1_expired_steer_planning_consumes_nothing_and_io_closes(
     io_owner = KernelSessionIO()
     model = _ScriptedModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4336,7 +4419,8 @@ def test_round3_1_expired_steer_planning_consumes_nothing_and_io_closes(
     async def exercise() -> None:
         task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
         assert await asyncio.to_thread(collector.started.wait, 5)
-        repository.enqueue_prompt(
+        enqueue_test_prompt(
+            repository,
             lease.guard,
             command_id=steer_command,
             queue_item_id=steer_queue,
@@ -4345,6 +4429,7 @@ def test_round3_1_expired_steer_planning_consumes_nothing_and_io_closes(
             target_turn_id=turn_id,
             permission_snapshot_id=None,
             requested_permission_mode=None,
+            model_call_binding=None,
             content=InlineContent.from_bytes(b"must remain pending"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
@@ -4379,7 +4464,8 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4395,6 +4481,7 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
     collector = _BlockingSourceCollector()
     model = _ScriptedModel([_text_stream("one call")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4406,7 +4493,8 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
     async def exercise():
         task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
         assert await asyncio.to_thread(collector.started.wait, 5)
-        repository.enqueue_prompt(
+        enqueue_test_prompt(
+            repository,
             lease.guard,
             command_id=future_command_id,
             queue_item_id=future_queue_item_id,
@@ -4415,12 +4503,14 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
             target_turn_id=None,
             permission_snapshot_id="permission:future",
             requested_permission_mode=DEFAULT_PERMISSION_MODE,
+            model_call_binding=test_model_binding(test_model_runtime()),
             content=InlineContent.from_bytes(b"future"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
             deadline_monotonic=monotonic() + 10,
         )
-        repository.enqueue_prompt(
+        enqueue_test_prompt(
+            repository,
             lease.guard,
             command_id=steer_command_id,
             queue_item_id=steer_queue_item_id,
@@ -4429,6 +4519,7 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
             target_turn_id=turn_id,
             permission_snapshot_id=None,
             requested_permission_mode=None,
+            model_call_binding=None,
             content=InlineContent.from_bytes(b"steer now"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
@@ -4461,7 +4552,8 @@ def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4474,6 +4566,7 @@ def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
         [_text_stream("first answer"), _text_stream("final answer", block="text:2")]
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4488,7 +4581,8 @@ def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
         for index, text in enumerate(("steer one", "steer two"), start=1):
             steer_command = _name(f"command-steer-{index}")
             steer_queue = _name(f"queue-steer-{index}")
-            repository.enqueue_prompt(
+            enqueue_test_prompt(
+                repository,
                 lease.guard,
                 command_id=steer_command,
                 queue_item_id=steer_queue,
@@ -4497,6 +4591,7 @@ def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
                 target_turn_id=turn_id,
                 permission_snapshot_id=None,
                 requested_permission_mode=None,
+                model_call_binding=None,
                 content=InlineContent.from_bytes(text.encode("utf-8")),
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="test",
@@ -4538,7 +4633,8 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4553,6 +4649,7 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
     reader = _FailingPostConsumptionReader(CanonicalProviderInputReader(provider))
     model = _ScriptedModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4565,7 +4662,8 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
     async def exercise() -> None:
         task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
         assert await asyncio.to_thread(collector.started.wait, 5)
-        repository.enqueue_prompt(
+        enqueue_test_prompt(
+            repository,
             lease.guard,
             command_id=steer_command_id,
             queue_item_id=steer_queue_item_id,
@@ -4574,6 +4672,7 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
             target_turn_id=turn_id,
             permission_snapshot_id=None,
             requested_permission_mode=None,
+            model_call_binding=None,
             content=InlineContent.from_bytes(b"accepted then mismatched"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
@@ -4612,7 +4711,8 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _CancellingFirstSteerRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4626,6 +4726,7 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
     collector = _BlockingSourceCollector()
     model = _ScriptedModel([_text_stream("initial only")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4637,7 +4738,8 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
     async def exercise():
         task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
         assert await asyncio.to_thread(collector.started.wait, 5)
-        repository.enqueue_prompt(
+        enqueue_test_prompt(
+            repository,
             lease.guard,
             command_id=steer_command_id,
             queue_item_id=steer_queue_item_id,
@@ -4646,6 +4748,7 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
             target_turn_id=turn_id,
             permission_snapshot_id=None,
             requested_permission_mode=None,
+            model_call_binding=None,
             content=InlineContent.from_bytes(b"cancel before consume"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
@@ -4687,7 +4790,8 @@ def test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4696,6 +4800,7 @@ def test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open(
     )
     model = _ScriptedModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4732,7 +4837,8 @@ def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4741,6 +4847,7 @@ def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
     )
     model = _ScriptedModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4776,7 +4883,8 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -4792,6 +4900,7 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
     )
     model = _ScriptedModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4837,7 +4946,8 @@ def test_round3_compile_failure_observer_cannot_block_turn_interruption(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4846,6 +4956,7 @@ def test_round3_compile_failure_observer_cannot_block_turn_interruption(
     )
     model = _ScriptedModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4875,7 +4986,8 @@ def test_round3_source_registry_drift_interrupts_with_zero_provider_open(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4884,6 +4996,7 @@ def test_round3_source_registry_drift_interrupts_with_zero_provider_open(
     )
     model = _ScriptedModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4903,7 +5016,8 @@ def test_round3_surface_revoked_before_borrow_has_zero_provider_open(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4915,6 +5029,7 @@ def test_round3_surface_revoked_before_borrow_has_zero_provider_open(
         _AssertingTool(provider, session_id), tool_names=("test_tool",)
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4934,7 +5049,8 @@ def test_round9_native_planning_timeout_is_typed_before_provider_open(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4943,6 +5059,7 @@ def test_round9_native_planning_timeout_is_typed_before_provider_open(
     )
     model = _NativePlanningDeadlineModel([_text_stream("must not open")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -4962,7 +5079,8 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _MeasuredRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -4972,6 +5090,7 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
     model = _ScriptedModel([_tool_stream(), _text_stream("done", block="text:2")])
     tool = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -5028,7 +5147,8 @@ def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(
     workspace.mkdir()
     missing_workdir = tmp_path / "missing-workdir"
     sentinel = workspace / "must-not-exist"
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -5058,6 +5178,7 @@ def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(
     )
     seal_test_direct_tool_port(tools)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -5110,7 +5231,8 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -5134,6 +5256,7 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
         tools.todo_owner.activate_root_run(prepared)
 
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel(
@@ -5258,7 +5381,8 @@ def test_stage2_no_attempt_result_is_committed_before_any_physical_invoke(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -5268,6 +5392,7 @@ def test_stage2_no_attempt_result_is_committed_before_any_physical_invoke(
     model = _ScriptedModel([_tool_stream(), _text_stream("done", block="text:2")])
     tools = _DenyingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -5297,7 +5422,8 @@ def test_stage2_lost_assistant_commit_ack_exact_confirms_single_winner(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _LostAssistantAckRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -5305,6 +5431,7 @@ def test_stage2_lost_assistant_commit_ack_exact_confirms_single_winner(
         deadline_monotonic=monotonic() + 30,
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream("one winner")]),
@@ -5335,7 +5462,8 @@ def test_round5a1_assistant_settlement_retries_same_candidate_after_transient_no
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _TransientNoneAssistantRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -5343,6 +5471,7 @@ def test_round5a1_assistant_settlement_retries_same_candidate_after_transient_no
         deadline_monotonic=monotonic() + 30,
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream("settled after NONE")]),
@@ -5362,7 +5491,8 @@ def test_round5a1_assistant_settlement_conflict_cold_resets_without_hanging(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _ConflictingAssistantCommitRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -5370,6 +5500,7 @@ def test_round5a1_assistant_settlement_conflict_cold_resets_without_hanging(
         deadline_monotonic=monotonic() + 30,
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream("must not win")]),
@@ -5406,7 +5537,8 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -5432,6 +5564,7 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
     bus = LiveAgentEventBus()
     observer_id, _generation, _revision = bus.subscribe()
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -5496,7 +5629,8 @@ def test_round5a1_assistant_settlement_survives_caller_cancellation(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _BlockingAssistantCommitRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -5504,6 +5638,7 @@ def test_round5a1_assistant_settlement_survives_caller_cancellation(
         deadline_monotonic=monotonic() + 30,
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream("accepted exactly once")]),
@@ -5543,34 +5678,34 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _LostAssistantAckRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id="test:chat-replay",
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             message_field="reasoning_content",
             replay_policy=ThinkingReplayPolicy.ALWAYS,
         ),
     )
     model = DirectKernelModelPort(
-        api_key_boundary=ProcessApiKeyBoundary(),
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-            provider_profile=profile,
+            model_id="test-pro",
+            wire_api="openai_chat_completions",
+            route_wire_profile=profile,
         ),
     )
-    model._registry.get("openai_chat_completions")._adapter._mock_chunks = [
+    model._model_runtime.transport_registry(model._transport_timeout).get(  # noqa: SLF001
+        "openai_chat_completions"
+    )._adapter._mock_chunks = [
         {
             "choices": [
                 {
@@ -5591,6 +5726,7 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
         },
     ]
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -5646,19 +5782,19 @@ def test_round5a1_complete_tool_loop_replays_exact_reasoning_on_second_call(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id=f"test:{api}:tool-loop",
         wire_api=api,
         thinking=(
             ThinkingProfile(
-                enabled=True,
                 message_field="reasoning_content",
                 replay_policy=ThinkingReplayPolicy.ALWAYS,
             )
@@ -5667,18 +5803,18 @@ def test_round5a1_complete_tool_loop_replays_exact_reasoning_on_second_call(
         ),
     )
     model = _SequencedDirectKernelModel(
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api=api,
-            provider_profile=profile,
+            model_id="test-pro",
+            wire_api=api,
+            route_wire_profile=profile,
         ),
         scripts=scripts,
     )
     tools = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -5764,19 +5900,19 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    first_lease = repository.acquire_host_writer(
+    first_lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-one"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id=f"test:{api}:durable-restart",
         wire_api=api,
         thinking=(
             ThinkingProfile(
-                enabled=True,
                 message_field="reasoning_content",
                 replay_policy=ThinkingReplayPolicy.ALWAYS,
             )
@@ -5787,19 +5923,19 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
 
     def model() -> _SequencedDirectKernelModel:
         return _SequencedDirectKernelModel(
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api=api,
-                provider_profile=profile,
+                model_id="test-pro",
+                wire_api=api,
+                route_wire_profile=profile,
             ),
             scripts=(script,),
         )
 
     first_model = model()
     first_runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=first_lease,
         model=first_model,
@@ -5819,7 +5955,8 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
         ).fetchone() == (1,)
 
     replacement_repository = ConversationKernelRepository(provider)
-    replacement_lease = replacement_repository.acquire_host_writer(
+    replacement_lease = _acquire_bound_host_writer(
+        replacement_repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-two"),
@@ -5828,6 +5965,7 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
     )
     second_model = model()
     replacement_runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=replacement_repository,
         writer_lease=replacement_lease,
         model=second_model,
@@ -5859,18 +5997,18 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-one"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id="test:chat:durable-corruption",
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             message_field="reasoning_content",
             replay_policy=ThinkingReplayPolicy.ALWAYS,
         ),
@@ -5878,18 +6016,18 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
 
     def model(*, base_url: str) -> _SequencedDirectKernelModel:
         return _SequencedDirectKernelModel(
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url=base_url,
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
-                provider_profile=profile,
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
+                route_wire_profile=profile,
             ),
             scripts=(_round5a1_chat_scripts()[1],),
         )
 
     first_runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model(base_url="https://example.invalid/v1"),
@@ -5906,7 +6044,8 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
         )
 
     exact_repository = ConversationKernelRepository(provider)
-    exact_lease = exact_repository.acquire_host_writer(
+    exact_lease = _acquire_bound_host_writer(
+        exact_repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-two"),
@@ -5915,6 +6054,7 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
     )
     exact_model = model(base_url="https://example.invalid/v1")
     exact_runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=exact_repository,
         writer_lease=exact_lease,
         model=exact_model,
@@ -5928,7 +6068,8 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
     assert exact_model.requests == []
 
     cold_repository = ConversationKernelRepository(provider)
-    cold_lease = cold_repository.acquire_host_writer(
+    cold_lease = _acquire_bound_host_writer(
+        cold_repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-three"),
@@ -5937,6 +6078,7 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
     )
     cold_model = model(base_url="https://different.example.invalid/v1")
     cold_runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=cold_repository,
         writer_lease=cold_lease,
         model=cold_model,
@@ -6025,11 +6167,10 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id="test:chat:one-planning-deadline",
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             message_field="reasoning_content",
             replay_policy=ThinkingReplayPolicy.ALWAYS,
         ),
@@ -6037,18 +6178,18 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
 
     def model() -> _SequencedDirectKernelModel:
         return _SequencedDirectKernelModel(
-            config=test_llm_config(
-                api_key="test",
+            model_runtime=test_model_runtime(
+                api_key="sk-fixture-secret",
                 base_url="https://example.invalid/v1",
-                pro_model="test-pro",
-                flash_model="test-flash",
-                api="openai_chat_completions",
-                provider_profile=profile,
+                model_id="test-pro",
+                wire_api="openai_chat_completions",
+                route_wire_profile=profile,
             ),
             scripts=(_round5a1_chat_scripts()[1],),
         )
 
-    first_lease = repository.acquire_host_writer(
+    first_lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-one"),
@@ -6057,6 +6198,7 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
     )
     asyncio.run(
         ConversationKernelRunner(
+            model_resolution_snapshot_provider=test_model_resolution_snapshot,
             repository=repository,
             writer_lease=first_lease,
             model=model(),
@@ -6069,7 +6211,8 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
     )
 
     replacement_repository = ConversationKernelRepository(provider)
-    replacement_lease = replacement_repository.acquire_host_writer(
+    replacement_lease = _acquire_bound_host_writer(
+        replacement_repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-two"),
@@ -6081,6 +6224,7 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
     )
     replacement_model = model()
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=replacement_repository,
         writer_lease=replacement_lease,
         model=replacement_model,
@@ -6114,35 +6258,35 @@ def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _CountingAssistantCommitRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id="test:chat:near-bound",
         wire_api="openai_chat_completions",
         thinking=ThinkingProfile(
-            enabled=True,
             message_field="reasoning_content",
             replay_policy=ThinkingReplayPolicy.ALWAYS,
         ),
     )
     model = _SequencedDirectKernelModel(
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-            provider_profile=profile,
+            model_id="test-pro",
+            wire_api="openai_chat_completions",
+            route_wire_profile=profile,
         ),
         scripts=(_round5a1_chat_scripts()[1],),
     )
     continuity = _NearBoundReplayContinuityOwner(session_id=session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -6180,7 +6324,8 @@ def test_stage2_lost_tool_request_ack_confirms_before_single_dispatch(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _LostAssistantAckRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -6189,6 +6334,7 @@ def test_stage2_lost_tool_request_ack_confirms_before_single_dispatch(
     )
     tools = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_tool_stream(), _text_stream("done", block="text:2")]),
@@ -6220,7 +6366,8 @@ def test_stage2_subagent_runner_produces_durable_message_child(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -6228,7 +6375,8 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         deadline_monotonic=monotonic() + 30,
     )
     parent_turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=parent_turn_id,
@@ -6236,6 +6384,7 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"delegate"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -6247,6 +6396,7 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         objective="produce one message",
     )
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream("child answer")]),
@@ -6299,7 +6449,8 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -6307,7 +6458,8 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
         deadline_monotonic=monotonic() + 30,
     )
     parent_turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=parent_turn_id,
@@ -6315,6 +6467,7 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"delegate an exact child tool loop"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -6326,12 +6479,11 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
         parent_turn_id=parent_turn_id,
         objective=objective,
     )
-    profile = ProviderProfile(
+    profile = RouteWireProfile(
         id=f"test:{api}:round10-child",
         wire_api=api,
         thinking=(
             ThinkingProfile(
-                enabled=True,
                 message_field="reasoning_content",
                 replay_policy=ThinkingReplayPolicy.ALWAYS,
             )
@@ -6340,18 +6492,18 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
         ),
     )
     model = _SequencedDirectKernelModel(
-        config=test_llm_config(
-            api_key="test",
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
             base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api=api,
-            provider_profile=profile,
+            model_id="test-pro",
+            wire_api=api,
+            route_wire_profile=profile,
         ),
         scripts=scripts,
     )
     tools = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -6402,7 +6554,8 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -6410,7 +6563,8 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         deadline_monotonic=monotonic() + 30,
     )
     parent_turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=parent_turn_id,
@@ -6418,6 +6572,7 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"delegate explicit result"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -6444,6 +6599,7 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
     )
     delegate = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -6550,7 +6706,8 @@ def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_re
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -6558,7 +6715,8 @@ def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_re
         deadline_monotonic=monotonic() + 30,
     )
     parent_turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=parent_turn_id,
@@ -6566,6 +6724,7 @@ def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_re
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"delegate mixed report rejection"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -6589,6 +6748,7 @@ def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_re
     model = _ScriptedModel([mixed, _text_stream("recovered inferred result")])
     delegate = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,
@@ -6634,7 +6794,8 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -6642,7 +6803,8 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
         deadline_monotonic=monotonic() + 30,
     )
     parent_turn_id = _name("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_name("command"),
         turn_id=parent_turn_id,
@@ -6650,6 +6812,7 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
         context_binding_revision_id=_name("revision"),
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(b"delegate"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -6671,6 +6834,7 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
 
     tools = _AssertingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=CallbackScriptedKernelModel(incomplete_stream),
@@ -6716,7 +6880,8 @@ def test_stage2_confirmation_without_controller_keeps_policy_and_result_closed(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _MeasuredRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -6725,6 +6890,7 @@ def test_stage2_confirmation_without_controller_keeps_policy_and_result_closed(
     )
     tools = _ConfirmationWithoutControllerTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_tool_stream(), _text_stream("done", block="text:2")]),
@@ -6769,7 +6935,8 @@ def test_stage2_large_assistant_content_uses_immutable_blob_reference(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -6778,6 +6945,7 @@ def test_stage2_large_assistant_content_uses_immutable_blob_reference(
     )
     text = "x" * (70 << 10)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_text_stream(text)]),
@@ -6809,7 +6977,8 @@ def test_stage2_cancellation_does_not_turn_a_live_tool_into_system_error(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -6818,6 +6987,7 @@ def test_stage2_cancellation_does_not_turn_a_live_tool_into_system_error(
     )
     tools = _BlockingTool(provider, session_id)
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=_ScriptedModel([_tool_stream()]),
@@ -6859,7 +7029,8 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
+    lease = _acquire_bound_host_writer(
+        repository,
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -6868,6 +7039,7 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
     )
     model = _ScriptedModel([_tool_stream(), _text_stream("done", block="text:2")])
     runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
         model=model,

@@ -26,9 +26,8 @@ from pulsara_agent.ports.live_agent_event import (
     TextStartPayload,
     live_digest,
 )
-from pulsara_agent.settings import PulsaraSettings, StorageConfig
 from pulsara_agent.llm.input import MessageRole
-from tests.support.model_config import test_llm_config
+from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
 
 
@@ -142,17 +141,12 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
 
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", _DogfoodModelPort)
     monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
-    settings = PulsaraSettings(
-        llm=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        storage=StorageConfig(
-            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
-        ),
+    model_runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api="openai_chat_completions",
+        postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
     )
     workspace = HostWorkspaceInput(
         workspace_kind="project",
@@ -161,10 +155,11 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
 
     async def scenario() -> None:
         core = KernelHostCore.production(
-            settings=settings,
+            model_runtime=model_runtime,
             authenticated_first_party_extension_ids=frozenset({"extension:dogfood"}),
         )
         first = await core.open_session(workspace)
+        await first.update_model_call_binding(test_model_binding(model_runtime))
         committed_deliveries: list[ExtensionDelivery] = []
         turn_completed = asyncio.Event()
 
@@ -265,27 +260,23 @@ def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
     model = _SteerModelPort()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
-    settings = PulsaraSettings(
-        llm=test_llm_config(
-            api_key="test",
-            base_url="https://example.invalid/v1",
-            pro_model="test-pro",
-            flash_model="test-flash",
-            api="openai_chat_completions",
-        ),
-        storage=StorageConfig(
-            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
-        ),
+    model_runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api="openai_chat_completions",
+        postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
     )
 
     async def scenario() -> None:
-        core = KernelHostCore.production(settings=settings)
+        core = KernelHostCore.production(model_runtime=model_runtime)
         session = await core.open_session(
             HostWorkspaceInput(
                 workspace_kind="project",
                 workspace_root=tmp_path,
             )
         )
+        await session.update_model_call_binding(test_model_binding(model_runtime))
         running = asyncio.create_task(
             session.run_turn("initial", command_id="command:steer-root")
         )

@@ -111,6 +111,12 @@ from pulsara_agent.primitives.tool_observation import (
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
+from tests.support.model_config import (
+    acquire_bound_test_writer,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
+)
 from tests.support.round3 import direct_tool_invocation_context
 from tests.support.subagents import accept_active_subagent_fixture
 
@@ -523,7 +529,8 @@ def test_round7_custom_tool_cannot_promote_claimed_trusted_duration(
 
 def _start_turn(repository, lease, text: bytes) -> str:
     turn_id = _id("turn")
-    repository.start_root_turn(
+    start_test_root_turn(
+        repository,
         lease.guard,
         command_id=_id("command"),
         turn_id=turn_id,
@@ -531,6 +538,7 @@ def _start_turn(repository, lease, text: bytes) -> str:
         context_binding_revision_id=_id("revision"),
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
         content=InlineContent.from_bytes(text),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
@@ -568,9 +576,7 @@ def _start_active_child(repository, lease) -> tuple[str, str]:
         entry_id=_id("entry"),
         context_binding_revision_id=_id("revision"),
         task_start_event_id=task_id.launch.task_start.event_id,
-        expected_parent_permission_snapshot=(
-            task_id.launch.parent_permission_snapshot
-        ),
+        expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
         content=InlineContent.from_bytes(b"perform one bounded task"),
         occurred_at=datetime.now(timezone.utc),
         actor_id="subagent:test",
@@ -585,7 +591,8 @@ def test_round7_previous_success_masks_raw_failure(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -648,7 +655,8 @@ def test_round7_late_result_changes_only_a_covering_cut(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     workspace_id = _id("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -783,7 +791,8 @@ def test_round7_child_user_stop_atomically_settles_turn_task_and_occurrences(
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -865,9 +874,7 @@ class _CanonicalChildRaceRunner:
             entry_id=_id("entry"),
             context_binding_revision_id=_id("revision"),
             task_start_event_id=launch.task_start.event_id,
-            expected_parent_permission_snapshot=(
-                launch.parent_permission_snapshot
-            ),
+            expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
             content=InlineContent.from_bytes(objective.encode()),
             occurred_at=datetime.now(timezone.utc),
             actor_id=task_id,
@@ -938,7 +945,8 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     workspace_id = _id("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -962,7 +970,7 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
             repository=repository,
             guard=lease.guard,
             io_owner=KernelSessionIO(),
-            configured_model_identity="test-pro",
+            model_runtime=test_model_runtime(),
             deadline_factory=KernelExecutionDeadlineFactory(),
         ),
         terminal_cwd=Path.cwd,
@@ -1036,7 +1044,8 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     workspace_id = _id("workspace")
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -1060,7 +1069,7 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
             repository=repository,
             guard=lease.guard,
             io_owner=KernelSessionIO(),
-            configured_model_identity="test-pro",
+            model_runtime=test_model_runtime(),
             deadline_factory=KernelExecutionDeadlineFactory(),
         ),
         terminal_cwd=Path.cwd,
@@ -1146,7 +1155,8 @@ def test_round7_child_cancellation_event_failure_rolls_back_both_rows(
             )
 
     repository = FailingCancellationRepository(provider)
-    lease = repository.acquire_host_writer(
+    lease = acquire_bound_test_writer(
+        repository,
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),

@@ -21,6 +21,7 @@ from pulsara_agent.retrieval.tokenizer import (
     MEMORY_RETRIEVAL_TOKENIZER_CONTRACT_VERSION,
     MemoryRetrievalTokenizerV1,
 )
+from pulsara_agent.llm.model_connections import ModelCallBinding
 
 
 MAXIMUM_MEMORY_STATEMENT_BYTES = 8 * 1024
@@ -453,6 +454,7 @@ class FrozenMemoryCandidateForGovernance:
     status: MemoryCandidateStatus
     processing_started_at: object
     terminal_fence: FrozenMemoryGovernanceTerminalFence
+    origin_model_call_binding: ModelCallBinding
 
     def __post_init__(self) -> None:
         if self.status is not MemoryCandidateStatus.PROCESSING:
@@ -461,6 +463,8 @@ class FrozenMemoryCandidateForGovernance:
             raise ValueError("governance candidate lacks claim time")
         if self.terminal_fence.source_entry_id != self.prepared.producer_entry_id:
             raise ValueError("governance fence does not name the candidate source")
+        if not isinstance(self.origin_model_call_binding, ModelCallBinding):
+            raise ValueError("governance candidate lacks its origin model binding")
 
 
 @dataclass(frozen=True, slots=True)

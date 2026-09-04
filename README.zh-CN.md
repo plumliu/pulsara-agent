@@ -102,8 +102,8 @@ Kernel 当前支持：
 - Host-scoped stdio/Streamable HTTP MCP：bounded discovery、cold direct tools、
   late/native-incompatible meta inspect/use、typed unavailable gate、
   catalog/resource/prompt读取、local authorization与CLI lifecycle管理；
-- advisory PostgreSQL memory：每次`remember`只提交一个candidate，五类closed
-  taxonomy，USER/domain与exact WORKSPACE scope隔离，best-effort governance，
+- advisory PostgreSQL memory：每次`remember`只提交一个candidate，四类closed
+  taxonomy，global与exact workspace applicability隔离，best-effort governance，
   多语种sparse recall，optional 1024维dense recall与explicit rerank，以及
   direct/reverse/最多two-hop relation read；
 - foreground safe-point context compaction提供manual、proactive与mid-turn三条
@@ -144,33 +144,25 @@ canonical authority。
 uv sync
 ```
 
-环境文件至少需要：
+Pulsara 不再从 `.env` 或产品专用环境变量读取配置。启动本地应用后，在“设置”中：
 
-```dotenv
-PULSARA_API_KEY=...
-PULSARA_BASE_URL=https://api.openai.com/v1
-PULSARA_API=openai_responses
-PULSARA_PRO_MODEL=...
-PULSARA_FLASH_MODEL=...
+- 保存本机 PostgreSQL runtime DSN 与可选 admin DSN；
+- 显式检查 runtime database，或使用 admin DSN 初始化/迁移；
+- 选择 provider 与 models.dev 目录中的模型，选择 Chat Completions 或 Responses，
+  并添加 API key；
+- 可选地分别填写 DashScope embedding 与 rerank 两枚独立 key。
 
-# Optional advisory-memory data egress；未配置或禁用时仍保留sparse recall。
-PULSARA_EMBEDDING_API_KEY=...
-PULSARA_RERANK_API_KEY=...
-
-PULSARA_POSTGRES_DSN=postgresql://pulsara_runtime:...@localhost:5432/pulsara
-PULSARA_POSTGRES_ADMIN_DSN=postgresql://pulsara_admin:...@localhost:5432/pulsara
-```
-
-Admin DSN 只用于 `db migrate`；普通 Host 只验证 clean schema，并使用 runtime
-role。
+非 secret metadata 只保存在 `${PULSARA_HOME}/local-settings.yaml`（或 Pulsara
+默认 home）；API key 为 write-only，只进入 macOS Keychain。零配置也能启动应用和
+设置壳；缺少任一 DashScope key 时 sparse memory recall 仍可使用。
 
 ```sh
-uv run pulsara db migrate --env-file .env
-uv run pulsara db verify --deep --env-file .env
-uv run pulsara app --env-file .env
+uv run pulsara app
+uv run pulsara config-check
+uv run pulsara db verify --deep
 ```
 
-最后一条命令会启动仅限本机访问的 Web 应用并打开浏览器；使用 `--no-open` 可以只启动
+第一条命令会启动仅限本机访问的 Web 应用并打开浏览器；使用 `--no-open` 可以只启动
 服务。页面关闭或服务重启后，持久会话与其原工作目录仍可继续。
 
 唯一 active migration universe 是
@@ -276,9 +268,9 @@ provider dispatch、compaction、Plan control、tool execution、memory与steer 
 旧facade、兼容import、新fingerprint或durable recovery机制。验证记录在
 [`production_code_cleanup_and_runner_decomposition_activation.json`](benchmarks/suites/core/v1/production_code_cleanup_and_runner_decomposition_activation.json)。
 Round 8用advisory dataset取代旧memory durability/recovery graph。`remember`会与
-ToolResult同事务接受一个candidate；governance、cheap-hint reflection、
+ToolResult同事务接受一个candidate；governance、cheap-hint prompting、
 embedding与reranking均保持可丢失的process-local弱完成。Accepted item只能是
-FACT、USER_PROFILE、RESPONSE_PREFERENCE、ACTION_RULE或DECISION。Sparse recall
+FACT、USER_PROFILE、RESPONSE_PREFERENCE或DECISION。Sparse recall
 始终本地可用；automatic dense recall与explicit rerank是optional remote data egress。
 Memory只通过bounded append-only `MEMORY_RECALL`与
 `MEMORY_RESPONSE_PREFERENCE_HEAD`进入model input，不改写已安装prefix，也不获得
@@ -302,28 +294,17 @@ endpoint/database 的 operator 授权时，不得重置真实环境。
 
 ## 运行
 
-单轮：
+本地 Web 应用是配置与对话的主要入口：
 
 ```sh
-uv run pulsara host run \
-  --env-file .env \
-  --workspace /path/to/project \
-  "解释这个仓库"
+uv run pulsara app --workspace /path/to/project
 ```
 
-交互式 REPL：
+会话已经显式选择模型连接后，可用 headless REPL 恢复该 canonical session，
+不再经过环境文件：
 
 ```sh
 uv run pulsara host repl \
-  --env-file .env \
-  --workspace /path/to/project
-```
-
-恢复该 workspace 最近一次 conversation：
-
-```sh
-uv run pulsara host repl \
-  --env-file .env \
   --workspace /path/to/project \
   --continue
 ```

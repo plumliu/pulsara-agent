@@ -27,7 +27,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.repository import (
-    build_prepared_root_turn_admission,
+    build_prepared_root_turn_intent,
     build_prepared_subagent_turn_admission,
 )
 from pulsara_agent.conversation_kernel.host import KernelHostCore
@@ -64,7 +64,7 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
+from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.terminal_process.models import TerminalResult, TerminalStatus
@@ -151,7 +151,7 @@ def test_round5_deadline_factory_only_accepts_closed_owners_and_issues_fresh() -
 
 def test_round5_turn_admission_candidates_freeze_complete_event_drafts() -> None:
     occurred_at = datetime.now(timezone.utc)
-    root = build_prepared_root_turn_admission(
+    root = build_prepared_root_turn_intent(
         session_id="session:root",
         command_id="command:root",
         turn_id="turn:root",
@@ -180,9 +180,10 @@ def test_round5_turn_admission_candidates_freeze_complete_event_drafts() -> None
         occurred_at=occurred_at,
     )
 
-    for candidate in (root, child):
-        with pytest.raises(TypeError):
-            candidate.event.payload["mutated"] = True  # type: ignore[index]
+    with pytest.raises((AttributeError, TypeError)):
+        root.actor_id = "mutated"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        child.event.payload["mutated"] = True  # type: ignore[index]
 
 
 def test_round5_close_owners_use_independent_policy_fields() -> None:
@@ -208,10 +209,10 @@ def test_round5_foreground_openai_timeout_is_typed_and_has_no_total(
     monkeypatch.setattr(openai_client, "AsyncOpenAI", FakeAsyncOpenAI)
     policy = KernelExecutionWatchdogPolicy().foreground_transport
     openai_client.build_async_openai_client(
-        api_key="test",
+        api_key="sk-fixture-secret",
         base_url="https://example.invalid/v1",
         timeout_policy=policy,
-        api_key_boundary=ProcessApiKeyBoundary(),
+        credential_boundary=ProcessCredentialBoundary(),
         max_retries=0,
     )
 
@@ -316,10 +317,10 @@ def _responses_sse_frames() -> tuple[bytes, ...]:
 
 async def _consume_local_sse(*, api: str, base_url: str) -> int:
     client = openai_client.build_async_openai_client(
-        api_key="test",
+        api_key="sk-fixture-secret",
         base_url=base_url,
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 0.05, None),
-        api_key_boundary=ProcessApiKeyBoundary(),
+        credential_boundary=ProcessCredentialBoundary(),
         max_retries=0,
     )
     try:

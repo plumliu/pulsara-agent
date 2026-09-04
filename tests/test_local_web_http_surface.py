@@ -13,10 +13,38 @@ from pulsara_agent.web_app import session_controller as session_controller_modul
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.http_server import LocalHttpServer
 from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.llm.model_catalog import ModelsDevCatalogClient
+from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.local_credentials import (
+    CredentialState,
+    DashScopeEmbeddingCredential,
+    DashScopeRerankCredential,
+    InMemoryCredentialStore,
+    ModelProviderCredential,
+)
+from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.capability.user_skill_config import (
     load_user_skill_config,
     set_user_skill_enabled,
 )
+from tests.support.model_config import test_model_runtime
+
+
+def _model_server_dependencies() -> dict[str, object]:
+    runtime = test_model_runtime()
+
+    async def refresh_database_state() -> None:
+        return None
+
+    return {
+        "settings": runtime.settings,
+        "catalog": runtime.catalog,
+        "credentials": runtime.credentials,
+        "model_runtime": runtime,
+        "database_state": lambda: "ready",
+        "refresh_database_state": refresh_database_state,
+        "postgres_settings_saved": lambda: None,
+    }
 
 
 class _Sessions:
@@ -238,6 +266,217 @@ class _Bridge:
         }
 
 
+def test_zero_config_settings_and_database_surface_stays_usable(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_exercise_zero_config_settings_and_database(tmp_path))
+
+
+async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    (static_root / "index.html").write_text("Pulsara settings", encoding="utf-8")
+    base = test_model_runtime()
+    settings = LocalSettingsStore(tmp_path / "pulsara" / "local-settings.yaml")
+    credentials = InMemoryCredentialStore()
+    runtime = ModelRuntime(
+        settings=settings,
+        catalog=base.catalog,
+        credentials=credentials,
+        route_wires=base.route_wires,
+    )
+    database_state = "database_not_configured"
+    state_refreshes = 0
+    settings_saved = 0
+
+    async def refresh_database_state() -> None:
+        nonlocal state_refreshes
+        state_refreshes += 1
+
+    def postgres_settings_saved() -> None:
+        nonlocal settings_saved, database_state
+        settings_saved += 1
+        database_state = "database_configured_unverified"
+
+    server = LocalHttpServer(
+        sessions=cast(LocalSessionController, _Sessions()),
+        bridge=cast(LocalBrowserBridge, _Bridge()),
+        static_root=static_root,
+        requested_port=0,
+        is_ready=lambda: True,
+        is_draining=lambda: False,
+        settings=settings,
+        catalog=base.catalog,
+        credentials=credentials,
+        model_runtime=runtime,
+        database_state=lambda: database_state,
+        refresh_database_state=refresh_database_state,
+        postgres_settings_saved=postgres_settings_saved,
+    )
+    await server.start()
+    mutation_headers = {
+        "Origin": server.origin,
+        "Sec-Fetch-Site": "same-origin",
+    }
+    secret = "model-api-key-sentinel"
+    try:
+        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+            async with client.get(f"{server.origin}/api/app/bootstrap") as response:
+                assert response.status == 200
+                payload = await response.json()
+                assert payload["database_state"] == "database_not_configured"
+                assert payload["model_configurations"] == []
+
+            async with client.get(f"{server.origin}/api/sessions") as response:
+                assert response.status == 503
+                assert (await response.json())["error"]["code"] == (
+                    "DATABASE_DATA_PLANE_UNAVAILABLE"
+                )
+
+            async with client.get(f"{server.origin}/api/model-catalog") as response:
+                assert response.status == 200
+                catalog = await response.json()
+                assert catalog["status"] == "ready"
+                assert catalog["routes"][0]["route_id"] == "test"
+                model = catalog["routes"][0]["models"][0]
+                assert model["model_id"] == "test-model"
+                executable = [
+                    item for item in model["wire_apis"] if item["executable"]
+                ]
+                assert [item["wire_api"] for item in executable] == [
+                    "openai_responses"
+                ]
+
+            async with client.post(
+                f"{server.origin}/api/model-configurations",
+                json={
+                    "route_id": "test",
+                    "model_id": "test-model",
+                    "wire_api": "openai_responses",
+                    "api_key": secret,
+                },
+                headers=mutation_headers,
+            ) as response:
+                assert response.status == 201
+                payload = await response.json()
+                rendered = str(payload)
+                assert secret not in rendered
+                assert payload["model_configuration"]["credential_state"] == "PRESENT"
+                connection_id = payload["model_configuration"]["id"]
+
+            stored = settings.read()
+            assert len(stored.model_connections) == 1
+            assert stored.model_connections[0].id.value == connection_id
+            assert secret not in settings.path.read_text(encoding="utf-8")
+            assert credentials.state(
+                ModelProviderCredential(stored.model_connections[0].id)
+            ) is CredentialState.PRESENT
+
+            for kind, key in (
+                ("embedding", DashScopeEmbeddingCredential()),
+                ("rerank", DashScopeRerankCredential()),
+            ):
+                async with client.put(
+                    f"{server.origin}/api/local-settings/dashscope-credentials/{kind}",
+                    json={"api_key": f"{kind}-secret"},
+                    headers=mutation_headers,
+                ) as response:
+                    assert response.status == 200
+                    assert (await response.json()) == {
+                        "credential_state": "PRESENT"
+                    }
+                assert credentials.state(key) is CredentialState.PRESENT
+
+            async with client.delete(
+                f"{server.origin}/api/local-settings/dashscope-credentials/embedding",
+                headers=mutation_headers,
+            ) as response:
+                assert response.status == 200
+                assert (await response.json()) == {"credential_state": "MISSING"}
+            assert credentials.state(DashScopeEmbeddingCredential()) is (
+                CredentialState.MISSING
+            )
+            assert credentials.state(DashScopeRerankCredential()) is (
+                CredentialState.PRESENT
+            )
+
+            async with client.put(
+                f"{server.origin}/api/local-settings/postgres",
+                json={
+                    "runtime_dsn": "postgresql://pulsara@localhost:5432/pulsara",
+                    "admin_dsn": None,
+                },
+                headers=mutation_headers,
+            ) as response:
+                assert response.status == 200
+                payload = await response.json()
+                assert payload["database_state"] == "database_configured_unverified"
+                assert payload["restart_required"] is False
+            assert settings_saved == 1
+            assert state_refreshes == 0
+            assert settings.read().postgres is not None
+    finally:
+        await server.aclose()
+
+
+def test_settings_catalog_refresh_reports_invalid_without_losing_snapshot(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_exercise_settings_catalog_refresh_failure(tmp_path))
+
+
+async def _exercise_settings_catalog_refresh_failure(tmp_path: Path) -> None:
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    (static_root / "index.html").write_text("Pulsara settings", encoding="utf-8")
+    runtime = test_model_runtime()
+
+    async def invalid_fetch() -> object:
+        raise ValueError("invalid json")
+
+    runtime.catalog.client = ModelsDevCatalogClient(fetch_override=invalid_fetch)
+    server = LocalHttpServer(
+        sessions=cast(LocalSessionController, _Sessions()),
+        bridge=cast(LocalBrowserBridge, _Bridge()),
+        static_root=static_root,
+        requested_port=0,
+        is_ready=lambda: True,
+        is_draining=lambda: False,
+        **_model_server_dependencies_for_runtime(runtime),
+    )
+    await server.start()
+    try:
+        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+            async with client.post(
+                f"{server.origin}/api/model-catalog/refresh",
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 502
+                assert (await response.json())["error"]["code"] == (
+                    "model_catalog_invalid"
+                )
+            async with client.get(f"{server.origin}/api/model-catalog") as response:
+                assert response.status == 200
+                assert (await response.json())["status"] == "ready"
+    finally:
+        await server.aclose()
+
+
+def _model_server_dependencies_for_runtime(runtime: ModelRuntime) -> dict[str, object]:
+    async def refresh_database_state() -> None:
+        return None
+
+    return {
+        "settings": runtime.settings,
+        "catalog": runtime.catalog,
+        "credentials": runtime.credentials,
+        "model_runtime": runtime,
+        "database_state": lambda: "ready",
+        "refresh_database_state": refresh_database_state,
+        "postgres_settings_saved": lambda: None,
+    }
+
+
 def test_bare_loopback_origin_serves_app_and_api_without_authentication(
     tmp_path: Path,
 ) -> None:
@@ -258,6 +497,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
         requested_port=0,
         is_ready=lambda: True,
         is_draining=lambda: False,
+        **_model_server_dependencies(),
     )
     await server.start()
     try:
@@ -465,6 +705,7 @@ async def _exercise_request_guards(tmp_path: Path) -> None:
         requested_port=0,
         is_ready=lambda: True,
         is_draining=lambda: False,
+        **_model_server_dependencies(),
     )
     await server.start()
     try:

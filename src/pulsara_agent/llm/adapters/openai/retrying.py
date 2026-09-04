@@ -19,12 +19,9 @@ LOGGER = logging.getLogger(__name__)
 def sdk_max_retries_for_transport(
     *,
     retry_config: LLMRetryConfig,
-    explicit_max_retries: int | None,
 ) -> int | None:
     """Return SDK max_retries for a transport that has Pulsara safe retry."""
 
-    if explicit_max_retries is not None:
-        return explicit_max_retries
     return 0 if retry_config.enabled else None
 
 
@@ -62,7 +59,7 @@ def log_retry_attempt(
         "attempt=%s/%s reason=%s delay_seconds=%s status_code=%s provider_code=%s "
         "error_type=%s has_semantic_output=%s",
         api,
-        model.provider,
+        model.route_id,
         model.id,
         _safe_host(model.base_url),
         trace.attempt,
