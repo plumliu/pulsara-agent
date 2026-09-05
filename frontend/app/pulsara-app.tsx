@@ -438,7 +438,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     void (async () => {
       while (active && !abort.signal.aborted) {
         try {
-          publishProjection(await connection.observe(abort.signal));
+          const next = await connection.observe(abort.signal);
+          publishProjection(next);
+          for (const notice of next.presentationNotices ?? []) {
+            notify(notice);
+          }
           setRuntimeStatus('online');
         } catch (error) {
           if (abort.signal.aborted || !active) return;
@@ -455,7 +459,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       active = false;
       abort.abort();
     };
-  }, [connection, openRuntimeSession, publishProjection]);
+  }, [connection, notify, openRuntimeSession, publishProjection]);
 
   const taskRefreshKey = useMemo(() => projection.agentTasks.map((task) => (
     `${task.id}:${task.status}:${task.result?.id ?? ''}:${task.completionDelivered ? '1' : '0'}`

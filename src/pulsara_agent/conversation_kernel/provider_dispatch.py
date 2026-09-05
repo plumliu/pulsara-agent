@@ -80,7 +80,8 @@ from pulsara_agent.llm.request import (
     FrozenProviderWireInputQuote,
     FrozenProviderWireInputPlan,
 )
-from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.resolution import ResolvedModelCall, ResolvedModelTarget
+from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.provider_replay import (
     build_provider_replay_target_compatibility,
 )
@@ -226,6 +227,14 @@ _ROOT_COMPLETION_SUFFIX_BATCH_ITEMS = 16
 class KernelModelPort(Protocol):
     def prepare_target(
         self, request: KernelModelTargetPreparationRequest
+    ) -> PreparedKernelModelTarget: ...
+
+    def prepare_resolved_target(
+        self,
+        request: KernelModelTargetPreparationRequest,
+        *,
+        target: ResolvedModelTarget,
+        binding: ModelCallBinding,
     ) -> PreparedKernelModelTarget: ...
 
     def freeze_native_tool_eligibility(
@@ -868,6 +877,13 @@ class InstalledProviderOpen:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _InstalledResolvedModelCall:
+    epoch_nonce: str
+    epoch_revision: int
+    call: ResolvedModelCall = dataclass_field(repr=False)
+
+
 class ProviderDispatchCoordinator:
     """Own one exact canonical cut through continuity installation."""
 
@@ -922,9 +938,85 @@ class ProviderDispatchCoordinator:
         )
         self._compaction_owner = compaction_owner
         self._subagent_runtime = subagent_runtime
+        self._installed_targets: dict[
+            ProviderInputContinuityScope, _InstalledResolvedModelCall
+        ] = {}
+
+    def discard_installed_target(
+        self, scope: ProviderInputContinuityScope
+    ) -> None:
+        """Release the process-local target owned by a discarded scope."""
+
+        self._installed_targets.pop(scope, None)
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+
+    def installed_source_target(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        destination: PreparedKernelModelTarget,
+    ) -> ResolvedModelCall | None:
+        """Return A only when the installed epoch proves an A -> B switch.
+
+        The dictionary is merely the process-local owner of the exact target
+        object used for the installed epoch.  Continuity remains authoritative:
+        stale entries are ignored and no fingerprint is used to recreate data.
+        """
+
+        predecessor = self._continuity.current_view(scope)
+        if predecessor is None:
+            self._installed_targets.pop(scope, None)
+            return None
+        source_owner = self._installed_targets.get(scope)
+        if (
+            source_owner is None
+            or source_owner.epoch_nonce != predecessor.epoch_nonce
+            or source_owner.epoch_revision != predecessor.epoch_revision
+        ):
+            raise RuntimeError(
+                "installed provider epoch lost its exact process-local model target"
+            )
+        source = source_owner.call
+        if (
+            source.binding.connection_id == destination.call.binding.connection_id
+            and source.target.fact == destination.target.fact
+        ):
+            return None
+        return source
+
+    def prepare_installed_source_target(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        source: ResolvedModelCall,
+        turn_id: str,
+        model_call_index: int,
+    ) -> PreparedKernelModelTarget:
+        predecessor = self._continuity.current_view(scope)
+        if (
+            predecessor is None
+            or predecessor.compatibility.model_connection_id
+            != source.binding.connection_id
+            or predecessor.compatibility.model_target_fingerprint
+            != source.target.fact.target_fingerprint
+        ):
+            raise RuntimeError("model-switch source epoch drifted")
+        binding = source.binding
+        return self._model.prepare_resolved_target(
+            KernelModelTargetPreparationRequest(
+                session_id=self._writer_lease.guard.session_id,
+                turn_id=turn_id,
+                model_call_index=model_call_index,
+                purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+                maximum_input_tokens=self._maximum_input_tokens_per_call,
+                maximum_output_tokens=self._maximum_output_tokens_per_call,
+                binding=binding,
+            ),
+            target=source.target,
+            binding=binding,
+        )
 
     async def _drain_root_completion_suffix(
         self,
@@ -2095,7 +2187,9 @@ class ProviderDispatchCoordinator:
                     and memory_use_policy.allows_writes
                     and base_facts.run_permission_snapshot.effective_mode
                     is not PermissionMode.READ_ONLY
-                    and any(item.name == "remember" for item in model_surface.tool_specs)
+                    and any(
+                        item.name == "remember" for item in model_surface.tool_specs
+                    )
                 )
                 if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER:
                     preference_source = build_memory_context_source(
@@ -2916,6 +3010,11 @@ class ProviderDispatchCoordinator:
                 execution=execution,
             )
             installed = True
+            self._installed_targets[permit.scope] = _InstalledResolvedModelCall(
+                epoch_nonce=permit.epoch_nonce,
+                epoch_revision=permit.epoch_revision,
+                call=prepared_call.call,
+            )
             self._tools.install_provider_input_tool_result_deliveries(
                 permit=permit,
                 canonical_facts=canonical_facts,
@@ -3349,6 +3448,7 @@ def provider_input_compatibility(
         compiler_contract_version=COMPILER_CONTRACT_VERSION,
         base_system_semantic_fingerprint=base.source_semantic_fingerprint,
         tool_surface_fingerprint=binding.tool_surface.surface_fingerprint,
+        model_connection_id=prepared_call.call.binding.connection_id,
         model_target_fingerprint=binding.target_fact.target_fingerprint,
         estimator_fingerprint=binding.estimator_fingerprint,
         provider_message_lowering_contract=context_fingerprint(

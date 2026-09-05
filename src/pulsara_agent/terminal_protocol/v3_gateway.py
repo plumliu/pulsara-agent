@@ -78,7 +78,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:29514ef1f767cbeeeed86501c1172c11b759000b475f36416a8653811f4da056"
+    "sha256:a2a3ec445a7d0fe59121a57b145481914511e2814637dbc6eb83db40765e957c"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -542,11 +542,17 @@ class TerminalKernelProtocolServer:
             control_wire = tuple(
                 _live_control_event_to_wire(item) for item in control.events
             )
+            presentation_notices = (
+                state.host_session.take_presentation_notices(state.attachment_id)
+                if state.granted_role == wire.ATTACHMENT_ROLE_CONTROLLER
+                else ()
+            )
             if (
                 batch.projections
                 or live_wire
                 or settlements
                 or control_wire
+                or presentation_notices
                 or monotonic() >= deadline
             ):
                 return wire.ServerFrame(
@@ -561,6 +567,7 @@ class TerminalKernelProtocolServer:
                         live_control_owner_epoch=control.owner_epoch,
                         through_live_control_revision=control.through_revision,
                         live_control=control_wire,
+                        presentation_notices=presentation_notices,
                     )
                 )
             await asyncio.sleep(min(0.05, max(0.0, deadline - monotonic())))

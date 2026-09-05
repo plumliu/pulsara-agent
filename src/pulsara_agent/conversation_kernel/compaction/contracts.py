@@ -81,6 +81,7 @@ class CompactionTrigger(StrEnum):
     MANUAL = "MANUAL"
     AUTO_ACTIVE_CONTEXT = "AUTO_ACTIVE_CONTEXT"
     MID_TURN_FOLLOWUP = "MID_TURN_FOLLOWUP"
+    MODEL_SWITCH_HANDOVER = "MODEL_SWITCH_HANDOVER"
 
 
 class CompactionTargetBranch(StrEnum):

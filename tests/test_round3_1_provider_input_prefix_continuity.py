@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.model_connections import ModelConnectionId
 from pulsara_agent.conversation_kernel.process_local_settlement import (
     await_started_settlement,
 )
@@ -117,6 +118,7 @@ def test_round3_1_epoch_compatibility_excludes_per_call_identity() -> None:
         compiler_contract_version="compiler:v2",
         base_system_semantic_fingerprint="sha256:" + "1" * 64,
         tool_surface_fingerprint="sha256:" + "2" * 64,
+        model_connection_id=ModelConnectionId("model-connection:" + "0" * 32),
         model_target_fingerprint="sha256:" + "3" * 64,
         estimator_fingerprint="sha256:" + "4" * 64,
         provider_message_lowering_contract="lowering:v2",

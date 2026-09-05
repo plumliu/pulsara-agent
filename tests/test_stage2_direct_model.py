@@ -492,6 +492,7 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
         tool_surface_fingerprint=(
             request.prepared_call.tool_surface.model_surface.surface_fingerprint
         ),
+        model_connection_id=request.prepared_call.call.binding.connection_id,
         model_target_fingerprint=(
             request.prepared_call.compile_binding.target_fact.target_fingerprint
         ),

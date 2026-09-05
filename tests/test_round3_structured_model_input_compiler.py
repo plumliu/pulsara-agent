@@ -1134,6 +1134,7 @@ def _append_compatibility(
         compiler_contract_version=COMPILER_CONTRACT_VERSION,
         base_system_semantic_fingerprint=base.source_semantic_fingerprint,
         tool_surface_fingerprint=binding.tool_surface.surface_fingerprint,
+        model_connection_id=prepared.call.binding.connection_id,
         model_target_fingerprint=binding.target_fact.target_fingerprint,
         estimator_fingerprint=binding.estimator_fingerprint,
         provider_message_lowering_contract=PROVIDER_MESSAGE_LOWERING_CONTRACT,
@@ -3609,7 +3610,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-            "sha256:c176eb3889288bbba79d7edca8ab78910a6de909e6c3275f40c821d425eed5be"
+            "sha256:3fde05bf5a06bf29e82155acb8de30e9aeb1e300ca4a093271d1c4338d0d6340"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

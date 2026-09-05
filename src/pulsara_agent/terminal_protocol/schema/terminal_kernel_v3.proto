@@ -657,6 +657,7 @@ message ObservationResponse {
   uint64 live_control_owner_epoch = 9;
   uint64 through_live_control_revision = 10;
   repeated LiveControlEventProjection live_control = 11;
+  repeated string presentation_notices = 12;
 }
 
 message LiveControlSnapshotRequest {

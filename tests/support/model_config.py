@@ -16,6 +16,7 @@ from pulsara_agent.llm.model_catalog import (
     ModelHardLimits,
     ModelTargetKey,
     ModelsDevCatalogClient,
+    ReasoningControlContract,
     ReasoningProviderDefault,
     RouteWireDialect,
     WireApi,
@@ -101,6 +102,7 @@ def test_model_runtime(
     postgres_dsn: str | None = None,
     connection_id: ModelConnectionId | None = None,
     tool_call: bool | None = True,
+    reasoning: ReasoningControlContract | None = None,
 ) -> TestModelRuntime:
     """Build one exact catalog-backed connection with one typed credential."""
 
@@ -120,7 +122,7 @@ def test_model_runtime(
         wire_dialect=RouteWireDialect.OPENAI_COMPATIBLE,
         total_context_tokens=resolved_limits.total_context_tokens,
         limits=hard_limits,
-        reasoning=ReasoningProviderDefault(),
+        reasoning=reasoning or ReasoningProviderDefault(),
         tool_call=tool_call,
         wire_shape_hint=(
             "completions"

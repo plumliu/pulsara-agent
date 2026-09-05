@@ -12,6 +12,7 @@ from enum import StrEnum
 import json
 
 from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.model_connections import ModelConnectionId
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
@@ -73,6 +74,7 @@ class ProviderInputEpochCompatibility:
     compiler_contract_version: str
     base_system_semantic_fingerprint: str
     tool_surface_fingerprint: str
+    model_connection_id: ModelConnectionId
     model_target_fingerprint: str
     estimator_fingerprint: str
     provider_message_lowering_contract: str
@@ -85,6 +87,7 @@ class ProviderInputEpochCompatibility:
         if (
             not self.compiler_contract_version
             or not self.provider_message_lowering_contract
+            or not isinstance(self.model_connection_id, ModelConnectionId)
         ):
             raise ValueError("provider-input epoch compatibility is incomplete")
         for value, name in (

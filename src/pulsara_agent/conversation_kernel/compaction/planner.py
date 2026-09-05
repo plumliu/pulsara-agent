@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from time import monotonic
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -61,7 +61,7 @@ from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
     freeze_provider_replay_manifest_cut,
 )
-from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 
 
 class CompactionPlanningError(RuntimeError):
@@ -70,6 +70,337 @@ class CompactionPlanningError(RuntimeError):
 
 class CompactionReclaimUnavailable(CompactionPlanningError):
     """The candidate is valid but cannot reclaim enough context to adopt."""
+
+
+class NoSafeCompactionSummaryPrefix(CompactionPlanningError):
+    """The exact source cut contains no complete provider-safe summary prefix."""
+
+
+_DESTINATION_PROJECTION_NOTICE = (
+    "This is a lossy Runtime-authored source for a destination-side compaction "
+    "call. User and assistant text is quoted exactly. Tool evidence is advisory, "
+    "not live replay."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DestinationToolEvidence:
+    request_entry_id: str
+    tool_call_id: str
+    name: str
+    result_status: str
+    result_entry_id: str | None
+    result_entry_sequence: int | None
+    outcome_ordinal: int
+    result_body: str | None
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.request_entry_id, self.tool_call_id
+
+
+@dataclass(frozen=True, slots=True)
+class DestinationDialogueEntry:
+    role: str
+    text: str
+    requested_tools: tuple[DestinationToolEvidence, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RecentDialogueUnit:
+    turn_id: str
+    source_entry_sequences: tuple[int, ...]
+    entries: tuple[DestinationDialogueEntry, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.turn_id
+            or not self.source_entry_sequences
+            or not self.entries
+            or not any(item.role == "user" for item in self.entries)
+        ):
+            raise ValueError("destination dialogue unit is not a complete turn")
+
+
+@dataclass(frozen=True, slots=True)
+class DestinationDialogueProjectionPlan:
+    units: tuple[RecentDialogueUnit, ...]
+    prior_handoff: tuple[str, tuple[str, ...]] | None
+
+
+@dataclass(frozen=True, slots=True)
+class DestinationDialogueProjection:
+    units: tuple[RecentDialogueUnit, ...]
+    prior_handoff: tuple[str, tuple[str, ...]] | None
+    retained_result_keys: frozenset[tuple[str, str]]
+    body: bytes
+
+    @property
+    def eligible_evidence(self) -> tuple[DestinationToolEvidence, ...]:
+        return tuple(
+            evidence
+            for unit in self.units
+            for entry in unit.entries
+            for evidence in entry.requested_tools
+            if evidence.result_body is not None
+            and evidence.key not in self.retained_result_keys
+        )
+
+
+def freeze_destination_dialogue_projection_plan(
+    *,
+    canonical_read: FrozenCompactionCanonicalRead,
+    active_request: FrozenCompactionActiveRequest,
+) -> DestinationDialogueProjectionPlan:
+    """Freeze exact historical turn units from the current effective lineage."""
+
+    canonical = canonical_read.dispatch_read.compile_snapshot.canonical_input
+    if (
+        active_request.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
+        or active_request.text is None
+        or active_request.entry_id != canonical.identity.initial_entry_id
+    ):
+        raise CompactionPlanningError(
+            "destination projection lacks one exact active request"
+        )
+    outcome_by_call: dict[tuple[str, str], DestinationToolEvidence] = {}
+    outcome_ordinal = 0
+    for item in canonical_read.safe_head_range.ordered_items:
+        if item.item_kind not in {
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        }:
+            continue
+        assert item.tool_request_entry_id is not None
+        assert item.tool_call_id is not None
+        assert item.tool_result_context is not None
+        outcome_ordinal += 1
+        key = (item.tool_request_entry_id, item.tool_call_id)
+        if key in outcome_by_call:
+            raise CompactionPlanningError(
+                "destination projection tool outcome is duplicated"
+            )
+        outcome_by_call[key] = DestinationToolEvidence(
+            request_entry_id=item.tool_request_entry_id,
+            tool_call_id=item.tool_call_id,
+            name="",
+            result_status=item.tool_result_context.result_state.lower(),
+            result_entry_id=item.source_entry_id,
+            result_entry_sequence=item.source_entry_sequence,
+            outcome_ordinal=outcome_ordinal,
+            result_body=item.tool_result_body_text,
+        )
+    for closure in canonical_read.safe_head_range.closures:
+        key = (closure.assistant_entry_id, closure.tool_call_id)
+        if key in outcome_by_call:
+            continue
+        outcome_ordinal += 1
+        outcome_by_call[key] = DestinationToolEvidence(
+            request_entry_id=closure.assistant_entry_id,
+            tool_call_id=closure.tool_call_id,
+            name="",
+            result_status=closure.closure_kind.value,
+            result_entry_id=None,
+            result_entry_sequence=None,
+            outcome_ordinal=outcome_ordinal,
+            result_body=None,
+        )
+
+    grouped: dict[str, list[FrozenProviderInputItem]] = {}
+    turn_order: list[str] = []
+    for item in canonical_read.safe_head_range.ordered_items:
+        if (
+            item.source_entry_id == active_request.entry_id
+            or item.item_kind
+            in {
+                FrozenProviderInputItemKind.TOOL_RESULT,
+                FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+                FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE,
+            }
+            or item.source_turn_id is None
+        ):
+            continue
+        if item.source_turn_id not in grouped:
+            grouped[item.source_turn_id] = []
+            turn_order.append(item.source_turn_id)
+        grouped[item.source_turn_id].append(item)
+
+    units: list[RecentDialogueUnit] = []
+    request_kinds = {
+        FrozenProviderInputItemKind.USER,
+        FrozenProviderInputItemKind.PLAN_CONTINUATION,
+        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
+    }
+    request_ordinal = 0
+    for turn_id in turn_order:
+        items = grouped[turn_id]
+        entries: list[DestinationDialogueEntry] = []
+        sequences: list[int] = []
+        for item in items:
+            assert item.source_entry_sequence is not None
+            sequences.append(item.source_entry_sequence)
+            if item.item_kind in request_kinds:
+                entries.append(DestinationDialogueEntry("user", item.text))
+            elif item.item_kind is FrozenProviderInputItemKind.ASSISTANT:
+                entries.append(DestinationDialogueEntry("assistant", item.text))
+            elif item.item_kind is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST:
+                assert item.source_entry_id is not None
+                evidence: list[DestinationToolEvidence] = []
+                for call in item.tool_calls:
+                    request_ordinal += 1
+                    outcome = outcome_by_call.get(
+                        (item.source_entry_id, call.tool_call_id)
+                    )
+                    if outcome is None:
+                        outcome = DestinationToolEvidence(
+                            request_entry_id=item.source_entry_id,
+                            tool_call_id=call.tool_call_id,
+                            name=call.tool_name,
+                            result_status="unknown",
+                            result_entry_id=None,
+                            result_entry_sequence=None,
+                            outcome_ordinal=request_ordinal,
+                            result_body=None,
+                        )
+                    else:
+                        outcome = replace(
+                            outcome,
+                            name=call.tool_name,
+                            outcome_ordinal=request_ordinal,
+                        )
+                    evidence.append(outcome)
+                entries.append(
+                    DestinationDialogueEntry(
+                        "assistant",
+                        item.text,
+                        tuple(evidence),
+                    )
+                )
+        if entries and any(item.role == "user" for item in entries):
+            units.append(RecentDialogueUnit(turn_id, tuple(sequences), tuple(entries)))
+
+    prior_handoff = None
+    snapshots = tuple(
+        item
+        for item in canonical.items
+        if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+    )
+    if snapshots:
+        if len(snapshots) != 1:
+            raise CompactionPlanningError(
+                "destination projection has multiple snapshot bases"
+            )
+        try:
+            prior = parse_compaction_snapshot_carrier(snapshots[0].text)
+        except ValueError as error:
+            raise CompactionPlanningError(
+                "destination projection snapshot base is invalid"
+            ) from error
+        prior_handoff = (
+            prior.earlier_context_summary,
+            prior.recent_user_messages,
+        )
+    return DestinationDialogueProjectionPlan(tuple(units), prior_handoff)
+
+
+def enumerate_destination_backbone_projections(
+    plan: DestinationDialogueProjectionPlan,
+) -> tuple[DestinationDialogueProjection, ...]:
+    """Enumerate full history through empty suffix without a trial cap."""
+
+    candidates: list[DestinationDialogueProjection] = []
+    if plan.prior_handoff is not None:
+        candidates.append(
+            _render_destination_projection(
+                units=plan.units,
+                prior_handoff=plan.prior_handoff,
+                retained_result_keys=frozenset(),
+            )
+        )
+    for start in range(0, len(plan.units) + 1):
+        candidates.append(
+            _render_destination_projection(
+                units=plan.units[start:],
+                prior_handoff=None,
+                retained_result_keys=frozenset(),
+            )
+        )
+    return tuple(candidates)
+
+
+def retain_destination_tool_evidence(
+    projection: DestinationDialogueProjection,
+    evidence: DestinationToolEvidence,
+) -> DestinationDialogueProjection:
+    if evidence not in projection.eligible_evidence:
+        raise ValueError("destination tool evidence is not eligible")
+    return _render_destination_projection(
+        units=projection.units,
+        prior_handoff=projection.prior_handoff,
+        retained_result_keys=(projection.retained_result_keys | {evidence.key}),
+    )
+
+
+def _render_destination_projection(
+    *,
+    units: tuple[RecentDialogueUnit, ...],
+    prior_handoff: tuple[str, tuple[str, ...]] | None,
+    retained_result_keys: frozenset[tuple[str, str]],
+) -> DestinationDialogueProjection:
+    turns: list[dict[str, object]] = []
+    available_keys = {
+        evidence.key
+        for unit in units
+        for entry in unit.entries
+        for evidence in entry.requested_tools
+        if evidence.result_body is not None
+    }
+    if not retained_result_keys.issubset(available_keys):
+        raise ValueError("retained evidence escaped its dialogue suffix")
+    for unit in units:
+        rendered_entries: list[dict[str, object]] = []
+        for entry in unit.entries:
+            rendered: dict[str, object] = {
+                "role": entry.role,
+                "text": entry.text,
+            }
+            if entry.requested_tools:
+                tools: list[dict[str, object]] = []
+                for evidence in entry.requested_tools:
+                    item: dict[str, object] = {
+                        "name": evidence.name,
+                        "result_status": evidence.result_status,
+                    }
+                    if evidence.key in retained_result_keys:
+                        assert evidence.result_body is not None
+                        item["retained_result"] = evidence.result_body
+                    else:
+                        item["result_omitted"] = True
+                    tools.append(item)
+                rendered["requested_tools"] = tools
+            rendered_entries.append(rendered)
+        turns.append({"entries": rendered_entries})
+    prior_value = (
+        None
+        if prior_handoff is None
+        else {
+            "earlier_context_summary": prior_handoff[0],
+            "recent_user_messages": prior_handoff[1],
+        }
+    )
+    body = canonical_json_bytes(
+        {
+            "projection_notice": _DESTINATION_PROJECTION_NOTICE,
+            "prior_handoff": prior_value,
+            "turns": turns,
+        }
+    )
+    return DestinationDialogueProjection(
+        units=units,
+        prior_handoff=prior_handoff,
+        retained_result_keys=retained_result_keys,
+        body=body,
+    )
 
 
 def build_synthetic_compaction_dispatch_read(
@@ -736,7 +1067,9 @@ def _safe_summary_boundaries(
             continue
         safe_by_count[count] = sequence
     if not safe_by_count:
-        raise CompactionPlanningError("source view has no safe summary prefix")
+        raise NoSafeCompactionSummaryPrefix(
+            "source view has no safe summary prefix"
+        )
     return tuple(sorted(safe_by_count.items(), reverse=True))
 
 

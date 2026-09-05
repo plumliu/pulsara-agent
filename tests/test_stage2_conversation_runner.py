@@ -116,6 +116,16 @@ from pulsara_agent.llm.provider import (
     ThinkingReplayPolicy,
 )
 from pulsara_agent.llm.result import TransportUsageReport
+from pulsara_agent.llm.provider_sanitization import sanitize_provider_failure
+from pulsara_agent.llm.model_catalog import (
+    ReasoningEffortChoices,
+    ReasoningSelectableControls,
+)
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    ModelConnectionId,
+    ReasoningEffortSelection,
+)
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
@@ -407,11 +417,12 @@ class _CompactionSummaryTransport:
     ) -> None:
         self._scripts = list(text) if isinstance(text, list) else [text]
         self._usage_modes = list(usage_modes or ())
+        self.calls: list[object] = []
         self.contexts: list[object] = []
         self.usage_reports: list[TransportUsageReport] = []
 
     def open_stream(self, *, call, context):
-        del call
+        self.calls.append(call)
         self.contexts.append(context)
         if not self._scripts:
             raise AssertionError("unexpected extra compaction summary request")
@@ -1738,6 +1749,514 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert attempt_count == 0
     if lose_adoption_ack:
         assert repository.lost_once
+
+
+@pytest.mark.parametrize(
+    ("history", "summaries", "expected_tier", "expected_summary_models"),
+    (
+        ("brief history", "unused summary", None, ()),
+        (
+            "large history:" + "h" * 50_000,
+            "small source-model handover",
+            2,
+            ("source-model",),
+        ),
+        (
+            "large history:" + "h" * 50_000,
+            [
+                "oversized source-model handover:" + "a" * 50_000,
+                "small destination-model handover",
+            ],
+            3,
+            ("source-model", "destination-model"),
+        ),
+        (
+            "large history:" + "h" * 50_000,
+            [
+                [
+                    ProviderStreamTerminal(
+                        terminal_kind=(
+                            ProviderNormalizedTerminalKind.OUTPUT_INCOMPLETE
+                        ),
+                        usage=TransportUsageReport(
+                            usage_status="missing", usage=None
+                        ),
+                        incomplete_reason=(
+                            ProviderOutputIncompleteReason.UNKNOWN_PROVIDER_INCOMPLETE
+                        ),
+                    )
+                ],
+                "small destination-model handover after source failure",
+            ],
+            3,
+            ("source-model", "destination-model"),
+        ),
+        (
+            "large history:" + "h" * 50_000,
+            [
+                [
+                    ProviderStreamTerminal(
+                        terminal_kind=(
+                            ProviderNormalizedTerminalKind.PROVIDER_ERROR
+                        ),
+                        usage=TransportUsageReport(
+                            usage_status="missing", usage=None
+                        ),
+                        error=sanitize_provider_failure(
+                            message="source provider quota exhausted",
+                            code_hint="429",
+                        ),
+                    )
+                ],
+                "small destination-model handover after source provider error",
+            ],
+            3,
+            ("source-model", "destination-model"),
+        ),
+        (
+            "large history:" + "h" * 50_000,
+            [
+                [
+                    ProviderStreamTerminal(
+                        terminal_kind=(
+                            ProviderNormalizedTerminalKind.PROVIDER_ERROR
+                        ),
+                        usage=TransportUsageReport(
+                            usage_status="missing", usage=None
+                        ),
+                        error=sanitize_provider_failure(
+                            message="source provider quota exhausted",
+                            code_hint="429",
+                        ),
+                    )
+                ],
+                _summary_tool_stream("destination-summary-call:1"),
+                "small destination-model handover after denied tool call",
+            ],
+            3,
+            ("source-model", "destination-model", "destination-model"),
+        ),
+    ),
+    ids=(
+        "tier-1",
+        "tier-2",
+        "tier-3-nonfit",
+        "tier-3-source-incomplete",
+        "tier-3-source-provider-error",
+        "tier-3-destination-summary-tool-repair",
+    ),
+)
+def test_model_switch_uses_exact_three_tier_handover_path(
+    stage2_migrated_postgres_database,
+    history: str,
+    summaries: str | list[list[object] | str],
+    expected_tier: int | None,
+    expected_summary_models: tuple[str, ...],
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_runtime = test_model_runtime(
+        model_id="source-model",
+        wire_api="openai_chat_completions",
+    )
+    destination_runtime = test_model_runtime(
+        model_id="destination-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        limits=test_model_limits(
+            total_context_tokens=256_000,
+            max_input_tokens=12_000,
+            max_output_tokens=1_000,
+            default_output_tokens=1_000,
+            input_safety_margin_tokens=0,
+        ),
+    )
+    active_runtime = [source_runtime]
+    model = _CompactionScriptedModel(
+        [_text_stream(history), _text_stream("destination answer")],
+        summaries,
+    )
+    model._model_runtime = source_runtime
+    model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            manual_enabled=False,
+            auto_trigger_ratio=0.85,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    presentation_notices: list[str] = []
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=(
+            lambda: active_runtime[0].freeze_resolution_snapshot()
+        ),
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+        presentation_notice_sink=presentation_notices.append,
+    )
+    switch_results: list[object] = []
+    execute_switch = runner.compaction.execute_model_switch_active
+
+    async def record_switch(**kwargs):
+        result = await execute_switch(**kwargs)
+        switch_results.append(result)
+        return result
+
+    runner.compaction.execute_model_switch_active = record_switch
+
+    async def exercise():
+        first = await runner.run_turn("source request")
+        active_runtime[0] = destination_runtime
+        model._model_runtime = destination_runtime
+        model._preparer = DirectKernelModelPort(model_runtime=destination_runtime)
+        repository.update_session_model_call_binding(
+            lease.guard,
+            binding=test_model_binding(destination_runtime),
+            deadline_monotonic=monotonic() + 30,
+        )
+        second = await runner.run_turn("destination request")
+        await owner.aclose()
+        return first, second
+
+    first, second = asyncio.run(exercise())
+
+    assert first.final_text == history
+    assert second.final_text == "destination answer"
+    assert tuple(
+        call.target.fact.model_id for call in model.summary_transport.calls
+    ) == (expected_summary_models)
+    assert [
+        request.prepared_call.call.target.fact.model_id for request in model.requests
+    ] == [
+        "source-model",
+        "destination-model",
+    ]
+    assert len(switch_results) == (0 if expected_tier is None else 1)
+    if expected_tier is not None:
+        assert switch_results[0].model_switch_tier == expected_tier
+    assert presentation_notices == (
+        ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
+        if expected_tier == 3
+        else []
+    )
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        snapshot_count, event_count = connection.execute(
+            "SELECT "
+            "(SELECT count(*) FROM pulsara_v3.context_snapshots "
+            " WHERE session_id = %s), "
+            "(SELECT count(*) FROM pulsara_v3.agent_events "
+            " WHERE session_id = %s AND event_type = 'CompactionAdopted')",
+            (session_id, session_id),
+        ).fetchone()
+    assert (snapshot_count, event_count) == (
+        (0, 0) if expected_tier is None else (1, 1)
+    )
+
+
+def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_runtime = test_model_runtime(
+        model_id="same-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "0" * 32),
+    )
+    destination_runtime = test_model_runtime(
+        model_id="same-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+    )
+    active_runtime = [source_runtime]
+    model = _CompactionScriptedModel(
+        [_text_stream("source answer"), _text_stream("destination answer")],
+        "unused summary",
+    )
+    model._model_runtime = source_runtime
+    model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(enabled=False, automatic_enabled=False)
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=(
+            lambda: active_runtime[0].freeze_resolution_snapshot()
+        ),
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    recorder = _RecordingColdEpochAssembler(
+        runner._provider_dispatch._cold_epoch_assembler
+    )
+    runner._provider_dispatch._cold_epoch_assembler = recorder
+    scope = ProviderInputContinuityScope(
+        session_id=session_id,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+
+    async def exercise():
+        first = await runner.run_turn("source request")
+        source_epoch = runner._continuity.current_view(scope)
+        assert source_epoch is not None
+        active_runtime[0] = destination_runtime
+        model._model_runtime = destination_runtime
+        model._preparer = DirectKernelModelPort(model_runtime=destination_runtime)
+        repository.update_session_model_call_binding(
+            lease.guard,
+            binding=test_model_binding(destination_runtime),
+            deadline_monotonic=monotonic() + 30,
+        )
+        second = await runner.run_turn("destination request")
+        destination_epoch = runner._continuity.current_view(scope)
+        assert destination_epoch is not None
+        await owner.aclose()
+        return first, second, source_epoch, destination_epoch
+
+    first, second, source_epoch, destination_epoch = asyncio.run(exercise())
+
+    assert first.final_text == "source answer"
+    assert second.final_text == "destination answer"
+    assert len(recorder.semantic_seeds) == 1
+    assert source_epoch.epoch_nonce != destination_epoch.epoch_nonce
+    assert destination_epoch.compatibility.model_connection_id == ModelConnectionId(
+        "model-connection:" + "2" * 32
+    )
+    assert model.summary_transport.calls == []
+    assert [
+        request.prepared_call.call.binding.connection_id
+        for request in model.requests
+    ] == [
+        ModelConnectionId("model-connection:" + "0" * 32),
+        ModelConnectionId("model-connection:" + "2" * 32),
+    ]
+
+
+def test_reasoning_only_change_keeps_the_installed_epoch(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    runtime = test_model_runtime(
+        model_id="reasoning-model",
+        wire_api="openai_chat_completions",
+        reasoning=ReasoningSelectableControls(
+            effort=ReasoningEffortChoices(("low", "high"))
+        ),
+    )
+    low = ModelCallBinding(
+        ModelConnectionId("model-connection:" + "0" * 32),
+        ReasoningEffortSelection("low"),
+    )
+    high = replace(low, reasoning=ReasoningEffortSelection("high"))
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=low,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _CompactionScriptedModel(
+        [_text_stream("low answer"), _text_stream("high answer")],
+        "unused summary",
+    )
+    model._model_runtime = runtime
+    model._preparer = DirectKernelModelPort(model_runtime=runtime)
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(automatic_enabled=False)
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=runtime.freeze_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    scope = ProviderInputContinuityScope(
+        session_id=session_id,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+
+    async def exercise():
+        first = await runner.run_turn("first request")
+        first_epoch = runner._continuity.current_view(scope)
+        assert first_epoch is not None
+        repository.update_session_model_call_binding(
+            lease.guard,
+            binding=high,
+            deadline_monotonic=monotonic() + 30,
+        )
+        second = await runner.run_turn("second request")
+        second_epoch = runner._continuity.current_view(scope)
+        assert second_epoch is not None
+        await owner.aclose()
+        return first, second, first_epoch, second_epoch
+
+    first, second, first_epoch, second_epoch = asyncio.run(exercise())
+
+    assert first.final_text == "low answer"
+    assert second.final_text == "high answer"
+    assert first_epoch.epoch_nonce == second_epoch.epoch_nonce
+    assert first_epoch.epoch_revision + 1 == second_epoch.epoch_revision
+    assert model.summary_transport.calls == []
+    assert [request.prepared_call.call.binding for request in model.requests] == [
+        low,
+        high,
+    ]
+
+
+def test_disabled_compaction_rejects_nonfit_model_switch_without_mutation(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_runtime = test_model_runtime(
+        model_id="source-model",
+        wire_api="openai_chat_completions",
+    )
+    destination_runtime = test_model_runtime(
+        model_id="destination-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        limits=test_model_limits(
+            total_context_tokens=256_000,
+            max_input_tokens=12_000,
+            max_output_tokens=1_000,
+            default_output_tokens=1_000,
+            input_safety_margin_tokens=0,
+        ),
+    )
+    active_runtime = [source_runtime]
+    model = _CompactionScriptedModel(
+        [_text_stream("large history:" + "h" * 50_000)],
+        "summary must not run",
+    )
+    model._model_runtime = source_runtime
+    model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            enabled=False,
+            automatic_enabled=False,
+            manual_enabled=False,
+            auto_trigger_ratio=0.85,
+        )
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=(
+            lambda: active_runtime[0].freeze_resolution_snapshot()
+        ),
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    scope = ProviderInputContinuityScope(
+        session_id=session_id,
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+
+    async def exercise():
+        first = await runner.run_turn("source request")
+        source_epoch = runner._continuity.current_view(scope)
+        assert source_epoch is not None
+        active_runtime[0] = destination_runtime
+        model._model_runtime = destination_runtime
+        model._preparer = DirectKernelModelPort(model_runtime=destination_runtime)
+        repository.update_session_model_call_binding(
+            lease.guard,
+            binding=test_model_binding(destination_runtime),
+            deadline_monotonic=monotonic() + 30,
+        )
+        with pytest.raises(StructuredModelInputCompileError) as raised:
+            await runner.run_turn("destination request")
+        current_epoch = runner._continuity.current_view(scope)
+        await owner.aclose()
+        return first, source_epoch, current_epoch, raised.value
+
+    first, source_epoch, current_epoch, error = asyncio.run(exercise())
+
+    assert first.final_text.startswith("large history:")
+    assert error.kind is ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
+    assert current_epoch is source_epoch
+    assert len(model.requests) == 1
+    assert model.summary_transport.calls == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        snapshot_count, adoption_count = connection.execute(
+            "SELECT "
+            "(SELECT count(*) FROM pulsara_v3.context_snapshots "
+            " WHERE session_id = %s), "
+            "(SELECT count(*) FROM pulsara_v3.agent_events "
+            " WHERE session_id = %s AND event_type = 'CompactionAdopted')",
+            (session_id, session_id),
+        ).fetchone()
+    assert (snapshot_count, adoption_count) == (0, 0)
 
 
 @pytest.mark.parametrize(

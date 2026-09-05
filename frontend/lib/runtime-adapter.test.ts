@@ -233,6 +233,39 @@ describe('selectPromptCommand', () => {
     });
   });
 
+  it('projects process-local presentation notices from only the current observation', async () => {
+    const responses = [{
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }, {
+      observation: {
+        through_event_sequence: '0',
+        presentation_notices: [
+          '模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。',
+        ],
+      },
+    }, {
+      observation: { through_event_sequence: '0' },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect((await connection.observe()).presentationNotices).toEqual([
+      '模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。',
+    ]);
+    expect((await connection.observe()).presentationNotices).toEqual([]);
+  });
+
   it('projects provider reasoning and distinguishes full text from a summary', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,

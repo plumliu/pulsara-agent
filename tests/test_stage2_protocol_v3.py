@@ -128,6 +128,39 @@ def _state(*, role: int) -> _Connection:
     )
 
 
+class _PresentationNoticeInteractions:
+    def __init__(self, controller_id: str | None) -> None:
+        self.controller_id = controller_id
+
+    def current_controller_id(self) -> str | None:
+        return self.controller_id
+
+    def is_current_controller(self, attachment_id: str) -> bool:
+        return attachment_id == self.controller_id
+
+    async def controller_detached(self, attachment_id: str) -> None:
+        if self.controller_id == attachment_id:
+            self.controller_id = None
+
+
+def test_stage2_presentation_notice_is_ephemeral_and_controller_bound() -> None:
+    host = object.__new__(KernelHostSession)
+    interactions = _PresentationNoticeInteractions("attachment:old")
+    host._interactions = interactions
+    host._presentation_notices = {}
+
+    host._offer_presentation_notice("one-shot notice")
+    assert host.take_presentation_notices("attachment:observer") == ()
+    assert host.take_presentation_notices("attachment:old") == ("one-shot notice",)
+    assert host.take_presentation_notices("attachment:old") == ()
+
+    host._offer_presentation_notice("must not replay after reconnect")
+    asyncio.run(host.controller_detached("attachment:old"))
+    interactions.controller_id = "attachment:new"
+    assert host.take_presentation_notices("attachment:new") == ()
+    assert host._presentation_notices == {}
+
+
 def test_stage2_observer_cannot_mutate_but_can_detach() -> None:
     server = _server()
     observer = _state(role=wire.ATTACHMENT_ROLE_OBSERVER)

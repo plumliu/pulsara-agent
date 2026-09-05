@@ -152,6 +152,7 @@ export interface LocalSettingsReadModel {
 
 export interface RuntimeProjection {
   messages: Message[];
+  presentationNotices?: string[];
   contextCompaction?: ContextCompactionBoundary;
   isRunning: boolean;
   queuedCount: number;
@@ -602,6 +603,7 @@ interface ObservationPayload {
     kind: string;
     interaction?: Record<string, unknown>;
   }>;
+  presentation_notices?: string[];
   gap?: { kind: string; reason?: string };
 }
 
@@ -1059,6 +1061,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
   private liveRevision = 0;
   private liveControlOwnerEpoch = 0;
   private liveControlRevision = 0;
+  private presentationNotices: string[] = [];
   private writerGeneration = 0;
   private olderHistoryCursor?: ProtocolHistoryCursor;
   private closed = false;
@@ -1121,6 +1124,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     if (observation.gap?.kind) {
       throw new RuntimeGapError(observation.gap.kind, '连接状态需要刷新。');
     }
+    this.presentationNotices = [...(observation.presentation_notices ?? [])];
     for (const committed of observation.committed ?? []) {
       if (committed.projection_kind === 'IMMUTABLE_ENTRY' && committed.entry) {
         this.entries.set(committed.entry.entry_id, committed.entry);
@@ -1736,6 +1740,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     const interaction = projectInteraction(this.liveControl, this.control);
     return {
       messages: messages.map(productVisibleMessage),
+      presentationNotices: this.presentationNotices,
       contextCompaction: projectContextCompaction(this.control),
       isRunning: Boolean(activeTurn) || hasActiveDraft,
       queuedCount: numeric(this.control.prompt_queue_total_count),

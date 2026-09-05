@@ -3037,7 +3037,8 @@ def _compatibility_reset_reason(
     if previous.tool_surface_fingerprint != compatibility.tool_surface_fingerprint:
         return ProviderInputEpochResetReason.TOOL_SURFACE_CHANGED
     if (
-        previous.model_target_fingerprint != compatibility.model_target_fingerprint
+        previous.model_connection_id != compatibility.model_connection_id
+        or previous.model_target_fingerprint != compatibility.model_target_fingerprint
         or previous.estimator_fingerprint != compatibility.estimator_fingerprint
     ):
         return ProviderInputEpochResetReason.MODEL_TARGET_CHANGED

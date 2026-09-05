@@ -155,6 +155,14 @@ class KernelInteractionCoordinator:
                 and self._controller_id == attachment_id
             )
 
+    def current_controller_id(self) -> str | None:
+        """Return the exact current process-local controller attachment."""
+
+        with self._controller_lock:
+            if self._closed:
+                return None
+            return self._controller_id
+
     async def request_tool_confirmation(
         self,
         *,

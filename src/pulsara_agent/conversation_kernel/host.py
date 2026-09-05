@@ -526,6 +526,7 @@ class KernelHostSession:
             io_owner=self._io,
             deadline_factory=self._deadlines,
         )
+        self._presentation_notices: dict[str, list[str]] = {}
         self._plan_interactions = KernelPlanInteractionCoordinator()
         self._plan_continuations = ContinuationAdmissionOwner()
         self._input_continuity = HostProviderInputContinuityOwner(session_id=session_id)
@@ -716,6 +717,7 @@ class KernelHostSession:
             hook_context_owner=self._hook_context,
             hook_scope=self._hook_root_scope,
             session_start_source=session_start_source,
+            presentation_notice_sink=self._offer_presentation_notice,
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -3935,7 +3937,24 @@ class KernelHostSession:
 
         return self._interactions.is_current_controller(attachment_id)
 
+    def _offer_presentation_notice(self, notice: str) -> None:
+        """Bind an ephemeral product notice to the current controller only."""
+
+        attachment_id = self._interactions.current_controller_id()
+        if attachment_id is None:
+            return
+        self._presentation_notices.setdefault(attachment_id, []).append(notice)
+
+    def take_presentation_notices(self, attachment_id: str) -> tuple[str, ...]:
+        """Consume notices only from their exact live controller attachment."""
+
+        if not self._interactions.is_current_controller(attachment_id):
+            self._presentation_notices.pop(attachment_id, None)
+            return ()
+        return tuple(self._presentation_notices.pop(attachment_id, ()))
+
     async def controller_detached(self, attachment_id: str) -> None:
+        self._presentation_notices.pop(attachment_id, None)
         await self._interactions.controller_detached(attachment_id)
 
     async def resolve_tool_interaction(
@@ -4215,6 +4234,7 @@ class KernelHostSession:
             )
             async with self._lock:
                 self._closing = True
+                self._presentation_notices.clear()
                 self._tools.todo_owner.mark_closing(
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,

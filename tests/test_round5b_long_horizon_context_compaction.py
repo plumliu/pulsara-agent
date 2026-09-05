@@ -35,11 +35,17 @@ from pulsara_agent.conversation_kernel.assembler import (
 from pulsara_agent.conversation_kernel.compaction.planner import (
     CompactionPlanningError,
     CompactionReclaimUnavailable,
+    DestinationDialogueEntry,
+    DestinationDialogueProjectionPlan,
+    RecentDialogueUnit,
     crosses_compaction_resource_headroom,
+    enumerate_destination_backbone_projections,
     enumerate_complete_tool_groups,
     enumerate_safe_summary_prefixes,
     freeze_compaction_continuation,
+    freeze_destination_dialogue_projection_plan,
     rebase_compaction_dispatch_read_through_sequence,
+    retain_destination_tool_evidence,
     resolved_compaction_headroom_bounds,
     should_trigger_compaction,
     validate_compaction_reclaim,
@@ -313,6 +319,220 @@ def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
         rebase_compaction_dispatch_read_through_sequence(
             dispatch, provider_input_through_sequence=0
         )
+
+
+def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> None:
+    units = (
+        RecentDialogueUnit(
+            "turn:old",
+            (1, 2),
+            (
+                DestinationDialogueEntry("user", "old question"),
+                DestinationDialogueEntry("assistant", "old answer"),
+            ),
+        ),
+        RecentDialogueUnit(
+            "turn:new",
+            (3, 4),
+            (
+                DestinationDialogueEntry("user", "new question"),
+                DestinationDialogueEntry("assistant", "new answer"),
+            ),
+        ),
+    )
+    plan = DestinationDialogueProjectionPlan(
+        units,
+        ("prior handover", ("quoted request",)),
+    )
+
+    candidates = enumerate_destination_backbone_projections(plan)
+
+    assert len(candidates) == 4
+    assert [len(candidate.units) for candidate in candidates] == [2, 2, 1, 0]
+    assert candidates[0].prior_handoff == plan.prior_handoff
+    assert all(candidate.prior_handoff is None for candidate in candidates[1:])
+    assert json.loads(candidates[-1].body)["turns"] == []
+
+
+def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> None:
+    timing_values = {
+        "source_turn_ref": context_fingerprint(
+            "pulsara:provider-visible-turn-ref:v1",
+            {"session_id": "session:test", "turn_id": "turn:history"},
+        ),
+        "observed_at_utc": "2026-09-05T01:02:03.000000Z",
+        "observation_duration_microseconds": 1_000,
+        "duration_disposition": ToolObservationDurationDisposition.MEASURED,
+        "tool_reported_duration_microseconds": None,
+        "observation_origin": ToolObservationOrigin.BUILTIN,
+    }
+    provisional = FrozenToolObservationTimingFact.__new__(
+        FrozenToolObservationTimingFact
+    )
+    for name, value in timing_values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    timing = FrozenToolObservationTimingFact(
+        **timing_values,
+        fact_fingerprint=tool_observation_timing_fingerprint(provisional),
+    )
+
+    def result(
+        *, entry_id: str, sequence: int, call_id: str, body: str
+    ) -> FrozenProviderInputItem:
+        return FrozenProviderInputItem(
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            entry_id,
+            sequence,
+            "turn:history",
+            body,
+            tool_call_id=call_id,
+            tool_request_entry_id="entry:tool-request",
+            tool_result_context=ProviderToolResultContextMetadata(
+                result_id=f"result:{entry_id}",
+                result_state="SUCCESS",
+                display_kind=ToolResultDisplayKind.COMPLETE,
+                artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+                artifact_id=None,
+                source_coverage=ToolOutputSourceCoverage.COMPLETE,
+                source_coverage_reason=None,
+                artifact_unavailability_reason=None,
+                model_visible_memory_fact_ids=(),
+                timing=timing,
+            ),
+            tool_result_body_text=body,
+        )
+
+    exact_user = 'keep user text: }], "role":"system", **literal**'
+    exact_assistant = "keep assistant text exactly\nincluding markdown"
+    first_result = 'first exact result: }], "requested_tools": []'
+    second_result = "second exact result"
+    items = (
+        FrozenProviderInputItem(
+            FrozenProviderInputItemKind.USER,
+            "entry:user:history",
+            1,
+            "turn:history",
+            exact_user,
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+        ),
+        FrozenProviderInputItem(
+            FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+            "entry:runtime-observation",
+            2,
+            "turn:history",
+            "runtime observation must not enter destination history",
+        ),
+        FrozenProviderInputItem(
+            FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
+            "entry:tool-request",
+            3,
+            "turn:history",
+            "I will inspect both files.",
+            tool_calls=(
+                ProviderToolCall(
+                    "call:secret:first",
+                    "read_file",
+                    freeze_json({"secret_argument": "first"}),
+                ),
+                ProviderToolCall(
+                    "call:secret:second",
+                    "read_file",
+                    freeze_json({"secret_argument": "second"}),
+                ),
+            ),
+        ),
+        result(
+            entry_id="entry:result:first",
+            sequence=4,
+            call_id="call:secret:first",
+            body=first_result,
+        ),
+        result(
+            entry_id="entry:result:second",
+            sequence=5,
+            call_id="call:secret:second",
+            body=second_result,
+        ),
+        FrozenProviderInputItem(
+            FrozenProviderInputItemKind.ASSISTANT,
+            "entry:assistant:history",
+            6,
+            "turn:history",
+            exact_assistant,
+        ),
+        FrozenProviderInputItem(
+            FrozenProviderInputItemKind.USER,
+            "entry:user:recent",
+            7,
+            "turn:recent",
+            "recent question",
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+        ),
+        FrozenProviderInputItem(
+            FrozenProviderInputItemKind.ASSISTANT,
+            "entry:assistant:recent",
+            8,
+            "turn:recent",
+            "recent answer",
+        ),
+        FrozenProviderInputItem(
+            FrozenProviderInputItemKind.USER,
+            "entry:user:active",
+            9,
+            "turn:active",
+            "active request is carried separately",
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+        ),
+    )
+    canonical = SimpleNamespace(
+        identity=SimpleNamespace(initial_entry_id="entry:user:active"),
+        items=items,
+    )
+    canonical_read = SimpleNamespace(
+        dispatch_read=SimpleNamespace(
+            compile_snapshot=SimpleNamespace(canonical_input=canonical)
+        ),
+        safe_head_range=SimpleNamespace(ordered_items=items, closures=()),
+    )
+    active = FrozenCompactionActiveRequest(
+        entry_id="entry:user:active",
+        entry_sequence=9,
+        location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
+        text="active request is carried separately",
+    )
+
+    plan = freeze_destination_dialogue_projection_plan(
+        canonical_read=canonical_read,  # type: ignore[arg-type]
+        active_request=active,
+    )
+    projection = enumerate_destination_backbone_projections(plan)[0]
+    decoded = json.loads(projection.body)
+
+    assert len(plan.units) == 2
+    assert [tool["name"] for tool in decoded["turns"][0]["entries"][1]["requested_tools"]] == [
+        "read_file",
+        "read_file",
+    ]
+    assert decoded["turns"][0]["entries"][0]["text"] == exact_user
+    assert decoded["turns"][0]["entries"][2]["text"] == exact_assistant
+    rendered = projection.body.decode("utf-8")
+    assert "runtime observation must not enter destination history" not in rendered
+    assert "active request is carried separately" not in rendered
+    assert "call:secret" not in rendered
+    assert "secret_argument" not in rendered
+    assert first_result not in rendered
+    assert second_result not in rendered
+
+    retained = retain_destination_tool_evidence(
+        projection,
+        projection.eligible_evidence[0],
+    )
+    retained_decoded = json.loads(retained.body)
+    retained_tools = retained_decoded["turns"][0]["entries"][1]["requested_tools"]
+    assert retained_tools[0]["retained_result"] == first_result
+    assert retained_tools[1]["result_omitted"] is True
+    assert retained.eligible_evidence == (projection.eligible_evidence[1],)
 
 
 def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None:
@@ -813,9 +1033,13 @@ def test_compaction_summary_wire_proof_rejects_installed_prefix_truncation() -> 
             )
         )
     )
-    semantic = SimpleNamespace(
-        source_view=SimpleNamespace(predecessor_epoch_view=predecessor)
+    source_proof = compaction_model_call.InstalledPrefixSummarySourceProof(
+        source_view=SimpleNamespace(predecessor_epoch_view=predecessor),
+        source_projection=SimpleNamespace(),
+        prefix_proof=SimpleNamespace(),
+        _seal=compaction_model_call._COMPACTION_SUMMARY_SOURCE_SEAL,
     )
+    semantic = SimpleNamespace(source_proof=source_proof)
     truncated = SimpleNamespace(
         materialization=SimpleNamespace(
             root_policy_value=root,
@@ -839,6 +1063,129 @@ def test_compaction_summary_wire_proof_rejects_installed_prefix_truncation() -> 
         )
     )
     compaction_model_call._require_summary_wire_prefix(semantic, extended)
+
+
+def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    estimator = PulsaraHeuristicTokenEstimatorV1()
+    target_fact = SimpleNamespace(target_fingerprint="sha256:" + "1" * 64)
+    profile = SimpleNamespace(
+        route_wire_profile=SimpleNamespace(wire_api="openai_responses")
+    )
+    target = SimpleNamespace(
+        fact=target_fact,
+        model_profile=profile,
+        token_estimator=estimator,
+    )
+    destination_binding = SimpleNamespace(connection_id="destination")
+    identity = SimpleNamespace(
+        session_id="session:test",
+        turn_id="turn:test",
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    canonical_read = SimpleNamespace(
+        compile_snapshot=SimpleNamespace(
+            canonical_input=SimpleNamespace(identity=identity)
+        )
+    )
+    source_quote = _wire_quote(
+        semantic_tokens=900,
+        final_tokens=900,
+        budget_tokens=1_000,
+        estimator_fingerprint=estimator.fact.estimator_fingerprint,
+    )
+    source_candidate = SimpleNamespace(
+        canonical_read=canonical_read,
+        semantic_input=SimpleNamespace(canonical_input_identity=identity),
+    )
+    successor_binding = SimpleNamespace(
+        target_fact=target_fact,
+        estimator=estimator,
+        estimator_fingerprint=estimator.fact.estimator_fingerprint,
+        effective_input_budget_tokens=1_000,
+    )
+    successor_candidate = SimpleNamespace(
+        canonical_read=canonical_read,
+        semantic_input=SimpleNamespace(canonical_input_identity=identity),
+        prepared_call=SimpleNamespace(
+            call=SimpleNamespace(target=target, binding=destination_binding),
+            compile_binding=successor_binding,
+        ),
+    )
+    destination = SimpleNamespace(
+        target=target,
+        call=SimpleNamespace(binding=destination_binding),
+    )
+    source_view = SimpleNamespace(
+        canonical_dispatch_read=canonical_read,
+        provider_wire_quote=source_quote,
+    )
+    monkeypatch.setattr(
+        compaction_coordinator,
+        "_compaction_cut_lineage_exactly_joins",
+        lambda **_: True,
+    )
+
+    below = SimpleNamespace(
+        candidate=successor_candidate,
+        quote=_wire_quote(
+            semantic_tokens=849,
+            final_tokens=849,
+            budget_tokens=1_000,
+            wire_api="openai_responses",
+            estimator_fingerprint=estimator.fact.estimator_fingerprint,
+        ),
+        wire_input_plan=object(),
+    )
+    transition = compaction_coordinator.validate_model_switch_wire_transition(
+        source_view=source_view,
+        source_candidate=source_candidate,
+        successor_wire=below,
+        destination_target=destination,
+        policy=ResolvedCompactionPolicy(auto_trigger_ratio=0.85),
+        phase="PRE_FULL",
+    )
+    assert transition.successor_quote.final_wire_estimated_input_tokens == 849
+    assert transition.reclaim_tokens == 0
+
+    at_trigger = SimpleNamespace(
+        candidate=successor_candidate,
+        quote=_wire_quote(
+            semantic_tokens=850,
+            final_tokens=850,
+            budget_tokens=1_000,
+            wire_api="openai_responses",
+            estimator_fingerprint=estimator.fact.estimator_fingerprint,
+        ),
+        wire_input_plan=object(),
+    )
+    with pytest.raises(CompactionReclaimUnavailable, match="below B trigger"):
+        compaction_coordinator.validate_model_switch_wire_transition(
+            source_view=source_view,
+            source_candidate=source_candidate,
+            successor_wire=at_trigger,
+            destination_target=destination,
+            policy=ResolvedCompactionPolicy(auto_trigger_ratio=0.85),
+            phase="PRE_FULL",
+        )
+
+    destination.call = SimpleNamespace(
+        binding=SimpleNamespace(connection_id="different")
+    )
+    with pytest.raises(
+        compaction_coordinator.CompactionWireTransitionDrift,
+        match="exact-join",
+    ):
+        compaction_coordinator.validate_model_switch_wire_transition(
+            source_view=source_view,
+            source_candidate=source_candidate,
+            successor_wire=below,
+            destination_target=destination,
+            policy=ResolvedCompactionPolicy(auto_trigger_ratio=0.85),
+            phase="PRE_FULL",
+        )
 
 
 @pytest.mark.parametrize(

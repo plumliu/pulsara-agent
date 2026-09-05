@@ -46,6 +46,8 @@ from pulsara_agent.conversation_kernel.compaction.coordinator import (
     CompactionAttemptToken,
     CompactionCoordinator,
     CompactionExecutionResult,
+    ModelSwitchCompactionTriggerCandidate,
+    ModelSwitchDirectPrecompileDecision,
     OrdinaryPrecompileDecision,
     PreparedCompactSessionStart,
     PreparedCompactSessionStartFacts,
@@ -216,6 +218,11 @@ from pulsara_agent.hooks.contracts import (
 )
 from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
 from pulsara_agent.hooks.matcher import event_matcher_subject
+
+
+_MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE = (
+    "模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +457,7 @@ class ConversationKernelRunner:
         hook_context_owner: HookContextOwner | None = None,
         hook_scope: HookDispatchScopeRef | None = None,
         session_start_source: str = "startup",
+        presentation_notice_sink: Callable[[str], None] | None = None,
     ) -> None:
         if maximum_output_tokens_per_call < 1 or (
             maximum_input_tokens_per_call is not None
@@ -537,6 +545,7 @@ class ConversationKernelRunner:
         self._hook_dispatcher = hook_dispatcher
         self._hook_context_owner = hook_context_owner
         self._hook_scope = hook_scope
+        self._presentation_notice_sink = presentation_notice_sink
         self._session_start_boundary = _SessionStartColdBoundaryOwner(
             session_start_source
         )
@@ -752,6 +761,7 @@ class ConversationKernelRunner:
                 scope_subagent_task_id=task_id,
             )
             self._continuity.discard_scope(scope)
+            self._provider_dispatch.discard_installed_target(scope)
             self._memory_contexts.discard_scope(scope)
 
     async def _run_turn(
@@ -916,9 +926,13 @@ class ConversationKernelRunner:
                 wire_decision = None
                 if dispatch is None:
                     headroom_admission = None
-                    if self.compaction.automatic_allowed(
+                    allow_model_switch = (
+                        model_call_count == 1 and not completed_tool_batch
+                    )
+                    if self.compaction.precompile_needed(
                         scope_kind=intent.scope_kind,
                         scope_subagent_task_id=intent.scope_subagent_task_id,
+                        allow_model_switch=allow_model_switch,
                     ):
                         headroom_admission = (
                             await self.compaction.prepare_precompile_admission(
@@ -941,15 +955,23 @@ class ConversationKernelRunner:
                             scope_subagent_task_id=intent.scope_subagent_task_id,
                             headroom_admission=headroom_admission,
                             deadline=planning_deadline,
+                            allow_model_switch=allow_model_switch,
                         )
                         if isinstance(
                             precompile,
-                            OrdinaryPrecompileDecision,
+                            (
+                                OrdinaryPrecompileDecision,
+                                ModelSwitchDirectPrecompileDecision,
+                            ),
                         ):
                             headroom_admission = precompile.ordinary_admission
                             reusable_wire_observation = (
                                 precompile.reusable_wire_observation
                             )
+                            if isinstance(
+                                precompile, ModelSwitchDirectPrecompileDecision
+                            ):
+                                automatic_compaction_decided = True
                         else:
                             headroom_admission = None
                         if isinstance(
@@ -976,6 +998,47 @@ class ConversationKernelRunner:
                             )
                             self._require_active_compaction_continuation(compaction)
                             if compaction.successor_dispatch is not None:
+                                model_call_count -= 1
+                                successor_dispatch = compaction.successor_dispatch
+                                completed_tool_batch = False
+                                continue
+                        if isinstance(
+                            precompile,
+                            ModelSwitchCompactionTriggerCandidate,
+                        ):
+                            automatic_compaction_decided = True
+                            compaction = (
+                                await self.compaction.execute_model_switch_active(
+                                    turn_id=turn_id,
+                                    model_call_index=model_call_count,
+                                    inherited_memory_use_policy=(
+                                        current_memory_use_policy
+                                    ),
+                                    candidate=precompile,
+                                    scope_kind=intent.scope_kind,
+                                    scope_subagent_task_id=(
+                                        intent.scope_subagent_task_id
+                                    ),
+                                    hook_scope=self._hook_scope,
+                                    session_start_compact_port=(
+                                        self._compact_session_start_port(intent)
+                                    ),
+                                    session_start_boundary_port=(
+                                        self._compact_session_start_boundary_port(
+                                            intent
+                                        )
+                                    ),
+                                )
+                            )
+                            self._require_active_compaction_continuation(compaction)
+                            if compaction.successor_dispatch is not None:
+                                if (
+                                    compaction.model_switch_tier == 3
+                                    and self._presentation_notice_sink is not None
+                                ):
+                                    self._presentation_notice_sink(
+                                        _MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE
+                                    )
                                 model_call_count -= 1
                                 successor_dispatch = compaction.successor_dispatch
                                 completed_tool_batch = False

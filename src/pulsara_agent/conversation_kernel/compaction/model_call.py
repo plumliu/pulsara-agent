@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from threading import Lock
 
@@ -15,9 +15,16 @@ from pulsara_agent.conversation_kernel.assembler import (
     ProviderStreamAssembler,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionActiveRequestLocation,
+    FrozenCompactionActiveRequest,
+    FrozenCompactionCanonicalRead,
     FrozenCompactionSourceView,
     ProviderPrefixCutProof,
+    canonical_compaction_range_digest,
     compaction_summary_message_prefix_fingerprint,
+)
+from pulsara_agent.conversation_kernel.compaction.planner import (
+    DestinationDialogueProjection,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     summary_request_fingerprint,
@@ -37,6 +44,7 @@ from pulsara_agent.llm.request import (
     provider_wire_input_plan_identity_fingerprint,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.validation import validate_model_context_shape_for_call
 from pulsara_agent.model_input.contracts import (
     CanonicalModelInputIdentity,
@@ -46,6 +54,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputCompileBinding,
     compiled_message_placements_fingerprint,
 )
+from pulsara_agent.model_input.continuity import decode_runtime_observation
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
 )
@@ -62,6 +71,10 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.model_call import (
+    ResolvedModelTargetFact,
+    TokenEstimatorFact,
+)
 
 
 class _SummaryCallState(StrEnum):
@@ -115,12 +128,78 @@ class PreparedCompactionSummarySemanticInput:
                 raise ValueError("summary semantic fingerprint is invalid")
 
 
+class _CompactionSummarySourceSeal:
+    pass
+
+
+_COMPACTION_SUMMARY_SOURCE_SEAL = _CompactionSummarySourceSeal()
+
+
 @dataclass(frozen=True, slots=True)
-class PreparedCompactionSummarySemantic:
-    call: ResolvedModelCall = field(repr=False)
+class InstalledPrefixSummarySourceProof:
     source_view: FrozenCompactionSourceView = field(repr=False)
     source_projection: FrozenModelInputSemanticProjection = field(repr=False)
     prefix_proof: ProviderPrefixCutProof
+    _seal: _CompactionSummarySourceSeal = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._seal is not _COMPACTION_SUMMARY_SOURCE_SEAL:
+            raise ValueError("installed-prefix summary proof is not sealed")
+
+
+@dataclass(frozen=True, slots=True)
+class DestinationProjectionSummarySourceProof:
+    canonical_source: FrozenCompactionCanonicalRead = field(repr=False)
+    source_projection: FrozenModelInputSemanticProjection = field(repr=False)
+    target_fact: ResolvedModelTargetFact
+    route_wire_profile: RouteWireProfile = field(repr=False)
+    estimator_fact: TokenEstimatorFact
+    effective_input_budget_tokens: int
+    resolved_trigger_tokens: int
+    source_through_sequence: int
+    cumulative_source_digest: str
+    projection: DestinationDialogueProjection = field(repr=False)
+    active_request: FrozenCompactionActiveRequest = field(repr=False)
+    projection_message_ordinal: int
+    active_request_message_ordinal: int
+    _seal: _CompactionSummarySourceSeal = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        source = self.canonical_source
+        if (
+            self._seal is not _COMPACTION_SUMMARY_SOURCE_SEAL
+            or self.effective_input_budget_tokens < 1
+            or not 0 < self.resolved_trigger_tokens < self.effective_input_budget_tokens
+            or self.source_through_sequence
+            != source.safe_head_range.source_through_sequence
+            or self.cumulative_source_digest
+            != canonical_compaction_range_digest(
+                source.lineage_base, source.safe_head_range
+            )
+            or self.active_request.location
+            is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
+            or self.active_request.text is None
+            or self.active_request.entry_id
+            != source.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
+            or self.projection_message_ordinal < 0
+            or self.active_request_message_ordinal
+            != self.projection_message_ordinal + 1
+            or self.source_projection.canonical_input_identity
+            != source.dispatch_read.compile_snapshot.canonical_input.identity
+            or not self.source_projection.compile_binding_fingerprint
+        ):
+            raise ValueError("destination-projection summary proof is invalid")
+
+
+CompactionSummarySourceProof = (
+    InstalledPrefixSummarySourceProof | DestinationProjectionSummarySourceProof
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedCompactionSummarySemantic:
+    call: ResolvedModelCall = field(repr=False)
+    source_proof: CompactionSummarySourceProof = field(repr=False)
     compile_binding: ModelInputCompileBinding = field(repr=False)
     native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
     summary_request: str = field(repr=False)
@@ -128,43 +207,107 @@ class PreparedCompactionSummarySemantic:
     semantic_fingerprint: str
 
     def __post_init__(self) -> None:
-        source = self.source_projection
         compiled = self.semantic_input
         binding = self.compile_binding
-        count = self.prefix_proof.summary_prefix_message_count
-        expected_request = LLMMessage.user(self.summary_request)
-        expected_request_placement = _synthetic_summary_placement(
-            message_ordinal=count,
-            proof=self.prefix_proof,
-            summary_request=self.summary_request,
-        )
+        if self.call.fact.purpose is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY:
+            raise ValueError("summary semantic carrier has the wrong purpose")
         if (
-            self.call.fact.purpose is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
-            or self.call.target.fact != binding.target_fact
-            or source.canonical_input_identity
-            != self.source_view.canonical_dispatch_read.compile_snapshot.canonical_input.identity
-            or source.system_prompt != self.source_view.materialized_system_prompt()
-            or source.messages != self.source_view.materialized_messages()
-            or source.tools != binding.tool_surface.tool_specs
-            or source.compile_binding_fingerprint != binding.binding_fingerprint
-            or self.prefix_proof.source_view_fingerprint
-            != self.source_view.source_view_fingerprint
-            or not self.summary_request
-            or not 0 < count <= len(source.messages)
-            or compaction_summary_message_prefix_fingerprint(source.messages[:count])
-            != self.prefix_proof.summary_prefix_messages_fingerprint
-            or compiled.canonical_input_identity != source.canonical_input_identity
-            or compiled.system_prompt != source.system_prompt
-            or compiled.tools != source.tools
+            self.call.target.fact != binding.target_fact
             or compiled.compile_binding_fingerprint != binding.binding_fingerprint
-            or len(compiled.messages) < count + 1
-            or compiled.messages[:count] != source.messages[:count]
-            or compiled.message_placements[:count] != source.message_placements[:count]
-            or compiled.messages[count] != expected_request
-            or compiled.message_placements[count] != expected_request_placement
+            or compiled.tools != binding.tool_surface.tool_specs
+            or not self.summary_request
             or not self.semantic_fingerprint.startswith("sha256:")
         ):
             raise ValueError("summary semantic carrier does not exact-join")
+        proof = self.source_proof
+        if isinstance(proof, InstalledPrefixSummarySourceProof):
+            source = proof.source_projection
+            count = proof.prefix_proof.summary_prefix_message_count
+            expected_request_placement = _synthetic_summary_placement(
+                message_ordinal=count,
+                proof=proof.prefix_proof,
+                summary_request=self.summary_request,
+            )
+            if (
+                source.canonical_input_identity
+                != proof.source_view.canonical_dispatch_read.compile_snapshot.canonical_input.identity
+                or source.system_prompt
+                != proof.source_view.materialized_system_prompt()
+                or source.messages != proof.source_view.materialized_messages()
+                or source.tools != binding.tool_surface.tool_specs
+                or source.compile_binding_fingerprint != binding.binding_fingerprint
+                or proof.prefix_proof.source_view_fingerprint
+                != proof.source_view.source_view_fingerprint
+                or not 0 < count <= len(source.messages)
+                or compaction_summary_message_prefix_fingerprint(
+                    source.messages[:count]
+                )
+                != proof.prefix_proof.summary_prefix_messages_fingerprint
+                or compiled.canonical_input_identity != source.canonical_input_identity
+                or compiled.system_prompt != source.system_prompt
+                or len(compiled.messages) < count + 1
+                or compiled.messages[:count] != source.messages[:count]
+                or compiled.message_placements[:count]
+                != source.message_placements[:count]
+                or compiled.messages[count] != LLMMessage.user(self.summary_request)
+                or compiled.message_placements[count] != expected_request_placement
+            ):
+                raise ValueError("installed-prefix summary proof does not exact-join")
+        else:
+            identity = proof.canonical_source.dispatch_read.compile_snapshot.canonical_input.identity
+            projection_ordinal = proof.projection_message_ordinal
+            active_ordinal = proof.active_request_message_ordinal
+            summary_ordinal = active_ordinal + 1
+            current_messages, current_placements, active_placement = (
+                _destination_source_messages_and_active_placement(
+                    source_projection=proof.source_projection,
+                    active_request=proof.active_request,
+                )
+            )
+            expected_summary_placement = _ephemeral_summary_placement(
+                message_ordinal=summary_ordinal,
+                role=MessageRole.USER,
+                domain="destination-request",
+                identity={
+                    "prompt": summary_request_fingerprint(self.summary_request)
+                },
+            )
+            if (
+                self.call.target.fact != proof.target_fact
+                or self.call.target.model_profile.route_wire_profile
+                != proof.route_wire_profile
+                or binding.estimator.fact != proof.estimator_fact
+                or binding.effective_input_budget_tokens
+                != proof.effective_input_budget_tokens
+                or proof.source_projection.system_prompt != compiled.system_prompt
+                or proof.source_projection.tools != compiled.tools
+                or proof.source_projection.compile_binding_fingerprint
+                != binding.binding_fingerprint
+                or compiled.canonical_input_identity != identity
+                or compiled.messages[:projection_ordinal] != current_messages
+                or compiled.message_placements[:projection_ordinal]
+                != current_placements
+                or projection_ordinal >= len(compiled.messages)
+                or active_ordinal >= len(compiled.messages)
+                or summary_ordinal >= len(compiled.messages)
+                or compiled.messages[projection_ordinal]
+                != LLMMessage.user(proof.projection.body.decode("utf-8"))
+                or compiled.messages[active_ordinal]
+                != LLMMessage.user(proof.active_request.text)
+                or compiled.messages[summary_ordinal]
+                != LLMMessage.user(self.summary_request)
+                or compiled.message_placements[projection_ordinal].origin_entry_id
+                is not None
+                or compiled.message_placements[active_ordinal].origin_entry_id
+                != proof.active_request.entry_id
+                or compiled.message_placements[active_ordinal]
+                != replace(active_placement, message_ordinal=active_ordinal)
+                or compiled.message_placements[summary_ordinal]
+                != expected_summary_placement
+            ):
+                raise ValueError(
+                    "destination-projection summary proof does not exact-join"
+                )
         estimate = binding.estimator.estimate_frozen_input(
             system_prompt=compiled.system_prompt,
             messages=compiled.messages,
@@ -175,7 +318,10 @@ class PreparedCompactionSummarySemantic:
 
     @property
     def canonical_read(self) -> FrozenCanonicalProviderDispatchRead:
-        return self.source_view.canonical_dispatch_read
+        proof = self.source_proof
+        if isinstance(proof, InstalledPrefixSummarySourceProof):
+            return proof.source_view.canonical_dispatch_read
+        return proof.canonical_source.dispatch_read
 
     @property
     def tool_choice(self) -> str:
@@ -246,8 +392,7 @@ class PreparedCompactionSummaryCall:
                 "purpose": ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY.value,
                 "tool_choice": "auto",
                 "call": call.fact,
-                "source_view": semantic.source_view.source_view_fingerprint,
-                "prefix": semantic.prefix_proof.proof_fingerprint,
+                "source": _summary_source_identity_value(semantic.source_proof),
                 "semantic": semantic.semantic_fingerprint,
                 "wire": provider_wire_input_plan_identity_fingerprint(wire_input_plan),
                 "estimate": _estimate_value(compiled.final_estimate),
@@ -274,18 +419,18 @@ class PreparedCompactionSummaryCall:
         )
         assembler = ProviderStreamAssembler(
             session_id=(
-                self._semantic.source_view.canonical_dispatch_read.compile_snapshot.canonical_input.identity.session_id
+                self._semantic.canonical_read.compile_snapshot.canonical_input.identity.session_id
             ),
             turn_id=(
-                self._semantic.source_view.canonical_dispatch_read.compile_snapshot.canonical_input.identity.turn_id
+                self._semantic.canonical_read.compile_snapshot.canonical_input.identity.turn_id
             ),
             live_bus=_NullLiveBus(),  # type: ignore[arg-type]
             proposed_entry_id=f"compaction-summary:{self.request_fingerprint[7:39]}",
             conversation_scope_kind=(
-                self._semantic.source_view.canonical_dispatch_read.compile_snapshot.canonical_input.identity.conversation_scope_kind.value
+                self._semantic.canonical_read.compile_snapshot.canonical_input.identity.conversation_scope_kind.value
             ),
             scope_subagent_task_id=(
-                self._semantic.source_view.canonical_dispatch_read.compile_snapshot.canonical_input.identity.scope_subagent_task_id
+                self._semantic.canonical_read.compile_snapshot.canonical_input.identity.scope_subagent_task_id
             ),
         )
         terminal: ProviderStreamTerminal | None = None
@@ -450,14 +595,208 @@ def prepare_compaction_summary_semantic(
     )
     return PreparedCompactionSummarySemantic(
         call=call,
-        source_view=source_view,
-        source_projection=source_projection,
-        prefix_proof=prefix_proof,
+        source_proof=InstalledPrefixSummarySourceProof(
+            source_view=source_view,
+            source_projection=source_projection,
+            prefix_proof=prefix_proof,
+            _seal=_COMPACTION_SUMMARY_SOURCE_SEAL,
+        ),
         compile_binding=binding,
         native_projection_set=native_projection_set,
         summary_request=summary_request,
         semantic_input=compiled,
         semantic_fingerprint=semantic_fingerprint,
+    )
+
+
+def _destination_source_messages_and_active_placement(
+    *,
+    source_projection: FrozenModelInputSemanticProjection,
+    active_request: FrozenCompactionActiveRequest,
+) -> tuple[
+    tuple[LLMMessage, ...],
+    tuple[FrozenCompiledMessagePlacement, ...],
+    FrozenCompiledMessagePlacement,
+]:
+    active_matches = tuple(
+        (message, placement)
+        for message, placement in zip(
+            source_projection.messages,
+            source_projection.message_placements,
+            strict=True,
+        )
+        if placement.origin_entry_id == active_request.entry_id
+    )
+    if (
+        len(active_matches) != 1
+        or active_request.text is None
+        or active_matches[0][0] != LLMMessage.user(active_request.text)
+    ):
+        raise ValueError("destination active request has no exact source placement")
+    current: list[tuple[LLMMessage, FrozenCompiledMessagePlacement]] = []
+    for message, placement in zip(
+        source_projection.messages,
+        source_projection.message_placements,
+        strict=True,
+    ):
+        if placement.origin_entry_id is not None:
+            continue
+        try:
+            decode_runtime_observation(message)
+        except ValueError:
+            continue
+        current.append((message, placement))
+    current_messages = tuple(item[0] for item in current)
+    current_placements = tuple(
+        replace(item[1], message_ordinal=index) for index, item in enumerate(current)
+    )
+    return current_messages, current_placements, active_matches[0][1]
+
+
+def prepare_destination_projection_summary_semantic(
+    *,
+    call: ResolvedModelCall,
+    canonical_source: FrozenCompactionCanonicalRead,
+    compile_binding: ModelInputCompileBinding,
+    native_projection_set: FrozenNativeToolProjectionSet,
+    source_projection: FrozenModelInputSemanticProjection,
+    projection: DestinationDialogueProjection,
+    active_request: FrozenCompactionActiveRequest,
+    summary_request: str,
+    resolved_trigger_tokens: int,
+) -> PreparedCompactionSummarySemantic:
+    """Build one sealed B summary source without impersonating installed replay."""
+
+    identity = canonical_source.dispatch_read.compile_snapshot.canonical_input.identity
+    current_source_messages, current_source_placements, active_request_placement = (
+        _destination_source_messages_and_active_placement(
+            source_projection=source_projection,
+            active_request=active_request,
+        )
+    )
+    if (
+        call.fact.purpose is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
+        or call.target.fact != compile_binding.target_fact
+        or source_projection.canonical_input_identity != identity
+        or source_projection.tools != compile_binding.tool_surface.tool_specs
+        or source_projection.compile_binding_fingerprint
+        != compile_binding.binding_fingerprint
+        or active_request.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
+        or active_request.text is None
+        or active_request.entry_id != identity.initial_entry_id
+        or active_request_placement.origin_entry_id != active_request.entry_id
+    ):
+        raise ValueError("destination projection summary inputs do not exact-join")
+    normalized_source_placements = tuple(
+        replace(item, message_ordinal=index)
+        for index, item in enumerate(current_source_placements)
+    )
+    projection_ordinal = len(current_source_messages)
+    active_ordinal = projection_ordinal + 1
+    projection_message = LLMMessage.user(projection.body.decode("utf-8"))
+    active_message = LLMMessage.user(active_request.text)
+    messages = (
+        *current_source_messages,
+        projection_message,
+        active_message,
+        LLMMessage.user(summary_request),
+    )
+    placements = (
+        *normalized_source_placements,
+        _ephemeral_summary_placement(
+            message_ordinal=projection_ordinal,
+            role=MessageRole.USER,
+            domain="destination-projection",
+            identity={
+                "source": canonical_source.dispatch_read.composite_fingerprint,
+                "body": projection.body.decode("utf-8"),
+            },
+        ),
+        replace(active_request_placement, message_ordinal=active_ordinal),
+        _ephemeral_summary_placement(
+            message_ordinal=active_ordinal + 1,
+            role=MessageRole.USER,
+            domain="destination-request",
+            identity={"prompt": summary_request_fingerprint(summary_request)},
+        ),
+    )
+    estimate = compile_binding.estimator.estimate_frozen_input(
+        system_prompt=source_projection.system_prompt,
+        messages=messages,
+        tools=source_projection.tools,
+    )
+    source_digest = canonical_compaction_range_digest(
+        canonical_source.lineage_base,
+        canonical_source.safe_head_range,
+    )
+    proof = DestinationProjectionSummarySourceProof(
+        canonical_source=canonical_source,
+        source_projection=source_projection,
+        target_fact=call.target.fact,
+        route_wire_profile=call.target.model_profile.route_wire_profile,
+        estimator_fact=compile_binding.estimator.fact,
+        effective_input_budget_tokens=(compile_binding.effective_input_budget_tokens),
+        resolved_trigger_tokens=resolved_trigger_tokens,
+        source_through_sequence=(
+            canonical_source.safe_head_range.source_through_sequence
+        ),
+        cumulative_source_digest=source_digest,
+        projection=projection,
+        active_request=active_request,
+        projection_message_ordinal=projection_ordinal,
+        active_request_message_ordinal=active_ordinal,
+        _seal=_COMPACTION_SUMMARY_SOURCE_SEAL,
+    )
+    context_id = context_fingerprint(
+        "pulsara.destination-compaction-summary-context-id.v1",
+        {
+            "call": call.resolved_model_call_id,
+            "source": canonical_source.dispatch_read.composite_fingerprint,
+            "source_digest": source_digest,
+            "messages": compaction_summary_message_prefix_fingerprint(messages),
+        },
+    )
+    values = {
+        "context_id": context_id,
+        "canonical_input_identity": identity,
+        "system_prompt": source_projection.system_prompt,
+        "messages": messages,
+        "message_placements": placements,
+        "tools": source_projection.tools,
+        "final_estimate": estimate,
+        "compile_binding_fingerprint": compile_binding.binding_fingerprint,
+    }
+    compiled = PreparedCompactionSummarySemanticInput(
+        **values,
+        compiled_semantic_fingerprint=context_fingerprint(
+            "pulsara.destination-compaction-summary-semantic-input.v1",
+            {
+                "context": context_id,
+                "canonical": identity.identity_fingerprint,
+                "messages": compaction_summary_message_prefix_fingerprint(messages),
+                "placements": compiled_message_placements_fingerprint(placements),
+                "estimate": _estimate_value(estimate),
+                "binding": compile_binding.binding_fingerprint,
+            },
+        ),
+    )
+    return PreparedCompactionSummarySemantic(
+        call=call,
+        source_proof=proof,
+        compile_binding=compile_binding,
+        native_projection_set=native_projection_set,
+        summary_request=summary_request,
+        semantic_input=compiled,
+        semantic_fingerprint=context_fingerprint(
+            "pulsara.prepared-destination-compaction-summary-semantic.v1",
+            {
+                "call": call.fact,
+                "source": _summary_source_identity_value(proof),
+                "native": native_projection_set.projection_set_fingerprint,
+                "prompt": summary_request_fingerprint(summary_request),
+                "compiled": compiled.compiled_semantic_fingerprint,
+            },
+        ),
     )
 
 
@@ -474,7 +813,8 @@ def promote_compaction_summary_call(
         raise ValueError("summary wire decision is not executable")
     if (
         plan.quote is not decision.quote
-        or plan.wire_api != semantic.call.target.model_profile.route_wire_profile.wire_api
+        or plan.wire_api
+        != semantic.call.target.model_profile.route_wire_profile.wire_api
         or plan.route_wire_profile_fingerprint
         != provider_wire_profile_fingerprint(semantic.call)
         or decision.quote.estimator_fingerprint
@@ -603,9 +943,7 @@ def prepare_compaction_summary_repair_semantic(
     )
     return PreparedCompactionSummarySemantic(
         call=initial.call,
-        source_view=initial.source_view,
-        source_projection=initial.source_projection,
-        prefix_proof=initial.prefix_proof,
+        source_proof=initial.source_proof,
         compile_binding=initial.compile_binding,
         native_projection_set=initial.native_projection_set,
         summary_request=initial.summary_request,
@@ -618,7 +956,10 @@ def _require_summary_wire_prefix(
     semantic: PreparedCompactionSummarySemantic,
     plan: FrozenProviderWireInputPlan,
 ) -> None:
-    predecessor = semantic.source_view.predecessor_epoch_view
+    proof = semantic.source_proof
+    if not isinstance(proof, InstalledPrefixSummarySourceProof):
+        return
+    predecessor = proof.source_view.predecessor_epoch_view
     if predecessor is None:
         return
     old = predecessor.wire_input_plan.materialization
@@ -637,6 +978,26 @@ def _require_summary_wire_prefix(
         or actual_prefix[: len(old_items)] != old_items
     ):
         raise ValueError("summary actual wire input rewrote the installed prefix")
+
+
+def _summary_source_identity_value(
+    proof: CompactionSummarySourceProof,
+) -> object:
+    if isinstance(proof, InstalledPrefixSummarySourceProof):
+        return {
+            "kind": "INSTALLED_PREFIX",
+            "source_view": proof.source_view.source_view_fingerprint,
+            "prefix": proof.prefix_proof.proof_fingerprint,
+        }
+    return {
+        "kind": "DESTINATION_PROJECTION",
+        "canonical": proof.canonical_source.dispatch_read.composite_fingerprint,
+        "source_digest": proof.cumulative_source_digest,
+        "target": proof.target_fact.target_fingerprint,
+        "trigger": proof.resolved_trigger_tokens,
+        "projection": proof.projection.body.decode("utf-8"),
+        "active_request": proof.active_request.canonical_value(),
+    }
 
 
 def _synthetic_summary_placement(
@@ -710,6 +1071,9 @@ def _estimate_value(estimate: TokenEstimate) -> dict[str, object]:
 
 
 __all__ = [
+    "CompactionSummarySourceProof",
+    "DestinationProjectionSummarySourceProof",
+    "InstalledPrefixSummarySourceProof",
     "PreparedCompactionSummaryCall",
     "PreparedCompactionSummarySemantic",
     "PreparedCompactionSummarySemanticInput",
@@ -717,4 +1081,5 @@ __all__ = [
     "promote_compaction_summary_call",
     "prepare_compaction_summary_repair_semantic",
     "prepare_compaction_summary_semantic",
+    "prepare_destination_projection_summary_semantic",
 ]

@@ -165,6 +165,10 @@ class ScriptedKernelModel:
         self.preparation_requests.append(request)  # type: ignore[arg-type]
         return self._preparer.prepare_target(request)
 
+    def prepare_resolved_target(self, request, **kwargs):
+        self.preparation_requests.append(request)
+        return self._preparer.prepare_resolved_target(request, **kwargs)
+
     def freeze_native_tool_eligibility(self, **kwargs):
         return self._preparer.freeze_native_tool_eligibility(**kwargs)
 
@@ -232,6 +236,9 @@ class CallbackScriptedKernelModel:
 
     def prepare_target(self, request):
         return self._preparer.prepare_target(request)
+
+    def prepare_resolved_target(self, request, **kwargs):
+        return self._preparer.prepare_resolved_target(request, **kwargs)
 
     def freeze_native_tool_eligibility(self, **kwargs):
         return self._preparer.freeze_native_tool_eligibility(**kwargs)

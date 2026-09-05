@@ -589,9 +589,42 @@ class DirectKernelModelPort:
             request.binding,
             timeout_policy=self._transport_timeout,
         )
-        call = resolve_model_call(
+        return self.prepare_resolved_target(
+            request,
             target=target,
             binding=request.binding,
+        )
+
+    def prepare_resolved_target(
+        self,
+        request: KernelModelTargetPreparationRequest,
+        *,
+        target: ResolvedModelTarget,
+        binding: ModelCallBinding,
+    ) -> PreparedKernelModelTarget:
+        """Bind a fresh call to one exact process-local resolved target.
+
+        Model-switch handover needs the already-installed source target after
+        the session's durable turn binding has moved to the destination.  The
+        target is carried as the complete typed value; it is never re-resolved
+        from a provider/model lookup or reconstructed from a fingerprint.
+        """
+
+        if request.purpose is not ModelCallPurpose.AGENT_MODEL_LOOP:
+            raise ValueError("foreground model preparation purpose is invalid")
+        if (
+            request.model_call_index < 1
+            or request.maximum_output_tokens < 1
+            or (
+                request.maximum_input_tokens is not None
+                and request.maximum_input_tokens < 1
+            )
+            or binding.connection_id != target.connection.id
+        ):
+            raise ValueError("foreground resolved-target preparation is invalid")
+        call = resolve_model_call(
+            target=target,
+            binding=binding,
             purpose=request.purpose,
             resolved_model_call_id=f"model_call:{uuid4().hex}",
         )

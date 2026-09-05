@@ -475,7 +475,8 @@ Tier 3只允许发生在一个stable model-switch handover attempt中，并且�
 只有以下closed typed outcome允许Tier 2释放全部A candidate authority后进入Tier 3：
 
 - 全部A safe prefixes都完成exact search但没有可执行summary wire；
-- A summary transport在没有主turn semantic output或工具副作用的前提下typed失败；
+- A summary transport在没有主turn semantic output或工具副作用的前提下typed失败，包括A额度耗尽、
+  provider服务端不可用、超时或其他已经归一化的provider execution failure；
 - A summary为空、schema非法，且既有唯一tool-call repair也未形成合法terminal summary；
 - A summary合法terminal，但按B构造的pre-adoption dry successor不低于`B_trigger`、超过physical byte
   bound或未通过其他B hard admission。
@@ -488,8 +489,10 @@ Tier 3只允许发生在一个stable model-switch handover attempt中，并且�
 - A candidate枚举尚未完成就耗尽planning deadline：typed planning failure，不能采用当前碰巧fit的
   partial search result，也不能进入Tier 3。
 
-Tier 3不是普通automatic/manual compaction的fallback，也不能由provider context error、catalog
-refresh或UI convenience直接调用。它是model downshift时的显式destination-side rescue：先让B读取一份
+Tier 3不是普通automatic/manual compaction的fallback，也不能先physical open B 的normal request，
+再把B的provider context error当作补做handover的信号；catalog refresh或UI convenience同样不能直接
+调用它。Tier 2已实际尝试A summary而A发生前述typed transport failure时，进入Tier 3是本档位的正常
+closed fallback。它是model downshift时的显式destination-side rescue：先让B读取一份
 在B预算内的canonical-derived projection，再由B自己完成正式compaction，最后才处理当前用户请求。
 
 ### 6.2 Projection只是B summary call的临时source
@@ -1194,7 +1197,8 @@ frontend/app/styles/workbench.css
 - drift后fresh attempt仍只使用`retained_tool_groups = 0`，不回到默认`3`；
 - session selector再次变化：当前turn仍使用frozen B；
 - user cancel/Host close：停止，不adopt、不toast；
-- A无可执行summary prefix或summary transport稳定失败：可以进入Tier 3；
+- A无可执行summary prefix或summary transport失败（包括额度耗尽、服务端不可用或超时）：可以进入
+  Tier 3；该失败必须发生在主turn尚无semantic output或工具副作用时；
 - replay corruption、source digest mismatch、invariant/ownership failure：typed fail，不进入Tier 3；
 - A/B drift：fresh recapture；每个stable capture各最多一个逻辑A/B summary candidate；无repair时每个
   candidate各一个provider request，repair只增加request、不增加logical candidate；drift可产生新capture，
