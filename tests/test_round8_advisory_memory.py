@@ -972,8 +972,11 @@ def test_round8_duplicate_relations_taxonomy_correction_and_basis_are_exact(
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.memory_relations WHERE relation_kind='BASED_ON'"
-        ).fetchone() == (1,)
+            """SELECT source_fact_id, target_fact_id
+               FROM pulsara_v3.memory_relations
+               WHERE relation_kind='BASED_ON' AND target_fact_id=%s""",
+            (correct.fact_id,),
+        ).fetchall() == [(decision.fact_id, correct.fact_id)]
         assert connection.execute(
             "SELECT source_candidate_id FROM pulsara_v3.memory_facts WHERE id=%s",
             (correct.fact_id,),

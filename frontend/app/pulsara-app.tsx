@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityRail } from '../components/activity-rail';
 import { CapabilityView } from '../components/capability-view';
 import { DatabaseSetupGuide } from '../components/database-setup-guide';
+import { MemoryView } from '../components/memory-view';
 import { InspectorPanel } from '../components/inspector-panel';
 import { CommandPalette, NewSessionDialog, ToastStack } from '../components/overlays';
 import { OverviewView } from '../components/overview-view';
@@ -128,6 +129,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
   const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState('');
+  const [focusMemoryEntry, setFocusMemoryEntry] = useState<{ sessionId: string; entryId: string }>();
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
   const [taskInventory, setTaskInventory] = useState<AgentTask[]>([]);
   const [taskInventorySessionId, setTaskInventorySessionId] = useState('');
@@ -191,7 +193,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       session.id === activeSessionIdRef.current
         ? {
           ...session,
-          status: next.isRunning ? 'running' : 'completed',
+          status: next.isRunning ? 'running'
+            : next.control.latest_root_turn?.status === 'INTERRUPTED' ? 'interrupted'
+            : next.control.latest_root_turn?.status === 'COMPLETED' ? 'completed'
+            : 'draft',
           updatedAt: '刚刚',
         }
         : session
@@ -1130,6 +1135,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
             (skill) => skill.enabled && skill.effective,
           )}
           focusTaskId={focusedTask?.id}
+          focusMemoryEntry={focusMemoryEntry}
           focusTaskRevision={focusedTask?.revision ?? 0}
           focusTaskHighlighted={focusedTask?.highlighted ?? false}
           onReconnect={() => activeSessionId && void openRuntimeSession(activeSessionId, true)}
@@ -1214,6 +1220,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onNotify={notify}
         />
       )}
+
+      {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusMemoryEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
 
       <CommandPalette
         open={commandOpen}

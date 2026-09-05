@@ -1,0 +1,843 @@
+"""Canonical management queries and user-confirmed transactional memory deletion."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from itertools import zip_longest
+from time import monotonic
+
+from psycopg import IsolationLevel, sql
+from psycopg.errors import (
+    DeadlockDetected,
+    SerializationFailure,
+    LockNotAvailable,
+    QueryCanceled,
+    ForeignKeyViolation,
+    UniqueViolation,
+)
+from psycopg.rows import dict_row
+
+from pulsara_agent.conversation_kernel.memory.contracts import (
+    canonical_json_bytes,
+    canonical_memory_recorded_at,
+    memory_response_preference_item_payload,
+)
+from pulsara_agent.conversation_kernel.memory.management import (
+    MemoryManagementError,
+    MemoryManagementFact,
+    confirmation_records,
+    decode_cursor,
+    deletion_graph,
+    encode_cursor,
+    normalized_search,
+    page_size,
+    relative_role,
+    with_end,
+)
+from pulsara_agent.memory.scope import CTX_GLOBAL
+from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+
+
+_PROJECTS = """
+WITH activity AS (
+    SELECT s.workspace_id, s.workspace_label, s.workspace_root, s.id,
+           COALESCE((SELECT e.accepted_at FROM pulsara_v3.transcript_entries e
+                     WHERE e.session_id=s.id ORDER BY e.entry_sequence DESC LIMIT 1),
+                    s.created_at) AS last_activity_at
+    FROM pulsara_v3.sessions s
+    WHERE s.memory_domain_id=%s AND s.workspace_kind='project'
+), projects AS (
+    SELECT DISTINCT ON (workspace_id) workspace_id, workspace_label AS label,
+           workspace_root AS root, last_activity_at
+    FROM activity ORDER BY workspace_id, last_activity_at DESC, id DESC
+)
+"""
+
+_ACTIVE_CONFLICT = """EXISTS (
+    SELECT 1 FROM pulsara_v3.memory_relations r
+    JOIN pulsara_v3.memory_facts other
+      ON other.memory_domain_id=r.memory_domain_id
+     AND other.id=CASE WHEN r.source_fact_id=f.id THEN r.target_fact_id ELSE r.source_fact_id END
+    WHERE r.memory_domain_id=f.memory_domain_id AND r.relation_kind='CONTRADICTS'
+      AND (r.source_fact_id=f.id OR r.target_fact_id=f.id)
+      AND f.lifecycle='ACTIVE' AND other.lifecycle='ACTIVE'
+)"""
+
+
+def _freeze(value):
+    if isinstance(value, dict):
+        return tuple((key, _freeze(value[key])) for key in sorted(value))
+    if isinstance(value, list):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenMemoryDeletionPlan:
+    facts: tuple
+    relations: tuple
+    candidates: tuple
+    tool_refs: tuple
+    basis_refs: tuple
+    normalize: tuple
+    restore: tuple
+    lock_fact_ids: tuple[str, ...]
+    preference_contexts: tuple[str, ...]
+    confirmation: tuple[bytes, ...]
+
+
+def _frozen_rows(rows):
+    return tuple(_freeze(row) for row in rows)
+
+
+def _remaining(connection, deadline):
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise MemoryManagementError(
+            "MEMORY_DELETION_PLANNING_TIMEOUT", 504, "记忆操作超时，尚未删除，请重试"
+        )
+    connection.execute(
+        "SELECT set_config('statement_timeout', %s, true), set_config('lock_timeout', %s, true)",
+        (str(max(1, int(remaining * 1000))), str(max(1, int(remaining * 1000)))),
+    )
+
+
+class _MemoryManagementOperations:
+    def _management_connection(self, *, deadline_monotonic, execute=False):
+        return self._provider.connection(
+            lane=PostgresConnectionLane.MEMORY_MAINTENANCE
+            if execute
+            else PostgresConnectionLane.MEMORY_QUERY,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.SERIALIZABLE
+            if execute
+            else IsolationLevel.REPEATABLE_READ,
+        )
+
+    @staticmethod
+    def _management_context(connection, domain, selection):
+        if selection.view == "global":
+            return CTX_GLOBAL
+        row = connection.execute(
+            _PROJECTS + "SELECT workspace_id FROM projects WHERE workspace_id=%s",
+            (domain, selection.workspace_id),
+        ).fetchone()
+        if row is None:
+            raise MemoryManagementError(
+                "MEMORY_PROJECT_NOT_FOUND", 404, "找不到这个项目"
+            )
+        return row["workspace_id"]
+
+    def memory_management_projects(
+        self, *, memory_domain_id, deadline_monotonic, limit=40, cursor=None
+    ):
+        page_size(limit)
+        filters = {"domain": memory_domain_id, "directory": "projects"}
+        key = decode_cursor(cursor, filters, 2)
+        with self._management_connection(deadline_monotonic=deadline_monotonic) as c:
+            _remaining(c, deadline_monotonic)
+            rows = c.execute(
+                _PROJECTS
+                + """SELECT * FROM projects
+                WHERE (%s::timestamptz IS NULL OR (last_activity_at, workspace_id)<(%s::timestamptz,%s))
+                ORDER BY last_activity_at DESC, workspace_id DESC LIMIT %s""",
+                (
+                    memory_domain_id,
+                    None if key is None else key[0],
+                    None if key is None else key[0],
+                    None if key is None else key[1],
+                    limit + 1,
+                ),
+            ).fetchall()
+        selected = rows[:limit]
+        next_cursor = (
+            encode_cursor(
+                filters,
+                (
+                    selected[-1]["last_activity_at"].isoformat(),
+                    selected[-1]["workspace_id"],
+                ),
+            )
+            if len(rows) > limit
+            else None
+        )
+        return {
+            "items": [
+                {**r, "last_activity_at": r["last_activity_at"].isoformat()}
+                for r in selected
+            ],
+            "next_cursor": next_cursor,
+        }
+
+    def memory_management_catalog(
+        self,
+        *,
+        memory_domain_id,
+        selection,
+        deadline_monotonic,
+        lifecycle="active",
+        kind=None,
+        search=None,
+        limit=40,
+        cursor=None,
+    ):
+        page_size(limit)
+        from pulsara_agent.conversation_kernel.memory.contracts import MemoryFactKind
+
+        if lifecycle not in {"active", "updated"}:
+            raise ValueError("记忆状态筛选无效")
+        if kind is not None:
+            MemoryFactKind(kind)
+        search = normalized_search(search)
+        with self._management_connection(deadline_monotonic=deadline_monotonic) as c:
+            _remaining(c, deadline_monotonic)
+            context = self._management_context(c, memory_domain_id, selection)
+            filters = {
+                "domain": memory_domain_id,
+                "context": context,
+                "lifecycle": lifecycle,
+                "kind": kind,
+                "search": search,
+            }
+            key = decode_cursor(cursor, filters, 2)
+            # strpos is a literal substring: %, _ and backslash have no SQL pattern meaning.
+            rows = c.execute(
+                f"""SELECT f.*, {_ACTIVE_CONFLICT} AS needs_confirmation
+                FROM pulsara_v3.memory_facts f
+                WHERE memory_domain_id=%s AND context_id=%s AND lifecycle=%s
+                  AND (%s::text IS NULL OR fact_kind=%s)
+                  AND strpos(lower(statement), lower(%s))>0
+                  AND (%s::timestamptz IS NULL OR (updated_at,id)<(%s::timestamptz,%s))
+                ORDER BY updated_at DESC,id DESC LIMIT %s""",
+                (
+                    memory_domain_id,
+                    context,
+                    "ACTIVE" if lifecycle == "active" else "SUPERSEDED",
+                    kind,
+                    kind,
+                    search,
+                    None if key is None else key[0],
+                    None if key is None else key[0],
+                    None if key is None else key[1],
+                    limit + 1,
+                ),
+            ).fetchall()
+            selected = rows[:limit]
+            labels = self._management_labels(c, memory_domain_id)
+            return {
+                "items": [
+                    {
+                        **asdict(MemoryManagementFact.from_row(row)),
+                        "needs_confirmation": row["needs_confirmation"],
+                        "context_label": labels.get(context, "项目"),
+                    }
+                    for row in selected
+                ],
+                "next_cursor": encode_cursor(
+                    filters,
+                    (selected[-1]["updated_at"].isoformat(), selected[-1]["id"]),
+                )
+                if len(rows) > limit
+                else None,
+            }
+
+    @staticmethod
+    def _management_labels(c, domain):
+        return {
+            CTX_GLOBAL: "跨对话",
+            **{
+                r["workspace_id"]: r["label"]
+                for r in c.execute(
+                    _PROJECTS + "SELECT * FROM projects", (domain,)
+                ).fetchall()
+            },
+        }
+
+    def memory_management_detail(
+        self,
+        *,
+        memory_domain_id,
+        selection,
+        fact_id,
+        provenance_workspace_id,
+        deadline_monotonic,
+        limit=40,
+        cursor=None,
+    ):
+        page_size(limit)
+        with self._management_connection(deadline_monotonic=deadline_monotonic) as c:
+            _remaining(c, deadline_monotonic)
+            context = self._management_context(c, memory_domain_id, selection)
+            filters = {
+                "domain": memory_domain_id,
+                "context": context,
+                "fact_id": fact_id,
+            }
+            key = decode_cursor(cursor, filters, 3)
+            row = c.execute(
+                f"""SELECT f.*, {_ACTIVE_CONFLICT} AS needs_confirmation,
+                candidate.decision_public_summary, candidate.origin_workspace_id,
+                candidate.origin_session_id, candidate.producer_entry_id, e.turn_id, s.lifecycle AS source_session_lifecycle
+                FROM pulsara_v3.memory_facts f JOIN pulsara_v3.memory_candidates candidate ON candidate.id=f.source_candidate_id
+                JOIN pulsara_v3.transcript_entries e ON e.id=candidate.producer_entry_id AND e.session_id=candidate.origin_session_id
+                JOIN pulsara_v3.sessions s ON s.id=candidate.origin_session_id
+                WHERE f.memory_domain_id=%s AND f.context_id=%s AND f.id=%s""",
+                (memory_domain_id, context, fact_id),
+            ).fetchone()
+            if row is None:
+                raise MemoryManagementError("MEMORY_NOT_FOUND", 404, "这条记忆已不存在")
+            relations = c.execute(
+                """SELECT r.*, owner.decision_public_summary
+                FROM pulsara_v3.memory_relations r JOIN pulsara_v3.memory_candidates owner ON owner.id=r.decision_candidate_id
+                WHERE r.memory_domain_id=%s AND (r.source_fact_id=%s OR r.target_fact_id=%s)
+                  AND (%s::text IS NULL OR (r.relation_kind,r.accepted_at,r.id)>(%s,%s::timestamptz,%s))
+                ORDER BY r.relation_kind,r.accepted_at,r.id LIMIT %s""",
+                (
+                    memory_domain_id,
+                    fact_id,
+                    fact_id,
+                    None if key is None else key[0],
+                    None if key is None else key[0],
+                    None if key is None else key[1],
+                    None if key is None else key[2],
+                    limit + 1,
+                ),
+            ).fetchall()
+            companions = {
+                r["target_fact_id"]
+                if r["source_fact_id"] == fact_id
+                else r["source_fact_id"]
+                for r in relations[:limit]
+            }
+            facts = {
+                r["id"]: r
+                for r in c.execute(
+                    "SELECT * FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s AND id=ANY(%s)",
+                    (memory_domain_id, sorted(companions)),
+                ).fetchall()
+            }
+            labels = self._management_labels(c, memory_domain_id)
+            chosen = relations[:limit]
+            return {
+                "fact": {
+                    **asdict(MemoryManagementFact.from_row(row)),
+                    "needs_confirmation": row["needs_confirmation"],
+                    "context_label": labels.get(context, "项目"),
+                },
+                "formation": "在对话中记住",
+                "public_summary": row["decision_public_summary"],
+                "source": {
+                    "session_id": row["origin_session_id"],
+                    "turn_id": row["turn_id"],
+                    "entry_id": row["producer_entry_id"],
+                }
+                if row["source_session_lifecycle"] == "OPEN"
+                and row["origin_workspace_id"]
+                == (context if selection.view == "project" else provenance_workspace_id)
+                else None,
+                "relations": [
+                    self._management_relation(
+                        r,
+                        row,
+                        facts[
+                            r["target_fact_id"]
+                            if r["source_fact_id"] == fact_id
+                            else r["source_fact_id"]
+                        ],
+                    )
+                    for r in chosen
+                ],
+                "next_cursor": encode_cursor(
+                    filters,
+                    (
+                        chosen[-1]["relation_kind"],
+                        chosen[-1]["accepted_at"].isoformat(),
+                        chosen[-1]["id"],
+                    ),
+                )
+                if len(relations) > limit
+                else None,
+            }
+
+    @staticmethod
+    def _management_relation(relation, subject, companion):
+        return {
+            "relation_id": relation["id"],
+            "subject": asdict(MemoryManagementFact.from_row(subject)),
+            "companion": asdict(MemoryManagementFact.from_row(companion)),
+            "relative_role": relative_role(
+                relation["relation_kind"],
+                selected_is_source=relation["source_fact_id"] == subject["id"],
+            ).value,
+            "recorded_at": canonical_memory_recorded_at(relation["accepted_at"]),
+            "public_summary": relation.get("decision_public_summary"),
+        }
+
+    def memory_deletion_preview(
+        self, *, memory_domain_id, selection, fact_id, additional=(), deadline_monotonic
+    ):
+        with self._management_connection(deadline_monotonic=deadline_monotonic) as c:
+            _remaining(c, deadline_monotonic)
+            plan = self._memory_deletion_plan(
+                c, memory_domain_id, selection, fact_id, additional
+            )
+        return plan.confirmation
+
+    def _memory_deletion_plan(self, c, domain, selection, root, additional):
+        from .memory import (
+            MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_CONTEXT,
+            MAXIMUM_RESPONSE_PREFERENCE_CONTEXT_PROJECTION_BYTES,
+        )
+
+        context = self._management_context(c, domain, selection)
+        if (
+            c.execute(
+                "SELECT id FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s AND context_id=%s AND id=%s",
+                (domain, context, root),
+            ).fetchone()
+            is None
+        ):
+            raise MemoryManagementError("MEMORY_NOT_FOUND", 404, "这条记忆已不存在")
+        additional = tuple(sorted(set(additional) - {root}))
+        seeds = (root, *additional)
+        # Read the connected basis/update neighborhood, and one-hop conflict endpoints.
+        # UNION terminates cycles without a history, inventory, or graph-depth cutoff.
+        relations = c.execute(
+            """WITH RECURSIVE neighborhood(id) AS (
+            SELECT id FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s AND id=ANY(%s)
+            UNION
+            SELECT CASE WHEN r.source_fact_id=n.id THEN r.target_fact_id ELSE r.source_fact_id END
+            FROM neighborhood n JOIN pulsara_v3.memory_relations r
+              ON r.memory_domain_id=%s AND (r.source_fact_id=n.id OR r.target_fact_id=n.id)
+            WHERE r.relation_kind IN ('BASED_ON','SUPERSEDES')
+        ) SELECT DISTINCT r.* FROM pulsara_v3.memory_relations r
+          WHERE r.memory_domain_id=%s AND (r.source_fact_id IN (SELECT id FROM neighborhood)
+                                     OR r.target_fact_id IN (SELECT id FROM neighborhood))
+          ORDER BY r.id""",
+            (domain, list(seeds), domain, domain),
+        ).fetchall()
+        graph = deletion_graph(seeds, relations)
+        ids = set(seeds) | {
+            e[k] for e in relations for k in ("source_fact_id", "target_fact_id")
+        }
+        facts = {
+            r["id"]: r
+            for r in c.execute(
+                "SELECT * FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s AND id=ANY(%s) ORDER BY id",
+                (domain, sorted(ids)),
+            ).fetchall()
+        }
+        if not set(seeds) <= facts.keys():
+            raise MemoryManagementError(
+                "MEMORY_NOT_FOUND", 404, "一并删除的记忆已不存在"
+            )
+        removed = [r for r in relations if r["id"] in graph.relation_ids]
+        restores = [
+            facts[i] for i in graph.restore_ids if facts[i]["lifecycle"] == "SUPERSEDED"
+        ]
+        restores.sort(key=lambda r: (r["context_id"], r["accepted_at"], r["id"]))
+        deleted = sorted(graph.delete_ids)
+        candidates = c.execute(
+            """SELECT c.* FROM pulsara_v3.memory_candidates c
+            WHERE c.memory_domain_id=%s AND (
+              c.accepted_fact_id=ANY(%s) OR c.related_target_fact_id=ANY(%s)
+              OR c.duplicate_winner_fact_id=ANY(%s) OR c.applied_existing_fact_id=ANY(%s)
+              OR c.id=ANY(%s) OR c.id IN (SELECT candidate_id FROM pulsara_v3.memory_candidate_basis_refs
+                                        WHERE memory_domain_id=%s AND target_fact_id=ANY(%s)))
+            ORDER BY c.id""",
+            (
+                domain,
+                deleted,
+                deleted,
+                deleted,
+                deleted,
+                [r["decision_candidate_id"] for r in removed],
+                domain,
+                deleted,
+            ),
+        ).fetchall()
+        normalize = [
+            r
+            for r in candidates
+            if r["accepted_fact_id"] is not None
+            and r["accepted_fact_id"] not in graph.delete_ids
+        ]
+        for candidate in normalize:
+            if (
+                candidate["status"] != "ACCEPTED"
+                or candidate["decision_kind"]
+                not in {"ACCEPT_AND_SUPERSEDE", "ACCEPT_AND_CONTRADICT"}
+                or candidate["related_target_fact_id"] not in graph.delete_ids
+            ):
+                raise RuntimeError(
+                    "surviving candidate cannot be normalized under the deletion contract"
+                )
+        normalize_ids = {r["id"] for r in normalize}
+        candidate_deletes = [r for r in candidates if r["id"] not in normalize_ids]
+        candidate_ids = [r["id"] for r in candidate_deletes]
+        tool_refs = c.execute(
+            "SELECT * FROM pulsara_v3.memory_candidate_tool_result_refs WHERE candidate_id=ANY(%s) ORDER BY candidate_id,ordinal",
+            (candidate_ids,),
+        ).fetchall()
+        basis_refs = c.execute(
+            "SELECT * FROM pulsara_v3.memory_candidate_basis_refs WHERE candidate_id=ANY(%s) ORDER BY candidate_id,ordinal",
+            (candidate_ids,),
+        ).fetchall()
+        conflicts = []
+
+        def conflict(reason, subject, companion=None, group=None):
+            conflicts.append(
+                {
+                    "type": "RESTORATION_CONFLICT",
+                    "reason": reason,
+                    "subject": asdict(MemoryManagementFact.from_row(subject)),
+                    "companion": None
+                    if companion is None
+                    else asdict(MemoryManagementFact.from_row(companion)),
+                    "group": group or subject["id"],
+                }
+            )
+
+        for target, ancestor in graph.blocked_ancestry:
+            conflict("SURVIVING_SUPERSEDE_ANCESTRY", facts[target], facts[ancestor])
+        contexts = sorted({r["context_id"] for r in restores})
+        active = c.execute(
+            """SELECT * FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s
+            AND context_id=ANY(%s) AND lifecycle='ACTIVE' AND NOT(id=ANY(%s))
+            AND (fact_kind='RESPONSE_PREFERENCE' OR fact_semantic_digest=ANY(%s)) ORDER BY accepted_at,id""",
+            (domain, contexts, deleted, [r["fact_semantic_digest"] for r in restores]),
+        ).fetchall()
+        active_by_key = {
+            (r["context_id"], r["fact_semantic_digest"]): r for r in active
+        }
+        groups = {}
+        for restored in restores:
+            key = (restored["context_id"], restored["fact_semantic_digest"])
+            groups.setdefault(key, []).append(restored)
+            if key in active_by_key:
+                conflict("ACTIVE_SEMANTIC_COLLISION", restored, active_by_key[key])
+        for group in groups.values():
+            if len(group) > 1:
+                anchor = min(r["id"] for r in group)
+                for r in group:
+                    conflict("RESTORATION_SEMANTIC_COLLISION", r, group=anchor)
+        preference_contexts = sorted(
+            {
+                r["context_id"]
+                for r in restores
+                if r["fact_kind"] == "RESPONSE_PREFERENCE"
+            }
+        )
+        for pref_context in preference_contexts:
+            preferences = sorted(
+                [
+                    r
+                    for r in (*active, *restores)
+                    if r["fact_kind"] == "RESPONSE_PREFERENCE"
+                    and r["context_id"] == pref_context
+                ],
+                key=lambda r: (r["accepted_at"], r["id"]),
+            )
+            payload = [
+                memory_response_preference_item_payload(
+                    memory_id=r["id"],
+                    context_id=r["context_id"],
+                    statement=r["statement"],
+                    recorded_at=canonical_memory_recorded_at(r["accepted_at"]),
+                )
+                for r in preferences
+            ]
+            if (
+                len(payload) > MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_CONTEXT
+                or len(canonical_json_bytes(payload))
+                > MAXIMUM_RESPONSE_PREFERENCE_CONTEXT_PROJECTION_BYTES
+            ):
+                for r in restores:
+                    if (
+                        r["fact_kind"] == "RESPONSE_PREFERENCE"
+                        and r["context_id"] == pref_context
+                    ):
+                        conflict("RESPONSE_PREFERENCE_CAPACITY", r, group=pref_context)
+        owners = {
+            r["id"]: r
+            for r in c.execute(
+                "SELECT id,decision_public_summary FROM pulsara_v3.memory_candidates WHERE id=ANY(%s)",
+                ([r["decision_candidate_id"] for r in relations],),
+            ).fetchall()
+        }
+        effects = []
+        final_active = {
+            r["id"]
+            for r in facts.values()
+            if r["lifecycle"] == "ACTIVE" and r["id"] not in graph.delete_ids
+        } | {r["id"] for r in restores}
+        for relation in relations:
+            effect = (
+                "REMOVED"
+                if relation["id"] in graph.relation_ids
+                else (
+                    "BECOMES_ACTIVE_CONFLICT"
+                    if relation["relation_kind"] == "CONTRADICTS"
+                    and relation["source_fact_id"] in final_active
+                    and relation["target_fact_id"] in final_active
+                    and (
+                        relation["source_fact_id"] in graph.restore_ids
+                        or relation["target_fact_id"] in graph.restore_ids
+                    )
+                    else None
+                )
+            )
+            if effect is None:
+                continue
+            relation = {
+                **relation,
+                "decision_public_summary": owners[relation["decision_candidate_id"]][
+                    "decision_public_summary"
+                ],
+            }
+            effects.append(
+                {
+                    "type": "RELATION_EFFECT",
+                    **self._management_relation(
+                        relation,
+                        facts[relation["source_fact_id"]],
+                        facts[relation["target_fact_id"]],
+                    ),
+                    "effect": effect,
+                }
+            )
+        effects.sort(
+            key=lambda r: (
+                r["relation_id"],
+                r["effect"],
+                r["subject"]["fact_id"],
+                r["companion"]["fact_id"],
+            )
+        )
+        conflicts.sort(
+            key=lambda r: (
+                r["reason"],
+                r["subject"]["context_id"],
+                r["group"],
+                r["subject"]["fact_id"],
+                "" if r["companion"] is None else r["companion"]["fact_id"],
+            )
+        )
+        delete_rows = sorted(
+            [facts[i] for i in graph.delete_ids],
+            key=lambda r: (r["memory_domain_id"], r["context_id"], r["id"]),
+        )
+        records = tuple(
+            canonical_json_bytes(r)
+            for r in with_end(
+                confirmation_records(
+                    selection=selection,
+                    root=root,
+                    additional=additional,
+                    deletes=map(MemoryManagementFact.from_row, delete_rows),
+                    effects=effects,
+                    restores=map(MemoryManagementFact.from_row, restores),
+                    conflicts=conflicts,
+                )
+            )
+        )
+        return FrozenMemoryDeletionPlan(
+            _frozen_rows(delete_rows),
+            _frozen_rows(removed),
+            _frozen_rows(candidate_deletes),
+            _frozen_rows(tool_refs),
+            _frozen_rows(basis_refs),
+            _frozen_rows(normalize),
+            _frozen_rows(restores),
+            tuple(sorted(set(facts) | {r["id"] for r in active})),
+            tuple(preference_contexts),
+            records,
+        )
+
+    def execute_memory_deletion(
+        self,
+        *,
+        memory_domain_id,
+        selection,
+        fact_id,
+        additional,
+        expected_records,
+        deadline_monotonic,
+    ):
+        from .memory import _MemoryOperations
+
+        # Only concrete memory FK/unique conflicts can mean a concurrently added reference.
+        reference_conflicts = {
+            "memory_candidate_fact_fk",
+            "memory_candidate_related_target_fk",
+            "memory_candidate_duplicate_winner_fk",
+            "memory_candidate_applied_existing_fk",
+            "memory_candidate_basis_refs_memory_domain_id_target_contex_fkey",
+            "memory_candidate_basis_refs_candidate_id_memory_domain_id__fkey",
+            "memory_candidate_tool_result__candidate_id_origin_session__fkey",
+            "memory_relations_memory_domain_id_source_context_id_source_fkey",
+            "memory_relations_memory_domain_id_target_context_id_target_fkey",
+            "memory_relations_decision_candidate_id_memory_domain_id_fkey",
+            "memory_facts_source_candidate_id_id_fkey",
+            "uq_pulsara_v3_memory_active_semantic",
+        }
+        while True:
+            if monotonic() >= deadline_monotonic:
+                raise MemoryManagementError(
+                    "MEMORY_DELETION_PLANNING_TIMEOUT",
+                    504,
+                    "记忆删除超时，尚未删除，请重试",
+                )
+            try:
+                with self._management_connection(
+                    deadline_monotonic=deadline_monotonic, execute=True
+                ) as c:
+                    _remaining(c, deadline_monotonic)
+                    plan = self._memory_deletion_plan(
+                        c, memory_domain_id, selection, fact_id, additional
+                    )
+                    c.execute(
+                        "SELECT id FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
+                        (memory_domain_id, list(plan.lock_fact_ids)),
+                    ).fetchall()
+                    for table, rows in (
+                        ("memory_relations", plan.relations),
+                        ("memory_candidates", (*plan.candidates, *plan.normalize)),
+                    ):
+                        c.execute(
+                            sql.SQL(
+                                "SELECT id FROM pulsara_v3.{} WHERE id=ANY(%s) ORDER BY id FOR UPDATE"
+                            ).format(sql.Identifier(table)),
+                            ([dict(r)["id"] for r in rows],),
+                        ).fetchall()
+                    for table in (
+                        "memory_candidate_tool_result_refs",
+                        "memory_candidate_basis_refs",
+                    ):
+                        c.execute(
+                            sql.SQL(
+                                "SELECT candidate_id FROM pulsara_v3.{} WHERE candidate_id=ANY(%s) ORDER BY candidate_id,ordinal FOR UPDATE"
+                            ).format(sql.Identifier(table)),
+                            ([dict(r)["id"] for r in plan.candidates],),
+                        ).fetchall()
+                    fresh = self._memory_deletion_plan(
+                        c, memory_domain_id, selection, fact_id, additional
+                    )
+                    if fresh.lock_fact_ids != plan.lock_fact_ids:
+                        c.rollback()
+                        continue
+                    for context in fresh.preference_contexts:
+                        # Reuse governance's exact lock key and owner boundary.
+                        from types import SimpleNamespace
+
+                        _MemoryOperations._lock_response_preference_context(
+                            c,
+                            SimpleNamespace(
+                                memory_domain_id=memory_domain_id, context_id=context
+                            ),
+                        )
+                    plan = self._memory_deletion_plan(
+                        c, memory_domain_id, selection, fact_id, additional
+                    )
+                    if any(
+                        a != b
+                        for a, b in zip_longest(plan.confirmation, expected_records())
+                    ):
+                        raise MemoryManagementError(
+                            "MEMORY_DELETION_PLAN_DRIFTED",
+                            409,
+                            "记忆已发生变化，请重新确认",
+                            preview=plan.confirmation,
+                        )
+                    import json
+
+                    if json.loads(plan.confirmation[0])["disposition"] != "READY":
+                        raise MemoryManagementError(
+                            "MEMORY_DELETION_NEEDS_RESOLUTION",
+                            409,
+                            "请选择需要一并删除的旧记忆",
+                            preview=plan.confirmation,
+                        )
+                    _remaining(c, deadline_monotonic)
+                    for table, rows in (
+                        ("memory_candidate_tool_result_refs", plan.tool_refs),
+                        ("memory_candidate_basis_refs", plan.basis_refs),
+                        ("memory_relations", plan.relations),
+                    ):
+                        self._memory_exact_delete(c, table, rows)
+                    for frozen in plan.normalize:
+                        old = dict(frozen)
+                        row = c.execute(
+                            """UPDATE pulsara_v3.memory_candidates SET decision_kind='ACCEPT', related_target_fact_id=NULL
+                            WHERE id=%s RETURNING *""",
+                            (old["id"],),
+                        ).fetchone()
+                        expected = {
+                            **old,
+                            "decision_kind": "ACCEPT",
+                            "related_target_fact_id": None,
+                        }
+                        if _freeze(row) != _freeze(expected):
+                            raise RuntimeError(
+                                "memory candidate normalization changed unexpected fields"
+                            )
+                    self._memory_exact_delete(c, "memory_candidates", plan.candidates)
+                    self._memory_exact_delete(c, "memory_facts", plan.facts)
+                    operation_at = datetime.now(timezone.utc)
+                    for frozen in plan.restore:
+                        old = dict(frozen)
+                        row = c.execute(
+                            "UPDATE pulsara_v3.memory_facts SET lifecycle='ACTIVE',updated_at=%s WHERE id=%s RETURNING *",
+                            (operation_at, old["id"]),
+                        ).fetchone()
+                        if _freeze(row) != _freeze(
+                            {**old, "lifecycle": "ACTIVE", "updated_at": operation_at}
+                        ):
+                            raise RuntimeError(
+                                "memory restoration changed unexpected fields"
+                            )
+                    _remaining(c, deadline_monotonic)
+                    c.execute("SET CONSTRAINTS ALL IMMEDIATE")
+                    result = []
+                    for raw in plan.confirmation:
+                        record = json.loads(raw)
+                        if record["type"] == "HEADER":
+                            record.pop("disposition")
+                            record["result"] = "DELETED"
+                        elif record["type"] in {"ADDITIONAL_ROOT", "END"}:
+                            continue
+                        elif record["type"] == "FACT_RESTORE":
+                            record["fact"]["lifecycle"] = "ACTIVE"
+                            record["fact"]["updated_at"] = operation_at.isoformat()
+                        result.append(record)
+                    result = tuple(canonical_json_bytes(r) for r in with_end(result))
+                return result
+            except (
+                DeadlockDetected,
+                SerializationFailure,
+                LockNotAvailable,
+                QueryCanceled,
+            ):
+                continue
+            except (ForeignKeyViolation, UniqueViolation) as exc:
+                if exc.diag.constraint_name not in reference_conflicts:
+                    raise
+
+    @staticmethod
+    def _memory_exact_delete(c, table, rows):
+        for frozen in rows:
+            old = dict(frozen)
+            keys = ("candidate_id", "ordinal") if table.endswith("_refs") else ("id",)
+            statement = sql.SQL(
+                "DELETE FROM pulsara_v3.{} WHERE {} RETURNING *"
+            ).format(
+                sql.Identifier(table),
+                sql.SQL(" AND ").join(
+                    sql.SQL("{}=%s").format(sql.Identifier(k)) for k in keys
+                ),
+            )
+            actual = c.execute(statement, tuple(old[k] for k in keys)).fetchall()
+            if len(actual) != 1 or _freeze(actual[0]) != frozen:
+                raise RuntimeError("memory deletion row differs from its locked plan")

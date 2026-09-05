@@ -105,12 +105,31 @@ def test_round3_1_scope_and_frontier_are_closed() -> None:
         ProcessLocalCanonicalFrontier(
             latest_context_binding_revision_id="revision:1",
             context_base_semantic_identity="sha256:" + "0" * 64,
-            through_sequence=0,
+            through_sequence=-1,
             ordered_item_fingerprints=(
                 "sha256:" + "1" * 64,
                 "sha256:" + "2" * 64,
             ),
         )
+
+
+def test_frontier_entry_cut_does_not_limit_lowered_blocks_or_tool_closures() -> None:
+    frontier = ProcessLocalCanonicalFrontier(
+        latest_context_binding_revision_id="revision:1",
+        context_base_semantic_identity="sha256:" + "0" * 64,
+        through_sequence=1,
+        ordered_item_fingerprints=tuple("sha256:" + str(i) * 64 for i in range(5)),
+    )
+    successor = replace(
+        frontier,
+        through_sequence=2,
+        ordered_item_fingerprints=frontier.ordered_item_fingerprints + ("sha256:" + "5" * 64,),
+    )
+    frontier.require_prefix_of(successor)
+    with pytest.raises(ValueError, match="prefix was rewritten"):
+        frontier.require_prefix_of(replace(successor, ordered_item_fingerprints=successor.ordered_item_fingerprints[1:]))
+    with pytest.raises(ValueError, match="sequence moved backwards"):
+        successor.require_prefix_of(frontier)
 
 
 def test_round3_1_epoch_compatibility_excludes_per_call_identity() -> None:

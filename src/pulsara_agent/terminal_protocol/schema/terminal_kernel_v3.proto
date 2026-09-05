@@ -175,6 +175,12 @@ message CanonicalReasoningBlock {
   CanonicalContentReference content = 4;
 }
 
+message CanonicalToolResult {
+  string assistant_entry_id = 1;
+  string tool_call_id = 2;
+  string result_state = 3;
+}
+
 message CanonicalEntry {
   string entry_id = 1;
   string turn_id = 2;
@@ -189,6 +195,7 @@ message CanonicalEntry {
   string accepted_at_utc = 11;
   repeated CanonicalReasoningBlock reasoning_blocks = 12;
   string source_subagent_task_id = 13;
+  CanonicalToolResult tool_result = 14;
 }
 
 message ActiveTurnControl {
@@ -289,6 +296,12 @@ message ContextCompactionControl {
   string accepted_at_utc = 5;
 }
 
+message LatestRootTurnControl {
+  string turn_id = 1;
+  string status = 2;
+  string terminal_reason = 3;
+}
+
 message CanonicalControl {
   string session_lifecycle = 1;
   repeated ActiveTurnControl active_turns = 2;
@@ -301,6 +314,7 @@ message CanonicalControl {
   PlanInteractionControl open_plan_interaction = 10;
   PlanHandoffControl latest_plan_handoff = 11;
   ContextCompactionControl latest_context_compaction = 12;
+  LatestRootTurnControl latest_root_turn = 13;
 }
 
 message HistoryCursor {

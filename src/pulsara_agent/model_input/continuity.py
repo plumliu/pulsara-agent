@@ -115,8 +115,10 @@ class ProcessLocalCanonicalFrontier:
         if not self.latest_context_binding_revision_id or self.through_sequence < 0:
             raise ValueError("canonical frontier identity is invalid")
         _fingerprint(self.context_base_semantic_identity, "context base")
-        if len(self.ordered_item_fingerprints) > self.through_sequence + 1:
-            raise ValueError("canonical frontier item count exceeds its sequence cut")
+        # The cut counts transcript entries, not lowered input items. One
+        # entry can expose multiple blocks; interrupted calls also need
+        # derived closure items. Prefix equality below protects the actual
+        # ordered input independently of the canonical sequence cut.
         for value in self.ordered_item_fingerprints:
             _fingerprint(value, "canonical item")
 

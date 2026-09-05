@@ -33,7 +33,7 @@ import {
   WandSparkles,
   Zap,
 } from 'lucide-react';
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ContextCompactionBoundary,
   ModelCallBindingPayload,
@@ -48,6 +48,7 @@ import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline } from './markdown-body';
 
 interface WorkbenchViewProps {
+  focusMemoryEntry?: { sessionId: string; entryId: string };
   workspace: Workspace;
   session: SessionSummary;
   messages: Message[];
@@ -1007,6 +1008,7 @@ function reasoningSelectionLabel(
 }
 
 export function WorkbenchView({
+  focusMemoryEntry,
   workspace,
   session,
   messages,
@@ -1093,6 +1095,18 @@ export function WorkbenchView({
     [contextCompactionIndex, messages],
   );
   const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
+
+  const locatedMemoryRequest = useRef<typeof focusMemoryEntry>(undefined);
+  useEffect(() => {
+    if (!focusMemoryEntry || locatedMemoryRequest.current === focusMemoryEntry || focusMemoryEntry.sessionId !== session.id) return;
+    const target = [...(threadRef.current?.querySelectorAll<HTMLElement>('[data-memory-entry]') ?? [])]
+      .find(element => element.dataset.memoryEntry === focusMemoryEntry.entryId)?.firstElementChild;
+    if (!target) return;
+    locatedMemoryRequest.current = focusMemoryEntry;
+    followLatestRef.current = false;
+    const frame = requestAnimationFrame(() => target.scrollIntoView({ block: 'center' }));
+    return () => cancelAnimationFrame(frame);
+  }, [focusMemoryEntry, session.id, messages]);
 
   const insertSkill = useCallback((name: string) => {
     const marker = `$${name}`;
@@ -1306,6 +1320,11 @@ export function WorkbenchView({
         }}
       >
         <div className="thread-column">
+          {session.status === 'interrupted' && runtimeStatus === 'online' && (
+            <div className="runtime-banner" role="status">
+              本轮执行已中断，未正常完成。你可以发送新消息继续。
+            </div>
+          )}
           {runtimeStatus !== 'online' && (
             <div className={`runtime-banner runtime-banner--${runtimeStatus}`}>
               <span>{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在重新连接…' : runtimeError ?? '本地服务未连接。'}</span>
@@ -1320,7 +1339,7 @@ export function WorkbenchView({
             </div>
           )}
           {messages.map((message, index) => (
-            <Fragment key={message.id}>
+            <div key={message.id} data-memory-entry={message.id} style={{ display: 'contents' }}>
               {contextCompactionIndex === index && contextCompaction && (
                 <ContextCompactionDivider />
               )}
@@ -1340,7 +1359,7 @@ export function WorkbenchView({
                     onNotify={onNotify}
                   />
                 )}
-            </Fragment>
+            </div>
           ))}
           {contextCompactionIndex === messages.length && contextCompaction && (
             <ContextCompactionDivider />

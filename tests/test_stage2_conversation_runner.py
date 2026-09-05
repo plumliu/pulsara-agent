@@ -4482,6 +4482,87 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
     assert user_messages == ["initial", "steer one", "steer two"]
 
 
+def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
+    stage2_migrated_postgres_database, tmp_path,
+) -> None:
+    from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
+    from pulsara_agent.conversation_kernel.io import KernelSessionIO
+    from pulsara_agent.memory.scope import MemoryDomainContext, freeze_memory_read_context_binding
+    from pulsara_agent.retrieval.config import EmbeddingBackendConfig
+    from pulsara_agent.settings import LocalSettingsStore
+    from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, workspace_id = _name("session"), _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository, session_id=session_id, workspace_id=workspace_id,
+        writer_owner_id=_name("host"), lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    io = KernelSessionIO()
+    memory = KernelMemoryToolPort(
+        repository=repository, session_id=session_id,
+        read_binding=freeze_memory_read_context_binding(
+            domain=MemoryDomainContext("test", "transient"), host_workspace_id=workspace_id,
+        ),
+        embedding_config=EmbeddingBackendConfig(), io_owner=io,
+        settings=LocalSettingsStore(tmp_path / "settings.yaml"),
+    )
+
+    class MemoryDelegate(_AssertingTool):
+        async def invoke(self, *, tool_name, arguments, invocation_context, **kwargs):
+            return await memory.invoke(
+                tool_name=tool_name, arguments=arguments, invocation_context=invocation_context,
+            )
+
+    model = _ScriptedModel([
+        _named_tool_stream(tool_name="remember", tool_call_id="call:bad-citation", arguments={
+            "statement": "Test memory", "context_target": "GLOBAL", "kind_hint": "FACT",
+            "cited_tool_result_handles": ["tool:not-visible"],
+        }),
+        _text_stream("记忆引用无效，本次未保存。"),
+        _text_stream("下一轮仍可以正常回复。"),
+    ])
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository, writer_lease=lease, model=model,
+        tools=StructuredToolPort(MemoryDelegate(provider, session_id), tool_names=("remember",)),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+
+    async def exercise():
+        try:
+            first = await runner.run_turn("Please save the test memory")
+            assert first.final_text == "记忆引用无效，本次未保存。"
+            second = await runner.run_turn("Continue normally")
+            assert second.final_text == "下一轮仍可以正常回复。"
+        finally:
+            await memory.aclose()
+            await io.aclose(deadline_monotonic=monotonic() + 10)
+
+    asyncio.run(exercise())
+    assert len(model.requests) == 3
+    snapshot = CanonicalProtocolReader(provider).snapshot(
+        session_id=session_id, maximum_entries=10, maximum_control_items=20,
+        deadline_monotonic=monotonic() + 10,
+    )
+    assert snapshot.control.latest_root_turn.status == "COMPLETED"
+    assert not snapshot.control.active_turns
+    result_entries = [entry for entry in snapshot.entries if entry.HasField("tool_result")]
+    assert len(result_entries) == 1
+    assert result_entries[0].tool_result.result_state == "APPLICATION_ERROR"
+    assert result_entries[0].tool_result.tool_call_id == "call:bad-citation"
+    assert result_entries[0].tool_result.assistant_entry_id in {
+        entry.entry_id for entry in snapshot.entries if entry.blocks
+    }
+    with provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 10) as c:
+        assert c.execute("SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s", (session_id,)).fetchall() == [("APPLICATION_ERROR",)]
+        assert c.execute("SELECT status FROM pulsara_v3.turns WHERE session_id=%s ORDER BY accepted_at", (session_id,)).fetchall() == [("COMPLETED",), ("COMPLETED",)]
+        assert c.execute("SELECT count(*) FROM pulsara_v3.memory_candidates WHERE origin_session_id=%s", (session_id,)).fetchone()[0] == 0
+
+
 def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
     stage2_migrated_postgres_database,
 ) -> None:

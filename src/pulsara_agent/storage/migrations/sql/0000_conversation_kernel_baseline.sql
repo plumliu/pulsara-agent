@@ -1372,7 +1372,7 @@ CREATE TABLE pulsara_v3.memory_facts (
     UNIQUE (source_candidate_id, id),
     FOREIGN KEY (source_candidate_id, id)
         REFERENCES pulsara_v3.memory_candidates (id, accepted_fact_id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (fact_kind <> 'RESPONSE_PREFERENCE' OR octet_length(statement) <= 2048)
 );
 CREATE UNIQUE INDEX uq_pulsara_v3_memory_active_semantic

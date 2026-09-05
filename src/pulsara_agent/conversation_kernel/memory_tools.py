@@ -226,7 +226,7 @@ class KernelMemoryToolPort:
         invocation_context: KernelToolInvocationContext,
     ) -> KernelToolResult:
         if self._closed:
-            return _json_result("TOOL_UNAVAILABLE", {"error": "memory owner is closed"})
+            return _json_result("SYSTEM_ERROR", {"error": "memory owner is closed"})
         if invocation_context.session_id != self._session_id:
             return _json_result("SYSTEM_ERROR", {"error": "memory session mismatch"})
         policy = invocation_context.memory_context.memory_use_policy
@@ -244,7 +244,10 @@ class KernelMemoryToolPort:
             if tool_name == "memory_explain":
                 return await self._get(arguments, explain=True)
         except (TypeError, ValueError) as exc:
-            return _json_result("INVALID_ARGUMENTS", {"error": str(exc)})
+            # invoke runs after a canonical attempt has been admitted. A bad
+            # citation/basis is a known application rejection, not a preflight
+            # INVALID_ARGUMENTS outcome (which must have no attempt).
+            return _json_result("APPLICATION_ERROR", {"error": str(exc)})
         raise KeyError(tool_name)
 
     async def _remember(

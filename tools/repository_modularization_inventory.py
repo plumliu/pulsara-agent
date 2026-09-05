@@ -40,6 +40,7 @@ REPOSITORY_OWNER_CLASSES = {
     "_SubagentCompletionOperations",
     "_JobOperations",
     "_MemoryOperations",
+    "_MemoryManagementOperations",
 }
 
 CLOSED_OWNER_RENAMES = {
@@ -343,10 +344,13 @@ def _runtime_contracts(symbols: Iterable[str]) -> dict[str, object]:
     internal_contracts = importlib.import_module(
         "pulsara_agent.conversation_kernel._repository.contracts"
     ) if IMPLEMENTATION_PATH.exists() else None
-    for name in classes:
+    for name, (source_path, _node) in classes.items():
         value = getattr(module, name, None)
         if value is None and internal_contracts is not None:
-            value = getattr(internal_contracts, name)
+            value = getattr(internal_contracts, name, None)
+        if value is None:
+            source_module = ".".join(source_path.relative_to(ROOT / "src").with_suffix("").parts)
+            value = getattr(importlib.import_module(source_module), name)
         assert value is not None
         if is_dataclass(value):
             parameters = value.__dataclass_params__

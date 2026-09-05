@@ -2,6 +2,7 @@
 
 import {
   Blocks,
+  Brain,
   Check,
   Command,
   Gauge,
@@ -28,6 +29,7 @@ interface CommandPaletteProps {
 }
 
 const commandItems = [
+  { id: 'memory', label: '打开记忆', detail: '查看背景、偏好与记忆关系', icon: Brain, view: 'memory' as AppView },
   { id: 'overview', label: '打开总览', detail: '查看运行状态与最近活动', icon: Gauge, view: 'overview' as AppView },
   { id: 'workbench', label: '打开会话工作台', detail: '回到当前活动会话', icon: MessageCircle, view: 'workbench' as AppView },
   { id: 'capabilities', label: '打开能力', detail: '管理插件、MCP 与技能', icon: Blocks, view: 'capabilities' as AppView },

@@ -531,6 +531,20 @@ class CanonicalProtocolReader:
             accepted_at_utc=_utc(row["accepted_at"]),
             source_subagent_task_id=str(row["source_subagent_task_id"] or ""),
         )
+        if row["entry_kind"] == "TOOL_RESULT":
+            tool_result = connection.execute(
+                """SELECT tool_call_entry_id, tool_call_id, result_state
+                   FROM pulsara_v3.tool_results
+                   WHERE session_id=%s AND result_entry_id=%s""",
+                (row["session_id"], entry_id),
+            ).fetchone()
+            if tool_result is None:
+                raise ValueError("canonical tool result is missing its relational row")
+            result.tool_result.CopyFrom(wire.CanonicalToolResult(
+                assistant_entry_id=str(tool_result["tool_call_entry_id"]),
+                tool_call_id=str(tool_result["tool_call_id"]),
+                result_state=str(tool_result["result_state"]),
+            ))
         for ordinal, reasoning in enumerate(self._reasoning_blocks(connection, row)):
             content = reasoning.text.encode("utf-8")
             target = result.reasoning_blocks.add(
@@ -777,6 +791,18 @@ class CanonicalProtocolReader:
             session_lifecycle=lifecycle,
             prompt_queue_total_count=queue_total,
         )
+        latest_root = connection.execute(
+            """SELECT id, status, terminal_reason FROM pulsara_v3.turns
+               WHERE session_id = %s AND conversation_scope_kind = 'ROOT'
+               ORDER BY accepted_at DESC, id DESC LIMIT 1""",
+            (session_id,),
+        ).fetchone()
+        if latest_root is not None:
+            result.latest_root_turn.CopyFrom(wire.LatestRootTurnControl(
+                turn_id=str(latest_root["id"]),
+                status=str(latest_root["status"]),
+                terminal_reason=str(latest_root["terminal_reason"] or ""),
+            ))
         for row in turns:
             target = result.active_turns.add(
                 turn_id=str(row["id"]),

@@ -9,6 +9,8 @@ from typing import Awaitable, Callable, cast
 from uuid import UUID
 
 from aiohttp import web
+from pulsara_agent.web_app.memory_controller import LocalMemoryController
+from pulsara_agent.conversation_kernel.memory.management import MemoryManagementError
 
 from pulsara_agent.conversation_kernel.host import KernelHostCoreClosing
 from pulsara_agent.llm.model_catalog import (
@@ -311,6 +313,12 @@ class LocalHttpServer:
             await runner.cleanup()
 
     def _install_routes(self) -> None:
+        memory = LocalMemoryController(self.sessions)
+        self._app.router.add_get("/api/memories/projects", memory.projects)
+        self._app.router.add_get("/api/memories", memory.catalog)
+        self._app.router.add_get("/api/memories/{fact_id}", memory.detail)
+        self._app.router.add_post("/api/memories/{fact_id}/deletion-preview", memory.deletion)
+        self._app.router.add_delete("/api/memories/{fact_id}", memory.deletion)
         self._app.router.add_get("/healthz", self._health)
         self._app.router.add_get("/", self._index)
         self._app.router.add_get("/og.png", self._public_file)
@@ -474,6 +482,8 @@ class LocalHttpServer:
                 status=409,
                 retryable=False,
             )
+        except MemoryManagementError as exc:
+            return self._error_response(exc.code, str(exc), status=exc.status, retryable=exc.status in {409, 504})
         except LocalSettingsUnavailable:
             return self._error_response(
                 "local_settings_unavailable",
@@ -589,7 +599,7 @@ class LocalHttpServer:
                 )
         if request.path.startswith("/api/") and request.path != "/api/healthz":
             if (
-                request.path.startswith(("/api/sessions", "/api/connections"))
+                request.path.startswith(("/api/sessions", "/api/connections", "/api/memories"))
                 and self._database_state() != "ready"
             ):
                 raise HttpPublicError(

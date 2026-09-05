@@ -8,6 +8,7 @@ import './styles/inspector.css';
 import './styles/overview.css';
 import './styles/settings.css';
 import './styles/capabilities.css';
+import './styles/memory.css';
 import './styles/overlays.css';
 import './styles/responsive.css';
 

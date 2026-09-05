@@ -11,6 +11,41 @@ import type { AgentTask } from './pulsara-types';
 afterEach(() => vi.unstubAllGlobals());
 
 describe('selectPromptCommand', () => {
+  it('joins tool results exactly across interrupted history, reordered results, and paging', async () => {
+    const content = (text: string) => ({ kind: 'INLINE', inline_content: btoa(text) });
+    const request = (id: string, sequence: number, call: string) => ({
+      entry_id: id, turn_id: id === 'old' ? 'turn-old' : 'turn-new', entry_sequence: String(sequence),
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{ block_id: `${id}-block`, block_kind: 'TOOL_CALL', tool_call_id: call, tool_name: 'remember' }],
+    });
+    const result = (id: string, sequence: number, assistant: string, call: string, state: string) => ({
+      entry_id: id, turn_id: 'turn-new', entry_sequence: String(sequence),
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: content('plain text is not a success verdict'),
+      tool_result: { assistant_entry_id: assistant, tool_call_id: call, result_state: state },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: { snapshot: {
+        session_id: 'session-1', writer_generation: '1', event_sequence_cut: '7',
+        entries: [
+          request('old', 1, 'old-call'), request('a', 2, 'call-a'), request('b', 3, 'call-b'),
+          result('result-b', 4, 'b', 'call-b', 'APPLICATION_ERROR'),
+          result('result-a', 5, 'a', 'call-a', 'SUCCESS'),
+          result('detached', 6, 'request-outside-page', 'other-call', 'APPLICATION_ERROR'),
+        ], control: {},
+      } }, live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const messages = connection.current().messages;
+    expect(messages.find(m => m.id === 'old')?.traces?.[0]).toMatchObject({ status: 'cancelled' });
+    expect(messages.find(m => m.id === 'old')?.traces?.[0].resultText).toBeUndefined();
+    expect(messages.find(m => m.id === 'a')?.traces?.[0]).toMatchObject({ status: 'completed' });
+    expect(messages.find(m => m.id === 'b')?.traces?.[0]).toMatchObject({ status: 'failed' });
+    expect(messages.find(m => m.id === 'b')?.traces).toHaveLength(1);
+    expect(messages.find(m => m.id === 'detached')?.traces?.[0]).toMatchObject({ status: 'failed' });
+  });
+
   it('submits a normal prompt when there is no active turn', () => {
     expect(selectPromptCommand(false, false)).toBe('SUBMIT_PROMPT');
   });
@@ -563,12 +598,14 @@ describe('selectPromptCommand', () => {
       },
       {
         entry_id: 'create-result', turn_id: 'turn-root', entry_sequence: '4',
+        tool_result: { assistant_entry_id: 'root-create', tool_call_id: 'call-create', result_state: 'SUCCESS' },
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
         content: content(JSON.stringify({ tasks: [{ task_id: 'task-1', status: 'active' }] })),
       },
       toolRequest(5, 'task-read', 'read_file', 'call-read', 'SUBAGENT_TASK', 'task-1'),
       {
         entry_id: 'read-result', turn_id: 'turn-task-1', entry_sequence: '6',
+        tool_result: { assistant_entry_id: 'task-read', tool_call_id: 'call-read', result_state: 'SUCCESS' },
         entry_kind: 'TOOL_RESULT', scope_kind: 'SUBAGENT_TASK',
         scope_subagent_task_id: 'task-1',
         content: content(JSON.stringify({ status: 'ok', path: 'README.md', total_lines: 1 })),
@@ -582,12 +619,14 @@ describe('selectPromptCommand', () => {
       toolRequest(8, 'root-wait', 'wait_agent', 'call-wait'),
       {
         entry_id: 'wait-result', turn_id: 'turn-root', entry_sequence: '9',
+        tool_result: { assistant_entry_id: 'root-wait', tool_call_id: 'call-wait', result_state: 'SUCCESS' },
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
         content: content(JSON.stringify({ pending_task_ids: [], settled: [{ status: 'completed' }] })),
       },
       toolRequest(10, 'root-denied', 'create_agent_tasks', 'call-denied'),
       {
         entry_id: 'denied-result', turn_id: 'turn-root', entry_sequence: '11',
+        tool_result: { assistant_entry_id: 'root-denied', tool_call_id: 'call-denied', result_state: 'PERMISSION_DENIED' },
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
         content: content('ROOT subagent orchestration requires bypass-permissions mode'),
       },
@@ -602,12 +641,14 @@ describe('selectPromptCommand', () => {
       ),
       {
         entry_id: 'user-denied-result', turn_id: 'turn-root', entry_sequence: '13',
+        tool_result: { assistant_entry_id: 'root-user-denied', tool_call_id: 'call-user-denied', result_state: 'PERMISSION_DENIED' },
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
         content: content('tool execution denied by user'),
       },
       toolRequest(14, 'root-artifact-read', 'artifact_read', 'call-artifact-read'),
       {
         entry_id: 'artifact-read-result', turn_id: 'turn-root', entry_sequence: '15',
+        tool_result: { assistant_entry_id: 'root-artifact-read', tool_call_id: 'call-artifact-read', result_state: 'SUCCESS' },
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
         content: content(JSON.stringify({ status: 'ok', content: 'retained page' })),
       },
@@ -721,6 +762,7 @@ describe('selectPromptCommand', () => {
             }],
           }, {
             entry_id: 'result-mcp-list', turn_id: 'turn-1', entry_sequence: '2',
+            tool_result: { assistant_entry_id: 'assistant-mcp-list', tool_call_id: 'call-mcp-list', result_state: 'SUCCESS' },
             entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: content(resultText),
           }],
           control: {

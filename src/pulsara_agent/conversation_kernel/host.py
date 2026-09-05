@@ -8,6 +8,7 @@ acquires a new writer generation and rehydrates canonical rows only.
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -1834,10 +1835,14 @@ class KernelHostSession:
     def _observe_active_root_task_done(task: asyncio.Task[KernelRunResult]) -> None:
         """Consume a detached ROOT task exception after task-owned settlement."""
 
-        try:
-            task.exception()
-        except (asyncio.CancelledError, Exception):
-            pass
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logging.getLogger(__name__).error(
+                "ROOT execution failed (%s)", task.get_name(),
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def _run_owned_root_task(
         self,
@@ -5134,6 +5139,56 @@ class KernelHostCore:
                     initial_plugin_view.close()
             await io_owner.aclose(deadline_monotonic=deadline)
             raise
+
+    async def memory_management_projects(self, *, memory_domain_id, limit=40, cursor=None):
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.memory_management_projects, memory_domain_id=memory_domain_id,
+            limit=limit, cursor=cursor, deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def memory_management_catalog(self, *, memory_domain_id, selection, **filters):
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.memory_management_catalog, memory_domain_id=memory_domain_id,
+            selection=selection, deadline_monotonic=self._canonical_deadline(), **filters,
+        )
+
+    async def memory_management_detail(self, *, memory_domain_id, selection, fact_id,
+                                       provenance_workspace_id, limit=40, cursor=None):
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.memory_management_detail, memory_domain_id=memory_domain_id,
+            selection=selection, fact_id=fact_id, provenance_workspace_id=provenance_workspace_id,
+            limit=limit, cursor=cursor, deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def memory_deletion_preview(self, *, memory_domain_id, selection, fact_id, additional=()):
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.memory_deletion_preview, memory_domain_id=memory_domain_id,
+            selection=selection, fact_id=fact_id, additional=additional,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def execute_memory_deletion(self, *, memory_domain_id, selection, fact_id, additional, expected_records):
+        repository = await self._ensure_resources()
+        # Join physical execution before the HTTP owner may close its confirmation file.
+        task = asyncio.create_task(asyncio.to_thread(
+            repository.execute_memory_deletion, memory_domain_id=memory_domain_id,
+            selection=selection, fact_id=fact_id, additional=additional, expected_records=expected_records,
+            deadline_monotonic=self._canonical_deadline(),
+        ))
+        cancelled = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        result = task.result()
+        if cancelled is not None:
+            raise cancelled
+        return result
 
     async def list_resumable_sessions(
         self,

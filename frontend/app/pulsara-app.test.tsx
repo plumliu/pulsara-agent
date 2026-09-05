@@ -1,9 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { LocalMemoryApi } from '../lib/memory-api';
 import type {
   CommandReceipt,
   RuntimeAdapter,
   RuntimeBootstrap,
+  ModelCatalogReadModel,
   RuntimeConnection,
   RuntimeInteractionContent,
   RuntimeInteractionSummary,
@@ -307,6 +309,7 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  memory = new LocalMemoryApi();
   sessions = [initialSession];
   modelConfigurations = [...bootstrap.model_configurations];
   taskInventory: AgentTask[] = [];
@@ -334,7 +337,7 @@ class FakeAdapter implements RuntimeAdapter {
     return { ...bootstrap, model_configurations: this.modelConfigurations };
   }
 
-  async modelCatalog() {
+  async modelCatalog(): Promise<ModelCatalogReadModel> {
     return {
       status: 'ready' as const,
       routes: [{
@@ -523,6 +526,22 @@ class FakeAdapter implements RuntimeAdapter {
 }
 
 describe('PulsaraApp', () => {
+  it('shows canonical ROOT interruption instead of treating idle as completed', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(), isRunning: false, activeTurnId: undefined,
+      control: { latest_root_turn: {
+        turn_id: 'turn-interrupted', status: 'INTERRUPTED',
+        terminal_reason: 'FOREGROUND_EXECUTION_INTERRUPTED',
+      } },
+    };
+    render(<PulsaraApp adapter={adapter} />);
+    expect(await screen.findByText('本轮执行已中断，未正常完成。你可以发送新消息继续。')).toBeTruthy();
+    const workbench = screen.getByRole('region', { name: '会话工作台' });
+    expect(within(workbench).getByText('已中断')).toBeTruthy();
+    expect(within(workbench).queryByText('FOREGROUND_EXECUTION_INTERRUPTED')).toBeNull();
+  });
+
   it('opens the real workbench state supplied by its adapter', async () => {
     render(<PulsaraApp adapter={new FakeAdapter()} />);
     expect(await screen.findByRole('heading', { name: '准备发布' })).toBeTruthy();
@@ -537,7 +556,7 @@ describe('PulsaraApp', () => {
     expect(screen.queryByText(/文件已更改|项变更/)).toBeNull();
     expect(screen.queryByRole('button', { name: '添加附件' })).toBeNull();
     expect(screen.getByRole('button', { name: '能力' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: '记忆' })).toBeNull();
+    expect(screen.getByRole('button', { name: '记忆' })).toBeTruthy();
   });
 
   it('keeps the full session catalog in the composer and user-owned capabilities on the first-class page', async () => {
@@ -1790,13 +1809,13 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '模型' }));
     fireEvent.click(screen.getByRole('button', { name: /添加配置/ }));
 
-    const providerSelect = await screen.findByLabelText('提供方') as HTMLSelectElement;
+    const providerSelect = await screen.findByLabelText('提供方') as unknown as HTMLSelectElement;
     expect([...providerSelect.options].slice(1).map((option) => option.value)).toEqual([
       'alpha', 'bravo', 'zulu',
     ]);
 
     fireEvent.change(providerSelect, { target: { value: 'alpha' } });
-    const modelSelect = screen.getByLabelText('模型') as HTMLSelectElement;
+    const modelSelect = screen.getByLabelText('模型') as unknown as HTMLSelectElement;
     expect([...modelSelect.options].slice(1).map((option) => option.value)).toEqual([
       'Alpha-model', 'middle-model', 'zeta-model',
     ]);
@@ -1851,7 +1870,7 @@ describe('PulsaraApp', () => {
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'catalog-only-model' } });
 
     expect(screen.getByText(/没有声明 OpenAI-compatible 接口/)).toBeTruthy();
-    expect((screen.getByLabelText('API 协议') as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByLabelText('API 协议') as unknown as HTMLSelectElement).disabled).toBe(true);
     expect(screen.getByRole('option', { name: 'Chat Completions · 暂不支持' })).toBeTruthy();
     expect(screen.getByRole('option', { name: 'Responses · 暂不支持' })).toBeTruthy();
   });

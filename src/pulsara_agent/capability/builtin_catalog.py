@@ -2156,7 +2156,7 @@ def _catalog_shape(name: str):
         return (
             BuiltinToolBindingKind.MEMORY_PROPOSAL,
             BuiltinToolAvailabilityKind.REQUIRES_MEMORY_PROPOSAL_PORT,
-            both,
+            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "memory_write",
         )
     if name in _SUBAGENT_PARENT:

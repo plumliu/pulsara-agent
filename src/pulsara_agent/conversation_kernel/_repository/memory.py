@@ -73,6 +73,7 @@ from .contracts import (
     ConversationKernelConflict,
     _ObservedActiveMemoryDuplicate,
 )
+from .memory_management import _MemoryManagementOperations
 
 
 MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_CONTEXT = 16
@@ -90,7 +91,7 @@ class AcceptedMemoryGovernance:
     relation_id: str | None = None
 
 
-class _MemoryOperations:
+class _MemoryOperations(_MemoryManagementOperations):
     def confirm_memory_candidate_intake(
         self,
         *,

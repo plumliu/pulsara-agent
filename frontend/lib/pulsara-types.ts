@@ -2,6 +2,7 @@ export type AppView =
   | 'overview'
   | 'workbench'
   | 'capabilities'
+  | 'memory'
   | 'settings';
 
 export type RuntimeStatus =

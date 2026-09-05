@@ -1,3 +1,4 @@
+import { LocalMemoryApi } from './memory-api';
 import type {
   AgentTask,
   CapabilityOperation,
@@ -226,6 +227,7 @@ export type RuntimeInteractionResolution =
 
 /** Browser boundary for the local Pulsara application. */
 export interface RuntimeAdapter {
+  readonly memory: LocalMemoryApi;
   bootstrap(): Promise<RuntimeBootstrap>;
   modelCatalog(refresh?: boolean): Promise<ModelCatalogReadModel>;
   localSettings(): Promise<LocalSettingsReadModel>;
@@ -409,6 +411,7 @@ interface ProtocolEntry {
   reasoning_blocks?: ProtocolReasoningBlock[];
   accepted_at_utc?: string;
   source_subagent_task_id?: string;
+  tool_result?: { assistant_entry_id?: string; tool_call_id?: string; result_state?: string };
 }
 
 interface ProtocolActiveTurn {
@@ -489,6 +492,7 @@ interface ProtocolToolAttempt {
 
 export interface ProtocolCanonicalControl {
   session_lifecycle?: string;
+  latest_root_turn?: { turn_id?: string; status?: string; terminal_reason?: string };
   active_turns?: ProtocolActiveTurn[];
   prompt_queue?: Array<Record<string, unknown>>;
   prompt_queue_total_count?: string | number;
@@ -668,6 +672,7 @@ function resolveBrowserInstanceId(): string {
 }
 
 export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
+  readonly memory = new LocalMemoryApi();
   private readonly browserInstanceId: string;
 
   constructor(browserInstanceId = resolveBrowserInstanceId()) {
@@ -1704,7 +1709,6 @@ class LocalRuntimeConnection implements RuntimeConnection {
     });
     const messages = projectEntries(
       canonical,
-      this.control.tool_attempts ?? [],
       activeTurnIds,
     );
     for (const draft of visibleDrafts) {
@@ -1727,7 +1731,6 @@ class LocalRuntimeConnection implements RuntimeConnection {
       messages,
       projectSubagentRuns(
         canonical,
-        this.control.tool_attempts ?? [],
         agentTasks,
         visibleDrafts,
       ),
@@ -2162,11 +2165,9 @@ function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
 
 function projectEntries(
   entries: ProtocolEntry[],
-  attempts: ProtocolToolAttempt[],
   activeTurnIds: ReadonlySet<string>,
 ): Message[] {
   const messages: Message[] = [];
-  const unresolvedTraces: ToolTrace[] = [];
   for (const entry of entries) {
     if (entry.scope_kind === 'SUBAGENT_TASK') continue;
     if (
@@ -2221,7 +2222,6 @@ function projectEntries(
         .filter((block) => block.block_kind === 'TOOL_CALL')
         .map(projectToolBlock);
       const reasoning = projectReasoningBlocks(entry);
-      unresolvedTraces.push(...traces);
       messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
@@ -2237,17 +2237,14 @@ function projectEntries(
       continue;
     }
     if (entry.entry_kind === 'TOOL_RESULT') {
-      const attempt = attempts.find((item) => item.result_entry_id === entry.entry_id);
-      const target = attempt
-        ? messages.find((message) => message.id === attempt.assistant_entry_id)
+      const resultRef = entry.tool_result;
+      const target = resultRef
+        ? messages.find((message) => message.id === resultRef.assistant_entry_id)
         : undefined;
-      const trace = target?.traces?.find((item) => item.id === attempt?.tool_call_id);
-      const pendingTrace = trace ?? unresolvedTraces.shift();
+      const pendingTrace = target?.traces?.find((item) => item.id === resultRef?.tool_call_id);
       if (pendingTrace) {
-        const pendingIndex = unresolvedTraces.indexOf(pendingTrace);
-        if (pendingIndex >= 0) unresolvedTraces.splice(pendingIndex, 1);
         const result = decodeContent(entry.content);
-        const resultState = attempt?.result_state || inferToolResultState(result);
+        const resultState = resultRef?.result_state;
         const succeeded = resultState === 'SUCCESS';
         const cancelled = resultState === 'CANCELLED'
           || resultState === 'CANCELLED_BEFORE_DISPATCH';
@@ -2260,17 +2257,16 @@ function projectEntries(
         pendingTrace.meta = succeeded ? '操作完成' : cancelled ? '操作已取消' : '操作未完成';
         continue;
       }
-      const fallbackTarget = [...messages].reverse().find((message) => message.role === 'assistant');
       const fallbackTrace: ToolTrace = {
         id: entry.entry_id,
         kind: 'artifact',
         title: '操作结果',
         subtitle: '已记录',
-        status: 'completed',
+        status: resultRef?.result_state === 'SUCCESS' ? 'completed' : 'failed',
+        resultText: decodeContent(entry.content),
         output: [formatToolResult(decodeContent(entry.content))].filter(Boolean),
       };
-      if (fallbackTarget) fallbackTarget.traces = [...(fallbackTarget.traces ?? []), fallbackTrace];
-      else messages.push({
+      messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
         entrySequence: numeric(entry.entry_sequence),
@@ -2320,14 +2316,12 @@ function projectEntries(
 
 function projectSubagentRuns(
   entries: ProtocolEntry[],
-  attempts: ProtocolToolAttempt[],
   tasks: AgentTask[],
   drafts: LiveDraft[],
 ): SubagentRun[] {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const runs = new Map<string, SubagentRun>();
   const order = new Map<string, number>();
-  const unresolvedByTask = new Map<string, ToolTrace[]>();
   let fallbackIndex = 0;
 
   const ensureRun = (taskId: string, sequence = Number.MAX_SAFE_INTEGER): SubagentRun => {
@@ -2355,7 +2349,6 @@ function projectSubagentRuns(
     };
     runs.set(taskId, run);
     order.set(taskId, sequence);
-    unresolvedByTask.set(taskId, []);
     return run;
   };
 
@@ -2396,7 +2389,6 @@ function projectSubagentRuns(
         .filter((block) => block.block_kind === 'TOOL_CALL')
         .map(projectToolBlock);
       const reasoning = projectReasoningBlocks(entry);
-      unresolvedByTask.get(taskId)?.push(...traces);
       run.activities.push({
         id: entry.entry_id,
         time: formatTime(entry.accepted_at_utc),
@@ -2412,17 +2404,13 @@ function projectSubagentRuns(
       continue;
     }
     if (entry.entry_kind === 'TOOL_RESULT') {
-      const attempt = attempts.find((item) => item.result_entry_id === entry.entry_id);
-      const target = attempt
-        ? run.activities.find((activity) => activity.id === attempt.assistant_entry_id)
+      const resultRef = entry.tool_result;
+      const target = resultRef
+        ? run.activities.find((activity) => activity.id === resultRef.assistant_entry_id)
         : undefined;
-      const trace = target?.traces?.find((item) => item.id === attempt?.tool_call_id);
-      const unresolved = unresolvedByTask.get(taskId) ?? [];
-      const pendingTrace = trace ?? unresolved.shift();
+      const pendingTrace = target?.traces?.find((item) => item.id === resultRef?.tool_call_id);
       if (pendingTrace) {
-        const pendingIndex = unresolved.indexOf(pendingTrace);
-        if (pendingIndex >= 0) unresolved.splice(pendingIndex, 1);
-        const resultState = attempt?.result_state || inferToolResultState(content);
+        const resultState = resultRef?.result_state;
         const succeeded = resultState === 'SUCCESS';
         const cancelled = resultState === 'CANCELLED'
           || resultState === 'CANCELLED_BEFORE_DISPATCH';
@@ -2433,6 +2421,17 @@ function projectSubagentRuns(
           pendingTrace.output = [formatToolResult(content)];
         }
         pendingTrace.meta = succeeded ? '操作完成' : cancelled ? '操作已取消' : '操作未完成';
+      } else {
+        // The request can be outside a paginated history window. Keep this
+        // result visible without assigning it to a different tool call.
+        run.activities.push({
+          id: entry.entry_id, time: formatTime(entry.accepted_at_utc), body: '', status: 'completed',
+          traces: [{
+            id: entry.entry_id, kind: 'artifact', title: '操作结果', subtitle: '已记录',
+            status: resultRef?.result_state === 'SUCCESS' ? 'completed' : 'failed',
+            resultText: content, output: [formatToolResult(content)].filter(Boolean),
+          }],
+        });
       }
       continue;
     }
@@ -2479,10 +2478,11 @@ function projectSubagentRuns(
     });
   }
 
-  for (const [taskId, traces] of unresolvedByTask) {
-    const run = runs.get(taskId);
-    if (!run || ['pending', 'running', 'waiting'].includes(run.status)) continue;
-    for (const trace of traces) settleHistoricalTrace(trace);
+  for (const run of runs.values()) {
+    if (['pending', 'running', 'waiting'].includes(run.status)) continue;
+    for (const activity of run.activities) {
+      for (const trace of activity.traces ?? []) settleHistoricalTrace(trace);
+    }
   }
 
   return [...runs.values()].sort(
@@ -2521,29 +2521,6 @@ function attachSubagentRuns(messages: Message[], runs: SubagentRun[]): void {
     ));
     if (!target) continue;
     target.subagentRuns = [...(target.subagentRuns ?? []), ...group];
-  }
-}
-
-function inferToolResultState(content: string): string {
-  const normalizedContent = content.trim().toLowerCase();
-  if (
-    normalizedContent.includes('permission denied')
-    || normalizedContent.includes('tool execution denied by user')
-    || normalizedContent.includes('requires bypass-permissions mode')
-    || normalizedContent.includes('not permitted')
-  ) return 'PERMISSION_DENIED';
-  try {
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    const status = String(parsed.status ?? '').toLowerCase();
-    if (['cancelled', 'canceled', 'killed', 'interrupted'].includes(status)) return 'CANCELLED';
-    if (['denied', 'permission_denied', 'forbidden'].includes(status)) return 'PERMISSION_DENIED';
-    if (['error', 'failed', 'failure', 'invalid'].includes(status)) return 'APPLICATION_ERROR';
-    if (parsed.ok === false || parsed.success === false) return 'APPLICATION_ERROR';
-    if (typeof parsed.error === 'string' && parsed.error.trim()) return 'APPLICATION_ERROR';
-    if (typeof parsed.exit_code === 'number' && parsed.exit_code !== 0) return 'APPLICATION_ERROR';
-    return 'SUCCESS';
-  } catch {
-    return normalizedContent ? 'SUCCESS' : 'APPLICATION_ERROR';
   }
 }
 

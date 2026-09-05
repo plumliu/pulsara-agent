@@ -785,6 +785,10 @@ def test_stage2_snapshot_and_history_page_are_bounded_by_final_wire_bytes(
         deadline_monotonic=monotonic() + 30,
     )
     assert 0 < len(snapshot.entries) < 6
+    assert snapshot.control.latest_root_turn.turn_id == turn_id
+    assert snapshot.control.latest_root_turn.status == "INTERRUPTED"
+    assert snapshot.control.latest_root_turn.terminal_reason == "TEST_BOUNDARY"
+    assert not snapshot.control.active_turns
     assert len(snapshot.SerializeToString(deterministic=True)) <= 140_000
     assert snapshot.HasField("older_history_cursor")
     entries, cursor, has_more = reader.history_page(

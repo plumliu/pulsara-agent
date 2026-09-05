@@ -841,6 +841,7 @@ class DirectKernelToolPort:
                     for item in bindings
                     if item.tool_name
                     not in {
+                        "remember",
                         "terminal_monitor",
                         "enter_plan",
                         "ask_plan_question",
@@ -2851,7 +2852,9 @@ class DirectKernelToolPort:
                 )
             except LookupError:
                 return KernelToolResult(
-                    state="TOOL_UNAVAILABLE",
+                    # The attempt already exists; scope expiry is a known
+                    # rejection, not a no-dispatch TOOL_UNAVAILABLE result.
+                    state="APPLICATION_ERROR",
                     content=b'{"error":"todo scope is no longer active"}',
                     effect_class="read_only",
                     physical_observation=_freeze_physical_observation(

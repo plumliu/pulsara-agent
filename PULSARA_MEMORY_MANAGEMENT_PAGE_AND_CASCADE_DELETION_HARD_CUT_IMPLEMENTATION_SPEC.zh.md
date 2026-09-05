@@ -1,17 +1,23 @@
 # Pulsara 记忆一级页面与级联删除 Hard-cut 实施规范
 
-状态：实施前权威规范
+状态：已实施；实施与验证记录见 `dogfood_evidence/memory_management/IMPLEMENTATION.zh.md`（2026-09-05）。
 
 适用仓库：pulsara_agent
 
-当前实现基线：`13d43930`（`feat: hard-cut advisory memory taxonomy and scope`）
+记忆语义前置基线：`13d43930`（`feat: hard-cut advisory memory taxonomy and scope`）
+
+实施代码基线：实际开始实施时的当前 clean HEAD。`13d43930` 只用于指定已完成的记忆语义前置，不再作为整个仓库的 schema/diff 比较起点。实施必须保留此后已落地的本地设置、PostgreSQL 数据面就绪状态、跨目录会话列表、模型配置与模型切换等现行契约，不得为了回到记忆前置 commit 而回退它们。
 
 强制前置：
 `PULSARA_MEMORY_GOVERNANCE_TERMINAL_CLAIM_SOURCE_SEMANTICS_AND_PROMPT_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`
 与
 `PULSARA_MEMORY_TAXONOMY_AND_SCOPE_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`
-已在上述基线完整实施、验证并通过审查。开始本规范实施时必须先核验该完成态仍在；本规范只从
-两项前置完成后的 clean-v0 基线继续，不把前置工作重复计入本功能；不得在管理页面或删除实现中
+的文档契约已冻结、验证并通过审查，其主体已在上述语义基线落地。当前代码真值复核同时发现一处必须
+先收口的实现漂移：前置 taxonomy 契约规定 candidate 只能由 Main Agent 的 `remember` 产生，但现行
+builtin catalog 与 child surface 仍把 `remember` 暴露给 `SUBAGENT_CHILD`。这不是本页面可以重新定义的
+新来源；实施步骤 0 必须先把 invocation owner 与实际 child surface 一起恢复为 main-only，并增加回归
+测试，不增加数据库字段、来源枚举或迁移兼容。除此之外，本规范只从两项前置完成后的 clean-v0 基线
+继续，不把前置工作重复计入本功能；不得在管理页面或删除实现中
 重新定义 candidate、governance、来源、四类 taxonomy、context、公开形成摘要或
 relation 语义。发生冲突时，后者对 taxonomy、context、structured shape、recorded_at 与 reflector
 减法的定义优先。
@@ -25,7 +31,7 @@ relation 语义。发生冲突时，后者对 taxonomy、context、structured sh
 5. 两份规范引用的当前生产代码；
 6. archived_docs 下的历史设计仅作背景，不能覆盖以上契约。
 
-本规范冻结“记忆”一级页面、完整管理读取、关系产品投影和用户发起的物理删除语义。实施必须是一次 clean-v0 hard cut：允许重置已核验的本地可丢弃 PostgreSQL 数据库，只修改当前基线，不提供旧库迁移、双读写、兼容别名、feature flag、软删除过渡或修复任务。
+本规范冻结“记忆”一级页面、完整管理读取、关系产品投影和用户发起的物理删除语义。实施必须是一次 clean-v0 hard cut：允许重置已核验的本地可丢弃 PostgreSQL 数据库，只在实施开始时的当前基线上前进，不提供旧库迁移、双读写、兼容别名、feature flag、软删除过渡或修复任务。
 
 ---
 
@@ -68,11 +74,14 @@ Pulsara 增加一个与“会话”“能力”同级的“记忆”页面。它
 - AGENTS.md
 - PULSARA_MEMORY_GOVERNANCE_TERMINAL_CLAIM_SOURCE_SEMANTICS_AND_PROMPT_HARD_CUT_IMPLEMENTATION_SPEC.zh.md
 - PULSARA_MEMORY_TAXONOMY_AND_SCOPE_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md
+- src/pulsara_agent/capability/builtin_catalog.py
+- src/pulsara_agent/memory/product_contract.py
 - src/pulsara_agent/memory/scope.py
 - src/pulsara_agent/conversation_kernel/memory/contracts.py
 - src/pulsara_agent/conversation_kernel/memory/recall.py
 - src/pulsara_agent/conversation_kernel/memory/dispatch.py
 - src/pulsara_agent/conversation_kernel/memory_tools.py
+- src/pulsara_agent/conversation_kernel/tool_runtime.py
 - src/pulsara_agent/conversation_kernel/memory/governor.py
 - src/pulsara_agent/conversation_kernel/_repository/memory.py
 - src/pulsara_agent/conversation_kernel/host.py
@@ -84,12 +93,14 @@ Pulsara 增加一个与“会话”“能力”同级的“记忆”页面。它
 - src/pulsara_agent/storage/migrations/contracts.py
 - src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json
 - src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_runtime_grants_v1.json
+- src/pulsara_agent/settings.py
 - src/pulsara_agent/web_app/application.py
 - src/pulsara_agent/web_app/session_controller.py
 - src/pulsara_agent/web_app/http_server.py
 - frontend/lib/pulsara-types.ts
 - frontend/lib/runtime-adapter.ts
 - frontend/components/activity-rail.tsx
+- frontend/components/database-setup-guide.tsx
 - frontend/components/overlays.tsx
 - frontend/app/pulsara-app.tsx
 - frontend/app/layout.tsx
@@ -98,7 +109,9 @@ Pulsara 增加一个与“会话”“能力”同级的“记忆”页面。它
 - tests/test_stage2_conversation_kernel_postgres.py
 - tests/test_stage5_clean_migration.py
 - tests/test_local_web_http_surface.py
+- tests/test_local_web_session_order_postgres.py
 - tests/test_stage2_conversation_runner.py
+- tests/test_round9_unified_capability_semantics.py
 - tests/test_repository_modularization_architecture.py
 - tests/test_fingerprint_subtraction_architecture.py
 - frontend/lib/runtime-adapter.test.ts
@@ -123,6 +136,15 @@ Pulsara 增加一个与“会话”“能力”同级的“记忆”页面。它
 CONTRADICTS 是 governance 在结算时被动识别的变化/冲突关系。三者都是 canonical 关系，但 UI
 不得把后两者描述成用户或 Main Agent 主动编写的指令，也不在本页面提供关系编辑入口。
 
+当前实现与上述权威契约存在一处具体漂移：`_catalog_shape` 对 `_MEMORY_PROPOSAL` 返回了
+`HOST_MAIN_RUN + SUBAGENT_CHILD`，`sealed_builtin_capability_snapshot` 的 child 过滤也没有移除
+`remember`。实现必须做最小 hard cut：catalog requirement 只保留 `HOST_MAIN_RUN`，新的 child
+capability snapshot/model surface 中不存在 `remember`，ROOT surface 继续存在；不能只改元数据而让
+实际 executor binding 仍泄漏，也不能反向把 child 扩张成第二类 candidate producer。已冻结的现有
+epoch/prefix 不在原地重写，变更从新的合法 surface 边界生效。这个执行面收口不需要给
+memory_candidates 增加 author/scope 列、ROOT composite FK、CHECK 或 trigger；不要为了重复证明 surface
+contract 而强化数据库。
+
 当前 lifecycle 只有 ACTIVE 和 SUPERSEDED。
 
 CONTRADICTS 在产品语义上无向。memory_relation_id 对端点进行无序规范化，数据库也用 least / greatest 唯一索引防止反向重复。数据库行仍保留 source_fact_id 和 target_fact_id，但这只是关系存储形状，不是 UI 主语。
@@ -134,7 +156,11 @@ CONTRADICTS 在产品语义上无向。memory_relation_id 对端点进行无序�
 `ctx:global`。Project context 来自 canonical project path 的稳定 identity。同一目录的 session 共享
 workspace_id 和 exact memory context。
 
-当前 LocalSessionController.list_sessions 明确使用 include_closed=False，因此不能作为“曾经打开的项目”选择器真源。项目目录表必须由 kernel 独立读取所有 OPEN 和 CLOSED canonical sessions，并按 workspace_id 聚合。
+当前 `LocalSessionController.list_sessions` 已通过
+`KernelHostCore.list_resumable_sessions_across_workspaces` 读取当前 domain 中的跨目录会话，但它仍固定
+`include_closed=False`，且返回的是会话而非项目聚合。因此它不能作为“曾经打开的项目”选择器真源。项目目录表必须由 kernel 独立读取所有 OPEN 和 CLOSED canonical sessions，并按 workspace_id 聚合。
+
+当前用户可见会话顺序已明确不使用 `sessions.updated_at`：该列会被 writer lease、模型绑定等维护写入更新，会令纯维护操作伪造用户活动并导致列表乱跳。现行真源使用每个 session 最后一条 canonical `transcript_entries.accepted_at`，无 transcript 时回退 `sessions.created_at`。Memory project catalog 必须复用这个“对话活动”定义，不能重新引入 raw `sessions.updated_at`。
 
 ### 2.2 已确认的数据库真相
 
@@ -189,6 +215,23 @@ exact-semantic duplicate source 可以通过 APPLIED_TO_EXISTING candidate 给�
 
 回答偏好只在新的 ROOT_HUMAN_PROMPT 边界冻结。已开始的 turn 可能已经冻结旧 memory source；删除不能回写或重建已安装 provider input prefix。提交删除后，下一个符合条件的 ROOT human prompt 必须重新采集并通过现有 append-only source invalidation 观察新真相。
 
+### 2.4 已确认的 Web 数据面真相
+
+当前本地 Web 应用可以在 PostgreSQL 未配置或未就绪时启动。
+`LocalWebApplication.database_state` 的现行闭集为：
+
+- `database_not_configured`；
+- `database_configured_unverified`；
+- `database_unavailable`；
+- `database_schema_action_required`；
+- `ready`。
+
+PostgreSQL runtime/admin DSN 的产品真源是 `LocalSettingsStore`；生产 Web/Kernel 不再从
+`.env` 或 `PULSARA_POSTGRES_*` 直接组装记忆管理连接。`KernelHostCore._ensure_resources`
+在数据面首次真正需要时获得 process-owned verified access lease，repository 在该已借用的 verified provider 上打开局部 connection。Memory management 必须通过这条现行 Kernel 资源边界，不得从 Web controller 旁路新建 DSN connection、第二个 schema-verification lease 或常驻 provider owner。
+
+当前 HTTP security middleware 已在数据面非 `ready` 时拒绝 session/connection 数据路由，前端也已用 `DatabaseSetupGuide` 引导用户前往“设置 → 本地服务”。本功能必须把全部 `/api/memories` 路由和 MemoryView 接入同一个就绪真源，不另造一个“memory database ready”状态。
+
 ---
 
 ## 3. 不可妥协的 hard-cut 边界
@@ -239,10 +282,9 @@ AppView 增加 memory。ActivityRail 在“会话”和“能力”附近增加�
 - 目录当前不存在、session 已 CLOSED，仍可出现在选择器；
 - transient / quick workspace 永远不出现。
 
-项目选择器按最近活动时间降序、workspace_id 稳定打破平局；最近活动时间就是该 workspace 分组中
-最大的 canonical session.updated_at，不虚构数据库不存在的“最后打开时间”。显示 workspace_label 和
-workspace_root；若同一 workspace_id 有多条 session，使用 `updated_at DESC, id DESC` 第一行的
-label/root。
+项目选择器按最近对话活动时间降序、workspace_id 稳定打破平局。对每个 session，对话活动时间固定为其最后一条 canonical `transcript_entries.accepted_at`，没有 transcript 时为 `sessions.created_at`；project `last_activity_at` 是该 workspace 分组中此值的最大值。禁止使用 raw `sessions.updated_at`，因为 writer lease 和模型绑定维护会更新它，并不代表用户对话活动。
+
+显示 workspace_label 和 workspace_root；若同一 workspace_id 有多条 session，使用上述 per-session 对话活动时间 `DESC, id DESC` 第一行的 label/root。这只是从现有 canonical 时间中选出项目排序，不虚构数据库不存在的“最后打开时间”。
 
 进入“项目”视角时，若尚无仍有效的本地选择，则默认选择 catalog 第一项，即最近活动的项目；刷新与
 分页时只要原选择仍在 catalog 中就保持它。catalog 为空时显示项目空状态，不制造 transient fallback。
@@ -311,6 +353,10 @@ ACTIVE RESPONSE_PREFERENCE 一旦处于活动 contradiction，补充说明“冲
 canonical projection，表示这条记忆何时被接受，不表示正文所描述事件的发生时间或内容新鲜度；UI
 不得据此推断“最近发生”。
 
+`recorded_at` 继续复用现有 `canonical_memory_recorded_at` 的 UTC 秒级产品编码。management DTO 中的
+`updated_at` 则必须保留数据库 instant 的完整 timezone-aware 精度，因为它还参与删除 confirmation 的
+freshness 比对；前端可以把它格式化成淡化的本地时间，但不能把视觉舍入后的字符串回传为 authority。
+
 relation 显示自己的 recorded_at。仅删除 CONTRADICTS/BASED_ON 等 relation 时，不为制造 UI“更新时间”
 而触碰存活 companion fact 的 updated_at；SUPERSEDES 恢复导致 lifecycle 改变时才按执行算法更新该
 fact timestamp。
@@ -325,6 +371,8 @@ fact timestamp。
 - 项目无事实：“这个项目还没有共享记忆”；
 - 筛选无结果：“没有符合当前筛选的记忆”；
 - 管理读取不可用：显示可重试错误，不能把错误伪装成空清单。
+
+当 `database_state != ready` 时不属于“管理读取出错”，而是整个 canonical 数据面尚未可用。“记忆”一级入口仍然可达，但 MemoryView 不发起 catalog/detail/preview/delete 请求，直接复用现有 `DatabaseSetupGuide` 与对应状态文案，引导用户前往“设置 → 本地服务”。不得显示“还没有记忆”或保留旧列表来伪装数据面就绪。
 
 ---
 
@@ -403,7 +451,7 @@ summary；“更新了 / 已由…更新 / 与…存在冲突”只能来自 rel
 
 - MAIN_AGENT_REMEMBER：产品文案“在对话中记住”；
 - decision_public_summary：作为“整理摘要”展示；
-- raw decision kind、reason code 不显示。当前唯一 producer 是 Main Agent 的 `remember` tool call；
+- raw decision kind、reason code 不显示。权威且唯一的 producer path 是 Main Agent 的 `remember` tool call；
   `MEMORY_WRITE_HINT` 不是 candidate source，不能产生另一种形成方式。
 
 governance auxiliary model 是内部 advisory settlement mechanism，不是另一位产品作者。页面不显示其
@@ -438,9 +486,11 @@ project catalog 从 pulsara_v3.sessions 读取：
 - workspace_kind = 'project'；
 - 包含 OPEN 和 CLOSED；
 - 按 workspace_id 聚合；
-- 取每组 updated_at 最新 session 的 workspace_root 和 workspace_label；
+- 每个 session 先取最后 canonical transcript entry `accepted_at`，无 entry 时取 `sessions.created_at`；
+- 取每组上述对话活动时间最新 session 的 workspace_root 和 workspace_label；
 - transient 永久排除；
-- keyset 为 last_activity_at DESC、workspace_id DESC，其中 last_activity_at = MAX(session.updated_at)；
+- keyset 为 last_activity_at DESC、workspace_id DESC，其中 last_activity_at = MAX(per-session canonical conversation activity)；
+- writer lease renew/release、Host resume、模型绑定变更或其他只更新 `sessions.updated_at` 的维护操作不得重排 project catalog；
 - 不复用 /api/sessions 的 include_closed=False 结果。
 
 目录行不存在并不删除 project identity，也不隐藏已有 memory。
@@ -449,6 +499,8 @@ catalog row 对外携带 `workspace_id`、label、root 与 last_activity_at。�
 canonical project context identity 相同，但 API 仍把它当 server catalog selection key：客户端不能
 另传自由格式 context_id，服务端必须先在当前 domain 的 catalog 中 exact join workspace_id，再从该
 row 得到查询 context。不得再创造语义重复的 `project_id` 字段。
+
+`workspace_root` 和 label 在这里只是来自 canonical session 的展示信息。服务端必须直接使用 exact-joined `workspace_id` 构造 management context/provenance binding，不能再调用要求目录当前存在的 `resolve_workspace`，也不能从 root 重算 identity。否则目录已删除、symlink 现状变化或挂载暂时不可用时，会错误隐藏或重指向已有项目记忆。
 
 ### 6.2 Catalog query
 
@@ -767,6 +819,10 @@ confirmation 不是只含数量的摘要，各 record 携带与其类型相符�
 
 candidate status、candidate refs 和 governance 内部 reason code 不跨产品边界。
 
+confirmation 中 `recorded_at` 使用现有 UTC 秒级 canonical encoder；`updated_at` 使用完整
+timezone-aware database instant 的 canonical ISO 编码，不截去数据库精度。二者都来自现有列，不新增
+version、generation 或 fingerprint。
+
 fact_semantic_digest 继续是 repository internal plan 用于 ACTIVE uniqueness/admission 的现有 canonical
 semantic boundary，但不进入浏览器 confirmation：完整 statement、kind、context、lifecycle 与时间已经
 随 typed fact 携带，再带 digest 是重复 DTO fingerprint。它不能代替 relation、ownership 或 exact DML
@@ -801,12 +857,12 @@ exact DML result 和既有数据库约束。
 
 src/pulsara_agent/web_app/http_server.py 当前 Application 使用 client_max_size = 8 MiB。普通 JSON API 保留该物理边界，但 deletion preview/execute 不能把它变成 fact/relation 数量的隐式上限。
 
-preview request、preview response、confirmed DELETE request 和大结果采用 application/x-ndjson 的 canonical typed record stream：
+preview request、preview response、confirmed DELETE request 和大结果采用 application/x-ndjson 的 canonical typed record stream。各方向的记录集合不得混为一谈：
 
-- HEADER：view、workspace_id、root、disposition；global view 的 workspace_id 为 null；
-- ADDITIONAL_ROOT：每个用户 seed 一条；
-- FACT_DELETE、RELATION_EFFECT、FACT_RESTORE、RESTORATION_CONFLICT：每个产品 expectation 一条；
-- END：exact record counts 和流终止。
+- preview request：HEADER(view、workspace_id、root；global 的 workspace_id 为 null)，随后每个用户 seed 一条 ADDITIONAL_ROOT，最后为带 exact counts 的 END；
+- preview response：HEADER(view、workspace_id、root、disposition)，随后为 canonical ADDITIONAL_ROOT、FACT_DELETE、RELATION_EFFECT、FACT_RESTORE、RESTORATION_CONFLICT records，最后为 END；
+- confirmed DELETE request：逐 record 原样携带用户已经完整看到并确认的 preview response；只有完整 preview 才能产生 disposition，DELETE 中必须为 READY；
+- deletion result：HEADER(view、workspace_id、root 与已提交结果类型)，随后为实际提交的 FACT_DELETE、RELATION_EFFECT、FACT_RESTORE product records，最后为 END；它不伪装成新的 preview disposition，也不返回 restoration conflict。
 
 200 deletion result 同样一条 product fact/relation effect 一条 record，最后以 END exact counts 收口；
 candidate delete/normalize 与 ref cleanup 是内部执行细节，不进入 result records，也不以内部行数冒充
@@ -831,9 +887,10 @@ canonical row 的物理协议边界。record 总数和总 body bytes 没有固�
 
 完成 END 校验后才打开 repository transaction，避免慢上传占用 row lock。executor 从临时文件按 canonical 顺序流式读取 expected confirmation，与 fresh plan 的 confirmation iterator 逐条 exact compare。
 
-handler 必须通过已验证的 route-specific raw-stream path 绕过 aiohttp Application 的 8 MiB aggregate read check；不能简单把全局 client_max_size 调大或设为 unlimited。transport 使用 connect/write/read-idle watchdog，不增加 total upload lifetime cap。单 record 非法返回 400；本地临时存储耗尽是 typed physical-resource failure、零 DB mutation。
+handler 必须直接增量消费 aiohttp `request.content`。当前 aiohttp 的 8 MiB
+`client_max_size` 在 `request.read()`/`request.json()` 这类 aggregate read 路径中累计并拒绝 body；直接读 payload stream 就是本功能需要的 route-local 路径。不要为此新建 listener、新增绕过 security middleware 的入口、修改 aiohttp 私有字段，也不能把全局 `client_max_size` 调大或设为 unlimited。transport 使用局部 write/read-idle watchdog，不增加 total upload lifetime cap。单 record 非法返回 400；本地临时存储耗尽是 typed physical-resource failure、零 DB mutation。
 
-preview 在只读 planning 完成后先释放 DB transaction/borrow，再从 operation-local buffer 流式响应，不能因慢浏览器长期占用 repeatable-read snapshot。
+preview 在只读 planning 完成后先关闭 DB transaction/connection，再从 operation-local buffer 流式响应，不能因慢浏览器长期占用 repeatable-read snapshot。KernelHostCore 已持有的 verified access lease 仍归 Core 所有，不在单次 preview 中释放或复制。
 
 ---
 
@@ -912,6 +969,11 @@ CHECK、ACTIVE semantic unique index 与 embedding CASCADE 继续作为数据库
 
 memory_embeddings 已有 DELETE，且 fact FK 的既有 CASCADE 保留。不能给 runtime role 增加 session、transcript、tool result 或 agent event 的 DELETE。
 
+实装 PostgreSQL 核验补充：`SELECT … FOR UPDATE` 除 SELECT 外还需要 UPDATE 权限；
+`memory_relations` 与两张 candidate ref 表因此同时新增 UPDATE。现有 grant manifest
+按表管理权限，沿用这一机制，不新增列权限框架。该权限仅支撑 executor 的稳定顺序锁行，
+不新增修改关系/ref 的产品路径，实际删除仍使用 exact DELETE RETURNING。
+
 ### 11.6 资源与重置
 
 只编辑 0000_conversation_kernel_baseline.sql，不创建增量 migration。使用仓库已有 clean catalog/grant 生成与验证流程更新：
@@ -925,18 +987,21 @@ memory_embeddings 已有 DELETE，且 fact FK 的既有 CASCADE 保留。不能�
 
 ### 11.7 精确数据库 delta 与最小性证明
 
-以下 delta 的比较起点必须是当前 `13d43930`：governance terminal-claim/source-semantics 与
-taxonomy/context subtraction 均已完成，clean-v0 已包含四类 taxonomy、exact context、recorded_at
-projection、当前 reason vocabulary（包括 `INSUFFICIENT_SOURCE_SUPPORT`）及 reflector hard cut。
-不得拿任一前置实施前的 catalog 作为本规范的直接 before snapshot，也不得把前置变化误算为
-deletion 功能的数据库变化。
+`13d43930` 只是 governance terminal-claim/source-semantics 与 taxonomy/context subtraction 的记忆语义前置锚点，不是本任务整仓 schema diff 的直接 before snapshot。该 commit 之后的现行 clean-v0 已合法包含与本功能无关的模型绑定、permission contract 等变化；若直接从 `13d43930` 比较，会把这些已落地真相误报为记忆删除越界。
 
-从该前置基线起，本任务允许的数据库差异封闭为三类：
+实施者必须在任何 schema/resource 编辑前：
+
+1. 确认当前工作区无其他任务的并发修改；
+2. 以实施开始时的当前 clean HEAD 作为 Git diff 起点，不创建自制文件哈希、snapshot registry 或第二套证据系统；
+3. 确认其中仍然是四类 taxonomy、exact context、recorded_at projection、当前 reason vocabulary（包括 `INSUFFICIENT_SOURCE_SUPPORT`）及 reflector hard cut；
+4. 只用 Git 比较本任务的最终结果与该实际起点。
+
+从该实际实施基线起，本任务允许的数据库差异封闭为三类：
 
 | 类别 | 精确变化 | 必要性 |
 |---|---|---|
 | FK action | 仅 `memory_facts(source_candidate_id, id) -> memory_candidates(id, accepted_fact_id)` 从 `ON DELETE RESTRICT` 改为 deferred `ON DELETE NO ACTION` | 原来的双向 RESTRICT 不存在合法的 accepted pair 删除顺序；该单向变化允许 candidate-first，同事务结束仍要求 pair 不得单边残留 |
-| runtime privilege | 仅给 runtime role 增加 `memory_candidates`、两张 candidate ref 表、`memory_facts`、`memory_relations` 的 DELETE | executor 必须显式执行这些表的删除；`memory_embeddings` 已有 DELETE，其他产品表不在授权范围 |
+| runtime privilege | 给 `memory_candidates`、两张 candidate ref 表、`memory_facts`、`memory_relations` 增加 DELETE；两张 ref 表和 `memory_relations` 增加锁行所需 UPDATE | executor 显式删除并先稳定锁行；`memory_embeddings` 已有 DELETE，其他产品表不在授权范围 |
 | 派生资源 | 按现有 generator 更新 baseline checksum、migration universe identity、catalog/grants resources 中确实由前两项引起的值 | 这是现有 clean-v0 verifier 的派生证据，不是新机制或额外约束 |
 
 除此之外，表、列、enum、index、UNIQUE、CHECK、FK 列集合、trigger、function、role 和未列出的既有 grant 都不得变化。实现前后用 catalog/schema diff 证明此封闭集合；若 generator 显示额外差异，先视为越界或工具漂移调查，不能把它直接纳入本功能。
@@ -959,9 +1024,9 @@ preview 是只读、可重试操作：
 8. 读取最终 admission 所需的 exact active semantic winners、surviving supersede ancestry 和
    preference contexts；
 9. 构造 READY 或 NEEDS_RESOLUTION internal plan，并把 product confirmation canonical records 写入 operation-local transport buffer；
-10. rollback/结束只读事务并释放 DB borrow；只由 response writer 线性接管临时 buffer，不保留 registry entry。
+10. rollback/结束只读事务并关闭 operation-local DB connection；只由 response writer 线性接管临时 buffer，不保留 registry entry。
 
-preview 不能占用 summary lane、Host writer guard 或 session lease。它使用现有 MEMORY_MAINTENANCE/只读适配 lane 的局部 borrow，结束即释放。
+project catalog、memory catalog、detail 和 preview 都使用现有 `MEMORY_QUERY` lane；preview 不能占用 summary lane、Host writer guard 或 session lease。每次调用只在 Core 已有 verified provider 上打开自己的 operation-local connection，结束即关闭；不额外 borrow/alias 一个 provider owner。
 
 ### 12.2 Execute
 
@@ -1028,10 +1093,10 @@ embedding worker 对已删除 fact 的 upsert 由 exact fact FK/refetch 拒绝�
 
 - HTTP request stream 只表达用户 intent 和 confirmed typed product confirmation；
 - Web controller 不持有 SQL transaction；
-- kernel management service 持有一次 PostgreSQL connection-provider borrow；
-- repository planner/executor 持有一次 transaction；
+- KernelHostCore 继续唯一持有现行 process-owned `VerifiedPostgresAccessLease`，memory management service 不再获取、alias 或释放第二个 provider borrow；
+- repository 的每次 planner/executor 调用持有一个 operation-local connection 和一次 transaction；
 - internal plan 没有跨请求服务器 owner；
-- transport TemporaryFile、connection、borrow、cursor 均有唯一 owner，并在 success/error/cancel 后释放一次；
+- transport TemporaryFile、operation-local connection 与 cursor 均有唯一 owner，并在 success/error/cancel 后释放一次；Core access lease 只由 Core shutdown 路径释放；
 - 不 alias HostWriterGuard，不借用任意 live session 作为 USER 删除 authority。
 
 ---
@@ -1039,6 +1104,16 @@ embedding worker 对已删除 fact 的 upsert 由 exact fact FK/refetch 拒绝�
 ## 13. Web API
 
 建议单一路由集合：
+
+### 13.0 数据面 admission
+
+全部 `/api/memories` 路由必须在 `LocalHttpServer._security` 中接入与
+`/api/sessions`、`/api/connections` 相同的 `database_state == ready` admission。任一非
+`ready` 状态都必须在进入 memory controller/Kernel 前复用现有
+`DATABASE_DATA_PLANE_UNAVAILABLE` 503，不新增 memory 私有的就绪开关、快照或缓存回退。
+
+这个 gate 不能只放在前端：直接 HTTP 请求也必须被拒绝。数据面就绪后，路由通过
+`KernelHostCore` 的懒加载 verified resource 路径读写；HTTP controller 不读 local settings 中的 DSN，不自行连库。
 
 ### 13.1 GET /api/memories/projects
 
@@ -1084,9 +1159,9 @@ response 以 NDJSON 流返回 READY 或 NEEDS_RESOLUTION 的 FrozenMemoryDeletio
 
 request content-type 为 application/x-ndjson：
 
-- HEADER 携 view/workspace_id/root；
+- HEADER 携 view/workspace_id/root 与 READY disposition；
 - ADDITIONAL_ROOT 逐条表达用户额外删除授权；
-- 其余 records 是 preview 已完整显示并确认的 canonical FrozenMemoryDeletionConfirmation；
+- 其余 records 与 HEADER/ADDITIONAL_ROOT 一起构成 preview 已完整显示并确认的 canonical FrozenMemoryDeletionConfirmation，不能只回传其中一部分；
 - END 结束。
 
 响应：
@@ -1099,14 +1174,13 @@ request content-type 为 application/x-ndjson：
 - 408 MEMORY_DELETION_CONFIRMATION_READ_IDLE：stream 未完整到达，未执行；
 - 504 MEMORY_DELETION_PLANNING_TIMEOUT：未执行；
 - 507 MEMORY_DELETION_TRANSPORT_STORAGE_EXHAUSTED：operation-local buffer 不可用，未执行；
-- 503：数据库管理面不可用。
+- 503 `DATABASE_DATA_PLANE_UNAVAILABLE`：PostgreSQL 数据面未就绪；已就绪后发生的局部管理读写失败按真实 typed 错误投影，不伪装成 empty。
 
 DELETE 缺失完整 confirmed confirmation sequence 或 END 时不能执行，不能把一次旧 preview 当长期 authority。http_server 必须证明超过 8 MiB aggregate 的合法 stream 能到达 executor；全局 client_max_size 不能先返回 413。
 
 ### 13.6 安全与文案
 
-- preview/DELETE raw-stream routes 继续经过 LocalHttpServer 既有 Host、Origin、Sec-Fetch-Site 与 draining
-  middleware；绕过 aggregate body read 不能绕过 same-origin 安全边界，也不另开 listener；
+- preview/DELETE raw-stream routes 继续经过 LocalHttpServer 既有 Host、Origin、Sec-Fetch-Site、database readiness 与 draining middleware；直接消费 `request.content` 不能绕过 same-origin 或数据面安全边界，也不另开 listener；
 - 不接受 memory_domain_id；
 - 不回传 raw SQL、candidate internal status 或 reason code；
 - 所有 confirmation impact、error 和 detail 都使用产品 DTO 与产品文案；
@@ -1124,6 +1198,7 @@ DELETE 缺失完整 confirmed confirmation sequence 或 END 时不能执行，�
 
 MemoryView 独立维护：
 
+- 从 app bootstrap 读取的 database readiness（不在 MemoryView 内创造第二个状态机）；
 - active context tab；
 - project catalog/current project；
 - search text；
@@ -1143,6 +1218,17 @@ MemoryView 独立维护：
 - 清空不再匹配的 selected detail；
 - 从第一页重新加载；
 - 不把一个 context 的 cursor 用到另一个 context。
+
+当 database readiness 非 `ready` 时：
+
+- ActivityRail 和 command palette 中的“记忆”入口仍可点击，便于用户看到为何当前不可用；
+- MemoryView 清除旧 catalog/detail/deletion authority，不发起 memory API；
+- 页面复用 `DatabaseSetupGuide` 的现行状态文案和“前往本地服务设置”动作，不另造记忆专用配置流；
+- 数据面恢复 `ready` 后从 project/catalog 第一页 fresh load，不恢复旧 preview 或 confirmation。
+
+详情选择不得触发整个列表重载或自动滚动页面。重复点击已选记忆不重新请求；切换到另一条记忆
+（包括关系 companion）时保留已挂载的详情及其内容，读取成功后原位替换。读取期间显示轻量状态，
+禁用旧详情的删除等操作；失败时保留原详情，过期或关闭后的响应不得覆盖当前选择。
 
 ### 14.2 删除确认
 
@@ -1174,7 +1260,12 @@ runtime adapter 必须用 ReadableStream 增量解码 preview NDJSON，并按 ca
 - cancel/error 必须丢弃未完成 sequence；
 - 不得只保留前 N 条后仍允许删除。
 
-最终 DELETE 用 request ReadableStream 逐条编码 confirmation，不先 JSON.stringify 为一个大字符串。浏览器/handler 的 read-idle watchdog 可以中止失活 transport，但不能添加 total stream lifetime cap。
+最终 DELETE 将 confirmation 逐条编码为 NDJSON Blob parts，不先 JSON.stringify 为一个大字符串；
+浏览器按 Blob 上传，handler 仍通过 request.content 增量接收。这里不用 request ReadableStream：
+现有 loopback aiohttp listener 是 HTTP/1.1，Chromium 会拒绝 HTTP/1.x 的流式 request body，
+见 [Chrome 官方限制说明](https://developer.chrome.com/docs/capabilities/web-apis/fetch-streaming-requests#doesnt_work_on_http1x)。
+这不是双路径或运行时 fallback，也不为一个上传机制引入 HTTP/2 listener。response 继续 ReadableStream
+增量解码；handler 的 read/write-idle watchdog 中止失活 transport，不添加 total stream lifetime cap。
 
 点击后不做 optimistic hard delete。等待 200 后关闭 detail、清理 selection 并重新加载当前 catalog。409 时保留页面，展示“记忆已发生变化，请重新确认”及 fresh impact。
 
@@ -1232,6 +1323,8 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 
 必须修改：
 
+- src/pulsara_agent/capability/builtin_catalog.py（仅收口 `remember` 的 main-only owner）
+- src/pulsara_agent/conversation_kernel/tool_runtime.py（仅保证 child frozen surface 不暴露 `remember`）
 - src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql
 - src/pulsara_agent/storage/migrations/manifest.py
 - src/pulsara_agent/storage/migrations/resources/0000_conversation_kernel_expected_catalog_v1.json
@@ -1253,6 +1346,8 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - src/pulsara_agent/web_app/memory_controller.py
 - frontend/components/memory-view.tsx
 - frontend/app/styles/memory.css
+
+MemoryView 必须复用 `frontend/components/database-setup-guide.tsx` 的现行引导与文案真源；若现有 variant 已能正确布局则不修改该文件，只在 Memory 页的视觉布局确有需要时扩展一个展示 variant，不改其数据面语义。
 
 若样式采用 Next layout 直接 import 而非 globals.css 聚合，再同步修改 frontend/app/layout.tsx；两种入口
 只选当前项目的一条真实样式加载路径，不做重复 import。
@@ -1285,7 +1380,9 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - tests/test_stage2_conversation_kernel_postgres.py
 - tests/test_round8_advisory_memory.py
 - tests/test_local_web_http_surface.py
+- tests/test_local_web_session_order_postgres.py
 - tests/test_stage2_conversation_runner.py
+- tests/test_round9_unified_capability_semantics.py
 - tests/test_repository_modularization_architecture.py
 - tests/test_fingerprint_subtraction_architecture.py
 - frontend/lib/runtime-adapter.test.ts
@@ -1295,18 +1392,17 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 
 ## 17. 严格实施顺序
 
-0. 核验 `13d43930` 中 governance 与 taxonomy/context subtraction 两项前置 hard cut 的完成态、
-   PostgreSQL/real-provider 证据和唯一四类/exact-context clean-v0 baseline 仍未漂移；不重复实施前置。
+0. 在实际当前 clean HEAD 上核验 `13d43930` 所代表的 governance 与 taxonomy/context subtraction 两项前置 hard cut、PostgreSQL/real-provider 证据和唯一四类/exact-context clean-v0 真相；同时保留后续已落地的本地设置、数据面就绪状态、会话排序和模型绑定 schema。先修复已确认的唯一 producer 漂移：`remember` catalog owner 只允许 `HOST_MAIN_RUN`，child frozen/model surface 不含该工具，ROOT surface 保持可用；用 capability regression 证明后再继续页面实现。以该 current HEAD 作为本功能 Git diff 起点，不重复实现其他前置内容。
 1. 冻结 management DTO、relative relation role、error/disposition；先写纯 contract tests。
 2. 只修改 clean-v0 的 fact 到 source candidate FK action 与五张 memory 表的 runtime DELETE grants，并同步 catalog resources；先用 schema diff 证明没有新增 index、UNIQUE、composite FK、function 或 trigger。
 3. reset 已核验的本地 disposable database，先证明 clean-v0 与现有 memory governance 全绿。
-4. 实现 project catalog、memory catalog 和 paginated detail；证明不复用 bounded recall。
+4. 实现 project catalog、memory catalog 和 paginated detail；project 排序复用 canonical conversation activity 而不是 raw `sessions.updated_at`，并证明不复用 bounded recall。
 5. 实现纯 deletion closure/planning 投影；覆盖所有图代数和 restoration conflict。
 6. 实现 SERIALIZABLE transactional executor、exact plan compare、candidate cleanup 和 retry-under-deadline。
 7. 暴露 KernelHostCore facade；不得让 Web controller 直接查询数据库。
-8. 实现 memory controller、五个 HTTP routes，以及 preview/DELETE 独立 NDJSON raw-stream admission；先用 >8 MiB integration test 证明没有 aggregate cap。
+8. 实现 memory controller、五个 HTTP routes，把全部路由接入现有 database-readiness middleware，并让 preview/DELETE 直接增量消费 `request.content`；先用 >8 MiB integration test 证明没有 aggregate cap 且 Host/Origin/readiness 安全边界仍在。
 9. 实现 runtime adapter 的增量 stream typed decode/encode，拒绝 raw enum、truncated END 和 count 漂移。
-10. 实现 ActivityRail memory 入口、MemoryView、detail aside/drawer。
+10. 实现 ActivityRail/command palette memory 入口、MemoryView、detail aside/drawer，并在数据面未就绪时复用 `DatabaseSetupGuide`。
 11. 实现 deletion preview、resolution 和最终 confirmation。
 12. 跑 focused tests，修复回归。
 13. 跑完整 PostgreSQL、clean migration 和 frontend test/build。
@@ -1327,6 +1423,9 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - CLOSED-only project 仍出现；
 - transient/quick 永不出现；
 - project path 当前不存在仍出现；
+- 已删除/暂不可用目录的 management context 直接使用 catalog exact-joined workspace_id，不要求 `resolve_workspace` 成功，不从 root 重算 identity；
+- project `last_activity_at` 取每个 session 最后 transcript `accepted_at`，无 transcript 时取 `created_at`；
+- writer lease renew/release、resume 和 model-binding 更新即使改变 raw `sessions.updated_at`，也不重排 project catalog；
 - 首次进入 project 默认选择最近活动项，刷新时保留仍存在的选择，空 catalog 不 fallback 到 quick；
 - 不同 memory_domain 隔离；
 - client 伪造 context/domain/workspace id 被拒绝，project_id/context_id 兼容别名不存在。
@@ -1356,6 +1455,7 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - 同一 CONTRADICTS 行打开 b：显示“与 a 存在冲突”；
 - 反向插入/least-greatest 规范化不改变两端文案；
 - raw source/target、decision_kind、reason_code 不渲染；
+- ROOT/Main Agent 的 `remember` 继续投影为 MAIN_AGENT_REMEMBER / “在对话中记住”；child capability snapshot 与 model surface 均不含 `remember`，不能产生第二类 candidate author；
 - BASED_ON 投影为主动“形成依据”，SUPERSEDES/CONTRADICTS 投影为被动“变化与冲突”，不伪造编辑者；
 - active conflict 与 superseded status 优先级正确。
 
@@ -1454,6 +1554,7 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 ### 18.10 Web 与前端
 
 - 五个 routes 和 method/body validation；
+- 所有 `/api/memories` routes 在五种现行 database state 中只有 `ready` 可进入 controller，其他状态在 security middleware 复用 `DATABASE_DATA_PLANE_UNAVAILABLE` 503；
 - deletion preview/DELETE 使用 canonical NDJSON，不调用 request.json/read；
 - 合法 confirmed confirmation stream 总量超过 8 MiB 仍到达 executor，不被 aiohttp client_max_size 预先 413；
 - 超过 8 MiB 且发生 plan drift 返回业务 409，证明 transport 没有成为 inventory cap；
@@ -1461,7 +1562,7 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - 大型 collision/capacity/ancestry group 被规范化为多条 bounded RESTORATION_CONFLICT records，
   不出现无界 record array；
 - truncated/missing END、count mismatch、cancel、read-idle timeout 均零 DB mutation 且唯一关闭 transport owner；
-- preview 释放 DB borrow 后再向慢客户端流式响应；
+- preview 关闭 operation-local DB transaction/connection 后再向慢客户端流式响应，不释放或 alias Core-owned access lease；
 - runtime adapter 不把 streamed confirmation 聚合成单一 JSON request body；
 - domain 不能由 client 提交；
 - forged Host、cross-origin 与 cross-site preview/DELETE 在进入 management service 前被既有 middleware
@@ -1470,6 +1571,7 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 - 四种 restoration product reason 均映射为产品文案和具体 companion/group，不渲染 enum/governance
   reason code；
 - AppView memory 可从 rail 与 command palette 到达；
+- database state 非 `ready` 时 MemoryView 不发起 API、不显示伪空清单、清除旧 deletion confirmation，并复用 `DatabaseSetupGuide` 引导前往本地服务设置；恢复 `ready` 后 fresh load；
 - “跨对话”/“项目”tabs、selector、filters、history、pagination；
 - detail 在页面内部，不打开 session inspector；
 - project 以 catalog selection、global 以真实 WebApplication workspace 做 provenance fence；只在
@@ -1505,7 +1607,7 @@ active turn 与 idle session 的删除数据库语义完全相同。差异只在
 
 clean-v0 与 PostgreSQL：
 
-    .venv/bin/python -m pytest -q tests/test_stage5_clean_migration.py tests/test_stage2_conversation_kernel_postgres.py tests/test_memory_governance_semantics.py tests/test_memory_management_postgres.py
+    .venv/bin/python -m pytest -q tests/test_stage5_clean_migration.py tests/test_stage2_conversation_kernel_postgres.py tests/test_memory_governance_semantics.py tests/test_memory_management_postgres.py tests/test_local_web_session_order_postgres.py
 
 Web：
 
@@ -1513,7 +1615,7 @@ Web：
 
 Prefix continuity 与 architecture：
 
-    .venv/bin/python -m pytest -q tests/test_stage2_conversation_runner.py tests/test_repository_modularization_architecture.py tests/test_fingerprint_subtraction_architecture.py
+    .venv/bin/python -m pytest -q tests/test_stage2_conversation_runner.py tests/test_round9_unified_capability_semantics.py tests/test_repository_modularization_architecture.py tests/test_fingerprint_subtraction_architecture.py
 
 Frontend：
 
@@ -1552,11 +1654,14 @@ Frontend：
 - 把 SUPERSEDED orphan 留在库中；
 - 关系超过 100 条时宣称完整；
 - 用 memory_search 结果渲染管理目录；
+- 用会被 writer lease/模型绑定维护更新的 raw `sessions.updated_at` 排序 project catalog；
+- 继续把 `remember` 暴露给 `SUBAGENT_CHILD`，或新增 child candidate author/source 类型来合理化该漂移；
 - 让前端提交 memory_domain_id 或 raw context_id；
 - 让模型调用 delete_memory；
 - 新增 plan fingerprint、registry 或 durable deletion job；
 - 将完整 confirmation JSON.stringify 后交给 8 MiB aggregate request limit；
 - 为绕过 deletion stream 而把整个 WebApplication 的 client_max_size 改成 unlimited；
+- 为 memory controller 从 local settings/.env 单独读 DSN、自建 PostgreSQL provider/verification lease 或另造 database-ready 开关；
 - 为本功能新增 incoming SUPERSEDES partial unique index、relation fact_kind composite FK 或全局 lifecycle/lineage constraint trigger；
 - 新增事后 affected-subgraph/全库图扫描，只为重复证明锁内 plan 与 exact DML 已完成的工作；
 - 修改当前 provider prefix；
@@ -1572,10 +1677,10 @@ Frontend：
 只有同时满足以下条件才算完成：
 
 0. governance 与 taxonomy/context subtraction 两项前置 hard cut 已完成全部 DoD；terminal claim、
-   source-aware prompt、四类 taxonomy、exact context、recorded_at 与 clean-v0 基线没有被本功能回退或旁路。
+   source-aware prompt、四类 taxonomy、exact context、recorded_at 与 clean-v0 基线没有被本功能回退或旁路；`remember` 的 catalog owner 与实际 child surface 均恢复为前置契约规定的 Main Agent-only，且不原地改写已冻结 epoch/prefix。
 1. “记忆”是可用一级页面，不是静态 mock。
 2. global 与 project context 精确，quick 被排除；“关于你”只表示 USER_PROFILE kind。
-3. catalog/detail 是独立、分页、完整的管理读取面。
+3. catalog/detail 是独立、分页、完整的管理读取面；project 排序基于 canonical conversation activity，不受 writer-lease/model-binding 维护写入影响。
 4. CONTRADICTS 两端都以当前详情对象为主语投影 companion。
 5. relation target 删除后 surviving accepted candidate 的 formation summary 保持非空且 byte-identical，
    不重跑 governance 或生成 replacement 文案。
@@ -1588,4 +1693,5 @@ Frontend：
 11. provider prefix continuity 与下一 ROOT prompt 生效时点有测试。
 12. 超过 8 MiB 的 confirmed confirmation stream 能进入 executor，且没有 total inventory cap、plan registry 或全局 unlimited body。
 13. Python、PostgreSQL、Web、Frontend 和浏览器 dogfood 全部通过并保留具体证据。
-14. 最终 git diff 只包含本功能及必要 clean-v0 资源更新，没有覆盖并发任务或未跟踪用户文件。
+14. 最终 git diff 只包含本功能、已明确的 main-only producer 漂移修正及必要 clean-v0 资源更新，没有覆盖并发任务或未跟踪用户文件。
+15. `/api/memories` 与 MemoryView 复用现行 database readiness/`DatabaseSetupGuide`；非 `ready` 时既不进入 Kernel management，也不伪装空目录，不存在第二个 DSN、provider lease 或就绪状态机。

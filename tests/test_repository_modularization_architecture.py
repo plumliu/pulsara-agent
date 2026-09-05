@@ -759,6 +759,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND8_ADDED_TOP_LEVEL_CLASSES
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_TOP_LEVEL_CLASSES
         | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_CLASSES
+        | {"FrozenMemoryDeletionPlan"}
     )
     for key, added, changed in (
         (
@@ -770,6 +771,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
                 | _ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS
                 | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_FUNCTIONS
+                | {"_freeze", "_frozen_rows", "_remaining"}
             )
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
             | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS,
@@ -791,6 +793,19 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _ROUND9_2_ADDED_METHODS
                 | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
                 | _MODEL_UNIVERSE_ADDED_METHODS
+                | {
+                    "_management_connection",
+                    "_management_context",
+                    "_management_labels",
+                    "_management_relation",
+                    "memory_management_projects",
+                    "memory_management_catalog",
+                    "memory_management_detail",
+                    "memory_deletion_preview",
+                    "_memory_deletion_plan",
+                    "execute_memory_deletion",
+                    "_memory_exact_delete",
+                }
             )
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
             | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS,
@@ -864,7 +879,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
         - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
     ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_RUNTIME_DATACLASSES | (
-        _MODEL_UNIVERSE_RUNTIME_ADDED_DATACLASSES
+        _MODEL_UNIVERSE_RUNTIME_ADDED_DATACLASSES | {"FrozenMemoryDeletionPlan"}
     )
     for name in (
         set(baseline_runtime["dataclasses"])
@@ -899,6 +914,19 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND9_2_ADDED_METHODS
             | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
             | _MODEL_UNIVERSE_ADDED_METHODS
+            | {
+                "_management_connection",
+                "_management_context",
+                "_management_labels",
+                "_management_relation",
+                "memory_management_projects",
+                "memory_management_catalog",
+                "memory_management_detail",
+                "memory_deletion_preview",
+                "_memory_deletion_plan",
+                "execute_memory_deletion",
+                "_memory_exact_delete",
+            }
         )
         - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
         - _MODEL_UNIVERSE_REMOVED_METHODS
@@ -936,7 +964,21 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         "_RepositoryKernel._insert_initial_context_binding_revision",
     }
     changed_owners = (
-        _ROUND7_ADDED_METHODS
+        {
+            "_management_connection",
+            "_management_context",
+            "_management_labels",
+            "_management_relation",
+            "memory_management_projects",
+            "memory_management_catalog",
+            "memory_management_detail",
+            "memory_deletion_preview",
+            "_memory_deletion_plan",
+            "execute_memory_deletion",
+            "_memory_exact_delete",
+            "_remaining",
+        }
+        | _ROUND7_ADDED_METHODS
         | _ROUND7_CHANGED_METHODS
         | _ROUND8_ADDED_METHODS
         | _ROUND8_CHANGED_METHODS

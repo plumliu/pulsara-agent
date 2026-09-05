@@ -81,6 +81,40 @@ from pulsara_agent.primitives.tool_observation import (
 )
 
 
+def test_remember_is_main_only_in_frozen_and_model_surfaces(tmp_path):
+    import asyncio
+    from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+    from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+    from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
+    from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+    from tests.support.round3 import prepare_test_direct_tool_surface
+
+    async def exercise():
+        port = DirectKernelToolPort(
+            workspace_root=tmp_path, host_owner_id="host:memory-main-only",
+            session_id="session:memory-main-only", live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        )
+        port.bind_memory_port(SimpleNamespace(tool_names=frozenset({"remember", "memory_get"})))
+        try:
+            for scope, task, expected in (
+                (ModelInputScopeKind.ROOT, None, True),
+                (ModelInputScopeKind.SUBAGENT_TASK, "task:child", False),
+            ):
+                surface = prepare_test_direct_tool_surface(
+                    port, conversation_scope_kind=scope, scope_subagent_task_id=task,
+                )
+                assert ("remember" in {s.name for s in surface.model_surface.tool_specs}) is expected
+                snapshot = port.sealed_builtin_capability_snapshot(
+                    conversation_scope_kind=scope, scope_subagent_task_id=task,
+                )
+                assert ("remember" in {b.tool_name for b in snapshot.executor_bindings}) is expected
+            assert len(builtin_tool_catalog_entry("remember").availability_requirement.allowed_invocation_owners) == 1
+        finally:
+            await port.aclose()
+    asyncio.run(exercise())
+
+
 def _spec(name: str, schema: dict[str, object]) -> FrozenToolSpec:
     return FrozenToolSpec(
         name=name,

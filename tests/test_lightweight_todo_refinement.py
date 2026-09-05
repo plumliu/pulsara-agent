@@ -651,7 +651,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
             )
         finally:
             borrow.close()
-        assert result.state == "TOOL_UNAVAILABLE"
+        assert result.state == "APPLICATION_ERROR"
         assert result.process_local_settlement is None
         snapshot = port.todo_owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT,
