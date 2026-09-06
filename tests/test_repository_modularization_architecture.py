@@ -1047,6 +1047,10 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
         | _MEMORY_TAXONOMY_HARD_CUT_RETIRED_PYTEST_NODES
         | _PERMISSION_HOST_SCOPE_HARD_CUT_RETIRED_PYTEST_NODES
         | _MODEL_UNIVERSE_HARD_CUT_RETIRED_PYTEST_NODES
+        # SDK transport owns buffering. The capability hard-cut §6.3 explicitly
+        # retires the old per-slot raw byte reservation, rather than keeping an
+        # unused implementation merely to retain this historical unit test.
+        | {"tests/test_round6_mcp_production.py::test_round6_slot_wire_budget_is_shared_and_released"}
     )
     assert (
         "tests/test_stage2_architecture.py::"

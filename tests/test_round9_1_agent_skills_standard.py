@@ -457,7 +457,13 @@ def test_round9_1_production_has_no_fifth_root_or_skill_execution_authority() ->
     production = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(package_root.rglob("*.py"))
     )
-    assert ".claude/skills" not in production
+    # An explicitly selected import source is not a fifth runtime discovery root.
+    # Keep the exception closed to the one-shot portable Skill importer.
+    assert {
+        path.relative_to(package_root).as_posix()
+        for path in package_root.rglob("*.py")
+        if ".claude/skills" in path.read_text(encoding="utf-8")
+    } == {"capability/skill_import.py"}
     assert "ACTIVATE_SKILL" not in production
     assert "skill_health" not in production
     semantic_contracts = "\n".join(

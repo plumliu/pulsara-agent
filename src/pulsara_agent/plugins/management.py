@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from threading import Event
 
+from pulsara_agent.capability.mcp_management import McpManagementConflict
+
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
     PulsaraHomeResolution,
@@ -110,6 +112,64 @@ class PluginManagementService:
         self._credential_boundary = credential_boundary
         self._home_resolution = pulsara_home_resolution
 
+    async def authorize_plugin_mcp(self, *, identity, local_server_id, expected_package_install_id,
+                                   deadline_monotonic, connections, action="login"):
+        """Login uses a saved disabled or enabled instance, never a browser draft."""
+        import asyncio
+        from .contracts import NeverCancelPluginOperation
+        from .mcp_adapter import materialize_plugin_mcp_definition
+        from .mcp_connection import plugin_connection_owner
+
+        async with connections.lane:
+            store = self._store()
+            if store is None:
+                raise ValueError("Plugin store is unavailable")
+            layout = store.layout(identity)
+            state = await asyncio.to_thread(store.read_state, layout)
+            if state is None or state.current_package_install_id != expected_package_install_id:
+                raise McpManagementConflict("Plugin changed; refresh before logging in")
+            cancellation = NeverCancelPluginOperation()
+            scrub = await asyncio.to_thread(self._credential_boundary.capture_scrub_set,
+                                           deadline_monotonic=deadline_monotonic,
+                                           cancellation=cancellation)
+            summary = await asyncio.to_thread(
+                store.read_package_summary, layout, state.current_package_install_id,
+                deadline_monotonic=deadline_monotonic, cancellation=cancellation, scrub_set=scrub,
+            )
+            server = next((server for server in summary.mcp.mcp_servers
+                           if server.local_server_id == local_server_id), None)
+            if server is None:
+                raise ValueError("Plugin MCP component is unavailable")
+            config = materialize_plugin_mcp_definition(
+                identity=identity, state=state, server=server,
+                package_root=layout.plugin_package_parent / state.current_package_install_id,
+                data_root=layout.data_root,
+                secret_resolver=connections.settings.read().mcp_secret,
+            )
+            def current_target():
+                return config if store.read_state(layout) == state else None
+
+            owner = plugin_connection_owner(identity, local_server_id)
+            if action == "login":
+                return connections.oauth._begin(owner, current_target)
+            if action == "status":
+                return connections.oauth.login_state(owner, config)
+        def require_current():
+            if current_target() is None:
+                raise McpManagementConflict("Plugin changed; refresh before authorization changes")
+        if action == "logout":
+            await connections.oauth.logout(owner, require_current=require_current)
+        elif action == "cancel":
+            await connections.oauth.cancel(owner, require_current=require_current)
+        else:
+            raise ValueError("invalid Plugin authorization action")
+        return connections.oauth.login_state(owner, config)
+
+    async def replace_plugin_mcp_connection_overlay(self, request, *, connections):
+        from .connection_management import replace_plugin_connection
+
+        return await replace_plugin_connection(self, connections, request)
+
     def validate_local_plugin_source(
         self, request: ValidateLocalPluginSourceRequest
     ):
@@ -125,12 +185,8 @@ class PluginManagementService:
             )
         observer = PluginSourceObserver(self._credential_boundary)
         try:
-            observation = observer.observe(
-                request.source_path,
-                deadline_monotonic=request.deadline_monotonic,
-                cancellation=request.cancellation,
-                scrub_set=scrub_set,
-            )
+            from .source_import import observe_plugin_import
+            observation = observe_plugin_import(observer, request, scrub_set=scrub_set)
         except PluginPackageInvalid as exc:
             return InvalidPluginValidationOutcome(
                 _safe_path(request.source_path, scrub_set),
@@ -170,9 +226,25 @@ class PluginManagementService:
         finally:
             observation.close()
 
-    def install_local_plugin(self, request: InstallLocalPluginRequest):
+    async def install_local_plugin(self, request: InstallLocalPluginRequest, *, connections):
+        import asyncio
+
+        worker = asyncio.create_task(self._install_local_plugin(request, connections=connections))
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        return worker.result()
+
+    async def _install_local_plugin(self, request: InstallLocalPluginRequest, *, connections):
+        import asyncio
+        from .connection_management import install_plugin_package
+
         try:
-            scrub_set = self._capture_scrub_set(request)
+            scrub_set = await asyncio.to_thread(self._capture_scrub_set, request)
         except ProcessCredentialBoundaryCancelled:
             return FailedPluginInstallOutcome(
                 PluginInstallDisposition.CANCELLED, _withheld_source_path()
@@ -202,12 +274,8 @@ class PluginManagementService:
             )
         observer = PluginSourceObserver(self._credential_boundary)
         try:
-            observation = observer.observe(
-                request.source_path,
-                deadline_monotonic=request.deadline_monotonic,
-                cancellation=request.cancellation,
-                scrub_set=scrub_set,
-            )
+            from .source_import import observe_plugin_import
+            observation = await asyncio.to_thread(observe_plugin_import, observer, request, scrub_set=scrub_set)
         except PluginPackageInvalid as exc:
             return FailedPluginInstallOutcome(
                 PluginInstallDisposition.INVALID,
@@ -249,19 +317,17 @@ class PluginManagementService:
                 workspace_root=request.workspace_root,
             )
             try:
-                result = store.install(
-                    observation,
-                    scope=request.scope,
-                    workspace_root=request.workspace_root,
-                    replace=request.replace,
-                    deadline_monotonic=request.deadline_monotonic,
-                    cancellation=request.cancellation,
-                    scrub_set=scrub_set,
+                result = await install_plugin_package(
+                    store, connections, observation, request, scrub_set,
                 )
+            except McpManagementConflict:
+                raise
             except PluginPackageCancelled:
                 result = StoreOperationCancelled()
             except PluginPackageTimedOut:
                 result = StoreOperationTimedOut()
+            except (MemoryError, OSError, ValueError):
+                result = StoreMutationFailure(_diagnostic(PluginDiagnosticCode.STATE_UNAVAILABLE))
             return _install_outcome(
                 result,
                 source_path=safe_source_path,
@@ -317,14 +383,19 @@ class PluginManagementService:
                 )
             )
         try:
+            from pulsara_agent.settings import LocalSettingsStore, LOCAL_SETTINGS_FILE_NAME
+
             result = store.set_enabled(
                 identity,
                 expected_package_install_id=(
                     request.expected_current_package_install_id
                 ),
                 enabled=request.enabled,
+                connection_review=request.connection_review,
+                settings=LocalSettingsStore(store.home / LOCAL_SETTINGS_FILE_NAME),
                 deadline_monotonic=request.deadline_monotonic,
                 cancellation=request.cancellation,
+                prepared_current=request.prepared_current,
             )
         except PluginPackageCancelled:
             return settle(
@@ -403,7 +474,7 @@ class PluginManagementService:
             )
         )
 
-    def remove_local_plugin(self, request: RemoveLocalPluginRequest):
+    async def remove_local_plugin(self, request: RemoveLocalPluginRequest, *, connections=None):
         identity = _request_identity(
             request.scope, request.plugin_id, request.workspace_root
         )
@@ -446,11 +517,17 @@ class PluginManagementService:
                 )
             )
         try:
-            result = store.remove(
-                identity,
-                deadline_monotonic=request.deadline_monotonic,
-                cancellation=request.cancellation,
-            )
+            from .connection_management import remove_plugin_state
+            from pulsara_agent.capability.mcp_management import LocalMcpManagementService
+            from pulsara_agent.settings import LocalSettingsStore, LOCAL_SETTINGS_FILE_NAME
+
+            owns_connections = connections is None
+            connections = connections or LocalMcpManagementService(LocalSettingsStore(store.home / LOCAL_SETTINGS_FILE_NAME), user_config_path=store.home / "mcp.yaml")
+            try:
+                result = await remove_plugin_state(store, connections, identity, request)
+            finally:
+                if owns_connections:
+                    await connections.aclose()
         except PluginPackageCancelled:
             return settle(
                 FailedPluginRemovalOutcome(
@@ -463,6 +540,11 @@ class PluginManagementService:
                     PluginRemovalDisposition.TIMED_OUT, identity
                 )
             )
+        if result.stale:
+            return settle(FailedPluginRemovalOutcome(
+                PluginRemovalDisposition.STALE, identity,
+                diagnostics=(_diagnostic(PluginDiagnosticCode.STATE_RACED),),
+            ))
         if result.diagnostic is not None:
             return settle(
                 FailedPluginRemovalOutcome(
@@ -493,7 +575,7 @@ class PluginManagementService:
         if result.removed:
             return settle(
                 RemovedPluginOutcome(
-                    identity, result.previous.current_package_install_id
+                    identity, result.previous.current_package_install_id, result.cleanup_attention
                 )
             )
         return settle(
@@ -636,7 +718,8 @@ def _install_outcome(
                 value.state.current_package_install_id, scrub_set
             ),
             _safe_summary(value.summary, scrub_set),
-            diagnostics,
+            diagnostics + _safe_diagnostics(value.connection_diagnostics, scrub_set),
+            cleanup_attention=value.cleanup_attention,
         )
     if isinstance(value, StoreAlreadyPresent):
         return AlreadyPresentPluginInstallOutcome(
@@ -857,6 +940,7 @@ def _safe_removal_outcome(value, scrub_set: ProcessCredentialScrubSet):
         return RemovedPluginOutcome(
             _safe_identity(value.identity, scrub_set),
             _safe_package_install_id(value.prior_package_install_id, scrub_set),
+            value.cleanup_attention,
         )
     if isinstance(value, FailedPluginRemovalOutcome):
         return FailedPluginRemovalOutcome(
@@ -877,6 +961,7 @@ def _safe_inspection_outcome(
     instances = tuple(
         PluginInstanceInspection(
             identity=_safe_identity(item.identity, scrub_set),
+            mcp_connection_overlays=item.mcp_connection_overlays,
             package_install_id=_safe_package_install_id(
                 item.package_install_id, scrub_set
             ),
@@ -985,6 +1070,7 @@ def _safe_mcp_summary(value, scrub_set: ProcessCredentialScrubSet):
                     for key, item in value.environment
                 )
             ),
+            connection_inputs=value.connection_inputs,
         )
     if isinstance(value, PluginMcpHttpSummary):
         return PluginMcpHttpSummary(
@@ -999,6 +1085,7 @@ def _safe_mcp_summary(value, scrub_set: ProcessCredentialScrubSet):
                     for key, item in value.public_headers
                 )
             ),
+            connection_inputs=value.connection_inputs,
         )
     if isinstance(value, PluginMcpSseSummary):
         return PluginMcpSseSummary(
@@ -1013,6 +1100,7 @@ def _safe_mcp_summary(value, scrub_set: ProcessCredentialScrubSet):
                     for key, item in value.public_headers
                 )
             ),
+            connection_inputs=value.connection_inputs,
         )
     raise TypeError("Plugin MCP summary union is open")
 

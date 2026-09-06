@@ -60,7 +60,6 @@ from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
     McpAdvertisedCapabilities,
     McpProtocolConformanceError,
     McpTransportOperationError,
-    _SlotByteBudget,
     _enforce_http_network_policy,
     _has_legacy_discovery_fallback_evidence,
     _normalize_legacy_discovery_http_error,
@@ -617,18 +616,6 @@ def test_round6_public_http_resolution_is_pinned_with_logical_host_and_sni(
         assert pinned.sni_hostname == "mcp.example.test"
 
     asyncio.run(exercise())
-
-
-def test_round6_slot_wire_budget_is_shared_and_released() -> None:
-    budget = _SlotByteBudget(32)
-    budget.reserve(16)
-    budget.reserve(16)
-    with pytest.raises(McpWireBoundExceeded, match="slot bound"):
-        budget.reserve(1)
-    budget.release(16)
-    budget.reserve(1)
-    budget.release(17)
-    assert budget.used == 0
 
 
 def test_round6_json_shape_is_rejected_before_object_allocation(
@@ -3877,7 +3864,9 @@ def test_round6_stdio_eof_fences_exact_slot_and_schedules_reconnect(
 
 def test_round6_cli_config_edit_and_standalone_reconnect_boundary(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
     parser = build_parser()
     workspace = str(tmp_path)
     add = parser.parse_args(
@@ -3941,8 +3930,8 @@ def test_round6_config_is_closed_whole_entry_and_secret_safe(
         "      type: streamable_http\n"
         "      endpoint: https://example.invalid/mcp\n"
         "    auth:\n"
-        "      type: bearer_environment_ref\n"
-        "      environment_variable: ROUND6_SECRET\n",
+        "      type: bearer\n"
+        "      reference: {source: environment, name: ROUND6_SECRET}\n",
         encoding="utf-8",
     )
     (workspace / ".pulsara" / "mcp.yaml").write_text(
@@ -4013,8 +4002,8 @@ def test_round6_config_is_closed_whole_entry_and_secret_safe(
         "      type: streamable_http\n"
         "      endpoint: https://example.invalid/mcp\n"
         "    auth:\n"
-        "      type: bearer_environment_ref\n"
-        "      environment_variable: ROUND6_SECRET\n",
+        "      type: bearer\n"
+        "      reference: {source: environment, name: ROUND6_SECRET}\n",
         encoding="utf-8",
     )
     (secret_one,) = load_mcp_server_configs(user_config_path=secret_config)
@@ -4200,7 +4189,7 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
             for imported in imports
         ):
             sdk_importers.append(path.name)
-            assert path.name == "sdk_facade.py"
+            assert path.name in {"sdk_facade.py", "oauth.py"}
         assert not any(
             token in node.name.lower()
             for node in ast.walk(tree)
@@ -4213,7 +4202,8 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
             or imported.endswith("conversation_kernel.repository")
             for imported in imports
         ), path
-    assert sdk_importers == ["sdk_facade.py"]
+    # OAuth is the second narrow SDK boundary; neither owner adds kernel rows/events.
+    assert sorted(sdk_importers) == ["oauth.py", "sdk_facade.py"]
 
     direct_model_source = (
         root / "src" / "pulsara_agent" / "conversation_kernel" / "direct_model.py"

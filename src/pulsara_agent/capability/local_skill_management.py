@@ -13,6 +13,17 @@ from pulsara_agent.capability.bundled_skills import (
     BundledSkillDefinitionProducer,
     BundledSkillDistributionBindingOwner,
 )
+from pulsara_agent.capability.contracts import LocalSkillRootKind
+from pulsara_agent.capability.local_skill_removal import (
+    LocalSkillRemovalIdentity,
+    LocalSkillRemovalOutcome,
+    observe_loose_skill_removal,
+    remove_inspected_loose_skill,
+)
+from pulsara_agent.capability.user_skill_config import (
+    USER_SKILL_CONFIG_NAME,
+    workspace_skill_config_path,
+)
 
 from pulsara_agent.capability.local_skill_publisher import (
     AtomicLocalSkillPublisher,
@@ -91,6 +102,8 @@ class InstallLooseLocalSkillRequest:
     source_path: Path
     scope: LocalSkillInstallScope
     workspace_root: Path | None = None
+    name: str | None = None
+    description: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, LocalSkillInstallScope):
@@ -187,6 +200,65 @@ class LocalSkillManagementService:
     ) -> LocalSkillValidationOutcome:
         return _validate_source(request.source_path)
 
+    def inspect_loose_skill_removal(
+        self,
+        *,
+        skill_path: Path,
+        scope: LocalSkillInstallScope,
+        workspace_root: Path | None = None,
+    ) -> LocalSkillRemovalIdentity:
+        root, name, _ = self._removal_target(skill_path, scope, workspace_root)
+        return observe_loose_skill_removal(root, name)
+
+    def remove_loose_local_skill(
+        self,
+        *,
+        skill_path: Path,
+        scope: LocalSkillInstallScope,
+        expected: LocalSkillRemovalIdentity,
+        workspace_root: Path | None = None,
+    ) -> LocalSkillRemovalOutcome:
+        root, name, config = self._removal_target(skill_path, scope, workspace_root)
+        return remove_inspected_loose_skill(
+            root, name, expected=expected, config_path=config
+        )
+
+    def _removal_target(self, path, scope, workspace_root):
+        if not isinstance(scope, LocalSkillInstallScope):
+            raise TypeError("Skill removal scope is not closed")
+        if (scope is LocalSkillInstallScope.WORKSPACE) != (workspace_root is not None):
+            raise ValueError("Skill removal workspace conflicts with scope")
+        if not path.is_absolute() or path.name != SKILL_FILE_NAME:
+            raise ValueError("Skill removal requires the exact installed SKILL.md path")
+        user_home = self._user_home_resolution or resolve_user_home()
+        producer = self._loose_producer or LooseSkillDefinitionProducer(
+            pulsara_home_resolution=self._home_resolution(
+                user_home_resolution=user_home
+            ),
+            user_home_resolution=user_home,
+        )
+        policy = producer.prepare_root_policy(workspace_root or Path.cwd())
+        allowed = (
+            {LocalSkillRootKind.USER_PULSARA, LocalSkillRootKind.USER_AGENTS}
+            if scope is LocalSkillInstallScope.USER
+            else {LocalSkillRootKind.WORKSPACE_PULSARA}
+        )
+        roots = [
+            root
+            for root in policy.roots
+            if root.root_kind in allowed and root.path == path.parent.parent
+        ]
+        if len(roots) != 1:
+            raise ValueError("Skill is not an owned immediate child in this scope")
+        if workspace_root is None:
+            home = self._home_resolution(user_home_resolution=user_home)
+            if home.path is None:
+                raise ValueError("Pulsara home is unavailable")
+            config = home.path / USER_SKILL_CONFIG_NAME
+        else:
+            config = workspace_skill_config_path(workspace_root)
+        return roots[0].path, path.parent.name, config
+
     def install_loose_local_skill(
         self,
         request: InstallLooseLocalSkillRequest,
@@ -204,6 +276,8 @@ class LocalSkillManagementService:
             workspace_root=request.workspace_root,
             pulsara_home=home,
             cancellation=cancellation,
+            name=request.name,
+            description=request.description,
         )
 
     def inspect_effective_skill_catalog(

@@ -3,6 +3,7 @@
 > 状态：**ACTIVATED**
 >
 > 初次激活：2026-08-24；unified catalog hard-cut同步：2026-08-25。
+> 2026-09-06：GUI 来源导入与 managed-root 删除由能力页 MCP/可安装能力删除 hard-cut 规范扩展；仍复用本文的 source observation 与 atomic publisher，不增加 runtime discovery root。
 >
 > Effective catalog的current authority：[`PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。本文只拥有loose local management operations、source observation与atomic publisher契约。
 >
@@ -94,7 +95,9 @@ workspace -> <workspace>/.pulsara/skills/<name>
 user      -> ${PULSARA_HOME}/skills/<name>
 ```
 
-不写`.agents/skills`，不支持overwrite/update/remove/rollback/merge或remote acquisition。
+安装不写`.agents/skills`，不支持overwrite/update/rollback/merge或remote acquisition。
+删除是独立 typed operation，允许移除用户有权管理的既有 loose roots 中 exact Skill，并清理其
+enablement override；不是安装覆盖、目录级通配删除或历史 transcript 改写。
 
 Closed dispositions：
 
@@ -210,7 +213,10 @@ Workspace resolution：
 - validate只解析source；
 - human/`--json`都只是typed outcome projection，JSON不是GUI wire protocol。
 
-Official bundled `pulsara-mcp-installer`、`pulsara-plugin-installer`、`pulsara-skill-creator`与`pulsara-skill-installer`只调用global CLI和各自已有的running-Host控制面；它们不回退到source checkout或private installer。旧private `skill_utils.py`、`install-local-skill.py`、`list-installed-skills.py`及引用/packaged copies已经删除。
+Official bundled installers 优先使用现有 typed running-Host 控制面；MCP/Plugin 使用
+`manage_capability` 与用户表单，Skill 使用既有安装/读取路径及 GUI 导入。global CLI 是
+out-of-band 管理入口，变更后需显式 reload；first-party GUI/tool 变更自动在 safe point 采用，
+不例行二次 reload。它们不回退到 source checkout 或 private installer；旧 private 脚本仍保持删除。
 
 旧`sync-bundled/status/reset` CLI与对应sync/manifest/provenance/hash/backup/opt-out owner已经由unified hard cut删除。Package bundled Skills是read-only catalog defaults，不属于loose management service或publisher。
 

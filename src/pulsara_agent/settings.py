@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Literal, TypeVar
 from uuid import uuid4
@@ -22,6 +22,16 @@ from pulsara_agent.llm.model_connections import (
 from pulsara_agent.local_source_binding import (
     open_absolute_directory_nofollow,
     open_or_create_absolute_directory_nofollow,
+)
+from pulsara_agent.mcp_credentials import (
+    LocalMcpCredential,
+    LocalMcpOAuthRecord,
+    McpCredentialBinding,
+    McpCredentialOwner,
+    binding_from_dict,
+    binding_to_dict,
+    owner_from_dict,
+    owner_to_dict,
 )
 
 
@@ -106,8 +116,14 @@ class LocalSettings:
         default_factory=LocalDashScopeCredentials,
         repr=False,
     )
+    mcp_credentials: tuple[LocalMcpCredential, ...] = field(default=(), repr=False)
+    mcp_oauth: tuple[LocalMcpOAuthRecord, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
+        bindings = tuple(item.binding for item in self.mcp_credentials)
+        owners = tuple(item.owner for item in self.mcp_oauth)
+        if len(bindings) != len(set(bindings)) or len(owners) != len(set(owners)):
+            raise ValueError("duplicate MCP private binding")
         ids = tuple(item.id for item in self.model_connections)
         if len(ids) != len(set(ids)):
             raise ValueError("local settings contain duplicate model connection IDs")
@@ -146,6 +162,17 @@ class LocalSettings:
 
     def dashscope_api_key(self, kind: DashScopeCredentialKind) -> str | None:
         return self.dashscope_credentials.api_key(kind)
+
+    def mcp_secret(self, binding: McpCredentialBinding) -> str | None:
+        return next(
+            (item.value for item in self.mcp_credentials if item.binding == binding),
+            None,
+        )
+
+    def mcp_authorization(
+        self, owner: McpCredentialOwner
+    ) -> LocalMcpOAuthRecord | None:
+        return next((item for item in self.mcp_oauth if item.owner == owner), None)
 
     def require_dashscope_api_key(self, kind: DashScopeCredentialKind) -> str:
         value = self.dashscope_api_key(kind)
@@ -196,6 +223,25 @@ def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
             "embedding_api_key": settings.dashscope_credentials.embedding_api_key,
             "rerank_api_key": settings.dashscope_credentials.rerank_api_key,
         },
+        "mcp_credentials": [
+            {"binding": binding_to_dict(item.binding), "value": item.value}
+            for item in settings.mcp_credentials
+        ],
+        "mcp_oauth": [
+            {
+                "owner": owner_to_dict(item.owner),
+                "resource_url": item.resource_url,
+                "issuer": item.issuer,
+                "client_id": item.client_id,
+                "scope": item.scope,
+                "token_json": item.token_json,
+                "client_json": item.client_json,
+                "expires_at": item.expires_at,
+                "metadata_json": item.metadata_json,
+                "auth_json": item.auth_json,
+            }
+            for item in settings.mcp_oauth
+        ],
     }
 
 
@@ -205,6 +251,8 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         "postgres",
         "model_connections",
         "dashscope_credentials",
+        "mcp_credentials",
+        "mcp_oauth",
     }:
         raise ValueError("local settings have an invalid closed shape")
     if value["schema"] != LOCAL_SETTINGS_SCHEMA:
@@ -264,7 +312,46 @@ def local_settings_from_dict(value: object) -> LocalSettings:
             embedding_api_key=embedding_api_key,
             rerank_api_key=rerank_api_key,
         ),
+        mcp_credentials=_mcp_credentials_from_dict(value["mcp_credentials"]),
+        mcp_oauth=_mcp_oauth_from_dict(value["mcp_oauth"]),
     )
+
+
+def _mcp_credentials_from_dict(raw: object) -> tuple[LocalMcpCredential, ...]:
+    if not isinstance(raw, list):
+        raise ValueError("MCP credentials must be an array")
+    result = []
+    for item in raw:
+        if not isinstance(item, dict) or set(item) != {"binding", "value"}:
+            raise ValueError("invalid MCP credential shape")
+        result.append(
+            LocalMcpCredential(binding_from_dict(item["binding"]), item["value"])
+        )
+    return tuple(result)
+
+
+def _mcp_oauth_from_dict(raw: object) -> tuple[LocalMcpOAuthRecord, ...]:
+    if not isinstance(raw, list):
+        raise ValueError("MCP authorizations must be an array")
+    result = []
+    for item in raw:
+        if not isinstance(item, dict) or set(item) != {
+            "owner",
+            "resource_url",
+            "issuer",
+            "client_id",
+            "scope",
+            "token_json",
+            "client_json",
+            "expires_at",
+            "metadata_json",
+            "auth_json",
+        }:
+            raise ValueError("invalid MCP authorization shape")
+        result.append(
+            LocalMcpOAuthRecord(**{**item, "owner": owner_from_dict(item["owner"])})
+        )
+    return tuple(result)
 
 
 def read_local_settings(path: Path | None = None) -> LocalSettings:
@@ -379,6 +466,90 @@ class LocalSettingsStore:
     def read(self) -> LocalSettings:
         return read_local_settings(self.path)
 
+    def resolve_mcp_secret(self, binding: McpCredentialBinding) -> str | None:
+        return self.read().mcp_secret(binding)
+
+    async def replace_mcp_secrets(
+        self,
+        owner: McpCredentialOwner,
+        changes: tuple[tuple[McpCredentialBinding, str | None], ...],
+    ) -> LocalSettings:
+        if any(binding.owner != owner for binding, _ in changes):
+            raise ValueError("MCP secret mutation crosses its owner")
+        if len({binding for binding, _ in changes}) != len(changes):
+            raise ValueError("duplicate MCP secret mutation")
+        additions = tuple(
+            LocalMcpCredential(binding, value)
+            for binding, value in changes
+            if value is not None
+        )
+        changed = {binding for binding, _ in changes}
+        updated, _ = await self._run_mutation(
+            lambda current: (
+                replace(
+                    current,
+                    mcp_credentials=tuple(
+                        item
+                        for item in current.mcp_credentials
+                        if item.binding not in changed
+                    )
+                    + additions,
+                ),
+                None,
+            ),
+            name="publish-mcp-credentials",
+            repair=False,
+        )
+        return updated
+
+    async def replace_mcp_authorization(
+        self,
+        owner: McpCredentialOwner,
+        record: LocalMcpOAuthRecord | None,
+        *,
+        expected: LocalMcpOAuthRecord | None,
+    ) -> LocalSettings:
+        if record is not None and record.owner != owner:
+            raise ValueError("OAuth record crosses its owner")
+
+        def mutation(current: LocalSettings) -> tuple[LocalSettings, None]:
+            if current.mcp_authorization(owner) != expected:
+                raise ValueError("MCP authorization changed")
+            return replace(
+                current,
+                mcp_oauth=tuple(
+                    item for item in current.mcp_oauth if item.owner != owner
+                )
+                + (() if record is None else (record,)),
+            ), None
+
+        updated, _ = await self._run_mutation(
+            mutation, name="publish-mcp-authorization", repair=False
+        )
+        return updated
+
+    async def remove_mcp_credentials(self, owner: McpCredentialOwner) -> LocalSettings:
+        # Caller holds the canonical mutation lane and has verified owner removal.
+        updated, _ = await self._run_mutation(
+            lambda current: (
+                replace(
+                    current,
+                    mcp_credentials=tuple(
+                        item
+                        for item in current.mcp_credentials
+                        if item.binding.owner != owner
+                    ),
+                    mcp_oauth=tuple(
+                        item for item in current.mcp_oauth if item.owner != owner
+                    ),
+                ),
+                None,
+            ),
+            name="remove-mcp-credentials",
+            repair=False,
+        )
+        return updated
+
     def _read_for_explicit_repair(self) -> LocalSettings:
         """Read the latest document or start a user-requested replacement.
 
@@ -403,6 +574,8 @@ class LocalSettingsStore:
                     model_connections=current.model_connections,
                     model_api_keys=current.model_api_keys,
                     dashscope_credentials=current.dashscope_credentials,
+                    mcp_credentials=current.mcp_credentials,
+                    mcp_oauth=current.mcp_oauth,
                 ),
                 None,
             ),
@@ -439,17 +612,15 @@ class LocalSettingsStore:
     ) -> tuple[LocalSettings, None]:
         if current.connection(connection.id) is not None:
             raise ValueError("model connection ID already exists")
-        key = (
-            ()
-            if api_key is None
-            else (LocalModelApiKey(connection.id, api_key),)
-        )
+        key = () if api_key is None else (LocalModelApiKey(connection.id, api_key),)
         return (
             LocalSettings(
                 postgres=current.postgres,
                 model_connections=(*current.model_connections, connection),
                 model_api_keys=(*current.model_api_keys, *key),
                 dashscope_credentials=current.dashscope_credentials,
+                mcp_credentials=current.mcp_credentials,
+                mcp_oauth=current.mcp_oauth,
             ),
             None,
         )
@@ -472,6 +643,8 @@ class LocalSettingsStore:
                         if item.connection_id != connection_id
                     ),
                     dashscope_credentials=current.dashscope_credentials,
+                    mcp_credentials=current.mcp_credentials,
+                    mcp_oauth=current.mcp_oauth,
                 ),
                 current.connection(connection_id) is not None,
             ),
@@ -492,6 +665,8 @@ class LocalSettingsStore:
                     dashscope_credentials=current.dashscope_credentials.replacing(
                         kind, api_key
                     ),
+                    mcp_credentials=current.mcp_credentials,
+                    mcp_oauth=current.mcp_oauth,
                 ),
                 None,
             ),
@@ -511,6 +686,8 @@ class LocalSettingsStore:
                     dashscope_credentials=current.dashscope_credentials.replacing(
                         kind, None
                     ),
+                    mcp_credentials=current.mcp_credentials,
+                    mcp_oauth=current.mcp_oauth,
                 ),
                 None,
             ),
@@ -520,13 +697,14 @@ class LocalSettingsStore:
 
     async def _run_mutation(
         self,
-        mutation: Callable[
-            [LocalSettings], tuple[LocalSettings, MutationResult]
-        ],
+        mutation: Callable[[LocalSettings], tuple[LocalSettings, MutationResult]],
         *,
         name: str,
+        repair: bool = True,
     ) -> tuple[LocalSettings, MutationResult]:
-        settlement = asyncio.create_task(self._mutate(mutation), name=name)
+        settlement = asyncio.create_task(
+            self._mutate(mutation, repair=repair), name=name
+        )
         cancelled: asyncio.CancelledError | None = None
         while not settlement.done():
             try:
@@ -541,12 +719,14 @@ class LocalSettingsStore:
 
     async def _mutate(
         self,
-        mutation: Callable[
-            [LocalSettings], tuple[LocalSettings, MutationResult]
-        ],
+        mutation: Callable[[LocalSettings], tuple[LocalSettings, MutationResult]],
+        *,
+        repair: bool = True,
     ) -> tuple[LocalSettings, MutationResult]:
         async with self._lock:
-            current = await asyncio.to_thread(self._read_for_explicit_repair)
+            current = await asyncio.to_thread(
+                self._read_for_explicit_repair if repair else self.read
+            )
             updated, result = mutation(current)
             if updated == current:
                 return current, result

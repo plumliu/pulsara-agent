@@ -1,109 +1,74 @@
 ---
 name: pulsara-mcp-installer
-description: Configure and verify local MCP servers through Pulsara's official management commands and running-Host reload/catalog tools. Use when the user asks to install, add, connect, configure, test, enable, disable, remove, or diagnose an MCP server in Pulsara.
+description: Add, edit, authorize, test and remove MCP connections through Pulsara's capability management tool and shared user forms.
 ---
 
 # Pulsara MCP Installer
 
-Use this skill to add an MCP server to Pulsara's existing local configuration
-surface and prove that Pulsara can discover its tools. An MCP vendor's ordinary
-CLI is not automatically its MCP server; use an authoritative Streamable HTTP
-endpoint or stdio command intended for MCP.
-
-## Product Availability
-
-Use the installed global `pulsara` launcher. First confirm that the installed
-distribution exposes `pulsara mcp`. If it does not, report a Pulsara distribution
-or launcher blocker and stop. Do not fall back to a source checkout, repository
-`.venv`, `python -m`, `uv run`, a private script, or direct YAML editing.
+Use the running Host's `manage_capability` tool for first-party MCP changes.
+Use the global `pulsara mcp` CLI only for explicitly out-of-band administration.
+Do not use a checkout, private script, raw YAML editing or a second installer.
 
 ## Workflow
 
-1. Establish the authoritative connection shape before writing configuration:
-   - remote MCP: exact Streamable HTTP endpoint;
-   - local MCP: exact executable plus each argument in order.
-   Do not guess an endpoint, command, argument, credential, or transport from a
-   product name alone.
-2. Choose configuration visibility from the user's request:
-   - user configuration applies across workspaces and omits `--workspace`;
-   - workspace configuration uses `--workspace <workspace-root>` and applies only
-     when that workspace MCP source is trusted by the Host.
-   Ask only when this choice would materially change the result and the request
-   does not already say global, user, machine, project, directory, or workspace.
-3. Inspect existing truth before adding a duplicate:
+1. Establish the authoritative MCP endpoint or exact stdio command/args/cwd.
+   A vendor CLI is not necessarily an MCP server. Streamable HTTP and explicit
+   legacy SSE are supported by the official SDK; never guess transport by name.
+2. Choose USER or WORKSPACE from the user's intent. Inspect `list_mcp_servers`
+   before adding a duplicate. Do not silently broaden workspace trust or network access.
+3. Call `manage_capability` with ADD_LOCAL_MCP, UPDATE_LOCAL_MCP or REMOVE_LOCAL_MCP,
+   exact server_id and scope. Public config uses the native structured schema,
+   not a serialized blob. Omit unknown connection details so the shared user
+   form can obtain them; do not invent values.
+4. Never put credential values in tool arguments, conversation, logs or a package.
+   The user fills managed secrets directly in the shared form/private settings.
+   Environment references remain an advanced option. OAuth uses AUTHORIZE_MCP
+   with explicit user interaction; CLEAR_MCP_AUTHORIZATION clears local grants,
+   not remote tokens. A background connection cannot start a browser login.
+5. Read both mutation and adoption outcomes. First-party management automatically
+   adopts through the existing safe point before the next model request; do not
+   routinely call `reload_capabilities` a second time. Use explicit reload for
+   out-of-band CLI/file changes or a reported partial adoption only.
+6. Use `list_mcp_servers` for the exact configured identity. When a tool is
+   NEW_MCP_META_ONLY, call `inspect_new_mcp_tool` and then `use_new_mcp_tool`
+   with the returned reference. Never guess names or schemas; same-epoch
+   SYSTEM/tools are not rewritten.
+7. If requested, perform one safe representative call. Saving, authorizing,
+   discovering a catalog and executing a tool are distinct outcomes; report
+   exactly what passed and what remains unavailable.
 
-```bash
-pulsara mcp list
-pulsara mcp list --workspace <workspace-root>
+## Public candidate example
+
+For a known public Streamable HTTP endpoint, `config` can be:
+
+```json
+{"display_name":"Docs","enabled":true,"transport":{"type":"streamable_http","endpoint":"https://example.org/mcp"},"auth":{"type":"none"}}
 ```
 
-4. Add one remote server:
+Only use `allow_http_localhost: true` inside transport for an explicitly approved
+loopback HTTP service. UPDATE replaces the whole entry, not one field. If the
+complete current settings are unavailable, omit `config`: the shared editor is
+prefilled from current configuration. Do not search repository implementation or
+private settings for the schema or secrets.
 
-```bash
-pulsara mcp add <server-id> --url <streamable-http-endpoint>
-pulsara mcp add <server-id> --url <streamable-http-endpoint> --workspace <workspace-root>
-```
+## User-only import and administration
 
-   Or add one stdio server, keeping every argument separate and ordered:
+The capability page can import selected JSON/JSONC MCP configurations without a
+model: preview, classify header/env values, fill inputs, save, then test. File
+templates require an explicit user-selected file; do not read arbitrary local
+files or execute headersHelper commands. Unknown behavior is not silently dropped.
 
-```bash
-pulsara mcp add <server-id> --stdio-command <executable> --arg <argument> --arg <argument>
-```
+For out-of-band administration, the installed launcher exposes `pulsara mcp list`,
+`add`, `doctor`, `enable`, `disable`, and `remove`; inspect `--help`
+for supported arguments. Such a CLI process does not own an already running
+Host: follow its change with one explicit `reload_capabilities`.
+If the launcher is missing, report the distribution problem instead of using a
+repository runtime. Tool availability in the current Host is independent of PATH.
 
-5. Keep defaults unless evidence or the user's request requires otherwise:
-   - use `--allow-http-localhost` only for an actual localhost HTTP endpoint;
-   - use `--allow-private-network` only for an intended private-network endpoint;
-   - use `--proved-stateless` only when the server contract proves stateless HTTP;
-   - use `--required` only when Host startup must treat this server as required;
-   - use `--scope ROOT_AND_SUBAGENTS` only when delegated tasks should see it;
-   - keep `--effect AUTO` unless an authoritative contract proves a narrower
-     `READ_ONLY` default or requires `EXTERNAL_EFFECT`.
-6. Verify the exact configured server through Pulsara's production connector:
+## Boundaries
 
-```bash
-pulsara mcp doctor <server-id>
-pulsara mcp doctor <server-id> --workspace <workspace-root>
-```
-
-   Do not claim success unless doctor reaches a ready state and reports the
-   expected catalog. A reachable endpoint alone is not an installed MCP server.
-7. In an already-running Host, call `reload_capabilities` after configuration changes.
-   This existing reload path refreshes local MCP and Plugin sources without
-   rewriting the installed provider-input prefix. Then call
-   `list_mcp_servers` with the exact server id.
-8. A newly discovered tool may not become a direct provider tool inside the
-   current epoch. If its route is `NEW_MCP_META_ONLY`, pass its exact listed name
-   to `inspect_new_mcp_tool`, read the returned schema, and invoke it only with
-   `use_new_mcp_tool` and the exact returned tool reference. Never guess a tool
-   name, schema, or tool reference. A new conversation may expose the tool
-   directly at its cold-epoch boundary.
-9. When verification is requested and a safe read-only MCP operation exists,
-   invoke one representative operation within the user's stated scope. Report
-   the connector state, discovered tool count, invoked tool, and concrete result
-   or typed blocker.
-
-Use the ordinary lifecycle commands for later management:
-
-```bash
-pulsara mcp enable <server-id> [--workspace <workspace-root>]
-pulsara mcp disable <server-id> [--workspace <workspace-root>]
-pulsara mcp remove <server-id> [--workspace <workspace-root>]
-```
-
-`pulsara mcp reconnect` requires an active Host-owned supervisor and cannot make
-a standalone CLI process control another Host. Prefer the running Host's reload
-and catalog path after a configuration change.
-
-## Guardrails
-
-- This skill grants no filesystem, terminal, network, remote-effect, workspace
-  trust, or subagent authority. Ordinary permission policy still applies.
-- Do not replace or remove an existing server id unless the user has requested
-  that exact lifecycle change. There is no implicit update operation.
-- Do not bypass Pulsara validation by editing `mcp.yaml` directly.
-- Do not print, persist, or invent credentials. If the authoritative server
-  requires an authentication shape the management surface cannot represent,
-  report that exact blocker instead of silently connecting anonymously.
-- Do not infer statelessness from a successful request or missing session header.
-- Do not confuse direct endpoint protocol success with Pulsara connector success;
-  use `mcp doctor` and the running catalog as the product evidence.
+The skill grants no tool, filesystem, network, subagent or process permission.
+Do not remove/replace an existing connection without the user's request.
+Do not infer statelessness or read-only effects from one successful call.
+Tool calls are not automatically replayed after an auth failure or disconnect.
+SDK HTTP/SSE and Pulsara policy are shared by standalone and Plugin MCPs.

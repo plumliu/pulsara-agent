@@ -305,9 +305,9 @@ def test_enabled_mcp_enters_kernel_resource_activation(
         raise RuntimeError("resource activation observed")
 
     monkeypatch.setattr(
-        kernel_host,
-        "load_mcp_server_configs",
-        lambda **_: (SimpleNamespace(server_id="mcp:test", enabled=True),),
+        kernel_host.LocalMcpManagementService,
+        "load_configs",
+        lambda *_args, **_kwargs: (SimpleNamespace(server_id="mcp:test", enabled=True),),
     )
     monkeypatch.setattr(KernelHostCore, "_ensure_resources", observed_activation)
     core = KernelHostCore(model_runtime=test_model_runtime())
@@ -359,6 +359,7 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
     class BlockingSession:
         def __init__(self, **kwargs: object) -> None:
             self.session_id = str(kwargs["session_id"])
+            self.workspace = kwargs["workspace"]
             self.extensions = object()
             self.closed = False
             self.binding = kwargs["bundled_skill_binding"]
@@ -375,7 +376,7 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
         return FakeRepository()
 
     monkeypatch.setattr(kernel_host, "LocalHookSourceProvider", FakeHookSourceProvider)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(kernel_host, "KernelHostSession", BlockingSession)
     monkeypatch.setattr(kernel_host, "resolve_user_home", observed_user_home)
     monkeypatch.setattr(KernelHostCore, "_ensure_resources", fake_resources)

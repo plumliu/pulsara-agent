@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pulsara_agent.capability.descriptor import BuiltinToolDescriptor
+from pulsara_agent.capability.management_effects import (
+    ResolvedCapabilityEffectProjection,
+)
 from pulsara_agent.capability.builtin_catalog import (
     builtin_action_permission_override,
     builtin_tool_catalog_entry,
@@ -27,6 +30,7 @@ class BuiltinToolCallClassification:
     approval_reason: str | None = None
     deny_reason: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+    capability_effects: ResolvedCapabilityEffectProjection | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -57,7 +61,37 @@ class BuiltinToolCallClassifier(Protocol):
 
 
 class DefaultBuiltinToolCallClassifier:
-    def classify_builtin(self, call: Any) -> BuiltinToolCallClassification:
+    def classify_builtin(
+        self,
+        call: Any,
+        *,
+        capability_effects: ResolvedCapabilityEffectProjection | None = None,
+    ) -> BuiltinToolCallClassification:
+        if capability_effects is not None:
+            if call.name != "manage_capability" or not isinstance(
+                capability_effects, ResolvedCapabilityEffectProjection
+            ):
+                raise ValueError(
+                    "resolved capability effects belong only to manage_capability"
+                )
+            # This narrow preparation-first binding is classified from the
+            # canonical owner's value, never arguments.path/scope/trusted.
+            return BuiltinToolCallClassification(
+                descriptor_id="builtin:manage_capability",
+                tool_name=call.name,
+                effective_read_only=False,
+                effective_concurrency_safe=False,
+                effective_permission_category="capability_management",
+                effective_is_destructive=capability_effects.destructive,
+                effective_is_open_world=False,
+                builtin_tool_family="plugin_control",
+                metadata={
+                    "workspace_write": capability_effects.workspace_write,
+                    "outside_workspace_write": capability_effects.outside_workspace_write,
+                    "process_control": capability_effects.process_control,
+                },
+                capability_effects=capability_effects,
+            )
         entry = builtin_tool_catalog_entry(call.name)
         return self.classify(call, entry.descriptor)
 

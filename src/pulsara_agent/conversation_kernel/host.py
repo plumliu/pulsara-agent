@@ -199,7 +199,8 @@ from pulsara_agent.ports.terminal_observation import (
     ExistingTurnInstallation,
     NewTurnInstallation,
 )
-from pulsara_agent.mcp_config import McpServerConfig, load_mcp_server_configs
+from pulsara_agent.mcp_config import McpServerConfig
+from pulsara_agent.capability.mcp_management import LocalMcpManagementService
 from pulsara_agent.conversation_kernel.mcp import McpHostSupervisor
 from pulsara_agent.conversation_kernel.mcp.contracts import (
     McpCatalogSnapshot,
@@ -487,10 +488,14 @@ class KernelHostSession:
         plugin_view_owner: EnabledPluginViewOwner,
         initial_plugin_view: FrozenEnabledPluginView,
         credential_boundary: ProcessCredentialBoundary,
+        mcp_management: LocalMcpManagementService,
+        capability_change_notifier: Callable[[Path | None], Awaitable[int]] | None = None,
         local_mcp_configs: tuple[McpServerConfig, ...] = (),
         mcp_configs: tuple[McpServerConfig, ...] = (),
     ) -> None:
         self._model_runtime = model_runtime
+        self.mcp_management = mcp_management
+        self._capability_change_notifier = capability_change_notifier
         self.workspace = workspace
         self.repository = repository
         self.runtime_session_id = session_id
@@ -592,6 +597,14 @@ class KernelHostSession:
         )
         self._tools.bind_interaction_port(self._interactions)
         self._tools.bind_capability_reload_port(self)
+        from .capability_management import CapabilityManagementPreparation
+        self._tools.bind_capability_management(CapabilityManagementPreparation(
+            mcp=mcp_management,
+            plugins=PluginManagementService(credential_boundary=credential_boundary,
+                pulsara_home_resolution=pulsara_home_resolution),
+            workspace_root=workspace.workspace_root,
+            deadline=lambda: self._deadlines.deadline(KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION),
+        ))
         self._subagents = KernelSubagentManager(
             repository=repository,
             guard=self._lease.guard,
@@ -697,6 +710,7 @@ class KernelHostSession:
             model=self._model,
             tools=self._tools,
             live_bus=self.live_bus,
+            before_provider_preparation=self._adopt_capabilities_if_requested,
             io_owner=self._io,
             context_source_collector=self._context_sources,
             model_resolution_snapshot_provider=(
@@ -735,9 +749,9 @@ class KernelHostSession:
         self._command_failures: dict[str, KernelCommandOutcome] = {}
         self._lock = asyncio.Lock()
         self._capability_reload_settlement_lock = asyncio.Lock()
-        self._project_capability_refresh_requested_revision = 0
-        self._project_capability_refresh_applied_revision = 0
-        self._project_capability_refresh_attention: str | None = None
+        self._capability_refresh_requested_revision = 0
+        self._capability_refresh_applied_revision = 0
+        self._capability_refresh_attention: str | None = None
         self._ingress_hook_attempts: dict[str, _IngressHookAttempt] = {}
         self._compaction_write_reservations: dict[
             tuple[ModelInputScopeKind, str | None], int
@@ -928,7 +942,7 @@ class KernelHostSession:
         )
         try:
             local_mcp_configs = await asyncio.to_thread(
-                load_mcp_server_configs,
+                self.mcp_management.load_configs,
                 workspace_root=self.workspace.workspace_root,
                 trust_workspace_config=self.workspace.trust_workspace_mcp_config,
                 approved_workspace_server_identities=(
@@ -945,33 +959,42 @@ class KernelHostSession:
         finally:
             self._capability_reload_settlement_lock.release()
 
-    async def request_project_capability_refresh(self) -> int:
-        """Mark this live Session to adopt its directory config next turn."""
+    async def adopt_capability_management_change(self, *, workspace_root: Path | None):
+        pending = 0
+        if self._capability_change_notifier is not None:
+            pending = await self._capability_change_notifier(workspace_root)
+        await self.request_capability_refresh()
+        await self._adopt_capabilities_if_requested()
+        attention = bool(self.capability_refresh_attention)
+        return {"status": "PARTIAL" if attention else "RELOADED", "reloaded_sessions": int(not attention),
+                "pending_sessions": max(0, pending - 1), "attention_sessions": int(attention)}
+
+    async def request_capability_refresh(self) -> int:
+        """Mark the next unprepared dispatch; do not wake an otherwise idle turn."""
 
         async with self._lock:
             self._require_open()
-            self._project_capability_refresh_requested_revision += 1
-            revision = self._project_capability_refresh_requested_revision
-            self._queue_wake.set()
+            self._capability_refresh_requested_revision += 1
+            revision = self._capability_refresh_requested_revision
             return revision
 
     @property
-    def project_capability_refresh_pending(self) -> bool:
+    def capability_refresh_pending(self) -> bool:
         return (
-            self._project_capability_refresh_requested_revision
-            > self._project_capability_refresh_applied_revision
+            self._capability_refresh_requested_revision
+            > self._capability_refresh_applied_revision
         )
 
     @property
-    def project_capability_refresh_attention(self) -> str | None:
-        return self._project_capability_refresh_attention
+    def capability_refresh_attention(self) -> str | None:
+        return self._capability_refresh_attention
 
-    async def _adopt_project_capabilities_if_requested(self) -> bool:
-        """Attempt one directory adoption without starving the queued root turn."""
+    async def _adopt_capabilities_if_requested(self) -> bool:
+        """Adopt marked user/directory sources before the next provider preparation."""
 
         async with self._lock:
-            requested = self._project_capability_refresh_requested_revision
-            if requested <= self._project_capability_refresh_applied_revision:
+            requested = self._capability_refresh_requested_revision
+            if requested <= self._capability_refresh_applied_revision:
                 return True
         attention: str | None = None
         try:
@@ -984,11 +1007,11 @@ class KernelHostSession:
             if outcome.get("mcp") != "RELOADED":
                 attention = "PROJECT_MCP_ADOPTION_INCOMPLETE"
         async with self._lock:
-            self._project_capability_refresh_applied_revision = max(
-                self._project_capability_refresh_applied_revision,
+            self._capability_refresh_applied_revision = max(
+                self._capability_refresh_applied_revision,
                 requested,
             )
-            self._project_capability_refresh_attention = attention
+            self._capability_refresh_attention = attention
         return True
 
     async def _reload_capabilities_serialized(
@@ -1018,6 +1041,9 @@ class KernelHostSession:
             mcp = normalize_plugin_mcp_configs(
                 existing_configs=self._local_mcp_configs,
                 view=replacement,
+                secret_resolver=self.mcp_management.settings.read().mcp_secret,
+                oauth_manager=self.mcp_management.oauth,
+                current_state=self._plugin_view_owner.current_state,
             )
             _raise_if_deadline_expired(
                 deadline, "Capability reload composition deadline expired"
@@ -1840,7 +1866,8 @@ class KernelHostSession:
         error = task.exception()
         if error is not None:
             logging.getLogger(__name__).error(
-                "ROOT execution failed (%s)", task.get_name(),
+                "ROOT execution failed (%s)",
+                task.get_name(),
                 exc_info=(type(error), error, error.__traceback__),
             )
 
@@ -3319,16 +3346,10 @@ class KernelHostSession:
                 try:
                     model_resolution_snapshot.validate(candidate.model_call_binding)
                 except (KeyError, ValueError):
-                    rejected = await self._settle_queued_model_rejection(
-                        candidate
-                    )
+                    rejected = await self._settle_queued_model_rejection(candidate)
                     if rejected:
                         self._queue_wake.set()
                         continue
-                    break
-                if not await self._adopt_project_capabilities_if_requested():
-                    await asyncio.sleep(0.1)
-                    self._queue_wake.set()
                     break
                 async with self._lock:
                     try:
@@ -3991,6 +4012,30 @@ class KernelHostSession:
             "Interaction decision accepted.",
         )
 
+    def read_capability_form(
+        self, *, attachment_id: str, interaction_id: str,
+        expected_owner_epoch: int, expected_live_revision: int,
+    ):
+        self._require_open()
+        return self._interactions.current_capability_form(
+            attachment_id=attachment_id, interaction_id=interaction_id,
+            expected_owner_epoch=expected_owner_epoch,
+            expected_live_revision=expected_live_revision,
+        )
+
+    async def resolve_capability_form(
+        self, *, attachment_id: str, interaction_id: str,
+        expected_owner_epoch: int, expected_live_revision: int,
+        decision: str, submission: dict[str, object] | None = None,
+    ) -> None:
+        self._require_open()
+        await self._interactions.resolve_capability_form(
+            attachment_id=attachment_id, interaction_id=interaction_id,
+            expected_owner_epoch=expected_owner_epoch,
+            expected_live_revision=expected_live_revision,
+            decision=decision, submission=submission,
+        )
+
     async def stop_current_turn(self) -> bool:
         async with self._lock:
             task = self._active_task
@@ -4474,6 +4519,7 @@ class KernelHostSession:
             model=self._model,
             tools=self._tools,
             live_bus=self.live_bus,
+            before_provider_preparation=self._adopt_capabilities_if_requested,
             io_owner=self._io,
             context_source_collector=self._context_sources,
             model_resolution_snapshot_provider=(
@@ -4789,6 +4835,7 @@ class KernelHostCore:
         self._blob_gc_io: KernelSessionIO | None = None
         self._blob_gc_task: asyncio.Task[None] | None = None
         self._sessions: dict[str, KernelHostSession] = {}
+        self._workspace_capability_revisions: dict[Path, int] = {}
         self._open_attempts: set[asyncio.Future[None]] = set()
         self._close_attempts: dict[str, HostSessionCloseAttempt] = {}
         self._extension_routes: dict[str, tuple[str, KernelExtensionHost]] = {}
@@ -4802,6 +4849,9 @@ class KernelHostCore:
         )
         self._bundled_skill_binding = BundledSkillDistributionBindingOwner()
         self._credential_boundary = credential_boundary or ProcessCredentialBoundary()
+        self.mcp_management = LocalMcpManagementService(
+            model_runtime.settings, credential_boundary=self._credential_boundary
+        )
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -4818,17 +4868,17 @@ class KernelHostCore:
             request=request,
         )
 
-    async def install_user_plugin(self, source_path: Path) -> PluginInstallOutcome:
+    async def install_user_plugin(self, source_path: Path, *, source_format="native", import_classifications=(), import_public_values=()) -> PluginInstallOutcome:
         """Install one local package into the user Plugin store, initially disabled."""
 
         request = InstallLocalPluginRequest(
             source_path=source_path,
             scope=PluginScopeKind.USER,
             deadline_monotonic=self._canonical_deadline(),
+            source_format=source_format, import_classifications=import_classifications, import_public_values=import_public_values,
         )
-        return await _shielded_plugin_filesystem_call(
-            self._plugin_management().install_local_plugin,
-            request=request,
+        return await self._plugin_management().install_local_plugin(
+            request, connections=self.mcp_management,
         )
 
     async def set_user_plugin_enabled(
@@ -4837,6 +4887,7 @@ class KernelHostCore:
         plugin_id: str,
         package_install_id: str,
         enabled: bool,
+        connection_review,
     ) -> PluginEnablementOutcome:
         """Apply one exact reviewed user Plugin enablement cut."""
 
@@ -4845,6 +4896,7 @@ class KernelHostCore:
             plugin_id=plugin_id,
             enabled=enabled,
             expected_current_package_install_id=package_install_id,
+            connection_review=connection_review,
             deadline_monotonic=self._canonical_deadline(),
             external_process_acceptance=(
                 ExternalProcessAcceptance.ACCEPTED if enabled else None
@@ -4855,17 +4907,17 @@ class KernelHostCore:
             request=request,
         )
 
-    async def remove_user_plugin(self, plugin_id: str) -> PluginRemovalOutcome:
+    async def remove_user_plugin(self, plugin_id: str, package_install_id: str) -> PluginRemovalOutcome:
         """Remove one user Plugin state reference."""
 
         request = RemoveLocalPluginRequest(
             scope=PluginScopeKind.USER,
             plugin_id=plugin_id,
             deadline_monotonic=self._canonical_deadline(),
+            expected_current_package_install_id=package_install_id,
         )
-        return await _shielded_plugin_filesystem_call(
-            self._plugin_management().remove_local_plugin,
-            request=request,
+        return await self._plugin_management().remove_local_plugin(
+            request, connections=self.mcp_management,
         )
 
     @classmethod
@@ -5021,6 +5073,9 @@ class KernelHostCore:
         session_start_source: str,
     ) -> KernelHostSession:
         workspace = resolve_workspace(workspace_input)
+        canonical_root = workspace.workspace_root.resolve(strict=False)
+        async with self._lock:
+            capability_baseline = self._workspace_capability_revisions.setdefault(canonical_root, 0)
         deadline = self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
         user_home_resolution = resolve_user_home()
         pulsara_home_resolution = resolve_pulsara_home(
@@ -5063,7 +5118,7 @@ class KernelHostCore:
                 trust_store=hook_source_provider.trust_store,
             )
             local_mcp_configs = await asyncio.to_thread(
-                load_mcp_server_configs,
+                self.mcp_management.load_configs,
                 workspace_root=workspace.workspace_root,
                 trust_workspace_config=workspace.trust_workspace_mcp_config,
                 approved_workspace_server_identities=(
@@ -5073,6 +5128,9 @@ class KernelHostCore:
             mcp_normalization = normalize_plugin_mcp_configs(
                 existing_configs=local_mcp_configs,
                 view=initial_plugin_view,
+                secret_resolver=self.mcp_management.settings.read().mcp_secret,
+                oauth_manager=self.mcp_management.oauth,
+                current_state=plugin_view_owner.current_state,
             )
             mcp_configs = mcp_normalization.configs
             repository = await self._ensure_resources()
@@ -5096,6 +5154,8 @@ class KernelHostCore:
             )
             session = KernelHostSession(
                 model_runtime=self._model_runtime,
+                mcp_management=self.mcp_management,
+                capability_change_notifier=self.mark_capability_change,
                 workspace=workspace,
                 repository=repository,
                 writer_lease=writer_lease,
@@ -5122,13 +5182,7 @@ class KernelHostCore:
                 mcp_configs=mcp_configs,
             )
             await session.start_mcp()
-            async with self._lock:
-                if self._closing:
-                    raise KernelHostCoreClosing(
-                        "Kernel Host shutdown won before session registration"
-                    )
-                self._sessions[host_id] = session
-                self._extension_routes[session_id] = (host_id, session.extensions)
+            await self._register_prepared_session(session, capability_baseline)
             return session
         except BaseException:
             if "session" in locals():
@@ -5140,45 +5194,93 @@ class KernelHostCore:
             await io_owner.aclose(deadline_monotonic=deadline)
             raise
 
-    async def memory_management_projects(self, *, memory_domain_id, limit=40, cursor=None):
-        repository = await self._ensure_resources()
-        return await asyncio.to_thread(
-            repository.memory_management_projects, memory_domain_id=memory_domain_id,
-            limit=limit, cursor=cursor, deadline_monotonic=self._canonical_deadline(),
-        )
+    async def _register_prepared_session(self, session: KernelHostSession, capability_baseline: int) -> None:
+        """Join source capture with publication without missing an in-flight edit."""
+        root = session.workspace.workspace_root.resolve(strict=False)
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Kernel Host shutdown won before session registration")
+            self._sessions[session.host_session_id] = session
+            self._extension_routes[session.session_id] = (session.host_session_id, session.extensions)
+            changed = self._workspace_capability_revisions[root] > capability_baseline
+        if changed:
+            await session.request_capability_refresh()
 
-    async def memory_management_catalog(self, *, memory_domain_id, selection, **filters):
+    async def memory_management_projects(
+        self, *, memory_domain_id, limit=40, cursor=None
+    ):
         repository = await self._ensure_resources()
         return await asyncio.to_thread(
-            repository.memory_management_catalog, memory_domain_id=memory_domain_id,
-            selection=selection, deadline_monotonic=self._canonical_deadline(), **filters,
-        )
-
-    async def memory_management_detail(self, *, memory_domain_id, selection, fact_id,
-                                       provenance_workspace_id, limit=40, cursor=None):
-        repository = await self._ensure_resources()
-        return await asyncio.to_thread(
-            repository.memory_management_detail, memory_domain_id=memory_domain_id,
-            selection=selection, fact_id=fact_id, provenance_workspace_id=provenance_workspace_id,
-            limit=limit, cursor=cursor, deadline_monotonic=self._canonical_deadline(),
-        )
-
-    async def memory_deletion_preview(self, *, memory_domain_id, selection, fact_id, additional=()):
-        repository = await self._ensure_resources()
-        return await asyncio.to_thread(
-            repository.memory_deletion_preview, memory_domain_id=memory_domain_id,
-            selection=selection, fact_id=fact_id, additional=additional,
+            repository.memory_management_projects,
+            memory_domain_id=memory_domain_id,
+            limit=limit,
+            cursor=cursor,
             deadline_monotonic=self._canonical_deadline(),
         )
 
-    async def execute_memory_deletion(self, *, memory_domain_id, selection, fact_id, additional, expected_records):
+    async def memory_management_catalog(
+        self, *, memory_domain_id, selection, **filters
+    ):
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.memory_management_catalog,
+            memory_domain_id=memory_domain_id,
+            selection=selection,
+            deadline_monotonic=self._canonical_deadline(),
+            **filters,
+        )
+
+    async def memory_management_detail(
+        self,
+        *,
+        memory_domain_id,
+        selection,
+        fact_id,
+        provenance_workspace_id,
+        limit=40,
+        cursor=None,
+    ):
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.memory_management_detail,
+            memory_domain_id=memory_domain_id,
+            selection=selection,
+            fact_id=fact_id,
+            provenance_workspace_id=provenance_workspace_id,
+            limit=limit,
+            cursor=cursor,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def memory_deletion_preview(
+        self, *, memory_domain_id, selection, fact_id, additional=()
+    ):
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.memory_deletion_preview,
+            memory_domain_id=memory_domain_id,
+            selection=selection,
+            fact_id=fact_id,
+            additional=additional,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def execute_memory_deletion(
+        self, *, memory_domain_id, selection, fact_id, additional, expected_records
+    ):
         repository = await self._ensure_resources()
         # Join physical execution before the HTTP owner may close its confirmation file.
-        task = asyncio.create_task(asyncio.to_thread(
-            repository.execute_memory_deletion, memory_domain_id=memory_domain_id,
-            selection=selection, fact_id=fact_id, additional=additional, expected_records=expected_records,
-            deadline_monotonic=self._canonical_deadline(),
-        ))
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                repository.execute_memory_deletion,
+                memory_domain_id=memory_domain_id,
+                selection=selection,
+                fact_id=fact_id,
+                additional=additional,
+                expected_records=expected_records,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+        )
         cancelled = None
         while not task.done():
             try:
@@ -5189,6 +5291,25 @@ class KernelHostCore:
         if cancelled is not None:
             raise cancelled
         return result
+
+    async def mark_capability_change(self, workspace_root: Path | None = None) -> int:
+        canonical_root = workspace_root.resolve(strict=False) if workspace_root is not None else None
+        async with self._lock:
+            roots = {canonical_root} if canonical_root is not None else set(self._workspace_capability_revisions)
+            for root in roots:
+                self._workspace_capability_revisions[root] = self._workspace_capability_revisions.get(root, 0) + 1
+            sessions = tuple(session for session in self._sessions.values()
+                if canonical_root is None or session.workspace.workspace_root.resolve() == canonical_root)
+        marked = 0
+        for session in sessions:
+            try:
+                await session.request_capability_refresh()
+                marked += 1
+            except RuntimeError:
+                async with self._lock:
+                    if self._sessions.get(session.host_session_id) is session:
+                        raise
+        return marked
 
     async def list_resumable_sessions(
         self,
@@ -5422,6 +5543,7 @@ class KernelHostCore:
     ) -> None:
         if open_settlements:
             await asyncio.gather(*open_settlements)
+        await self.mcp_management.aclose()
         async with self._lock:
             session_ids = tuple(self._sessions)
         for host_session_id in session_ids:

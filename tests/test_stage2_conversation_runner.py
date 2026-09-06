@@ -1542,6 +1542,37 @@ def _large_native_replay_script(
     raise AssertionError(f"unsupported test API: {api}")
 
 
+def test_capability_adoption_runs_before_each_unprepared_dispatch(stage2_migrated_postgres_database):
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = _acquire_bound_host_writer(
+        repository, session_id=session_id, workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"), lease_seconds=30, deadline_monotonic=monotonic() + 30,
+    )
+    tool = _AssertingTool(provider, session_id)
+    observations = []
+
+    async def adopt():
+        observations.append(tuple(tool.invocations))
+        return True
+
+    model = _ScriptedModel([_tool_stream(), _text_stream("after update")])
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository, writer_lease=lease, model=model,
+        tools=StructuredToolPort(tool, tool_names=("terminal",)),
+        live_bus=LiveAgentEventBus(), context_source_collector=StaticContextSourceCollector(),
+        before_provider_preparation=adopt,
+    )
+    result = asyncio.run(runner.run_turn("call a tool and continue"))
+    assert result.final_text == "after update"
+    assert result.model_call_count == 2
+    assert len(observations) == 2
+    assert observations[0] == ()
+    assert len(observations[1]) == 1
+
+
 def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -5733,6 +5764,81 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
         "AssistantMessageAccepted",
         "TurnCompleted",
     )
+
+
+@pytest.mark.parametrize("permission, response, expected_actor", [
+    ("bypass-permissions", "SUBMIT", "runtime"),
+    ("accept-edits", "SUBMIT", "runtime"),
+    ("ask-permissions", "SUBMIT", "human"),
+    ("read-only", "SUBMIT", "human"),
+    ("read-only", "CANCEL", None),
+    ("read-only", "NO_CONTROLLER", None),
+])
+def test_manage_capability_settles_through_real_attempt_and_model_followup(
+    stage2_migrated_postgres_database, tmp_path, permission, response, expected_actor,
+):
+    from tests.test_capability_management_preparation import preparation
+    from pulsara_agent.capability.management_form import AcceptedCapabilityFormSubmission
+    from pulsara_agent.conversation_kernel.interaction import ToolInteractionResolution
+    from pulsara_agent.capability.mcp_management import LocalMcpTarget
+    from pulsara_agent.primitives.permission import PermissionMode
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, workspace_id = _name("session"), _name("workspace")
+    lease = _acquire_bound_host_writer(repository, session_id=session_id, workspace_id=workspace_id,
+        writer_owner_id=_name("host"), lease_seconds=30, deadline_monotonic=monotonic() + 30)
+    service = preparation(tmp_path)
+    target = LocalMcpTarget("fixture", service.workspace_root)
+    args = {"action": "ADD_LOCAL_MCP", "scope": "WORKSPACE", "server_id": "fixture",
+        "config": {"transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"}}}
+    model = _ScriptedModel([_named_tool_stream(tool_name="manage_capability", tool_call_id="call:manage", arguments=args),
+                            _text_stream("management settled; continuing normally")])
+    forms, adoptions = [], []
+
+    class Interaction:
+        async def request_capability_form(self, **kwargs):
+            forms.append(kwargs["form"])
+            assert service.mcp.inspect(target) is None
+            if response == "NO_CONTROLLER":
+                return ToolInteractionResolution("DENY", "interaction:no-controller", "no controller")
+            if response == "CANCEL":
+                return ToolInteractionResolution("CANCEL", "interaction:cancel", "cancelled")
+            values = await kwargs["form"].prepare_submission({})
+            return ToolInteractionResolution("SUBMIT", "interaction:user-fixture", "submitted",
+                capability_submission=AcceptedCapabilityFormSubmission(values))
+
+    class Adoption:
+        async def adopt_capability_management_change(self, *, workspace_root):
+            assert workspace_root == service.workspace_root
+            assert service.mcp.inspect(target) is not None
+            adoptions.append(workspace_root)
+            return "RELOADED"
+
+    live_bus = LiveAgentEventBus()
+    tools = DirectKernelToolPort(workspace_root=service.workspace_root, host_owner_id="host:manage",
+        session_id=session_id, live_bus=live_bus, authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+    tools.bind_capability_management(service)
+    seal_test_direct_tool_port(tools, interaction=Interaction(), capability_reload=Adoption())
+    runner = ConversationKernelRunner(model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository, writer_lease=lease, model=model, tools=tools, live_bus=live_bus,
+        context_source_collector=StaticContextSourceCollector())
+
+    async def run():
+        try:
+            return await runner.run_turn("configure this MCP", requested_permission_mode=PermissionMode(permission))
+        finally:
+            await tools.aclose(timeout_seconds=2)
+            await service.mcp.aclose()
+    result = asyncio.run(run())
+    assert result.final_text == "management settled; continuing normally"
+    assert len(forms) == (0 if permission in {"bypass-permissions", "accept-edits"} else 1)
+    assert len(adoptions) == (0 if expected_actor is None else 1)
+    rows = repository.rehydrate_session(session_id=session_id, deadline_monotonic=monotonic() + 30)
+    assert sum(row["entry_kind"] == "TOOL_RESULT" for row in rows) == 1
+    with provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30) as connection:
+        attempts = connection.execute("SELECT actor_kind, authorization_kind FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s", (session_id,)).fetchall()
+    assert attempts == ([] if expected_actor is None else [(expected_actor, "human" if expected_actor == "human" else "machine")])
 
 
 def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(

@@ -1,16 +1,15 @@
 # Conservative Plugin Conversion Contract
 
-Conversion is a model-assisted authoring step before ordinary Pulsara validation
-and installation. It is not a Runtime compatibility profile, fallback parser, or
-permission boundary.
+Conversion uses the official selected-format importer before native validation
+and installation, not model rewriting. It is not a runtime compatibility profile,
+fallback parser or permission boundary.
 
-## Eligible Failures
+## Selected Import Format
 
-Consider conversion only after the production validator has completed a safe,
-read-only source observation and returned deterministic format or component
-diagnostics. Typical eligible evidence includes a recognized vendor manifest path
-with no Agent Plugins 1.0 root `plugin.json`, or a standard candidate whose exact
-diagnostic identifies a representable declaration difference.
+Select native, Claude, Codex or Cursor explicitly. The importer holds a safe
+source observation, follows that distribution's declarations and creates a
+temporary native candidate. Native packages go directly to the sole validator.
+Do not first fail native validation to discover an already-selected format.
 
 Do not convert a source that failed because of:
 
@@ -26,23 +25,22 @@ The model cannot repair or override these admission outcomes.
 
 ## Candidate Construction
 
-Create a new attempt-local directory and leave the source unchanged. Preserve all
-safe ordinary resources unless a copied vendor control file would become active
-under Agent Plugins 1.0 or Pulsara semantics. Original vendor manifests may remain
-as inert resources; only the new root `plugin.json`, root `mcp.json`, fixed
-`skills/`, and fixed `dev.pulsara/` extension paths carry Pulsara meaning.
+The importer owns the attempt-local candidate and leaves the source unchanged.
+It copies ordinary resources and the complete selected Skill directories. Vendor
+control manifests are not activated or unioned; the importer writes the native
+root `plugin.json`, root `mcp.json`, fixed `skills/`, and supported fixed
+`dev.pulsara/` extension paths. Do not construct a second candidate with shell
+commands or model-generated edits.
 
 Use the Published Agent Plugins 1.0 schema identifier in the new root manifest.
-Map identity and metadata only from exact source facts. Preserve an authored name
-and version. If the source host explicitly derives identity from a directory name,
-that same normalized source basename may supply the missing name; otherwise do not
-invent one.
+Map identity and metadata only from exact source facts. Preserve the authored
+name and version; missing required native metadata is an import error, not a
+reason to invent identity.
 
-Copy scripts, binaries, assets, and other ordinary resources byte-for-byte. Do not
-modify an executable to make it portable. Skill frontmatter may be normalized only
-when all nonportable information is preserved truthfully and the instructional
-body retains the same meaning. Record every non-byte-identical text edit in the
-call-local conversion report.
+Scripts, binaries, assets and selected Skill files are copied byte-for-byte. Do
+not modify an executable or rewrite Skill instructions to make a Plugin portable.
+The GUI preview shows selected components, ordinary connection parameters and
+import notices; there is no separate conversion-report artifact or registry.
 
 ## Semantic Preservation Test
 
@@ -61,10 +59,10 @@ Conversion succeeds only when all of these statements are true:
 6. License and compatibility statements remain truthful.
 7. The sole Pulsara production validator returns `VALID` for the complete candidate.
 
-Presentation metadata can remain inert or be omitted from the active standard
-manifest only when it never affects source behavior. Report it; do not promote it
-to a Pulsara capability. If an optional-looking field is required for the Plugin's
-stated purpose, it is active and blocks conversion when unsupported.
+Known presentation metadata may be omitted from the active standard manifest
+when it never affects source behavior. Do not promote it to a Pulsara capability.
+Unknown behavior-bearing fields block conversion rather than being silently
+discarded. The importer owns the supported field set, not a model's judgment.
 
 ## Honest Stop
 

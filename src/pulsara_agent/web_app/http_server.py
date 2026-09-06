@@ -51,8 +51,12 @@ from pulsara_agent.llm.connection_probe import (
 from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
 from pulsara_agent.mcp_config import (
     McpConfiguredServerBoundExceeded,
-    WorkspaceMcpConfigStaleError,
 )
+from pulsara_agent.capability.mcp_management import (
+    McpManagementConflict,
+    McpSecretMutation,
+)
+from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalIdentity
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.protocol_client import ProtocolBridgeError
 from pulsara_agent.web_app.session_controller import (
@@ -81,9 +85,7 @@ def _reasoning_payload(value) -> dict[str, object]:
         return {
             "kind": "selectable",
             "effort": (
-                None
-                if value.effort is None
-                else {"values": list(value.effort.values)}
+                None if value.effort is None else {"values": list(value.effort.values)}
             ),
             "toggle": value.toggle is not None,
             "budget_tokens": (
@@ -114,13 +116,10 @@ def _user_declared_reasoning(value: object):
             raise ValueError("custom reasoning kind is invalid")
         values = value["values"]
         if not isinstance(values, list) or not all(
-            isinstance(item, str) and item and item == item.strip()
-            for item in values
+            isinstance(item, str) and item and item == item.strip() for item in values
         ):
             raise ValueError("custom reasoning efforts are invalid")
-        return ReasoningSelectableControls(
-            effort=ReasoningEffortChoices(tuple(values))
-        )
+        return ReasoningSelectableControls(effort=ReasoningEffortChoices(tuple(values)))
     raise ValueError("custom reasoning has an invalid closed shape")
 
 
@@ -160,7 +159,10 @@ def _catalog_entry_payload(
                     controls_supported_by_adapter(entry.reasoning, route_wire)
                 ),
                 "recommended": (
-                    (entry.wire_shape_hint == "responses" and wire_api is WireApi.OPENAI_RESPONSES)
+                    (
+                        entry.wire_shape_hint == "responses"
+                        and wire_api is WireApi.OPENAI_RESPONSES
+                    )
                     or (
                         entry.wire_shape_hint == "completions"
                         and wire_api is WireApi.OPENAI_CHAT_COMPLETIONS
@@ -174,7 +176,9 @@ def _catalog_entry_payload(
         "wire_dialect": entry.wire_dialect.value,
         "context_tokens": entry.total_context_tokens,
         "input_tokens": None if entry.limits is None else entry.limits.max_input_tokens,
-        "output_tokens": None if entry.limits is None else entry.limits.max_output_tokens,
+        "output_tokens": None
+        if entry.limits is None
+        else entry.limits.max_output_tokens,
         "tool_call": entry.tool_call,
         "wire_shape_hint": entry.wire_shape_hint,
         "wire_apis": wires,
@@ -198,6 +202,13 @@ def _dashscope_credential_kind(kind: str) -> DashScopeCredentialKind:
     raise ValueError("unknown DashScope credential kind")
 
 
+def _plugin_import_strings(body, key):
+    value = body.get(key, {})
+    if not isinstance(value, dict) or any(not isinstance(item, str) for item in value.values()):
+        raise ValueError("插件普通输入与分类需要文字值")
+    return tuple(sorted(value.items()))
+
+
 def _optional_body_string(body: dict[str, object], key: str) -> str | None:
     value = body.get(key)
     if value is None:
@@ -205,6 +216,46 @@ def _optional_body_string(body: dict[str, object], key: str) -> str | None:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{key} must be a non-empty string")
     return value
+
+
+def _mcp_import_source(body: dict[str, object]) -> dict[str, object]:
+    content = _optional_body_string(body, "content")
+    shape = body.get("shape", "auto")
+    if content is None or shape not in {
+        "auto",
+        "mcpServers",
+        "opencode",
+        "map",
+        "server",
+    }:
+        raise ValueError("MCP import requires content and a supported source shape")
+    return {
+        "content": content,
+        "shape": shape,
+        "server_id": _optional_body_string(body, "server_id"),
+    }
+
+
+def _mcp_import_values(body: dict[str, object], key: str) -> dict[str, str]:
+    value = body.get(key, {})
+    if not isinstance(value, dict) or any(
+        not isinstance(item, str) for item in value.values()
+    ):
+        raise ValueError("MCP import fields must be a string mapping")
+    return value
+
+
+def _retain_credentials_confirmed(body: dict[str, object]) -> bool:
+    value = body.get("retain_credentials_confirmed", False)
+    if not isinstance(value, bool):
+        raise ValueError("MCP retained credential confirmation must be boolean")
+    return value
+
+
+def _mcp_secret_changes(body: dict[str, object]) -> tuple[McpSecretMutation, ...]:
+    from pulsara_agent.capability.management_form import parse_mcp_secret_changes
+
+    return parse_mcp_secret_changes(body.get("secret_changes", []))
 
 
 class HttpPublicError(RuntimeError):
@@ -317,7 +368,9 @@ class LocalHttpServer:
         self._app.router.add_get("/api/memories/projects", memory.projects)
         self._app.router.add_get("/api/memories", memory.catalog)
         self._app.router.add_get("/api/memories/{fact_id}", memory.detail)
-        self._app.router.add_post("/api/memories/{fact_id}/deletion-preview", memory.deletion)
+        self._app.router.add_post(
+            "/api/memories/{fact_id}/deletion-preview", memory.deletion
+        )
         self._app.router.add_delete("/api/memories/{fact_id}", memory.deletion)
         self._app.router.add_get("/healthz", self._health)
         self._app.router.add_get("/", self._index)
@@ -325,7 +378,9 @@ class LocalHttpServer:
         self._app.router.add_get("/assets/{tail:.*}", self._public_file)
         self._app.router.add_get("/api/app/bootstrap", self._bootstrap)
         self._app.router.add_get("/api/model-catalog", self._model_catalog)
-        self._app.router.add_post("/api/model-catalog/refresh", self._refresh_model_catalog)
+        self._app.router.add_post(
+            "/api/model-catalog/refresh", self._refresh_model_catalog
+        )
         self._app.router.add_get(
             "/api/model-configurations", self._model_configurations
         )
@@ -368,22 +423,62 @@ class LocalHttpServer:
             "/api/capabilities/skills/install", self._install_user_skill
         )
         self._app.router.add_post(
+            "/api/capabilities/skills/preview", self._preview_skill_import
+        )
+        self._app.router.add_post(
             "/api/capabilities/skills/enabled", self._set_user_skill_enabled
+        )
+        self._app.router.add_post(
+            "/api/capabilities/skills/remove", self._remove_skill
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/skills/remove", self._remove_skill
         )
         self._app.router.add_post("/api/capabilities/mcp", self._create_user_mcp_server)
         self._app.router.add_post(
-            "/api/capabilities/mcp/{server_id}/enabled",
-            self._set_user_mcp_enabled,
+            "/api/capabilities/mcp/test", self._test_mcp_server
+        )
+        self._app.router.add_post(
+            "/api/capabilities/mcp/import/preview", self._preview_mcp_import
+        )
+        self._app.router.add_post("/api/capabilities/mcp/import", self._import_mcp)
+        self._app.router.add_put(
+            "/api/capabilities/mcp/{server_id}", self._update_user_mcp_server
+        )
+        self._app.router.add_delete(
+            "/api/capabilities/mcp/{server_id}", self._remove_user_mcp_server
+        )
+        self._app.router.add_post(
+            "/api/capabilities/mcp/{server_id}/authorize", self._authorize_mcp
+        )
+        self._app.router.add_get(
+            "/api/capabilities/mcp/{server_id}/authorization",
+            self._mcp_authorization,
+        )
+        self._app.router.add_delete(
+            "/api/capabilities/mcp/{server_id}/authorization",
+            self._mcp_authorization,
+        )
+        self._app.router.add_post(
+            "/api/capabilities/mcp/{server_id}/authorization/cancel",
+            self._mcp_authorization,
         )
         self._app.router.add_post(
             "/api/capabilities/plugins/install", self._install_user_plugin
         )
+        self._app.router.add_post("/api/capabilities/plugins/preview-import", self._preview_plugin_import)
         self._app.router.add_post(
             "/api/capabilities/plugins/{plugin_id}/enabled",
             self._set_user_plugin_enabled,
         )
         self._app.router.add_delete(
             "/api/capabilities/plugins/{plugin_id}", self._remove_user_plugin
+        )
+        self._app.router.add_put(
+            "/api/capabilities/plugins/{plugin_id}/mcp/{server_id}", self._replace_user_plugin_connection
+        )
+        self._app.router.add_post(
+            "/api/capabilities/plugins/{plugin_id}/mcp/{server_id}/authorization", self._plugin_mcp_authorization
         )
         self._app.router.add_get("/api/sessions", self._list_sessions)
         self._app.router.add_get(
@@ -414,6 +509,15 @@ class LocalHttpServer:
             "/api/sessions/{session_id}/capabilities/mcp",
             self._create_session_mcp_server,
         )
+        self._app.router.add_post("/api/sessions/{session_id}/capabilities/mcp/import", self._import_mcp)
+        self._app.router.add_post("/api/sessions/{session_id}/capabilities/mcp/test", self._test_mcp_server)
+        self._app.router.add_post("/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorize", self._authorize_mcp)
+        self._app.router.add_get("/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization", self._mcp_authorization)
+        self._app.router.add_delete("/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization", self._mcp_authorization)
+        self._app.router.add_post("/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization/cancel", self._mcp_authorization)
+        self._app.router.add_put(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}", self._update_session_mcp_server
+        )
         self._app.router.add_post(
             "/api/sessions/{session_id}/capabilities/mcp/{server_id}/enabled",
             self._set_session_mcp_enabled,
@@ -437,6 +541,8 @@ class LocalHttpServer:
             "query-command",
             "live-control-snapshot",
             "resolve-interaction",
+            "read-capability-form",
+            "resolve-capability-form",
             "resolve-plan-interaction",
             "read-plan-question",
             "read-plan-draft",
@@ -468,12 +574,24 @@ class LocalHttpServer:
             return self._error_response(
                 exc.code, exc.public_message, status=409, retryable=True
             )
-        except WorkspaceMcpConfigStaleError:
-            return self._error_response(
-                "PROJECT_CAPABILITY_STALE",
-                "项目能力已经变化，正在读取最新状态。",
+        except McpManagementConflict:
+            if "session_id" in request.match_info:
+                return self._error_response(
+                    "PROJECT_CAPABILITY_STALE",
+                    "项目能力已经变化，请刷新后再修改。",
+                    status=409,
+                    retryable=True,
+                )
+            return web.json_response(
+                {
+                    "error": {
+                        "code": "MCP_CONFIG_CHANGED",
+                        "message": "连接已发生变化，请刷新后再修改。",
+                        "retryable": True,
+                    },
+                    "capabilities": await self.sessions.inspect_user_capabilities(),
+                },
                 status=409,
-                retryable=True,
             )
         except McpConfiguredServerBoundExceeded:
             return self._error_response(
@@ -483,7 +601,12 @@ class LocalHttpServer:
                 retryable=False,
             )
         except MemoryManagementError as exc:
-            return self._error_response(exc.code, str(exc), status=exc.status, retryable=exc.status in {409, 504})
+            return self._error_response(
+                exc.code,
+                str(exc),
+                status=exc.status,
+                retryable=exc.status in {409, 504},
+            )
         except LocalSettingsUnavailable:
             return self._error_response(
                 "local_settings_unavailable",
@@ -599,7 +722,9 @@ class LocalHttpServer:
                 )
         if request.path.startswith("/api/") and request.path != "/api/healthz":
             if (
-                request.path.startswith(("/api/sessions", "/api/connections", "/api/memories"))
+                request.path.startswith(
+                    ("/api/sessions", "/api/connections", "/api/memories")
+                )
                 and self._database_state() != "ready"
             ):
                 raise HttpPublicError(
@@ -703,9 +828,7 @@ class LocalHttpServer:
         )
         return web.json_response(
             {
-                "model_configuration": await self._connection_summary(
-                    resolved.config
-                ),
+                "model_configuration": await self._connection_summary(resolved.config),
                 "wire_shape_warning": _wire_shape_warning(
                     resolved.target.target_facts.wire_shape_hint,
                     resolved.config.target.wire_api,
@@ -714,9 +837,7 @@ class LocalHttpServer:
             status=201,
         )
 
-    async def _delete_model_configuration(
-        self, request: web.Request
-    ) -> web.Response:
+    async def _delete_model_configuration(self, request: web.Request) -> web.Response:
         connection_id = ModelConnectionId(request.match_info["connection_id"])
         settings, deleted = await self.settings.delete_model_connection(connection_id)
         return web.json_response(
@@ -1071,9 +1192,17 @@ class LocalHttpServer:
             await self.sessions.open_capability_root(request.match_info["root"])
         )
 
+    async def _preview_skill_import(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"source_path"} or not isinstance(body["source_path"], str):
+            raise ValueError("Skill preview requires a selected local source path")
+        return web.json_response(
+            await self.sessions.preview_skill_import(source_path=body["source_path"])
+        )
+
     async def _install_user_skill(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"source_path", "active_session_id"}:
+        if set(body) - {"source_path", "active_session_id", "name", "description"}:
             raise ValueError("unexpected Skill install field")
         source_path = body.get("source_path")
         if not isinstance(source_path, str):
@@ -1081,6 +1210,8 @@ class LocalHttpServer:
         payload = await self.sessions.install_user_skill(
             source_path=source_path,
             active_session_id=_optional_body_string(body, "active_session_id"),
+            name=_optional_body_string(body, "name"),
+            description=_optional_body_string(body, "description"),
         )
         return web.json_response(payload, status=201)
 
@@ -1100,72 +1231,191 @@ class LocalHttpServer:
             )
         )
 
+    async def _remove_skill(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"path", "expected", "active_session_id"}:
+            raise ValueError("unexpected Skill removal field")
+        path = _optional_body_string(body, "path")
+        raw = body.get("expected")
+        names = {"root_device", "root_inode", "directory_device", "directory_inode"}
+        if (
+            path is None
+            or not isinstance(raw, dict)
+            or set(raw) != names
+            or any(
+                not isinstance(value, str)
+                or not value.isascii()
+                or not value.isdecimal()
+                for value in raw.values()
+            )
+        ):
+            raise ValueError("Skill removal needs the current inspected identity")
+        expected = LocalSkillRemovalIdentity(
+            **{name: int(value) for name, value in raw.items()}
+        )
+        if "session_id" in request.match_info:
+            if "active_session_id" in body:
+                raise ValueError("Project Skill removal cannot select another session")
+            return web.json_response(await self.sessions.remove_session_skill(
+                request.match_info["session_id"], skill_path=path, expected=expected,
+            ))
+        return web.json_response(
+            await self.sessions.remove_user_skill(
+                skill_path=path,
+                expected=expected,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _preview_mcp_import(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"content", "shape", "server_id"}:
+            raise ValueError("unexpected MCP import preview field")
+        return web.json_response(
+            await self.sessions.preview_mcp_import(**_mcp_import_source(body))
+        )
+
+    async def _import_mcp(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "content",
+            "shape",
+            "server_id",
+            "selected_server_id",
+            "allow_http_localhost",
+            "classifications",
+            "values",
+            "transport",
+            "active_session_id",
+        }:
+            raise ValueError("unexpected MCP import field")
+        selected = _optional_body_string(body, "selected_server_id")
+        if selected is None:
+            raise ValueError("MCP import requires a selected server")
+        return web.json_response(
+            await self.sessions.import_mcp(
+                **_mcp_import_source(body),
+                selected_server_id=selected,
+                classifications=_mcp_import_values(body, "classifications"),
+                values=_mcp_import_values(body, "values"),
+                transport=_optional_body_string(body, "transport"),
+                allow_http_localhost=body.get("allow_http_localhost", False),
+                active_session_id=_optional_body_string(body, "active_session_id"),
+                session_id=request.match_info.get("session_id"),
+            ),
+            status=201,
+        )
+
     async def _create_user_mcp_server(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        allowed = {
-            "server_id",
-            "display_name",
-            "transport",
-            "endpoint",
-            "command",
-            "args",
-            "available_to_subagents",
-            "active_session_id",
-        }
-        if set(body) - allowed:
+        if set(body) - {"server_id", "config", "secret_changes", "active_session_id"}:
             raise ValueError("unexpected MCP field")
-        args = body.get("args", [])
-        if not isinstance(args, list) or any(
-            not isinstance(item, str) for item in args
-        ):
-            raise ValueError("MCP args must be strings")
-        server_id = body.get("server_id")
-        display_name = body.get("display_name", "")
-        transport = body.get("transport")
-        available_to_subagents = body.get("available_to_subagents", False)
-        if (
-            not isinstance(server_id, str)
-            or not isinstance(display_name, str)
-            or not isinstance(transport, str)
-            or not isinstance(available_to_subagents, bool)
-        ):
-            raise ValueError("MCP fields are invalid")
-        endpoint = body.get("endpoint")
-        command = body.get("command")
-        if endpoint is not None and not isinstance(endpoint, str):
-            raise ValueError("MCP endpoint is invalid")
-        if command is not None and not isinstance(command, str):
-            raise ValueError("MCP command is invalid")
-        payload = await self.sessions.create_user_mcp_server(
-            server_id=server_id,
-            display_name=display_name,
-            transport=transport,
-            endpoint=endpoint,
-            command=command,
-            args=args,
-            available_to_subagents=available_to_subagents,
-            active_session_id=_optional_body_string(body, "active_session_id"),
-        )
-        return web.json_response(payload, status=201)
-
-    async def _set_user_mcp_enabled(self, request: web.Request) -> web.Response:
-        body = await self._json_body(request)
-        if set(body) - {"enabled", "active_session_id"}:
-            raise ValueError("unexpected MCP enablement field")
-        enabled = body.get("enabled")
-        if not isinstance(enabled, bool):
-            raise ValueError("MCP enabled must be boolean")
+        server_id = _optional_body_string(body, "server_id")
+        config = body.get("config")
+        if server_id is None or not isinstance(config, dict):
+            raise ValueError("MCP id and complete config are required")
         return web.json_response(
-            await self.sessions.set_user_mcp_enabled(
-                server_id=request.match_info["server_id"],
-                enabled=enabled,
+            await self.sessions.create_user_mcp_server(
+                server_id=server_id,
+                config=config,
+                secret_changes=_mcp_secret_changes(body),
                 active_session_id=_optional_body_string(body, "active_session_id"),
+            ),
+            status=201,
+        )
+
+    async def _update_user_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "config",
+            "expected_identity",
+            "secret_changes",
+            "active_session_id",
+            "retain_credentials_confirmed",
+        }:
+            raise ValueError("unexpected MCP field")
+        config = body.get("config")
+        expected = _optional_body_string(body, "expected_identity")
+        if not isinstance(config, dict) or expected is None:
+            raise ValueError("MCP config and current identity are required")
+        return web.json_response(
+            await self.sessions.update_user_mcp_server(
+                server_id=request.match_info["server_id"],
+                config=config,
+                expected=expected,
+                secret_changes=_mcp_secret_changes(body),
+                active_session_id=_optional_body_string(body, "active_session_id"),
+                retain_credentials_confirmed=_retain_credentials_confirmed(body),
+            )
+        )
+
+    async def _test_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {
+            "server_id",
+            "config",
+            "secret_changes",
+            "retain_credentials_confirmed",
+        }:
+            raise ValueError("unexpected MCP test field")
+        server_id = _optional_body_string(body, "server_id")
+        config = body.get("config")
+        if server_id is None or not isinstance(config, dict):
+            raise ValueError("MCP id and complete test config are required")
+        return web.json_response(
+            await self.sessions.test_mcp_server(
+                server_id=server_id,
+                config=config,
+                secret_changes=_mcp_secret_changes(body),
+                retain_credentials_confirmed=_retain_credentials_confirmed(body),
+                session_id=request.match_info.get("session_id"),
+            )
+        )
+
+    async def _remove_user_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"expected_identity", "active_session_id"}:
+            raise ValueError("unexpected MCP removal field")
+        expected = _optional_body_string(body, "expected_identity")
+        if expected is None:
+            raise ValueError("MCP current identity is required")
+        return web.json_response(
+            await self.sessions.remove_user_mcp_server(
+                server_id=request.match_info["server_id"],
+                expected=expected,
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
+
+    async def _authorize_mcp(self, request: web.Request) -> web.Response:
+        if await self._json_body(request):
+            raise ValueError("MCP login uses the saved target")
+        return web.json_response(
+            await self.sessions.authorize_mcp(request.match_info["server_id"], session_id=request.match_info.get("session_id")),
+            status=202,
+        )
+
+    async def _mcp_authorization(self, request: web.Request) -> web.Response:
+        if request.method != "GET" and await self._json_body(request):
+            raise ValueError("MCP authorization action has no draft")
+        action = (
+            "status"
+            if request.method == "GET"
+            else "logout"
+            if request.method == "DELETE"
+            else "cancel"
+        )
+        return web.json_response(
+            await self.sessions.mcp_authorization(
+                request.match_info["server_id"],
+                action=action,
+                session_id=request.match_info.get("session_id"),
             )
         )
 
     async def _install_user_plugin(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"source_path", "active_session_id"}:
+        if set(body) - {"source_path", "active_session_id", "source_format", "classifications", "public_values"}:
             raise ValueError("unexpected Plugin install field")
         source_path = body.get("source_path")
         if not isinstance(source_path, str):
@@ -1173,36 +1423,85 @@ class LocalHttpServer:
         payload = await self.sessions.install_user_plugin(
             source_path=source_path,
             active_session_id=_optional_body_string(body, "active_session_id"),
+            source_format=_optional_body_string(body, "source_format") or "native",
+            classifications=_plugin_import_strings(body, "classifications"),
+            public_values=_plugin_import_strings(body, "public_values"),
         )
         return web.json_response(payload, status=201)
 
+    async def _preview_plugin_import(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"source_path"} or not isinstance(body["source_path"], str):
+            raise ValueError("请选择插件源目录")
+        return web.json_response(await self.sessions.preview_plugin_import(**body))
+
     async def _set_user_plugin_enabled(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"enabled", "package_install_id", "active_session_id"}:
+        if set(body) - {"enabled", "package_install_id", "active_session_id", "connection_review"}:
             raise ValueError("unexpected Plugin enablement field")
         enabled = body.get("enabled")
         package_install_id = body.get("package_install_id")
         if not isinstance(enabled, bool) or not isinstance(package_install_id, str):
             raise ValueError("Plugin enablement fields are invalid")
+        from pulsara_agent.plugins.mcp_connection import review_from_dict
+
+        connection_review = review_from_dict(body.get("connection_review"))
         return web.json_response(
             await self.sessions.set_user_plugin_enabled(
                 plugin_id=request.match_info["plugin_id"],
                 package_install_id=package_install_id,
                 enabled=enabled,
+                connection_review=connection_review,
                 active_session_id=_optional_body_string(body, "active_session_id"),
             )
         )
 
+    async def _plugin_mcp_authorization(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"action", "package_install_id"}:
+            raise ValueError("Plugin MCP authorization fields are invalid")
+        package = _optional_body_string(body, "package_install_id")
+        action = _optional_body_string(body, "action")
+        if not package or action not in {"login", "logout", "cancel", "status"}:
+            raise ValueError("Plugin MCP authorization action is invalid")
+        return web.json_response(await self.sessions.plugin_mcp_authorization(
+            plugin_id=request.match_info["plugin_id"], server_id=request.match_info["server_id"],
+            package_install_id=package, action=action,
+        ))
+
     async def _remove_user_plugin(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"active_session_id"}:
+        if set(body) - {"active_session_id", "package_install_id"}:
             raise ValueError("unexpected Plugin removal field")
+        package_install_id = body.get("package_install_id")
+        if not isinstance(package_install_id, str) or not package_install_id:
+            raise ValueError("Plugin removal requires the inspected package")
         return web.json_response(
             await self.sessions.remove_user_plugin(
                 plugin_id=request.match_info["plugin_id"],
+                package_install_id=package_install_id,
                 active_session_id=_optional_body_string(body, "active_session_id"),
             )
         )
+
+    async def _replace_user_plugin_connection(self, request: web.Request) -> web.Response:
+        from pulsara_agent.plugins.mcp_connection import overlay_from_dict
+
+        body = await self._json_body(request)
+        if set(body) - {"package_install_id", "expected_overlay", "overlay", "secret_changes", "retain_credentials_confirmed", "active_session_id"}:
+            raise ValueError("unexpected Plugin connection field")
+        package = body.get("package_install_id")
+        if not isinstance(package, str) or not package or "expected_overlay" not in body or "overlay" not in body:
+            raise ValueError("Plugin connection requires exact inspected values")
+        return web.json_response(await self.sessions.replace_user_plugin_connection(
+            plugin_id=request.match_info["plugin_id"], server_id=request.match_info["server_id"],
+            package_install_id=package,
+            expected_overlay=overlay_from_dict(body["expected_overlay"]) if body["expected_overlay"] is not None else None,
+            overlay=overlay_from_dict(body["overlay"]) if body["overlay"] is not None else None,
+            secret_changes=_mcp_secret_changes(body),
+            retain_credentials_confirmed=_retain_credentials_confirmed(body),
+            active_session_id=_optional_body_string(body, "active_session_id"),
+        ))
 
     async def _reconnect_session_mcp(self, request: web.Request) -> web.Response:
         payload = await self.sessions.reconnect_session_mcp(
@@ -1213,7 +1512,11 @@ class LocalHttpServer:
 
     async def _install_session_skill(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) != {"source_path"}:
+        if "source_path" not in body or set(body) - {
+            "source_path",
+            "name",
+            "description",
+        }:
             raise HttpPublicError(
                 "SKILL_INSTALL_REQUEST_INVALID",
                 "安装项目技能需要选择一个本地目录。",
@@ -1229,6 +1532,8 @@ class LocalHttpServer:
         payload = await self.sessions.install_session_skill(
             request.match_info["session_id"],
             source_path=source_path,
+            name=_optional_body_string(body, "name"),
+            description=_optional_body_string(body, "description"),
         )
         return web.json_response(payload)
 
@@ -1250,50 +1555,33 @@ class LocalHttpServer:
 
     async def _create_session_mcp_server(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        allowed = {
-            "server_id",
-            "display_name",
-            "transport",
-            "endpoint",
-            "command",
-            "args",
-            "available_to_subagents",
-        }
-        if set(body) - allowed:
+        if set(body) - {"server_id", "config", "secret_changes"}:
             raise ValueError("unexpected project MCP field")
-        args = body.get("args", [])
-        if not isinstance(args, list) or any(
-            not isinstance(item, str) for item in args
-        ):
-            raise ValueError("project MCP args must be strings")
         server_id = body.get("server_id")
-        display_name = body.get("display_name", "")
-        transport = body.get("transport")
-        available_to_subagents = body.get("available_to_subagents", False)
-        if (
-            not isinstance(server_id, str)
-            or not isinstance(display_name, str)
-            or not isinstance(transport, str)
-            or not isinstance(available_to_subagents, bool)
-        ):
+        config = body.get("config")
+        if not isinstance(server_id, str) or not isinstance(config, dict):
             raise ValueError("project MCP fields are invalid")
-        endpoint = body.get("endpoint")
-        command = body.get("command")
-        if endpoint is not None and not isinstance(endpoint, str):
-            raise ValueError("project MCP endpoint is invalid")
-        if command is not None and not isinstance(command, str):
-            raise ValueError("project MCP command is invalid")
         payload = await self.sessions.create_session_mcp_server(
             request.match_info["session_id"],
             server_id=server_id,
-            display_name=display_name,
-            transport=transport,
-            endpoint=endpoint,
-            command=command,
-            args=args,
-            available_to_subagents=available_to_subagents,
+            config=config,
+            secret_changes=_mcp_secret_changes(body),
         )
         return web.json_response(payload, status=201)
+
+    async def _update_session_mcp_server(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) - {"config", "expected_identity", "secret_changes", "retain_credentials_confirmed"}:
+            raise ValueError("unexpected project MCP update field")
+        config = body.get("config")
+        expected = _optional_body_string(body, "expected_identity")
+        if not isinstance(config, dict) or expected is None:
+            raise ValueError("project MCP requires complete config and inspected identity")
+        return web.json_response(await self.sessions.update_session_mcp_server(
+            request.match_info["session_id"], server_id=request.match_info["server_id"],
+            config=config, expected_identity=expected, secret_changes=_mcp_secret_changes(body),
+            retain_credentials_confirmed=_retain_credentials_confirmed(body),
+        ))
 
     async def _set_session_mcp_enabled(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
@@ -1425,6 +1713,12 @@ class LocalHttpServer:
                 ),
                 "resolve-interaction": lambda: self.bridge.resolve_interaction(
                     connection_id, body
+                ),
+                "read-capability-form": lambda: self.bridge.capability_form(
+                    connection_id, body, submit=False,
+                ),
+                "resolve-capability-form": lambda: self.bridge.capability_form(
+                    connection_id, body, submit=True,
                 ),
                 "resolve-plan-interaction": lambda: (
                     self.bridge.resolve_plan_interaction(connection_id, body)

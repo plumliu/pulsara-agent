@@ -129,6 +129,23 @@ def set_user_skill_enabled(
     normalized = _normalize_skill_path(skill_path)
     entries = {item.path: item for item in snapshot.entries}
     entries[normalized] = UserSkillConfigEntry(normalized, enabled)
+    return _write_skill_entries(snapshot.config_path, entries)
+
+
+def remove_user_skill_override(
+    *, skill_path: Path, config_path: Path | None = None
+) -> Path:
+    snapshot = load_user_skill_config(config_path=config_path)
+    if not snapshot.available:
+        raise ValueError(snapshot.error)
+    normalized = _normalize_skill_path(skill_path)
+    entries = {item.path: item for item in snapshot.entries if item.path != normalized}
+    if len(entries) == len(snapshot.entries):
+        return snapshot.config_path
+    return _write_skill_entries(snapshot.config_path, entries)
+
+
+def _write_skill_entries(path: Path, entries: dict[Path, UserSkillConfigEntry]) -> Path:
     encoded = yaml.safe_dump(
         {
             "skills": [
@@ -141,7 +158,6 @@ def set_user_skill_enabled(
     ).encode("utf-8")
     if len(encoded) > MAXIMUM_USER_SKILL_CONFIG_BYTES:
         raise ValueError("技能配置内容过多，无法保存。")
-    path = snapshot.config_path
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         dir=path.parent,
@@ -167,7 +183,10 @@ def _normalize_skill_path(path: Path) -> Path:
     expanded = path.expanduser()
     if not expanded.is_absolute():
         raise ValueError("user Skill config path must be absolute")
-    return expanded.resolve(strict=False)
+    # These are namespace rules, not requests to follow a current filesystem
+    # occupant. In particular, deleting a Skill must not retarget its rule to a
+    # symlink installed at the old pathname after the visible unbind.
+    return Path(os.path.normpath(expanded))
 
 
 def _unavailable(path: Path) -> UserSkillConfigSnapshot:

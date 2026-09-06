@@ -1,3 +1,4 @@
+.inspector-scrim { display: none; }
 .inspector-panel {
   position: relative;
   z-index: 18;

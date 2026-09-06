@@ -1,4 +1,4 @@
-"""Pre-parse byte and JSON-shape bounds for MCP transports."""
+"""MCP stdio decoding and shared post-SDK discovery/schema admission bounds."""
 
 from __future__ import annotations
 
@@ -11,12 +11,9 @@ from typing import Any
 class McpWireBounds:
     maximum_stdio_frame_bytes: int = 16 * 1024 * 1024
     maximum_http_json_body_bytes: int = 16 * 1024 * 1024
-    maximum_sse_event_data_bytes: int = 16 * 1024 * 1024
-    maximum_buffered_transport_bytes_per_slot: int = 32 * 1024 * 1024
     maximum_wire_json_nodes: int = 65_536
     maximum_wire_json_depth: int = 128
     maximum_schema_utf8_bytes: int = 256 * 1024
-    maximum_schema_nodes: int = 4_096
     maximum_schema_depth: int = 64
     maximum_discovery_candidate_bytes_per_server: int = 32 * 1024 * 1024
     maximum_discovery_candidate_bytes_per_host: int = 128 * 1024 * 1024
@@ -27,6 +24,10 @@ DEFAULT_MCP_WIRE_BOUNDS = McpWireBounds()
 
 class McpWireBoundExceeded(ValueError):
     pass
+
+
+class McpSchemaBoundExceeded(McpWireBoundExceeded):
+    """A tool definition, rather than authentication or transport, exceeded admission."""
 
 
 def bounded_json_loads(
@@ -267,12 +268,18 @@ def validate_schema(value: object, bounds: McpWireBounds) -> None:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     if len(encoded) > bounds.maximum_schema_utf8_bytes:
-        raise McpWireBoundExceeded("MCP tool schema exceeds the byte bound")
-    validate_json_shape(
-        value,
-        maximum_nodes=bounds.maximum_schema_nodes,
-        maximum_depth=bounds.maximum_schema_depth,
-    )
+        raise McpSchemaBoundExceeded("MCP tool schema exceeds the byte bound")
+    try:
+        # Reuse the wire object budget. A separate 4096-node budget rejected
+        # ordinary schemas (Notion: 5770 nodes / 64 KB) without measuring actual
+        # validator complexity. The schema byte/depth boundaries remain intact.
+        validate_json_shape(
+            value,
+            maximum_nodes=bounds.maximum_wire_json_nodes,
+            maximum_depth=bounds.maximum_schema_depth,
+        )
+    except McpWireBoundExceeded as exc:
+        raise McpSchemaBoundExceeded(str(exc)) from exc
 
 
 def result_type_presence(value: object) -> tuple[bool, str | None]:
@@ -288,6 +295,7 @@ def result_type_presence(value: object) -> tuple[bool, str | None]:
 __all__ = [
     "DEFAULT_MCP_WIRE_BOUNDS",
     "McpWireBoundExceeded",
+    "McpSchemaBoundExceeded",
     "McpWireBounds",
     "bounded_json_loads",
     "result_type_presence",

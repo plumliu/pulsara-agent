@@ -2,6 +2,12 @@
 
 > 状态：**ACTIVATED — 2026-08-14（post-activation boundary review closed）**
 >
+> 2026-09-06 SDK ownership hard-cut：当前能力页规范 §6.3 覆盖本文旧 HTTP/SSE framing、
+> pre-parse JSON grammar 与 per-slot raw-buffer reservation 要求。HTTP/SSE 使用官方 MCP 2.1.0
+> transport；SSE 采用依赖的 1 MiB event/pending-line 限制，普通 HTTP decoded body 在 SDK
+> 解析前限制 16 MiB，HTTP/SSE 结构在 SDK carrier 后检查。不再承诺旧 16 MiB SSE 与 32 MiB
+> raw-buffer 聚合等价。stdio 精确环境、frame、进程关闭及 discovery/schema 产品边界保留。
+>
 > Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process installation candidate fingerprint/proof字段以及逐文件、文档与activation evidence SHA门禁；MCP config、catalog/schema、policy、slot/binding与MAC ref边界digest继续有效。
 >
 > 记录日期：2026-08-13；当前下游同步：2026-08-26（Round 9.3）
@@ -188,6 +194,10 @@ Round 6 不要求高级 Go MCP dashboard。Protocol/TUI 继续使用现有generi
 - skill manifest 对late-ready MCP tool的动态依赖解析；Round 6只恢复scope-filtered direct tool surface、MCP_CATALOG与list_mcp_servers，不修改skill activation/catalog authority。
 
 ### 1.6 SDK与协议contract
+
+2026-09-06 依赖版本后继：用户明确要求升级至 `mcp[cli]==2.1.0` / `mcp-types==2.1.0`。
+下面的 2.0.0 是 Round 6 原始验证基线；当前版本及 SDK transport 替换状态见能力页 hard-cut 规范 §6.3。
+版本升级本身不表示已经删除自写 transport，也不改变下面保留的协商与结算语义。
 
 Round 6冻结hard-cut前已经验证过的official Python SDK public-v2 seam：
 
@@ -753,32 +763,33 @@ V1 支持：
 
 Round 9.3建立的同一injected `ProcessApiKeyBoundary`必须覆盖MCP stdio final spawn与HTTP final sink admission，并与supported key rotation、Hook spawn、provider final sink及Plugin irreversible publish共用underlying gate。Async acquisition不得阻塞event loop，cancelled acquisition必须shield+join；guard跨越spawn/send irreversible cut。Exact nonempty `PULSARA_API_KEY`不得进入Plugin MCP environment、stdin、stdout/stderr、diagnostic或provider model payload；provider authentication所必需的client-owned credential header仅按Round 9.3 §5.6 closed carrier处理，不属于Plugin MCP header authority。
 
-V1 不支持 legacy SSE 与隐式全环境继承。
+当前支持用户显式选择的 legacy SSE；不支持隐式全环境继承。
 
-official SDK 的默认 stdio/HTTP helper 在完成 JSON parse 前不能证明内存有界，因此“SDK facade bounded”不能只限制 parse 后的 page/item 数。Round 6 必须在 SDK model/session 层之前安装 Pulsara-owned public framing seam；不得 monkeypatch SDK private field：
+HTTP/SSE 由官方 MCP SDK 2.1.0 与 httpx2 处理，Pulsara 使用自定义 HTTP client 注入网络、
+凭据与普通 decoded body 限制。SSE 使用 SDK 的 1 MiB event/pending-line 界限；不再声称有
+Pulsara-owned SSE 16 MiB 或跨请求 32 MiB reservation。stdio 保留已验证的有限 framing 缺口。
+详见能力页 hard-cut §6.3，不为保留旧 pre-parse 分配保证重新实现 HTTP/SSE parser。
 
 ~~~text
 McpWireBounds
   maximum_stdio_frame_bytes                 16 MiB
   maximum_http_json_body_bytes              16 MiB
-  maximum_sse_event_data_bytes              16 MiB
-  maximum_buffered_transport_bytes_per_slot 32 MiB
   maximum_wire_json_nodes                    65536
   maximum_wire_json_depth                      128
   maximum_schema_utf8_bytes                256 KiB
-  maximum_schema_nodes                        4096
+  schema nodes share maximum_wire_json_nodes  65536
   maximum_schema_depth                          64
   maximum_discovery_candidate_bytes_per_server 32 MiB
   maximum_discovery_candidate_bytes_per_host  128 MiB
 ~~~
 
 - stdio adapter 必须以 bounded byte buffer 找到一条完整 frame，再把该 frame交给 public SDK message/session API；超限时立即终止 exact slot并 join process group；
-- HTTP adapter 必须在 `aread()`/JSON decode 前流式计数 body；SSE decoder 必须逐块计数当前 event-data，不能先无限累积；并发request/listener必须共享一个slot-owned 32 MiB byte reservation，不能把16 MiB上限按并发数重复获得；
+- 普通 HTTP JSON response 在 decoded body 进入 SDK parser 前计数；SSE event/line 由 SDK 计数，不复制其状态机。并发与 aggregate discovery admission 继续由既有 owner 限制；
 - stdio EOF必须形成exact slot transport failure并推进future reconnect，不能把reader正常返回误报为READY；stderr被立即丢弃，其bound计算resident chunk而非生命周期累计吞吐；
-- bounded JSON decoder必须用能识别quoted string、escape、number、object key和container depth的线性grammar scanner，在`json.loads`及SDK/Pydantic object graph分配前执行wire-level node/depth budget；schema subobject再执行更窄的byte/node/depth bound，且都发生在conformance/normalization前；
+- stdio bounded JSON decoder 在 parse 前执行节点/深度检查；HTTP/SSE 的 typed message 在 SDK 之后检查形状。schema 在 conformance/normalization 前校验 256 KiB、depth 64，并共享现有 65,536 wire 节点预算；
 - Host aggregate discovery reservation必须在`client.open()`之前取得，因为open已经执行initialize/discover；reservation一直持有到listing normalization、candidate physical quote和pending installation完成；
 - 任一 frame/body/event/schema/aggregate bound 超限，都丢弃整个 candidate或终止 exact operation，不能安装 partial snapshot，也不能把截断 JSON lower 为 known success；
-- 若 pinned SDK 没有能注入上述 bound 的 public transport seam，implementation 必须提供小型 Pulsara-owned transport/framing adapter并继续复用 official SDK 的 public session与typed model；不得以“SDK内部最终会parse”为由豁免 pre-parse bound。
+- 对 SDK 扩展口的缺口只保留有实测证据的最小接线；禁止恢复整套自写 HTTP/SSE 传输或已退役的配置字段。
 
 ### 6.5 Exposure policy
 
@@ -1823,7 +1834,7 @@ canonical commit ACK unknown 继续使用现有 stable candidate 与 stateless e
 - pagination complete 且 deterministic；
 - partial/oversized listing 不能安装；
 - oversized stdio frame、HTTP JSON body、SSE event在JSON parse前终止，内存不超过sealed transport bound；
-- wire JSON node/depth在`json.loads`前拒绝、schema 256 KiB/4096 nodes/depth 64与从`client.open()`开始的per-server/Host aggregate candidate reservation均有边界测试；
+- schema 256 KiB/共享 wire 65536 nodes/depth 64与从`client.open()`开始的per-server/Host aggregate candidate reservation均有边界测试；HTTP/SSE 的 SDK 后 shape 验证按能力页 hard-cut §6.3，stdio 保留 pre-parse 检查；
 - URI-template adjacent expression、错误query/matrix variable name与linear-time回归闭合；合法长remote name的exact physical result可完成remote-identity publication与ToolResult canonical acceptance；
 - invalid schema 按 closed policy 处理；
 - stale config/attempt candidate 被丢弃；

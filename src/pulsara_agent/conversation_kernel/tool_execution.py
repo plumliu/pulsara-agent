@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from datetime import datetime, timezone
 
@@ -846,6 +846,38 @@ class ToolBatchExecutor:
                 capability_decision_id = _stable_id(
                     "capability-decision", assistant_entry_id, call.tool_call_id
                 )
+                if authorization.kind is KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED:
+                    management = authorization.capability_call
+                    assert management is not None
+                    if authorization.capability_permission_required:
+                        permission_request = self._tools.prepare_permission_request(
+                            tool_call_id=call.tool_call_id, turn_id=turn_id,
+                            surface_borrow=surface_borrow,
+                        )
+                        permission_decision = PermissionDecision.ABSTAIN
+                        if hook_view is not None and hook_scope is not None and isinstance(
+                            prepared_invocation, PreparedResolvedToolInvocation
+                        ):
+                            permission_outcome = await self._dispatch_permission_request(
+                                view=hook_view, scope=hook_scope, prepared=prepared_invocation,
+                                permission_request=permission_request, turn_id=turn_id,
+                                tool_call_id=call.tool_call_id, request=request, canonical_facts=canonical_facts,
+                            )
+                            permission_decision = permission_outcome.decision
+                        if permission_decision is PermissionDecision.DENY:
+                            management.discard()
+                            authorization = KernelToolAuthorization(
+                                KernelToolAuthorizationKind.PERMISSION_DENIED,
+                                "hook:permission-deny", "Capability management was denied by the permission Hook")
+                        elif permission_decision is PermissionDecision.ALLOW and not management.prepared.user_inputs:
+                            authorization = replace(authorization, kind=KernelToolAuthorizationKind.ALLOW,
+                                                    reference="hook:permission-allow")
+                    if authorization.kind is KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED:
+                        authorization = await self._tools.request_capability_form(
+                            authorization=authorization, turn_id=turn_id,
+                            assistant_entry_id=assistant_entry_id, tool_call_id=call.tool_call_id,
+                            permission_snapshot=canonical_facts.run_permission_snapshot,
+                        )
                 if (
                     authorization.kind
                     is KernelToolAuthorizationKind.REQUIRE_CONFIRMATION
@@ -1097,6 +1129,24 @@ class ToolBatchExecutor:
                     attempt_id = authorization.accepted_attempt_id or _id(
                         "tool-attempt"
                     )
+                    if authorization.capability_user_submission:
+                        if authorization.capability_call is None:
+                            raise RuntimeError("user capability admission lost its call owner")
+                        accepted_attempt = await self._io.run(
+                            self._repository.accept_tool_attempt,
+                            self._writer_lease.guard,
+                            attempt_id=attempt_id, assistant_entry_id=assistant_entry_id,
+                            tool_call_id=call.tool_call_id,
+                            authorization_kind="human", authorization_reference=authorization.reference,
+                            actor_kind="human", actor_id="capability-user-control-plane",
+                            remote_idempotency_key=None, retry_of_attempt_id=None,
+                            permission_snapshot_fingerprint=canonical_facts.run_permission_snapshot.snapshot_fingerprint,
+                            occurred_at=datetime.now(timezone.utc), deadline_monotonic=self._canonical_deadline(),
+                        )
+                        authorization = replace(authorization,
+                            accepted_attempt_id=accepted_attempt.attempt_id,
+                            accepted_permission_snapshot_fingerprint=accepted_attempt.permission_snapshot_fingerprint)
+                        attempt_permission_snapshot_fingerprint = accepted_attempt.permission_snapshot_fingerprint
                     # The adapter is not reachable until both the complete
                     # tool-request message and this attempt transaction return.
                     if authorization.accepted_attempt_id is None:
@@ -1216,6 +1266,7 @@ class ToolBatchExecutor:
                             subagent_parent_context_subject
                         ),
                         surface_borrow=surface_borrow,
+                        capability_call=authorization.capability_call,
                         memory_context=request.memory_context,
                     )
                     try:

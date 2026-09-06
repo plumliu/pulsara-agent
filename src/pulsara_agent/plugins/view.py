@@ -146,6 +146,9 @@ class EnabledPluginViewOwner:
         self._store = store
         self._observer = PluginSourceObserver(credential_boundary)
 
+    def current_state(self, identity):
+        return self._store.read_state(self._store.layout(identity))
+
     def observe(
         self,
         *,

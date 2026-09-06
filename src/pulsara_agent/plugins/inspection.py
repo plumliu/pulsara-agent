@@ -158,6 +158,7 @@ class PluginInspectionService:
                             summary=observation.summary,
                             diagnostics=observation.diagnostics,
                             package_in_use=package_in_use,
+                            mcp_connection_overlays=state.mcp_connection_overlays,
                         )
                     )
                     if state.enabled:
@@ -265,6 +266,7 @@ class PluginInspectionService:
             try:
                 _check_abort(deadline_monotonic, cancellation)
                 existing = load_mcp_server_configs(
+                    user_config_path=self._home / "mcp.yaml",
                     workspace_root=workspace_root,
                     trust_workspace_config=workspace_root is not None,
                 )

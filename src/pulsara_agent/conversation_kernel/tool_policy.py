@@ -16,6 +16,9 @@ from pulsara_agent.tool_permission import (
     preset_to_policy,
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
+from pulsara_agent.capability.management_effects import (
+    ResolvedCapabilityEffectProjection,
+)
 
 
 class ToolDispatchDecisionKind(StrEnum):
@@ -33,6 +36,7 @@ class ToolDispatchAuthorizationRequest:
     assistant_entry_id: str
     permission_snapshot: FrozenRunPermissionSnapshot
     workspace_root: Path
+    capability_effects: ResolvedCapabilityEffectProjection | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +77,8 @@ class DefaultToolDispatchAuthorizationPolicy:
         )
         try:
             decision = await asyncio.wait_for(
-                gate.evaluate([call]), timeout=self._timeout_seconds
+                gate.evaluate([call], capability_effects=request.capability_effects),
+                timeout=self._timeout_seconds,
             )
         except asyncio.CancelledError:
             raise

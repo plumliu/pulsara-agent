@@ -2,6 +2,10 @@
 
 状态：Active（2026-08-30）
 
+2026-09-06 能力管理面同步：导入、凭据、编辑、删除与自动采用的当前契约由
+`PULSARA_CAPABILITY_PAGE_MCP_EDIT_CREDENTIAL_AND_INSTALLABLE_CAPABILITY_DELETION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`
+收敛；本页不另设控制面或兼容路径。
+
 本规范定义 Pulsara 的第一套完整前端产品面。它消费 Kernel 现有的 renderer-neutral
 Terminal Protocol v3，但不成为 conversation、tool、permission、memory、subagent 或
 execution 的第二套 authority。
@@ -38,6 +42,12 @@ Pulsara 前端是面向本地长时 Agent 工作的「可观测工作台」。�
 会话工作台使用四栏桌面布局：activity rail、session sidebar、conversation workbench、
 inspector。窄屏时 inspector 变为抽屉，session sidebar 变为 overlay；手机宽度下 activity
 rail 变为底部导航。
+
+窗口从桌面缩窄时自动收起 inspector；窄屏仍允许手动展开，通过遮罩或关闭按钮收起。
+重新放宽窗口不强制覆盖用户的收起选择。composer 按自身可用宽度而非整个窗口决定布局：
+模型标签保持单行、省略超长部分，悬停和模型菜单保留完整名称；发送/停止按钮不被压缩。
+空间不足时，推理、Skills、规划与权限使用同一组控件收进向上展开的“选项”面板，
+当前权限仍在入口可见。Escape 或点击输入框之外关闭面板，不重置已选设置。
 
 ## 3. 视觉系统
 
@@ -220,9 +230,16 @@ cache 恢复目录真相。
 - Skill 通过既有 atomic local installation service 安装到用户根。安装结果及 diagnostics 来自
   该 service，前端不自行复制、校验或覆盖 Skill 文件。Skill 开关配置同样使用 atomic replace，
   单文件读取边界为 1 MiB；配置损坏时用户 Skill fail-closed，能力页显示需留意而不静默重启；
-- MCP 新增与启停写入 `~/.pulsara/mcp.yaml` 的单一配置真相。Plugin 安装、启停与移除走现有
-  in-process management service；启用 Plugin 的明确点击同时构成对其已审阅包启动本地进程或
-  网络连接的接受；
+- MCP 新增、编辑、启停与删除写入 `~/.pulsara/mcp.yaml` 单一配置真相，认证值只进入
+  `local-settings.yaml`。导入预览与保存、连接测试分别结算；OAuth 保存不等于登录。
+  Plugin 先选目录并自动识别；唯一发行版直接预览，多个发行版展示组件差异后才让用户选择。
+  经一次性官方转换后进入唯一 native validator，安装为 disabled；
+  实例连接参数与凭据在独立编辑器填写。启用必须提交当前 exact package 的完整 review，
+  不是把普通开关点击当作已经审阅；删除清理实例专属凭据、保留 Plugin data；
+- loose Skill 可从普通或外部宿主目录独立导入，完整保留资源。只有用户拥有的 managed
+  roots 支持删除，bundled/inherited/Plugin child 不出现假删除按钮；
+- 模型侧 ROOT `manage_capability` 与 GUI 共用 typed owner 和表单。用户私有输入不进入
+  模型参数、返回值或 live 投影；permission、配置 mutation 与 adoption 独立结算；
 - 每次 MCP/Plugin 变化后，控制面并行通知所有当前已打开会话重新读取用户 MCP 配置与 enabled
   Plugin view，并通过既有 safe-point owner 采用。一个会话失败不会阻止其他会话采用，页面会
   显示需重试的会话数量；Skill 配置由每个会话在同一既有 safe-point Skill observation 中读取，

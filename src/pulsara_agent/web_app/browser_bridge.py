@@ -27,6 +27,8 @@ from pulsara_agent.web_app.protocol_client import (
     ProtocolTransportClosed,
 )
 from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.primitives.context import thaw_json
+from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 
 
 def protobuf_json(message: Message) -> dict[str, object]:
@@ -361,6 +363,58 @@ class LocalBrowserBridge:
         return protobuf_json(
             await connection.controller.request("resolve_interaction", request)
         )
+
+    async def capability_form(
+        self,
+        connection_id: str,
+        body: dict[str, object],
+        *,
+        submit: bool,
+    ) -> dict[str, object]:
+        # The private input stays on this narrow HTTP path; it is never sent to
+        # Protocol-v3 command/interaction DTOs, broadcasts or command history.
+        required = {"interaction_id", "expected_owner_epoch", "expected_live_revision"}
+        allowed = required | ({"decision", "submission"} if submit else set())
+        if set(body) - allowed or not required <= set(body):
+            raise ProtocolBridgeError(
+                "CAPABILITY_FORM_INVALID", "能力表单请求不完整，请重新打开。"
+            )
+        connection = await self._connection(connection_id)
+        if connection.role != "controller":
+            raise ProtocolBridgeError(
+                "CONTROLLER_REQUIRED", "请在当前控制此会话的窗口操作。"
+            )
+        session = self.sessions.session_by_host_id(connection.host_session_id)
+        kwargs = dict(
+            attachment_id=connection.controller.attachment_id,
+            interaction_id=_required_string(body, "interaction_id"),
+            expected_owner_epoch=_uint(
+                body.get("expected_owner_epoch"), "expected_owner_epoch"
+            ),
+            expected_live_revision=_uint(
+                body.get("expected_live_revision"), "expected_live_revision"
+            ),
+        )
+        try:
+            if not submit:
+                return {"form": thaw_json(session.read_capability_form(**kwargs))}
+            await session.resolve_capability_form(
+                **kwargs,
+                decision=body.get("decision"),
+                submission=body.get("submission"),
+            )
+        except ConversationKernelConflict:
+            raise ProtocolBridgeError(
+                "CAPABILITY_FORM_STALE", "能力表单已变化或已关闭，请等待当前会话更新。"
+            ) from None
+        except Exception:
+            # A validator may include the submitted secret in its exception.
+            # Do not serialize it or attach it to a public/protocol error.
+            raise ProtocolBridgeError(
+                "CAPABILITY_FORM_INVALID",
+                "配置尚未提交，请检查填写内容与当前连接后重试。",
+            ) from None
+        return {"submitted": body.get("decision") == "SUBMIT"}
 
     async def resolve_plan_interaction(
         self, connection_id: str, body: dict[str, object]

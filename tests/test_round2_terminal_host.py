@@ -161,7 +161,7 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
     command = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}"
     model = _TerminalMonitorDogfoodModel(command)
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
     monkeypatch.setenv("PULSARA_TERMINAL_SHELL_SNAPSHOT", "0")
     model_runtime = test_model_runtime(
         api_key="sk-fixture-secret",

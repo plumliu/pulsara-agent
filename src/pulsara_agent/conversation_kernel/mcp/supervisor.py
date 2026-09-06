@@ -1177,6 +1177,9 @@ def _candidate_exact_joins_config(
     )
 
 
+DEFAULT_MCP_CONNECT_ATTEMPT_TIMEOUT_SECONDS = 120.0
+
+
 class McpHostSupervisor:
     """The only owner allowed to connect, fence, and close MCP slots."""
 
@@ -1190,7 +1193,7 @@ class McpHostSupervisor:
         client_factory: type[BoundedMcpSdkClient] = BoundedMcpSdkClient,
         required_startup_timeout_seconds: float = 120.0,
         optional_fast_start_seconds: float = 3.0,
-        connect_attempt_timeout_seconds: float = 120.0,
+        connect_attempt_timeout_seconds: float = DEFAULT_MCP_CONNECT_ATTEMPT_TIMEOUT_SECONDS,
     ) -> None:
         if len(configs) > MAXIMUM_CONFIGURED_MCP_SERVERS:
             raise ValueError("too many configured MCP servers")
@@ -1641,7 +1644,7 @@ class McpHostSupervisor:
                             self._set_catalog_state_locked(
                                 server_id, McpServerState.DISCOVERING
                             )
-                    snapshot, policies = await _discover(client, config)
+                    snapshot, policies = await discover_mcp_catalog(client, config)
                     candidate_lease = slot.issue_lease(0)
                     candidate = _candidate(
                         config=config,
@@ -2583,7 +2586,7 @@ def _close_physical_lifetime_anchor(anchor: object) -> None:
     close()
 
 
-async def _discover(
+async def discover_mcp_catalog(
     client: BoundedMcpSdkClient,
     config: McpServerConfig,
 ) -> tuple[McpDiscoverySnapshot, tuple[McpToolExecutionPolicyFact, ...]]:
@@ -2766,8 +2769,8 @@ async def _discover(
         sdk_conformance_contract_fingerprint=context_fingerprint(
             "mcp-sdk-conformance:v2",
             (
-                "mcp==2.0.0",
-                "mcp-types==2.0.0",
+                "mcp==2.1.0",
+                "mcp-types==2.1.0",
                 "modern-explicit-result-type",
                 "negotiated-legacy-implicit-complete",
             ),

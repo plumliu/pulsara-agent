@@ -11,6 +11,7 @@ from pathlib import Path
 import signal
 import sys
 from time import monotonic
+from pulsara_agent.plugins.contracts import SuccessfulPluginInstallOutcome
 
 from pulsara_agent import __version__
 from pulsara_agent.capability import (
@@ -51,9 +52,6 @@ from pulsara_agent.mcp_config import (
     McpServerConfig,
     StdioTransportConfig,
     StreamableHttpTransportConfig,
-    load_mcp_server_configs,
-    set_mcp_server_enabled,
-    write_mcp_server_config,
 )
 from pulsara_agent.primitives.permission import (
     DEFAULT_PERMISSION_MODE,
@@ -149,6 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--scope", choices=("workspace", "user"), required=True)
     install.add_argument("--workspace", default=None)
     install.add_argument("--json", action="store_true")
+    install.add_argument("--name", default=None)
+    install.add_argument("--description", default=None)
     for name in ("list", "doctor"):
         command = skill_commands.add_parser(name)
         command.add_argument("--workspace", default=None)
@@ -323,9 +323,7 @@ def main() -> None:
         except _PluginCliUsageError as exc:
             _plugin_cli_parser_error(parser, str(exc), credential_boundary)
         except ValueError as exc:
-            _plugin_cli_parser_error(
-                parser, _public_error(exc), credential_boundary
-            )
+            _plugin_cli_parser_error(parser, _public_error(exc), credential_boundary)
         _plugin_cli_print(output, credential_boundary)
         if exit_status:
             raise SystemExit(exit_status)
@@ -412,9 +410,7 @@ async def _local_web_app(args) -> None:
         permission_policy=_permission_policy(args),
         active_skill_names=_active_skill_names_from_args(args),
         port=args.port,
-        static_root=(
-            None if args.static_root is None else Path(args.static_root)
-        ),
+        static_root=(None if args.static_root is None else Path(args.static_root)),
     )
     await run_local_web_application(
         application,
@@ -560,6 +556,8 @@ def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
                     source_path=_resolved_local_source(args.path),
                     scope=scope,
                     workspace_root=workspace,
+                    name=args.name,
+                    description=args.description,
                 ),
                 cancellation=probe,
             )
@@ -579,9 +577,7 @@ def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
             inspection = service.inspect_effective_skill_catalog(
                 InspectEffectiveSkillCatalogRequest(workspace, plugin_definitions)
             )
-            payload = _skill_inspection_payload(
-                inspection, doctor=command == "doctor"
-            )
+            payload = _skill_inspection_payload(inspection, doctor=command == "doctor")
             rendered = (
                 json.dumps(payload, indent=2, ensure_ascii=False)
                 if args.json
@@ -589,8 +585,7 @@ def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
             )
             status = (
                 0
-                if inspection.disposition
-                is EffectiveSkillCatalogDisposition.COMPLETE
+                if inspection.disposition is EffectiveSkillCatalogDisposition.COMPLETE
                 else 2
             )
             return rendered, status
@@ -624,9 +619,7 @@ def _cli_plugin_skill_definitions(
         )
     else:
         view = EnabledPluginViewOwner(
-            store=ManagedPluginStore(
-                pulsara_home=home, credential_boundary=boundary
-            ),
+            store=ManagedPluginStore(pulsara_home=home, credential_boundary=boundary),
             credential_boundary=boundary,
         ).observe(
             workspace_root=workspace,
@@ -829,9 +822,7 @@ def _skill_inspection_payload(inspection, *, doctor: bool) -> dict[str, object]:
                         "path": str(item.path),
                         "origin_label": skill_origin_label(item.origin),
                         "name": item.name,
-                        "winner_origin_label": skill_origin_label(
-                            item.winner_origin
-                        ),
+                        "winner_origin_label": skill_origin_label(item.winner_origin),
                         "winner_path": str(item.winner_path),
                         "diagnostic_codes": [
                             code.value for code in item.diagnostic_codes
@@ -865,8 +856,7 @@ def _skill_inspection_text(payload: dict[str, object], *, doctor: bool) -> str:
     skills = payload.get("skills", [])
     if (
         not skills
-        and payload["disposition"]
-        == EffectiveSkillCatalogDisposition.COMPLETE.value
+        and payload["disposition"] == EffectiveSkillCatalogDisposition.COMPLETE.value
     ):
         lines.append("No effective Skills.")
     for item in skills:
@@ -916,9 +906,7 @@ def _skill_inspection_text(payload: dict[str, object], *, doctor: bool) -> str:
             if isinstance(cause, dict):
                 for diagnostic in cause.get("diagnostics", []):
                     if isinstance(diagnostic, dict):
-                        lines.append(
-                            f"- {diagnostic['code']}: {diagnostic['message']}"
-                        )
+                        lines.append(f"- {diagnostic['code']}: {diagnostic['message']}")
     return "\n".join(lines)
 
 
@@ -968,8 +956,11 @@ def _plugins_command(
 
     if command == "add":
         scope, workspace = _plugin_scope_and_workspace(args)
+        from pulsara_agent.capability.mcp_management import LocalMcpManagementService
+        from pulsara_agent.settings import LocalSettingsStore
+
         with _bridge_skill_sigint(cancellation):
-            result = service.install_local_plugin(
+            result = asyncio.run(service.install_local_plugin(
                 InstallLocalPluginRequest(
                     _resolved_local_source(args.path),
                     scope,
@@ -977,8 +968,9 @@ def _plugins_command(
                     workspace,
                     args.replace,
                     cancellation,
-                )
-            )
+                ),
+                connections=LocalMcpManagementService(LocalSettingsStore(), credential_boundary=boundary),
+            ))
         payload = _plugin_install_payload(result)
         return _render_plugin_payload(payload, args.json), _plugin_exit_status(
             result.disposition
@@ -1016,6 +1008,15 @@ def _plugins_command(
                 }
                 return _render_plugin_payload(payload, args.json), 1
             review = _plugin_instance_payload(target, include_diagnostics=True)
+            from pulsara_agent.plugins.mcp_connection import connection_review, review_to_dict
+            from pulsara_agent.settings import LocalSettingsStore, LOCAL_SETTINGS_FILE_NAME
+
+            reviewed_connections = connection_review(
+                target.mcp_connection_overlays,
+                LocalSettingsStore(service._store().home / LOCAL_SETTINGS_FILE_NAME).read().mcp_secret,
+                servers=target.summary.mcp.mcp_servers, identity=target.identity,
+            )
+            review["connection_review"] = review_to_dict(reviewed_connections)
             if command == "enable" and not args.yes:
                 _plugin_cli_stderr(_plugin_enable_review_text(review), boundary)
                 _plugin_cli_stderr(
@@ -1050,6 +1051,7 @@ def _plugins_command(
                             else None
                         ),
                         cancellation,
+                        connection_review=reviewed_connections,
                     )
                 )
             payload = _plugin_enablement_payload(result, reviewed=review)
@@ -1061,12 +1063,23 @@ def _plugins_command(
 
     if command == "remove":
         scope, workspace = _plugin_scope_and_workspace(args)
-        with _bridge_skill_sigint(cancellation):
-            result = service.remove_local_plugin(
-                RemoveLocalPluginRequest(
-                    scope, args.plugin_id, deadline, workspace, cancellation
-                )
-            )
+        inspection = service.inspect_local_plugins(
+            InspectLocalPluginsRequest(deadline, workspace, cancellation)
+        )
+        try:
+            if not isinstance(inspection, PluginInspectionOutcome) or inspection.disposition is not PluginInspectionDisposition.COMPLETE:
+                return _render_plugin_payload(_plugin_inspection_payload(inspection, doctor=True, projection="remove-preflight"), args.json), 2
+            target = next((item for item in inspection.instances if item.identity.scope is scope and item.identity.plugin_id == args.plugin_id), None)
+            if target is None:
+                return _render_plugin_payload({"operation": "remove_local_plugin", "disposition": "NOT_FOUND", "plugin_id": args.plugin_id}, args.json), 1
+            with _bridge_skill_sigint(cancellation):
+                result = asyncio.run(service.remove_local_plugin(
+                    RemoveLocalPluginRequest(
+                        scope, args.plugin_id, deadline, target.package_install_id, workspace, cancellation
+                    )
+                ))
+        finally:
+            _close_inspection_anchors(inspection)
         payload = _plugin_removal_payload(result)
         return _render_plugin_payload(payload, args.json), _plugin_exit_status(
             result.disposition
@@ -1111,9 +1124,7 @@ def _plugin_scope_and_workspace(
     scope = PluginScopeKind(args.scope.upper())
     if scope is PluginScopeKind.USER:
         if args.workspace is not None:
-            raise _PluginCliUsageError(
-                "--workspace is not valid with --scope user"
-            )
+            raise _PluginCliUsageError("--workspace is not valid with --scope user")
         return scope, None
     return scope, _resolved_skill_workspace(args.workspace)
 
@@ -1154,6 +1165,8 @@ def _plugin_install_payload(result) -> dict[str, object]:
         payload["package_install_id"] = package_id
     if hasattr(result, "enabled"):
         payload["enabled"] = result.enabled
+    if isinstance(result, SuccessfulPluginInstallOutcome):
+        payload["cleanup_attention"] = result.cleanup_attention
     if hasattr(result, "summary"):
         payload["summary"] = _plugin_summary_payload(result.summary)
     for name in (
@@ -1255,9 +1268,7 @@ def _plugin_inspection_payload(
     return payload
 
 
-def _plugin_instance_payload(
-    item, *, include_diagnostics: bool
-) -> dict[str, object]:
+def _plugin_instance_payload(item, *, include_diagnostics: bool) -> dict[str, object]:
     payload: dict[str, object] = {
         "identity": _plugin_identity_payload(item.identity),
         "package_install_id": item.package_install_id,
@@ -1397,8 +1408,12 @@ def _plugin_gc_payload(result) -> dict[str, object]:
         "operation": "gc_local_plugin_packages",
         "disposition": result.disposition.value,
         "progress": {
-            "ordered_removed": [_plugin_gc_ref(item) for item in progress.ordered_removed],
-            "ordered_in_use": [_plugin_gc_ref(item) for item in progress.ordered_in_use],
+            "ordered_removed": [
+                _plugin_gc_ref(item) for item in progress.ordered_removed
+            ],
+            "ordered_in_use": [
+                _plugin_gc_ref(item) for item in progress.ordered_in_use
+            ],
             "current_attempted_ref": (
                 None
                 if progress.current_attempted_ref is None
@@ -1480,7 +1495,11 @@ def _diagnostic_payload(item) -> dict[str, object]:
     if hasattr(item, "to_dict"):
         return item.to_dict()
     value: dict[str, object] = {
-        "code": getattr(getattr(item, "code", None), "value", getattr(item, "code", type(item).__name__)),
+        "code": getattr(
+            getattr(item, "code", None),
+            "value",
+            getattr(item, "code", type(item).__name__),
+        ),
         "message": getattr(item, "message", type(item).__name__),
     }
     for name in ("severity", "path", "component", "source_label"):
@@ -1505,9 +1524,7 @@ def _render_plugin_payload(payload: dict[str, object], json_output: bool) -> str
     ]
     identity = payload.get("identity")
     if isinstance(identity, dict):
-        lines.append(
-            f"Instance: {identity.get('scope')}:{identity.get('plugin_id')}"
-        )
+        lines.append(f"Instance: {identity.get('scope')}:{identity.get('plugin_id')}")
     if "package_install_id" in payload:
         lines.append(f"Package install id: {payload['package_install_id']}")
     instances = payload.get("instances")
@@ -1522,16 +1539,12 @@ def _render_plugin_payload(payload: dict[str, object], json_output: bool) -> str
                     f"{item['package_install_id']} enabled={item['enabled']}"
                 )
                 skills = ", ".join(item.get("effective_skill_names", [])) or "none"
-                servers = ", ".join(
-                    item.get("effective_mcp_server_ids", [])
-                ) or "none"
+                servers = ", ".join(item.get("effective_mcp_server_ids", [])) or "none"
                 hook_count = item.get("effective_hook_definition_count", 0)
                 hook_trust = item.get("effective_hook_trust_disposition") or "none"
                 lines.append(f"  effective Skills: {skills}")
                 lines.append(f"  effective MCP servers: {servers}")
-                lines.append(
-                    f"  effective Hooks: {hook_count} trust={hook_trust}"
-                )
+                lines.append(f"  effective Hooks: {hook_count} trust={hook_trust}")
     for diagnostic in payload.get("diagnostics", []):
         if isinstance(diagnostic, dict):
             lines.append(f"- {diagnostic['code']}: {diagnostic['message']}")
@@ -1616,6 +1629,16 @@ async def _mcp_command(
     credential_boundary: ProcessCredentialBoundary | None = None,
 ) -> dict[str, object]:
     boundary = credential_boundary or ProcessCredentialBoundary()
+    from pulsara_agent.capability.mcp_management import (
+        LocalMcpManagementService,
+        LocalMcpTarget,
+        config_guard,
+        config_to_entry,
+    )
+
+    management = LocalMcpManagementService(
+        LocalSettingsStore(), credential_boundary=boundary
+    )
     workspace_root = (
         Path(args.workspace).expanduser().resolve()
         if getattr(args, "workspace", None)
@@ -1623,7 +1646,7 @@ async def _mcp_command(
     )
     command = args.mcp_command
     if command == "list":
-        configs = load_mcp_server_configs(
+        configs = management.load_configs(
             workspace_root=workspace_root,
             trust_workspace_config=workspace_root is not None,
         )
@@ -1659,28 +1682,32 @@ async def _mcp_command(
             "effect_policy": {"default_effect": args.effect},
             "catalog_refresh_interval_ms": 300_000,
         }
-        path = write_mcp_server_config(
-            server_id=args.server_id,
-            entry=entry,
-            workspace_root=workspace_root,
-        )
+        target = LocalMcpTarget(args.server_id, workspace_root)
+        await management.create(target, entry)
+        path = management.path(target)
         return {"status": "ok", "server_id": args.server_id, "path": str(path)}
     if command == "remove":
-        path = write_mcp_server_config(
-            server_id=args.server_id,
-            entry=None,
-            workspace_root=workspace_root,
-        )
+        target = LocalMcpTarget(args.server_id, workspace_root)
+        current = management.inspect(target)
+        if current is None:
+            raise KeyError(args.server_id)
+        await management.remove(target, expected=config_guard(current))
+        path = management.path(target)
         return {"status": "ok", "server_id": args.server_id, "path": str(path)}
     if command in {"enable", "disable"}:
-        path = set_mcp_server_enabled(
-            server_id=args.server_id,
-            enabled=command == "enable",
-            workspace_root=workspace_root,
+        target = LocalMcpTarget(args.server_id, workspace_root)
+        current = management.inspect(target)
+        if current is None:
+            raise KeyError(args.server_id)
+        await management.update(
+            target,
+            {**config_to_entry(current), "enabled": command == "enable"},
+            expected=config_guard(current),
         )
+        path = management.path(target)
         return {"status": "ok", "server_id": args.server_id, "path": str(path)}
     if command == "doctor":
-        configs = load_mcp_server_configs(
+        configs = management.load_configs(
             workspace_root=workspace_root,
             trust_workspace_config=workspace_root is not None,
         )
@@ -1918,9 +1945,7 @@ def _hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
         "trusted_definition_digest": snapshot.trust.trusted_definition_digest,
         "trusted_at": snapshot.trust.trusted_at,
         "runnable_handler_count": len(snapshot.definitions) if snapshot.runnable else 0,
-        "declaration_environment": dict(
-            snapshot.provenance.declaration_environment
-        ),
+        "declaration_environment": dict(snapshot.provenance.declaration_environment),
         "diagnostics": [
             {"code": item.code, "message": item.message}
             for item in snapshot.diagnostics
@@ -2141,9 +2166,7 @@ async def _config_check() -> dict[str, object]:
             "embedding_configured": (
                 settings.dashscope_api_key("embedding") is not None
             ),
-            "rerank_configured": (
-                settings.dashscope_api_key("rerank") is not None
-            ),
+            "rerank_configured": (settings.dashscope_api_key("rerank") is not None),
         },
         "model_connections": connections,
     }

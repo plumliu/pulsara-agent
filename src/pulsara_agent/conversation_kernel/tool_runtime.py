@@ -15,6 +15,11 @@ from uuid import uuid4
 
 from jsonschema import ValidationError, validators
 
+from .capability_management import CapabilityManagementPreparation
+from .capability_management_execution import CapabilityManagementCall
+from pulsara_agent.capability.mcp_management import McpManagementConflict
+from pulsara_agent.capability.management_form import PendingCapabilityForm, AcceptedCapabilityFormSubmission
+
 from pulsara_agent.capability.builtin_catalog import (
     BuiltinToolCatalogEntry,
     builtin_availability_requirement_identity_fingerprint,
@@ -371,6 +376,7 @@ class KernelMemoryToolPort(Protocol):
 
 
 class KernelToolInteractionResolution(Protocol):
+    capability_submission: AcceptedCapabilityFormSubmission | None
     decision: str
     reference: str
     public_message: str
@@ -379,6 +385,10 @@ class KernelToolInteractionResolution(Protocol):
 
 
 class KernelToolInteractionPort(Protocol):
+    async def request_capability_form(self, *, turn_id: str, assistant_entry_id: str,
+        tool_call_id: str, permission_snapshot: FrozenRunPermissionSnapshot,
+        form: PendingCapabilityForm) -> KernelToolInteractionResolution: ...
+
     async def request_tool_confirmation(
         self,
         *,
@@ -400,6 +410,10 @@ class KernelToolInteractionPort(Protocol):
 
 
 class KernelCapabilityReloadPort(Protocol):
+    async def adopt_capability_management_change(
+        self, *, workspace_root: Path | None
+    ) -> Mapping[str, object]: ...
+
     async def reload_hooks(
         self, *, deadline_monotonic: float | None
     ) -> Mapping[str, object]: ...
@@ -686,6 +700,7 @@ class DirectKernelToolPort:
             _DirectPlanControlTool("exit_plan"),
             _DirectCapabilityControlTool("reload_hooks"),
             _DirectCapabilityControlTool("reload_capabilities"),
+            _DirectCapabilityControlTool("manage_capability"),
             _DirectMcpCatalogTool("list_mcp_servers"),
             _DirectMcpCatalogTool("inspect_new_mcp_tool"),
             _DirectMcpCatalogTool("use_new_mcp_tool"),
@@ -735,6 +750,8 @@ class DirectKernelToolPort:
         self._memory: KernelMemoryToolPort | None = None
         self._interaction: KernelToolInteractionPort | None = None
         self._capability_reload: KernelCapabilityReloadPort | None = None
+        self._capability_management = None
+
         self._mcp_supervisor: McpHostSupervisor | None = None
         self._mcp_current: McpInstalledRuntimeGeneration | None = None
         self._mcp_runtime_by_surface_generation: dict[
@@ -782,6 +799,13 @@ class DirectKernelToolPort:
             if self._capability_reload is not None:
                 raise RuntimeError("Capability reload port is already bound")
             self._capability_reload = port
+
+    def bind_capability_management(self, service: CapabilityManagementPreparation) -> None:
+        with self._surface_lock:
+            self._require_builtin_composition_preparing_locked()
+            if self._capability_management is not None:
+                raise RuntimeError("Capability management is already bound")
+            self._capability_management = service
 
     def bind_mcp_supervisor(self, supervisor: McpHostSupervisor) -> None:
         with self._surface_lock:
@@ -1734,6 +1758,22 @@ class DirectKernelToolPort:
                 permission_snapshot=permission_snapshot,
                 surface_borrow=surface_borrow,
             )
+        capability_call = None
+        if tool_name == "manage_capability":
+            access = surface_borrow.prepared.access
+            if access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
+                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    "capability:root-only", "Capability management is available only in ROOT")
+            if self._capability_management is None:
+                return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                    "capability:unavailable", "Capability management is unavailable")
+            try:
+                prepared = await self._capability_management.prepare(arguments)
+            except ValueError as exc:
+                return KernelToolAuthorization(KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                    "capability:invalid-target", str(exc))
+            capability_call = CapabilityManagementCall(self._capability_management, prepared)
+            capability_call.subject = (self._session_id, turn_id, assistant_entry_id, tool_call_id)
         decision = await self._authorization_policy.decide(
             ToolDispatchAuthorizationRequest(
                 tool_name=tool_name,
@@ -1743,8 +1783,24 @@ class DirectKernelToolPort:
                 assistant_entry_id=assistant_entry_id,
                 permission_snapshot=permission_snapshot,
                 workspace_root=self._workspace_root,
+                capability_effects=capability_call.prepared.effects if capability_call else None,
             )
         )
+        if capability_call is not None:
+            readonly_form = (decision.kind is ToolDispatchDecisionKind.DENY
+                             and permission_snapshot.effective_mode is PermissionMode.READ_ONLY)
+            if decision.kind is ToolDispatchDecisionKind.DENY and not readonly_form:
+                capability_call.discard()
+                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    decision.reference, decision.public_message)
+            form = readonly_form or bool(capability_call.prepared.user_inputs) or (
+                decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION)
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED if form else KernelToolAuthorizationKind.ALLOW,
+                decision.reference, decision.public_message,
+                capability_call=capability_call,
+                capability_permission_required=decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION,
+            )
         if decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.REQUIRE_CONFIRMATION,
@@ -2182,6 +2238,36 @@ class DirectKernelToolPort:
             "hook:permission-allow",
         )
 
+    async def request_capability_form(
+        self, *, authorization, turn_id, assistant_entry_id, tool_call_id, permission_snapshot,
+    ):
+        call = authorization.capability_call
+        if call is None or authorization.kind is not KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED:
+            raise RuntimeError("capability form has no prepared call")
+        if self._interaction is None:
+            call.discard()
+            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "interaction:no-controller", "Capability configuration requires a controller")
+        try:
+            resolution = await self._interaction.request_capability_form(
+                turn_id=turn_id, assistant_entry_id=assistant_entry_id, tool_call_id=tool_call_id,
+                permission_snapshot=permission_snapshot, form=call.form(authorization.public_message),
+            )
+        except BaseException:
+            call.discard()
+            raise
+        if resolution.decision == "SUBMIT" and resolution.capability_submission is not None:
+            call.accept(resolution.capability_submission)
+            return KernelToolAuthorization(KernelToolAuthorizationKind.ALLOW,
+                resolution.reference, resolution.public_message,
+                capability_call=call, capability_user_submission=True)
+        call.discard()
+        return KernelToolAuthorization(
+            KernelToolAuthorizationKind.TOOL_UNAVAILABLE if "no-controller" in resolution.reference
+            else KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH,
+            resolution.reference, resolution.public_message,
+        )
+
     async def request_confirmation(
         self,
         *,
@@ -2485,6 +2571,36 @@ class DirectKernelToolPort:
             raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
         invocation_started = monotonic()
         observation_origin = tool_observation_origin_for_binding(binding)
+        if tool_name == "manage_capability":
+            call = invocation_context.capability_call
+            if (call is None or call.service is not self._capability_management
+                or call.subject != (self._session_id, turn_id, assistant_entry_id, tool_call_id)
+                or invocation_context.conversation_scope_kind != "ROOT"):
+                raise RuntimeError("capability execution lost its exact prepared owner")
+            try:
+                values = await call.execute()
+            except McpManagementConflict as exc:
+                values = {"status": "CONFLICT", "message": str(exc), "adoption": "NOT_APPLICABLE"}
+            except ValueError:
+                # Private form values may be present in a native validator's
+                # exception. Do not put that exception into tool/Hook context.
+                values = {"status": "REJECTED", "message": "Capability operation could not be applied; review its current configuration.", "adoption": "NOT_APPLICABLE"}
+            if values["status"] == "APPLIED":
+                try:
+                    values["adoption"] = await self._capability_reload.adopt_capability_management_change(
+                        workspace_root=call._root())
+                except asyncio.CancelledError:
+                    # Source is already settled. Preserve that fact; a later
+                    # safe point may retry adoption, never replay the mutation.
+                    values["adoption"] = "PARTIAL"
+                except Exception:
+                    values["adoption"] = "PARTIAL"
+            return KernelToolResult(
+                state="SUCCESS" if values["status"] == "APPLIED" else "APPLICATION_ERROR",
+                content=json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode(),
+                effect_class="unknown_effect",
+                physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
+            )
         if tool_name == "reload_hooks":
             if self._capability_reload is None:
                 raise RuntimeError("Hook reload port is unavailable")

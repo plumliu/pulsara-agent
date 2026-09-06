@@ -1943,6 +1943,8 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             dry_dispatch=dry,
             source_view=None,
             source_wire_candidate=None,
+            model_switch_candidate=None,
+            model_switch_tier=None,
             protected_tail_selection_fingerprint="tail:1",
             compaction_read=None,
             trigger=CompactionTrigger.MANUAL,
@@ -1975,6 +1977,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             class _OuterOwner:
                 def __init__(self) -> None:
                     self.settled = None
+                    self.policy = SimpleNamespace(enabled=True)
 
                 async def run_fenced(self, *, scope, trigger, operation):
                     del scope, trigger

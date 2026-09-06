@@ -1,9 +1,18 @@
 import { LocalMemoryApi } from './memory-api';
 import type {
+  PluginImportOptions,
+  PluginImportDiscovery,
   AgentTask,
   CapabilityOperation,
   CapabilitySnapshot,
-  McpCreateInput,
+  PluginMcpConnection,
+  PluginMcpEditInput,
+  UserPluginCapability,
+  McpEditInput,
+  McpImportSource,
+  McpImportPreview,
+  McpImportSelection,
+  McpConnectionTestResult,
   McpServerStatus,
   Message,
   PermissionMode,
@@ -13,10 +22,14 @@ import type {
   SessionSummary,
   SessionWorkspaceSelection,
   SkillInstallResult,
+  SkillCapability,
+  SkillImportInput,
+  SkillImportCandidate,
   SubagentRun,
   TodoRun,
   ToolTrace,
   UserCapabilitySnapshot,
+  UserSkillCapability,
   Workspace,
 } from './pulsara-types';
 import { protocolPermissionModes } from './pulsara-types';
@@ -186,6 +199,7 @@ export type RuntimeInteractionSummary =
     prompt: string;
     options: string[];
   }
+  | { id: string; kind: 'capability-form'; prompt: string; options: string[] }
   | {
     id: string;
     kind: 'plan-question' | 'plan-draft';
@@ -194,6 +208,7 @@ export type RuntimeInteractionSummary =
   };
 
 export type RuntimeInteractionContent =
+  | { kind: 'capability-form'; form: Record<string, unknown> }
   | {
     kind: 'tool-confirmation';
     prompt: string;
@@ -216,6 +231,7 @@ export type RuntimeInteractionContent =
   };
 
 export type RuntimeInteractionResolution =
+  | { kind: 'capability'; decision: 'SUBMIT' | 'CANCEL'; submission?: Record<string, unknown> }
   | { kind: 'tool'; decision: 'allow' | 'deny' }
   | { kind: 'plan-question-option'; optionOrdinal: number }
   | { kind: 'plan-question-text'; text: string }
@@ -252,7 +268,7 @@ export interface RuntimeAdapter {
   reconnectMcpServer(sessionId: string, serverId: string): Promise<CapabilitySnapshot>;
   installSkill(
     sessionId: string,
-    sourcePath: string,
+    input: SkillImportInput,
   ): Promise<{
     installation: SkillInstallResult;
     adoption: ProjectCapabilityAdoption;
@@ -263,16 +279,21 @@ export interface RuntimeAdapter {
     skillId: string,
     enabled: boolean,
   ): Promise<ProjectCapabilityMutationResult>;
+  removeProjectSkill(sessionId: string, skill: SkillCapability): Promise<ProjectCapabilityMutationResult>;
   createProjectMcp(
     sessionId: string,
-    input: McpCreateInput,
+    input: McpEditInput,
   ): Promise<ProjectCapabilityMutationResult>;
+  testProjectMcp(sessionId: string, input: McpEditInput): Promise<McpConnectionTestResult>;
+  importProjectMcp(sessionId: string, input: McpImportSelection): Promise<ProjectCapabilityMutationResult>;
+  projectMcpAuthorization(sessionId: string, serverId: string, action: 'login' | 'status' | 'cancel' | 'logout'): Promise<{state: string; error: string | null}>;
   setProjectMcpEnabled(
     sessionId: string,
     serverId: string,
     configIdentity: string,
     enabled: boolean,
   ): Promise<ProjectCapabilityMutationResult>;
+  updateProjectMcp(sessionId: string, input: McpEditInput, expectedIdentity: string): Promise<ProjectCapabilityMutationResult>;
   removeProjectMcp(
     sessionId: string,
     serverId: string,
@@ -280,7 +301,8 @@ export interface RuntimeAdapter {
   ): Promise<ProjectCapabilityMutationResult>;
   inspectUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot>;
   refreshUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot>;
-  installUserSkill(sourcePath: string, activeSessionId?: string): Promise<{
+  previewSkillImport(sourcePath: string): Promise<SkillImportCandidate[]>;
+  installUserSkill(input: SkillImportInput, activeSessionId?: string): Promise<{
     operation: CapabilityOperation;
     capabilities: UserCapabilitySnapshot;
   }>;
@@ -288,15 +310,27 @@ export interface RuntimeAdapter {
     operation: CapabilityOperation;
     capabilities: UserCapabilitySnapshot;
   }>;
-  createUserMcp(input: McpCreateInput, activeSessionId?: string): Promise<{
+  removeUserSkill(skill: UserSkillCapability, activeSessionId?: string): Promise<{
+    operation: CapabilityOperation; capabilities: UserCapabilitySnapshot;
+  }>;
+  createUserMcp(input: McpEditInput, activeSessionId?: string): Promise<{
     operation: CapabilityOperation;
     capabilities: UserCapabilitySnapshot;
   }>;
-  setUserMcpEnabled(serverId: string, enabled: boolean, activeSessionId?: string): Promise<{
+  testUserMcp(input: McpEditInput): Promise<McpConnectionTestResult>;
+  previewMcpImport(input: McpImportSource): Promise<McpImportPreview[]>;
+  importUserMcp(input: McpImportSelection, activeSessionId?: string): Promise<{operation: CapabilityOperation; capabilities: UserCapabilitySnapshot}>;
+  updateUserMcp(input: McpEditInput, expectedIdentity: string, activeSessionId?: string): Promise<{
     operation: CapabilityOperation;
     capabilities: UserCapabilitySnapshot;
   }>;
-  installUserPlugin(sourcePath: string, activeSessionId?: string): Promise<{
+  removeUserMcp(serverId: string, expectedIdentity: string, activeSessionId?: string): Promise<{
+    operation: CapabilityOperation; capabilities: UserCapabilitySnapshot;
+  }>;
+  userMcpAuthorization(serverId: string, action: 'login' | 'status' | 'cancel' | 'logout'): Promise<{ state: string; error: string | null }>;
+  pluginMcpAuthorization(plugin: UserPluginCapability, connection: PluginMcpConnection, action: 'login' | 'status' | 'cancel' | 'logout'): Promise<{ state: string; error: string | null }>;
+  previewPluginImport(sourcePath: string): Promise<PluginImportDiscovery>;
+  installUserPlugin(sourcePath: string, activeSessionId?: string, options?: PluginImportOptions): Promise<{
     operation: CapabilityOperation;
     capabilities: UserCapabilitySnapshot;
   }>;
@@ -304,12 +338,14 @@ export interface RuntimeAdapter {
     pluginId: string,
     packageInstallId: string,
     enabled: boolean,
+    connectionReview: NonNullable<UserPluginCapability['connectionReview']>,
     activeSessionId?: string,
   ): Promise<{ operation: CapabilityOperation; capabilities: UserCapabilitySnapshot }>;
-  removeUserPlugin(pluginId: string, activeSessionId?: string): Promise<{
+  removeUserPlugin(pluginId: string, packageInstallId: string, activeSessionId?: string): Promise<{
     operation: CapabilityOperation;
     capabilities: UserCapabilitySnapshot;
   }>;
+  updatePluginConnection(plugin: UserPluginCapability, connection: PluginMcpConnection, input: PluginMcpEditInput, activeSessionId?: string): Promise<{ operation: CapabilityOperation; capabilities: UserCapabilitySnapshot }>;
   openCapabilityRoot(root: 'agents' | 'pulsara'): Promise<void>;
 }
 
@@ -337,7 +373,7 @@ export interface RuntimeConnection {
   resolveInteraction(
     interaction: RuntimeInteractionSummary,
     resolution: RuntimeInteractionResolution,
-  ): Promise<CommandReceipt>;
+  ): Promise<CommandReceipt | { submitted: boolean }>;
   queryCommand(commandId: string): Promise<CommandReceipt | undefined>;
   close(): Promise<void>;
 }
@@ -824,7 +860,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
 
   async installSkill(
     sessionId: string,
-    sourcePath: string,
+    input: SkillImportInput,
   ): Promise<{
     installation: SkillInstallResult;
     adoption: ProjectCapabilityAdoption;
@@ -834,7 +870,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/install`,
       {
         method: 'POST',
-        body: JSON.stringify({ source_path: sourcePath }),
+        body: JSON.stringify({ source_path: input.sourcePath, name: input.name, description: input.description }),
       },
     );
     return {
@@ -861,7 +897,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
 
   async createProjectMcp(
     sessionId: string,
-    input: McpCreateInput,
+    input: McpEditInput,
   ): Promise<ProjectCapabilityMutationResult> {
     const payload = await apiRequest<Record<string, unknown>>(
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp`,
@@ -869,16 +905,34 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         method: 'POST',
         body: JSON.stringify({
           server_id: input.serverId,
-          display_name: input.displayName,
-          transport: input.transport,
-          endpoint: input.endpoint,
-          command: input.command,
-          args: input.args,
-          available_to_subagents: input.availableToSubagents,
+          config: input.config,
+          secret_changes: input.secretChanges,
         }),
       },
     );
     return projectCapabilityMutation(payload);
+  }
+
+  async testProjectMcp(sessionId: string, input: McpEditInput): Promise<McpConnectionTestResult> {
+    return apiRequest<McpConnectionTestResult>(`/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/test`, {
+      method: 'POST', body: JSON.stringify({server_id: input.serverId, config: input.config,
+        secret_changes: input.secretChanges, retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false}),
+    });
+  }
+
+  async importProjectMcp(sessionId: string, input: McpImportSelection): Promise<ProjectCapabilityMutationResult> {
+    return projectCapabilityMutation(await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/import`,
+      {method: 'POST', body: JSON.stringify(input)},
+    ));
+  }
+
+  async projectMcpAuthorization(sessionId: string, serverId: string, action: 'login' | 'status' | 'cancel' | 'logout') {
+    const suffix = action === 'login' ? 'authorize' : action === 'cancel' ? 'authorization/cancel' : 'authorization';
+    return apiRequest<{state: string; error: string | null}>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(serverId)}/${suffix}`,
+      {method: action === 'status' ? 'GET' : action === 'logout' ? 'DELETE' : 'POST', ...(action === 'status' ? {} : {body: '{}'})},
+    );
   }
 
   async setProjectMcpEnabled(
@@ -897,6 +951,13 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return projectCapabilityMutation(payload);
   }
 
+  async removeProjectSkill(sessionId: string, skill: SkillCapability): Promise<ProjectCapabilityMutationResult> {
+    return projectCapabilityMutation(await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/skills/remove`,
+      {method: 'POST', body: JSON.stringify({path: skill.path, expected: skill.removalIdentity})},
+    ));
+  }
+
   async removeProjectMcp(
     sessionId: string,
     serverId: string,
@@ -910,6 +971,14 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       },
     );
     return projectCapabilityMutation(payload);
+  }
+
+  async updateProjectMcp(sessionId: string, input: McpEditInput, expectedIdentity: string): Promise<ProjectCapabilityMutationResult> {
+    return projectCapabilityMutation(await apiRequest<Record<string, unknown>>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/capabilities/mcp/${encodeURIComponent(input.serverId)}`,
+      { method: 'PUT', body: JSON.stringify({ config: input.config, expected_identity: expectedIdentity,
+        secret_changes: input.secretChanges, retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false }) },
+    ));
   }
 
   async inspectUserCapabilities(activeSessionId?: string): Promise<UserCapabilitySnapshot> {
@@ -928,12 +997,19 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     ));
   }
 
-  async installUserSkill(sourcePath: string, activeSessionId?: string) {
+  async previewSkillImport(sourcePath: string): Promise<SkillImportCandidate[]> {
+    const result = await apiRequest<{ items: Array<{ source_path: string; name: string; description: string; valid: boolean; details: string[] }> }>('/api/capabilities/skills/preview', {
+      method: 'POST', body: JSON.stringify({ source_path: sourcePath }),
+    });
+    return result.items.map((item) => ({ sourcePath: item.source_path, name: item.name, description: item.description, valid: item.valid, details: item.details }));
+  }
+
+  async installUserSkill(input: SkillImportInput, activeSessionId?: string) {
     return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
       '/api/capabilities/skills/install',
       {
         method: 'POST',
-        body: JSON.stringify({ source_path: sourcePath, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
+        body: JSON.stringify({ source_path: input.sourcePath, name: input.name, description: input.description, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
       },
     ));
   }
@@ -952,41 +1028,76 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     ));
   }
 
-  async createUserMcp(input: McpCreateInput, activeSessionId?: string) {
-    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
-      '/api/capabilities/mcp',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          server_id: input.serverId,
-          display_name: input.displayName,
-          transport: input.transport,
-          endpoint: input.endpoint,
-          command: input.command,
-          args: input.args,
-          available_to_subagents: input.availableToSubagents,
-          ...(activeSessionId ? { active_session_id: activeSessionId } : {}),
-        }),
-      },
-    ));
+  async createUserMcp(input: McpEditInput, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>('/api/capabilities/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ server_id: input.serverId, config: input.config, secret_changes: input.secretChanges,
+        ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
+    }));
   }
 
-  async setUserMcpEnabled(serverId: string, enabled: boolean, activeSessionId?: string) {
-    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
-      `/api/capabilities/mcp/${encodeURIComponent(serverId)}/enabled`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ enabled, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
-      },
-    ));
+  async removeUserSkill(skill: UserSkillCapability, activeSessionId?: string) {
+    if (!skill.removalIdentity) throw new Error('技能目录尚未确认，请刷新后重试。');
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>('/api/capabilities/skills/remove', {
+      method: 'POST', body: JSON.stringify({path: skill.path, expected: skill.removalIdentity,
+        ...(activeSessionId ? {active_session_id: activeSessionId} : {})}),
+    }));
   }
 
-  async installUserPlugin(sourcePath: string, activeSessionId?: string) {
+  async updateUserMcp(input: McpEditInput, expectedIdentity: string, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      `/api/capabilities/mcp/${encodeURIComponent(input.serverId)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ config: input.config, secret_changes: input.secretChanges, expected_identity: expectedIdentity,
+          retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false,
+          ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
+      }));
+  }
+
+  async testUserMcp(input: McpEditInput): Promise<McpConnectionTestResult> {
+    return apiRequest('/api/capabilities/mcp/test', { method: 'POST', body: JSON.stringify({
+      server_id: input.serverId, config: input.config, secret_changes: input.secretChanges,
+      retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false,
+    }) });
+  }
+
+  async previewMcpImport(input: McpImportSource): Promise<McpImportPreview[]> {
+    return (await apiRequest<{items: McpImportPreview[]}>('/api/capabilities/mcp/import/preview', {method: 'POST', body: JSON.stringify(input)})).items;
+  }
+
+  async importUserMcp(input: McpImportSelection, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>('/api/capabilities/mcp/import', {method: 'POST', body: JSON.stringify({...input, active_session_id: activeSessionId})}));
+  }
+
+  async removeUserMcp(serverId: string, expectedIdentity: string, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      `/api/capabilities/mcp/${encodeURIComponent(serverId)}`, {
+        method: 'DELETE', body: JSON.stringify({ expected_identity: expectedIdentity,
+          ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
+      }));
+  }
+
+  async userMcpAuthorization(serverId: string, action: 'login' | 'status' | 'cancel' | 'logout') {
+    const suffix = action === 'login' ? 'authorize' : action === 'cancel' ? 'authorization/cancel' : 'authorization';
+    return apiRequest<{ state: string; error: string | null }>(
+      `/api/capabilities/mcp/${encodeURIComponent(serverId)}/${suffix}`, {
+        method: action === 'status' ? 'GET' : action === 'logout' ? 'DELETE' : 'POST',
+        ...(action === 'status' ? {} : { body: '{}' }),
+      });
+  }
+
+  async previewPluginImport(sourcePath: string) {
+    return apiRequest<PluginImportDiscovery>('/api/capabilities/plugins/preview-import', {
+      method: 'POST', body: JSON.stringify({source_path: sourcePath}),
+    });
+  }
+
+  async installUserPlugin(sourcePath: string, activeSessionId?: string, options?: PluginImportOptions) {
     return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
       '/api/capabilities/plugins/install',
       {
         method: 'POST',
-        body: JSON.stringify({ source_path: sourcePath, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
+        body: JSON.stringify({ source_path: sourcePath, ...options, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
       },
     ));
   }
@@ -995,6 +1106,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     pluginId: string,
     packageInstallId: string,
     enabled: boolean,
+    connectionReview: NonNullable<UserPluginCapability['connectionReview']>,
     activeSessionId?: string,
   ) {
     return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
@@ -1004,19 +1116,37 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         body: JSON.stringify({
           enabled,
           package_install_id: packageInstallId,
+          connection_review: connectionReview,
           ...(activeSessionId ? { active_session_id: activeSessionId } : {}),
         }),
       },
     ));
   }
 
-  async removeUserPlugin(pluginId: string, activeSessionId?: string) {
+  async pluginMcpAuthorization(plugin: UserPluginCapability, connection: PluginMcpConnection, action: 'login' | 'status' | 'cancel' | 'logout') {
+    return apiRequest<{state: string; error: string | null}>(
+      `/api/capabilities/plugins/${encodeURIComponent(plugin.id)}/mcp/${encodeURIComponent(connection.serverId)}/authorization`,
+      {method: 'POST', body: JSON.stringify({package_install_id: plugin.packageInstallId, action})},
+    );
+  }
+
+  async removeUserPlugin(pluginId: string, packageInstallId: string, activeSessionId?: string) {
     return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
       `/api/capabilities/plugins/${encodeURIComponent(pluginId)}`,
       {
         method: 'DELETE',
-        body: JSON.stringify(activeSessionId ? { active_session_id: activeSessionId } : {}),
+        body: JSON.stringify({ package_install_id: packageInstallId, ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }),
       },
+    ));
+  }
+
+  async updatePluginConnection(plugin: UserPluginCapability, connection: PluginMcpConnection, input: PluginMcpEditInput, activeSessionId?: string) {
+    return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
+      `/api/capabilities/plugins/${encodeURIComponent(plugin.id)}/mcp/${encodeURIComponent(connection.serverId)}`,
+      { method: 'PUT', body: JSON.stringify({ package_install_id: plugin.packageInstallId,
+        expected_overlay: connection.overlay, overlay: input.overlay, secret_changes: input.secretChanges,
+        retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false,
+        ...(activeSessionId ? { active_session_id: activeSessionId } : {}) }) },
     ));
   }
 
@@ -1184,6 +1314,13 @@ class LocalRuntimeConnection implements RuntimeConnection {
   async readInteraction(
     interaction: RuntimeInteractionSummary,
   ): Promise<RuntimeInteractionContent> {
+    if (interaction.kind === 'capability-form') {
+      const response = await this.post<{form: Record<string, unknown>}>('read-capability-form', {
+        interaction_id: interaction.id, expected_owner_epoch: this.liveControlOwnerEpoch,
+        expected_live_revision: this.liveControlRevision,
+      });
+      return {kind: 'capability-form', form: response.form};
+    }
     if (interaction.kind === 'tool-confirmation') {
       return {
         kind: 'tool-confirmation',
@@ -1264,11 +1401,20 @@ class LocalRuntimeConnection implements RuntimeConnection {
   async resolveInteraction(
     interaction: RuntimeInteractionSummary,
     resolution: RuntimeInteractionResolution,
-  ): Promise<CommandReceipt> {
+  ): Promise<CommandReceipt | { submitted: boolean }> {
     const current = this.project().interaction;
     if (!current || current.id !== interaction.id || current.kind !== interaction.kind) {
       throw new RuntimeApiError('INTERACTION_STALE', '这项确认已经更新，请查看最新内容。', true);
     }
+    if (interaction.kind === 'capability-form') {
+      if (resolution.kind !== 'capability') throw new RuntimeApiError('INTERACTION_INVALID', '请提交配置或取消。', false);
+      return this.post<{submitted: boolean}>('resolve-capability-form', {
+        interaction_id: interaction.id, expected_owner_epoch: this.liveControlOwnerEpoch,
+        expected_live_revision: this.liveControlRevision, decision: resolution.decision,
+        submission: resolution.decision === 'SUBMIT' ? resolution.submission ?? {} : null,
+      });
+    }
+    if (resolution.kind === 'capability') throw new RuntimeApiError('INTERACTION_INVALID', '当前不是能力配置表单。', false);
     const commandId = `command:web:${crypto.randomUUID()}`;
     if (interaction.kind === 'tool-confirmation') {
       if (resolution.kind !== 'tool') {
@@ -1848,6 +1994,7 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
     sessionId: String(value.session_id ?? ''),
     workspacePath: String(value.workspace_path ?? ''),
     workspaceKind: value.workspace_kind === 'quick' ? 'quick' : 'project',
+    credentialScopeKey: typeof value.credential_scope_key === 'string' ? value.credential_scope_key : undefined,
     adoption: {
       scope: 'workspace',
       pending: Boolean(adoption.pending),
@@ -1855,7 +2002,7 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
         || adoption.attention === 'PROJECT_MCP_ADOPTION_INCOMPLETE'
         ? adoption.attention
         : undefined,
-      when: 'next-user-turn',
+      when: 'next-provider-dispatch',
     },
     skills: {
       status: skills.status === 'attention' ? 'attention' : 'ready',
@@ -1875,6 +2022,7 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
             : 'bundled'
         ),
         editable: Boolean(item.editable),
+        removalIdentity: projectSkillRemovalIdentity(item.removal_identity),
         enabled: item.enabled !== false,
         effective: item.effective !== false,
         configured: Boolean(item.configured),
@@ -1916,6 +2064,7 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
                 ? 'plugin' as const
                 : 'host' as const,
           editable: Boolean(server.editable),
+          config: asRecord(server.config),
           configIdentity: typeof server.config_identity === 'string' && server.config_identity
             ? server.config_identity
             : undefined,
@@ -1962,7 +2111,7 @@ function projectCapabilityAdoption(value: Record<string, unknown>): ProjectCapab
   return {
     scope: 'workspace',
     pendingSessions: numeric(value.pending_sessions),
-    when: 'next-user-turn',
+    when: 'next-provider-dispatch',
   };
 }
 
@@ -1996,6 +2145,7 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
       configPath: String(skills.config_path ?? ''),
       items: recordArray(skills.items).map((item) => ({
         name: String(item.name ?? ''),
+        removalIdentity: projectSkillRemovalIdentity(item.removal_identity),
         description: String(item.description ?? ''),
         location: String(item.location ?? ''),
         path: String(item.path ?? ''),
@@ -2025,6 +2175,8 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
         const transport = asRecord(server.transport);
         return {
           id: String(server.id ?? ''),
+          config: asRecord(server.config),
+          currentIdentity: String(server.current_identity ?? ''),
           name: String(server.name ?? server.id ?? 'MCP 服务'),
           enabled: Boolean(server.enabled),
           status: mcpStatusByProtocol[String(server.status ?? '')] ?? 'failed',
@@ -2067,6 +2219,13 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
         packageRoot: String(item.package_root ?? ''),
         skillCount: numeric(item.skill_count),
         mcpCount: numeric(item.mcp_count),
+        mcpConnections: recordArray(item.mcp_connections).map((connection) => ({
+          serverId: String(connection.server_id), defaults: asRecord(connection.defaults), config: asRecord(connection.config),
+          overlay: connection.overlay === null ? null : asRecord(connection.overlay),
+          credentialOwner: asRecord(connection.credential_owner) as unknown as PluginMcpConnection['credentialOwner'],
+          connectionInputs: recordArray(connection.connection_inputs) as NonNullable<PluginMcpConnection['connectionInputs']>,
+        })),
+        connectionReview: recordArray(item.connection_review) as NonNullable<UserPluginCapability['connectionReview']>,
         effectiveSkillNames: stringArray(item.effective_skill_names),
         effectiveMcpServerIds: stringArray(item.effective_mcp_server_ids),
         details: stringArray(item.details),
@@ -2075,9 +2234,17 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
     },
     adoption: Object.keys(adoption).length > 0 ? {
       updatedSessions: numeric(adoption.updated_sessions),
+      pendingSessions: numeric(adoption.pending_sessions),
       attentionSessions: numeric(adoption.attention_sessions),
     } : undefined,
   };
+}
+
+function projectSkillRemovalIdentity(value: unknown): UserSkillCapability['removalIdentity'] {
+  const raw = asRecord(value);
+  const names = ['root_device', 'root_inode', 'directory_device', 'directory_inode'] as const;
+  if (names.some((name) => typeof raw[name] !== 'string' || !/^\d+$/.test(raw[name] as string))) return undefined;
+  return Object.fromEntries(names.map((name) => [name, raw[name]])) as NonNullable<UserSkillCapability['removalIdentity']>;
 }
 
 function projectUserCapabilityOperation(value: Record<string, unknown>): {
@@ -2093,7 +2260,10 @@ function projectUserCapabilityOperation(value: Record<string, unknown>): {
       details: stringArray(operation.details),
       pluginId: typeof operation.plugin_id === 'string' ? operation.plugin_id : undefined,
     },
-    capabilities: projectUserCapabilitySnapshot(asRecord(value.capabilities)),
+    capabilities: projectUserCapabilitySnapshot({
+      ...asRecord(value.capabilities),
+      ...(value.adoption === undefined ? {} : { adoption: value.adoption }),
+    }),
   };
 }
 
@@ -2740,7 +2910,7 @@ function projectInteraction(
   if (liveId) {
     return {
       id: liveId,
-      kind: 'tool-confirmation',
+      kind: live?.interaction_kind === 'CAPABILITY_FORM' ? 'capability-form' : 'tool-confirmation',
       prompt: String(live?.public_prompt ?? ''),
       options: Array.isArray(live?.public_options)
         ? live.public_options.map(String)

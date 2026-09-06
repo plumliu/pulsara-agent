@@ -62,6 +62,7 @@ def _task_row(
 
 class _TaskCore:
     def __init__(self) -> None:
+        self.mcp_management = SimpleNamespace(lane=asyncio.Lock())
         self.rows = (
             _task_row(1, status="COMPLETED"),
             _task_row(2, status="WAITING_DEPENDENCY"),

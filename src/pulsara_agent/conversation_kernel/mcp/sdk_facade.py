@@ -1,12 +1,14 @@
-"""Official MCP SDK session over Pulsara-owned bounded framing transports."""
+"""Official MCP SDK protocol/transports with Pulsara policy and process boundaries."""
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from datetime import date
 import ipaddress
+import logging
 import os
 from pathlib import Path
 import signal
@@ -15,7 +17,7 @@ from typing import Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import anyio
-import httpx
+import httpx2
 from mcp import ClientSession
 import mcp_types as types
 from mcp_types.version import (
@@ -27,6 +29,7 @@ from mcp.shared.message import SessionMessage
 
 from pulsara_agent.mcp_config import (
     ExactAbsoluteMcpCwd,
+    LegacySseTransportConfig,
     McpHttpNetworkPolicy,
     McpServerConfig,
     StdioTransportConfig,
@@ -35,8 +38,7 @@ from pulsara_agent.mcp_config import (
 )
 from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundary,
-    ProcessCredentialBoundAsyncClient,
-    admit_process_credential_http_operation,
+    ProcessCredentialBoundMcpClient,
 )
 
 from .wire import (
@@ -49,6 +51,19 @@ from .wire import (
 
 
 NotificationCallback = Callable[[str], Awaitable[None]]
+
+_private_sdk_wire = ContextVar("pulsara_mcp_private_sdk_wire", default=False)
+
+
+class _SdkWireLogFilter(logging.Filter):
+    def filter(self, record):
+        # SDK trace/validation logs may contain raw credential-bearing carriers.
+        # Product diagnostics are emitted after the exact secret scrub boundary.
+        return not _private_sdk_wire.get()
+
+
+for _logger_name in ("mcp.client.sse", "mcp.client.streamable_http"):
+    logging.getLogger(_logger_name).addFilter(_SdkWireLogFilter())
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,32 +88,6 @@ class _PinnedHttpEndpoint:
     url: str
     host_header: str
     sni_hostname: str | None
-
-
-class _SlotByteBudget:
-    """Slot-local reservation for concurrently retained HTTP wire bytes."""
-
-    __slots__ = ("maximum", "used")
-
-    def __init__(self, maximum: int) -> None:
-        if maximum <= 0:
-            raise ValueError("MCP slot byte budget must be positive")
-        self.maximum = maximum
-        self.used = 0
-
-    def reserve(self, amount: int) -> None:
-        if amount < 0:
-            raise ValueError("MCP slot byte reservation cannot be negative")
-        if self.used + amount > self.maximum:
-            raise McpWireBoundExceeded(
-                "MCP concurrent transport buffers exceed the slot bound"
-            )
-        self.used += amount
-
-    def release(self, amount: int) -> None:
-        if amount < 0 or amount > self.used:
-            raise RuntimeError("MCP slot byte reservation settlement conflicts")
-        self.used -= amount
 
 
 class McpProtocolConformanceError(ValueError):
@@ -208,6 +197,7 @@ class _BoundedTransport:
         self.enforce_closed_result_type = False
         self.allow_legacy_implicit_complete = False
         self._closed = False
+        self._secret_values: tuple[str, ...] = ()
 
     async def start(self) -> None:
         raise NotImplementedError
@@ -220,19 +210,53 @@ class _BoundedTransport:
 
     def _parse(self, data: bytes | bytearray, *, maximum_bytes: int) -> object:
         try:
-            return bounded_json_loads(
+            parsed = bounded_json_loads(
                 data,
                 maximum_bytes=maximum_bytes,
                 maximum_nodes=self.bounds.maximum_wire_json_nodes,
                 maximum_depth=self.bounds.maximum_wire_json_depth,
             )
+            return self._scrub(parsed)
         except McpProtocolConformanceError:
             raise
-        except BaseException as exc:
+        except BaseException:
             # A peer frame is already physically present.  Malformed JSON,
             # shape overflow and SDK carrier validation are therefore exact
             # protocol failures, never evidence of an unknown remote effect.
-            raise McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID") from exc
+            raise McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID") from None
+
+    def _scrub(self, value: object, *, identity: bool = False) -> object:
+        if isinstance(value, str):
+            for secret in self._secret_values:
+                if secret in value:
+                    if identity:
+                        raise McpProtocolConformanceError(
+                            "MCP_RESPONSE_CONTAINS_CREDENTIAL_IN_IDENTITY"
+                        )
+                    value = value.replace(secret, "[credential removed]")
+            return value
+        if isinstance(value, list):
+            return [self._scrub(item, identity=identity) for item in value]
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                self._scrub(key, identity=True)
+                result[key] = self._scrub(
+                    item,
+                    identity=identity
+                    or key
+                    in {
+                        "id",
+                        "name",
+                        "method",
+                        "inputSchema",
+                        "outputSchema",
+                        "uri",
+                        "uriTemplate",
+                    },
+                )
+            return result
+        return value
 
     def _decode_parsed(self, raw: object) -> SessionMessage:
         try:
@@ -285,9 +309,11 @@ class _BoundedStdioTransport(_BoundedTransport):
         workspace_root: Path,
         credential_boundary: ProcessCredentialBoundary,
         bounds: McpWireBounds,
+        secret_resolver=None,
     ) -> None:
         super().__init__(bounds)
         self._config = config
+        self._secret_resolver = secret_resolver
         self._workspace_root = workspace_root
         self._credential_boundary = credential_boundary
         self._process: asyncio.subprocess.Process | None = None
@@ -314,13 +340,12 @@ class _BoundedStdioTransport(_BoundedTransport):
         }
         environment["PATH"] = self._config.lookup_path
         environment.update(dict(self._config.environment))
-        for target, reference in self._config.secret_environment_refs:
-            value = os.environ.get(reference)
-            if value is None:
-                raise ValueError(
-                    "MCP stdio secret environment reference is unavailable"
-                )
-            environment[target] = value
+        from pulsara_agent.mcp_credentials import resolved_secret_values
+
+        for target, reference in self._config.secret_environment:
+            values = resolved_secret_values(reference, self._secret_resolver)
+            environment[target] = values[0]
+            self._secret_values += values
         process: asyncio.subprocess.Process | None = None
         cancelled: asyncio.CancelledError | None = None
         async with self._credential_boundary.async_guard() as guard:
@@ -474,336 +499,268 @@ class _BoundedStdioTransport(_BoundedTransport):
         for task in pending:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._secret_values = ()
         await self.read_writer.aclose()
 
 
-class _BoundedHttpTransport(_BoundedTransport):
+class _McpHttpClient(ProcessCredentialBoundMcpClient):
+    """HTTP policy/credentials only; SDK owns MCP and SSE protocol behavior."""
+
     def __init__(
         self,
-        config: McpServerConfig,
-        transport: StreamableHttpTransportConfig,
+        transport_config,
         *,
-        credential_boundary: ProcessCredentialBoundary,
-        bounds: McpWireBounds,
-    ) -> None:
+        bounds,
+        credential_boundary,
+        config=None,
+        observe_secrets=None,
+        **kwargs,
+    ):
+        follow_redirects = kwargs.pop("follow_redirects", False)
+        super().__init__(
+            credential_boundary=credential_boundary,
+            trust_env=False,
+            follow_redirects=follow_redirects,
+            **kwargs,
+        )
+        self.transport_config = transport_config
+        self.bounds = bounds
+        self.config = config
+        self.observe_secrets = observe_secrets
+        self.sessionful = False
+        self.static_headers = {}
+        if config is not None:
+            from pulsara_agent.mcp_config import OAuthAuthorization
+
+            if isinstance(config.auth, OAuthAuthorization):
+                self.static_headers = dict(config.public_headers)
+            else:
+                self.static_headers, secrets = config.resolve_header_snapshot()
+                if observe_secrets is not None:
+                    observe_secrets(secrets)
+
+    async def _send_single_request(self, request):
+        from pulsara_agent.mcp_config import OAuthAuthorization
+        from pulsara_agent.mcp_credentials import McpCredentialMissing
+
+        if self.config is not None:
+            if _http_origin(str(request.url)) != _http_origin(
+                self.transport_config.endpoint
+            ):
+                raise ValueError("MCP credential destination changed")
+            request.headers.update(self.static_headers)
+            if isinstance(self.config.auth, OAuthAuthorization):
+                if self.config.authorization_provider is None:
+                    raise McpCredentialMissing()
+                authorization, secrets = await self.config.authorization_provider()
+                self.observe_secrets(secrets)
+                request.headers["Authorization"] = authorization
+        content = await request.aread()
+        if len(content) > self.bounds.maximum_http_json_body_bytes:
+            raise McpTransportOperationError(may_have_reached_server=False)
+        pinned = await _enforce_http_network_policy(
+            replace(self.transport_config, endpoint=str(request.url))
+        )
+        headers = dict(request.headers)
+        headers["host"] = pinned.host_header
+        physical = httpx2.Request(
+            request.method,
+            pinned.url,
+            headers=headers,
+            content=content,
+            extensions={**request.extensions, **_http_request_extensions(pinned)},
+        )
+        response = await super()._send_single_request(physical)
+        response.request = request  # Logical origin for SDK URLs and HTTP redirects.
+        self.sessionful |= bool(response.headers.get("mcp-session-id"))
+        if "text/event-stream" in response.headers.get("content-type", "").lower():
+            return response
+        # HTTPX2 owns decompression; bound the decoded body before SDK materializes
+        # its RPC carrier. This is not a claim about decoder-internal allocations.
+        try:
+            body = await _bounded_aread(
+                response, self.bounds.maximum_http_json_body_bytes
+            )
+            if response.status_code == 400 and content:
+                import json
+
+                try:
+                    raw_request = json.loads(content)
+                    raw = json.loads(body)
+                except (ValueError, UnicodeError):
+                    pass
+                else:
+                    normalized = _normalize_legacy_discovery_http_error(
+                        raw,
+                        request=raw_request,
+                        response_status=400,
+                        has_session_id=bool(response.headers.get("mcp-session-id")),
+                    )
+                    if normalized is not raw:
+                        body = json.dumps(normalized).encode()
+            result_headers = dict(response.headers)
+            result_headers.pop("content-encoding", None)
+            result_headers.pop("content-length", None)
+            return httpx2.Response(
+                response.status_code,
+                headers=result_headers,
+                content=bytes(body),
+                request=request,
+                extensions=response.extensions,
+            )
+        finally:
+            await response.aclose()
+
+    def _build_redirect_request(self, request, response):
+        redirected = super()._build_redirect_request(request, response)
+        if request.method not in {"GET", "HEAD"} and (
+            _http_origin(str(request.url)) != _http_origin(str(redirected.url))
+        ):
+            raise ValueError("OAuth credential-bearing redirect changes origin")
+        return redirected
+
+
+def _http_origin(url):
+    parsed = urlsplit(url)
+    return (
+        parsed.scheme,
+        parsed.hostname,
+        parsed.port or (443 if parsed.scheme == "https" else 80),
+    )
+
+
+class _SdkHttpTransport(_BoundedTransport):
+    """Single task owns official transport contexts; no HTTP/SSE state machine."""
+
+    def __init__(self, config, transport, *, credential_boundary, bounds):
         super().__init__(bounds)
-        self._config = config
-        self._transport = transport
-        self._credential_boundary = credential_boundary
-        self._client: httpx.AsyncClient | None = None
-        self._writer_task: asyncio.Task[object] | None = None
-        self._listener_task: asyncio.Task[object] | None = None
-        self._request_tasks: set[asyncio.Task[None]] = set()
-        maximum_requests = (
-            config.stateless_http_max_in_flight
-            if transport.proved_stateless and config.supports_parallel_tool_calls
-            else 1
-        )
-        self._request_lane = asyncio.Semaphore(maximum_requests)
-        self._parallel_requests = maximum_requests > 1
-        self._session_id: str | None = None
-        self._endpoint: _PinnedHttpEndpoint | None = None
-        self._byte_budget = _SlotByteBudget(
-            bounds.maximum_buffered_transport_bytes_per_slot
-        )
-        self._closed = False
+        self.config = config
+        self.transport_config = transport
+        self.credential_boundary = credential_boundary
+        self._stop = asyncio.Event()
+        self._ready = asyncio.get_running_loop().create_future()
+        self._owner = None
+        self._client = None
 
     @property
-    def sessionful(self) -> bool:
-        return self._session_id is not None
-
-    async def start(self) -> None:
-        self._endpoint = await _enforce_http_network_policy(self._transport)
-        headers = self._config.resolved_headers()
-        self._client = ProcessCredentialBoundAsyncClient(
-            credential_boundary=self._credential_boundary,
-            headers=headers,
-            follow_redirects=False,
-            trust_env=False,
-            timeout=httpx.Timeout(connect=10, write=10, pool=10, read=None),
-        )
-        self._writer_task = asyncio.create_task(
-            self._writer(), name=f"mcp-http-writer:{self._config.server_id}"
+    def sessionful(self):
+        return isinstance(self.transport_config, LegacySseTransportConfig) or (
+            self._client is not None and self._client.sessionful
         )
 
-    async def _writer(self) -> None:
+    def _observe_secrets(self, secrets):
+        self._secret_values = tuple(dict.fromkeys((*self._secret_values, *secrets)))
+
+    async def start(self):
+        self._owner = asyncio.create_task(self._run(), name="mcp-sdk-http-owner")
+        await asyncio.shield(self._ready)
+
+    async def _run(self):
+        from contextlib import asynccontextmanager
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.client.sse import sse_client
+
+        private_context = _private_sdk_wire.set(True)
+        try:
+            async with _McpHttpClient(
+                self.transport_config,
+                bounds=self.bounds,
+                credential_boundary=self.credential_boundary,
+                config=self.config,
+                observe_secrets=self._observe_secrets,
+                timeout=httpx2.Timeout(connect=10, write=10, pool=10, read=None),
+            ) as client:
+                self._client = client
+
+                @asynccontextmanager
+                async def factory(**kwargs):
+                    # The injected client is owned here, not by the SDK factory.
+                    yield client
+
+                context = (
+                    sse_client(
+                        self.transport_config.endpoint, httpx_client_factory=factory
+                    )
+                    if isinstance(self.transport_config, LegacySseTransportConfig)
+                    else streamable_http_client(
+                        self.transport_config.endpoint, http_client=client
+                    )
+                )
+                async with context as (read, write):
+                    async with anyio.create_task_group() as group:
+                        group.start_soon(self._read_sdk_messages, read)
+                        group.start_soon(self._forward_requests, write)
+                        self._ready.set_result(None)
+                        await self._stop.wait()
+                        group.cancel_scope.cancel()
+        except BaseException as exc:
+            if not self._ready.done():
+                self._ready.set_exception(exc)
+            elif not self._closed:
+                await self._offer_failure(
+                    McpTransportOperationError(may_have_reached_server=True),
+                    "MCP SDK transport failed",
+                )
+        finally:
+            _private_sdk_wire.reset(private_context)
+            await self.read_writer.aclose()
+
+    async def _read_sdk_messages(self, read):
+        from .wire import validate_json_shape
+
+        async for message in read:
+            if isinstance(message, Exception):
+                await self._offer_failure(
+                    McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID"),
+                    "MCP SDK carrier invalid",
+                )
+                continue
+            try:
+                raw = message.message.model_dump(
+                    by_alias=True, mode="json", exclude_unset=True
+                )
+                validate_json_shape(
+                    raw,
+                    maximum_nodes=self.bounds.maximum_wire_json_nodes,
+                    maximum_depth=self.bounds.maximum_wire_json_depth,
+                )
+                await self.read_writer.send(self._decode_parsed(self._scrub(raw)))
+            except (ValueError, TypeError):
+                await self._offer_failure(
+                    McpProtocolConformanceError("MCP_RESPONSE_CARRIER_INVALID"),
+                    "MCP SDK carrier invalid",
+                )
+
+    async def _forward_requests(self, write):
         async with self.write_reader:
             async for message in self.write_reader:
-                if not self._parallel_requests:
-                    await self._send_message(message)
-                    continue
-                await self._request_lane.acquire()
-                task = asyncio.create_task(
-                    self._send_message(message),
-                    name=f"mcp-http-request:{self._config.server_id}",
-                )
-                self._request_tasks.add(task)
-                task.add_done_callback(self._request_done)
+                await write.send(message)
 
-    def _request_done(self, task: asyncio.Task[None]) -> None:
-        self._request_tasks.discard(task)
-        self._request_lane.release()
-        if not task.cancelled():
-            with suppress(BaseException):
-                task.result()
-
-    async def _send_message(self, message: SessionMessage) -> None:
-        assert self._client is not None and self._endpoint is not None
-        try:
-            payload = self._encode(message)
-        except BaseException:
-            await self._offer_failure(
-                McpTransportOperationError(may_have_reached_server=False),
-                "MCP HTTP encode failed",
-            )
-            return
-        try:
-            self._byte_budget.reserve(len(payload))
-        except McpWireBoundExceeded:
-            await self._offer_failure(
-                McpTransportOperationError(may_have_reached_server=False),
-                "MCP HTTP request exceeds aggregate slot memory",
-            )
-            return
-        headers = {
-            "Accept": "application/json, text/event-stream",
-            "Content-Type": "application/json",
-            "Host": self._endpoint.host_header,
-        }
-        if message.metadata is not None and getattr(message.metadata, "headers", None):
-            headers.update(message.metadata.headers or {})
-        if self._session_id is not None:
-            headers["Mcp-Session-Id"] = self._session_id
-        response_context = None
-        response = None
-        try:
-            request = message.message.model_dump(
-                by_alias=True,
-                mode="json",
-                exclude_none=True,
-            )
-            final_headers = self._config.resolved_headers(headers)
-
-            async def open_response() -> httpx.Response:
-                nonlocal response_context
-                response_context = self._client.stream(
-                    "POST",
-                    self._endpoint.url,
-                    content=payload,
-                    headers=final_headers,
-                    extensions=_http_request_extensions(self._endpoint),
-                )
-                return await response_context.__aenter__()
-
-            response = await admit_process_credential_http_operation(
-                credential_boundary=self._credential_boundary,
-                guarded_values=(
-                    self._endpoint.url,
-                    payload,
-                    *(item for pair in final_headers.items() for item in pair),
-                ),
-                operation=open_response,
-            )
-            assert response is not None and response_context is not None
-            try:
-                response_session_id = response.headers.get("Mcp-Session-Id")
-                if response.status_code >= 400 and "application/json" in (
-                    response.headers.get("content-type", "").lower()
-                ):
-                    await self._consume_response(
-                        response,
-                        request=request,
-                        response_session_id=response_session_id,
-                    )
-                    return
-                response.raise_for_status()
-                if response_session_id:
-                    self._session_id = response_session_id
-                    self._ensure_listener()
-                if response.status_code == 202:
-                    return
-                try:
-                    await self._consume_response(response)
-                except McpProtocolConformanceError:
-                    raise
-                except BaseException as exc:
-                    if isinstance(exc, asyncio.CancelledError):
-                        raise
-                    raise McpProtocolConformanceError(
-                        "MCP_RESPONSE_CARRIER_INVALID"
-                    ) from exc
-            finally:
-                await response_context.__aexit__(None, None, None)
-        except McpProtocolConformanceError as exc:
-            # The HTTP response was received and decoded far enough to prove a
-            # peer conformance failure.  Preserve that exact settlement instead
-            # of converting it into may-have-written ambiguity.
-            await self._offer_failure(exc, "MCP HTTP response invalid")
-        except BaseException as exc:
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            may_have_reached = not isinstance(
-                exc, httpx.ConnectError | httpx.PoolTimeout
-            )
-            await self._offer_failure(
-                McpTransportOperationError(may_have_reached_server=may_have_reached),
-                "MCP HTTP request failed",
-            )
-        finally:
-            self._byte_budget.release(len(payload))
-
-    def _ensure_listener(self) -> None:
-        if self._listener_task is None or self._listener_task.done():
-            self._listener_task = asyncio.create_task(
-                self._listener(), name=f"mcp-http-listener:{self._config.server_id}"
-            )
-
-    async def _listener(self) -> None:
-        assert (
-            self._client is not None
-            and self._session_id is not None
-            and self._endpoint is not None
-        )
-        try:
-            async with self._client.stream(
-                "GET",
-                self._endpoint.url,
-                headers={
-                    "Accept": "text/event-stream",
-                    "Mcp-Session-Id": self._session_id,
-                    "Host": self._endpoint.host_header,
-                },
-                extensions=_http_request_extensions(self._endpoint),
-            ) as response:
-                if response.status_code in {404, 405}:
-                    return
-                response.raise_for_status()
-                await self._consume_sse(response)
-        except BaseException as exc:
-            await self._offer_failure(exc, "MCP HTTP listener cancelled")
-
-    async def _consume_response(
-        self,
-        response: httpx.Response,
-        *,
-        request: dict[str, object] | None = None,
-        response_session_id: str | None = None,
-    ) -> None:
-        content_type = response.headers.get("content-type", "").lower()
-        if "text/event-stream" in content_type:
-            await self._consume_sse(response)
-            return
-        data, reserved = await _bounded_aread(
-            response,
-            self.bounds.maximum_http_json_body_bytes,
-            budget=self._byte_budget,
-        )
-        try:
-            raw = self._parse(
-                data,
-                maximum_bytes=self.bounds.maximum_http_json_body_bytes,
-            )
-            if request is not None:
-                raw = _normalize_legacy_discovery_http_error(
-                    raw,
-                    request=request,
-                    response_status=response.status_code,
-                    has_session_id=response_session_id is not None,
-                )
-            await self.read_writer.send(self._decode_parsed(raw))
-        finally:
-            self._byte_budget.release(reserved)
-
-    async def _consume_sse(self, response: httpx.Response) -> None:
-        data = bytearray()
-        line_buffer = bytearray()
-        try:
-            async for chunk in response.aiter_bytes():
-                if len(line_buffer) + len(chunk) > (
-                    self.bounds.maximum_sse_event_data_bytes + 4096
-                ):
-                    raise McpWireBoundExceeded("MCP SSE line exceeds the bound")
-                self._byte_budget.reserve(len(chunk))
-                line_buffer.extend(chunk)
-                while (newline := line_buffer.find(b"\n")) >= 0:
-                    line_length = newline
-                    self._byte_budget.reserve(line_length)
-                    line = bytes(line_buffer[:newline]).removesuffix(b"\r")
-                    del line_buffer[: newline + 1]
-                    self._byte_budget.release(newline + 1)
-                    try:
-                        if not line:
-                            if data:
-                                await self.read_writer.send(
-                                    self._decode(
-                                        data,
-                                        maximum_bytes=(
-                                            self.bounds.maximum_sse_event_data_bytes
-                                        ),
-                                    )
-                                )
-                                self._byte_budget.release(len(data))
-                                data.clear()
-                            continue
-                        if line.startswith(b"data:"):
-                            value = line[5:].lstrip()
-                            addition = len(value) + (1 if data else 0)
-                            self._byte_budget.reserve(addition)
-                            if data:
-                                data.extend(b"\n")
-                            data.extend(value)
-                            if len(data) > self.bounds.maximum_sse_event_data_bytes:
-                                raise McpWireBoundExceeded(
-                                    "MCP SSE event exceeds the bound"
-                                )
-                    finally:
-                        self._byte_budget.release(line_length)
-            if line_buffer or data:
-                raise ValueError("MCP SSE stream ended with an incomplete event")
-        finally:
-            self._byte_budget.release(len(line_buffer) + len(data))
-
-    async def aclose(self) -> None:
+    async def aclose(self):
         if self._closed:
             return
         self._closed = True
+        self._stop.set()
+        if self._owner is not None:
+            if not self._ready.done():
+                self._owner.cancel()
+            await asyncio.shield(self._owner)
+            if self._ready.done() and not self._ready.cancelled():
+                self._ready.exception()
+        self._secret_values = ()
         await self.write_stream.aclose()
-        tasks = tuple(
-            task
-            for task in (self._writer_task, self._listener_task)
-            if task is not None
-        )
-        tasks += tuple(self._request_tasks)
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        if self._client is not None:
-            await self._client.aclose()
-        await self.read_writer.aclose()
 
 
 async def _bounded_aread(
-    response: httpx.Response,
+    response: httpx2.Response,
     maximum: int,
-    *,
-    budget: _SlotByteBudget,
-) -> tuple[bytearray, int]:
+) -> bytearray:
     body = bytearray()
-    total = 0
-    reserved = 0
-    try:
-        async for chunk in response.aiter_bytes():
-            if total + len(chunk) > maximum:
-                raise McpWireBoundExceeded("MCP HTTP body exceeds the bound")
-            budget.reserve(len(chunk))
-            reserved += len(chunk)
-            total += len(chunk)
-            body.extend(chunk)
-        return body, total
-    except BaseException:
-        budget.release(reserved)
-        raise
+    async for chunk in response.aiter_bytes():
+        if len(body) + len(chunk) > maximum:
+            raise McpWireBoundExceeded("MCP HTTP body exceeds the bound")
+        body.extend(chunk)
+    return body
 
 
 def _http_request_extensions(endpoint: _PinnedHttpEndpoint) -> dict[str, object]:
@@ -894,6 +851,9 @@ class BoundedMcpSdkClient:
         self.server_instructions = ""
         self.advertised_capabilities: McpAdvertisedCapabilities | None = None
         self._allow_legacy_implicit_complete = False
+        self._owner_task = None
+        self._session_ready = None
+        self._session_stop = asyncio.Event()
 
     @property
     def session(self) -> ClientSession:
@@ -923,7 +883,7 @@ class BoundedMcpSdkClient:
         """
 
         return (
-            isinstance(self._transport, _BoundedHttpTransport)
+            isinstance(self._transport, _SdkHttpTransport)
             and self.config.supports_parallel_tool_calls
             and isinstance(self.config.transport, StreamableHttpTransportConfig)
             and self.config.transport.proved_stateless
@@ -931,6 +891,30 @@ class BoundedMcpSdkClient:
         )
 
     async def open(self) -> None:
+        if self._owner_task is not None:
+            raise RuntimeError("MCP SDK client was opened twice")
+        self._session_ready = asyncio.get_running_loop().create_future()
+        self._owner_task = asyncio.create_task(
+            self._run_session(), name="mcp-sdk-session-owner"
+        )
+        try:
+            await asyncio.shield(self._session_ready)
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def _run_session(self):
+        try:
+            await self._open_session()
+            self._session_ready.set_result(None)
+            await self._session_stop.wait()
+        except BaseException as exc:
+            if not self._session_ready.done():
+                self._session_ready.set_exception(exc)
+        finally:
+            await self._close_resources()
+
+    async def _open_session(self) -> None:
         if self._session is not None:
             raise RuntimeError("MCP SDK client was opened twice")
         transport_config = self.config.transport
@@ -940,9 +924,10 @@ class BoundedMcpSdkClient:
                 workspace_root=self._workspace_root,
                 credential_boundary=self._credential_boundary,
                 bounds=self._bounds,
+                secret_resolver=self.config.secret_resolver,
             )
         else:
-            transport = _BoundedHttpTransport(
+            transport = _SdkHttpTransport(
                 self.config,
                 transport_config,
                 credential_boundary=self._credential_boundary,
@@ -991,7 +976,6 @@ class BoundedMcpSdkClient:
                 prompts=capabilities.prompts is not None,
             )
         except BaseException:
-            await self.aclose()
             raise
 
     async def _handle_notification(self, message: object) -> None:
@@ -1060,6 +1044,15 @@ class BoundedMcpSdkClient:
         return effective_value
 
     async def aclose(self) -> None:
+        self._session_stop.set()
+        if self._owner_task is not None:
+            if not self._session_ready.done():
+                self._owner_task.cancel()
+            await asyncio.shield(self._owner_task)
+            if self._session_ready.done() and not self._session_ready.cancelled():
+                self._session_ready.exception()
+
+    async def _close_resources(self) -> None:
         async with self._close_lock:
             if self._closed:
                 return

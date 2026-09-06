@@ -8,6 +8,11 @@
 >
 > 修订日期：2026-08-26
 >
+> 2026-09-06 能力管理 hard-cut 同步：安装前的 Claude/Codex/Cursor 一次性转换、实例 MCP
+> 连接/凭据、用户 enable review、删除凭据清理及 first-party 自动采用，服从
+> `PULSARA_CAPABILITY_PAGE_MCP_EDIT_CREDENTIAL_AND_INSTALLABLE_CAPABILITY_DELETION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`。
+> Runtime 仍只读 native package；原文中的模型手动转换与不支持 SSE 不再是当前契约。
+>
 > 当前代码真源：`src/pulsara_agent/capability/`、`conversation_kernel/capability.py`、`mcp_config.py`、`conversation_kernel/mcp/`、`hooks/`、`conversation_kernel/host.py`、`conversation_kernel/tool_runtime.py`、`conversation_kernel/subagent.py`、`conversation_kernel/cold_epoch.py`。本文中的 owner、transaction、carrier 和调用顺序如与旧文字冲突，以实施时 working-tree production topology 为准；不得为旧稿恢复已删除的 DTO、owner、dual path 或 compatibility wrapper。
 >
 > 强制上位约束：[`AGENTS.md`](AGENTS.md)、[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)、[`PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_UNIFIED_SKILL_DEFINITION_PRODUCERS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md`](ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md`](ROUND_9_UNIFIED_CAPABILITY_SEMANTICS_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md`](ROUND_6_MCP_PRODUCTION_CAPABILITY_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md`](ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md)、[`ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md`](ROUND_5B_LONG_HORIZON_CONTEXT_COMPACTION_IMPLEMENTATION_SPEC.zh.md)。`contracts/`与archived gap index不是本轮authority；本轮不更新它们，也不更新README。
@@ -213,7 +218,13 @@ Pulsara本轮的安装单元是Agent Plugins 1.0 package，不声称直接安装
 
 兼容性仅指`dev.pulsara/hooks/hooks.json`使用Round 9.2已经冻结的Codex-compatible command Hook grammar；portable core仍严格遵守Agent Plugins 1.0。
 
-作者若要迁移Codex package，应创建root `plugin.json`并把Pulsara-specific Hook file放入`dev.pulsara/`。Runtime不得从root basename、vendor manifest或alternate path猜identity/component。Package内只读`pulsara-plugin-installer`只提供模型侧authoring workflow：首次strict validation失败且failure是deterministic format/schema difference时，模型才按需读取Codex source reference与实际source内容，在attempt-local目录生成new standard candidate，再交给同一个production parser。Hook conversion不能只按同名event猜测，必须exact join §9的matcher/stdin/environment/output/control/owner timing。Filesystem/symlink/special-file/secret/race/unavailable/cancel/deadline失败不得触发转换；任何required active component没有exact Pulsara representation时必须报告`NOT_CONVERTIBLE`且不安装。该Skill不增加foreign manifest parser、alternate package identity、partial Plugin、Runtime fallback、receipt或durable conversion state。
+GUI 由目录自动发现 native、Claude、Codex、Cursor manifest：唯一发行版直接预览，多个时展示
+各自组件后让用户选择，不合并；typed installer 继续传确切发行格式。外部格式由官方 importer
+读取该格式的 active/default/empty 声明，生成 attempt-local native candidate，再交唯一
+production parser；不要求先试错 native validation，也不由模型重写。Runtime 不读取外部
+manifest、不合并相邻宿主声明。Hook conversion 仍必须有等价 event/matcher/stdin/environment/
+output/control/owner timing；无法表示的 active component 阻止整包转换。来源安全、race、
+cancel/deadline 错误不得靠转换绕过；无 durable conversion state、partial Plugin 或 fallback。
 
 ---
 
@@ -1231,8 +1242,7 @@ Package replace/disable后，old active/retained body按existing frozen/canonica
 - schema version与`plugin.json`匹配；
 - top-level只有`$schema`与`mcpServers`；
 - 每个server独立validate；
-- supported transports：`stdio`与`streamable-http`；
-- `sse`本轮typed unsupported，不fallback；
+- supported transports：`stdio`、`streamable-http` 与显式 `sse`；后两者交官方 SDK transport，不自动互换；
 - Runtime不联网fetch schema。
 
 ### 8.2 Native normalization
@@ -1317,6 +1327,11 @@ Existing local/Host config的omitted cwd仍由native parser形成`WorkspaceRelat
 Package root/data binding由Plugin composition传给adapter；MCP supervisor不读Plugin state或manifest。`${PLUGIN_DATA}` cwd在composition时还必须通过package-store narrow port证明exact instance data root存在、是held no-follow directory且Host user可写/进入；失败只使exact process-bearing server unavailable。
 
 ### 8.4 Streamable HTTP
+
+2026-09-06：实例连接 overlay 可提供 Bearer、秘密 Header、OAuth 及有限普通参数；只由
+用户编辑器写入 local-settings 私有值，不改 immutable package。参数化外部来源经 importer
+写入固定 `dev.pulsara/mcp/connection-inputs.json` 声明，runtime 不执行模板代码。
+下文 fixed `headers` 仍是包内公开字面量，不能用它替代实例 credential owner。
 
 Agent Plugins fixed `headers`是visible public data，不是secret refs，也不是authentication mechanism。Current native config hard-cut在generic `McpServerConfig`增加独立字段：
 

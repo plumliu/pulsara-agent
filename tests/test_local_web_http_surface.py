@@ -9,6 +9,7 @@ from aiohttp import ClientSession, DummyCookieJar
 import pytest
 
 from pulsara_agent import mcp_config
+from pulsara_agent.capability.mcp_management import McpManagementConflict
 from pulsara_agent.web_app import http_server as http_server_module
 from pulsara_agent.web_app import session_controller as session_controller_module
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
@@ -41,6 +42,10 @@ def _model_server_dependencies() -> dict[str, object]:
 
 
 class _Sessions:
+    async def preview_plugin_import(self, *, source_path):
+        assert source_path == "/plugin-source"
+        return {"candidates": []}
+
     def __init__(self) -> None:
         self.reconnect_calls: list[tuple[str, str]] = []
         self.install_calls: list[tuple[str, str]] = []
@@ -104,6 +109,8 @@ class _Sessions:
         session_id: str,
         *,
         source_path: str,
+        name: str | None = None,
+        description: str | None = None,
     ) -> dict[str, object]:
         self.install_calls.append((session_id, source_path))
         return {
@@ -171,14 +178,21 @@ class _Sessions:
     ) -> dict[str, object]:
         return _user_capabilities(active_session_id)
 
-    async def set_user_mcp_enabled(
+    async def update_user_mcp_server(
         self,
         *,
         server_id: str,
-        enabled: bool,
+        config: dict[str, object],
+        expected: str,
+        secret_changes: tuple,
         active_session_id: str | None,
+        retain_credentials_confirmed: bool = False,
     ) -> dict[str, object]:
-        self.user_mcp_toggle_calls.append((server_id, enabled, active_session_id))
+        assert expected == "current-docs"
+        assert secret_changes == ()
+        self.user_mcp_toggle_calls.append(
+            (server_id, config["enabled"], active_session_id)
+        )
         return {
             "operation": {"status": "DISABLED", "success": True},
             "capabilities": _user_capabilities(active_session_id),
@@ -330,12 +344,8 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 assert catalog["routes"][0]["route_id"] == "test"
                 model = catalog["routes"][0]["models"][0]
                 assert model["model_id"] == "test-model"
-                executable = [
-                    item for item in model["wire_apis"] if item["executable"]
-                ]
-                assert [item["wire_api"] for item in executable] == [
-                    "openai_responses"
-                ]
+                executable = [item for item in model["wire_apis"] if item["executable"]]
+                assert [item["wire_api"] for item in executable] == ["openai_responses"]
 
             async with client.post(
                 f"{server.origin}/api/model-configurations",
@@ -397,9 +407,9 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 deleted = await response.json()
                 assert deleted["model_configuration_id"] == connection_id
                 assert deleted["deleted"] is True
-                assert [
-                    item["id"] for item in deleted["model_configurations"]
-                ] == [custom["id"]]
+                assert [item["id"] for item in deleted["model_configurations"]] == [
+                    custom["id"]
+                ]
             stored = settings.read()
             assert [item.id.value for item in stored.model_connections] == [
                 custom["id"]
@@ -612,6 +622,20 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 payload = await response.json()
                 assert payload["runtime"]["origin"] == server.origin
 
+            async with client.post(
+                f"{server.origin}/api/capabilities/plugins/preview-import",
+                json={"source_path": "/plugin-source"},
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 200
+                assert await response.json() == {"candidates": []}
+            async with client.post(
+                f"{server.origin}/api/capabilities/plugins/preview-import",
+                json={"source_path": "/plugin-source", "source_format": "claude"},
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 400
+
             async with client.get(
                 f"{server.origin}/api/sessions/session-1/tasks",
                 params={"limit": "17", "cursor": "next-page"},
@@ -658,9 +682,13 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     )
                 ]
 
-            async with client.post(
-                f"{server.origin}/api/capabilities/mcp/docs/enabled",
-                json={"enabled": False, "active_session_id": "session-1"},
+            async with client.put(
+                f"{server.origin}/api/capabilities/mcp/docs",
+                json={
+                    "config": {"enabled": False},
+                    "expected_identity": "current-docs",
+                    "active_session_id": "session-1",
+                },
                 headers={
                     "Origin": server.origin,
                     "Sec-Fetch-Site": "same-origin",
@@ -705,11 +733,9 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 f"{server.origin}/api/sessions/session-1/capabilities/mcp",
                 json={
                     "server_id": "project-docs",
-                    "display_name": "Project Docs",
-                    "transport": "http",
-                    "endpoint": "https://example.com/mcp",
-                    "args": [],
-                    "available_to_subagents": True,
+                    "config": {"display_name": "Project Docs",
+                               "transport": {"type": "streamable_http", "endpoint": "https://example.com/mcp"},
+                               "scope_policy": "ROOT_AND_SUBAGENTS"},
                 },
                 headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
             ) as response:
@@ -728,7 +754,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                     ("session-1", "project-docs", "config-v1", False)
                 ]
 
-            sessions.project_mcp_toggle_error = mcp_config.WorkspaceMcpConfigStaleError(
+            sessions.project_mcp_toggle_error = McpManagementConflict(
                 "changed"
             )
             async with client.post(
@@ -915,7 +941,7 @@ def test_user_mcp_live_overlay_requires_exact_user_source_and_config(
     monkeypatch.setattr(
         session_controller_module,
         "_user_plugins_payload",
-        lambda _inspection: {"status": "ready", "items": [], "details": []},
+        lambda _inspection, _resolver: {"status": "ready", "items": [], "details": []},
     )
 
     def project(live_config: object) -> dict[str, object]:
@@ -923,6 +949,7 @@ def test_user_mcp_live_overlay_requires_exact_user_source_and_config(
             skills={},
             mcp_configs=(user_config,),
             plugins=object(),
+            secret_resolver=lambda _binding: None,
             live_inspection=SimpleNamespace(
                 mcp_catalog=SimpleNamespace(servers=(live_server,)),
                 mcp_configured_servers=(live_config,),

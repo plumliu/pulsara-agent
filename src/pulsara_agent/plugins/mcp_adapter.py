@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -21,9 +21,10 @@ from pulsara_agent.mcp_config import (
     McpHttpNetworkPolicy,
     McpScopePolicy,
     McpServerConfig,
-    NoAuth,
     StdioTransportConfig,
     StreamableHttpTransportConfig,
+    LegacySseTransportConfig,
+    OAuthAuthorization,
     freeze_mcp_server_config,
 )
 from pulsara_agent.plugins.contracts import (
@@ -33,10 +34,16 @@ from pulsara_agent.plugins.contracts import (
     PluginDiagnosticCode,
     PluginMcpNormalizationDisposition,
     PluginMcpHttpSummary,
+    PluginMcpSseSummary,
     PluginMcpStdioSummary,
     PluginScopeKind,
 )
 from pulsara_agent.plugins.package_store import PhysicalLifetimeAnchor
+from pulsara_agent.plugins.mcp_connection import (
+    apply_connection_overlay,
+    plugin_connection_owner,
+    resolve_connection_overlay,
+)
 from pulsara_agent.plugins.view import (
     FrozenEnabledPluginInstance,
     FrozenEnabledPluginView,
@@ -74,6 +81,9 @@ def normalize_plugin_mcp_configs(
     *,
     existing_configs: tuple[McpServerConfig, ...],
     view: FrozenEnabledPluginView,
+    secret_resolver=None,
+    oauth_manager=None,
+    current_state=None,
 ) -> PluginMcpNormalizationResult:
     """Build the one deterministic local+Plugin native config tuple.
 
@@ -96,7 +106,18 @@ def normalize_plugin_mcp_configs(
     candidates: list[McpServerConfig] = []
     for instance, server in _selected_servers(view):
         try:
-            config = _normalize_server(instance, server)
+            config = _normalize_server(
+                instance, server, secret_resolver=secret_resolver
+            )
+            try:
+                config = bind_plugin_authorization(
+                    config, instance.identity, instance.state,
+                    local_server_id=server.local_server_id,
+                    current_state=current_state, oauth_manager=oauth_manager,
+                )
+            except BaseException:
+                _close_anchor(config.physical_lifetime_anchor)
+                raise
         except ValueError:
             diagnostics.append(
                 _diagnostic(
@@ -164,6 +185,24 @@ def framed_plugin_mcp_server_id(plugin_id: str, local_server_id: str) -> str:
     return value
 
 
+def bind_plugin_authorization(config, identity, state, *, local_server_id, current_state, oauth_manager):
+    if not isinstance(config.auth, OAuthAuthorization):
+        return config
+    if oauth_manager is None or current_state is None:
+        raise ValueError("Plugin OAuth requires the shared authorization owner")
+    # The selected definition is already frozen. Only the existing instance state
+    # is reread before grant publication; no package/config registry is introduced.
+    owner = plugin_connection_owner(identity, local_server_id)
+
+    def current_target():
+        return config if current_state(identity) == state else None
+
+    async def authorization():
+        return await oauth_manager.authorization(owner, config, current_target)
+
+    return replace(config, authorization_provider=authorization)
+
+
 def _selected_servers(
     view: FrozenEnabledPluginView,
 ) -> Iterable[
@@ -208,88 +247,141 @@ def _valid_servers(
     if instance is None or instance.mcp.parsed is None:
         return
     for server in instance.mcp.parsed.valid_servers:
-        if isinstance(server, (PluginMcpStdioSummary, PluginMcpHttpSummary)):
+        if isinstance(
+            server, (PluginMcpStdioSummary, PluginMcpHttpSummary, PluginMcpSseSummary)
+        ):
             yield instance, server
 
 
 def _normalize_server(
     instance: FrozenEnabledPluginInstance,
-    server: PluginMcpStdioSummary | PluginMcpHttpSummary,
+    server: PluginMcpStdioSummary | PluginMcpHttpSummary | PluginMcpSseSummary,
+    *,
+    secret_resolver=None,
 ) -> McpServerConfig:
-    plugin_id = instance.identity.plugin_id
-    server_id = framed_plugin_mcp_server_id(plugin_id, server.local_server_id)
     anchor = instance.physical_lifetime_anchor.duplicate()
     try:
-        package_root = instance.package_root
-        data_root = instance.data_root
-        if isinstance(server, PluginMcpStdioSummary):
-            command = server.command
-            if command.startswith("./"):
-                command = str(_contained(package_root, command[2:]))
-            environment = {
-                key: _expand(value, package_root=package_root, data_root=data_root)
-                for key, value in server.environment
-            }
-            if any(key in environment for key in ("PLUGIN_ROOT", "PLUGIN_DATA")):
-                raise ValueError("Plugin MCP environment uses a reserved key")
-            environment["PLUGIN_ROOT"] = str(package_root)
-            environment["PLUGIN_DATA"] = str(data_root)
-            cwd, authority = _resolve_cwd(
-                server.cwd, package_root=package_root, data_root=data_root
-            )
-            transport = StdioTransportConfig(
-                command=command,
-                args=tuple(
-                    _expand(value, package_root=package_root, data_root=data_root)
-                    for value in server.args
-                ),
-                cwd=ExactAbsoluteMcpCwd(cwd, authority),
-                environment=tuple(sorted(environment.items())),
-                lookup_path=os.environ.get("PATH", ""),
-            )
-        else:
-            transport = StreamableHttpTransportConfig(
-                endpoint=server.endpoint,
-                allow_http_localhost=server.endpoint.lower().startswith("http://"),
-                network_policy=McpHttpNetworkPolicy.PUBLIC_ONLY,
-            )
-        source = ManagedPackageMcpRuntimeSource(
-            store_scope_key=(
-                "user"
-                if instance.identity.scope is PluginScopeKind.USER
-                else f"workspace:{instance.identity.workspace_state_key}"
-            ),
-            package_owner_key=plugin_id,
-            package_install_id=instance.state.current_package_install_id,
-        )
-        return freeze_mcp_server_config(
-            server_id=server_id,
-            display_name=f"{plugin_id}:{server.local_server_id}",
-            enabled=True,
-            required=False,
-            transport=transport,
-            auth=NoAuth(),
-            exposure_policy=McpExposurePolicy(),
-            scope_policy=McpScopePolicy.ROOT_AND_SUBAGENTS,
-            effect_policy=McpEffectPolicyConfig(
-                default_effect=McpConfiguredEffect.AUTO
-            ),
-            supports_parallel_tool_calls=False,
-            stateless_http_max_in_flight=1,
-            catalog_refresh_interval_ms=DEFAULT_MCP_REFRESH_INTERVAL_MS,
-            default_tool_timeout_ms=DEFAULT_MCP_TOOL_TIMEOUT_MS,
-            per_tool_timeout_ms=(),
-            runtime_source=source,
-            public_headers=(
-                server.public_headers
-                if isinstance(server, PluginMcpHttpSummary)
-                else ()
-            ),
-            physical_lifetime_anchor=anchor,
+        return materialize_plugin_mcp_definition(
+            identity=instance.identity,
+            state=instance.state,
+            server=server,
+            package_root=instance.package_root,
+            data_root=instance.data_root,
+            anchor=anchor,
+            secret_resolver=secret_resolver,
         )
     except BaseException:
         anchor.close()
         raise
+
+
+def materialize_plugin_mcp_definition(
+    *,
+    identity,
+    state,
+    server,
+    package_root,
+    data_root,
+    anchor=None,
+    secret_resolver=None,
+) -> McpServerConfig:
+    """Shared exact composition for installed inspection and live materialization.
+
+    A definition inspected without a physical anchor does not own a package
+    lifetime and must never be handed to the live supervisor.
+    """
+    plugin_id = identity.plugin_id
+    server_id = framed_plugin_mcp_server_id(plugin_id, server.local_server_id)
+    if isinstance(server, PluginMcpStdioSummary):
+        command = server.command
+        if command.startswith("./"):
+            command = str(_contained(package_root, command[2:]))
+        environment = {
+            key: _expand(value, package_root=package_root, data_root=data_root)
+            for key, value in server.environment
+        }
+        if any(key in environment for key in ("PLUGIN_ROOT", "PLUGIN_DATA")):
+            raise ValueError("Plugin MCP environment uses a reserved key")
+        environment["PLUGIN_ROOT"] = str(package_root)
+        environment["PLUGIN_DATA"] = str(data_root)
+        cwd, authority = _resolve_cwd(
+            server.cwd, package_root=package_root, data_root=data_root
+        )
+        transport = StdioTransportConfig(
+            command=command,
+            args=tuple(
+                _expand(value, package_root=package_root, data_root=data_root)
+                for value in server.args
+            ),
+            cwd=ExactAbsoluteMcpCwd(cwd, authority),
+            environment=tuple(sorted(environment.items())),
+            lookup_path=os.environ.get("PATH", ""),
+        )
+    else:
+        transport = (
+            LegacySseTransportConfig
+            if isinstance(server, PluginMcpSseSummary)
+            else StreamableHttpTransportConfig
+        )(
+            endpoint=server.endpoint,
+            allow_http_localhost=server.endpoint.lower().startswith("http://"),
+            network_policy=McpHttpNetworkPolicy.PUBLIC_ONLY,
+        )
+    source = ManagedPackageMcpRuntimeSource(
+        store_scope_key=(
+            "user"
+            if identity.scope is PluginScopeKind.USER
+            else f"workspace:{identity.workspace_state_key}"
+        ),
+        package_owner_key=plugin_id,
+        package_install_id=state.current_package_install_id,
+    )
+    transport, public_headers, auth = apply_connection_overlay(
+        transport,
+        server.public_headers
+        if isinstance(server, (PluginMcpHttpSummary, PluginMcpSseSummary))
+        else (),
+        resolve_connection_overlay(server, next(
+            (
+                item
+                for item in state.mcp_connection_overlays
+                if item.local_server_id == server.local_server_id
+            ),
+            None,
+        ), owner=plugin_connection_owner(identity, server.local_server_id)),
+    )
+    owner = plugin_connection_owner(identity, server.local_server_id)
+
+    def resolve(binding):
+        if binding.owner != owner:
+            raise ValueError("Plugin connection references another credential owner")
+        return secret_resolver(binding) if secret_resolver is not None else None
+
+    config = freeze_mcp_server_config(
+        server_id=server_id,
+        display_name=f"{plugin_id}:{server.local_server_id}",
+        enabled=True,
+        required=False,
+        transport=transport,
+        auth=auth,
+        exposure_policy=McpExposurePolicy(),
+        scope_policy=McpScopePolicy.ROOT_AND_SUBAGENTS,
+        effect_policy=McpEffectPolicyConfig(default_effect=McpConfiguredEffect.AUTO),
+        supports_parallel_tool_calls=False,
+        stateless_http_max_in_flight=1,
+        catalog_refresh_interval_ms=DEFAULT_MCP_REFRESH_INTERVAL_MS,
+        default_tool_timeout_ms=DEFAULT_MCP_TOOL_TIMEOUT_MS,
+        per_tool_timeout_ms=(),
+        runtime_source=source,
+        public_headers=public_headers,
+        physical_lifetime_anchor=anchor,
+        secret_resolver=resolve,
+    )
+    from pulsara_agent.capability.mcp_management import managed_bindings
+
+    if any(binding.owner != owner for binding in managed_bindings(config)):
+        raise ValueError("Plugin connection references another credential owner")
+    return config
 
 
 def _resolve_cwd(

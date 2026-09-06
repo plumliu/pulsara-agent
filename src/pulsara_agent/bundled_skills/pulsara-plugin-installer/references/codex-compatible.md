@@ -1,8 +1,13 @@
 # Codex-Compatible Package Conversion
 
-Read this file only after strict Agent Plugins 1.0 validation fails and the source
-contains credible Codex package evidence such as `.codex-plugin/plugin.json`.
-Marker presence is evidence to inspect, not proof that conversion will succeed.
+Select Codex explicitly when importing `.codex-plugin/plugin.json`. Marker
+presence is evidence to inspect, not proof that conversion will succeed; the
+official importer creates the native candidate without model rewriting.
+
+Absent declarations use only the selected format's defaults. Explicit empty
+MCP/hooks declarations must not load neighboring host files. Skill resources
+remain complete. Private inputs are configured on the disabled installed instance,
+not copied into the native candidate. An import never grants enablement acceptance.
 
 ## Inspect
 

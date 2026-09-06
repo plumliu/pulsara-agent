@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Protocol, TypeAlias
 
 from pulsara_agent.hooks.contracts import HookTrustDisposition
+from pulsara_agent.plugins.mcp_connection import PluginMcpConnectionOverlay, PluginConnectionReview
+from pulsara_agent.plugins.connection_inputs import PluginConnectionInputs
 
 
 PLUGIN_MANIFEST_SCHEMA_ID = (
@@ -71,6 +73,7 @@ class PluginEnablementDisposition(StrEnum):
 class PluginRemovalDisposition(StrEnum):
     REMOVED = "REMOVED"
     NOT_FOUND = "NOT_FOUND"
+    STALE = "STALE"
     UNAVAILABLE = "UNAVAILABLE"
     CANCELLED = "CANCELLED"
     TIMED_OUT = "TIMED_OUT"
@@ -293,6 +296,7 @@ class PluginMcpStdioSummary:
     args: tuple[str, ...]
     cwd: str | None
     environment: tuple[tuple[str, str], ...]
+    connection_inputs: PluginConnectionInputs = field(default_factory=PluginConnectionInputs, kw_only=True)
     kind: PluginMcpTransportSummaryKind = field(
         default=PluginMcpTransportSummaryKind.STDIO, init=False
     )
@@ -303,6 +307,7 @@ class PluginMcpHttpSummary:
     local_server_id: str
     endpoint: str
     public_headers: tuple[tuple[str, str], ...]
+    connection_inputs: PluginConnectionInputs = field(default_factory=PluginConnectionInputs, kw_only=True)
     kind: PluginMcpTransportSummaryKind = field(
         default=PluginMcpTransportSummaryKind.STREAMABLE_HTTP, init=False
     )
@@ -313,6 +318,7 @@ class PluginMcpSseSummary:
     local_server_id: str
     endpoint: str
     public_headers: tuple[tuple[str, str], ...]
+    connection_inputs: PluginConnectionInputs = field(default_factory=PluginConnectionInputs, kw_only=True)
     kind: PluginMcpTransportSummaryKind = field(
         default=PluginMcpTransportSummaryKind.SSE, init=False
     )
@@ -365,6 +371,9 @@ class PluginValidationSummary:
 class ValidateLocalPluginSourceRequest:
     source_path: Path
     deadline_monotonic: float
+    source_format: str = field(default="native", kw_only=True)
+    import_classifications: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
+    import_public_values: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
     cancellation: PluginCancellationPort = field(
         default_factory=NeverCancelPluginOperation, repr=False, compare=False
     )
@@ -379,8 +388,12 @@ class InstallLocalPluginRequest:
     source_path: Path
     scope: PluginScopeKind
     deadline_monotonic: float
+    source_format: str = field(default="native", kw_only=True)
+    import_classifications: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
+    import_public_values: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
     workspace_root: Path | None = None
     replace: bool = False
+    prepared_current: PreparedPluginInstanceObservation | None = field(default=None, repr=False, kw_only=True)
     cancellation: PluginCancellationPort = field(
         default_factory=NeverCancelPluginOperation, repr=False, compare=False
     )
@@ -403,6 +416,8 @@ class SetLocalPluginEnabledRequest:
     enabled: bool
     expected_current_package_install_id: str
     deadline_monotonic: float
+    connection_review: tuple[PluginConnectionReview, ...] = field(kw_only=True)
+    prepared_current: PreparedPluginInstanceObservation | None = field(default=None, repr=False, kw_only=True)
     workspace_root: Path | None = None
     external_process_acceptance: ExternalProcessAcceptance | None = None
     cancellation: PluginCancellationPort = field(
@@ -429,6 +444,8 @@ class RemoveLocalPluginRequest:
     scope: PluginScopeKind
     plugin_id: str
     deadline_monotonic: float
+    expected_current_package_install_id: str
+    prepared_current: PreparedPluginInstanceObservation | None = field(default=None, repr=False, kw_only=True)
     workspace_root: Path | None = None
     cancellation: PluginCancellationPort = field(
         default_factory=NeverCancelPluginOperation, repr=False, compare=False
@@ -438,6 +455,8 @@ class RemoveLocalPluginRequest:
         _validate_instance_request(
             self.scope, self.plugin_id, self.workspace_root, self.deadline_monotonic
         )
+        if not _valid_package_install_id(self.expected_current_package_install_id):
+            raise ValueError("expected Plugin removal package id is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,6 +574,7 @@ class PluginInstanceState:
     current_package_install_id: str
     enabled: bool
     workspace_state_key: str | None = None
+    mcp_connection_overlays: tuple[PluginMcpConnectionOverlay, ...] = ()
     contract_id: str = field(default=PLUGIN_INSTANCE_STATE_CONTRACT_ID, init=False)
 
     def __post_init__(self) -> None:
@@ -570,6 +590,30 @@ class PluginInstanceState:
             self.workspace_state_key
         ):
             raise ValueError("Plugin instance state workspace key is invalid")
+        names = tuple(item.local_server_id for item in self.mcp_connection_overlays)
+        if names != tuple(sorted(set(names))):
+            raise ValueError("Plugin MCP overlays must be unique and ordered")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPluginInstanceObservation:
+    """Optional model-preparation guard, not another user enablement receipt.
+
+    A user control-plane mutation already authorizes its physical effects. A
+    model operation instead has a permission verdict derived from this exact
+    prior state (including disabled/process-free cases). Rejoin it under the
+    existing instance lock so a concurrent enable cannot silently expand those
+    effects. None inside this value explicitly observes an absent instance.
+    """
+
+    identity: PluginInstanceIdentity
+    current: PluginInstanceState | None
+
+    def __post_init__(self):
+        if self.current is not None and self.identity != PluginInstanceIdentity(
+            self.current.scope, self.current.plugin_id, self.current.workspace_state_key,
+        ):
+            raise ValueError("prepared Plugin state belongs to another instance")
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,6 +623,7 @@ class SuccessfulPluginInstallOutcome:
     package_install_id: str
     summary: PluginValidationSummary
     diagnostics: tuple[object, ...]
+    cleanup_attention: bool = False
     enabled: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -713,6 +758,7 @@ PluginEnablementOutcome: TypeAlias = (
 class RemovedPluginOutcome:
     identity: PluginInstanceIdentity
     prior_package_install_id: str
+    cleanup_attention: bool = False
     disposition: PluginRemovalDisposition = field(
         default=PluginRemovalDisposition.REMOVED, init=False
     )
@@ -729,6 +775,7 @@ class FailedPluginRemovalOutcome:
     def __post_init__(self) -> None:
         if self.disposition not in {
             PluginRemovalDisposition.NOT_FOUND,
+            PluginRemovalDisposition.STALE,
             PluginRemovalDisposition.UNAVAILABLE,
             PluginRemovalDisposition.CANCELLED,
             PluginRemovalDisposition.TIMED_OUT,
@@ -763,6 +810,7 @@ class PluginInstanceInspection:
     effective_hook: bool = False
     effective_hook_definition_count: int = 0
     effective_hook_trust_disposition: HookTrustDisposition | None = None
+    mcp_connection_overlays: tuple[PluginMcpConnectionOverlay, ...] = ()
 
     def __post_init__(self) -> None:
         for values, label in (

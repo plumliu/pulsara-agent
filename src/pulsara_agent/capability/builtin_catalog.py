@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Literal
 
+from pulsara_agent.capability.management_intent import capability_management_input_schema
+
 from pulsara_agent.memory.product_contract import (
     MEMORY_COHESIVE_UNIT_GUIDE,
     MEMORY_CONTEXT_PRODUCT_GUIDE,
@@ -87,6 +89,7 @@ class BuiltinToolLongHorizonPolicyKind(StrEnum):
 
 
 _LONG_HORIZON_POLICY_KIND_BY_NAME = {
+    "manage_capability": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
     "artifact_read": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "ask_plan_question": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
     "create_agent_tasks": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
@@ -436,6 +439,26 @@ _SUBAGENT_CONTEXT_TURNS_DESCRIPTION = (
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
+    "manage_capability": _descriptor(
+        name="manage_capability",
+        description=(
+            "Manage owned local MCP connections and Plugin instances in USER or the "
+            "current WORKSPACE scope. Submit a public native candidate or omit missing "
+            "configuration to let the user complete the shared editor. Never request "
+            "or include API keys, secret values or tokens. Expected guards may be "
+            "omitted for fresh inspection, but must not be guessed. Plugin install "
+            "always starts disabled; enable always requires user review. ROOT only, "
+            "available in every permission mode. Await settlement; after RELOADED, "
+            "verify with list/inspect without routinely calling reload_capabilities. "
+            "APPLIED reports the completed change, not whether a user form appeared: "
+            "the runtime may have collected user confirmation while this call was pending."
+        ),
+        input_schema=capability_management_input_schema(),
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="plugin_control",
+        artifact_mode=ToolArtifactMode.NEVER,
+    ),
     "reload_capabilities": _descriptor(
         name="reload_capabilities",
         description=(
@@ -2073,7 +2096,7 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "hook_control",
         )
-    if name == "reload_capabilities":
+    if name in {"reload_capabilities", "manage_capability"}:
         return (
             BuiltinToolBindingKind.PLUGIN_CONTROL,
             BuiltinToolAvailabilityKind.ALWAYS,

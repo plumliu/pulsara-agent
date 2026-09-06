@@ -370,7 +370,7 @@ async def _open_test_session(
     import pulsara_agent.conversation_kernel.host as kernel_host
 
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
     core = KernelHostCore.production(model_runtime=_runtime(postgres_dsn))
     session = await core.open_session(
         HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path)
@@ -390,7 +390,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
 
     model = _PlanHostModel()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
     model_runtime = test_model_runtime(
         api_key="sk-fixture-secret",
         base_url="https://example.invalid/v1",

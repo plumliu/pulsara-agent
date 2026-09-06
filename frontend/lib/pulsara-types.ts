@@ -68,6 +68,7 @@ export interface McpServerCapability {
   source: 'workspace' | 'user' | 'plugin' | 'host';
   editable: boolean;
   configIdentity?: string;
+  config?: Record<string, unknown>;
   enabled: boolean;
   configuredEnabled: boolean;
   needsApproval: boolean;
@@ -88,6 +89,7 @@ export interface McpServerCapability {
 }
 
 export interface SkillCapability {
+  removalIdentity?: UserSkillCapability['removalIdentity'];
   id: string;
   name: string;
   description: string;
@@ -112,11 +114,12 @@ export interface CapabilitySnapshot {
   sessionId: string;
   workspacePath: string;
   workspaceKind: 'quick' | 'project';
+  credentialScopeKey?: string;
   adoption: {
     scope: 'workspace';
     pending: boolean;
     attention?: 'PROJECT_CAPABILITY_ADOPTION_FAILED' | 'PROJECT_MCP_ADOPTION_INCOMPLETE';
-    when: 'next-user-turn';
+    when: 'next-provider-dispatch';
   };
   skills: {
     status: 'ready' | 'attention';
@@ -146,6 +149,7 @@ export interface SkillInstallResult {
 }
 
 export interface UserSkillCapability {
+  removalIdentity?: Record<'root_device' | 'root_inode' | 'directory_device' | 'directory_inode', string>;
   name: string;
   description: string;
   location: string;
@@ -157,6 +161,8 @@ export interface UserSkillCapability {
 
 export interface UserMcpServerCapability {
   id: string;
+  config: Record<string, unknown>;
+  currentIdentity: string;
   name: string;
   enabled: boolean;
   status: McpServerStatus;
@@ -187,6 +193,27 @@ export interface UserPluginCapability {
   effectiveSkillNames: string[];
   effectiveMcpServerIds: string[];
   details: string[];
+  mcpConnections?: PluginMcpConnection[];
+  connectionReview?: { overlay: Record<string, unknown>; credentials: {name: string; present: boolean; sources: string[]}[] }[];
+}
+
+export interface McpCredentialOwner {
+  kind: 'local' | 'plugin'; scope_key: string; server_id: string; plugin_id: string | null;
+}
+
+export interface PluginMcpConnection {
+  serverId: string;
+  defaults: Record<string, unknown>;
+  config: Record<string, unknown>;
+  overlay: Record<string, unknown> | null;
+  credentialOwner: McpCredentialOwner;
+  connectionInputs?: Array<{name: string; title: string; private: boolean; required: boolean; default: string | null}>;
+}
+
+export interface PluginMcpEditInput {
+  overlay: Record<string, unknown> | null;
+  secretChanges: McpEditInput['secretChanges'];
+  retainCredentialsConfirmed?: boolean;
 }
 
 export interface UserCapabilitySnapshot {
@@ -210,6 +237,7 @@ export interface UserCapabilitySnapshot {
   };
   adoption?: {
     updatedSessions: number;
+    pendingSessions: number;
     attentionSessions: number;
   };
 }
@@ -225,7 +253,7 @@ export interface CapabilityOperation {
 export interface ProjectCapabilityAdoption {
   scope: 'workspace';
   pendingSessions: number;
-  when: 'next-user-turn';
+  when: 'next-provider-dispatch';
 }
 
 export interface ProjectCapabilityMutationResult {
@@ -234,14 +262,22 @@ export interface ProjectCapabilityMutationResult {
   capabilities: CapabilitySnapshot;
 }
 
-export interface McpCreateInput {
+export interface McpEditInput {
   serverId: string;
-  displayName: string;
-  transport: 'http' | 'stdio';
-  endpoint?: string;
-  command?: string;
-  args: string[];
-  availableToSubagents: boolean;
+  retainCredentialsConfirmed?: boolean;
+  config: Record<string, unknown>;
+  secretChanges: Array<{
+    binding: { owner: McpCredentialOwner; name: string };
+    value: string | null;
+  }>;
+}
+
+export interface McpConnectionTestResult {
+  status: 'ready' | 'credential_required' | 'authorization_required' | 'timeout' | 'schema_bound_exceeded' | 'failed';
+  tools: number;
+  resources: number;
+  resource_templates: number;
+  prompts: number;
 }
 
 export type SessionWorkspaceSelection =
@@ -417,3 +453,56 @@ export const protocolPermissionModes: Record<PermissionMode, string> = {
   'ask-permissions': 'PERMISSION_MODE_ASK_PERMISSIONS',
   'bypass-permissions': 'PERMISSION_MODE_BYPASS_PERMISSIONS',
 };
+export interface SkillImportInput {
+  sourcePath: string;
+  name?: string;
+  description?: string;
+}
+
+export interface SkillImportCandidate extends SkillImportInput {
+  name: string;
+  description: string;
+  valid: boolean;
+  details: string[];
+}
+export interface McpImportSource {
+  content: string;
+  shape: 'auto' | 'mcpServers' | 'opencode' | 'map' | 'server';
+  server_id?: string;
+}
+export interface McpImportPreview {
+  server_id: string;
+  transport: 'stdio' | 'streamable_http' | 'sse' | null;
+  fields: Array<{ target: string; private: boolean; template_literals: boolean; variables: Array<{ name: string; has_default: boolean; environment: boolean; file_path?: string | null }> }>;
+  issues: Array<{ path: string; message: string }>;
+  notices: string[];
+}
+export interface PluginImportOptions {
+  source_format: 'native' | 'claude' | 'codex' | 'cursor';
+  classifications: Record<string, string>;
+  public_values: Record<string, string>;
+}
+export interface PluginImportPreview {
+  name: string;
+  source_format: PluginImportOptions['source_format'];
+  skills: string[];
+  hooks: string[];
+  mcp: McpImportPreview[];
+  notices: string[];
+}
+export interface PluginImportDiscovery {
+  candidates: Array<{
+    source_format: PluginImportOptions['source_format'];
+    manifest: string;
+    preview: PluginImportPreview | null;
+    error: string | null;
+  }>;
+}
+
+export interface McpImportSelection extends McpImportSource {
+  selected_server_id: string;
+  classifications: Record<string, string>;
+  values: Record<string, string>;
+  transport?: 'streamable_http' | 'sse';
+  allow_http_localhost?: boolean;
+}

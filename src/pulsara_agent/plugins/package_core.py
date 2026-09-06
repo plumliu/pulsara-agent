@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from importlib import resources
 import ipaddress
@@ -11,8 +11,11 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 from time import monotonic
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from .source_import import PluginSourceImport
 
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
@@ -60,6 +63,7 @@ from pulsara_agent.plugins.contracts import (
     PluginHookDefinitionSummary,
     PluginManifest,
     PluginMcpHttpSummary,
+    PluginMcpSseSummary,
     PluginMcpServerSummary,
     PluginMcpStdioSummary,
     PluginSkillSummary,
@@ -158,12 +162,15 @@ class HeldPluginPackageObservation:
     hook_config: ParsedHookConfig | None
     enforce_managed_admission: bool = True
     _closed: bool = False
+    source_import: PluginSourceImport | None = None
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         os.close(self.descriptor)
+        if self.source_import is not None:
+            self.source_import.close()
 
     def __enter__(self) -> "HeldPluginPackageObservation":
         return self
@@ -924,6 +931,36 @@ def _parse_mcp(
             diagnostics.append(server)
         else:
             valid.append(server)
+    input_path = PurePosixPath("dev.pulsara/mcp/connection-inputs.json")
+    input_entry = next((item for item in entries if item.relative_path == input_path), None)
+    if input_entry is not None:
+        from .connection_inputs import parse_connection_inputs, connection_input_defaults
+        from pulsara_agent.mcp_credentials import McpCredentialOwner
+        try:
+            if input_entry.kind is not PackageEntryKind.REGULAR_FILE:
+                raise ValueError("connection inputs are not a regular file")
+            definitions = parse_connection_inputs(bounded_json_loads(
+                _read_bounded_entry(root_fd, input_entry, maximum=MAXIMUM_PLUGIN_JSON_BYTES,
+                    deadline_monotonic=deadline_monotonic, cancellation=cancellation),
+                maximum_bytes=MAXIMUM_PLUGIN_JSON_BYTES, maximum_nodes=MAXIMUM_PLUGIN_JSON_NODES,
+                maximum_depth=MAXIMUM_PLUGIN_JSON_DEPTH, maximum_string_utf8_bytes=MAXIMUM_PLUGIN_JSON_SCALAR_BYTES,
+                reject_duplicate_keys=True,
+            ), server_ids=declared)
+            expanded = []
+            for server in valid:
+                definition = definitions.get(server.local_server_id)
+                if definition is not None:
+                    # This parse proves only structural connection inputs. The
+                    # actual instance owner is bound during materialization.
+                    connection_input_defaults(definition,
+                        owner=McpCredentialOwner("plugin", "user", server.local_server_id, "validation"),
+                        transport_kind="streamable_http" if server.kind.value == "streamable-http" else server.kind.value)
+                    server = replace(server, connection_inputs=definition)
+                expanded.append(server)
+            valid = expanded
+        except (ValueError, JsonBoundExceeded, DuplicateJsonKey):
+            diagnostic = _diagnostic(PluginDiagnosticCode.MCP_COMPONENT_INVALID, source / input_path)
+            return PluginComponentSummary(PluginComponentObservationDisposition.INVALID, diagnostics=(diagnostic,)), None
     component = ParsedPluginMcpComponent(
         declared,
         tuple(sorted(valid, key=lambda item: item.local_server_id)),
@@ -945,12 +982,6 @@ def _normalize_portable_server(
     source: Path,
 ) -> PluginMcpServerSummary | PluginDiagnostic:
     kind = raw["type"]
-    if kind == "sse":
-        return _diagnostic(
-            PluginDiagnosticCode.MCP_TRANSPORT_UNSUPPORTED,
-            source / "mcp.json",
-            component=local_id,
-        )
     if kind == "stdio":
         command = raw["command"]
         assert isinstance(command, str)
@@ -986,7 +1017,7 @@ def _normalize_portable_server(
             cwd,
             tuple(sorted(environment.items())),  # type: ignore[arg-type]
         )
-    assert kind == "streamable-http"
+    assert kind in {"streamable-http", "sse"}
     endpoint = raw["url"]
     headers = raw.get("headers", {})
     assert isinstance(endpoint, str) and isinstance(headers, dict)
@@ -996,7 +1027,7 @@ def _normalize_portable_server(
             source / "mcp.json",
             component=local_id,
         )
-    return PluginMcpHttpSummary(
+    return (PluginMcpSseSummary if kind == "sse" else PluginMcpHttpSummary)(
         local_id,
         endpoint,
         tuple(sorted(headers.items())),  # type: ignore[arg-type]
@@ -1277,6 +1308,8 @@ def revalidate_observation(
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
 ) -> None:
+    if observation.source_import is not None:
+        observation.source_import.revalidate()
     _revalidate_source(
         observation.source_path,
         observation.descriptor,

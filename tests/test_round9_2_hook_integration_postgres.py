@@ -460,7 +460,7 @@ def test_round9_2_host_sources_stop_and_prefix_continuity(
         ]
     )
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
     main_thread_id = threading.get_ident()
     cold_scans: list[tuple[int, float | None]] = []
     original_discover = kernel_host.LocalHookSourceProvider.discover
@@ -553,7 +553,7 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
     monkeypatch.setenv("PULSARA_HOME", str(home))
     model = _QueuedContextIsolationModel()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
         core = KernelHostCore.production(
@@ -640,7 +640,7 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
         ]
     )
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
         core = KernelHostCore.production(
@@ -795,7 +795,7 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
 
     model = CallbackScriptedKernelModel(stream)
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
         core = KernelHostCore.production(
@@ -938,7 +938,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
         ]
     )
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
         core = KernelHostCore.production(
@@ -1081,7 +1081,7 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
     monkeypatch.setenv("PULSARA_HOME", str(home))
     model = _SubagentHookModel(log_path)
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
         core = KernelHostCore.production(
@@ -1188,7 +1188,7 @@ def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
         "Earlier work completed; retain the current objective and exact next step.",
     )
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
         core = KernelHostCore.production(
@@ -1301,7 +1301,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
         "Earlier resumed history is complete; preserve the current request.",
     )
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
         core = KernelHostCore.production(
@@ -1400,7 +1400,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
     monkeypatch.setenv("PULSARA_HOME", str(home))
     model = _ActiveCompactionModel()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
     async def scenario() -> None:
         core = KernelHostCore.production(

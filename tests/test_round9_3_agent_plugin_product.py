@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from inspect import signature
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -102,8 +103,8 @@ def _package(root: Path, *, marker: str = "one") -> Path:
                                 {
                                     "type": "command",
                                     "command": (
-                                        "printf '{\"additionalContext\":"
-                                        "\"plugin context\"}'"
+                                        'printf \'{"additionalContext":'
+                                        '"plugin context"}\''
                                     ),
                                 }
                             ],
@@ -128,6 +129,19 @@ def _package(root: Path, *, marker: str = "one") -> Path:
     return root
 
 
+def _install(service, request):
+    import asyncio
+    from pulsara_agent.capability.mcp_management import LocalMcpManagementService
+    from pulsara_agent.settings import LocalSettingsStore, LOCAL_SETTINGS_FILE_NAME
+
+    home = service._store().home
+    connections = LocalMcpManagementService(
+        LocalSettingsStore(home / LOCAL_SETTINGS_FILE_NAME),
+        user_config_path=home / "mcp.yaml",
+    )
+    return asyncio.run(service.install_local_plugin(request, connections=connections))
+
+
 def _owners(tmp_path: Path, *, credential: str = ""):
     home = resolve_pulsara_home(str(tmp_path / "home"))
     boundary = ProcessCredentialBoundary(credential)
@@ -150,8 +164,8 @@ def test_round9_3_six_operations_close_local_lifecycle(tmp_path: Path) -> None:
         ValidateLocalPluginSourceRequest(source, deadline)
     )
     assert validation.disposition is PluginValidationDisposition.VALID
-    installed = service.install_local_plugin(
-        InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
+    installed = _install(
+        service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
     )
     assert installed.disposition is PluginInstallDisposition.INSTALLED
     assert installed.enabled is False
@@ -169,6 +183,7 @@ def test_round9_3_six_operations_close_local_lifecycle(tmp_path: Path) -> None:
             installed.package_install_id,
             deadline,
             external_process_acceptance=ExternalProcessAcceptance.ACCEPTED,
+            connection_review=(),
         )
     )
     assert enabled.disposition is PluginEnablementDisposition.ENABLED
@@ -183,14 +198,16 @@ def test_round9_3_six_operations_close_local_lifecycle(tmp_path: Path) -> None:
     )
     assert effective.effective_hook is True
     assert effective.effective_hook_definition_count == 2
-    assert (
-        effective.effective_hook_trust_disposition
-        is HookTrustDisposition.UNTRUSTED
-    )
+    assert effective.effective_hook_trust_disposition is HookTrustDisposition.UNTRUSTED
     enabled_inspection.close()
-    removed = service.remove_local_plugin(
-        RemoveLocalPluginRequest(
-            PluginScopeKind.USER, "fixture-plugin", deadline
+    removed = asyncio.run(
+        service.remove_local_plugin(
+            RemoveLocalPluginRequest(
+                PluginScopeKind.USER,
+                "fixture-plugin",
+                deadline,
+                installed.package_install_id,
+            )
         )
     )
     assert removed.disposition is PluginRemovalDisposition.REMOVED
@@ -206,8 +223,8 @@ def test_round9_3_one_view_feeds_skill_mcp_and_hook_native_owners(
     source = _package(tmp_path / "source")
     boundary, service, store = _owners(tmp_path)
     deadline = monotonic() + 30
-    installed = service.install_local_plugin(
-        InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
+    installed = _install(
+        service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
     )
     enabled = service.set_local_plugin_enabled(
         SetLocalPluginEnabledRequest(
@@ -217,12 +234,11 @@ def test_round9_3_one_view_feeds_skill_mcp_and_hook_native_owners(
             installed.package_install_id,
             deadline,
             external_process_acceptance=ExternalProcessAcceptance.ACCEPTED,
+            connection_review=(),
         )
     )
     assert enabled.disposition is PluginEnablementDisposition.ENABLED
-    view = EnabledPluginViewOwner(
-        store=store, credential_boundary=boundary
-    ).observe(
+    view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
         cancellation=NeverCancelPluginOperation(),
@@ -325,8 +341,7 @@ def test_round9_3_cli_and_dependency_direction_are_single_path() -> None:
         "conversation_kernel/mcp",
     ):
         text = "\n".join(
-            item.read_text(encoding="utf-8")
-            for item in (root / relative).glob("*.py")
+            item.read_text(encoding="utf-8") for item in (root / relative).glob("*.py")
         )
         assert "pulsara_agent.plugins" not in text
     assert not any(

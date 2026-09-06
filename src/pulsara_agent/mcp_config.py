@@ -10,14 +10,27 @@ import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
 import yaml
 
 from pulsara_agent.primitives.context import context_fingerprint
+from pulsara_agent.mcp_credentials import (
+    McpSecretInput,
+    McpSecretResolver,
+    McpCredentialMissing,
+    resolve_secret,
+    secret_from_dict,
+    secret_to_dict,
+)
 
 
-DEFAULT_USER_MCP_CONFIG = Path.home() / ".pulsara" / "mcp.yaml"
+def default_user_mcp_config_path() -> Path:
+    from pulsara_agent.capability.pulsara_home import require_pulsara_home
+
+    return require_pulsara_home() / "mcp.yaml"
+
+
 WORKSPACE_MCP_CONFIG = ".pulsara/mcp.yaml"
 DEFAULT_MCP_TOOL_TIMEOUT_MS = 600_000
 DEFAULT_MCP_REFRESH_INTERVAL_MS = 300_000
@@ -33,6 +46,7 @@ _HTTP_TCHAR = frozenset(
 class McpTransportKind(StrEnum):
     STDIO = "stdio"
     STREAMABLE_HTTP = "streamable_http"
+    SSE = "sse"
 
 
 class McpHttpNetworkPolicy(StrEnum):
@@ -47,10 +61,6 @@ class McpScopePolicy(StrEnum):
 
 class McpConfiguredServerBoundExceeded(ValueError):
     """The existing native MCP composition bound would be exceeded."""
-
-
-class WorkspaceMcpConfigStaleError(ValueError):
-    """A project MCP mutation no longer matches the value the user inspected."""
 
 
 class McpInvalidToolPolicy(StrEnum):
@@ -150,7 +160,7 @@ class StdioTransportConfig:
         default_factory=lambda: WorkspaceRelativeMcpCwd(".")
     )
     environment: tuple[tuple[str, str], ...] = field(default=(), repr=False)
-    secret_environment_refs: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+    secret_environment: tuple[tuple[str, McpSecretInput], ...] = ()
     lookup_path: str = field(
         default_factory=lambda: os.environ.get("PATH", ""), repr=False
     )
@@ -162,9 +172,7 @@ class StdioTransportConfig:
         if any("\x00" in item for item in self.args):
             raise ValueError("MCP stdio argument contains NUL")
         _validate_unique_pairs(self.environment, "MCP stdio environment")
-        _validate_unique_pairs(
-            self.secret_environment_refs, "MCP stdio secret environment"
-        )
+        _validate_secret_pairs(self.secret_environment, header=False)
         if (
             not isinstance(self.cwd, (WorkspaceRelativeMcpCwd, ExactAbsoluteMcpCwd))
             or "\x00" in self.lookup_path
@@ -194,7 +202,19 @@ class StreamableHttpTransportConfig:
                 raise ValueError("MCP HTTP requires HTTPS except explicit localhost")
 
 
-McpTransportConfig = StdioTransportConfig | StreamableHttpTransportConfig
+@dataclass(frozen=True, slots=True)
+class LegacySseTransportConfig(StreamableHttpTransportConfig):
+    kind: McpTransportKind = McpTransportKind.SSE
+
+    def __post_init__(self) -> None:
+        super(LegacySseTransportConfig, self).__post_init__()
+        if self.proved_stateless:
+            raise ValueError("legacy SSE is sessionful")
+
+
+McpTransportConfig = (
+    StdioTransportConfig | StreamableHttpTransportConfig | LegacySseTransportConfig
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,32 +223,67 @@ class NoAuth:
 
 
 @dataclass(frozen=True, slots=True)
-class StaticHeaderEnvironmentRefs:
-    headers: tuple[tuple[str, str], ...]
-    kind: str = "static_header_environment_refs"
+class StaticHeaderSecretReferences:
+    headers: tuple[tuple[str, McpSecretInput], ...]
+    kind: str = "static_headers"
 
     def __post_init__(self) -> None:
-        _validate_unique_pairs(self.headers, "MCP static headers")
+        _validate_secret_pairs(self.headers, header=True)
 
 
 @dataclass(frozen=True, slots=True)
-class BearerEnvironmentRef:
-    environment_variable: str
-    kind: str = "bearer_environment_ref"
+class BearerSecret:
+    reference: McpSecretInput
+    kind: str = "bearer"
 
     def __post_init__(self) -> None:
-        if not _valid_env_name(self.environment_variable):
-            raise ValueError("MCP bearer environment reference is invalid")
+        secret_to_dict(self.reference)
 
 
 @dataclass(frozen=True, slots=True)
-class UnsupportedOAuth:
-    reason: str = "OAuth is not supported by Round 6 V1"
-    kind: str = "unsupported_oauth"
+class OAuthAuthorization:
+    client_id: str | None = None
+    client_secret: McpSecretInput | None = None
+    scope: str | None = None
+    redirect_uri: str = "http://127.0.0.1:17839/callback"
+    resource: str | None = None
+    client_metadata_url: str | None = None
+    kind: str = "oauth"
+
+    def __post_init__(self) -> None:
+        from urllib.parse import urlsplit
+
+        uri = urlsplit(self.redirect_uri)
+        if (
+            uri.scheme != "http"
+            or uri.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or not uri.port
+            or not uri.path
+            or uri.query
+            or uri.fragment
+            or uri.username
+        ):
+            raise ValueError(
+                "OAuth callback must be an exact loopback HTTP URL with a port"
+            )
+        for value in (self.resource, self.client_metadata_url):
+            if value is not None:
+                parsed = urlsplit(value)
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.netloc
+                    or parsed.username
+                    or parsed.fragment
+                ):
+                    raise ValueError("OAuth metadata/resource URL must use HTTPS")
+        if self.client_secret is not None:
+            if not self.client_id:
+                raise ValueError("OAuth client secret requires a client ID")
+            secret_to_dict(self.client_secret)
 
 
 McpAuthConfig = (
-    NoAuth | StaticHeaderEnvironmentRefs | BearerEnvironmentRef | UnsupportedOAuth
+    NoAuth | StaticHeaderSecretReferences | BearerSecret | OAuthAuthorization
 )
 
 
@@ -291,6 +346,12 @@ class McpServerConfig:
     physical_lifetime_anchor: object | None = field(
         default=None, repr=False, compare=False
     )
+    secret_resolver: McpSecretResolver | None = field(
+        default=None, repr=False, compare=False
+    )
+    authorization_provider: (
+        Callable[[], Awaitable[tuple[str, tuple[str, ...]]]] | None
+    ) = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.server_id or not self.display_name:
@@ -315,6 +376,12 @@ class McpServerConfig:
         ):
             raise TypeError("MCP runtime source identity union is open")
         _validate_public_headers(self.public_headers)
+        if isinstance(self.transport, StdioTransportConfig) and self.public_headers:
+            raise ValueError("stdio MCP cannot send HTTP headers")
+        if isinstance(self.transport, StdioTransportConfig) and not isinstance(
+            self.auth, NoAuth
+        ):
+            raise ValueError("stdio MCP uses secret env, not HTTP authentication")
         semantic, runtime, resolved = _derive_config_fingerprints(
             server_id=self.server_id,
             display_name=self.display_name,
@@ -332,6 +399,7 @@ class McpServerConfig:
             per_tool_timeout_ms=self.per_tool_timeout_ms,
             runtime_source=self.runtime_source,
             public_headers=self.public_headers,
+            secret_resolver=self.secret_resolver,
         )
         if (
             self.semantic_config_fingerprint != semantic
@@ -343,53 +411,51 @@ class McpServerConfig:
     def resolved_headers(
         self, final_overrides: Mapping[str, str] | None = None
     ) -> dict[str, str]:
+        resolved, _ = self.resolve_header_snapshot()
+        if final_overrides is None:
+            return resolved
+        return _merge_headers_case_insensitive(resolved, final_overrides)
+
+    def resolve_header_snapshot(self) -> tuple[dict[str, str], tuple[str, ...]]:
+        from pulsara_agent.mcp_credentials import resolved_secret_values
+
         result = dict(self.public_headers)
+        secrets: tuple[str, ...] = ()
         if isinstance(self.auth, NoAuth):
             resolved = result
-        elif isinstance(self.auth, UnsupportedOAuth):
-            raise ValueError(self.auth.reason)
-        elif isinstance(self.auth, BearerEnvironmentRef):
-            value = os.environ.get(self.auth.environment_variable)
-            if value is None:
-                raise ValueError("MCP bearer secret reference is unavailable")
+        elif isinstance(self.auth, OAuthAuthorization):
+            raise McpCredentialMissing()
+        elif isinstance(self.auth, BearerSecret):
+            secrets = resolved_secret_values(self.auth.reference, self.secret_resolver)
+            value = secrets[0]
             resolved = _merge_headers_case_insensitive(
                 result, {"Authorization": f"Bearer {value}"}
             )
         else:
             auth_headers: dict[str, str] = {}
-            for name, environment_variable in self.auth.headers:
-                value = os.environ.get(environment_variable)
-                if value is None:
-                    raise ValueError("MCP header secret reference is unavailable")
-                auth_headers[name] = value
+            for name, reference in self.auth.headers:
+                values = resolved_secret_values(reference, self.secret_resolver)
+                auth_headers[name] = values[0]
+                secrets += values
             resolved = _merge_headers_case_insensitive(result, auth_headers)
-        if final_overrides is None:
-            return resolved
-        return _merge_headers_case_insensitive(resolved, final_overrides)
-
-
-@dataclass(frozen=True, slots=True)
-class WorkspaceMcpConfigWriteResult:
-    path: Path
-    config: McpServerConfig | None
-
-
-# Compatibility name retained for callers which only inspect enabled IDs.
-DetectedMcpServerConfig = McpServerConfig
+        return resolved, secrets
 
 
 def load_mcp_server_configs(
     *,
     workspace_root: Path | None = None,
-    user_config_path: Path = DEFAULT_USER_MCP_CONFIG,
+    user_config_path: Path | None = None,
     host_overrides: Mapping[str, Mapping[str, Any]] | None = None,
     trust_workspace_config: bool = False,
     approved_workspace_server_identities: Mapping[str, str] | None = None,
+    secret_resolver: McpSecretResolver | None = None,
 ) -> tuple[McpServerConfig, ...]:
     # User configuration is explicit local authority.  A repository-owned
     # workspace file is untrusted until this exact Host open opts in: merely
     # checking out a repository must not launch code or resolve secret refs.
-    merged = _load_raw(user_config_path.expanduser())
+    merged = _load_raw(
+        (user_config_path or default_user_mcp_config_path()).expanduser()
+    )
     source_by_server_id = {
         server_id: McpLocalConfigSourceKind.USER for server_id in merged
     }
@@ -403,6 +469,7 @@ def load_mcp_server_configs(
                 runtime_source=LocalConfiguredMcpRuntimeSource(
                     McpLocalConfigSourceKind.WORKSPACE
                 ),
+                secret_resolver=secret_resolver,
             )
             trusted = trust_workspace_config or (
                 approved.get(server_id)
@@ -437,6 +504,7 @@ def load_mcp_server_configs(
             runtime_source=LocalConfiguredMcpRuntimeSource(
                 source_by_server_id[server_id]
             ),
+            secret_resolver=secret_resolver,
         )
         for server_id in sorted(merged)
     )
@@ -469,7 +537,9 @@ def validate_workspace_mcp_server_addition_capacity(
 ) -> None:
     """Reject one project addition before it can exceed the native composition."""
 
-    user_path = DEFAULT_USER_MCP_CONFIG if user_config_path is None else user_config_path
+    user_path = (
+        default_user_mcp_config_path() if user_config_path is None else user_config_path
+    )
     user_ids = set(_load_raw(user_path.expanduser()))
     workspace_ids = set(_load_raw(workspace_mcp_config_path(workspace_root)))
     prospective_ids = user_ids | workspace_ids | set(managed_server_ids) | {server_id}
@@ -490,128 +560,6 @@ def workspace_mcp_config_path(workspace_root: Path) -> Path:
     if path.is_symlink():
         raise ValueError("project MCP config must not be a symlink")
     return path
-
-
-def write_mcp_server_config(
-    *,
-    server_id: str,
-    entry: Mapping[str, Any] | None,
-    workspace_root: Path | None = None,
-    user_config_path: Path = DEFAULT_USER_MCP_CONFIG,
-) -> Path:
-    path = (
-        workspace_mcp_config_path(workspace_root)
-        if workspace_root is not None
-        else user_config_path.expanduser()
-    )
-    raw = _load_raw(path)
-    if entry is None:
-        raw.pop(server_id, None)
-    else:
-        candidate = dict(entry)
-        _parse_server(server_id, candidate)
-        raw[server_id] = candidate
-    _write_mcp_raw(path, raw, workspace_root=workspace_root)
-    return path
-
-
-def create_workspace_mcp_server_config(
-    *,
-    workspace_root: Path,
-    server_id: str,
-    entry: Mapping[str, Any],
-) -> WorkspaceMcpConfigWriteResult:
-    """Create one exact project entry and return the value that was written."""
-
-    path = workspace_mcp_config_path(workspace_root)
-    raw = _load_raw(path)
-    if server_id in raw:
-        raise ValueError("MCP server id already exists in this project")
-    candidate = dict(entry)
-    config = _parse_server(
-        server_id,
-        candidate,
-        runtime_source=LocalConfiguredMcpRuntimeSource(
-            McpLocalConfigSourceKind.WORKSPACE
-        ),
-    )
-    raw[server_id] = candidate
-    _write_mcp_raw(path, raw, workspace_root=workspace_root)
-    return WorkspaceMcpConfigWriteResult(path=path, config=config)
-
-
-def set_workspace_mcp_server_enabled(
-    *,
-    workspace_root: Path,
-    server_id: str,
-    enabled: bool,
-    expected_approval_identity: str,
-) -> WorkspaceMcpConfigWriteResult:
-    """Change one project entry only if it is the value the user inspected."""
-
-    path = workspace_mcp_config_path(workspace_root)
-    raw = _load_raw(path)
-    entry = raw.get(server_id)
-    if entry is None:
-        raise KeyError(server_id)
-    current = _parse_server(
-        server_id,
-        entry,
-        runtime_source=LocalConfiguredMcpRuntimeSource(
-            McpLocalConfigSourceKind.WORKSPACE
-        ),
-    )
-    if (
-        mcp_server_workspace_approval_identity(current)
-        != expected_approval_identity
-    ):
-        raise WorkspaceMcpConfigStaleError(
-            "MCP configuration changed; refresh before editing it"
-        )
-    updated = dict(entry)
-    updated["enabled"] = enabled
-    config = _parse_server(
-        server_id,
-        updated,
-        runtime_source=LocalConfiguredMcpRuntimeSource(
-            McpLocalConfigSourceKind.WORKSPACE
-        ),
-    )
-    raw[server_id] = updated
-    _write_mcp_raw(path, raw, workspace_root=workspace_root)
-    return WorkspaceMcpConfigWriteResult(path=path, config=config)
-
-
-def remove_workspace_mcp_server_config(
-    *,
-    workspace_root: Path,
-    server_id: str,
-    expected_approval_identity: str,
-) -> WorkspaceMcpConfigWriteResult:
-    """Remove one project entry only if it is the value the user inspected."""
-
-    path = workspace_mcp_config_path(workspace_root)
-    raw = _load_raw(path)
-    entry = raw.get(server_id)
-    if entry is None:
-        raise KeyError(server_id)
-    current = _parse_server(
-        server_id,
-        entry,
-        runtime_source=LocalConfiguredMcpRuntimeSource(
-            McpLocalConfigSourceKind.WORKSPACE
-        ),
-    )
-    if (
-        mcp_server_workspace_approval_identity(current)
-        != expected_approval_identity
-    ):
-        raise WorkspaceMcpConfigStaleError(
-            "MCP configuration changed; refresh before editing it"
-        )
-    raw.pop(server_id)
-    _write_mcp_raw(path, raw, workspace_root=workspace_root)
-    return WorkspaceMcpConfigWriteResult(path=path, config=None)
 
 
 def _write_mcp_raw(
@@ -649,32 +597,6 @@ def _write_mcp_raw(
         raise
 
 
-def set_mcp_server_enabled(
-    *,
-    server_id: str,
-    enabled: bool,
-    workspace_root: Path | None = None,
-    user_config_path: Path = DEFAULT_USER_MCP_CONFIG,
-) -> Path:
-    """Edit one explicit config entry without serializing runtime discovery."""
-
-    path = (
-        workspace_mcp_config_path(workspace_root)
-        if workspace_root is not None
-        else user_config_path.expanduser()
-    )
-    raw = _load_raw(path)
-    entry = raw.get(server_id)
-    if entry is None:
-        raise KeyError(server_id)
-    updated = dict(entry)
-    updated["enabled"] = enabled
-    _parse_server(server_id, updated)
-    raw[server_id] = updated
-    _write_mcp_raw(path, raw, workspace_root=workspace_root)
-    return path
-
-
 def freeze_mcp_server_config(
     *,
     server_id: str,
@@ -694,6 +616,7 @@ def freeze_mcp_server_config(
     runtime_source: McpRuntimeSourceIdentity | None = None,
     public_headers: tuple[tuple[str, str], ...] = (),
     physical_lifetime_anchor: object | None = None,
+    secret_resolver: McpSecretResolver | None = None,
 ) -> McpServerConfig:
     source = runtime_source or LocalConfiguredMcpRuntimeSource()
     semantic, runtime, resolved = _derive_config_fingerprints(
@@ -713,6 +636,7 @@ def freeze_mcp_server_config(
         per_tool_timeout_ms=per_tool_timeout_ms,
         runtime_source=source,
         public_headers=public_headers,
+        secret_resolver=secret_resolver,
     )
     return McpServerConfig(
         server_id,
@@ -735,6 +659,7 @@ def freeze_mcp_server_config(
         source,
         public_headers,
         physical_lifetime_anchor,
+        secret_resolver,
     )
 
 
@@ -743,6 +668,7 @@ def _parse_server(
     raw: Mapping[str, Any],
     *,
     runtime_source: McpRuntimeSourceIdentity | None = None,
+    secret_resolver: McpSecretResolver | None = None,
 ) -> McpServerConfig:
     server_id = server_id.strip()
     if not server_id or len(server_id.encode("utf-8")) > 128:
@@ -750,93 +676,24 @@ def _parse_server(
     _reject_unknown_keys(
         raw,
         {
-            "allow_http_localhost",
-            "allow_private_network",
-            "network_policy",
-            "args",
             "auth",
             "catalog_refresh_interval_ms",
-            "command",
-            "cwd",
             "default_tool_timeout_ms",
             "display_name",
             "effect_policy",
             "enabled",
-            "endpoint",
-            "env",
             "exposure_policy",
-            "follow_redirects",
             "per_tool_timeout_ms",
-            "proved_stateless",
+            "public_headers",
             "required",
             "scope_policy",
-            "secret_env",
             "stateless_http_max_in_flight",
             "supports_parallel_tool_calls",
-            "tool_timeout_ms",
             "transport",
-            "url",
         },
         "MCP server",
     )
-    if _boolean(raw.get("follow_redirects", False), "MCP follow_redirects"):
-        raise ValueError("MCP HTTP redirects are disabled in Round 6 V1")
     transport_raw = raw.get("transport")
-    if isinstance(transport_raw, str):
-        kind = transport_raw.lower()
-        transport_raw = (
-            {
-                "type": "stdio",
-                "command": raw.get("command"),
-                "args": raw.get("args", []),
-                "cwd": raw.get("cwd"),
-                "env": raw.get("env", {}),
-                "secret_env": raw.get("secret_env", {}),
-            }
-            if kind == "stdio"
-            else {
-                "type": kind,
-                "endpoint": raw.get("url") or raw.get("endpoint"),
-                "allow_http_localhost": raw.get("allow_http_localhost", False),
-                "network_policy": raw.get(
-                    "network_policy",
-                    (
-                        "ALLOW_PRIVATE"
-                        if raw.get("allow_private_network", False)
-                        else "PUBLIC_ONLY"
-                    ),
-                ),
-                "proved_stateless": raw.get("proved_stateless", False),
-            }
-        )
-    if transport_raw is None:
-        # Accept the common explicit flat spelling as input, while freezing the
-        # same typed transport fact.
-        transport_raw = (
-            {
-                "type": "stdio",
-                "command": raw.get("command"),
-                "args": raw.get("args", []),
-                "cwd": raw.get("cwd"),
-                "env": raw.get("env", {}),
-                "secret_env": raw.get("secret_env", {}),
-            }
-            if "command" in raw
-            else {
-                "type": "streamable_http",
-                "endpoint": raw.get("url") or raw.get("endpoint"),
-                "allow_http_localhost": raw.get("allow_http_localhost", False),
-                "network_policy": raw.get(
-                    "network_policy",
-                    (
-                        "ALLOW_PRIVATE"
-                        if raw.get("allow_private_network", False)
-                        else "PUBLIC_ONLY"
-                    ),
-                ),
-                "proved_stateless": raw.get("proved_stateless", False),
-            }
-        )
     if not isinstance(transport_raw, Mapping):
         raise ValueError("MCP transport must be an object")
     transport_type = _string(
@@ -849,9 +706,12 @@ def _parse_server(
             "MCP stdio transport",
         )
         environment = _string_mapping(transport_raw.get("env", {}), "MCP env")
-        secret_environment = _string_mapping(
-            transport_raw.get("secret_env", {}), "MCP secret env"
-        )
+        secret_environment = {
+            name: secret_from_dict(value)
+            for name, value in _mapping(
+                transport_raw.get("secret_env", {}), "MCP secret env"
+            ).items()
+        }
         transport: McpTransportConfig = StdioTransportConfig(
             command=_string(transport_raw.get("command") or "", "MCP command"),
             args=_string_list(transport_raw.get("args", []), "MCP args"),
@@ -861,24 +721,27 @@ def _parse_server(
                 else "."
             ),
             environment=tuple(sorted(environment.items())),
-            secret_environment_refs=tuple(sorted(secret_environment.items())),
+            secret_environment=tuple(sorted(secret_environment.items())),
         )
-    elif transport_type in {"streamable_http", "http"}:
+    elif transport_type in {"streamable_http", "sse"}:
         _reject_unknown_keys(
             transport_raw,
             {
                 "type",
                 "endpoint",
-                "url",
                 "allow_http_localhost",
                 "network_policy",
                 "proved_stateless",
             },
             "MCP HTTP transport",
         )
-        transport = StreamableHttpTransportConfig(
+        transport = (
+            LegacySseTransportConfig
+            if transport_type == "sse"
+            else StreamableHttpTransportConfig
+        )(
             endpoint=_string(
-                transport_raw.get("endpoint") or transport_raw.get("url") or "",
+                transport_raw.get("endpoint") or "",
                 "MCP HTTP endpoint",
             ),
             allow_http_localhost=_boolean(
@@ -906,14 +769,12 @@ def _parse_server(
         exposure_raw,
         {
             "include_tool_names",
-            "include",
             "exclude_tool_names",
-            "exclude",
             "invalid_tool_policy",
         },
         "MCP exposure policy",
     )
-    include = exposure_raw.get("include_tool_names", exposure_raw.get("include", "ALL"))
+    include = exposure_raw.get("include_tool_names")
     include_all = include is None or (
         isinstance(include, str) and include.lower() == "all"
     )
@@ -923,7 +784,7 @@ def _parse_server(
         ),
         exclude_tool_names=tuple(
             _sorted_string_list(
-                exposure_raw.get("exclude_tool_names", exposure_raw.get("exclude", [])),
+                exposure_raw.get("exclude_tool_names", []),
                 "MCP excluded tools",
             )
         ),
@@ -986,10 +847,7 @@ def _parse_server(
         "MCP stateless concurrency",
     )
     default_timeout = _integer(
-        raw.get(
-            "default_tool_timeout_ms",
-            raw.get("tool_timeout_ms", DEFAULT_MCP_TOOL_TIMEOUT_MS),
-        ),
+        raw.get("default_tool_timeout_ms", DEFAULT_MCP_TOOL_TIMEOUT_MS),
         "MCP tool timeout",
     )
     per_tool_timeout = tuple(sorted(per_timeout.items()))
@@ -1009,7 +867,14 @@ def _parse_server(
         default_tool_timeout_ms=default_timeout,
         per_tool_timeout_ms=per_tool_timeout,
         runtime_source=runtime_source or LocalConfiguredMcpRuntimeSource(),
-        public_headers=(),
+        public_headers=tuple(
+            sorted(
+                _string_mapping(
+                    raw.get("public_headers", {}), "MCP public headers"
+                ).items()
+            )
+        ),
+        secret_resolver=secret_resolver,
     )
 
 
@@ -1018,35 +883,56 @@ def _parse_auth(raw: object) -> McpAuthConfig:
         return NoAuth()
     if not isinstance(raw, Mapping):
         raise ValueError("MCP auth must be an object")
-    _reject_unknown_keys(
-        raw,
-        {"type", "environment_variable", "env", "headers"},
-        "MCP auth",
-    )
     kind = _string(raw.get("type", "none"), "MCP auth type").lower()
-    if kind in {"", "none"}:
+    if kind == "none":
+        _reject_unknown_keys(raw, {"type"}, "MCP auth")
         return NoAuth()
-    if kind == "bearer_environment_ref":
-        return BearerEnvironmentRef(
-            _string(
-                raw.get("environment_variable") or raw.get("env") or "",
-                "MCP bearer environment reference",
-            )
-        )
-    if kind == "static_header_environment_refs":
-        return StaticHeaderEnvironmentRefs(
+    if kind == "bearer":
+        _reject_unknown_keys(raw, {"type", "reference"}, "MCP auth")
+        return BearerSecret(secret_from_dict(raw.get("reference")))
+    if kind == "static_headers":
+        _reject_unknown_keys(raw, {"type", "headers"}, "MCP auth")
+        return StaticHeaderSecretReferences(
             tuple(
                 sorted(
-                    _string_mapping(raw.get("headers", {}), "MCP auth headers").items()
+                    (name, secret_from_dict(value))
+                    for name, value in _mapping(
+                        raw.get("headers", {}), "MCP auth headers"
+                    ).items()
                 )
             )
         )
     if kind == "oauth":
-        return UnsupportedOAuth()
+        _reject_unknown_keys(
+            raw,
+            {
+                "type",
+                "client_id",
+                "client_secret",
+                "scope",
+                "redirect_uri",
+                "resource",
+                "client_metadata_url",
+            },
+            "MCP OAuth",
+        )
+        fields = {
+            name: _string(value, "MCP OAuth field")
+            for name, value in raw.items()
+            if name not in {"type", "client_secret"} and value is not None
+        }
+        return OAuthAuthorization(
+            **fields,
+            client_secret=secret_from_dict(raw["client_secret"])
+            if raw.get("client_secret") is not None
+            else None,
+        )
     raise ValueError("MCP auth type is unsupported")
 
 
-def _transport_fingerprint_payload(value: McpTransportConfig) -> object:
+def _transport_fingerprint_payload(
+    value: McpTransportConfig, resolver: McpSecretResolver | None = None
+) -> object:
     if isinstance(value, StdioTransportConfig):
         return {
             "kind": value.kind.value,
@@ -1055,13 +941,13 @@ def _transport_fingerprint_payload(value: McpTransportConfig) -> object:
             "cwd": _cwd_fingerprint_payload(value.cwd),
             "lookup_path": value.lookup_path,
             "environment": value.environment,
-            "secret_environment_refs": tuple(
+            "secret_environment": tuple(
                 (
                     target,
-                    reference,
-                    _secret_generation_commitment(reference),
+                    secret_to_dict(reference),
+                    _secret_generation_commitment(reference, resolver),
                 )
-                for target, reference in value.secret_environment_refs
+                for target, reference in value.secret_environment
             ),
         }
     return {
@@ -1073,22 +959,37 @@ def _transport_fingerprint_payload(value: McpTransportConfig) -> object:
     }
 
 
-def _auth_fingerprint_payload(value: McpAuthConfig) -> object:
-    if isinstance(value, StaticHeaderEnvironmentRefs):
+def _auth_fingerprint_payload(
+    value: McpAuthConfig, resolver: McpSecretResolver | None = None
+) -> object:
+    if isinstance(value, StaticHeaderSecretReferences):
         return {
             "kind": value.kind,
             "refs": tuple(
-                (name, reference, _secret_generation_commitment(reference))
+                (
+                    name,
+                    secret_to_dict(reference),
+                    _secret_generation_commitment(reference, resolver),
+                )
                 for name, reference in value.headers
             ),
         }
-    if isinstance(value, BearerEnvironmentRef):
+    if isinstance(value, BearerSecret):
         return {
             "kind": value.kind,
-            "ref": value.environment_variable,
+            "ref": secret_to_dict(value.reference),
             "secret_generation_commitment": _secret_generation_commitment(
-                value.environment_variable
+                value.reference, resolver
             ),
+        }
+    if isinstance(value, OAuthAuthorization):
+        return {
+            **_auth_workspace_approval_payload(value),
+            "client_secret_commitment": _secret_generation_commitment(
+                value.client_secret, resolver
+            )
+            if value.client_secret is not None
+            else None,
         }
     return {"kind": value.kind}
 
@@ -1103,7 +1004,9 @@ def _transport_workspace_approval_payload(value: McpTransportConfig) -> object:
             "args": value.args,
             "cwd": _cwd_fingerprint_payload(value.cwd),
             "environment": value.environment,
-            "secret_environment_refs": value.secret_environment_refs,
+            "secret_environment": tuple(
+                (name, secret_to_dict(ref)) for name, ref in value.secret_environment
+            ),
         }
     return {
         "kind": value.kind.value,
@@ -1117,10 +1020,25 @@ def _transport_workspace_approval_payload(value: McpTransportConfig) -> object:
 def _auth_workspace_approval_payload(value: McpAuthConfig) -> object:
     """Freeze secret reference names, never their values or process commitments."""
 
-    if isinstance(value, StaticHeaderEnvironmentRefs):
-        return {"kind": value.kind, "refs": value.headers}
-    if isinstance(value, BearerEnvironmentRef):
-        return {"kind": value.kind, "ref": value.environment_variable}
+    if isinstance(value, StaticHeaderSecretReferences):
+        return {
+            "kind": value.kind,
+            "refs": tuple((name, secret_to_dict(ref)) for name, ref in value.headers),
+        }
+    if isinstance(value, BearerSecret):
+        return {"kind": value.kind, "ref": secret_to_dict(value.reference)}
+    if isinstance(value, OAuthAuthorization):
+        return {
+            "kind": value.kind,
+            "client_id": value.client_id,
+            "client_secret": secret_to_dict(value.client_secret)
+            if value.client_secret is not None
+            else None,
+            "scope": value.scope,
+            "redirect_uri": value.redirect_uri,
+            "resource": value.resource,
+            "client_metadata_url": value.client_metadata_url,
+        }
     return {"kind": value.kind}
 
 
@@ -1149,12 +1067,17 @@ def _runtime_source_payload(value: McpRuntimeSourceIdentity) -> object:
     raise TypeError("MCP runtime source identity union is open")
 
 
-def _secret_generation_commitment(environment_variable: str) -> str:
+def _secret_generation_commitment(
+    reference: McpSecretInput, resolver: McpSecretResolver | None = None
+) -> str:
     """Return one process-local opaque generation commitment, never a secret hash."""
 
-    value = os.environ.get(environment_variable)
+    try:
+        value = resolve_secret(reference, resolver)
+    except McpCredentialMissing:
+        value = None
     payload = (
-        environment_variable.encode("utf-8")
+        json.dumps(secret_to_dict(reference), sort_keys=True).encode("utf-8")
         + b"\0"
         + (value.encode("utf-8") if value is not None else b"<absent>")
     )
@@ -1194,6 +1117,8 @@ def mcp_server_workspace_approval_identity(config: McpServerConfig) -> str:
             "public_headers": config.public_headers,
         },
     )
+
+
 def _derive_config_fingerprints(
     *,
     server_id: str,
@@ -1212,6 +1137,7 @@ def _derive_config_fingerprints(
     per_tool_timeout_ms: tuple[tuple[str, int], ...],
     runtime_source: McpRuntimeSourceIdentity,
     public_headers: tuple[tuple[str, str], ...],
+    secret_resolver: McpSecretResolver | None = None,
 ) -> tuple[str, str, str]:
     semantic_payload = {
         "server_id": server_id,
@@ -1232,8 +1158,8 @@ def _derive_config_fingerprints(
         },
     }
     runtime_payload = {
-        "transport": _transport_fingerprint_payload(transport),
-        "auth": _auth_fingerprint_payload(auth),
+        "transport": _transport_fingerprint_payload(transport, secret_resolver),
+        "auth": _auth_fingerprint_payload(auth, secret_resolver),
         "supports_parallel_tool_calls": supports_parallel,
         "stateless_http_max_in_flight": stateless_http_max_in_flight,
         "catalog_refresh_interval_ms": catalog_refresh_interval_ms,
@@ -1266,16 +1192,13 @@ def _load_raw(path: Path) -> dict[str, dict[str, Any]]:
     text = data.decode("utf-8")
     if not text.strip():
         return {}
-    payload = (
-        json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
-    )
+    payload = yaml.safe_load(text)
     if payload is None:
         return {}
     if not isinstance(payload, Mapping):
         raise ValueError(f"MCP config must be an object: {path}")
-    if "servers" in payload:
-        _reject_unknown_keys(payload, {"servers"}, "MCP config root")
-    servers = payload.get("servers", payload)
+    _reject_unknown_keys(payload, {"servers"}, "MCP config root")
+    servers = payload.get("servers")
     if not isinstance(servers, Mapping):
         raise ValueError(f"MCP config 'servers' must be an object: {path}")
     result: dict[str, dict[str, Any]] = {}
@@ -1380,6 +1303,18 @@ def _validate_public_headers(values: tuple[tuple[str, str], ...]) -> None:
             raise ValueError("MCP public header is not ASCII") from exc
         if (
             not name
+            or name.casefold()
+            in {
+                "host",
+                "content-type",
+                "accept",
+                "mcp-session-id",
+                "mcp-protocol-version",
+                "content-length",
+                "connection",
+                "transfer-encoding",
+                "last-event-id",
+            }
             or any(item not in _HTTP_TCHAR for item in encoded_name)
             or name.casefold() in folded
             or value != value.strip(" \t")
@@ -1389,6 +1324,31 @@ def _validate_public_headers(values: tuple[tuple[str, str], ...]) -> None:
         ):
             raise ValueError("MCP public header is invalid")
         folded.add(name.casefold())
+
+
+def _validate_secret_pairs(
+    values: tuple[tuple[str, McpSecretInput], ...], *, header: bool
+) -> None:
+    names = tuple(name for name, _ in values)
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate MCP secret target")
+    if header:
+        _validate_public_headers(tuple((name, "") for name in names))
+    elif any(
+        not _valid_env_name(name)
+        or name
+        in {
+            "PULSARA_API_KEY",
+            "PATH",
+            "PYTHONPATH",
+            "LD_PRELOAD",
+            "DYLD_INSERT_LIBRARIES",
+        }
+        for name in names
+    ):
+        raise ValueError("MCP secret environment target is invalid or reserved")
+    for _, reference in values:
+        secret_to_dict(reference)
 
 
 def _merge_headers_case_insensitive(
@@ -1409,9 +1369,8 @@ def _valid_env_name(value: str) -> bool:
 
 
 __all__ = [
-    "BearerEnvironmentRef",
-    "DEFAULT_USER_MCP_CONFIG",
-    "DetectedMcpServerConfig",
+    "BearerSecret",
+    "default_user_mcp_config_path",
     "ExactAbsoluteMcpCwd",
     "LocalConfiguredMcpRuntimeSource",
     "ManagedPackageMcpRuntimeSource",
@@ -1428,23 +1387,17 @@ __all__ = [
     "McpStdioCwdBinding",
     "McpTransportKind",
     "NoAuth",
-    "StaticHeaderEnvironmentRefs",
+    "StaticHeaderSecretReferences",
     "StdioTransportConfig",
     "StreamableHttpTransportConfig",
-    "UnsupportedOAuth",
-    "WorkspaceMcpConfigWriteResult",
-    "WorkspaceMcpConfigStaleError",
+    "LegacySseTransportConfig",
+    "OAuthAuthorization",
     "WorkspaceRelativeMcpCwd",
-    "create_workspace_mcp_server_config",
     "freeze_mcp_server_config",
     "WORKSPACE_MCP_CONFIG",
     "load_mcp_server_configs",
     "load_workspace_mcp_server_configs",
     "mcp_server_workspace_approval_identity",
-    "remove_workspace_mcp_server_config",
-    "set_mcp_server_enabled",
-    "set_workspace_mcp_server_enabled",
     "validate_workspace_mcp_server_addition_capacity",
     "workspace_mcp_config_path",
-    "write_mcp_server_config",
 ]

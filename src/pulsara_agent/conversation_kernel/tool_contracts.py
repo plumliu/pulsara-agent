@@ -10,7 +10,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Mapping, Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .capability_management_execution import CapabilityManagementCall
 
 from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedMcpCapabilitySourceSnapshotSet,
@@ -130,6 +133,7 @@ class KernelToolInvocationContext:
     attempt_permission_snapshot_fingerprint: str
     surface_borrow: ProcessLocalToolSurfaceBorrow = field(repr=False, compare=False)
     permission_confirmation_granted: bool = False
+    capability_call: CapabilityManagementCall | None = field(default=None, repr=False, compare=False)
     subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
         field(default=None, repr=False)
     )
@@ -230,6 +234,7 @@ class KernelToolLiveSink(Protocol):
 class KernelToolAuthorizationKind(StrEnum):
     ALLOW = "ALLOW"
     REQUIRE_CONFIRMATION = "REQUIRE_CONFIRMATION"
+    CAPABILITY_FORM_REQUIRED = "CAPABILITY_FORM_REQUIRED"
     INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     TOOL_UNAVAILABLE = "TOOL_UNAVAILABLE"
@@ -241,6 +246,9 @@ class KernelToolAuthorization:
     kind: KernelToolAuthorizationKind
     reference: str
     public_message: str = ""
+    capability_call: CapabilityManagementCall | None = field(default=None, repr=False, compare=False, kw_only=True)
+    capability_permission_required: bool = field(default=False, kw_only=True)
+    capability_user_submission: bool = field(default=False, kw_only=True)
     accepted_attempt_id: str | None = None
     accepted_result_entry_id: str | None = None
     accepted_permission_snapshot_fingerprint: str | None = None
@@ -580,6 +588,12 @@ class ToolInvocationPort(Protocol):
         prepared_request: PreparedPermissionRequest,
         tool_name: str,
         assistant_entry_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> KernelToolAuthorization: ...
+
+    async def request_capability_form(
+        self, *, authorization: KernelToolAuthorization, turn_id: str,
+        assistant_entry_id: str, tool_call_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
     ) -> KernelToolAuthorization: ...
 

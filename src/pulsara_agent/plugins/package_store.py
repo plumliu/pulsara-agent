@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import errno
 import json
 import os
@@ -46,6 +46,8 @@ from pulsara_agent.plugins.contracts import (
     PluginVersionInspection,
 )
 from pulsara_agent.plugins.package_core import (
+    MAXIMUM_PLUGIN_JSON_NODES,
+    MAXIMUM_PLUGIN_JSON_DEPTH,
     COPY_CHUNK_BYTES,
     FrozenPackageEntry,
     HeldPluginPackageObservation,
@@ -62,6 +64,7 @@ from pulsara_agent.plugins.package_core import (
     revalidate_observation,
     tree_contains_secret,
 )
+from pulsara_agent.plugins.mcp_connection import overlay_from_dict, overlay_to_dict
 from pulsara_agent.primitives.bounded_json import bounded_json_loads
 from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundary,
@@ -162,6 +165,8 @@ class StoreInstallResult:
     data_root: Path
     summary: PluginValidationSummary
     replaced: bool
+    connection_diagnostics: tuple[PluginDiagnostic, ...] = ()
+    cleanup_attention: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +248,8 @@ class StoreRemovalResult:
     removed: bool
     ack_unknown: bool = False
     diagnostic: PluginDiagnostic | None = None
+    stale: bool = False
+    cleanup_attention: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,16 +339,18 @@ class ManagedPluginStore:
     def layout(self, identity: PluginInstanceIdentity) -> PluginStoreLayout:
         return PluginStoreLayout(self._home, identity)
 
-    def install(
+    def install_locked(
         self,
         observation: HeldPluginPackageObservation,
         *,
         scope: PluginScopeKind,
         workspace_root: Path | None,
-        replace: bool,
+        replace_existing: bool,
         deadline_monotonic: float,
         cancellation: PluginCancellationPort,
         scrub_set: ProcessCredentialScrubSet,
+        current: PluginInstanceState | None,
+        secret_resolver,
     ) -> StoreInstallOutcome:
         identity = self.identity(
             scope=scope,
@@ -351,44 +360,73 @@ class ManagedPluginStore:
         layout = self.layout(identity)
         _check_abort(deadline_monotonic, cancellation)
         try:
+            # The shared management owner holds edit_instance through publication
+            # AND private cleanup. This method only owns the new package lock.
+            if current is not None and not replace_existing:
+                summary = self.read_package_summary(
+                    layout,
+                    current.current_package_install_id,
+                    deadline_monotonic=deadline_monotonic,
+                    cancellation=cancellation,
+                    scrub_set=scrub_set,
+                )
+                return StoreAlreadyPresent(current, summary)
+            package_install_id = f"pkg_{uuid4().hex}"
+            state = PluginInstanceState(
+                identity.plugin_id,
+                identity.scope,
+                package_install_id,
+                False,
+                identity.workspace_state_key,
+                (),
+            )
+            from .mcp_adapter import materialize_plugin_mcp_definition
+
+            retained = []
+            diagnostics = []
+            servers = {server.local_server_id: server for server in observation.summary.mcp.mcp_servers}
+            for overlay in current.mcp_connection_overlays if current else ():
+                server = servers.get(overlay.local_server_id)
+                try:
+                    if server is None:
+                        raise ValueError("Plugin MCP component was removed")
+                    materialize_plugin_mcp_definition(
+                        identity=identity,
+                        state=replace(state, mcp_connection_overlays=(overlay,)),
+                        server=server,
+                        package_root=layout.plugin_package_parent / package_install_id,
+                        data_root=layout.data_root,
+                        secret_resolver=secret_resolver,
+                    )
+                except ValueError:
+                    diagnostics.append(PluginDiagnostic(
+                        PluginDiagnosticCode.MCP_SERVER_INVALID,
+                        "连接配置不再适用于新插件，请重新配置。",
+                        component=f"{identity.plugin_id}:{overlay.local_server_id}",
+                    ))
+                else:
+                    retained.append(overlay)
+            state = replace(state, mcp_connection_overlays=tuple(retained))
+            package_lock = layout.package_lock_path(package_install_id)
             with self._exclusive_lock(
-                layout.instance_lock_path,
+                package_lock,
                 deadline_monotonic=deadline_monotonic,
                 cancellation=cancellation,
             ):
-                current = self.read_state(layout)
-                if current is not None and not replace:
-                    summary = self.read_package_summary(
-                        layout,
-                        current.current_package_install_id,
-                        deadline_monotonic=deadline_monotonic,
-                        cancellation=cancellation,
-                        scrub_set=scrub_set,
-                    )
-                    return StoreAlreadyPresent(current, summary)
-                package_install_id = f"pkg_{uuid4().hex}"
-                state = PluginInstanceState(
-                    identity.plugin_id,
-                    identity.scope,
-                    package_install_id,
-                    False,
-                    identity.workspace_state_key,
-                )
-                package_lock = layout.package_lock_path(package_install_id)
-                with self._exclusive_lock(
-                    package_lock,
+                result = self._publish_and_cut_state(
+                    observation,
+                    layout=layout,
+                    state=state,
+                    replacing=current is not None,
                     deadline_monotonic=deadline_monotonic,
                     cancellation=cancellation,
-                ):
-                    return self._publish_and_cut_state(
-                        observation,
-                        layout=layout,
-                        state=state,
-                        replacing=current is not None,
-                        deadline_monotonic=deadline_monotonic,
-                        cancellation=cancellation,
-                        scrub_set=scrub_set,
-                    )
+                    scrub_set=scrub_set,
+                )
+                if isinstance(result, StoreInstallResult):
+                    result = replace(result, connection_diagnostics=tuple(diagnostics))
+                elif isinstance(result, StoreCleanupFailure) and isinstance(result.prior, StoreInstallResult):
+                    result = replace(result, prior=replace(result.prior, connection_diagnostics=tuple(diagnostics)))
+                return result
         except PluginPackageCancelled:
             raise
         except PluginPackageTimedOut:
@@ -751,14 +789,33 @@ class ManagedPluginStore:
         )
         return HeldPluginStateAggregate(states, observations)
 
+    @contextmanager
+    def edit_instance(self, identity, *, deadline_monotonic, cancellation):
+        """Hold the existing instance lock across connection and private settlement."""
+        layout = self.layout(identity)
+        with self._exclusive_lock(
+            layout.instance_lock_path, deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
+        ):
+            yield layout, self.read_state(layout)
+
+    def publish_connection_overlay(self, layout, previous, overlays):
+        """Caller owns edit_instance; publication has a fresh observable read-back."""
+        updated = replace(previous, mcp_connection_overlays=overlays)
+        _write_state_atomic(layout, updated, replacing=True, publisher=self._publisher)
+        return updated
+
     def set_enabled(
         self,
         identity: PluginInstanceIdentity,
         *,
         expected_package_install_id: str,
+        connection_review,
+        settings,
         enabled: bool,
         deadline_monotonic: float,
         cancellation: PluginCancellationPort,
+        prepared_current=None,
     ) -> StoreEnablementResult:
         layout = self.layout(identity)
         try:
@@ -770,10 +827,26 @@ class ManagedPluginStore:
                 previous = self.read_state(layout)
                 if previous is None:
                     return StoreEnablementResult(None, None)
-                if previous.current_package_install_id != expected_package_install_id:
+                if previous.current_package_install_id != expected_package_install_id or (
+                    prepared_current is not None and (
+                        identity != prepared_current.identity or previous != prepared_current.current
+                    )
+                ):
                     return StoreEnablementResult(
                         None,
                         previous,
+                        stale_observed_install_id=previous.current_package_install_id,
+                    )
+                from .mcp_connection import connection_review as capture_review
+                summary = self.read_package_summary(
+                    layout, previous.current_package_install_id,
+                    deadline_monotonic=deadline_monotonic, cancellation=cancellation,
+                    scrub_set=ProcessCredentialScrubSet(),
+                ) if enabled else None
+                if enabled and capture_review(previous.mcp_connection_overlays, settings.read().mcp_secret,
+                    servers=summary.mcp.mcp_servers, identity=identity) != connection_review:
+                    return StoreEnablementResult(
+                        None, previous,
                         stale_observed_install_id=previous.current_package_install_id,
                     )
                 if previous.enabled == enabled:
@@ -796,6 +869,7 @@ class ManagedPluginStore:
                     previous.current_package_install_id,
                     enabled,
                     previous.workspace_state_key,
+                    previous.mcp_connection_overlays,
                 )
                 _check_abort(deadline_monotonic, cancellation)
                 _write_state_atomic(layout, updated, replacing=True, publisher=self._publisher)
@@ -832,42 +906,21 @@ class ManagedPluginStore:
         _check_abort(deadline_monotonic, cancellation)
         return layout.data_root
 
-    def remove(
-        self,
-        identity: PluginInstanceIdentity,
-        *,
-        deadline_monotonic: float,
-        cancellation: PluginCancellationPort,
-    ) -> StoreRemovalResult:
-        layout = self.layout(identity)
+    def remove_instance_locked(self, layout, previous) -> StoreRemovalResult:
+        """Caller holds edit_instance through reference cut and private cleanup."""
         try:
-            with self._exclusive_lock(
-                layout.instance_lock_path,
-                deadline_monotonic=deadline_monotonic,
-                cancellation=cancellation,
-            ):
-                previous = self.read_state(layout)
-                if previous is None:
-                    return StoreRemovalResult(None, False)
-                _check_abort(deadline_monotonic, cancellation)
-                parent = open_absolute_directory_nofollow(layout.state_parent)
+            parent = open_absolute_directory_nofollow(layout.state_parent)
+            try:
+                os.unlink(layout.state_path.name, dir_fd=parent)
                 try:
-                    os.unlink(layout.state_path.name, dir_fd=parent)
-                    try:
-                        os.stat(
-                            layout.state_path.name,
-                            dir_fd=parent,
-                            follow_symlinks=False,
-                        )
-                    except FileNotFoundError:
-                        return StoreRemovalResult(previous, True)
-                    except OSError:
-                        return StoreRemovalResult(previous, False, ack_unknown=True)
+                    os.stat(layout.state_path.name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    return StoreRemovalResult(previous, True)
+                except OSError:
                     return StoreRemovalResult(previous, False, ack_unknown=True)
-                finally:
-                    os.close(parent)
-        except (PluginPackageCancelled, PluginPackageTimedOut):
-            raise
+                return StoreRemovalResult(previous, False, ack_unknown=True)
+            finally:
+                os.close(parent)
         except (MemoryError, OSError, ValueError):
             return StoreRemovalResult(
                 None,
@@ -1696,6 +1749,7 @@ def _state_payload(state: PluginInstanceState) -> bytes:
             "workspace_state_key": state.workspace_state_key,
             "current_package_install_id": state.current_package_install_id,
             "enabled": state.enabled,
+            "mcp_connection_overlays": [overlay_to_dict(item) for item in state.mcp_connection_overlays],
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1788,9 +1842,11 @@ def _read_state_at_with_evidence(
     value = bounded_json_loads(
         raw,
         maximum_bytes=MAXIMUM_PLUGIN_STATE_BYTES,
-        maximum_nodes=64,
-        maximum_depth=4,
-        maximum_string_utf8_bytes=1024,
+        # Instance connection documents use the existing package JSON envelope;
+        # the old identity-only depth/node limits cannot hold native auth refs.
+        maximum_nodes=MAXIMUM_PLUGIN_JSON_NODES,
+        maximum_depth=MAXIMUM_PLUGIN_JSON_DEPTH,
+        maximum_string_utf8_bytes=MAXIMUM_PLUGIN_STATE_BYTES,
         reject_duplicate_keys=True,
     )
     if not isinstance(value, dict) or set(value) != {
@@ -1800,18 +1856,22 @@ def _read_state_at_with_evidence(
         "workspace_state_key",
         "current_package_install_id",
         "enabled",
+        "mcp_connection_overlays",
     }:
         raise ValueError("Plugin state has an invalid shape")
     if value["contract_id"] != PLUGIN_INSTANCE_STATE_CONTRACT_ID or not isinstance(
         value["enabled"], bool
     ):
         raise ValueError("Plugin state contract is invalid")
+    if not isinstance(value["mcp_connection_overlays"], list):
+        raise ValueError("Plugin MCP overlays must be a list")
     state = PluginInstanceState(
         value["plugin_id"],
         PluginScopeKind(value["scope"]),
         value["current_package_install_id"],
         value["enabled"],
         value["workspace_state_key"],
+        tuple(overlay_from_dict(item) for item in value["mcp_connection_overlays"]),
     )
     if (
         state.plugin_id != layout.identity.plugin_id

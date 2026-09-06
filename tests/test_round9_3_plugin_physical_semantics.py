@@ -143,7 +143,7 @@ def _make_package(
                                 "hooks": [
                                     {
                                         "type": "command",
-                                        "command": "printf '{\"additionalContext\":\"ok\"}'",
+                                        "command": 'printf \'{"additionalContext":"ok"}\'',
                                     }
                                 ],
                             }
@@ -154,6 +154,19 @@ def _make_package(
             encoding="utf-8",
         )
     return root
+
+
+def _install(service, request):
+    import asyncio
+    from pulsara_agent.capability.mcp_management import LocalMcpManagementService
+    from pulsara_agent.settings import LocalSettingsStore, LOCAL_SETTINGS_FILE_NAME
+
+    home = service._store().home
+    connections = LocalMcpManagementService(
+        LocalSettingsStore(home / LOCAL_SETTINGS_FILE_NAME),
+        user_config_path=home / "mcp.yaml",
+    )
+    return asyncio.run(service.install_local_plugin(request, connections=connections))
 
 
 def _owners(tmp_path: Path, *, credential: str = ""):
@@ -176,6 +189,7 @@ def _enable(service, installed, plugin_id: str, deadline: float) -> None:
             installed.package_install_id,
             deadline,
             external_process_acceptance=ExternalProcessAcceptance.ACCEPTED,
+            connection_review=(),
         )
     )
     assert result.disposition.value == "ENABLED"
@@ -216,8 +230,13 @@ def test_round9_3_manifest_preprocessing_and_component_isolation(
         ValidateLocalPluginSourceRequest(source, monotonic() + 30)
     )
     assert result.disposition is PluginValidationDisposition.VALID
-    assert result.summary.skills.disposition is PluginComponentObservationDisposition.COMPLETE
-    assert result.summary.mcp.disposition is PluginComponentObservationDisposition.INVALID
+    assert (
+        result.summary.skills.disposition
+        is PluginComponentObservationDisposition.COMPLETE
+    )
+    assert (
+        result.summary.mcp.disposition is PluginComponentObservationDisposition.INVALID
+    )
     assert {item.code for item in result.diagnostics if hasattr(item, "code")} >= {
         PluginDiagnosticCode.MANIFEST_UNKNOWN_FIELD_IGNORED,
         PluginDiagnosticCode.EXTENSIONS_FIELD_IGNORED,
@@ -271,8 +290,8 @@ def test_round9_3_managed_runtime_narrows_resource_and_skill_symlinks(
     source = _make_package(tmp_path / "source", hooks=False)
     _home, boundary, service, store = _owners(tmp_path)
     deadline = monotonic() + 30
-    installed = service.install_local_plugin(
-        InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
+    installed = _install(
+        service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
     )
     _enable(service, installed, "physical-plugin", deadline)
     package_root = installed.summary.manifest.name
@@ -281,7 +300,11 @@ def test_round9_3_managed_runtime_narrows_resource_and_skill_symlinks(
     assert package_root == "physical-plugin"
     outside = tmp_path / "outside-skill.md"
     outside.write_text("outside", encoding="utf-8")
-    for directory in (managed, managed / "skills", managed / "skills" / "physical-skill"):
+    for directory in (
+        managed,
+        managed / "skills",
+        managed / "skills" / "physical-skill",
+    ):
         directory.chmod(0o700)
     document = managed / "skills" / "physical-skill" / "SKILL.md"
     document.unlink()
@@ -296,10 +319,15 @@ def test_round9_3_managed_runtime_narrows_resource_and_skill_symlinks(
     try:
         assert view.disposition.value == "COMPLETE"
         instance = view.user_instances[0]
-        assert instance.skills.disposition is PluginComponentObservationDisposition.COMPLETE
+        assert (
+            instance.skills.disposition
+            is PluginComponentObservationDisposition.COMPLETE
+        )
         assert instance.skills.candidates == ()
         assert instance.skills.invalid_diagnostics[0].code.value == "skill_file_escape"
-        assert instance.mcp.disposition is PluginComponentObservationDisposition.COMPLETE
+        assert (
+            instance.mcp.disposition is PluginComponentObservationDisposition.COMPLETE
+        )
     finally:
         view.close()
 
@@ -310,8 +338,8 @@ def test_round9_3_publish_modes_replace_disable_data_retention_and_gc_grammar(
     source = _make_package(tmp_path / "source")
     _home, _boundary, service, store = _owners(tmp_path)
     deadline = monotonic() + 30
-    first = service.install_local_plugin(
-        InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
+    first = _install(
+        service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
     )
     layout = store.layout(first.identity)
     first_root = layout.plugin_package_parent / first.package_install_id
@@ -325,18 +353,24 @@ def test_round9_3_publish_modes_replace_disable_data_retention_and_gc_grammar(
     manifest = json.loads((source / "plugin.json").read_text(encoding="utf-8"))
     manifest["version"] = "two"
     (source / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
-    second = service.install_local_plugin(
-        InstallLocalPluginRequest(
-            source, PluginScopeKind.USER, deadline, replace=True
-        )
+    second = _install(
+        service,
+        InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline, replace=True),
     )
     assert second.disposition is PluginInstallDisposition.REPLACED
     assert second.package_install_id != first.package_install_id
     assert second.enabled is False
     assert first_root.is_dir()
     assert layout.data_root.is_dir()
-    removed = service.remove_local_plugin(
-        RemoveLocalPluginRequest(PluginScopeKind.USER, "physical-plugin", deadline)
+    removed = asyncio.run(
+        service.remove_local_plugin(
+            RemoveLocalPluginRequest(
+                PluginScopeKind.USER,
+                "physical-plugin",
+                deadline,
+                second.package_install_id,
+            )
+        )
     )
     assert removed.disposition.value == "REMOVED"
     malformed = layout.plugin_package_parent / ".pulsara-stage-not-owned"
@@ -357,8 +391,8 @@ def test_round9_3_physical_anchor_blocks_gc_until_native_mcp_drain(
     source = _make_package(tmp_path / "source", hooks=False)
     _home, boundary, service, store = _owners(tmp_path)
     deadline = monotonic() + 30
-    installed = service.install_local_plugin(
-        InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
+    installed = _install(
+        service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
     )
     _enable(service, installed, "physical-plugin", deadline)
     view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
@@ -367,8 +401,15 @@ def test_round9_3_physical_anchor_blocks_gc_until_native_mcp_drain(
         cancellation=NeverCancelPluginOperation(),
     )
     mcp = normalize_plugin_mcp_configs(existing_configs=(), view=view)
-    removed = service.remove_local_plugin(
-        RemoveLocalPluginRequest(PluginScopeKind.USER, "physical-plugin", deadline)
+    removed = asyncio.run(
+        service.remove_local_plugin(
+            RemoveLocalPluginRequest(
+                PluginScopeKind.USER,
+                "physical-plugin",
+                deadline,
+                installed.package_install_id,
+            )
+        )
     )
     assert removed.disposition.value == "REMOVED"
     busy = service.gc_local_plugin_packages(
@@ -392,16 +433,16 @@ def test_round9_3_physical_anchor_blocks_gc_until_native_mcp_drain(
 def test_round9_3_replace_changes_mcp_lifetime_and_hook_trust_subject_state(
     tmp_path: Path,
 ) -> None:
-    first_source = _make_package(
-        tmp_path / "first", mcp_kind="http", hooks=True
-    )
+    first_source = _make_package(tmp_path / "first", mcp_kind="http", hooks=True)
     _home, boundary, service, store = _owners(tmp_path)
     deadline = monotonic() + 30
-    first = service.install_local_plugin(
-        InstallLocalPluginRequest(first_source, PluginScopeKind.USER, deadline)
+    first = _install(
+        service, InstallLocalPluginRequest(first_source, PluginScopeKind.USER, deadline)
     )
     _enable(service, first, "physical-plugin", deadline)
-    first_view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
+    first_view = EnabledPluginViewOwner(
+        store=store, credential_boundary=boundary
+    ).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
         cancellation=NeverCancelPluginOperation(),
@@ -427,14 +468,17 @@ def test_round9_3_replace_changes_mcp_lifetime_and_hook_trust_subject_state(
     second_source = _make_package(
         tmp_path / "second", marker="two", mcp_kind="http", hooks=True
     )
-    second = service.install_local_plugin(
+    second = _install(
+        service,
         InstallLocalPluginRequest(
             second_source, PluginScopeKind.USER, deadline, replace=True
-        )
+        ),
     )
     assert second.enabled is False
     _enable(service, second, "physical-plugin", deadline)
-    second_view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
+    second_view = EnabledPluginViewOwner(
+        store=store, credential_boundary=boundary
+    ).observe(
         workspace_root=tmp_path,
         deadline_monotonic=deadline,
         cancellation=NeverCancelPluginOperation(),
@@ -460,7 +504,9 @@ def test_round9_3_replace_changes_mcp_lifetime_and_hook_trust_subject_state(
     )
     second_snapshot = second_hooks.source_snapshots[0]
     assert second_snapshot.trust.disposition.value == "MODIFIED"
-    assert second_snapshot.definitions[0].command == first_snapshot.definitions[0].command
+    assert (
+        second_snapshot.definitions[0].command == first_snapshot.definitions[0].command
+    )
     assert second_snapshot.provenance.identity.kind is HookSourceKind.PLUGIN
 
     for snapshot in (first_snapshot, second_snapshot):
@@ -495,8 +541,8 @@ def test_round9_3_same_tier_plugin_skill_conflict_falls_through_to_bundled(
         ("alpha-plugin", first_source),
         ("beta-plugin", second_source),
     ):
-        installed = service.install_local_plugin(
-            InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
+        installed = _install(
+            service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
         )
         _enable(service, installed, plugin_id, deadline)
     view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
@@ -608,10 +654,9 @@ def test_round9_3_async_gate_cancel_joins_waiter_and_json_preflight_uses_stderr(
     home = tmp_path / "cli-home"
     monkeypatch.setenv("PULSARA_HOME", str(home))
     service = PluginManagementService(credential_boundary=boundary)
-    installed = service.install_local_plugin(
-        InstallLocalPluginRequest(
-            source, PluginScopeKind.USER, monotonic() + 30
-        )
+    installed = _install(
+        service,
+        InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30),
     )
     assert installed.disposition is PluginInstallDisposition.INSTALLED
     monkeypatch.setattr("builtins.input", lambda: "n")
@@ -639,8 +684,8 @@ def test_round9_3_inspection_cancel_is_closed_abort_not_partial(
     source = _make_package(tmp_path / "source", mcp_kind="none")
     _home, _boundary, service, _store = _owners(tmp_path)
     deadline = monotonic() + 30
-    installed = service.install_local_plugin(
-        InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
+    installed = _install(
+        service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
     )
     assert installed.disposition is PluginInstallDisposition.INSTALLED
 
@@ -665,14 +710,15 @@ def test_round9_3_inspection_cancel_is_closed_abort_not_partial(
 def test_round9_3_package_anchor_obeys_caller_deadline(tmp_path: Path) -> None:
     source = _make_package(tmp_path / "source", mcp_kind="none")
     _home, _boundary, service, store = _owners(tmp_path)
-    installed = service.install_local_plugin(
-        InstallLocalPluginRequest(
-            source, PluginScopeKind.USER, monotonic() + 30
-        )
+    installed = _install(
+        service,
+        InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30),
     )
     assert installed.disposition is PluginInstallDisposition.INSTALLED
     layout = store.layout(installed.identity)
-    descriptor = os.open(layout.package_lock_path(installed.package_install_id), os.O_RDWR)
+    descriptor = os.open(
+        layout.package_lock_path(installed.package_install_id), os.O_RDWR
+    )
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         with pytest.raises(PluginPackageTimedOut):
@@ -711,10 +757,9 @@ def test_round9_3_paired_source_read_failure_keeps_source_owner(
 
     monkeypatch.setattr(package_store_module, "_verify_paired_bytes", verify)
     monkeypatch.setattr(package_store_module.os, "read", fail_first_source_read)
-    outcome = service.install_local_plugin(
-        InstallLocalPluginRequest(
-            source, PluginScopeKind.USER, monotonic() + 30
-        )
+    outcome = _install(
+        service,
+        InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30),
     )
     assert state["fired"] is True
     assert outcome.disposition is PluginInstallDisposition.UNAVAILABLE
@@ -728,8 +773,7 @@ def test_round9_3_paired_source_read_failure_keeps_source_owner(
     )
     package_parent = store.layout(identity).plugin_package_parent
     assert not any(
-        item.name.startswith(".pulsara-stage-")
-        for item in package_parent.iterdir()
+        item.name.startswith(".pulsara-stage-") for item in package_parent.iterdir()
     )
 
 
@@ -818,8 +862,7 @@ def test_round9_3_http_gate_releases_after_body_before_response_headers() -> Non
             body_received.set()
             await allow_response.wait()
             writer.write(
-                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
-                b"Connection: close\r\n\r\nok"
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
             )
             await writer.drain()
             writer.close()

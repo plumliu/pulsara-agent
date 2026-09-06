@@ -18,7 +18,10 @@ from pulsara_agent.capability.local_skill_management import (
     LocalSkillInstallOutcome,
     LocalSkillInstallScope,
     LocalSkillManagementService,
+    ValidateLocalSkillSourceRequest,
 )
+from pulsara_agent.capability.skill_import import enumerate_skill_import_sources
+from pulsara_agent.capability.mcp_import import read_mcp_import, materialize_mcp_import
 from pulsara_agent.capability.contracts import LocalSkillRootKind
 from pulsara_agent.capability.local_skills import (
     LooseSkillDefinitionProducer,
@@ -43,9 +46,11 @@ from pulsara_agent.capability.user_skill_config import (
     workspace_skill_config_path,
 )
 from pulsara_agent.capability.workspace_mcp_trust import (
-    approve_workspace_mcp_server_config,
-    remove_workspace_mcp_server_approval,
     workspace_mcp_server_approvals,
+)
+from pulsara_agent.capability.local_skill_removal import (
+    LocalSkillRemovalIdentity,
+    LocalSkillRemovalDisposition,
 )
 from pulsara_agent.conversation_kernel.host import (
     KernelCapabilityCatalogInspection,
@@ -59,21 +64,21 @@ from pulsara_agent.llm.model_connections import (
     model_call_binding_to_dict,
 )
 from pulsara_agent.mcp_config import (
-    DEFAULT_USER_MCP_CONFIG,
+    default_user_mcp_config_path,
     McpLocalConfigSourceKind,
     McpScopePolicy,
     McpServerConfig,
     StdioTransportConfig,
     StreamableHttpTransportConfig,
-    create_workspace_mcp_server_config,
-    load_mcp_server_configs,
-    load_workspace_mcp_server_configs,
+    LegacySseTransportConfig,
     mcp_server_workspace_approval_identity,
-    remove_workspace_mcp_server_config,
-    set_mcp_server_enabled,
-    set_workspace_mcp_server_enabled,
-    validate_workspace_mcp_server_addition_capacity,
-    write_mcp_server_config,
+)
+from pulsara_agent.capability.mcp_management import (
+    LocalMcpTarget,
+    McpSecretMutation,
+    config_guard,
+    config_to_entry,
+    credential_presence,
 )
 from pulsara_agent.plugins.contracts import (
     AlreadyPresentPluginInstallOutcome,
@@ -151,8 +156,7 @@ class LocalSessionController:
         self._by_host: dict[str, HostSessionHandle] = {}
         self._resumes: dict[str, asyncio.Task[HostSessionHandle]] = {}
         self._lock = asyncio.Lock()
-        self._capability_mutation_lock = asyncio.Lock()
-        self._workspace_capability_revisions: dict[Path, int] = {}
+        self._capability_mutation_lock = core.mcp_management.lane
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
 
@@ -282,6 +286,8 @@ class LocalSessionController:
         session_id: str,
         *,
         source_path: str,
+        name: str | None = None,
+        description: str | None = None,
     ) -> dict[str, object]:
         source = Path(source_path.strip()).expanduser()
         if not source_path.strip() or not source.is_absolute():
@@ -289,20 +295,24 @@ class LocalSessionController:
         handle = await self.resume_session(session_id)
         workspace_root = handle.session.workspace.workspace_root
         async with self._capability_mutation_lock:
-            outcome = await asyncio.to_thread(
-                LocalSkillManagementService().install_loose_local_skill,
-                InstallLooseLocalSkillRequest(
-                    source_path=source,
-                    scope=LocalSkillInstallScope.WORKSPACE,
-                    workspace_root=workspace_root,
-                ),
+            outcome = await _settle_capability_io(
+                asyncio.to_thread(
+                    LocalSkillManagementService().install_loose_local_skill,
+                    InstallLooseLocalSkillRequest(
+                        source_path=source,
+                        scope=LocalSkillInstallScope.WORKSPACE,
+                        workspace_root=workspace_root,
+                        name=name,
+                        description=description,
+                    ),
+                )
             )
-            pending = (
-                await self._mark_workspace_capability_refresh(workspace_root)
-                if outcome.disposition.value == "INSTALLED"
-                else 0
-            )
-            capabilities = await self._session_capability_payload(handle)
+        pending = (
+            await self._mark_capability_refresh(workspace_root)
+            if outcome.disposition.value == "INSTALLED"
+            else 0
+        )
+        capabilities = await self._session_capability_payload(handle)
         return {
             "installation": _skill_install_payload(outcome),
             "adoption": _workspace_adoption_payload(pending),
@@ -329,20 +339,41 @@ class LocalSessionController:
                 enabled=enabled,
                 config_path=workspace_skill_config_path(workspace_root),
             )
-            pending = await self._mark_workspace_capability_refresh(workspace_root)
+            pending = await self._mark_capability_refresh(workspace_root)
             capabilities = await self._session_capability_payload(handle)
         return {
             "operation": {
                 "status": "ENABLED" if enabled else "DISABLED",
                 "success": True,
                 "message": (
-                    "项目技能已开启，将从下一次发送开始使用。"
+                    "项目技能已开启，将在会话的安全时机采用。"
                     if enabled
-                    else "项目技能已关闭，将从下一次发送开始停用。"
+                    else "项目技能已关闭，将在会话的安全时机停用。"
                 ),
             },
             "adoption": _workspace_adoption_payload(pending),
             "capabilities": capabilities,
+        }
+
+    async def remove_session_skill(self, session_id, *, skill_path, expected):
+        handle = await self.resume_session(session_id)
+        workspace_root = handle.session.workspace.workspace_root
+        async with self._capability_mutation_lock:
+            outcome = await _settle_capability_io(asyncio.to_thread(
+                LocalSkillManagementService().remove_loose_local_skill,
+                skill_path=Path(skill_path), scope=LocalSkillInstallScope.WORKSPACE,
+                expected=expected, workspace_root=workspace_root,
+            ))
+        changed = outcome.disposition in {
+            LocalSkillRemovalDisposition.REMOVED, LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
+        }
+        pending = await self._mark_capability_refresh(workspace_root) if changed else 0
+        return {
+            "operation": {"status": outcome.disposition.value, "success": changed,
+                          "message": "项目技能安装副本已删除。" if changed else "技能未删除，请刷新后重新确认。",
+                          "cleanup_attention": outcome.disposition is LocalSkillRemovalDisposition.CLEANUP_ATTENTION},
+            "adoption": _workspace_adoption_payload(pending),
+            "capabilities": await self._session_capability_payload(handle),
         }
 
     async def create_session_mcp_server(
@@ -350,67 +381,33 @@ class LocalSessionController:
         session_id: str,
         *,
         server_id: str,
-        display_name: str,
-        transport: str,
-        endpoint: str | None,
-        command: str | None,
-        args: list[str],
-        available_to_subagents: bool,
+        config: dict[str, object],
+        secret_changes: tuple[McpSecretMutation, ...] = (),
     ) -> dict[str, object]:
         handle = await self.resume_session(session_id)
         workspace_root = handle.session.workspace.workspace_root
-        entry = _new_mcp_entry(
-            server_id=server_id,
-            display_name=display_name,
-            transport=transport,
-            endpoint=endpoint,
-            command=command,
-            args=args,
-            available_to_subagents=available_to_subagents,
+        managed_server_ids = tuple(
+            item.server_id
+            for item in handle.session.inspect_capability_catalog().mcp_configured_servers
+            if item.source_kind == "MANAGED_PACKAGE"
         )
-        async with self._capability_mutation_lock:
-            managed_server_ids = tuple(
-                item.server_id
-                for item in handle.session.inspect_capability_catalog().mcp_configured_servers
-                if item.source_kind == "MANAGED_PACKAGE"
-            )
-            await asyncio.to_thread(
-                validate_workspace_mcp_server_addition_capacity,
-                workspace_root=workspace_root,
-                server_id=server_id.strip(),
-                managed_server_ids=managed_server_ids,
-            )
-            changed = False
-            try:
-                written = await asyncio.to_thread(
-                    create_workspace_mcp_server_config,
-                    workspace_root=workspace_root,
-                    server_id=server_id.strip(),
-                    entry=entry,
-                )
-                changed = True
-                if written.config is None:
-                    raise RuntimeError("created MCP config is unavailable")
-                await asyncio.to_thread(
-                    approve_workspace_mcp_server_config,
-                    workspace_root,
-                    written.config,
-                )
-            finally:
-                if changed:
-                    pending = await self._mark_workspace_capability_refresh(
-                        workspace_root
-                    )
-            capabilities = await self._session_capability_payload(handle)
-        return {
-            "operation": {
-                "status": "ADDED",
-                "success": True,
-                "message": "项目 MCP 已添加，将从下一次发送开始连接。",
-            },
-            "adoption": _workspace_adoption_payload(pending),
-            "capabilities": capabilities,
-        }
+        outcome = await self.core.mcp_management.create(
+            LocalMcpTarget(server_id.strip(), workspace_root),
+            config,
+            secrets=secret_changes,
+            managed_server_ids=managed_server_ids,
+        )
+        return await self._workspace_mcp_settlement(handle, outcome, "ADDED")
+
+    async def update_session_mcp_server(self, session_id, *, server_id, config, expected_identity,
+                                        secret_changes=(), retain_credentials_confirmed=False):
+        handle = await self.resume_session(session_id)
+        result = await self.core.mcp_management.update(
+            LocalMcpTarget(server_id, handle.session.workspace.workspace_root), config,
+            expected=expected_identity, secrets=secret_changes,
+            retain_credentials_confirmed=retain_credentials_confirmed,
+        )
+        return await self._workspace_mcp_settlement(handle, result, "UPDATED")
 
     async def set_session_mcp_enabled(
         self,
@@ -421,51 +418,18 @@ class LocalSessionController:
         expected_config_identity: str,
     ) -> dict[str, object]:
         handle = await self.resume_session(session_id)
-        workspace_root = handle.session.workspace.workspace_root
-        async with self._capability_mutation_lock:
-            changed = False
-            try:
-                written = await asyncio.to_thread(
-                    set_workspace_mcp_server_enabled,
-                    workspace_root=workspace_root,
-                    server_id=server_id,
-                    enabled=enabled,
-                    expected_approval_identity=expected_config_identity,
-                )
-                changed = True
-                if enabled:
-                    if written.config is None:
-                        raise RuntimeError("enabled MCP config is unavailable")
-                    await asyncio.to_thread(
-                        approve_workspace_mcp_server_config,
-                        workspace_root,
-                        written.config,
-                    )
-                else:
-                    await asyncio.to_thread(
-                        remove_workspace_mcp_server_approval,
-                        workspace_root,
-                        server_id,
-                    )
-            finally:
-                if changed:
-                    pending = await self._mark_workspace_capability_refresh(
-                        workspace_root
-                    )
-            capabilities = await self._session_capability_payload(handle)
-        return {
-            "operation": {
-                "status": "ENABLED" if enabled else "DISABLED",
-                "success": True,
-                "message": (
-                    "项目 MCP 已开启，将从下一次发送开始连接。"
-                    if enabled
-                    else "项目 MCP 已关闭，将从下一次发送开始停用。"
-                ),
-            },
-            "adoption": _workspace_adoption_payload(pending),
-            "capabilities": capabilities,
-        }
+        target = LocalMcpTarget(server_id, handle.session.workspace.workspace_root)
+        current = self.core.mcp_management.inspect(target)
+        if current is None:
+            raise KeyError(server_id)
+        outcome = await self.core.mcp_management.update(
+            target,
+            {**config_to_entry(current), "enabled": enabled},
+            expected=expected_config_identity,
+        )
+        return await self._workspace_mcp_settlement(
+            handle, outcome, "ENABLED" if enabled else "DISABLED"
+        )
 
     async def remove_session_mcp_server(
         self,
@@ -475,36 +439,25 @@ class LocalSessionController:
         expected_config_identity: str,
     ) -> dict[str, object]:
         handle = await self.resume_session(session_id)
-        workspace_root = handle.session.workspace.workspace_root
-        async with self._capability_mutation_lock:
-            changed = False
-            try:
-                await asyncio.to_thread(
-                    remove_workspace_mcp_server_config,
-                    workspace_root=workspace_root,
-                    server_id=server_id,
-                    expected_approval_identity=expected_config_identity,
-                )
-                changed = True
-                await asyncio.to_thread(
-                    remove_workspace_mcp_server_approval,
-                    workspace_root,
-                    server_id,
-                )
-            finally:
-                if changed:
-                    pending = await self._mark_workspace_capability_refresh(
-                        workspace_root
-                    )
-            capabilities = await self._session_capability_payload(handle)
+        target = LocalMcpTarget(server_id, handle.session.workspace.workspace_root)
+        outcome = await self.core.mcp_management.remove(
+            target, expected=expected_config_identity
+        )
+        return await self._workspace_mcp_settlement(handle, outcome, "REMOVED")
+
+    async def _workspace_mcp_settlement(self, handle, outcome, status):
+        pending = await self._mark_capability_refresh(
+            handle.session.workspace.workspace_root
+        )
         return {
             "operation": {
-                "status": "REMOVED",
-                "success": True,
-                "message": "项目 MCP 已移除，将从下一次发送开始生效。",
+                "status": status,
+                "success": outcome.applied,
+                "message": "项目 MCP 已更新，后续调用将使用新配置。",
+                "cleanup_attention": outcome.cleanup_attention,
             },
             "adoption": _workspace_adoption_payload(pending),
-            "capabilities": capabilities,
+            "capabilities": await self._session_capability_payload(handle),
         }
 
     async def inspect_user_capabilities(
@@ -514,7 +467,7 @@ class LocalSessionController:
 
         workspace_root = resolve_workspace(self.workspace_input).workspace_root
         skills_task = asyncio.to_thread(_inspect_user_skills, workspace_root)
-        mcp_task = asyncio.to_thread(load_mcp_server_configs)
+        mcp_task = asyncio.to_thread(self.core.mcp_management.load_configs)
         plugins_task = self.core.inspect_user_plugins()
         skills, mcp_configs, plugins = await asyncio.gather(
             skills_task, mcp_task, plugins_task
@@ -530,6 +483,7 @@ class LocalSessionController:
                 skills=skills,
                 mcp_configs=mcp_configs,
                 plugins=plugins,
+                secret_resolver=self.core.mcp_management.settings.read().mcp_secret,
                 live_inspection=live_inspection,
             )
         finally:
@@ -541,34 +495,74 @@ class LocalSessionController:
     ) -> dict[str, object]:
         """Adopt current user sources in every live Session, then inspect them."""
 
-        async with self._capability_mutation_lock:
-            updated, attention = await self._reload_live_capabilities()
-            payload = await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            )
+        updated, attention = await self._reload_live_capabilities()
+        payload = await self.inspect_user_capabilities(
+            active_session_id=active_session_id
+        )
         payload["adoption"] = {
             "updated_sessions": updated,
             "attention_sessions": attention,
         }
         return payload
 
+    async def preview_skill_import(self, *, source_path: str) -> dict[str, object]:
+        source = _absolute_local_source(source_path, "Skill")
+
+        def inspect():
+            service = LocalSkillManagementService()
+            items = []
+            for path in enumerate_skill_import_sources(source):
+                result = service.validate_local_skill_source(
+                    ValidateLocalSkillSourceRequest(path)
+                )
+                items.append(
+                    {
+                        "source_path": str(path),
+                        "name": result.parsed.name if result.parsed else path.name,
+                        "description": result.parsed.description
+                        if result.parsed
+                        else "",
+                        "valid": result.parsed is not None,
+                        "details": [item.message for item in result.diagnostics]
+                        + (
+                            ["暂时无法读取这个技能目录。"]
+                            if result.unavailable_reason
+                            else []
+                        ),
+                    }
+                )
+            return {"items": items}
+
+        return await asyncio.to_thread(inspect)
+
     async def install_user_skill(
-        self, *, source_path: str, active_session_id: str | None = None
+        self,
+        *,
+        source_path: str,
+        active_session_id: str | None = None,
+        name: str | None = None,
+        description: str | None = None,
     ) -> dict[str, object]:
         source = _absolute_local_source(source_path, "Skill")
         async with self._capability_mutation_lock:
-            outcome = await asyncio.to_thread(
-                LocalSkillManagementService().install_loose_local_skill,
-                InstallLooseLocalSkillRequest(
-                    source_path=source,
-                    scope=LocalSkillInstallScope.USER,
-                ),
+            outcome = await _settle_capability_io(
+                asyncio.to_thread(
+                    LocalSkillManagementService().install_loose_local_skill,
+                    InstallLooseLocalSkillRequest(
+                        source_path=source,
+                        scope=LocalSkillInstallScope.USER,
+                        name=name,
+                        description=description,
+                    ),
+                )
             )
-            capabilities = await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            )
+        pending = await self._mark_capability_refresh() if outcome.disposition.value == "INSTALLED" else 0
+        capabilities = await self.inspect_user_capabilities(
+            active_session_id=active_session_id
+        )
         return {
             "operation": _skill_install_payload(outcome),
+            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
             "capabilities": capabilities,
         }
 
@@ -606,7 +600,9 @@ class LocalSessionController:
             capabilities = await self.inspect_user_capabilities(
                 active_session_id=active_session_id
             )
+        pending = await self._mark_capability_refresh()
         return {
+            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
             "operation": {
                 "status": "ENABLED" if enabled else "DISABLED",
                 "success": True,
@@ -615,114 +611,234 @@ class LocalSessionController:
             "capabilities": capabilities,
         }
 
+    async def remove_user_skill(
+        self,
+        *,
+        skill_path: str,
+        expected: LocalSkillRemovalIdentity,
+        active_session_id: str | None = None,
+    ) -> dict[str, object]:
+        path = Path(skill_path).expanduser()
+        service = LocalSkillManagementService()
+        async with self._capability_mutation_lock:
+            work = asyncio.create_task(
+                asyncio.to_thread(
+                    service.remove_loose_local_skill,
+                    skill_path=path,
+                    scope=LocalSkillInstallScope.USER,
+                    expected=expected,
+                )
+            )
+            while not work.done():
+                try:
+                    await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            outcome = work.result()
+        changed = outcome.disposition in {
+            LocalSkillRemovalDisposition.REMOVED,
+            LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
+        }
+        pending = await self._mark_capability_refresh() if changed else 0
+        return {
+            "operation": {
+                "status": outcome.disposition.value,
+                "success": changed,
+                "message": {
+                    LocalSkillRemovalDisposition.REMOVED: "技能安装副本已删除，原始来源未改变。",
+                    LocalSkillRemovalDisposition.NOT_FOUND: "该技能已经不存在。",
+                    LocalSkillRemovalDisposition.STALE: "技能目录已改变，请刷新后重新确认。",
+                    LocalSkillRemovalDisposition.CLEANUP_ATTENTION: "技能已从列表移除，但部分本地清理未完成。",
+                }[outcome.disposition],
+            },
+            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
+            "capabilities": await self.inspect_user_capabilities(
+                active_session_id=active_session_id
+            ),
+        }
+
     async def create_user_mcp_server(
         self,
         *,
         server_id: str,
-        display_name: str,
-        transport: str,
-        endpoint: str | None,
-        command: str | None,
-        args: list[str],
-        available_to_subagents: bool,
+        config: dict[str, object],
+        secret_changes: tuple[McpSecretMutation, ...] = (),
         active_session_id: str | None = None,
     ) -> dict[str, object]:
-        server_id = server_id.strip()
-        display_name = display_name.strip() or server_id
-        if transport == "http":
-            entry: dict[str, object] = {
-                "display_name": display_name,
-                "enabled": True,
-                "required": False,
-                "transport": "streamable_http",
-                "url": (endpoint or "").strip(),
-                "scope_policy": (
-                    "ROOT_AND_SUBAGENTS" if available_to_subagents else "ROOT_ONLY"
-                ),
-            }
-        elif transport == "stdio":
-            entry = {
-                "display_name": display_name,
-                "enabled": True,
-                "required": False,
-                "transport": "stdio",
-                "command": (command or "").strip(),
-                "args": args,
-                "scope_policy": (
-                    "ROOT_AND_SUBAGENTS" if available_to_subagents else "ROOT_ONLY"
-                ),
-            }
-        else:
-            raise ValueError("MCP transport is invalid")
-        async with self._capability_mutation_lock:
-            existing = await asyncio.to_thread(load_mcp_server_configs)
-            if any(item.server_id == server_id for item in existing):
-                raise ValueError("MCP server id already exists")
-            await asyncio.to_thread(
-                write_mcp_server_config,
-                server_id=server_id,
-                entry=entry,
-            )
-            updated, attention = await self._reload_live_capabilities()
-            capabilities = await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            )
-        return {
-            "operation": {
-                "status": "ADDED",
-                "success": True,
-                "message": "MCP 服务已添加，并已用于当前打开的会话。",
-            },
-            "adoption": {
-                "updated_sessions": updated,
-                "attention_sessions": attention,
-            },
-            "capabilities": capabilities,
-        }
+        outcome = await self.core.mcp_management.create(
+            LocalMcpTarget(server_id),
+            config,
+            secret_changes,
+        )
+        return await self._user_mcp_settlement(outcome, "ADDED", active_session_id)
 
-    async def set_user_mcp_enabled(
+    async def preview_mcp_import(
+        self, *, content: str, shape: str, server_id: str | None
+    ):
+        drafts = await asyncio.to_thread(
+            read_mcp_import, content, shape=shape, server_id=server_id
+        )
+        return {"items": [draft.preview() for draft in drafts]}
+
+    async def import_mcp(
+        self,
+        *,
+        content: str,
+        shape: str,
+        server_id: str | None,
+        selected_server_id: str,
+        classifications: dict[str, str],
+        values: dict[str, str],
+        transport: str | None,
+        allow_http_localhost: bool = False,
+        active_session_id: str | None = None,
+        session_id: str | None = None,
+    ):
+        drafts = await asyncio.to_thread(
+            read_mcp_import, content, shape=shape, server_id=server_id
+        )
+        selected = [draft for draft in drafts if draft.server_id == selected_server_id]
+        if len(selected) != 1:
+            raise ValueError("请选择一个明确的 MCP 服务。")
+        handle = await self.resume_session(session_id) if session_id is not None else None
+        target = LocalMcpTarget(selected_server_id, handle.session.workspace.workspace_root if handle else None)
+        entry, secrets = materialize_mcp_import(
+            selected[0],
+            target.owner,
+            classifications=classifications,
+            values=values,
+            transport=transport,
+            allow_http_localhost=allow_http_localhost,
+        )
+        managed_ids = tuple(item.server_id for item in handle.session.inspect_capability_catalog().mcp_configured_servers
+                            if item.source_kind == "MANAGED_PACKAGE") if handle else ()
+        outcome = await self.core.mcp_management.create(target, entry, secrets, managed_server_ids=managed_ids)
+        if handle:
+            return await self._workspace_mcp_settlement(handle, outcome, "ADDED")
+        return await self._user_mcp_settlement(outcome, "ADDED", active_session_id)
+
+    async def update_user_mcp_server(
         self,
         *,
         server_id: str,
-        enabled: bool,
+        config: dict[str, object],
+        expected: str,
+        secret_changes: tuple[McpSecretMutation, ...] = (),
         active_session_id: str | None = None,
+        retain_credentials_confirmed: bool = False,
     ) -> dict[str, object]:
-        async with self._capability_mutation_lock:
-            await asyncio.to_thread(
-                set_mcp_server_enabled,
-                server_id=server_id,
-                enabled=enabled,
-            )
-            updated, attention = await self._reload_live_capabilities()
-            capabilities = await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            )
+        outcome = await self.core.mcp_management.update(
+            LocalMcpTarget(server_id),
+            config,
+            expected=expected,
+            secrets=secret_changes,
+            retain_credentials_confirmed=retain_credentials_confirmed,
+        )
+        return await self._user_mcp_settlement(outcome, "UPDATED", active_session_id)
+
+    async def test_mcp_server(
+        self,
+        *,
+        server_id: str,
+        config: dict[str, object],
+        secret_changes: tuple[McpSecretMutation, ...] = (),
+        retain_credentials_confirmed: bool = False,
+        session_id: str | None = None,
+    ) -> dict[str, object]:
+        handle = await self.resume_session(session_id) if session_id is not None else None
+        workspace_root = handle.session.workspace.workspace_root if handle else resolve_workspace(self.workspace_input).workspace_root
+        result = await self.core.mcp_management.test(
+            LocalMcpTarget(server_id, workspace_root if handle else None),
+            config,
+            workspace_root=workspace_root,
+            secrets=secret_changes,
+            retain_credentials_confirmed=retain_credentials_confirmed,
+        )
         return {
-            "operation": {
-                "status": "ENABLED" if enabled else "DISABLED",
-                "success": True,
-                "message": "MCP 服务已开启。" if enabled else "MCP 服务已关闭。",
-            },
-            "adoption": {
-                "updated_sessions": updated,
-                "attention_sessions": attention,
-            },
-            "capabilities": capabilities,
+            "status": result.status,
+            "tools": result.tools,
+            "resources": result.resources,
+            "resource_templates": result.resource_templates,
+            "prompts": result.prompts,
         }
 
+    async def remove_user_mcp_server(
+        self,
+        *,
+        server_id: str,
+        expected: str,
+        active_session_id: str | None = None,
+    ) -> dict[str, object]:
+        outcome = await self.core.mcp_management.remove(
+            LocalMcpTarget(server_id), expected=expected
+        )
+        return await self._user_mcp_settlement(outcome, "REMOVED", active_session_id)
+
+    async def _user_mcp_settlement(self, outcome, status, active_session_id):
+        # No canonical mutation lane is held while physical consumers adopt/drain.
+        pending = await self._mark_capability_refresh() if outcome.applied else 0
+        return {
+            "operation": {
+                "status": status,
+                "success": outcome.applied,
+                "message": "MCP 配置已保存。"
+                if status != "REMOVED"
+                else "MCP 服务已移除。",
+                "cleanup_attention": outcome.cleanup_attention,
+            },
+            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
+            "capabilities": await self.inspect_user_capabilities(
+                active_session_id=active_session_id
+            ),
+        }
+
+    async def authorize_mcp(self, server_id: str, *, session_id: str | None = None) -> dict[str, object]:
+        handle = await self.resume_session(session_id) if session_id is not None else None
+        target = LocalMcpTarget(server_id, handle.session.workspace.workspace_root if handle else None)
+        flow = await self.core.mcp_management.authorize(target)
+        return {"state": flow.state, "error": flow.error}
+
+    async def mcp_authorization(
+        self, server_id: str, *, action: str, session_id: str | None = None,
+    ) -> dict[str, object]:
+        handle = await self.resume_session(session_id) if session_id is not None else None
+        owner = LocalMcpTarget(server_id, handle.session.workspace.workspace_root if handle else None).owner
+        manager = self.core.mcp_management.oauth
+        if action == "cancel":
+            await manager.cancel(owner)
+        elif action == "logout":
+            await manager.logout(owner)
+        elif action != "status":
+            raise ValueError("invalid MCP authorization action")
+        return manager.login_state(owner)
+
     async def install_user_plugin(
-        self, *, source_path: str, active_session_id: str | None = None
+        self, *, source_path: str, active_session_id: str | None = None,
+        source_format="native", classifications=(), public_values=(),
     ) -> dict[str, object]:
         source = _absolute_local_source(source_path, "Plugin")
-        async with self._capability_mutation_lock:
-            outcome = await self.core.install_user_plugin(source)
-            capabilities = await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            )
+        outcome = await self.core.install_user_plugin(source, source_format=source_format,
+            import_classifications=classifications, import_public_values=public_values)
+        capabilities = await self.inspect_user_capabilities(
+            active_session_id=active_session_id
+        )
         return {
             "operation": _plugin_install_operation(outcome),
             "capabilities": capabilities,
         }
+
+    async def preview_plugin_import(self, *, source_path):
+        from pulsara_agent.plugins.source_import import preview_plugin_imports
+        from pulsara_agent.plugins.contracts import NeverCancelPluginOperation
+        source = _absolute_local_source(source_path, "Plugin")
+        return await asyncio.to_thread(
+            preview_plugin_imports, source,
+            deadline_monotonic=self.core._canonical_deadline(),
+            cancellation=NeverCancelPluginOperation(),
+            credential_boundary=self.core._credential_boundary,
+        )
 
     async def set_user_plugin_enabled(
         self,
@@ -730,6 +846,7 @@ class LocalSessionController:
         plugin_id: str,
         package_install_id: str,
         enabled: bool,
+        connection_review,
         active_session_id: str | None = None,
     ) -> dict[str, object]:
         async with self._capability_mutation_lock:
@@ -737,37 +854,73 @@ class LocalSessionController:
                 plugin_id=plugin_id,
                 package_install_id=package_install_id,
                 enabled=enabled,
+                connection_review=connection_review,
             )
-            updated, attention = await self._reload_live_capabilities()
-            capabilities = await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            )
+        pending = await self._mark_capability_refresh() if isinstance(outcome, SettledPluginEnablementOutcome) else 0
+        capabilities = await self.inspect_user_capabilities(
+            active_session_id=active_session_id
+        )
         return {
             "operation": _plugin_enablement_operation(outcome),
             "adoption": {
-                "updated_sessions": updated,
-                "attention_sessions": attention,
+                "updated_sessions": 0,
+                "pending_sessions": pending,
+                "attention_sessions": 0,
             },
             "capabilities": capabilities,
         }
 
     async def remove_user_plugin(
-        self, *, plugin_id: str, active_session_id: str | None = None
+        self, *, plugin_id: str, package_install_id: str, active_session_id: str | None = None
     ) -> dict[str, object]:
-        async with self._capability_mutation_lock:
-            outcome = await self.core.remove_user_plugin(plugin_id)
-            updated, attention = await self._reload_live_capabilities()
-            capabilities = await self.inspect_user_capabilities(
-                active_session_id=active_session_id
-            )
+        outcome = await self.core.remove_user_plugin(plugin_id, package_install_id)
+        pending = await self._mark_capability_refresh() if isinstance(outcome, RemovedPluginOutcome) else 0
+        capabilities = await self.inspect_user_capabilities(
+            active_session_id=active_session_id
+        )
         return {
             "operation": _plugin_removal_operation(outcome),
             "adoption": {
-                "updated_sessions": updated,
-                "attention_sessions": attention,
+                "updated_sessions": 0,
+                "pending_sessions": pending,
+                "attention_sessions": 0,
             },
             "capabilities": capabilities,
         }
+
+    async def replace_user_plugin_connection(
+        self, *, plugin_id, server_id, package_install_id, expected_overlay,
+        overlay, secret_changes, retain_credentials_confirmed=False,
+        active_session_id=None,
+    ):
+        from pulsara_agent.plugins.connection_management import ReplacePluginMcpConnectionRequest
+        from pulsara_agent.plugins.contracts import PluginInstanceIdentity
+
+        result = await self.core._plugin_management().replace_plugin_mcp_connection_overlay(
+            ReplacePluginMcpConnectionRequest(
+                PluginInstanceIdentity(PluginScopeKind.USER, plugin_id), server_id,
+                package_install_id, expected_overlay, overlay, self.core._canonical_deadline(),
+                secret_changes, retain_credentials_confirmed,
+            ), connections=self.core.mcp_management,
+        )
+        pending = await self._mark_capability_refresh() if result.applied else 0
+        return {
+            "operation": {"status": "UPDATED", "success": result.applied,
+                          "cleanup_attention": result.cleanup_attention, "message": "插件连接已保存。"},
+            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
+            "capabilities": await self.inspect_user_capabilities(active_session_id=active_session_id),
+        }
+
+    async def plugin_mcp_authorization(self, *, plugin_id, server_id, package_install_id, action):
+        from pulsara_agent.plugins.contracts import PluginInstanceIdentity
+
+        result = await self.core._plugin_management().authorize_plugin_mcp(
+            identity=PluginInstanceIdentity(PluginScopeKind.USER, plugin_id),
+            local_server_id=server_id, expected_package_install_id=package_install_id,
+            deadline_monotonic=self.core._canonical_deadline(),
+            connections=self.core.mcp_management, action=action,
+        )
+        return {"state": result.state, "error": result.error} if action == "login" else result
 
     async def open_capability_root(self, root: str) -> dict[str, object]:
         if root == "agents":
@@ -805,36 +958,9 @@ class LocalSessionController:
         )
         return len(results) - attention, attention
 
-    async def _mark_workspace_capability_refresh(self, workspace_root: Path) -> int:
-        """Mark every live Session for this directory without waking a turn."""
-
-        canonical_root = workspace_root.resolve(strict=False)
-        async with self._lock:
-            self._workspace_capability_revisions[canonical_root] = (
-                self._workspace_capability_revisions.get(canonical_root, 0) + 1
-            )
-            handles = tuple(
-                handle
-                for handle in self._by_session.values()
-                if handle.session.workspace.workspace_root.resolve(strict=False)
-                == canonical_root
-            )
-        if handles:
-            async def mark_if_still_open(handle: HostSessionHandle) -> bool:
-                try:
-                    await handle.session.request_project_capability_refresh()
-                except RuntimeError:
-                    async with self._lock:
-                        if self._by_session.get(handle.session_id) is not handle:
-                            return False
-                    raise
-                return True
-
-            marked = await asyncio.gather(
-                *(mark_if_still_open(handle) for handle in handles)
-            )
-            return sum(marked)
-        return 0
+    async def _mark_capability_refresh(self, workspace_root: Path | None = None) -> int:
+        """Web and model mutations share the Host's adoption owner."""
+        return await self.core.mark_capability_change(workspace_root)
 
     async def _session_capability_payload(
         self, handle: HostSessionHandle
@@ -842,7 +968,7 @@ class LocalSessionController:
         workspace_root = handle.session.workspace.workspace_root
         workspace_skills, workspace_mcp = await asyncio.gather(
             asyncio.to_thread(_inspect_workspace_skills, workspace_root),
-            asyncio.to_thread(load_workspace_mcp_server_configs, workspace_root),
+            asyncio.to_thread(self.core.mcp_management.inspect_scope, workspace_root),
         )
         workspace_mcp_approvals = await asyncio.to_thread(
             workspace_mcp_server_approvals, workspace_root
@@ -861,8 +987,8 @@ class LocalSessionController:
                 handle.session.workspace.trust_workspace_mcp_config
             ),
             workspace_mcp_approvals=workspace_mcp_approvals,
-            refresh_pending=handle.session.project_capability_refresh_pending,
-            refresh_attention=handle.session.project_capability_refresh_attention,
+            refresh_pending=handle.session.capability_refresh_pending,
+            refresh_attention=handle.session.capability_refresh_attention,
             inspection=handle.session.inspect_capability_catalog(),
         )
 
@@ -879,11 +1005,6 @@ class LocalSessionController:
             workspace_kind=workspace_kind,
             workspace_path=workspace_path,
         )
-        canonical_root = workspace_input.workspace_root.resolve(strict=False)
-        async with self._lock:
-            baseline_capability_revision = self._workspace_capability_revisions.get(
-                canonical_root, 0
-            )
         session = await self.core.open_session(
             workspace_input,
             permission_policy=self.permission_policy,
@@ -891,17 +1012,10 @@ class LocalSessionController:
         )
         handle = HostSessionHandle(session, workspace_input)
         try:
-            refresh_after_publish = False
             async with self._lock:
                 if self._closing:
                     raise KernelHostCoreClosing("Local Web application is draining")
                 self._publish_locked(handle)
-                refresh_after_publish = (
-                    self._workspace_capability_revisions.get(canonical_root, 0)
-                    > baseline_capability_revision
-                )
-            if refresh_after_publish:
-                await session.request_project_capability_refresh()
             return handle
         except BaseException:
             await self.core.close_session(
@@ -948,11 +1062,6 @@ class LocalSessionController:
                     self.workspace_input.trust_workspace_mcp_config
                 ),
             )
-            canonical_root = Path(workspace_input.workspace_root).resolve(strict=False)
-            async with self._lock:
-                baseline_capability_revision = self._workspace_capability_revisions.get(
-                    canonical_root, 0
-                )
             session = await self.core.resume_session(
                 session_id,
                 workspace_input=workspace_input,
@@ -962,24 +1071,17 @@ class LocalSessionController:
             handle = HostSessionHandle(session, workspace_input)
             try:
                 raced: HostSessionHandle | None = None
-                refresh_after_publish = False
                 async with self._lock:
                     if self._closing:
                         raise KernelHostCoreClosing("Local Web application is draining")
                     raced = self._by_session.get(session_id)
                     if raced is None:
                         self._publish_locked(handle)
-                        refresh_after_publish = (
-                            self._workspace_capability_revisions.get(canonical_root, 0)
-                            > baseline_capability_revision
-                        )
                 if raced is not None:
                     await self.core.close_session(
                         session.host_session_id, close_conversation=False
                     )
                     return raced
-                if refresh_after_publish:
-                    await session.request_project_capability_refresh()
                 return handle
             except BaseException:
                 await self.core.close_session(
@@ -1157,49 +1259,8 @@ def _workspace_adoption_payload(pending_sessions: int) -> dict[str, object]:
     return {
         "scope": "workspace",
         "pending_sessions": pending_sessions,
-        "when": "next_user_turn",
+        "when": "next_provider_dispatch",
     }
-
-
-def _new_mcp_entry(
-    *,
-    server_id: str,
-    display_name: str,
-    transport: str,
-    endpoint: str | None,
-    command: str | None,
-    args: list[str],
-    available_to_subagents: bool,
-) -> dict[str, object]:
-    normalized_id = server_id.strip()
-    if not normalized_id:
-        raise ValueError("MCP server id is required")
-    entry: dict[str, object] = {
-        "display_name": display_name.strip() or normalized_id,
-        "enabled": True,
-        "required": False,
-        "scope_policy": (
-            "ROOT_AND_SUBAGENTS" if available_to_subagents else "ROOT_ONLY"
-        ),
-    }
-    if transport == "http":
-        entry.update(
-            {
-                "transport": "streamable_http",
-                "url": (endpoint or "").strip(),
-            }
-        )
-    elif transport == "stdio":
-        entry.update(
-            {
-                "transport": "stdio",
-                "command": (command or "").strip(),
-                "args": args,
-            }
-        )
-    else:
-        raise ValueError("MCP transport is invalid")
-    return entry
 
 
 def _absolute_local_source(value: str, label: str) -> Path:
@@ -1207,6 +1268,28 @@ def _absolute_local_source(value: str, label: str) -> Path:
     if not value.strip() or not source.is_absolute():
         raise ValueError(f"{label} source path must be absolute")
     return source
+
+
+def _skill_removal_identity(
+    path: Path, scope: LocalSkillInstallScope, workspace_root: Path | None = None
+):
+    try:
+        identity = LocalSkillManagementService().inspect_loose_skill_removal(
+            skill_path=path,
+            scope=scope,
+            workspace_root=workspace_root,
+        )
+    except (ValueError, OSError):
+        return None
+    return {
+        name: str(getattr(identity, name))
+        for name in (
+            "root_device",
+            "root_inode",
+            "directory_device",
+            "directory_inode",
+        )
+    }
 
 
 def _inspect_user_skills(workspace_root: Path) -> dict[str, object]:
@@ -1257,6 +1340,9 @@ def _inspect_user_skills(workspace_root: Path) -> dict[str, object]:
                 "description": item.description,
                 "location": item.location,
                 "path": str(item.path),
+                "removal_identity": _skill_removal_identity(
+                    item.path, LocalSkillInstallScope.USER
+                ),
                 "enabled": config.enabled_for(item.path),
                 "root": (
                     "pulsara"
@@ -1346,6 +1432,7 @@ def _inspect_workspace_skills(workspace_root: Path) -> dict[str, object]:
         items.append(
             {
                 "id": f"{root}:{item.name}",
+                "removal_identity": _skill_removal_identity(item.path, LocalSkillInstallScope.WORKSPACE, workspace_root),
                 "name": item.name,
                 "description": item.description,
                 "location": item.location,
@@ -1402,6 +1489,7 @@ def _user_capability_payload(
     skills: dict[str, object],
     mcp_configs: tuple[McpServerConfig, ...],
     plugins: object,
+    secret_resolver,
     live_inspection: KernelCapabilityCatalogInspection | None,
 ) -> dict[str, object]:
     live_catalog = (
@@ -1448,7 +1536,7 @@ def _user_capability_payload(
                 "kind": "stdio",
                 "summary": config.transport.command,
             }
-        elif isinstance(config.transport, StreamableHttpTransportConfig):
+        elif isinstance(config.transport, (StreamableHttpTransportConfig, LegacySseTransportConfig)):
             transport = {
                 "kind": "http",
                 "summary": config.transport.endpoint,
@@ -1458,6 +1546,9 @@ def _user_capability_payload(
         mcp_servers.append(
             {
                 "id": config.server_id,
+                "config": config_to_entry(config),
+                "current_identity": config_guard(config),
+                "credentials": credential_presence(config),
                 "name": config.display_name,
                 "enabled": config.enabled,
                 "status": status,
@@ -1491,14 +1582,15 @@ def _user_capability_payload(
         ],
         "skills": skills,
         "mcp": {
-            "config_path": str(DEFAULT_USER_MCP_CONFIG.expanduser()),
+            "config_path": str(default_user_mcp_config_path()),
             "servers": mcp_servers,
         },
-        "plugins": _user_plugins_payload(plugins),
+        "plugins": _user_plugins_payload(plugins, secret_resolver),
     }
 
 
-def _user_plugins_payload(inspection: object) -> dict[str, object]:
+def _user_plugins_payload(inspection: object, secret_resolver) -> dict[str, object]:
+    from pulsara_agent.plugins.mcp_connection import connection_review, review_to_dict
     if isinstance(inspection, PluginInspectionAbort):
         return {
             "status": "attention",
@@ -1532,6 +1624,9 @@ def _user_plugins_payload(inspection: object) -> dict[str, object]:
                 "mcp_count": len(item.summary.mcp.mcp_servers),
                 "effective_skill_names": list(item.effective_skill_names),
                 "effective_mcp_server_ids": list(item.effective_mcp_server_ids),
+                "mcp_connections": _plugin_connection_editors(item),
+                "connection_review": review_to_dict(connection_review(item.mcp_connection_overlays, secret_resolver,
+                    servers=item.summary.mcp.mcp_servers, identity=item.identity)),
                 "details": [_diagnostic_message(value) for value in item.diagnostics],
             }
         )
@@ -1540,6 +1635,22 @@ def _user_plugins_payload(inspection: object) -> dict[str, object]:
         "items": sorted(items, key=lambda item: str(item["name"])),
         "details": [_diagnostic_message(item) for item in inspection.diagnostics],
     }
+
+
+def _plugin_connection_editors(instance):
+    from pulsara_agent.plugins.mcp_connection import connection_editor_definition, overlay_to_dict, plugin_connection_owner
+    from dataclasses import asdict
+
+    result = []
+    for server in instance.summary.mcp.mcp_servers:
+        overlay = next((item for item in instance.mcp_connection_overlays if item.local_server_id == server.local_server_id), None)
+        defaults, effective = connection_editor_definition(server, overlay,
+            owner=plugin_connection_owner(instance.identity, server.local_server_id))
+        result.append({"server_id": server.local_server_id, "defaults": defaults, "config": effective,
+                       "connection_inputs": [asdict(value) for value in server.connection_inputs.inputs],
+                       "overlay": overlay_to_dict(overlay) if overlay is not None else None,
+                       "credential_owner": asdict(plugin_connection_owner(instance.identity, server.local_server_id))})
+    return result
 
 
 def _diagnostic_message(value: object) -> str:
@@ -1563,11 +1674,15 @@ def _plugin_install_operation(outcome: object) -> dict[str, object]:
             "status": outcome.disposition.value,
             "success": True,
             "message": (
-                "插件已经安装；开启后会用于当前打开的会话。"
+                "插件已安装；部分旧连接凭据清理需要检查。"
+                if installed and outcome.cleanup_attention
+                else "插件已经安装；开启后会在安全时机用于会话。"
                 if installed
                 else "这个插件已经安装。"
             ),
             "plugin_id": outcome.identity.plugin_id,
+            "cleanup_attention": installed and outcome.cleanup_attention,
+            "details": [_diagnostic_message(item) for item in outcome.diagnostics] if installed else [],
         }
     if isinstance(outcome, FailedPluginInstallOutcome):
         return {
@@ -1601,7 +1716,8 @@ def _plugin_removal_operation(outcome: object) -> dict[str, object]:
         return {
             "status": outcome.disposition.value,
             "success": True,
-            "message": "插件已移除。",
+            "message": "插件已移除；部分本机凭据清理需要检查。" if outcome.cleanup_attention else "插件已移除。",
+            "cleanup_attention": outcome.cleanup_attention,
         }
     if isinstance(outcome, FailedPluginRemovalOutcome):
         return {
@@ -1620,7 +1736,7 @@ def _mcp_transport_payload(config: McpServerConfig) -> dict[str, str]:
             "summary": config.transport.command,
             "detail": shlex.join((config.transport.command, *config.transport.args)),
         }
-    if isinstance(config.transport, StreamableHttpTransportConfig):
+    if isinstance(config.transport, (StreamableHttpTransportConfig, LegacySseTransportConfig)):
         return {
             "kind": "http",
             "summary": config.transport.endpoint,
@@ -1697,6 +1813,8 @@ def _capability_payload(
                 "source": "workspace",
                 "editable": True,
                 "config_identity": mcp_server_workspace_approval_identity(config),
+                "config": config_to_entry(config),
+                "credentials": credential_presence(config),
                 "enabled": enabled,
                 "configured_enabled": config.enabled,
                 "needs_approval": config.enabled and not entry_trusted,
@@ -1792,6 +1910,7 @@ def _capability_payload(
                     "path": str(path),
                     "source": "workspace",
                     "editable": True,
+                    "removal_identity": raw.get("removal_identity"),
                     "enabled": bool(raw.get("enabled", True)),
                     "effective": path in winner_paths,
                     "configured": str(raw.get("name", ""))
@@ -1840,11 +1959,12 @@ def _capability_payload(
         "session_id": session_id,
         "workspace_path": str(workspace_root),
         "workspace_kind": workspace_kind,
+        "credential_scope_key": LocalMcpTarget("draft", workspace_root).owner.scope_key,
         "adoption": {
             "scope": "workspace",
             "pending": refresh_pending,
             "attention": refresh_attention,
-            "when": "next_user_turn",
+            "when": "next_provider_dispatch",
         },
         "skills": {
             "status": (
@@ -1930,6 +2050,19 @@ def _skill_issue_payload(issue: object) -> dict[str, object]:
             "details": [str(item.path) for item in issue.candidates],
         }
     raise TypeError("Skill candidate issue is open")
+
+
+async def _settle_capability_io(operation):
+    """Keep the mutation lane until a non-cancellable filesystem worker settles."""
+    task = asyncio.create_task(operation)
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    return task.result()
 
 
 def _skill_install_payload(outcome: LocalSkillInstallOutcome) -> dict[str, object]:

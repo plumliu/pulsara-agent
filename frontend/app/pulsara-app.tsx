@@ -24,10 +24,12 @@ import {
   type RuntimeProjection,
 } from '../lib/runtime-adapter';
 import type {
+  PluginImportOptions,
   AgentTask,
   AppView,
   CapabilitySnapshot,
-  McpCreateInput,
+  McpEditInput,
+  McpImportSelection,
   McpServerCapability,
   Message,
   PermissionMode,
@@ -35,10 +37,12 @@ import type {
   SessionSummary,
   SessionWorkspaceSelection,
   SkillCapability,
+  SkillImportInput,
   ToastMessage,
   UserCapabilitySnapshot,
   UserMcpServerCapability,
   UserPluginCapability,
+  PluginMcpConnection,
   UserSkillCapability,
   Workspace,
 } from '../lib/pulsara-types';
@@ -156,6 +160,15 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [runtimeError, setRuntimeError] = useState<string>();
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [inspectorOpen, setInspectorOpen] = useState(readInitialInspectorVisibility);
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const desktop = window.matchMedia('(min-width: 1221px)');
+    const onResize = (event: MediaQueryListEvent) => {
+      if (!event.matches) setInspectorOpen(false);
+    };
+    desktop.addEventListener('change', onResize);
+    return () => desktop.removeEventListener('change', onResize);
+  }, []);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
@@ -828,6 +841,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
     try {
       const receipt = await active.resolveInteraction(interaction, resolution);
+      if ('submitted' in receipt) {
+        if (!receipt.submitted) return false;
+        notify(resolution.kind === 'capability' && resolution.decision === 'CANCEL' ? '已取消本次配置' : '配置已提交', 'Pulsara 将继续处理。', 'success');
+        return true;
+      }
       if (receipt.status === 'rejected') {
         notify('这项选择没有被接受', productMessage(receipt.publicMessage, '内容可能已经更新，请查看最新状态。'), 'warning');
         return false;
@@ -846,9 +864,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [notify, recoverConnectionAfterOperation]);
 
-  const installDeviceSkill = useCallback(async (sourcePath: string): Promise<boolean> => {
+  const installDeviceSkill = useCallback(async (input: SkillImportInput): Promise<boolean> => {
     try {
-      const result = await adapter.installUserSkill(sourcePath, activeSessionIdRef.current || undefined);
+      const result = await adapter.installUserSkill(input, activeSessionIdRef.current || undefined);
       setUserCapabilities(result.capabilities);
       setUserCapabilityError(undefined);
       notify(result.operation.success ? '技能已安装' : '技能没有安装', result.operation.message, result.operation.success ? 'success' : 'warning');
@@ -860,9 +878,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter, loadCapabilities, notify]);
 
-  const installDevicePlugin = useCallback(async (sourcePath: string): Promise<boolean> => {
+  const installDevicePlugin = useCallback(async (sourcePath: string, options?: PluginImportOptions): Promise<boolean> => {
     try {
-      const result = await adapter.installUserPlugin(sourcePath, activeSessionIdRef.current || undefined);
+      const result = await adapter.installUserPlugin(sourcePath, activeSessionIdRef.current || undefined, options);
       setUserCapabilities(result.capabilities);
       setUserCapabilityError(undefined);
       notify(result.operation.success ? '插件已安装' : '插件没有安装', result.operation.message, result.operation.success ? 'success' : 'warning');
@@ -873,7 +891,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter, notify]);
 
-  const createDeviceMcp = useCallback(async (input: McpCreateInput): Promise<boolean> => {
+  const createDeviceMcp = useCallback(async (input: McpEditInput): Promise<boolean> => {
     try {
       const result = await adapter.createUserMcp(input, activeSessionIdRef.current || undefined);
       setUserCapabilities(result.capabilities);
@@ -887,12 +905,25 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter, loadCapabilities, notify]);
 
+  const importDeviceMcp = useCallback(async (input: McpImportSelection): Promise<boolean> => {
+    try {
+      const result = await adapter.importUserMcp(input, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      notify(result.operation.success ? 'MCP 已导入' : 'MCP 没有导入', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('MCP 导入失败', productMessage(error instanceof Error ? error.message : undefined, '请处理预览中的字段后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
   const toggleDeviceMcp = useCallback(async (
     server: UserMcpServerCapability,
     enabled: boolean,
   ): Promise<boolean> => {
     try {
-      const result = await adapter.setUserMcpEnabled(server.id, enabled, activeSessionIdRef.current || undefined);
+      const result = await adapter.updateUserMcp({serverId: server.id, config: {...server.config, enabled}, secretChanges: []}, server.currentIdentity, activeSessionIdRef.current || undefined);
       setUserCapabilities(result.capabilities);
       notify(enabled ? 'MCP 服务已开启' : 'MCP 服务已关闭', result.operation.message, result.operation.success ? 'success' : 'warning');
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
@@ -902,6 +933,63 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       return false;
     }
   }, [adapter, loadCapabilities, notify]);
+
+  const editDeviceMcp = useCallback(async (server: UserMcpServerCapability, input: McpEditInput): Promise<boolean> => {
+    try {
+      const result = await adapter.updateUserMcp(input, server.currentIdentity, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      notify('MCP 配置已更新', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('MCP 配置未更新', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重新打开编辑。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const removeDeviceMcp = useCallback(async (server: UserMcpServerCapability): Promise<boolean> => {
+    try {
+      const result = await adapter.removeUserMcp(server.id, server.currentIdentity, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      notify('MCP 服务已移除', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('MCP 服务未移除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const deviceMcpAuthorization = useCallback(async (server: UserMcpServerCapability, action: 'login' | 'status' | 'cancel' | 'logout') => {
+    try {
+      const result = await adapter.userMcpAuthorization(server.id, action);
+      const labels: Record<string, string> = { idle: '当前没有进行中的登录。', connecting: '正在准备登录，请在浏览器中继续。', awaiting_user: '请在浏览器中完成授权。', authorized: '已完成授权，可以测试连接。', cancelled: '登录已取消。', failed: '登录未完成，请检查客户端配置。' };
+      notify('MCP 授权', action === 'logout' ? '本机授权已清除，远端令牌未吊销。' : result.error || labels[result.state] || '登录状态已更新。', result.error ? 'warning' : 'neutral');
+    } catch (error) {
+      notify('授权操作未完成', productMessage(error instanceof Error ? error.message : undefined, '请检查连接是否已保存。'), 'warning');
+    }
+  }, [adapter, notify]);
+
+  const removeDeviceSkill = useCallback(async (skill: UserSkillCapability): Promise<boolean> => {
+    try {
+      const result = await adapter.removeUserSkill(skill, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      notify(result.operation.success ? '技能已删除' : '技能未删除', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('技能未删除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const pluginMcpAuthorization = useCallback(async (plugin: UserPluginCapability, connection: PluginMcpConnection, action: 'login' | 'status' | 'cancel' | 'logout') => {
+    try {
+      const result = await adapter.pluginMcpAuthorization(plugin, connection, action);
+      const labels: Record<string, string> = {idle: '当前没有进行中的登录。', connecting: '正在准备登录，请在浏览器中继续。', awaiting_user: '请在浏览器中完成授权。', authorized: '授权已完成。', cancelled: '登录已取消。', failed: '登录未完成。'};
+      notify('插件 MCP 授权', action === 'logout' ? '本机授权已清除，远端令牌未吊销。' : result.error || labels[result.state] || '授权状态已更新。', result.error ? 'warning' : 'neutral');
+    } catch (error) { notify('授权操作未完成', productMessage(error instanceof Error ? error.message : undefined, '请刷新连接后重试。'), 'warning'); }
+  }, [adapter, notify]);
 
   const toggleDeviceSkill = useCallback(async (
     skill: UserSkillCapability,
@@ -932,6 +1020,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         plugin.id,
         plugin.packageInstallId,
         enabled,
+        plugin.connectionReview ?? [],
         activeSessionIdRef.current || undefined,
       );
       setUserCapabilities(result.capabilities);
@@ -946,13 +1035,30 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   const removeDevicePlugin = useCallback(async (plugin: UserPluginCapability): Promise<boolean> => {
     try {
-      const result = await adapter.removeUserPlugin(plugin.id, activeSessionIdRef.current || undefined);
+      const result = await adapter.removeUserPlugin(plugin.id, plugin.packageInstallId, activeSessionIdRef.current || undefined);
       setUserCapabilities(result.capabilities);
       notify(result.operation.success ? '插件已移除' : '插件没有移除', result.operation.message, result.operation.success ? 'success' : 'warning');
       if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
       return result.operation.success;
     } catch (error) {
       notify('插件没有移除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      return false;
+    }
+  }, [adapter, loadCapabilities, notify]);
+
+  const editPluginConnection = useCallback(async (
+    plugin: UserPluginCapability,
+    connection: import('../lib/pulsara-types').PluginMcpConnection,
+    input: import('../lib/pulsara-types').PluginMcpEditInput,
+  ): Promise<boolean> => {
+    try {
+      const result = await adapter.updatePluginConnection(plugin, connection, input, activeSessionIdRef.current || undefined);
+      setUserCapabilities(result.capabilities);
+      notify('插件连接', result.operation.message, result.operation.success ? 'success' : 'warning');
+      if (activeSessionIdRef.current) void loadCapabilities(activeSessionIdRef.current);
+      return result.operation.success;
+    } catch (error) {
+      notify('插件连接未保存', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
       return false;
     }
   }, [adapter, loadCapabilities, notify]);
@@ -965,15 +1071,15 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter, notify]);
 
-  const installProjectSkill = useCallback(async (sourcePath: string): Promise<void> => {
+  const installProjectSkill = useCallback(async (input: SkillImportInput): Promise<void> => {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) throw new Error('请先打开一个会话。');
     setCapabilityBusy('正在添加技能…');
     try {
-      const result = await adapter.installSkill(sessionId, sourcePath);
+      const result = await adapter.installSkill(sessionId, input);
       adoptCapabilityMutation(sessionId, result.capabilities);
       if (!result.installation.installed) throw new Error(result.installation.message);
-      notify('项目技能已添加', '同一目录中的会话会在各自下次发送时载入。', 'success');
+      notify('项目技能已添加', '同一目录中的会话会在下次模型请求前的安全时机载入。', 'success');
     } finally {
       setCapabilityBusy(undefined);
     }
@@ -997,7 +1103,21 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter, adoptCapabilityMutation, notify]);
 
-  const createProjectMcp = useCallback(async (input: McpCreateInput): Promise<void> => {
+  const removeProjectSkill = useCallback(async (skill: SkillCapability): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || !skill.removalIdentity) return;
+    setCapabilityBusy('正在删除项目技能…');
+    try {
+      const result = await adapter.removeProjectSkill(sessionId, skill);
+      adoptCapabilityMutation(sessionId, result.capabilities);
+      notify(result.operation.success ? '技能已删除' : '技能未删除', result.operation.message, result.operation.success ? 'success' : 'warning');
+    } catch (error) {
+      notify('技能未删除', productMessage(error instanceof Error ? error.message : undefined, '请刷新后重试。'), 'warning');
+      throw error;
+    } finally { setCapabilityBusy(undefined); }
+  }, [adapter, adoptCapabilityMutation, notify]);
+
+  const createProjectMcp = useCallback(async (input: McpEditInput): Promise<void> => {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId) throw new Error('请先打开一个会话。');
     setCapabilityBusy('正在添加 MCP…');
@@ -1009,6 +1129,18 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     } finally {
       setCapabilityBusy(undefined);
     }
+  }, [adapter, adoptCapabilityMutation, notify]);
+
+  const editProjectMcp = useCallback(async (server: McpServerCapability, input: McpEditInput): Promise<void> => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || !server.configIdentity) throw new Error('请重新打开项目连接。');
+    setCapabilityBusy('正在保存 MCP…');
+    try {
+      const result = await adapter.updateProjectMcp(sessionId, input, server.configIdentity);
+      adoptCapabilityMutation(sessionId, result.capabilities);
+      if (!result.operation.success) throw new Error(result.operation.message);
+      notify('项目 MCP 已保存', result.operation.message, 'success');
+    } finally { setCapabilityBusy(undefined); }
   }, [adapter, adoptCapabilityMutation, notify]);
 
   const toggleProjectMcp = useCallback(async (
@@ -1155,8 +1287,26 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onPermissionChange={setTurnPermission}
         />
       )}
+      {activeView === 'workbench' && !databaseBlocked && inspectorOpen && <button className="inspector-scrim" aria-label="收起详情侧栏" onClick={() => setInspectorOpen(false)} />}
       {activeView === 'workbench' && !databaseBlocked && (
         <InspectorPanel
+          projectMcpForms={{
+            preview: (input) => adapter.previewMcpImport(input),
+            test: (input) => adapter.testProjectMcp(activeSessionId, input),
+            import: async (input) => {
+              const result = await adapter.importProjectMcp(activeSessionId, input);
+              adoptCapabilityMutation(activeSessionId, result.capabilities);
+              notify(result.operation.success ? '项目 MCP 已导入' : 'MCP 未导入', result.operation.message, result.operation.success ? 'success' : 'warning');
+              return result.operation.success;
+            },
+            authorize: async (server, action) => {
+              try {
+                const result = await adapter.projectMcpAuthorization(activeSessionId, server.id, action);
+                const labels: Record<string, string> = {idle: '当前没有进行中的登录。', connecting: '正在准备登录，请在浏览器中继续。', awaiting_user: '请在浏览器中完成授权。', authorized: '已完成授权，可以测试连接。', cancelled: '登录已取消。', failed: '登录未完成，请检查客户端配置。'};
+                notify('项目 MCP 授权', action === 'logout' ? '本机授权已清除，远端令牌未吊销。' : result.error || labels[result.state] || '登录状态已更新。', result.error ? 'warning' : 'neutral');
+              } catch (error) { notify('授权操作未完成', productMessage(error instanceof Error ? error.message : undefined, '请检查连接是否已保存。'), 'warning'); }
+            },
+          }}
           session={activeSession}
           isOpen={inspectorOpen}
           agentTasks={mergedProjection.agentTasks}
@@ -1176,7 +1326,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onRetryCapabilities={() => activeSessionId && void loadCapabilities(activeSessionId)}
           onToggleProjectSkill={toggleProjectSkill}
           onInstallProjectSkill={installProjectSkill}
+          onPreviewProjectSkills={(source) => adapter.previewSkillImport(source)}
+          onRemoveProjectSkill={removeProjectSkill}
           onCreateProjectMcp={createProjectMcp}
+          onEditProjectMcp={editProjectMcp}
           onToggleProjectMcp={toggleProjectMcp}
           onRemoveProjectMcp={removeProjectMcp}
           onReconnectProjectMcp={reconnectProjectMcp}
@@ -1201,12 +1354,23 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onRefresh={() => loadUserCapabilities(true)}
           onOpenRoot={openCapabilityRoot}
           onInstallSkill={installDeviceSkill}
+          onPreviewSkills={(sourcePath) => adapter.previewSkillImport(sourcePath)}
           onInstallPlugin={installDevicePlugin}
+          onPreviewPlugin={(path) => adapter.previewPluginImport(path)}
           onCreateMcp={createDeviceMcp}
+          onTestMcp={(input) => adapter.testUserMcp(input)}
+          onPreviewMcpImport={(input) => adapter.previewMcpImport(input)}
+          onImportMcp={importDeviceMcp}
+          onEditMcp={editDeviceMcp}
+          onRemoveMcp={removeDeviceMcp}
+          onMcpAuthorization={deviceMcpAuthorization}
           onToggleSkill={toggleDeviceSkill}
+          onRemoveSkill={removeDeviceSkill}
           onToggleMcp={toggleDeviceMcp}
           onTogglePlugin={toggleDevicePlugin}
           onRemovePlugin={removeDevicePlugin}
+          onEditPluginConnection={editPluginConnection}
+          onPluginMcpAuthorization={pluginMcpAuthorization}
         />
       )}
       {activeView === 'settings' && (

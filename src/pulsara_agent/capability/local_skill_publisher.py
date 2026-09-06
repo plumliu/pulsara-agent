@@ -9,6 +9,7 @@ from hashlib import sha256
 import os
 from pathlib import Path, PurePosixPath
 import stat
+import yaml
 from typing import Protocol
 from uuid import uuid4
 
@@ -39,6 +40,7 @@ from pulsara_agent.exclusive_publish import (
     ExclusivePublishPrimitiveUnavailable,
     PlatformExclusiveDirectoryPublisher,
 )
+from pulsara_agent.capability.skill_import import normalize_skill_import_document
 
 
 _DIRECTORY_FLAGS = (
@@ -188,6 +190,7 @@ class _FrozenSourceObservation:
     root_inode: int
     entries: tuple[_FrozenSourceEntry, ...]
     skill_document_bytes: bytes
+    published_document_bytes: bytes
     parsed: ParsedSkillDocument
 
 
@@ -288,6 +291,8 @@ class AtomicLocalSkillPublisher:
         workspace_root: Path | None,
         pulsara_home: PulsaraHomeResolution | None,
         cancellation: LocalSkillCancellationProbe | None = None,
+        name: str | None = None,
+        description: str | None = None,
     ) -> LocalSkillInstallOutcome:
         source = prepare_local_source_path(source_path)
         probe = cancellation or NeverCancelLocalSkillOperation()
@@ -390,7 +395,23 @@ class AtomicLocalSkillPublisher:
                     ),
                 )
             try:
-                parsed_result = parse_skill_document(skill_bytes)
+                published_bytes = normalize_skill_import_document(
+                    skill_bytes, name=name, description=description
+                )
+                parsed_result = parse_skill_document(published_bytes)
+            except (ValueError, UnicodeError, yaml.YAMLError):
+                return LocalSkillInstallOutcome(
+                    LocalSkillInstallDisposition.SOURCE_INVALID,
+                    source,
+                    diagnostics=(
+                        SkillDiagnostic(
+                            severity=SkillDiagnosticSeverity.WARNING,
+                            code=SkillDiagnosticCode.INVALID_FRONTMATTER_YAML,
+                            message="Skill frontmatter cannot be normalized; check its format and supplied fields",
+                            path=source / SKILL_FILE_NAME,
+                        ),
+                    ),
+                )
             except MemoryError:
                 return LocalSkillInstallOutcome(
                     LocalSkillInstallDisposition.SOURCE_UNAVAILABLE,
@@ -422,6 +443,7 @@ class AtomicLocalSkillPublisher:
                 root_inode=root_stat.st_ino,
                 entries=entries,
                 skill_document_bytes=skill_bytes,
+                published_document_bytes=published_bytes,
                 parsed=parsed_result.parsed,
             )
             if _paths_overlap(source, target_root_path):
@@ -527,7 +549,7 @@ class AtomicLocalSkillPublisher:
                             maximum=MAX_SKILL_FILE_BYTES,
                             probe=probe,
                         )
-                        if staged_skill_bytes != observation.skill_document_bytes:
+                        if staged_skill_bytes != observation.published_document_bytes:
                             raise _StageUnavailable("staged SKILL.md bytes conflict")
                         staged_parse = parse_skill_document(staged_skill_bytes)
                         staged_placement = (
@@ -1087,7 +1109,15 @@ def _copy_source_to_stage(
             continue
         if entry.kind is not _EntryKind.REGULAR_FILE:
             raise _StageUnavailable("unsupported source entry reached copy")
-        _copy_regular_file(source_fd, stage_fd, entry, probe)
+        _copy_regular_file(
+            source_fd,
+            stage_fd,
+            entry,
+            probe,
+            replacement=observation.published_document_bytes
+            if entry.relative_path == PurePosixPath(SKILL_FILE_NAME)
+            else None,
+        )
 
 
 def _copy_regular_file(
@@ -1095,6 +1125,8 @@ def _copy_regular_file(
     stage_root_fd: int,
     entry: _FrozenSourceEntry,
     probe: LocalSkillCancellationProbe,
+    *,
+    replacement: bytes | None = None,
 ) -> None:
     source_parent, name = _open_relative_parent(source_root_fd, entry.relative_path)
     stage_parent, stage_name = _open_relative_parent(stage_root_fd, entry.relative_path)
@@ -1119,6 +1151,8 @@ def _copy_regular_file(
                     os.fchmod(stage_file, 0o600 | (entry.executable_bits or 0))
                 except OSError as exc:
                     raise _StageUnavailable from exc
+                if replacement is not None:
+                    _write_all(stage_file, replacement)
                 while True:
                     _check_cancel(probe)
                     try:
@@ -1127,7 +1161,8 @@ def _copy_regular_file(
                         raise _SourceUnavailable from exc
                     if not chunk:
                         break
-                    _write_all(stage_file, chunk)
+                    if replacement is None:
+                        _write_all(stage_file, chunk)
                 if not _entry_matches_stat(entry, os.fstat(source_file)):
                     raise _SourceRaced("source file changed during copy")
             finally:
@@ -1277,7 +1312,12 @@ def _verify_stage_against_source(
             expected_metadata=metadata,
             probe=probe,
         )
-        if stage_digest != source_digest:
+        expected_digest = (
+            sha256(observation.published_document_bytes).digest()
+            if entry.relative_path == PurePosixPath(SKILL_FILE_NAME)
+            else source_digest
+        )
+        if stage_digest != expected_digest:
             raise _StageUnavailable("staged file bytes conflict")
         frozen_entries.append(
             _freeze_stage_entry(

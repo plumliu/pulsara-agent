@@ -183,6 +183,14 @@ def test_stage3_5_binding_v2_has_only_the_closed_identity_fields() -> None:
 
 def test_stage3_5_process_local_task_sites_are_closed() -> None:
     allowed = {
+        # Capability hard-cut: join local publication/credential cleanup before
+        # settling cancellation; OAuth owns disposable login/refresh tasks only.
+        # These are physical owners, not durable jobs or execution recovery.
+        "src/pulsara_agent/capability/mcp_management.py",
+        "src/pulsara_agent/plugins/management.py",
+        "src/pulsara_agent/plugins/connection_management.py",
+        "src/pulsara_agent/conversation_kernel/capability_management_execution.py",
+        "src/pulsara_agent/conversation_kernel/mcp/oauth.py",
         "src/pulsara_agent/conversation_kernel/assistant_settlement.py",
         "src/pulsara_agent/conversation_kernel/compaction/model_call.py",
         "src/pulsara_agent/conversation_kernel/compaction/runtime.py",

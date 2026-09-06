@@ -12,6 +12,8 @@ from threading import Event
 from threading import Thread
 from time import monotonic
 from time import sleep
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 from openai import APITimeoutError
@@ -490,6 +492,7 @@ def _bare_host_core_with_blocked_blob_gc(
     *, close_seconds: float
 ) -> tuple[KernelHostCore, asyncio.Event, asyncio.Event]:
     core = object.__new__(KernelHostCore)
+    core.mcp_management = SimpleNamespace(aclose=AsyncMock())
     core._deadlines = KernelExecutionDeadlineFactory(  # noqa: SLF001
         KernelExecutionWatchdogPolicy(blob_gc_close_seconds=close_seconds)
     )

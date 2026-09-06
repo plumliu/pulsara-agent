@@ -140,7 +140,7 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
     import pulsara_agent.conversation_kernel.host as kernel_host
 
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", _DogfoodModelPort)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
     model_runtime = test_model_runtime(
         api_key="sk-fixture-secret",
         base_url="https://example.invalid/v1",
@@ -259,7 +259,7 @@ def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
 
     model = _SteerModelPort()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host, "load_mcp_server_configs", lambda **_: ())
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
     model_runtime = test_model_runtime(
         api_key="sk-fixture-secret",
         base_url="https://example.invalid/v1",

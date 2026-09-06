@@ -1,5 +1,7 @@
 'use client';
 
+import { CapabilityInteractionEditor } from './capability-interaction-editor';
+
 import {
   ArrowDown,
   BookOpenText,
@@ -26,6 +28,7 @@ import {
   RotateCcw,
   Send,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   TerminalSquare,
   TriangleAlert,
@@ -864,17 +867,17 @@ function InteractionCard({
   const [feedback, setFeedback] = useState('');
   const interactionId = interaction.id;
   const interactionKind = interaction.kind;
-  const prompt = interaction.kind === 'tool-confirmation' ? interaction.prompt : '';
-  const optionsKey = interaction.kind === 'tool-confirmation' ? interaction.options.join('\u0000') : '';
-  const workflowId = interaction.kind === 'tool-confirmation' ? '' : interaction.workflowId;
-  const workflowRevision = interaction.kind === 'tool-confirmation' ? 0 : interaction.workflowRevision;
+  const prompt = 'prompt' in interaction ? interaction.prompt : '';
+  const optionsKey = 'options' in interaction ? interaction.options.join('\u0000') : '';
+  const workflowId = 'workflowId' in interaction ? interaction.workflowId : '';
+  const workflowRevision = 'workflowRevision' in interaction ? interaction.workflowRevision : 0;
 
   useEffect(() => {
     let current = true;
-    const requested: RuntimeInteractionSummary = interactionKind === 'tool-confirmation'
+    const requested: RuntimeInteractionSummary = interactionKind === 'tool-confirmation' || interactionKind === 'capability-form'
       ? {
         id: interactionId,
-        kind: 'tool-confirmation',
+        kind: interactionKind,
         prompt,
         options: optionsKey ? optionsKey.split('\u0000') : [],
       }
@@ -904,13 +907,14 @@ function InteractionCard({
           {interaction.kind === 'tool-confirmation' ? <ShieldCheck size={15} /> : <FileText size={15} />}
         </span>
         <div>
-          <span>{interaction.kind === 'tool-confirmation' ? '需要你的确认' : interaction.kind === 'plan-question' ? '规划需要你的选择' : '方案已准备好'}</span>
+          <span>{interaction.kind === 'capability-form' ? '需要你的配置' : interaction.kind === 'tool-confirmation' ? '需要你的确认' : interaction.kind === 'plan-question' ? '规划需要你的选择' : '方案已准备好'}</span>
           <small>{interaction.kind === 'tool-confirmation' ? '只决定这一次操作' : '确认后 Pulsara 会继续这次工作'}</small>
         </div>
       </header>
 
       {!content && !loadError && <div className="interaction-loading"><LoaderCircle size={14} /> 正在准备内容…</div>}
       {loadError && <p className="interaction-error">{loadError}</p>}
+      {content?.kind === 'capability-form' && <CapabilityInteractionEditor form={content.form} onResolve={resolution => onResolve(interaction, resolution)} />}
 
       {content?.kind === 'tool-confirmation' && (
         <>
@@ -1053,6 +1057,7 @@ export function WorkbenchView({
   const [skillOpen, setSkillOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [modelBindingBusy, setModelBindingBusy] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [jumpBottom, setJumpBottom] = useState(126);
@@ -1062,6 +1067,7 @@ export function WorkbenchView({
   const threadRef = useRef<HTMLDivElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const optionsTriggerRef = useRef<HTMLButtonElement>(null);
   const budgetInputRef = useRef<HTMLInputElement>(null);
   const composerComposingRef = useRef(false);
   const wordCount = draft.trim().length;
@@ -1073,6 +1079,27 @@ export function WorkbenchView({
     && (selectedModel.authentication === 'none' || selectedModel.credential_configured),
   );
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
+  useEffect(() => {
+    if (!optionsOpen && !modelOpen && !reasoningOpen && !skillOpen && !permissionOpen) return;
+    const close = () => {
+      setOptionsOpen(false); setModelOpen(false); setReasoningOpen(false);
+      setSkillOpen(false); setPermissionOpen(false);
+    };
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !composerWrapRef.current?.contains(event.target)) close();
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      close();
+      if (optionsOpen && optionsTriggerRef.current?.getClientRects().length) optionsTriggerRef.current.focus();
+    };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', outside);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [optionsOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen]);
   const contextCompactionIndex = useMemo(() => {
     if (!contextCompaction) return -1;
     const nextCanonical = messages.findIndex((message) => (
@@ -1116,6 +1143,7 @@ export function WorkbenchView({
       return current.trim() ? `${marker} ${current}` : `${marker} `;
     });
     setSkillOpen(false);
+    setOptionsOpen(false);
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
   }, []);
 
@@ -1366,7 +1394,7 @@ export function WorkbenchView({
           )}
           {canControl && interaction && (
             <InteractionCard
-              key={`${interaction.id}:${interaction.kind === 'tool-confirmation' ? 'live' : interaction.workflowRevision}`}
+              key={`${interaction.id}:${'workflowRevision' in interaction ? interaction.workflowRevision : 'live'}`}
               interaction={interaction}
               onRead={onReadInteraction}
               onResolve={onResolveInteraction}
@@ -1451,10 +1479,10 @@ export function WorkbenchView({
             {wordCount > 0 && <span className="draft-count">{wordCount}</span>}
           </div>
           <div className="composer-actions">
-            <div>
-              <div className="popover-anchor">
-                <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}`} onClick={() => { setModelOpen((value) => !value); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
-                  <Bot size={12} /> {modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} <ChevronDown size={10} />
+            <div className="composer-controls">
+              <div className="popover-anchor model-picker">
+                <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setOptionsOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
+                  <Bot size={12} /><span className="model-chip__label">{modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)}</span><ChevronDown size={10} />
                 </button>
                 {modelOpen && <div className="menu-popover model-menu">
                   <span className="menu-label">此会话的模型</span>
@@ -1465,6 +1493,10 @@ export function WorkbenchView({
                   {modelConfigurations.length > 0 && <button className="model-menu__settings" onClick={onOpenModelSettings}>管理模型配置</button>}
                 </div>}
               </div>
+              <button ref={optionsTriggerRef} className={`mode-chip composer-options-trigger${optionsOpen ? ' is-active' : ''}`} aria-label="本轮选项" aria-expanded={optionsOpen} aria-controls="composer-options" onClick={() => { setOptionsOpen(value => !value); setModelOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }}>
+                <SlidersHorizontal size={12} /><span>选项</span><small className={permission === 'bypass-permissions' ? 'is-danger' : ''}>{permissionLabels[permission]}</small>{((requestPlan && !isRunning) || activePlanMode) && <i title="已启用规划" />}<ChevronDown size={10} />
+              </button>
+              <div id="composer-options" className={`composer-secondary-controls${optionsOpen ? ' is-open' : ''}`}>
               <div className="popover-anchor">
                 <button className={`mode-chip${reasoningOpen ? ' is-active' : ''}`} onClick={() => { setReasoningOpen((value) => !value); setModelOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={reasoningOpen} disabled={!selectedModel || selectedModel.reasoning.kind !== 'selectable' || modelBindingBusy}>
                   <BrainCircuit size={12} /> {reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)} {selectedModel?.reasoning.kind === 'selectable' && <ChevronDown size={10} />}
@@ -1488,6 +1520,8 @@ export function WorkbenchView({
                     onClick={() => {
                       setSkillOpen((value) => !value);
                       setPermissionOpen(false);
+                      setReasoningOpen(false);
+                      setModelOpen(false);
                     }}
                     aria-expanded={skillOpen}
                     aria-label="选择技能"
@@ -1520,7 +1554,7 @@ export function WorkbenchView({
                 title={isRunning ? '当前运行结束后可为下一轮启用规划' : undefined}
               ><WandSparkles size={12} /> {activePlanMode ? '规划进行中' : requestPlan && !isRunning ? '本轮先规划' : '先规划'}</button>
               <div className="popover-anchor">
-                <button className={`mode-chip permission-chip${permission === 'bypass-permissions' ? ' is-danger' : ''}`} onClick={() => setPermissionOpen((value) => !value)} aria-expanded={permissionOpen} disabled={submitting}>
+                <button className={`mode-chip permission-chip${permission === 'bypass-permissions' ? ' is-danger' : ''}`} onClick={() => {setPermissionOpen((value) => !value); setReasoningOpen(false); setSkillOpen(false); setModelOpen(false);}} aria-expanded={permissionOpen} disabled={submitting}>
                   {permission === 'bypass-permissions' ? <TriangleAlert size={12} /> : <ShieldCheck size={12} />} {permissionLabels[permission]} <ChevronDown size={10} />
                 </button>
                 {permissionOpen && (
@@ -1534,6 +1568,7 @@ export function WorkbenchView({
                     ))}
                   </div>
                 )}
+              </div>
               </div>
             </div>
             <div>

@@ -10,6 +10,32 @@ import type { AgentTask } from './pulsara-types';
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('requests Plugin discovery using only the source directory', async () => {
+  const result = {candidates: []};
+  const fetcher = vi.fn(async () => new Response(JSON.stringify(result), {status: 200}));
+  vi.stubGlobal('fetch', fetcher);
+  expect(await new LocalHttpRuntimeAdapter().previewPluginImport('/source')).toEqual(result);
+  expect(fetcher).toHaveBeenCalledWith('/api/capabilities/plugins/preview-import', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({source_path: '/source'}),
+  }));
+});
+
+it('preserves pending safe-point adoption from a user capability mutation', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    operation: { status: 'CREATED', success: true },
+    adoption: { updated_sessions: 0, pending_sessions: 2, attention_sessions: 0 },
+    capabilities: { skills: {}, mcp: {}, plugins: {} },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+  const result = await new LocalHttpRuntimeAdapter().createUserMcp({
+    serverId: 'example', config: { transport: { type: 'streamable_http', endpoint: 'https://example.com/mcp' } },
+    secretChanges: [],
+  });
+  expect(result.operation.success).toBe(true);
+  expect(result.capabilities.adoption).toEqual({
+    updatedSessions: 0, pendingSessions: 2, attentionSessions: 0,
+  });
+});
+
 describe('selectPromptCommand', () => {
   it('joins tool results exactly across interrupted history, reordered results, and paging', async () => {
     const content = (text: string) => ({ kind: 'INLINE', inline_content: btoa(text) });

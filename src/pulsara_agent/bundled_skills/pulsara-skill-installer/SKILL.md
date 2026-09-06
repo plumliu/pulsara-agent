@@ -7,6 +7,18 @@ description: Install and inspect portable loose Agent Skills through Pulsara's o
 
 Use this skill to install a complete local Skill directory through Pulsara's official loose-Skill management service and global CLI.
 
+The capability page also provides a model-free import workflow: select a local
+directory (including `.opencode/skills`, `.claude/skills` or `.agents/skills`),
+preview candidates, supply a missing description and install selected Skills.
+It preserves the original source and all references/scripts/assets; metadata
+normalization happens only in the native installation candidate. It does not
+execute JS/TS host plugins found alongside independent Skills.
+
+User/workspace loose installations can be removed through the capability page.
+Only an explicitly selected
+managed copy is removed; bundled definitions and Plugin children are not loose
+deletion targets. A same-name lower-priority Skill may become effective again.
+
 ## Workflow
 
 1. Identify the source Skill directory and ask which scope the user wants if it is not already explicit:
@@ -49,7 +61,8 @@ Read `references/directory-contract.md` when the user needs the filesystem and r
 ## Guardrails
 
 - Do not choose workspace or user scope on the user's behalf when their intent is ambiguous.
-- Do not overwrite, merge, update, remove, roll back, or force an existing destination.
+- Do not overwrite, merge, roll back or force an existing destination. Use the
+  official removal operation only when the user requests that exact deletion.
 - Do not use raw `cp`, `copytree`, or a private script to imitate official installation.
 - Loose Skill installation does not create a receipt, ownership marker, or managed provenance.
 - Ordinary terminal and permission ownership still applies to every CLI invocation.

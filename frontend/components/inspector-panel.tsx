@@ -24,19 +24,28 @@ import {
   Sparkles,
   Trash2,
   Wrench,
-  X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { McpEditor } from './mcp-editor';
+import { McpImporter } from './mcp-importer';
+import { SkillImporter } from './skill-importer';
 import type {
   AgentTask,
   CapabilitySnapshot,
-  McpCreateInput,
+  McpEditInput,
+  McpImportSource,
+  McpImportPreview,
+  McpImportSelection,
+  McpConnectionTestResult,
   McpServerCapability,
+  UserMcpServerCapability,
   PermissionMode,
   SessionSummary,
   SkillCatalogIssue,
   SkillCapability,
+  SkillImportInput,
+  SkillImportCandidate,
   TaskStatus,
   TodoRun,
 } from '../lib/pulsara-types';
@@ -44,6 +53,7 @@ import { permissionLabels } from '../lib/pulsara-types';
 import { MarkdownBody } from './markdown-body';
 
 interface InspectorPanelProps {
+  projectMcpForms: ProjectMcpForms;
   session: SessionSummary;
   isOpen: boolean;
   agentTasks: AgentTask[];
@@ -62,13 +72,23 @@ interface InspectorPanelProps {
   onAcceptCompletion: (task: AgentTask) => void;
   onRetryCapabilities: () => void;
   onToggleProjectSkill: (skill: SkillCapability, enabled: boolean) => Promise<void>;
-  onInstallProjectSkill: (sourcePath: string) => Promise<void>;
-  onCreateProjectMcp: (input: McpCreateInput) => Promise<void>;
+  onPreviewProjectSkills: (sourcePath: string) => Promise<SkillImportCandidate[]>;
+  onInstallProjectSkill: (input: SkillImportInput) => Promise<void>;
+  onRemoveProjectSkill: (skill: SkillCapability) => Promise<void>;
+  onCreateProjectMcp: (input: McpEditInput) => Promise<void>;
+  onEditProjectMcp: (server: McpServerCapability, input: McpEditInput) => Promise<void>;
   onToggleProjectMcp: (server: McpServerCapability, enabled: boolean) => Promise<void>;
   onRemoveProjectMcp: (server: McpServerCapability) => Promise<void>;
   onReconnectProjectMcp: (server: McpServerCapability) => Promise<void>;
   onOpenUserCapabilities: () => void;
   onClose: () => void;
+}
+
+interface ProjectMcpForms {
+  preview: (input: McpImportSource) => Promise<McpImportPreview[]>;
+  import: (input: McpImportSelection) => Promise<boolean>;
+  test: (input: McpEditInput) => Promise<McpConnectionTestResult>;
+  authorize: (server: McpServerCapability, action: 'login' | 'status' | 'cancel' | 'logout') => Promise<void>;
 }
 
 type TaskFilter = 'all' | 'active' | 'attention' | 'settled';
@@ -215,26 +235,21 @@ function ProjectCapabilityDialog({
   initialKind,
   returnFocusTo,
   onClose,
+  onPreviewSkills,
   onInstallSkill,
   onCreateMcp,
+  credentialScopeKey,
+  mcpForms,
 }: {
+  mcpForms: ProjectMcpForms;
   initialKind: ProjectCapabilityKind;
   returnFocusTo?: HTMLElement | null;
   onClose: () => void;
-  onInstallSkill: (sourcePath: string) => Promise<void>;
-  onCreateMcp: (input: McpCreateInput) => Promise<void>;
+  onPreviewSkills: (sourcePath: string) => Promise<SkillImportCandidate[]>;
+  onInstallSkill: (input: SkillImportInput) => Promise<void>;
+  onCreateMcp: (input: McpEditInput) => Promise<void>;
+  credentialScopeKey: string;
 }) {
-  const [kind, setKind] = useState(initialKind);
-  const [sourcePath, setSourcePath] = useState('');
-  const [serverId, setServerId] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [transport, setTransport] = useState<'http' | 'stdio'>('http');
-  const [endpoint, setEndpoint] = useState('');
-  const [command, setCommand] = useState('');
-  const [args, setArgs] = useState('');
-  const [availableToSubagents, setAvailableToSubagents] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string>();
 
   useEffect(() => {
     const application = document.querySelector<HTMLElement>('main.pulsara-shell');
@@ -247,126 +262,54 @@ function ProjectCapabilityDialog({
     };
   }, [returnFocusTo]);
 
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !saving) onClose();
-    };
-    window.addEventListener('keydown', closeOnEscape);
-    return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [onClose, saving]);
+  if (initialKind === 'mcp') return createPortal(<McpEditor credentialScopeKey={credentialScopeKey} onClose={onClose} onTest={mcpForms.test} onSave={async (input) => { await onCreateMcp(input); return true; }} />, document.body);
+  return createPortal(<SkillImporter scopeLabel="应用到这个目录的所有会话" onPreview={onPreviewSkills} onInstall={async (input) => {await onInstallSkill(input); return true;}} onClose={onClose} />, document.body);
 
-  const submit = async () => {
-    setSaving(true);
-    setError(undefined);
-    try {
-      if (kind === 'skills') {
-        if (!sourcePath.trim()) throw new Error('请输入技能目录。');
-        await onInstallSkill(sourcePath.trim());
-      } else {
-        if (!serverId.trim()) throw new Error('请输入 MCP 标识。');
-        await onCreateMcp({
-          serverId: serverId.trim(),
-          displayName: displayName.trim() || serverId.trim(),
-          transport,
-          endpoint: transport === 'http' ? endpoint.trim() : undefined,
-          command: transport === 'stdio' ? command.trim() : undefined,
-          args: transport === 'stdio'
-            ? args.split('\n').map((item) => item.trim()).filter(Boolean)
-            : [],
-          availableToSubagents,
-        });
-      }
-      onClose();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '没有保存这项能力。');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return createPortal(
-    <div className="project-capability-dialog" role="dialog" aria-modal="true" aria-label="添加项目能力" aria-busy={saving}>
-      <button className="project-capability-dialog__backdrop" aria-label="关闭" disabled={saving} onClick={onClose} />
-      <section>
-        <header>
-          <div><small>应用到这个目录的所有会话</small><strong>添加能力</strong></div>
-          <button type="button" disabled={saving} onClick={onClose} aria-label="关闭"><X size={14} /></button>
-        </header>
-        <div className="project-capability-dialog__tabs">
-          <button disabled={saving} className={kind === 'skills' ? 'is-active' : ''} onClick={() => setKind('skills')}><Wrench size={12} /> 技能</button>
-          <button disabled={saving} className={kind === 'mcp' ? 'is-active' : ''} onClick={() => setKind('mcp')}><Server size={12} /> MCP</button>
-        </div>
-        {kind === 'skills' ? (
-          <label className="project-capability-field">
-            <span>本地技能目录</span>
-            <input disabled={saving} value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="/绝对路径/到/skill" autoFocus />
-            <small>技能会复制到当前工作目录，由这个目录中的会话共同使用。</small>
-          </label>
-        ) : (
-          <div className="project-capability-form">
-            <label className="project-capability-field"><span>标识</span><input disabled={saving} value={serverId} onChange={(event) => setServerId(event.target.value)} placeholder="docs" autoFocus /></label>
-            <label className="project-capability-field"><span>显示名称</span><input disabled={saving} value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="文档搜索" /></label>
-            <div className="project-capability-field project-capability-field--wide">
-              <span>连接方式</span>
-              <div className="project-capability-segmented">
-                <button disabled={saving} className={transport === 'http' ? 'is-active' : ''} onClick={() => setTransport('http')}>HTTP</button>
-                <button disabled={saving} className={transport === 'stdio' ? 'is-active' : ''} onClick={() => setTransport('stdio')}>本地命令</button>
-              </div>
-            </div>
-            {transport === 'http' ? (
-              <label className="project-capability-field project-capability-field--wide"><span>地址</span><input disabled={saving} value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://example.com/mcp" /></label>
-            ) : (
-              <>
-                <label className="project-capability-field project-capability-field--wide"><span>命令</span><input disabled={saving} value={command} onChange={(event) => setCommand(event.target.value)} placeholder="npx" /></label>
-                <label className="project-capability-field project-capability-field--wide"><span>参数（每行一项）</span><textarea disabled={saving} value={args} onChange={(event) => setArgs(event.target.value)} placeholder={'-y\n@scope/server'} /></label>
-              </>
-            )}
-            <label className="project-capability-check project-capability-field--wide">
-              <input disabled={saving} type="checkbox" checked={availableToSubagents} onChange={(event) => setAvailableToSubagents(event.target.checked)} />
-              <span><strong>允许子代理使用</strong><small>子代理会获得这个 MCP 中适合它的工具。</small></span>
-            </label>
-          </div>
-        )}
-        {error && <p className="project-capability-dialog__error"><AlertTriangle size={12} /> {error}</p>}
-        <footer>
-          <button type="button" disabled={saving} onClick={onClose}>取消</button>
-          <button className="is-primary" type="button" disabled={saving} onClick={() => void submit()}>{saving ? <LoaderCircle size={12} /> : <Plus size={12} />} 添加</button>
-        </footer>
-      </section>
-    </div>,
-    document.body,
-  );
 }
 
 function ProjectCapabilityPanel({
+  kind,
+  setKind,
+  mcpForms,
   snapshot,
   loading,
   error,
   busy,
   onRetry,
   onToggleSkill,
+  onPreviewSkills,
   onInstallSkill,
+  onRemoveSkill,
   onCreateMcp,
+  onEditMcp,
   onToggleMcp,
   onRemoveMcp,
   onReconnectMcp,
   onOpenUserCapabilities,
 }: {
+  mcpForms: ProjectMcpForms;
+  kind: ProjectCapabilityKind;
+  setKind: (kind: ProjectCapabilityKind) => void;
   snapshot?: CapabilitySnapshot;
   loading: boolean;
   error?: string;
   busy?: string;
   onRetry: () => void;
   onToggleSkill: (skill: SkillCapability, enabled: boolean) => Promise<void>;
-  onInstallSkill: (sourcePath: string) => Promise<void>;
-  onCreateMcp: (input: McpCreateInput) => Promise<void>;
+  onPreviewSkills: (sourcePath: string) => Promise<SkillImportCandidate[]>;
+  onInstallSkill: (input: SkillImportInput) => Promise<void>;
+  onCreateMcp: (input: McpEditInput) => Promise<void>;
+  onEditMcp: (server: McpServerCapability, input: McpEditInput) => Promise<void>;
   onToggleMcp: (server: McpServerCapability, enabled: boolean) => Promise<void>;
   onRemoveMcp: (server: McpServerCapability) => Promise<void>;
   onReconnectMcp: (server: McpServerCapability) => Promise<void>;
   onOpenUserCapabilities: () => void;
+  onRemoveSkill: (skill: SkillCapability) => Promise<void>;
 }) {
-  const [kind, setKind] = useState<ProjectCapabilityKind>('skills');
   const [expandedMcp, setExpandedMcp] = useState<string>();
+  const [editingMcp, setEditingMcp] = useState<McpServerCapability>();
+  const [importingMcp, setImportingMcp] = useState(false);
+  const [removingSkill, setRemovingSkill] = useState<string>();
   const [inheritedExpanded, setInheritedExpanded] = useState(false);
   const [dialogKind, setDialogKind] = useState<ProjectCapabilityKind>();
   const [dialogOpener, setDialogOpener] = useState<HTMLButtonElement | null>(null);
@@ -391,6 +334,10 @@ function ProjectCapabilityPanel({
     <article className={`project-capability-row${skill.enabled ? '' : ' is-disabled'}`} key={`${skill.source}:${skill.id}:${skill.path}`}>
       <span className="project-capability-row__icon"><Wrench size={13} /></span>
       <span className="project-capability-row__copy"><strong>{skill.name}</strong><small>{skill.description}</small></span>
+      {skill.editable && skill.removalIdentity && (removingSkill === skill.path ? <>
+        <button className="secondary-ghost" disabled={Boolean(busy)} onClick={() => setRemovingSkill(undefined)}>取消</button>
+        <button className="danger-ghost" disabled={Boolean(busy)} onClick={() => void onRemoveSkill(skill).then(() => setRemovingSkill(undefined), () => {})}>确认删除</button>
+      </> : <button className="danger-ghost" aria-label={`删除 ${skill.name}`} disabled={Boolean(busy)} onClick={() => setRemovingSkill(skill.path)}><Trash2 size={12} /></button>)}
       {skill.editable ? (
         <CapabilitySwitch checked={skill.enabled} disabled={Boolean(busy)} label={`${skill.enabled ? '关闭' : '开启'} ${skill.name}`} onChange={(enabled) => void onToggleSkill(skill, enabled)} />
       ) : (
@@ -427,6 +374,7 @@ function ProjectCapabilityPanel({
               <ul>{server.tools.map((tool) => <li key={tool.name}><code>{tool.name}</code><span>{tool.description || 'MCP 工具'}</span></li>)}</ul>
             )}
             <footer>
+              {server.editable && server.config && <button type="button" disabled={Boolean(busy)} onClick={() => setEditingMcp(server)}>编辑连接</button>}
               {server.effective && server.status !== 'disabled' && <button type="button" disabled={Boolean(busy)} onClick={() => void onReconnectMcp(server)}><RefreshCw size={11} /> 重新连接</button>}
               {server.editable && <button className="is-danger" type="button" disabled={Boolean(busy)} onClick={() => void onRemoveMcp(server)}><Trash2 size={11} /> 移除</button>}
             </footer>
@@ -441,7 +389,7 @@ function ProjectCapabilityPanel({
       <section className="inspector-section project-capability-overview">
         <div className="section-label"><span>{snapshot?.workspaceKind === 'quick' ? '工作目录能力' : '项目能力'}</span>{loading && <small><LoaderCircle size={10} /> 正在同步</small>}</div>
         <p>这里的修改会应用到同一目录的所有会话。</p>
-        {snapshot?.adoption.pending && <div className="project-capability-pending"><Sparkles size={12} /><span><strong>更改已保存</strong><small>这个会话会在下次发送时载入；新连接就绪后可用。</small></span></div>}
+        {snapshot?.adoption.pending && <div className="project-capability-pending"><Sparkles size={12} /><span><strong>更改已保存</strong><small>会话将在下一次模型请求前的安全时机载入；新连接就绪后可用。</small></span></div>}
         {snapshot?.adoption.attention && !snapshot.adoption.pending && (
           <div className="task-inventory-notice task-inventory-notice--error">
             <AlertTriangle size={15} />
@@ -453,6 +401,7 @@ function ProjectCapabilityPanel({
           </div>
         )}
         <div className="project-capability-toolbar">
+          {kind === 'mcp' && <button type="button" disabled={Boolean(busy)} onClick={() => setImportingMcp(true)}>导入 MCP</button>}
           <div role="tablist" aria-label="能力类型">
             <button role="tab" aria-selected={kind === 'skills'} className={kind === 'skills' ? 'is-active' : ''} onClick={() => { setKind('skills'); setInheritedExpanded(false); }}>技能 <span>{projectSkills.length}</span></button>
             <button role="tab" aria-selected={kind === 'mcp'} className={kind === 'mcp' ? 'is-active' : ''} onClick={() => { setKind('mcp'); setInheritedExpanded(false); }}>MCP <span>{projectMcp.length}</span></button>
@@ -498,7 +447,9 @@ function ProjectCapabilityPanel({
         </section>
       )}
       {busy && <div className="project-capability-busy"><LoaderCircle size={12} /> {busy}</div>}
-      {dialogKind && <ProjectCapabilityDialog initialKind={dialogKind} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
+      {dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
+      {editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
+      {importingMcp && createPortal(<McpImporter onPreview={mcpForms.preview} onImport={mcpForms.import} onClose={() => setImportingMcp(false)} />, document.body)}
     </div>
   );
 }
@@ -649,6 +600,7 @@ function TaskCard({
 }
 
 export function InspectorPanel({
+  projectMcpForms,
   session,
   isOpen,
   agentTasks,
@@ -667,8 +619,11 @@ export function InspectorPanel({
   onAcceptCompletion,
   onRetryCapabilities,
   onToggleProjectSkill,
+  onPreviewProjectSkills,
   onInstallProjectSkill,
+  onRemoveProjectSkill,
   onCreateProjectMcp,
+  onEditProjectMcp,
   onToggleProjectMcp,
   onRemoveProjectMcp,
   onReconnectProjectMcp,
@@ -676,6 +631,7 @@ export function InspectorPanel({
   onClose,
 }: InspectorPanelProps) {
   const [view, setView] = useState<InspectorView>('tasks');
+  const [capabilityKind, setCapabilityKind] = useState<ProjectCapabilityKind>('skills');
   const [filter, setFilter] = useState<TaskFilter>('all');
   const completedTodo = (todo?.items ?? []).filter((item) => item.status === 'completed').length;
   const activeCount = agentTasks.filter((task) => isActive(task.status)).length;
@@ -762,14 +718,21 @@ export function InspectorPanel({
         </section>
         </> : (
           <ProjectCapabilityPanel
+            key={session.id}
+            kind={capabilityKind}
+            setKind={setCapabilityKind}
+            mcpForms={projectMcpForms}
             snapshot={capabilities}
             loading={capabilityLoading}
             error={capabilityError}
             busy={capabilityBusy}
             onRetry={onRetryCapabilities}
             onToggleSkill={onToggleProjectSkill}
+            onPreviewSkills={onPreviewProjectSkills}
             onInstallSkill={onInstallProjectSkill}
+            onRemoveSkill={onRemoveProjectSkill}
             onCreateMcp={onCreateProjectMcp}
+            onEditMcp={onEditProjectMcp}
             onToggleMcp={onToggleProjectMcp}
             onRemoveMcp={onRemoveProjectMcp}
             onReconnectMcp={onReconnectProjectMcp}

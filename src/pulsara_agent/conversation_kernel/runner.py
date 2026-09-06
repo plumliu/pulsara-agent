@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from time import monotonic
-from typing import Callable, Mapping, Protocol
+from typing import Awaitable, Callable, Mapping, Protocol
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.assembler import (
@@ -431,6 +431,7 @@ class ConversationKernelRunner:
         live_bus: LiveAgentEventBus,
         input_reader: CanonicalProviderInputReader | None = None,
         safe_point: ProviderSafePointCoordinator | None = None,
+        before_provider_preparation: Callable[[], Awaitable[bool]] | None = None,
         content_publisher: CanonicalContentPublisher | None = None,
         io_owner: KernelSessionIO | None = None,
         context_source_collector: ContextSourceCollectorPort,
@@ -474,6 +475,7 @@ class ConversationKernelRunner:
             blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
         )
         blob_store = PostgresCanonicalBlobStore(repository.connection_provider)
+        self._before_provider_preparation = before_provider_preparation
         self._safe_point = safe_point or ProviderSafePointCoordinator(
             repository=repository,
             guard=writer_lease.guard,
@@ -873,6 +875,11 @@ class ConversationKernelRunner:
             root_completion_phase_opened = True
         try:
             while True:
+                if successor_dispatch is None and self._before_provider_preparation is not None:
+                    # No input/surface handle exists here. A transferred compaction
+                    # successor must be consumed untouched; edits wait for its next
+                    # ordinary preparation boundary instead of replanning it.
+                    await self._before_provider_preparation()
                 if (
                     intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
                     and intent.scope_subagent_task_id is not None

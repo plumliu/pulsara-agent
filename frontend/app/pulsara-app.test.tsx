@@ -76,7 +76,8 @@ const capabilitySnapshot: CapabilitySnapshot = {
   sessionId: 'session-1',
   workspacePath: '/tmp/pulsara_agent',
   workspaceKind: 'project',
-  adoption: { scope: 'workspace', pending: false, when: 'next-user-turn' },
+  credentialScopeKey: 'workspace-test',
+  adoption: { scope: 'workspace', pending: false, when: 'next-provider-dispatch' },
   skills: {
     status: 'ready',
     configPath: '/tmp/pulsara_agent/.pulsara/skills.yaml',
@@ -156,6 +157,8 @@ const userCapabilitySnapshot: UserCapabilitySnapshot = {
     configPath: '/Users/test/.pulsara/mcp.yaml',
     servers: [{
       id: 'personal-docs',
+      currentIdentity: 'current-personal-docs',
+      config: { display_name: '个人文档', enabled: true, transport: { type: 'streamable_http', endpoint: 'https://example.com/mcp' }, auth: { type: 'none' } },
       name: '个人文档',
       enabled: true,
       status: 'ready',
@@ -288,6 +291,8 @@ class FakeConnection implements RuntimeConnection {
 
   async readInteraction(interaction: RuntimeInteractionSummary): Promise<RuntimeInteractionContent> {
     switch (interaction.kind) {
+      case 'capability-form':
+        return {kind: 'capability-form', form: {action: 'REMOVE_LOCAL_MCP', scope: 'USER', prefill: {server_id: 'fixture'}}};
       case 'plan-question':
         return { kind: 'plan-question', question: '选择发布方式', options: [], allowFreeText: true };
       case 'plan-draft':
@@ -423,46 +428,66 @@ class FakeAdapter implements RuntimeAdapter {
     sessionId,
   }));
 
-  installSkill = vi.fn(async (sessionId: string, sourcePath: string) => ({
+  installSkill = vi.fn<RuntimeAdapter['installSkill']>(async (sessionId, input) => ({
     installation: {
       status: 'INSTALLED',
       installed: true,
       message: '技能已经安装。',
-      sourcePath,
+      sourcePath: input.sourcePath,
       destinationPath: '/tmp/pulsara_agent/.pulsara/skills/pdf',
       details: [],
     },
-    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-provider-dispatch' as const },
     capabilities: { ...capabilitySnapshot, sessionId },
   }));
 
   setProjectSkillEnabled = vi.fn<RuntimeAdapter['setProjectSkillEnabled']>(async (sessionId: string) => ({
     operation: { status: 'DISABLED', success: true, message: '项目技能已关闭。', details: [] },
-    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-provider-dispatch' as const },
     capabilities: { ...capabilitySnapshot, sessionId },
   }));
 
   createProjectMcp = vi.fn(async (sessionId: string) => ({
     operation: { status: 'ADDED', success: true, message: '项目 MCP 已添加。', details: [] },
-    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-provider-dispatch' as const },
+    capabilities: { ...capabilitySnapshot, sessionId },
+  }));
+
+  importProjectMcp = vi.fn(async (sessionId: string) => this.createProjectMcp(sessionId));
+  testProjectMcp = vi.fn<RuntimeAdapter['testProjectMcp']>(async () => ({status: 'ready', tools: 1, resources: 0, resource_templates: 0, prompts: 0}));
+  projectMcpAuthorization = vi.fn<RuntimeAdapter['projectMcpAuthorization']>(async () => ({state: 'awaiting_user', error: null}));
+
+  removeProjectSkill = vi.fn(async (sessionId: string) => ({
+    operation: {status: 'REMOVED', success: true, message: '技能已删除。', details: []},
+    adoption: {scope: 'workspace' as const, pendingSessions: 1, when: 'next-provider-dispatch' as const},
+    capabilities: {...capabilitySnapshot, sessionId},
+  }));
+
+  updateProjectMcp = vi.fn(async (sessionId: string) => ({
+    operation: { status: 'UPDATED', success: true, message: '项目 MCP 已更新。', details: [] },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-provider-dispatch' as const },
     capabilities: { ...capabilitySnapshot, sessionId },
   }));
 
   setProjectMcpEnabled = vi.fn(async (sessionId: string) => ({
     operation: { status: 'DISABLED', success: true, message: '项目 MCP 已关闭。', details: [] },
-    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-provider-dispatch' as const },
     capabilities: { ...capabilitySnapshot, sessionId },
   }));
 
   removeProjectMcp = vi.fn(async (sessionId: string) => ({
     operation: { status: 'REMOVED', success: true, message: '项目 MCP 已移除。', details: [] },
-    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-user-turn' as const },
+    adoption: { scope: 'workspace' as const, pendingSessions: 1, when: 'next-provider-dispatch' as const },
     capabilities: { ...capabilitySnapshot, sessionId },
   }));
 
   inspectUserCapabilities = vi.fn(async () => userCapabilitySnapshot);
 
   refreshUserCapabilities = vi.fn(async () => userCapabilitySnapshot);
+  previewSkillImport = vi.fn<RuntimeAdapter['previewSkillImport']>(async () => []);
+  previewMcpImport = vi.fn(async () => []);
+  importUserMcp = vi.fn(async () => ({operation: {status: 'ADDED', success: true, message: '已导入', details: []}, capabilities: userCapabilitySnapshot}));
+  testUserMcp = vi.fn(async () => ({status: 'ready' as const, tools: 1, resources: 0, resource_templates: 0, prompts: 0}));
 
   installUserSkill = vi.fn(async () => ({
     operation: { status: 'INSTALLED', success: true, message: '技能已安装。', details: [] },
@@ -485,10 +510,21 @@ class FakeAdapter implements RuntimeAdapter {
     capabilities: userCapabilitySnapshot,
   }));
 
-  setUserMcpEnabled = vi.fn(async () => ({
+  updateUserMcp = vi.fn(async () => ({
     operation: { status: 'ENABLED', success: true, message: 'MCP 服务已开启。', details: [] },
     capabilities: userCapabilitySnapshot,
   }));
+
+  removeUserMcp = vi.fn(async () => ({
+    operation: { status: 'REMOVED', success: true, message: 'MCP 服务已移除。', details: [] },
+    capabilities: userCapabilitySnapshot,
+  }));
+  removeUserSkill = vi.fn(async () => ({
+    operation: {status: 'REMOVED', success: true, message: '技能已删除。', details: []},
+    capabilities: userCapabilitySnapshot,
+  }));
+  userMcpAuthorization = vi.fn(async () => ({ state: 'idle', error: null }));
+  previewPluginImport = vi.fn(async () => ({candidates: [{source_format: 'codex' as const, manifest: '.codex-plugin/plugin.json', error: null, preview: {name: 'example', source_format: 'codex' as const, skills: [], hooks: [], mcp: [], notices: []}}]}));
 
   installUserPlugin = vi.fn(async () => ({
     operation: { status: 'INSTALLED', success: true, message: '插件已安装。', details: [] },
@@ -500,6 +536,9 @@ class FakeAdapter implements RuntimeAdapter {
     capabilities: userCapabilitySnapshot,
   }));
 
+  pluginMcpAuthorization = vi.fn(async () => ({state: 'idle', error: null}));
+
+  updatePluginConnection = vi.fn(async () => ({ operation: { status: 'UPDATED', success: true, message: '已保存', details: [] }, capabilities: userCapabilitySnapshot }));
   removeUserPlugin = vi.fn(async () => ({
     operation: { status: 'REMOVED', success: true, message: '插件已移除。', details: [] },
     capabilities: userCapabilitySnapshot,
@@ -572,7 +611,8 @@ describe('PulsaraApp', () => {
     expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
     expect(await screen.findByText('Personal Tools')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '查看 Personal Tools' }));
-    expect(await screen.findByText('已用于当前打开的会话')).toBeTruthy();
+    expect(await screen.findByText('已启用；会话将在安全时机采用')).toBeTruthy();
+    expect(screen.queryByText('已用于当前打开的会话')).toBeNull();
     expect(screen.queryByText('/Users/test/.pulsara/plugins/personal-tools')).toBeNull();
     fireEvent.click(screen.getByRole('tab', { name: /技能/ }));
     const skillSwitch = await screen.findByRole('switch', { name: '关闭 personal-pdf' });
@@ -632,10 +672,10 @@ describe('PulsaraApp', () => {
     adapter.inspectCapabilities.mockResolvedValue(projectSnapshot);
     adapter.setProjectSkillEnabled.mockResolvedValue({
       operation: { status: 'DISABLED', success: true, message: '项目技能已关闭。', details: [] },
-      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-user-turn' },
+      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-provider-dispatch' },
       capabilities: {
         ...projectSnapshot,
-        adoption: { scope: 'workspace', pending: true, when: 'next-user-turn' },
+        adoption: { scope: 'workspace', pending: true, when: 'next-provider-dispatch' },
         skills: {
           ...projectSnapshot.skills,
           items: projectSnapshot.skills.items.map((item) => (
@@ -734,21 +774,28 @@ describe('PulsaraApp', () => {
     addButton.focus();
     fireEvent.click(addButton);
 
-    const dialog = await screen.findByRole('dialog', { name: '添加项目能力' });
+    const dialog = await screen.findByRole('dialog', { name: '导入技能' });
     expect(inspector.contains(dialog)).toBe(false);
     const application = document.querySelector<HTMLElement>('main.pulsara-shell');
     expect(application?.inert).toBe(true);
-    fireEvent.click(within(dialog).getByRole('button', { name: 'MCP' }));
-    expect((within(dialog).getByRole('checkbox', { name: /允许子代理使用/ }) as HTMLInputElement).checked).toBe(false);
+    fireEvent.keyDown(window, {key: 'Escape'});
+    expect(application?.inert).toBe(false);
+    fireEvent.click(within(inspector).getByRole('tab', { name: /MCP/ }));
+    fireEvent.click(addButton);
+    const mcpDialog = await screen.findByRole('dialog', { name: '添加 MCP 服务' });
+    expect(inspector.contains(mcpDialog)).toBe(false);
+    expect((within(mcpDialog).getByRole('checkbox', { name: '也向子任务提供' }) as HTMLInputElement).checked).toBe(false);
 
     fireEvent.keyDown(window, { key: 'Escape' });
-    expect(screen.queryByRole('dialog', { name: '添加项目能力' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: '导入技能' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: '添加 MCP 服务' })).toBeNull();
     expect(application?.inert).toBe(false);
     await waitFor(() => expect(document.activeElement).toBe(addButton));
   });
 
   it('keeps the project capability dialog open while its mutation is saving', async () => {
     const adapter = new FakeAdapter();
+    adapter.previewSkillImport.mockResolvedValue([{sourcePath: '/tmp/market-skill', name: 'market-skill', description: 'A portable skill', valid: true, details: []}]);
     let finishInstallation!: (value: Awaited<ReturnType<FakeAdapter['installSkill']>>) => void;
     adapter.installSkill.mockImplementation(() => new Promise((resolve) => {
       finishInstallation = resolve;
@@ -759,11 +806,13 @@ describe('PulsaraApp', () => {
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
     const addButton = await within(inspector).findByRole('button', { name: '添加' });
     fireEvent.click(addButton);
-    const dialog = await screen.findByRole('dialog', { name: '添加项目能力' });
-    fireEvent.change(within(dialog).getByPlaceholderText('/绝对路径/到/skill'), {
+    const dialog = await screen.findByRole('dialog', { name: '导入技能' });
+    fireEvent.change(within(dialog).getByLabelText('来源目录'), {
       target: { value: '/tmp/market-skill' },
     });
-    fireEvent.click(within(dialog).getByRole('button', { name: '添加' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: '读取预览' }));
+    await within(dialog).findByText('/tmp/market-skill');
+    fireEvent.click(within(dialog).getByRole('button', { name: '安装所选技能' }));
 
     await waitFor(() => expect(dialog.getAttribute('aria-busy')).toBe('true'));
     expect((addButton as HTMLButtonElement).disabled).toBe(true);
@@ -771,11 +820,9 @@ describe('PulsaraApp', () => {
       expect((closeButton as HTMLButtonElement).disabled).toBe(true);
       fireEvent.click(closeButton);
     }
-    const cancelButton = within(dialog).getByRole('button', { name: '取消' });
-    expect((cancelButton as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(cancelButton);
     fireEvent.keyDown(window, { key: 'Escape' });
-    expect(screen.getByRole('dialog', { name: '添加项目能力' })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: '导入技能' })).toBeTruthy();
+    expect(adapter.installSkill).toHaveBeenCalledWith('session-1', {sourcePath: '/tmp/market-skill', name: 'market-skill', description: 'A portable skill', valid: true, details: []});
 
     await act(async () => finishInstallation({
       installation: {
@@ -786,10 +833,12 @@ describe('PulsaraApp', () => {
         destinationPath: '/tmp/pulsara_agent/.pulsara/skills/market-skill',
         details: [],
       },
-      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-user-turn' },
+      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-provider-dispatch' },
       capabilities: capabilitySnapshot,
     }));
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '添加项目能力' })).toBeNull());
+    expect(await within(dialog).findByText('已安装')).toBeTruthy();
+    fireEvent.keyDown(window, {key: 'Escape'});
+    expect(screen.queryByRole('dialog', { name: '导入技能' })).toBeNull();
   });
 
   it('refreshes a stale MCP snapshot after a rejected project mutation', async () => {
@@ -916,7 +965,7 @@ describe('PulsaraApp', () => {
       .mockReturnValue(olderInspection);
     adapter.setProjectMcpEnabled.mockResolvedValue({
       operation: { status: 'DISABLED', success: true, message: '项目 MCP 已关闭。', details: [] },
-      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-user-turn' },
+      adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-provider-dispatch' },
       capabilities: {
         ...inspectingSnapshot,
         mcp: {
@@ -1002,7 +1051,7 @@ describe('PulsaraApp', () => {
     await act(async () => {
       finishMutation({
         operation: { status: 'DISABLED', success: true, message: '项目技能已关闭。', details: [] },
-        adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-user-turn' },
+        adoption: { scope: 'workspace', pendingSessions: 1, when: 'next-provider-dispatch' },
         capabilities: {
           ...firstSnapshot,
           skills: { ...firstSnapshot.skills, items: [{ ...projectSkill, enabled: false }] },
@@ -1873,6 +1922,56 @@ describe('PulsaraApp', () => {
     expect((screen.getByLabelText('API 协议') as unknown as HTMLSelectElement).disabled).toBe(true);
     expect(screen.getByRole('option', { name: 'Chat Completions · 暂不支持' })).toBeTruthy();
     expect(screen.getByRole('option', { name: 'Responses · 暂不支持' })).toBeTruthy();
+  });
+
+  it('collapses the inspector when leaving desktop width without forcing it open again', async () => {
+    const media = new EventTarget();
+    let matches = true;
+    const removeListener = vi.spyOn(media, 'removeEventListener');
+    vi.stubGlobal('matchMedia', vi.fn(() => Object.assign(media, { matches })));
+    const view = render(<PulsaraApp adapter={new FakeAdapter()} />);
+    try {
+      await screen.findByRole('heading', { name: '准备发布' });
+      const inspector = screen.getByRole('complementary', { name: '当前会话详情' });
+      expect(inspector.classList.contains('is-open')).toBe(true);
+      matches = false;
+      act(() => media.dispatchEvent(Object.assign(new Event('change'), { matches })));
+      expect(inspector.classList.contains('is-open')).toBe(false);
+      fireEvent.click(screen.getByRole('button', { name: '切换检查器' }));
+      expect(inspector.classList.contains('is-open')).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: '收起详情侧栏' }));
+      expect(inspector.classList.contains('is-open')).toBe(false);
+      matches = true;
+      act(() => media.dispatchEvent(Object.assign(new Event('change'), { matches })));
+      expect(inspector.classList.contains('is-open')).toBe(false);
+    } finally {
+      view.unmount();
+      vi.unstubAllGlobals();
+    }
+    expect(removeListener).toHaveBeenCalledWith('change', expect.any(Function));
+  });
+
+  it('uses the same reasoning control inside composer options and dismisses the panel without resetting it', async () => {
+    const adapter = new FakeAdapter();
+    const update = vi.spyOn(adapter, 'updateModelCallBinding');
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const trigger = screen.getByRole('button', { name: '本轮选项' });
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: /推理 medium/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'high' }));
+    expect(await screen.findByRole('button', { name: /推理 high/ })).toBeTruthy();
+    expect(update).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(trigger);
+    expect(screen.getAllByRole('button', { name: /推理 high/ })).toHaveLength(1);
+    fireEvent.pointerDown(screen.getByRole('heading', { name: '准备发布' }));
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    const label = document.querySelector('.model-chip__label');
+    expect(label?.closest('button')?.title).toBe(label?.textContent);
+    expect(update).toHaveBeenCalledTimes(1);
   });
 
   it('keeps an exact reasoning selection until the user changes it again', async () => {

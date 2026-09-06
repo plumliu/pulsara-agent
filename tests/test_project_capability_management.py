@@ -9,6 +9,7 @@ import pytest
 
 import pulsara_agent.mcp_config as mcp_config_module
 
+
 from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
 from pulsara_agent.capability.resolver import (
     CompleteEffectiveSkillCatalogInspection,
@@ -31,11 +32,9 @@ from pulsara_agent.mcp_config import (
     McpLocalConfigSourceKind,
     McpScopePolicy,
     StdioTransportConfig,
-    create_workspace_mcp_server_config,
     load_mcp_server_configs,
     load_workspace_mcp_server_configs,
     mcp_server_workspace_approval_identity,
-    write_mcp_server_config,
 )
 from pulsara_agent.web_app.session_controller import (
     HostSessionHandle,
@@ -44,6 +43,43 @@ from pulsara_agent.web_app.session_controller import (
     _mcp_transport_payload,
 )
 from pulsara_agent.workspace_identity import HostWorkspaceInput
+
+
+async def _create_project_mcp_via_controller(controller, session_id, *, server_id, display_name,
+                              transport, endpoint, command, args, available_to_subagents):
+    connection = ({"type": "streamable_http", "endpoint": endpoint} if transport == "http"
+                  else {"type": "stdio", "command": command, "args": args})
+    return await controller.create_session_mcp_server(session_id, server_id=server_id,
+        config={"display_name": display_name, "transport": connection,
+                "scope_policy": "ROOT_AND_SUBAGENTS" if available_to_subagents else "ROOT_ONLY"})
+
+
+def _write_config_fixture(
+    *, server_id, entry, workspace_root=None, user_config_path=None
+):
+    path = (
+        mcp_config_module.workspace_mcp_config_path(workspace_root)
+        if workspace_root
+        else user_config_path
+    )
+    raw = mcp_config_module._load_raw(path)
+    mcp_config_module._parse_server(server_id, entry)
+    raw[server_id] = entry
+    mcp_config_module._write_mcp_raw(path, raw, workspace_root=workspace_root)
+
+
+def _create_project_mcp(*, workspace_root, server_id, entry):
+    from pulsara_agent.capability.mcp_management import (
+        LocalMcpManagementService,
+        LocalMcpTarget,
+    )
+    from pulsara_agent.settings import LocalSettingsStore
+
+    service = LocalMcpManagementService(
+        LocalSettingsStore(workspace_root.parent / "private-test-settings.yaml"),
+        user_config_path=workspace_root.parent / "missing-user.yaml",
+    )
+    return asyncio.run(service.create(LocalMcpTarget(server_id, workspace_root), entry))
 
 
 class _Session:
@@ -55,13 +91,25 @@ class _Session:
             workspace_kind="project",
         )
         self.refresh_requests = 0
+        self.extensions = object()
 
     def inspect_capability_catalog(self):
         return SimpleNamespace(mcp_configured_servers=())
 
-    async def request_project_capability_refresh(self) -> int:
+    async def request_capability_refresh(self) -> int:
         self.refresh_requests += 1
         return self.refresh_requests
+
+
+def _refresh_core(sessions=()):
+    from pulsara_agent.conversation_kernel.host import KernelHostCore
+    core = object.__new__(KernelHostCore)
+    core._lock = asyncio.Lock()
+    core._closing = False
+    core._sessions = {session.host_session_id: session for session in sessions}
+    core._extension_routes = {}
+    core._workspace_capability_revisions = {session.workspace.workspace_root.resolve(): 0 for session in sessions}
+    return core
 
 
 def _controller_with_sessions(
@@ -78,7 +126,16 @@ def _controller_with_sessions(
     controller = object.__new__(LocalSessionController)
     controller._lock = asyncio.Lock()
     controller._capability_mutation_lock = asyncio.Lock()
-    controller._workspace_capability_revisions = {}
+    from pulsara_agent.capability.mcp_management import LocalMcpManagementService
+    from pulsara_agent.settings import LocalSettingsStore
+    import pulsara_agent.mcp_config as mcp_config
+
+    controller.core = _refresh_core((primary, sibling, other))
+    controller.core.mcp_management = LocalMcpManagementService(
+            LocalSettingsStore(workspace_root.parent / "local-settings.yaml"),
+            user_config_path=mcp_config.default_user_mcp_config_path(),
+            lane=controller._capability_mutation_lock,
+        )
     controller._by_session = {item.session_id: item for item in handles}
 
     async def resume_session(session_id: str) -> HostSessionHandle:
@@ -90,6 +147,67 @@ def _controller_with_sessions(
     controller.resume_session = resume_session  # type: ignore[method-assign]
     controller._session_capability_payload = capability_payload  # type: ignore[method-assign]
     return controller, handles[0], primary, sibling, other
+
+
+def test_project_mcp_import_test_and_authorization_share_exact_directory_owner(tmp_path):
+    import json
+    from pulsara_agent.capability.mcp_management import LocalMcpTarget, McpConnectionTestOutcome
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    controller, handle, primary, sibling, other = _controller_with_sessions(workspace, tmp_path / "other")
+    manager = controller.core.mcp_management
+
+    async def run():
+        imported = await controller.import_mcp(
+            content=json.dumps({"mcpServers": {"docs": {"url": "https://example.org/mcp", "headers": {"Authorization": "Bearer private-import-fixture"}}}}),
+            shape="mcpServers", server_id=None, selected_server_id="docs",
+            classifications={}, values={}, transport="streamable_http", session_id=handle.session_id,
+        )
+        assert imported["operation"]["success"]
+        assert (primary.refresh_requests, sibling.refresh_requests, other.refresh_requests) == (1, 1, 0)
+        target = LocalMcpTarget("docs", workspace)
+        private = manager.settings.read()
+        assert private.mcp_credentials and all(item.binding.owner == target.owner for item in private.mcp_credentials)
+        path = mcp_config_module.workspace_mcp_config_path(workspace)
+        before = path.read_bytes()
+        assert b"private-import-fixture" not in before
+        assert "private-import-fixture" not in json.dumps(imported)
+        manager.test = AsyncMock(return_value=McpConnectionTestOutcome("ready", 2, 0, 0, 0))
+        result = await controller.test_mcp_server(session_id=handle.session_id, server_id="docs", config={"transport": {"type": "streamable_http", "endpoint": "https://draft.example/mcp"}})
+        assert result["status"] == "ready" and result["tools"] == 2
+        assert manager.test.call_args.args[0] == target
+        assert manager.test.call_args.kwargs["workspace_root"] == workspace
+        assert path.read_bytes() == before
+        manager.authorize = AsyncMock(return_value=SimpleNamespace(state="awaiting_user", error=None))
+        assert (await controller.authorize_mcp("docs", session_id=handle.session_id))["state"] == "awaiting_user"
+        manager.authorize.assert_awaited_once_with(target)
+        manager.oauth.logout = AsyncMock()
+        await controller.mcp_authorization("docs", action="logout", session_id=handle.session_id)
+        manager.oauth.logout.assert_awaited_once_with(target.owner)
+        await manager.aclose()
+
+    asyncio.run(run())
+
+
+def test_plugin_install_controller_does_not_reacquire_shared_management_lane(tmp_path):
+    from pulsara_agent.plugins.contracts import FailedPluginInstallOutcome, PluginInstallDisposition
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    controller, _, _, _, _ = _controller_with_sessions(workspace, tmp_path / "other")
+
+    async def install(source, *, source_format, import_classifications, import_public_values):
+        assert source_format == "native"
+        assert import_classifications == import_public_values == ()
+        assert not controller._capability_mutation_lock.locked()
+        async with controller._capability_mutation_lock:
+            return FailedPluginInstallOutcome(PluginInstallDisposition.UNAVAILABLE, source)
+
+    controller.core.install_user_plugin = install
+    controller.inspect_user_capabilities = AsyncMock(return_value={})
+    result = asyncio.run(controller.install_user_plugin(source_path=str(tmp_path / "source")))
+    assert not result["operation"]["success"]
 
 
 def test_project_skill_switch_derives_target_from_session_and_marks_same_directory(
@@ -122,6 +240,31 @@ def test_project_skill_switch_derives_target_from_session_and_marks_same_directo
     assert other.refresh_requests == 0
 
 
+def test_project_skill_removal_is_exact_and_only_notifies_its_directory(tmp_path):
+    from pulsara_agent.capability.local_skill_management import LocalSkillManagementService, LocalSkillInstallScope
+
+    workspace = tmp_path / 'workspace'
+    skill = workspace / '.pulsara' / 'skills' / 'review' / 'SKILL.md'
+    skill.parent.mkdir(parents=True)
+    skill.write_text('---\nname: review\ndescription: Review project.\n---\nKeep source faithful.\n')
+    controller, handle, primary, sibling, other = _controller_with_sessions(workspace, tmp_path / 'other')
+    service = LocalSkillManagementService()
+    expected = service.inspect_loose_skill_removal(
+        skill_path=skill, scope=LocalSkillInstallScope.WORKSPACE, workspace_root=workspace,
+    )
+    result = asyncio.run(controller.remove_session_skill(handle.session_id, skill_path=str(skill), expected=expected))
+    assert result['operation']['status'] == 'REMOVED'
+    assert not skill.parent.exists()
+    assert primary.refresh_requests == sibling.refresh_requests == 1
+    assert other.refresh_requests == 0
+    foreign = tmp_path / 'foreign' / '.pulsara' / 'skills' / 'review' / 'SKILL.md'
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text('do not delete')
+    with pytest.raises(ValueError, match='owned immediate child'):
+        asyncio.run(controller.remove_session_skill(handle.session_id, skill_path=str(foreign), expected=expected))
+    assert foreign.read_text() == 'do not delete'
+
+
 def test_project_mcp_write_is_session_scoped_and_approves_only_exact_entry(
     tmp_path: Path,
     monkeypatch,
@@ -134,7 +277,7 @@ def test_project_mcp_write_is_session_scoped_and_approves_only_exact_entry(
     )
 
     result = asyncio.run(
-        controller.create_session_mcp_server(
+        _create_project_mcp_via_controller(controller,
             handle.session_id,
             server_id="project-docs",
             display_name="Project Docs",
@@ -172,19 +315,18 @@ def test_project_mcp_approval_does_not_enable_an_unapproved_sibling(
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    write_mcp_server_config(
+    _write_config_fixture(
         workspace_root=workspace,
         server_id="unreviewed",
         entry={
-            "transport": "stdio",
-            "command": "unknown-command",
+            "transport": {"type": "stdio", "command": "unknown-command"},
             "enabled": True,
         },
     )
     controller, handle, *_ = _controller_with_sessions(workspace, tmp_path / "other")
 
     asyncio.run(
-        controller.create_session_mcp_server(
+        _create_project_mcp_via_controller(controller,
             handle.session_id,
             server_id="reviewed",
             display_name="Reviewed Docs",
@@ -218,7 +360,7 @@ def test_disabling_project_mcp_removes_its_workspace_approval(
     workspace.mkdir()
     controller, handle, *_ = _controller_with_sessions(workspace, tmp_path / "other")
     asyncio.run(
-        controller.create_session_mcp_server(
+        _create_project_mcp_via_controller(controller,
             handle.session_id,
             server_id="docs",
             display_name="Docs",
@@ -237,9 +379,7 @@ def test_disabling_project_mcp_removes_its_workspace_approval(
             handle.session_id,
             server_id="docs",
             enabled=False,
-            expected_config_identity=mcp_server_workspace_approval_identity(
-                inspected
-            ),
+            expected_config_identity=mcp_server_workspace_approval_identity(inspected),
         )
     )
 
@@ -257,7 +397,7 @@ def test_disabling_project_mcp_repairs_bad_approval_and_still_marks_sessions(
         workspace, tmp_path / "other"
     )
     asyncio.run(
-        controller.create_session_mcp_server(
+        _create_project_mcp_via_controller(controller,
             handle.session_id,
             server_id="docs",
             display_name="Docs",
@@ -276,9 +416,7 @@ def test_disabling_project_mcp_repairs_bad_approval_and_still_marks_sessions(
             handle.session_id,
             server_id="docs",
             enabled=False,
-            expected_config_identity=mcp_server_workspace_approval_identity(
-                inspected
-            ),
+            expected_config_identity=mcp_server_workspace_approval_identity(inspected),
         )
     )
 
@@ -295,43 +433,37 @@ def test_project_mcp_approval_survives_process_secret_commitment_rotation(
     monkeypatch.setenv("PROJECT_DOCS_TOKEN", "rotatable-secret")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    write_mcp_server_config(
+    _write_config_fixture(
         workspace_root=workspace,
         server_id="project-docs",
         entry={
-            "transport": "streamable_http",
-            "url": "https://example.com/mcp",
+            "transport": {
+                "type": "streamable_http",
+                "endpoint": "https://example.com/mcp",
+            },
             "auth": {
-                "type": "bearer_environment_ref",
-                "environment_variable": "PROJECT_DOCS_TOKEN",
+                "type": "bearer",
+                "reference": {"source": "environment", "name": "PROJECT_DOCS_TOKEN"},
             },
             "enabled": True,
         },
     )
 
-    monkeypatch.setattr(
-        mcp_config_module, "_PROCESS_SECRET_COMMITMENT_KEY", b"a" * 32
-    )
+    monkeypatch.setattr(mcp_config_module, "_PROCESS_SECRET_COMMITMENT_KEY", b"a" * 32)
     first = load_workspace_mcp_server_configs(workspace)[0]
     approve_workspace_mcp_server_config(workspace, first)
     first_approval = mcp_server_workspace_approval_identity(first)
 
-    monkeypatch.setattr(
-        mcp_config_module, "_PROCESS_SECRET_COMMITMENT_KEY", b"b" * 32
-    )
+    monkeypatch.setattr(mcp_config_module, "_PROCESS_SECRET_COMMITMENT_KEY", b"b" * 32)
     second = load_workspace_mcp_server_configs(workspace)[0]
     assert second.resolved_config_identity != first.resolved_config_identity
     assert mcp_server_workspace_approval_identity(second) == first_approval
-    assert workspace_mcp_server_approvals(workspace) == {
-        "project-docs": first_approval
-    }
+    assert workspace_mcp_server_approvals(workspace) == {"project-docs": first_approval}
 
     (loaded,) = load_mcp_server_configs(
         workspace_root=workspace,
         user_config_path=tmp_path / "missing-user.yaml",
-        approved_workspace_server_identities=workspace_mcp_server_approvals(
-            workspace
-        ),
+        approved_workspace_server_identities=workspace_mcp_server_approvals(workspace),
     )
     assert loaded.enabled is True
 
@@ -343,10 +475,13 @@ def test_project_mcp_approval_identity_does_not_depend_on_process_path(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setenv("PATH", "/first/bin")
-    write_mcp_server_config(
+    _write_config_fixture(
         workspace_root=workspace,
         server_id="local",
-        entry={"transport": "stdio", "command": "example-mcp", "enabled": True},
+        entry={
+            "transport": {"type": "stdio", "command": "example-mcp"},
+            "enabled": True,
+        },
     )
     first = load_workspace_mcp_server_configs(workspace)[0]
 
@@ -365,22 +500,26 @@ def test_project_mcp_writer_rejects_the_next_entry_without_corrupting_the_file(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     for index in range(MAXIMUM_MCP_CONFIGURED_SERVERS):
-        write_mcp_server_config(
+        _write_config_fixture(
             workspace_root=workspace,
             server_id=f"server-{index:02d}",
             entry={
-                "transport": "streamable_http",
-                "url": f"https://example.com/{index}/mcp",
+                "transport": {
+                    "type": "streamable_http",
+                    "endpoint": f"https://example.com/{index}/mcp",
+                },
             },
         )
 
     with pytest.raises(McpConfiguredServerBoundExceeded):
-        create_workspace_mcp_server_config(
+        _create_project_mcp(
             workspace_root=workspace,
             server_id="one-too-many",
             entry={
-                "transport": "streamable_http",
-                "url": "https://example.com/overflow/mcp",
+                "transport": {
+                    "type": "streamable_http",
+                    "endpoint": "https://example.com/overflow/mcp",
+                },
             },
         )
 
@@ -394,14 +533,16 @@ def test_project_mcp_addition_rejects_cross_source_capacity_before_writing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user_config = tmp_path / "user-mcp.yaml"
-    monkeypatch.setattr(mcp_config_module, "DEFAULT_USER_MCP_CONFIG", user_config)
+    monkeypatch.setattr(mcp_config_module, "default_user_mcp_config_path", lambda: user_config)
     for index in range(MAXIMUM_MCP_CONFIGURED_SERVERS):
-        write_mcp_server_config(
+        _write_config_fixture(
             user_config_path=user_config,
             server_id=f"user-{index:02d}",
             entry={
-                "transport": "streamable_http",
-                "url": f"https://example.com/{index}/mcp",
+                "transport": {
+                    "type": "streamable_http",
+                    "endpoint": f"https://example.com/{index}/mcp",
+                },
             },
         )
     workspace = tmp_path / "workspace"
@@ -412,7 +553,7 @@ def test_project_mcp_addition_rejects_cross_source_capacity_before_writing(
 
     with pytest.raises(McpConfiguredServerBoundExceeded):
         asyncio.run(
-            controller.create_session_mcp_server(
+            _create_project_mcp_via_controller(controller,
                 handle.session_id,
                 server_id="project-extra",
                 display_name="Project Extra",
@@ -437,7 +578,7 @@ def test_project_mcp_edit_rejects_a_stale_inspected_identity(
     workspace.mkdir()
     controller, handle, *_ = _controller_with_sessions(workspace, tmp_path / "other")
     asyncio.run(
-        controller.create_session_mcp_server(
+        _create_project_mcp_via_controller(controller,
             handle.session_id,
             server_id="docs",
             display_name="Docs",
@@ -480,12 +621,14 @@ def test_project_mcp_write_rejects_a_symlinked_project_capability_directory(
     (workspace / ".pulsara").symlink_to(external, target_is_directory=True)
 
     with pytest.raises(ValueError, match="symlink"):
-        create_workspace_mcp_server_config(
+        _create_project_mcp(
             workspace_root=workspace,
             server_id="docs",
             entry={
-                "transport": "streamable_http",
-                "url": "https://example.com/mcp",
+                "transport": {
+                    "type": "streamable_http",
+                    "endpoint": "https://example.com/mcp",
+                },
             },
         )
     assert not (external / "mcp.yaml").exists()
@@ -512,8 +655,9 @@ def test_project_skill_switch_rejects_a_symlinked_project_capability_directory(
     assert not (external / "skills.yaml").exists()
 
 
+@pytest.mark.parametrize("scope", ["user", "workspace"])
 def test_session_created_during_a_project_change_still_marks_lazy_refresh(
-    tmp_path: Path,
+    tmp_path: Path, scope: str,
 ) -> None:
     async def exercise() -> None:
         workspace = tmp_path / "workspace"
@@ -527,15 +671,16 @@ def test_session_created_during_a_project_change_still_marks_lazy_refresh(
         )
 
         async def open_session(*_args, **_kwargs):
+            baseline = controller.core._workspace_capability_revisions.setdefault(workspace.resolve(), 0)
             entered.set()
             await release.wait()
+            await controller.core._register_prepared_session(session, baseline)
             return session
 
         controller = object.__new__(LocalSessionController)
-        controller.core = SimpleNamespace(
-            open_session=open_session,
-            close_session=AsyncMock(),
-        )
+        controller.core = _refresh_core()
+        controller.core.open_session = open_session
+        controller.core.close_session = AsyncMock()
         controller.workspace_input = HostWorkspaceInput(
             workspace_kind="project",
             workspace_root=workspace,
@@ -548,7 +693,6 @@ def test_session_created_during_a_project_change_still_marks_lazy_refresh(
         controller._resumes = {}
         controller._lock = asyncio.Lock()
         controller._capability_mutation_lock = asyncio.Lock()
-        controller._workspace_capability_revisions = {}
         controller._closing = False
         controller._close_task = None
 
@@ -559,7 +703,7 @@ def test_session_created_during_a_project_change_still_marks_lazy_refresh(
             )
         )
         await entered.wait()
-        assert await controller._mark_workspace_capability_refresh(workspace) == 0
+        assert await controller._mark_capability_refresh(workspace if scope == "workspace" else None) == 0
         release.set()
         await creating
         assert session.refresh_requests == 1
@@ -567,8 +711,9 @@ def test_session_created_during_a_project_change_still_marks_lazy_refresh(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("scope", ["user", "workspace"])
 def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
-    tmp_path: Path,
+    tmp_path: Path, scope: str,
 ) -> None:
     async def exercise() -> None:
         workspace = tmp_path / "workspace"
@@ -586,16 +731,17 @@ def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
             )
 
         async def resume_session(*_args, **_kwargs):
+            baseline = controller.core._workspace_capability_revisions.setdefault(workspace.resolve(), 0)
             entered.set()
             await release.wait()
+            await controller.core._register_prepared_session(session, baseline)
             return session
 
         controller = object.__new__(LocalSessionController)
-        controller.core = SimpleNamespace(
-            read_resumable_session=read_resumable_session,
-            resume_session=resume_session,
-            close_session=AsyncMock(),
-        )
+        controller.core = _refresh_core()
+        controller.core.read_resumable_session = read_resumable_session
+        controller.core.resume_session = resume_session
+        controller.core.close_session = AsyncMock()
         controller.workspace_input = HostWorkspaceInput(
             workspace_kind="project",
             workspace_root=workspace,
@@ -608,13 +754,12 @@ def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
         controller._resumes = {}
         controller._lock = asyncio.Lock()
         controller._capability_mutation_lock = asyncio.Lock()
-        controller._workspace_capability_revisions = {}
         controller._closing = False
         controller._close_task = None
 
         resuming = asyncio.create_task(controller.resume_session("session:resumed"))
         await entered.wait()
-        assert await controller._mark_workspace_capability_refresh(workspace) == 0
+        assert await controller._mark_capability_refresh(workspace if scope == "workspace" else None) == 0
         release.set()
         handle = await resuming
         assert handle.session_id == "session:resumed"
@@ -638,19 +783,20 @@ def test_project_refresh_ignores_a_session_that_closes_during_marking(
             await release.wait()
             raise RuntimeError("kernel Host session is closing")
 
-        session.request_project_capability_refresh = close_during_refresh  # type: ignore[method-assign]
+        session.request_capability_refresh = close_during_refresh  # type: ignore[method-assign]
         handle = HostSessionHandle(session, SimpleNamespace())
         controller = object.__new__(LocalSessionController)
         controller._lock = asyncio.Lock()
-        controller._workspace_capability_revisions = {}
+        controller.core = _refresh_core((session,))
         controller._by_session = {handle.session_id: handle}
 
         marking = asyncio.create_task(
-            controller._mark_workspace_capability_refresh(workspace)
+            controller._mark_capability_refresh(workspace)
         )
         await entered.wait()
         async with controller._lock:
             controller._by_session.pop(handle.session_id)
+            controller.core._sessions.pop(session.host_session_id)
         release.set()
         assert await marking == 0
 
@@ -662,24 +808,25 @@ def test_live_session_refresh_is_lazy_until_the_next_turn_safe_point() -> None:
         session = SimpleNamespace(
             _lock=asyncio.Lock(),
             _queue_wake=asyncio.Event(),
-            _project_capability_refresh_requested_revision=0,
-            _project_capability_refresh_applied_revision=0,
-            _project_capability_refresh_attention=None,
+            _capability_refresh_requested_revision=0,
+            _capability_refresh_applied_revision=0,
+            _capability_refresh_attention=None,
             _require_open=lambda: None,
             reload_capabilities=AsyncMock(return_value={"mcp": "RELOADED"}),
         )
 
-        await KernelHostSession.request_project_capability_refresh(session)
+        await KernelHostSession.request_capability_refresh(session)
         session.reload_capabilities.assert_not_awaited()
-        assert KernelHostSession.project_capability_refresh_pending.fget(session)
+        assert not session._queue_wake.is_set()
+        assert KernelHostSession.capability_refresh_pending.fget(session)
 
-        adopted = await KernelHostSession._adopt_project_capabilities_if_requested(
+        adopted = await KernelHostSession._adopt_capabilities_if_requested(
             session
         )
         assert adopted is True
         session.reload_capabilities.assert_awaited_once_with(deadline_monotonic=None)
-        assert not KernelHostSession.project_capability_refresh_pending.fget(session)
-        assert session._project_capability_refresh_attention is None
+        assert not KernelHostSession.capability_refresh_pending.fget(session)
+        assert session._capability_refresh_attention is None
 
     asyncio.run(exercise())
 
@@ -689,25 +836,21 @@ def test_failed_project_capability_adoption_does_not_starve_the_queued_turn() ->
         session = SimpleNamespace(
             _lock=asyncio.Lock(),
             _queue_wake=asyncio.Event(),
-            _project_capability_refresh_requested_revision=0,
-            _project_capability_refresh_applied_revision=0,
-            _project_capability_refresh_attention=None,
+            _capability_refresh_requested_revision=0,
+            _capability_refresh_applied_revision=0,
+            _capability_refresh_attention=None,
             _require_open=lambda: None,
             reload_capabilities=AsyncMock(side_effect=ValueError("bad project MCP")),
         )
 
-        await KernelHostSession.request_project_capability_refresh(session)
-        assert await KernelHostSession._adopt_project_capabilities_if_requested(
-            session
-        )
-        assert not KernelHostSession.project_capability_refresh_pending.fget(session)
-        assert session._project_capability_refresh_attention == (
+        await KernelHostSession.request_capability_refresh(session)
+        assert await KernelHostSession._adopt_capabilities_if_requested(session)
+        assert not KernelHostSession.capability_refresh_pending.fget(session)
+        assert session._capability_refresh_attention == (
             "PROJECT_CAPABILITY_ADOPTION_FAILED"
         )
 
-        assert await KernelHostSession._adopt_project_capabilities_if_requested(
-            session
-        )
+        assert await KernelHostSession._adopt_capabilities_if_requested(session)
         session.reload_capabilities.assert_awaited_once_with(deadline_monotonic=None)
 
     asyncio.run(exercise())
@@ -740,14 +883,16 @@ def test_project_mcp_transition_keeps_one_editable_row(tmp_path: Path) -> None:
         winners=(),
         candidate_issues=(),
     )
-    write_mcp_server_config(
+    _write_config_fixture(
         workspace_root=workspace,
         server_id="time",
         entry={
             "display_name": "Time",
-            "transport": "stdio",
-            "command": "uvx",
-            "args": ["mcp-server-time"],
+            "transport": {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server-time"],
+            },
             "enabled": True,
             "scope_policy": McpScopePolicy.ROOT_ONLY.value,
         },
@@ -816,13 +961,15 @@ def test_disabled_workspace_mcp_does_not_hide_the_effective_user_server(
         winners=(),
         candidate_issues=(),
     )
-    write_mcp_server_config(
+    _write_config_fixture(
         workspace_root=workspace,
         server_id="docs",
         entry={
             "display_name": "Project Docs",
-            "transport": "streamable_http",
-            "url": "https://project.example.com/mcp",
+            "transport": {
+                "type": "streamable_http",
+                "endpoint": "https://project.example.com/mcp",
+            },
             "enabled": False,
         },
     )

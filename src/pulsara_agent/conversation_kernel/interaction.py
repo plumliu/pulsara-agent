@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from threading import Lock
 from uuid import uuid4
+
+from pulsara_agent.capability.management_form import (
+    AcceptedCapabilityFormSubmission,
+    CapabilityFormValues,
+    PendingCapabilityForm,
+)
+from pulsara_agent.primitives.context import FrozenJsonObjectFact
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, InlineContent
 from pulsara_agent.conversation_kernel.live_control import (
@@ -65,8 +72,17 @@ class ToolInteractionResolution:
     result_entry_sequence: int | None = None
     result_observed_at: datetime | None = None
     result_public_body: str | None = None
+    capability_submission: AcceptedCapabilityFormSubmission | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
+        if self.capability_submission is not None and (
+            self.decision != "SUBMIT"
+            or self.attempt_id is not None
+            or self.result_entry_id is not None
+        ):
+            raise ValueError("capability submission is pre-admission user input")
         if (self.result_entry_id is not None) != all(
             value is not None
             for value in (
@@ -97,6 +113,8 @@ class _PendingToolInteraction:
     discarded: bool = False
     resolving: bool = False
     settlement_changed: asyncio.Event | None = None
+    capability_form: PendingCapabilityForm | None = field(default=None, repr=False)
+    capability_cancelled: bool = False
 
 
 class KernelInteractionCoordinator:
@@ -173,6 +191,44 @@ class KernelInteractionCoordinator:
         permission_snapshot: FrozenRunPermissionSnapshot,
         admission_hooks: InteractionAdmissionHooks | None = None,
     ) -> ToolInteractionResolution:
+        return await self._request(
+            turn_id=turn_id,
+            assistant_entry_id=assistant_entry_id,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            permission_snapshot=permission_snapshot,
+            admission_hooks=admission_hooks,
+        )
+
+    async def request_capability_form(
+        self,
+        *,
+        turn_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+        form: PendingCapabilityForm,
+    ) -> ToolInteractionResolution:
+        return await self._request(
+            turn_id=turn_id,
+            assistant_entry_id=assistant_entry_id,
+            tool_call_id=tool_call_id,
+            tool_name="manage_capability",
+            permission_snapshot=permission_snapshot,
+            capability_form=form,
+        )
+
+    async def _request(
+        self,
+        *,
+        turn_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+        admission_hooks: InteractionAdmissionHooks | None = None,
+        capability_form: PendingCapabilityForm | None = None,
+    ) -> ToolInteractionResolution:
         if not self.has_controller():
             if admission_hooks is not None:
                 admission_hooks.discard()
@@ -218,6 +274,7 @@ class KernelInteractionCoordinator:
                 future=loop.create_future(),
                 admission_hooks=admission_hooks,
                 settlement_changed=asyncio.Event(),
+                capability_form=capability_form,
             )
             self._dormant.append(pending)
         await self._promote_next()
@@ -253,8 +310,13 @@ class KernelInteractionCoordinator:
         if decision not in {"ALLOW", "DENY"}:
             raise ValueError("tool interaction resolution is not closed")
         async with self._lock:
-            if self._closed or expected_writer_generation != self._guard.writer_generation:
-                raise ConversationKernelConflict("interaction writer generation is stale")
+            if (
+                self._closed
+                or expected_writer_generation != self._guard.writer_generation
+            ):
+                raise ConversationKernelConflict(
+                    "interaction writer generation is stale"
+                )
             pending = self._pending
             snapshot = self._live_control.current_snapshot()
             if (
@@ -268,7 +330,13 @@ class KernelInteractionCoordinator:
             ):
                 raise ConversationKernelConflict("interaction live authority is stale")
             if pending.resolving:
-                raise ConversationKernelConflict("interaction resolution is already active")
+                raise ConversationKernelConflict(
+                    "interaction resolution is already active"
+                )
+            if pending.capability_form is not None:
+                raise ConversationKernelConflict(
+                    "capability form requires SUBMIT or CANCEL"
+                )
             assert pending.settlement_changed is not None
             # Each physical resolution attempt owns a fresh unsettled edge.
             # A prior failed attempt set this event to wake detach/close; if it
@@ -355,6 +423,132 @@ class KernelInteractionCoordinator:
         await self._promote_next()
         return accepted
 
+    def current_capability_form(
+        self,
+        *,
+        attachment_id: str,
+        interaction_id: str,
+        expected_owner_epoch: int,
+        expected_live_revision: int,
+    ) -> FrozenJsonObjectFact:
+        # No await: the owner and snapshot are observed in one event-loop step.
+        pending = self._require_capability_form(
+            attachment_id=attachment_id,
+            interaction_id=interaction_id,
+            expected_owner_epoch=expected_owner_epoch,
+            expected_live_revision=expected_live_revision,
+        )
+        assert pending.capability_form is not None
+        return pending.capability_form.public_projection
+
+    def _require_capability_form(
+        self,
+        *,
+        attachment_id,
+        interaction_id,
+        expected_owner_epoch,
+        expected_live_revision,
+    ) -> _PendingToolInteraction:
+        if not self.is_current_controller(attachment_id):
+            raise ConversationKernelConflict("capability form controller is stale")
+        pending = self._pending
+        snapshot = self._live_control.current_snapshot()
+        if (
+            pending is None
+            or pending.capability_form is None
+            or pending.interaction_id != interaction_id
+            or pending.revision != expected_live_revision
+            or snapshot.owner_epoch != expected_owner_epoch
+            or snapshot.revision != expected_live_revision
+            or snapshot.current_interaction is None
+            or snapshot.current_interaction.interaction_id != interaction_id
+        ):
+            raise ConversationKernelConflict("capability form live authority is stale")
+        return pending
+
+    async def resolve_capability_form(
+        self,
+        *,
+        attachment_id: str,
+        interaction_id: str,
+        expected_owner_epoch: int,
+        expected_live_revision: int,
+        decision: str,
+        submission: dict[str, object] | None = None,
+    ) -> None:
+        """Validate and transfer input; never mutate or create a ToolAttempt here."""
+        if decision not in {"SUBMIT", "CANCEL"} or (
+            (decision == "SUBMIT") != isinstance(submission, dict)
+        ):
+            raise ValueError("capability form resolution is invalid")
+        async with self._lock:
+            pending = self._require_capability_form(
+                attachment_id=attachment_id,
+                interaction_id=interaction_id,
+                expected_owner_epoch=expected_owner_epoch,
+                expected_live_revision=expected_live_revision,
+            )
+            if pending.resolving:
+                raise ConversationKernelConflict("capability form is already resolving")
+            assert pending.settlement_changed is not None
+            pending.settlement_changed.clear()
+            pending.resolving = True
+        try:
+            values = None
+            if decision == "SUBMIT":
+                assert pending.capability_form is not None and submission is not None
+                # Parsing/reinspection is outside the slot lock. No mutation lane
+                # or provider deadline is held while waiting for user input.
+                values = await pending.capability_form.prepare_submission(submission)
+                if not isinstance(values, CapabilityFormValues):
+                    raise TypeError("capability form parser returned invalid input")
+            async with self._lock:
+                if self._pending is not pending:
+                    raise ConversationKernelConflict("capability form owner changed")
+                cancelled = (
+                    decision == "CANCEL"
+                    or pending.capability_cancelled
+                    or not self.is_current_controller(attachment_id)
+                )
+                event = self._live_control.close_interaction(
+                    expected_interaction_id=interaction_id
+                )
+                self._offer_interaction_event(
+                    event,
+                    turn_id=pending.turn_id,
+                    current=None,
+                    reason="CANCELLED" if cancelled else "SUBMITTED",
+                )
+                self._pending = None
+                if not pending.future.done():
+                    pending.future.set_result(
+                        ToolInteractionResolution(
+                            "CANCEL" if cancelled else "SUBMIT",
+                            "capability-form:cancelled"
+                            if cancelled
+                            else "capability-form:user-submitted",
+                            "能力配置已取消。" if cancelled else "用户已提交能力配置。",
+                            capability_submission=(
+                                AcceptedCapabilityFormSubmission(values)
+                                if not cancelled and values is not None
+                                else None
+                            ),
+                        )
+                    )
+        finally:
+            async with self._lock:
+                pending.resolving = False
+                pending.settlement_changed.set()
+            # A validation failure keeps the editor open unless its execution
+            # owner was cancelled while the read-only reinspection was running.
+            if pending.capability_cancelled:
+                await self._abort_candidate(
+                    interaction_id=interaction_id,
+                    reference="interaction:turn-cancelled",
+                    public_message="capability form was cancelled",
+                )
+            await self._promote_next()
+
     async def controller_detached(self, attachment_id: str) -> None:
         if not self.detach_controller(attachment_id):
             return
@@ -411,9 +605,7 @@ class KernelInteractionCoordinator:
             for candidate in discarded:
                 if not candidate.future.done():
                     candidate.future.set_result(
-                        ToolInteractionResolution(
-                            "DENY", reference, public_message
-                        )
+                        ToolInteractionResolution("DENY", reference, public_message)
                     )
         for candidate in discarded:
             self._discard_hooks(candidate)
@@ -448,6 +640,8 @@ class KernelInteractionCoordinator:
             pending = self._pending
             if pending is not None and pending.interaction_id == interaction_id:
                 if pending.resolving:
+                    if pending.capability_form is not None:
+                        pending.capability_cancelled = True
                     return
                 if pending.visible:
                     try:
@@ -475,9 +669,7 @@ class KernelInteractionCoordinator:
             pending = discarded
             if not pending.future.done():
                 pending.future.set_result(
-                    ToolInteractionResolution(
-                        "DENY", reference, public_message
-                    )
+                    ToolInteractionResolution("DENY", reference, public_message)
                 )
         self._discard_hooks(discarded)
         await self._promote_next()
@@ -535,9 +727,21 @@ class KernelInteractionCoordinator:
                 else:
                     view = CurrentInteractionView(
                         interaction_id=candidate.interaction_id,
-                        interaction_kind="TOOL_CONFIRMATION",
-                        public_prompt=f"Allow {candidate.tool_name}?",
-                        public_options=("ALLOW", "DENY"),
+                        interaction_kind=(
+                            "CAPABILITY_FORM"
+                            if candidate.capability_form
+                            else "TOOL_CONFIRMATION"
+                        ),
+                        public_prompt=(
+                            candidate.capability_form.public_prompt
+                            if candidate.capability_form
+                            else f"Allow {candidate.tool_name}?"
+                        ),
+                        public_options=(
+                            ("SUBMIT", "CANCEL")
+                            if candidate.capability_form
+                            else ("ALLOW", "DENY")
+                        ),
                         expires_at_utc=(
                             datetime.now(timezone.utc)
                             + timedelta(seconds=INTERACTION_TIMEOUT_SECONDS)
@@ -576,6 +780,8 @@ class KernelInteractionCoordinator:
                 pending = self._pending
                 if pending is not None:
                     if pending.resolving:
+                        if pending.capability_form is not None:
+                            pending.capability_cancelled = True
                         settlement_changed = pending.settlement_changed
                     else:
                         candidates.insert(0, pending)
@@ -596,9 +802,7 @@ class KernelInteractionCoordinator:
                 for candidate in candidates:
                     if not candidate.future.done():
                         candidate.future.set_result(
-                            ToolInteractionResolution(
-                                "DENY", reference, public_message
-                            )
+                            ToolInteractionResolution("DENY", reference, public_message)
                         )
             for candidate in candidates:
                 self._discard_hooks(candidate)

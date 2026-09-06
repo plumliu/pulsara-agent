@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Literal, Mapping, Protocol
 
 from pulsara_agent.capability.call_classifier import DefaultBuiltinToolCallClassifier
+from pulsara_agent.capability.management_effects import (
+    ResolvedCapabilityEffectProjection,
+)
 from pulsara_agent.primitives.permission import (
     DEFAULT_PERMISSION_MODE as _DEFAULT_PERMISSION_MODE,
     PermissionMode as _PermissionMode,
@@ -248,19 +251,40 @@ class PolicyPermissionGate:
     async def evaluate(
         self,
         calls: list[ToolCall],
+        *,
+        capability_effects: ResolvedCapabilityEffectProjection | None = None,
     ) -> PermissionDecision:
+        if capability_effects is not None and (
+            len(calls) != 1 or calls[0].name != "manage_capability"
+        ):
+            raise ValueError("capability effects require one exact management call")
         for call in calls:
-            decision = self._evaluate_call(call)
+            decision = self._evaluate_call(call, capability_effects=capability_effects)
             if decision.kind is not PermissionDecisionKind.ALLOW:
                 return decision
         base = await self.inner.evaluate(calls)
         return base
 
-    def _evaluate_call(self, call: ToolCall) -> PermissionDecision:
+    def _evaluate_call(
+        self,
+        call: ToolCall,
+        *,
+        capability_effects: ResolvedCapabilityEffectProjection | None = None,
+    ) -> PermissionDecision:
         try:
-            classification = DefaultBuiltinToolCallClassifier().classify_builtin(call)
+            classification = DefaultBuiltinToolCallClassifier().classify_builtin(
+                call,
+                capability_effects=capability_effects,
+            )
         except KeyError:
             classification = None
+        if call.name == "manage_capability":
+            if classification is None or classification.capability_effects is None:
+                return PermissionDecision(
+                    PermissionDecisionKind.DENY,
+                    "capability operation has not been prepared",
+                )
+            return self._evaluate_capability_effects(classification.capability_effects)
         if (
             classification is not None
             and classification.builtin_execution_binding_kind == "terminal_command"
@@ -350,6 +374,43 @@ class PolicyPermissionGate:
                     reason="file write requires user confirmation by permission policy",
                     suggested_rules=[{"tool": call.name, "reason": "write_scope_ask"}],
                 )
+        return PermissionDecision.allow()
+
+    def _evaluate_capability_effects(
+        self,
+        effects: ResolvedCapabilityEffectProjection,
+    ) -> PermissionDecision:
+        # The same preset fields govern ordinary writes and this resolved
+        # multi-effect operation. READ_ONLY remains DENY, not a write permit;
+        # the execution owner may separately ask the user to perform the edit.
+        if self.policy.profile is PermissionProfile.READ_ONLY:
+            return PermissionDecision(
+                PermissionDecisionKind.DENY,
+                "capability write requires user control plane",
+            )
+        writes = []
+        if effects.workspace_write:
+            writes.append(self.policy.workspace_write)
+        if effects.outside_workspace_write:
+            writes.append(self.policy.outside_workspace_write)
+        if FilesystemWriteAccess.DENY in writes or (
+            effects.process_control and self.policy.terminal is TerminalAccess.OFF
+        ):
+            return PermissionDecision(
+                PermissionDecisionKind.DENY,
+                "capability effect is outside the permission boundary",
+            )
+        if FilesystemWriteAccess.ASK in writes or (
+            effects.process_control
+            and (
+                self.policy.terminal is TerminalAccess.ASK
+                or self.policy.approval is ApprovalPolicy.ON_REQUEST
+            )
+        ):
+            return PermissionDecision(
+                PermissionDecisionKind.WAIT_FOR_USER,
+                "capability changes require user confirmation",
+            )
         return PermissionDecision.allow()
 
     def _filesystem_write_access(self, call: ToolCall) -> FilesystemWriteAccess:

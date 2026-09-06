@@ -18,6 +18,7 @@ from time import monotonic
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Protocol
 
 import httpx
+import httpx2
 
 
 PROCESS_CREDENTIAL_REPLACEMENT = b"[REDACTED_CREDENTIAL]"
@@ -205,7 +206,10 @@ class ProcessCredentialBoundary:
                     await asyncio.shield(task)
                 except asyncio.CancelledError:
                     continue
-                except (ProcessCredentialBoundaryCancelled, ProcessCredentialBoundaryTimedOut):
+                except (
+                    ProcessCredentialBoundaryCancelled,
+                    ProcessCredentialBoundaryTimedOut,
+                ):
                     break
             if task.done() and not task.cancelled():
                 try:
@@ -275,17 +279,14 @@ class ProcessCredentialBoundary:
                 if cancellation is not None and cancellation.cancellation_requested():
                     self._gate.release()
                     raise ProcessCredentialBoundaryCancelled
-                if (
-                    deadline_monotonic is not None
-                    and monotonic() >= deadline_monotonic
-                ):
+                if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
                     self._gate.release()
                     raise ProcessCredentialBoundaryTimedOut
                 return
 
 
-class ProcessCredentialBoundAsyncClient(httpx.AsyncClient):
-    """HTTPX client whose every physical request crosses the shared key gate."""
+class _ProcessCredentialClientBoundary:
+    """Shared admission only; the selected HTTP library still owns networking."""
 
     def __init__(
         self,
@@ -300,9 +301,7 @@ class ProcessCredentialBoundAsyncClient(httpx.AsyncClient):
             item.lower() for item in credential_header_names
         )
 
-    async def _send_single_request(
-        self, request: httpx.Request
-    ) -> httpx.Response:
+    async def _send_single_request(self, request: httpx.Request) -> httpx.Response:
         inherited = _CURRENT_HTTP_ADMISSION.get()
         use_inherited = (
             inherited is not None
@@ -360,6 +359,18 @@ class ProcessCredentialBoundAsyncClient(httpx.AsyncClient):
             await settle_admission()
 
 
+class ProcessCredentialBoundAsyncClient(
+    _ProcessCredentialClientBoundary, httpx.AsyncClient
+):
+    """HTTPX client whose physical requests cross the process credential gate."""
+
+
+class ProcessCredentialBoundMcpClient(
+    _ProcessCredentialClientBoundary, httpx2.AsyncClient
+):
+    """SDK-native HTTPX2 client using the same existing credential owner."""
+
+
 async def admit_process_credential_http_operation(
     *,
     credential_boundary: ProcessCredentialBoundary,
@@ -394,9 +405,7 @@ async def admit_process_credential_http_operation(
         except asyncio.CancelledError:
             operation_task.cancel()
             settled_task.cancel()
-            await asyncio.gather(
-                operation_task, settled_task, return_exceptions=True
-            )
+            await asyncio.gather(operation_task, settled_task, return_exceptions=True)
             raise
         finally:
             if not settled_task.done():
@@ -419,17 +428,14 @@ def _validate_http_request_secret_boundary(
 ) -> None:
     try:
         content = request.content
-    except httpx.RequestNotRead as exc:
+    except (httpx.RequestNotRead, httpx2.RequestNotRead) as exc:
         raise ValueError("streaming HTTP request body cannot be admitted") from exc
     if (
         guard.contains(str(request.url))
         or guard.contains(content)
         or any(
             guard.contains(name)
-            or (
-                name.lower() not in credential_header_names
-                and guard.contains(value)
-            )
+            or (name.lower() not in credential_header_names and guard.contains(value))
             for name, value in request.headers.raw
         )
     ):

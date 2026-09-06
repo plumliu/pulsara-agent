@@ -1096,10 +1096,10 @@ class _EmptyTestMcpCapabilityOwner:
         )
 
 
-def seal_test_direct_tool_port(port: DirectKernelToolPort) -> None:
+def seal_test_direct_tool_port(port: DirectKernelToolPort, *, interaction=None, capability_reload=None) -> None:
     """Complete the production composition boundary for a standalone test port."""
 
-    port.bind_interaction_port(object())  # type: ignore[arg-type]
+    port.bind_interaction_port(interaction if interaction is not None else object())  # type: ignore[arg-type]
     port.bind_subagent_port(  # type: ignore[arg-type]
         type("_EmptySubagentPort", (), {"tool_names": ()})()
     )
@@ -1107,7 +1107,7 @@ def seal_test_direct_tool_port(port: DirectKernelToolPort) -> None:
         type("_EmptyMemoryPort", (), {"tool_names": ()})()
     )
     port.bind_mcp_supervisor(_EmptyTestMcpCapabilityOwner())  # type: ignore[arg-type]
-    port.bind_capability_reload_port(object())  # type: ignore[arg-type]
+    port.bind_capability_reload_port(capability_reload if capability_reload is not None else object())  # type: ignore[arg-type]
     port.seal_builtin_composition()
 
 
