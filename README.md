@@ -73,8 +73,11 @@ The current Kernel supports:
   freshness frontiers; each accepted tool result carries an immutable observed
   time, monotonic duration disposition, execution origin, and optional trusted
   duration that the tool body cannot forge;
-- filesystem, `terminal`, `terminal_process`, `terminal_monitor`, and scoped
-  `artifact_read` tools;
+- revision-anchored filesystem tools: `read_file` returns an exact raw-byte
+  SHA-256 revision and records process-local seen lines, `edit_file` applies
+  deterministic operations only to that observed revision, and `write_file`
+  atomically creates without clobbering; plus `terminal`, `terminal_process`,
+  `terminal_monitor`, and scoped `artifact_read` tools;
 - an exact-run, process-local `todo(items=[...])` tool that atomically replaces
   one bounded pending/in-progress/completed snapshot; an empty list clears it,
   ROOT and child runs remain isolated, and Host replacement intentionally starts

@@ -145,6 +145,89 @@ def object_schema(*, properties: dict[str, Any], required: list[str]) -> dict[st
     }
 
 
+def _edit_operation_schema() -> dict[str, Any]:
+    logical_lines = {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "string",
+            "description": "One logical line without CR, LF, or NUL characters.",
+        },
+        "description": (
+            "Complete replacement or insertion logical lines. Array items do not "
+            "include newline characters; blank strings represent blank lines."
+        ),
+    }
+    inclusive_range = {
+        "start_line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "First original-file line in the inclusive range.",
+        },
+        "end_line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Last original-file line in the inclusive range.",
+        },
+    }
+    return {
+        "oneOf": [
+            object_schema(
+                properties={
+                    "kind": {"const": "replace_lines"},
+                    **inclusive_range,
+                    "lines": logical_lines,
+                },
+                required=["kind", "start_line", "end_line", "lines"],
+            ),
+            object_schema(
+                properties={
+                    "kind": {"const": "delete_lines"},
+                    **inclusive_range,
+                },
+                required=["kind", "start_line", "end_line"],
+            ),
+            object_schema(
+                properties={
+                    "kind": {"const": "insert_before"},
+                    "line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Original-file anchor line.",
+                    },
+                    "lines": logical_lines,
+                },
+                required=["kind", "line", "lines"],
+            ),
+            object_schema(
+                properties={
+                    "kind": {"const": "insert_after"},
+                    "line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Original-file anchor line.",
+                    },
+                    "lines": logical_lines,
+                },
+                required=["kind", "line", "lines"],
+            ),
+            object_schema(
+                properties={
+                    "kind": {"const": "replace_file"},
+                    "content": {
+                        "type": "string",
+                        "description": (
+                            "Complete desired UTF-8 text. This is the only operation "
+                            "that may replace or empty the whole existing file."
+                        ),
+                    },
+                },
+                required=["kind", "content"],
+            ),
+        ]
+    }
+
+
 def _mcp_item_list_schema() -> dict[str, Any]:
     return object_schema(
         properties={
@@ -830,13 +913,15 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "read_file": _descriptor(
         name="read_file",
         description=(
-            "Read the current contents of one local UTF-8 text file and return the "
-            "requested lines as line_number|text. Relative paths start in the current "
+            "Read the exact current bytes of one local UTF-8 text file and return a "
+            "SHA-256 content_revision plus requested lines as line_number|text. Copy "
+            "that revision unchanged into edit_file and edit only lines shown by this "
+            "tool. Relative paths start in the current "
             "workspace. Absolute paths, paths beginning with ~, and ${PULSARA_HOME}/... "
             "locations copied from the Skill catalog are also accepted for read-only "
             "text access. This tool does not read directories, blocked device paths, or "
-            "known binary file types. If truncated is true, continue from the offset in "
-            "the response hint. If a line window is too large, retry with a smaller limit."
+            "binary/invalid-UTF-8 files. If truncated is true, continue from the offset "
+            "in the response hint. If a line window is too large, retry with a smaller limit."
         ),
         input_schema=object_schema(
             properties={
@@ -963,15 +1048,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "edit_file": _descriptor(
         name="edit_file",
         description=(
-            "Replace a specific text block in an existing local UTF-8 file. Relative "
-            "paths start in the current workspace; absolute paths and ~ are accepted "
-            "when the current run permission allows that host-local write. Copy "
-            "old_text from a recent read and include enough "
-            "surrounding text to make it unique. The tool prefers an exact match and "
-            "has limited whitespace-tolerant matching; an ambiguous match fails without "
-            "writing unless replace_all is true. It preserves the file's line endings "
-            "and UTF-8 marker, verifies the saved content, and returns a unified diff. "
-            "Use write_file to create a file or replace its complete contents."
+            "Apply deterministic line operations to one existing UTF-8 text file. First "
+            "use read_file, copy its exact content_revision as base_revision, and modify "
+            "only lines or adjacent gaps shown by that read. Every operation uses "
+            "1-based line numbers from the same original revision; earlier operations in "
+            "the call never shift later anchors. A stale revision, unseen anchor, invalid "
+            "range, overlap, mixed line endings, or no-op fails before writing. Use "
+            "replace_file as the sole operation for an explicit complete replacement. "
+            "The tool stages in memory, atomically replaces, verifies exact persisted "
+            "bytes, and returns a diff, new revision, and changed line windows. Use "
+            "write_file only to create a path that does not exist."
         ),
         input_schema=object_schema(
             properties={
@@ -984,30 +1070,24 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                         "the current run permission allows the write."
                     ),
                 },
-                "old_text": {
+                "base_revision": {
                     "type": "string",
-                    "minLength": 1,
+                    "pattern": "^sha256:[0-9a-f]{64}$",
                     "description": (
-                        "Non-empty current text to replace. Include surrounding lines when "
-                        "needed so it identifies exactly one location."
+                        "Exact content_revision copied from the read_file result for this path."
                     ),
                 },
-                "new_text": {
-                    "type": "string",
+                "operations": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": _edit_operation_schema(),
                     "description": (
-                        "Replacement text. Use an empty string to delete the matched text."
-                    ),
-                },
-                "replace_all": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": (
-                        "False replaces one unique match and rejects ambiguity. Set true "
-                        "only when every match should be replaced."
+                        "Closed line operations against the original base_revision. "
+                        "Operations may not overlap or target the same gap."
                     ),
                 },
             },
-            required=["path", "old_text", "new_text"],
+            required=["path", "base_revision", "operations"],
         ),
         is_read_only=False,
         is_concurrency_safe=False,
@@ -1017,15 +1097,15 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "write_file": _descriptor(
         name="write_file",
         description=(
-            "Create or replace one complete local UTF-8 file. Relative paths start in "
+            "Create one new local UTF-8 text file without ever overwriting an existing "
+            "path. Relative paths start in "
             "the current workspace; absolute paths and ~ are accepted when the current "
             "run permission allows that host-local write. "
-            "content is the entire desired file, not a patch; an empty string creates or "
-            "truncates the file to zero length. Missing parent directories are created "
-            "automatically, and replacing an existing file preserves its line-ending style "
-            "and UTF-8 marker. Read an existing file immediately before replacing it: "
-            "if it changed since an earlier read, the result warns after writing rather "
-            "than cancelling the replacement. Use edit_file for a targeted change."
+            "content is the entire new file; an empty string creates a zero-length file. "
+            "Missing parent directories are created automatically. If the target already "
+            "exists or appears during publication, the call fails without changing it. "
+            "To modify, empty, or fully replace an existing file, call read_file and then "
+            "edit_file with its exact content_revision."
         ),
         input_schema=object_schema(
             properties={
@@ -1033,7 +1113,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "File to create or replace. Relative paths start in the current "
+                        "New file to create. Relative paths start in the current "
                         "workspace. Absolute paths and ~ address other local files when "
                         "the current run permission allows the write."
                     ),
@@ -1041,8 +1121,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                 "content": {
                     "type": "string",
                     "description": (
-                        "Complete desired UTF-8 contents of the file. This replaces all "
-                        "existing content; use an empty string for an empty file."
+                        "Complete desired UTF-8 contents of the new file. Use an empty "
+                        "string to create an empty file."
                     ),
                 },
             },

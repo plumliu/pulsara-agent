@@ -1,14 +1,16 @@
 """Workspace file-system built-in tools.
 
-This module ports the practical shape of Hermes' file tools into Pulsara's
-local-workspace runtime: paginated reads, structured search, atomic writes,
-staleness checks, fuzzy targeted edits, diffs, and post-write verification.
+Reads expose exact-byte content revisions and process-local seen-line
+observations. Existing files are changed only through revision-anchored,
+deterministic line operations; ``write_file`` is create-only.
 """
 
 from __future__ import annotations
 
 import difflib
+import errno
 import fnmatch
+from hashlib import sha256
 import os
 import re
 import subprocess
@@ -17,15 +19,16 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
-from typing import Any
+from typing import Any, Mapping
 
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
+from pulsara_agent.primitives.tool_observation import (
+    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+)
 from pulsara_agent.tools.builtins.schemas import (
-    bool_arg,
     int_arg,
     json_text,
-    required_str_arg,
     str_arg,
 )
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool, WritePathScope
@@ -37,7 +40,15 @@ MAX_READ_CHARS = 100_000
 DEFAULT_SEARCH_LIMIT = 50
 MAX_SEARCH_LIMIT = 1_000
 UTF8_BOM = "\ufeff"
+UTF8_BOM_BYTES = b"\xef\xbb\xbf"
+CONTENT_REVISION_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+CHANGED_WINDOW_CONTEXT_LINES = 3
+# Changed windows precede the diff in the result. Keeping their complete JSON
+# below this budget ensures the existing 8,000-character head/tail projection
+# does not expose a partial line while granting that line edit eligibility.
+MAX_CHANGED_WINDOWS_JSON_CHARS = 3_500
 BLOCKED_DEVICE_PATHS = {
+    "/dev/null",
     "/dev/zero",
     "/dev/random",
     "/dev/urandom",
@@ -91,7 +102,7 @@ BINARY_EXTENSIONS = {
 class _WorkspaceFileState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     path_locks: dict[Path, threading.Lock] = field(default_factory=dict)
-    read_timestamps: dict[Path, int] = field(default_factory=dict)
+    observations: dict[Path, "_FileObservationSlot"] = field(default_factory=dict)
     last_lookup_key: tuple | None = None
     consecutive_lookup_count: int = 0
 
@@ -102,6 +113,78 @@ class _WorkspaceFileState:
                 path_lock = threading.Lock()
                 self.path_locks[path] = path_lock
             return path_lock
+
+    def observe(
+        self,
+        path: Path,
+        revision: str,
+        intervals: tuple[tuple[int, int], ...],
+    ) -> None:
+        with self.lock:
+            current = self.observations.get(path)
+            if current is not None and current.content_revision == revision:
+                intervals = _merge_intervals((*current.seen_line_intervals, *intervals))
+            self.observations[path] = _FileObservationSlot(
+                content_revision=revision,
+                seen_line_intervals=intervals,
+            )
+
+    def observation(self, path: Path) -> "_FileObservationSlot | None":
+        with self.lock:
+            return self.observations.get(path)
+
+    def clear_observation(self, path: Path) -> None:
+        with self.lock:
+            self.observations.pop(path, None)
+
+
+@dataclass(frozen=True, slots=True)
+class _FileObservationSlot:
+    content_revision: str
+    seen_line_intervals: tuple[tuple[int, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _TextLayout:
+    text: str
+    lines: tuple[str, ...]
+    newline: str | None
+    had_final_newline: bool
+    had_bom: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _LineOperation:
+    kind: str
+    start_line: int | None = None
+    end_line: int | None = None
+    line: int | None = None
+    lines: tuple[str, ...] = ()
+    content: str | None = None
+
+
+class _FileApplicationError(ValueError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        hint: str,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        self.code = code
+        self.message = message
+        self.hint = hint
+        self.details = dict(details or {})
+        super().__init__(message)
+
+
+class _AtomicTargetExists(FileExistsError):
+    pass
+
+
+class _AtomicNoClobberUnavailable(OSError):
+    pass
 
 
 _STATES: dict[Path, _WorkspaceFileState] = {}
@@ -132,87 +215,99 @@ class ReadFileTool(WorkspaceTool):
         limit = _normalize_limit(
             int_arg(call.arguments, "limit", DEFAULT_READ_LINES), MAX_READ_LINES
         )
-        if _is_blocked_device(path):
-            raise ValueError(
-                f"cannot read device path that may block or produce infinite output: {path}"
-            )
-        if _has_binary_extension(path):
-            raise ValueError(f"cannot read binary file as text: {path.suffix.lower()}")
-        if not path.exists():
-            raise FileNotFoundError(f"file not found: {path}")
-        if not path.is_file():
-            raise ValueError(f"path is not a file: {path}")
-
         state = _state_for_workspace(self.workspace_root)
-        raw_text = path.read_text(encoding="utf-8", errors="replace")
-        text, had_bom = _strip_bom(raw_text)
-        lines = text.splitlines()
-        total_lines = len(lines)
-        start_index = min(offset - 1, total_lines)
-        end_index = min(start_index + limit, total_lines)
-        selected = lines[start_index:end_index]
-        content = "\n".join(
-            f"{line_number}|{line}"
-            for line_number, line in enumerate(selected, start=offset)
-        )
-        if len(content) > MAX_READ_CHARS:
-            return self._result(
-                call,
-                status=ToolResultState.ERROR,
-                output=json_text(
-                    {
-                        "error": (
-                            f"Read produced {len(content):,} characters, exceeding "
-                            f"the safety limit of {MAX_READ_CHARS:,}. Use a smaller limit."
+        path_lock = state.lock_for_path(path)
+        try:
+            with path_lock:
+                raw_bytes, layout = _read_existing_text(path)
+                revision = _content_revision(raw_bytes)
+                total_lines = len(layout.lines)
+                start_index = min(offset - 1, total_lines)
+                end_index = min(start_index + limit, total_lines)
+                selected = layout.lines[start_index:end_index]
+                content = "\n".join(
+                    f"{line_number}|{line}"
+                    for line_number, line in enumerate(selected, start=offset)
+                )
+                if len(content) > MAX_READ_CHARS:
+                    return self._result(
+                        call,
+                        status=ToolResultState.ERROR,
+                        output=json_text(
+                            {
+                                "error": "READ_OUTPUT_TOO_LARGE",
+                                "message": (
+                                    f"Read produced {len(content):,} characters, exceeding "
+                                    f"the safety limit of {MAX_READ_CHARS:,}."
+                                ),
+                                "path": _relpath(path, self.workspace_root),
+                                "access_scope": access_scope,
+                                "workspace_relative": workspace_relative,
+                                "total_lines": total_lines,
+                                "_hint": "Retry read_file with a smaller limit.",
+                            }
                         ),
-                        "path": _relpath(path, self.workspace_root),
-                        "access_scope": access_scope,
-                        "workspace_relative": workspace_relative,
-                        "total_lines": total_lines,
-                    }
-                ),
-                metadata={
-                    "path": str(path),
-                    "chars": len(content),
+                        metadata={
+                            "path": str(path),
+                            "chars": len(content),
+                            "access_scope": access_scope,
+                            "workspace_relative": workspace_relative,
+                        },
+                    )
+
+                truncated = end_index < total_lines
+                with state.lock:
+                    _track_lookup(state, ("read", path, offset, limit))
+                    consecutive = state.consecutive_lookup_count
+
+                payload: dict[str, Any] = {
+                    "status": "ok",
+                    "path": _relpath(path, self.workspace_root),
+                    "content_revision": revision,
                     "access_scope": access_scope,
                     "workspace_relative": workspace_relative,
-                },
-            )
-
-        truncated = end_index < total_lines
-        mtime_ns = path.stat().st_mtime_ns
-        with state.lock:
-            state.read_timestamps[path] = mtime_ns
-            _track_lookup(state, ("read", path, offset, limit))
-            consecutive = state.consecutive_lookup_count
-
-        payload: dict[str, Any] = {
-            "status": "ok",
-            "path": _relpath(path, self.workspace_root),
-            "access_scope": access_scope,
-            "workspace_relative": workspace_relative,
-            "offset": offset,
-            "limit": limit,
-            "total_lines": total_lines,
-            "file_size": path.stat().st_size,
-            "truncated": truncated,
-            "content": content,
-        }
-        if had_bom:
-            payload["had_utf8_bom"] = True
-        if truncated:
-            payload["_hint"] = (
-                f"More lines are available. Continue with offset={end_index + 1}."
-            )
-        if consecutive >= 3:
-            payload["_warning"] = (
-                f"You have read this exact file region {consecutive} times consecutively. "
-                "Use the information you already have."
-            )
+                    "offset": offset,
+                    "limit": limit,
+                    "total_lines": total_lines,
+                    "file_size": len(raw_bytes),
+                    "truncated": truncated,
+                    "content": content,
+                }
+                if layout.had_bom:
+                    payload["had_utf8_bom"] = True
+                if truncated:
+                    payload["_hint"] = (
+                        f"More lines are available. Continue with offset={end_index + 1}."
+                    )
+                if consecutive >= 3:
+                    payload["_warning"] = (
+                        f"You have read this exact file region {consecutive} times "
+                        "consecutively. Use the information you already have."
+                    )
+                output = json_text(payload)
+                fully_visible = (
+                    len(output.encode("utf-8"))
+                    <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+                )
+                intervals = (
+                    ((start_index + 1, end_index),)
+                    if fully_visible and end_index > start_index
+                    else ()
+                )
+                if not fully_visible:
+                    payload["_warning"] = (
+                        "This read exceeds the complete provider-visible ToolResult "
+                        "bound, so none of its lines authorize edit_file. Re-read the "
+                        "required range with a smaller limit."
+                    )
+                    output = json_text(payload)
+                state.observe(path, revision, intervals)
+        except _FileApplicationError as exc:
+            return _application_error_result(self, call, path, exc)
         return self._result(
             call,
             status=ToolResultState.SUCCESS,
-            output=json_text(payload),
+            output=output,
             metadata={
                 "path": str(path),
                 "truncated": truncated,
@@ -529,60 +624,72 @@ class EditFileTool(WorkspaceTool):
         path = self._resolve_path(
             str_arg(call.arguments, "path"), write_scope=write_scope
         )
-        old_text = required_str_arg(call.arguments, "old_text")
-        new_text = str_arg(call.arguments, "new_text")
-        if new_text is None:
-            raise ValueError("new_text is required")
-        replace_all = bool_arg(call.arguments, "replace_all", False)
-        if not path.exists():
-            raise FileNotFoundError(f"file not found: {path}")
-        if not path.is_file():
-            raise ValueError(f"path is not a file: {path}")
         state = _state_for_workspace(self.workspace_root)
         path_lock = state.lock_for_path(path)
-        with path_lock:
-            before_raw = path.read_text(encoding="utf-8", errors="replace")
-            before, had_bom = _strip_bom(before_raw)
-            updated, count, strategy, error = _fuzzy_replace(
-                before, old_text, new_text, replace_all
-            )
-            if error or count == 0:
-                return self._result(
-                    call,
-                    status=ToolResultState.ERROR,
-                    output=json_text(
-                        {
-                            "error": error or "old_text was not found",
-                            "path": _relpath(path, self.workspace_root),
-                            "_hint": "Re-read the file or use search_files to locate the current text.",
-                        }
-                    ),
-                    metadata={"path": str(path), "replacements": 0},
+        try:
+            base_revision, operations = _parse_edit_arguments(call.arguments)
+            with path_lock:
+                before_bytes, before_layout = _read_existing_text(path)
+                current_revision = _content_revision(before_bytes)
+                if current_revision != base_revision:
+                    raise _FileApplicationError(
+                        "CONTENT_REVISION_MISMATCH",
+                        "The file changed after the revision used for this edit.",
+                        hint="Re-read the target range and retry with the new content_revision.",
+                        details={"current_revision": current_revision},
+                    )
+                observation = state.observation(path)
+                if observation is None or observation.content_revision != base_revision:
+                    raise _FileApplicationError(
+                        "READ_OBSERVATION_REQUIRED",
+                        "No current read_file observation authorizes this edit.",
+                        hint=_read_hint_for_operations(operations),
+                    )
+                after_text = _stage_edit(
+                    before_layout,
+                    operations,
+                    observation.seen_line_intervals,
                 )
-            line_ending = _detect_line_ending(before_raw)
-            if line_ending:
-                updated = _normalize_line_endings(updated, line_ending)
-            write_text = (
-                UTF8_BOM if had_bom and not updated.startswith(UTF8_BOM) else ""
-            ) + updated
-            diff = _unified_diff(before, updated, _relpath(path, self.workspace_root))
-            _atomic_write_text(path, write_text)
-            verified, _ = _strip_bom(path.read_text(encoding="utf-8", errors="replace"))
-            if _normalize_line_endings(verified, "\n") != _normalize_line_endings(
-                updated, "\n"
-            ):
-                return self._result(
-                    call,
-                    status=ToolResultState.ERROR,
-                    output=json_text(
-                        {
-                            "error": "post-write verification failed; on-disk content differs from intended edit",
-                            "path": _relpath(path, self.workspace_root),
-                        }
-                    ),
-                    metadata={"path": str(path)},
+                after_bytes = _encode_text(
+                    after_text,
+                    had_bom=before_layout.had_bom,
                 )
-            _note_write(state, path)
+                if after_bytes == before_bytes:
+                    raise _FileApplicationError(
+                        "NO_OP",
+                        "The requested operations do not change the file.",
+                        hint="Remove the no-op operation or re-read before editing again.",
+                    )
+                staged_layout = _decode_text_bytes(after_bytes, path=path)
+                new_revision = _content_revision(after_bytes)
+                changed_windows, seen_intervals, windows_truncated = _changed_windows(
+                    before_layout.lines,
+                    staged_layout.lines,
+                )
+                diff = _unified_diff(
+                    _text_with_original_bom(before_layout),
+                    _text_with_original_bom(staged_layout),
+                    _relpath(path, self.workspace_root),
+                )
+                latest_bytes, _latest_layout = _read_existing_text(path)
+                if latest_bytes != before_bytes:
+                    latest_revision = _content_revision(latest_bytes)
+                    raise _FileApplicationError(
+                        "CONTENT_REVISION_MISMATCH",
+                        "The file changed while this edit was being staged.",
+                        hint="Re-read the target range and retry with the new content_revision.",
+                        details={"current_revision": latest_revision},
+                    )
+                _atomic_replace_bytes(path, after_bytes)
+                verified_bytes = path.read_bytes()
+                if verified_bytes != after_bytes:
+                    raise RuntimeError(
+                        "post-write verification failed; the file may already be modified"
+                    )
+                state.observe(path, new_revision, seen_intervals)
+        except _FileApplicationError as exc:
+            return _application_error_result(self, call, path, exc)
+
         return self._result(
             call,
             status=ToolResultState.SUCCESS,
@@ -590,13 +697,16 @@ class EditFileTool(WorkspaceTool):
                 {
                     "status": "ok",
                     "path": _relpath(path, self.workspace_root),
-                    "replacements": count,
-                    "strategy": strategy,
+                    "base_revision": base_revision,
+                    "content_revision": new_revision,
+                    "operations_applied": len(operations),
+                    "changed_windows": changed_windows,
+                    "changed_windows_truncated": windows_truncated,
                     "diff": diff,
                     "files_modified": [_relpath(path, self.workspace_root)],
                 }
             ),
-            metadata={"path": str(path), "replacements": count, "strategy": strategy},
+            metadata={"path": str(path), "operations_applied": len(operations)},
         )
 
 
@@ -610,47 +720,552 @@ class WriteFileTool(WorkspaceTool):
         *,
         write_scope: WritePathScope = WritePathScope.WORKSPACE,
     ) -> ToolExecutionResult:
-        path = self._resolve_path(
-            str_arg(call.arguments, "path"), write_scope=write_scope
-        )
+        raw_path = str_arg(call.arguments, "path")
+        path = self._resolve_path(raw_path, write_scope=write_scope)
+        requested_leaf = _requested_leaf_path(raw_path, self.workspace_root)
         if "content" not in call.arguments:
             raise ValueError("content is required")
         content = str_arg(call.arguments, "content")
         if content is None:
             raise ValueError("content must be a string")
-        if path.exists() and not path.is_file():
-            raise ValueError(f"path is not a regular file: {path}")
         state = _state_for_workspace(self.workspace_root)
         path_lock = state.lock_for_path(path)
-        with path_lock:
-            stale_warning = _stale_warning(state, path)
-            before = (
-                path.read_text(encoding="utf-8", errors="replace")
-                if path.exists()
-                else ""
-            )
-            if path.exists():
-                line_ending = _detect_line_ending(before)
-                if line_ending:
-                    content = _normalize_line_endings(content, line_ending)
-                if _has_bom(before) and not _has_bom(content):
-                    content = UTF8_BOM + content
-            _atomic_write_text(path, content)
-            _note_write(state, path)
+        try:
+            raw_bytes = _validate_new_text_content(path, content)
+            with path_lock:
+                if requested_leaf.is_symlink() or path.exists() or path.is_symlink():
+                    raise _FileApplicationError(
+                        "FILE_ALREADY_EXISTS",
+                        "write_file creates new files and never overwrites an existing path.",
+                        hint="Use read_file, then edit_file with the returned content_revision.",
+                    )
+                try:
+                    _atomic_create_bytes(path, raw_bytes)
+                except _AtomicTargetExists as exc:
+                    raise _FileApplicationError(
+                        "FILE_ALREADY_EXISTS",
+                        "The target appeared while write_file was preparing publication.",
+                        hint="Use read_file, then edit_file with the returned content_revision.",
+                    ) from exc
+                except _AtomicNoClobberUnavailable as exc:
+                    raise _FileApplicationError(
+                        "ATOMIC_NO_CLOBBER_UNAVAILABLE",
+                        "This filesystem cannot provide atomic no-clobber publication.",
+                        hint="Choose a supported local filesystem or create the file explicitly outside this tool.",
+                    ) from exc
+                verified_bytes = path.read_bytes()
+                if verified_bytes != raw_bytes:
+                    raise RuntimeError(
+                        "post-write verification failed; the file may already be created"
+                    )
+                state.clear_observation(path)
+        except _FileApplicationError as exc:
+            return _application_error_result(self, call, path, exc)
+
+        revision = _content_revision(verified_bytes)
         payload: dict[str, Any] = {
             "status": "ok",
             "path": _relpath(path, self.workspace_root),
-            "bytes_written": path.stat().st_size,
+            "content_revision": revision,
+            "bytes_written": len(verified_bytes),
             "files_modified": [_relpath(path, self.workspace_root)],
         }
-        if stale_warning:
-            payload["_warning"] = stale_warning
         return self._result(
             call,
             status=ToolResultState.SUCCESS,
             output=json_text(payload),
-            metadata={"path": str(path), "bytes": path.stat().st_size},
+            metadata={"path": str(path), "bytes": len(verified_bytes)},
         )
+
+
+def _content_revision(raw_bytes: bytes) -> str:
+    return f"sha256:{sha256(raw_bytes).hexdigest()}"
+
+
+def _requested_leaf_path(raw_path: str | None, workspace_root: Path) -> Path:
+    """Resolve parent components while retaining the requested final directory entry."""
+    if not raw_path or not raw_path.strip():
+        raise ValueError("path is required")
+    requested = Path(raw_path).expanduser()
+    if not requested.is_absolute():
+        requested = workspace_root / requested
+    return requested.parent.resolve() / requested.name
+
+
+def _application_error_result(
+    tool: WorkspaceTool,
+    call: ToolCall,
+    path: Path,
+    error: _FileApplicationError,
+) -> ToolExecutionResult:
+    payload: dict[str, object] = {
+        "error": error.code,
+        "message": error.message,
+        "path": _relpath(path, tool.workspace_root),
+        "_hint": error.hint,
+    }
+    payload.update(error.details)
+    return tool._result(
+        call,
+        status=ToolResultState.ERROR,
+        output=json_text(payload),
+        metadata={"path": str(path), "error_code": error.code},
+    )
+
+
+def _read_existing_text(path: Path) -> tuple[bytes, _TextLayout]:
+    if _is_blocked_device(path):
+        raise _FileApplicationError(
+            "UNSUPPORTED_BINARY_FILE",
+            "Blocked device paths cannot be read or edited as text files.",
+            hint="Choose a regular UTF-8 text file.",
+        )
+    if _has_binary_extension(path):
+        raise _FileApplicationError(
+            "UNSUPPORTED_BINARY_FILE",
+            f"Known binary file type is not supported: {path.suffix.lower()}",
+            hint="Choose a regular UTF-8 text file.",
+        )
+    if not path.exists():
+        raise _FileApplicationError(
+            "FILE_NOT_FOUND",
+            "The requested file does not exist.",
+            hint="Check the path. Use write_file only when creating a new file.",
+        )
+    if not path.is_file():
+        raise _FileApplicationError(
+            "NOT_A_REGULAR_FILE",
+            "The requested path is not a regular file.",
+            hint="Choose an existing regular UTF-8 text file.",
+        )
+    raw_bytes = path.read_bytes()
+    return raw_bytes, _decode_text_bytes(raw_bytes, path=path)
+
+
+def _decode_text_bytes(raw_bytes: bytes, *, path: Path) -> _TextLayout:
+    had_bom = raw_bytes.startswith(UTF8_BOM_BYTES)
+    body = raw_bytes[len(UTF8_BOM_BYTES) :] if had_bom else raw_bytes
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _FileApplicationError(
+            "UNSUPPORTED_TEXT_ENCODING",
+            "The file is not valid UTF-8 and cannot be edited without data loss.",
+            hint="Convert the file to UTF-8 explicitly before using file tools.",
+        ) from exc
+    if "\x00" in text:
+        raise _FileApplicationError(
+            "UNSUPPORTED_BINARY_FILE",
+            "The file contains NUL bytes and is treated as binary.",
+            hint="Use a binary-aware tool for this file.",
+        )
+    newline = _exact_newline_style(text)
+    had_final_newline = text.endswith(("\r\n", "\n", "\r"))
+    return _TextLayout(
+        text=text,
+        lines=_logical_lines(text, had_final_newline=had_final_newline),
+        newline=newline,
+        had_final_newline=had_final_newline,
+        had_bom=had_bom,
+    )
+
+
+def _logical_lines(text: str, *, had_final_newline: bool) -> tuple[str, ...]:
+    if not text:
+        return ()
+    parts = re.split(r"\r\n|\r|\n", text)
+    if had_final_newline:
+        parts.pop()
+    return tuple(parts)
+
+
+def _exact_newline_style(text: str) -> str | None:
+    styles = set(re.findall(r"\r\n|\r|\n", text))
+    if not styles:
+        return None
+    if styles == {"\n"}:
+        return "\n"
+    if styles == {"\r\n"}:
+        return "\r\n"
+    return "mixed"
+
+
+def _encode_text(text: str, *, had_bom: bool) -> bytes:
+    try:
+        body = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _FileApplicationError(
+            "UNSUPPORTED_TEXT_ENCODING",
+            "The requested content is not valid Unicode text encodable as UTF-8.",
+            hint="Remove surrogate code points and retry with valid Unicode text.",
+        ) from exc
+    return (UTF8_BOM_BYTES if had_bom else b"") + body
+
+
+def _validate_new_text_content(path: Path, content: str) -> bytes:
+    if _is_blocked_device(path) or _has_binary_extension(path) or "\x00" in content:
+        raise _FileApplicationError(
+            "UNSUPPORTED_BINARY_FILE",
+            "write_file creates regular UTF-8 text files only.",
+            hint="Choose a non-binary path and content without NUL bytes.",
+        )
+    return _encode_text(content, had_bom=False)
+
+
+def _parse_edit_arguments(
+    arguments: Mapping[str, object],
+) -> tuple[str, tuple[_LineOperation, ...]]:
+    required = {"path", "base_revision", "operations"}
+    if set(arguments) != required:
+        raise _FileApplicationError(
+            "INVALID_OPERATION_COMBINATION",
+            "edit_file accepts only path, base_revision, and operations.",
+            hint="Use the current line-operation schema; old_text/new_text are not supported.",
+        )
+    base_revision = arguments.get("base_revision")
+    if not isinstance(base_revision, str) or not CONTENT_REVISION_PATTERN.fullmatch(
+        base_revision
+    ):
+        raise _FileApplicationError(
+            "INVALID_CONTENT_REVISION",
+            "base_revision must be the exact SHA-256 content_revision from read_file.",
+            hint="Call read_file and copy its complete content_revision unchanged.",
+        )
+    raw_operations = arguments.get("operations")
+    if not isinstance(raw_operations, (list, tuple)) or not raw_operations:
+        raise _FileApplicationError(
+            "INVALID_OPERATION_COMBINATION",
+            "operations must be a non-empty array.",
+            hint="Provide at least one closed line operation.",
+        )
+    return base_revision, tuple(_parse_operation(item) for item in raw_operations)
+
+
+def _parse_operation(raw: object) -> _LineOperation:
+    if not isinstance(raw, Mapping):
+        raise _invalid_operation("Each operation must be an object.")
+    kind = raw.get("kind")
+    if kind == "replace_lines":
+        _require_exact_keys(raw, {"kind", "start_line", "end_line", "lines"})
+        return _LineOperation(
+            kind=kind,
+            start_line=_positive_line(raw.get("start_line"), "start_line"),
+            end_line=_positive_line(raw.get("end_line"), "end_line"),
+            lines=_operation_lines(raw.get("lines")),
+        )
+    if kind == "delete_lines":
+        _require_exact_keys(raw, {"kind", "start_line", "end_line"})
+        return _LineOperation(
+            kind=kind,
+            start_line=_positive_line(raw.get("start_line"), "start_line"),
+            end_line=_positive_line(raw.get("end_line"), "end_line"),
+        )
+    if kind in {"insert_before", "insert_after"}:
+        _require_exact_keys(raw, {"kind", "line", "lines"})
+        return _LineOperation(
+            kind=kind,
+            line=_positive_line(raw.get("line"), "line"),
+            lines=_operation_lines(raw.get("lines")),
+        )
+    if kind == "replace_file":
+        _require_exact_keys(raw, {"kind", "content"})
+        content = raw.get("content")
+        if not isinstance(content, str):
+            raise _invalid_operation("replace_file content must be a string.")
+        if "\x00" in content:
+            raise _FileApplicationError(
+                "UNSUPPORTED_BINARY_FILE",
+                "replace_file content contains a NUL byte.",
+                hint="Use valid UTF-8 text without NUL bytes.",
+            )
+        try:
+            content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _FileApplicationError(
+                "UNSUPPORTED_TEXT_ENCODING",
+                "replace_file content cannot be encoded as UTF-8.",
+                hint="Remove surrogate code points and retry.",
+            ) from exc
+        return _LineOperation(kind=kind, content=content)
+    raise _invalid_operation(f"Unsupported operation kind: {kind!r}.")
+
+
+def _require_exact_keys(raw: Mapping[str, object], expected: set[str]) -> None:
+    if set(raw) != expected:
+        raise _invalid_operation(
+            f"{raw.get('kind')!r} requires exactly {sorted(expected)}."
+        )
+
+
+def _positive_line(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise _invalid_operation(f"{name} must be a positive integer.")
+    return value
+
+
+def _operation_lines(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise _invalid_operation("lines must be a non-empty array of logical lines.")
+    lines: list[str] = []
+    for line in value:
+        if not isinstance(line, str) or any(
+            marker in line for marker in ("\r", "\n", "\x00")
+        ):
+            raise _invalid_operation(
+                "Each lines item must be one string without CR, LF, or NUL."
+            )
+        try:
+            line.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise _FileApplicationError(
+                "UNSUPPORTED_TEXT_ENCODING",
+                "An operation line cannot be encoded as UTF-8.",
+                hint="Remove surrogate code points and retry.",
+            ) from exc
+        lines.append(line)
+    return tuple(lines)
+
+
+def _invalid_operation(message: str) -> _FileApplicationError:
+    return _FileApplicationError(
+        "INVALID_OPERATION_COMBINATION",
+        message,
+        hint="Use one of replace_lines, delete_lines, insert_before, insert_after, or replace_file.",
+    )
+
+
+def _stage_edit(
+    layout: _TextLayout,
+    operations: tuple[_LineOperation, ...],
+    seen_intervals: tuple[tuple[int, int], ...],
+) -> str:
+    replace_file = tuple(item for item in operations if item.kind == "replace_file")
+    if replace_file:
+        if len(operations) != 1:
+            raise _invalid_operation("replace_file must be the only operation.")
+        assert replace_file[0].content is not None
+        return _stage_replace_file(layout, replace_file[0].content)
+    if layout.newline == "mixed":
+        raise _FileApplicationError(
+            "UNSUPPORTED_MIXED_LINE_ENDINGS",
+            "Local line operations require uniform LF or CRLF line endings.",
+            hint="Use replace_file with the current base_revision to replace the complete file.",
+        )
+    total_lines = len(layout.lines)
+    ranges: list[tuple[int, int, _LineOperation]] = []
+    gaps: dict[int, _LineOperation] = {}
+    for operation in operations:
+        if operation.kind in {"replace_lines", "delete_lines"}:
+            assert operation.start_line is not None and operation.end_line is not None
+            start = operation.start_line
+            end = operation.end_line
+            if start > end or end > total_lines:
+                raise _line_range_error(start, end, total_lines)
+            if not _interval_fully_seen(seen_intervals, start, end):
+                raise _unseen_error(start, end)
+            if (
+                operation.kind == "replace_lines"
+                and tuple(layout.lines[start - 1 : end]) == operation.lines
+            ):
+                raise _FileApplicationError(
+                    "NO_OP",
+                    f"replace_lines {start}..{end} is identical to the current lines.",
+                    hint="Remove the no-op operation or submit changed logical lines.",
+                )
+            for prior_start, prior_end, _ in ranges:
+                if max(start, prior_start) <= min(end, prior_end):
+                    raise _FileApplicationError(
+                        "OVERLAPPING_OPERATIONS",
+                        f"Line range {start}..{end} overlaps {prior_start}..{prior_end}.",
+                        hint="Use non-overlapping ranges based on the original file.",
+                    )
+            ranges.append((start, end, operation))
+            continue
+        assert operation.kind in {"insert_before", "insert_after"}
+        assert operation.line is not None
+        line = operation.line
+        if line > total_lines:
+            raise _line_range_error(line, line, total_lines)
+        if not _interval_fully_seen(seen_intervals, line, line):
+            raise _unseen_error(line, line)
+        gap = line - 1 if operation.kind == "insert_before" else line
+        if gap in gaps:
+            raise _FileApplicationError(
+                "OVERLAPPING_OPERATIONS",
+                f"More than one operation targets the gap around line {line}.",
+                hint="Combine insertions that target the same original-file gap.",
+            )
+        gaps[gap] = operation
+    for start, end, _ in ranges:
+        for gap in gaps:
+            if start <= gap < end:
+                raise _FileApplicationError(
+                    "OVERLAPPING_OPERATIONS",
+                    f"Insertion gap {gap} falls inside replaced range {start}..{end}.",
+                    hint="Move the insertion outside the range or combine it with replace_lines.",
+                )
+    return _materialize_line_operations(layout, ranges, gaps)
+
+
+def _stage_replace_file(layout: _TextLayout, content: str) -> str:
+    if content.startswith(UTF8_BOM):
+        content = content[len(UTF8_BOM) :]
+    if layout.newline == "mixed":
+        return content
+    target_newline = layout.newline if layout.newline in {"\n", "\r\n"} else "\n"
+    return _normalize_line_endings(content, target_newline)
+
+
+def _materialize_line_operations(
+    layout: _TextLayout,
+    ranges: list[tuple[int, int, _LineOperation]],
+    gaps: dict[int, _LineOperation],
+) -> str:
+    range_by_start = {start: (end, operation) for start, end, operation in ranges}
+    output: list[str] = []
+    cursor = 1
+    total_lines = len(layout.lines)
+    while cursor <= total_lines:
+        insertion = gaps.get(cursor - 1)
+        if insertion is not None:
+            output.extend(insertion.lines)
+        ranged = range_by_start.get(cursor)
+        if ranged is not None:
+            end, operation = ranged
+            if operation.kind == "replace_lines":
+                output.extend(operation.lines)
+            cursor = end + 1
+            continue
+        output.append(layout.lines[cursor - 1])
+        cursor += 1
+    tail = gaps.get(total_lines)
+    if tail is not None:
+        output.extend(tail.lines)
+    if not output:
+        return ""
+    newline = layout.newline if layout.newline in {"\n", "\r\n"} else "\n"
+    rendered = newline.join(output)
+    if layout.had_final_newline:
+        rendered += newline
+    return rendered
+
+
+def _line_range_error(start: int, end: int, total_lines: int) -> _FileApplicationError:
+    return _FileApplicationError(
+        "INVALID_LINE_RANGE",
+        f"Line range {start}..{end} is invalid for a {total_lines}-line file.",
+        hint=f"Call read_file with offset={max(1, min(start, total_lines or 1))} and retry.",
+        details={"total_lines": total_lines},
+    )
+
+
+def _unseen_error(start: int, end: int) -> _FileApplicationError:
+    return _FileApplicationError(
+        "UNSEEN_LINE_RANGE",
+        f"Lines {start}..{end} were not all shown by read_file for this revision.",
+        hint=f"Call read_file with offset={start}, limit={end - start + 1}, then retry.",
+        details={"suggested_read": {"offset": start, "limit": end - start + 1}},
+    )
+
+
+def _interval_fully_seen(
+    intervals: tuple[tuple[int, int], ...], start: int, end: int
+) -> bool:
+    return any(left <= start and end <= right for left, right in intervals)
+
+
+def _merge_intervals(
+    intervals: tuple[tuple[int, int], ...],
+) -> tuple[tuple[int, int], ...]:
+    if not intervals:
+        return ()
+    ordered = sorted(intervals)
+    merged: list[tuple[int, int]] = []
+    for start, end in ordered:
+        if not merged or start > merged[-1][1] + 1:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return tuple(merged)
+
+
+def _read_hint_for_operations(operations: tuple[_LineOperation, ...]) -> str:
+    anchors: list[int] = []
+    for operation in operations:
+        if operation.kind == "replace_file":
+            return "Call read_file for the target path and retry with its content_revision."
+        if operation.start_line is not None:
+            anchors.extend(
+                (operation.start_line, operation.end_line or operation.start_line)
+            )
+        elif operation.line is not None:
+            anchors.append(operation.line)
+    if not anchors:
+        return "Call read_file for the target path and retry."
+    start = min(anchors)
+    end = max(anchors)
+    return f"Call read_file with offset={start}, limit={end - start + 1}, then retry."
+
+
+def _changed_windows(
+    before: tuple[str, ...],
+    after: tuple[str, ...],
+) -> tuple[list[dict[str, object]], tuple[tuple[int, int], ...], bool]:
+    if not after:
+        return [], (), False
+    raw_ranges: list[tuple[int, int]] = []
+    matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if j1 == j2:
+            anchor = min(max(1, j1 + 1), len(after))
+            raw_ranges.append((anchor, anchor))
+            continue
+        start = j1 + 1
+        end = j2
+        if end - start + 1 > CHANGED_WINDOW_CONTEXT_LINES * 2:
+            raw_ranges.extend(
+                (
+                    (start, start + CHANGED_WINDOW_CONTEXT_LINES - 1),
+                    (end - CHANGED_WINDOW_CONTEXT_LINES + 1, end),
+                )
+            )
+        else:
+            raw_ranges.append((start, end))
+    expanded = tuple(
+        (
+            max(1, start - CHANGED_WINDOW_CONTEXT_LINES),
+            min(len(after), end + CHANGED_WINDOW_CONTEXT_LINES),
+        )
+        for start, end in raw_ranges
+    )
+    intervals = _merge_intervals(expanded)
+    windows: list[dict[str, object]] = []
+    visible_intervals: list[tuple[int, int]] = []
+    truncated = False
+    used_chars = len(json_text({"changed_windows": []}))
+    for start, end in intervals:
+        window: dict[str, object] = {
+            "offset": start,
+            "end_line": end,
+            "content": "\n".join(
+                f"{line_number}|{after[line_number - 1]}"
+                for line_number in range(start, end + 1)
+            ),
+        }
+        window_chars = len(json_text(window)) + (2 if windows else 0)
+        if used_chars + window_chars > MAX_CHANGED_WINDOWS_JSON_CHARS:
+            truncated = True
+            continue
+        windows.append(window)
+        visible_intervals.append((start, end))
+        used_chars += window_chars
+    return windows, tuple(visible_intervals), truncated
+
+
+def _text_with_original_bom(layout: _TextLayout) -> str:
+    return (UTF8_BOM if layout.had_bom else "") + layout.text
 
 
 def _normalize_offset(value: int) -> int:
@@ -684,25 +1299,6 @@ def _has_binary_extension(path: Path) -> bool:
     return path.suffix.lower() in BINARY_EXTENSIONS
 
 
-def _strip_bom(text: str) -> tuple[str, bool]:
-    if text.startswith(UTF8_BOM):
-        return text[len(UTF8_BOM) :], True
-    return text, False
-
-
-def _has_bom(text: str) -> bool:
-    return text.startswith(UTF8_BOM)
-
-
-def _detect_line_ending(text: str) -> str | None:
-    head = text[:4096]
-    if "\r\n" in head:
-        return "\r\n"
-    if "\n" in head:
-        return "\n"
-    return None
-
-
 def _normalize_line_endings(text: str, target: str) -> str:
     lf = text.replace("\r\n", "\n").replace("\r", "\n")
     if target == "\r\n":
@@ -719,9 +1315,7 @@ def _relpath(path: Path, root: Path) -> str:
         return str(path)
 
 
-def _path_access_scope(
-    path: Path, workspace_root: Path, user_home: Path | None
-) -> str:
+def _path_access_scope(path: Path, workspace_root: Path, user_home: Path | None) -> str:
     resolved = path.resolve()
     root = workspace_root.resolve()
     if resolved == root or root in resolved.parents:
@@ -751,9 +1345,7 @@ def _is_broad_search_root(
     return resolved in _broad_search_roots(root, user_home)
 
 
-def _broad_search_roots(
-    workspace_root: Path, user_home: Path | None
-) -> set[Path]:
+def _broad_search_roots(workspace_root: Path, user_home: Path | None) -> set[Path]:
     roots = {Path("/").resolve()}
     if user_home is not None:
         roots.add(user_home.resolve())
@@ -833,20 +1425,20 @@ def _parse_rg_match_line(line: str, root: Path) -> dict[str, Any] | None:
     }
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
+def _atomic_replace_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = path.stat().st_mode if path.exists() else None
+    mode = path.stat().st_mode
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        if mode is not None:
-            os.chmod(tmp_name, mode)
+        os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
+        _fsync_directory(path.parent)
     except Exception:
         try:
             os.unlink(tmp_name)
@@ -855,24 +1447,56 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
-def _stale_warning(state: _WorkspaceFileState, path: Path) -> str | None:
-    with state.lock:
-        read_mtime = state.read_timestamps.get(path)
-    if read_mtime is None or not path.exists():
-        return None
-    current_mtime = path.stat().st_mtime_ns
-    if current_mtime != read_mtime:
-        return (
-            f"{_relpath(path, path.parent)} was modified since the last read_file call. "
-            "The content previously read by the agent may be stale."
-        )
-    return None
+def _atomic_create_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    published = False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(tmp_name, path)
+            published = True
+        except FileExistsError as exc:
+            raise _AtomicTargetExists(str(path)) from exc
+        except OSError as exc:
+            unsupported = {
+                errno.EXDEV,
+                getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+                errno.EOPNOTSUPP,
+            }
+            if exc.errno in unsupported:
+                raise _AtomicNoClobberUnavailable(str(path)) from exc
+            raise
+        _fsync_directory(path.parent)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            if not published:
+                pass
 
 
-def _note_write(state: _WorkspaceFileState, path: Path) -> None:
-    mtime_ns = path.stat().st_mtime_ns
-    with state.lock:
-        state.read_timestamps[path] = mtime_ns
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            return
+        raise
+    try:
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+                raise
+    finally:
+        os.close(fd)
 
 
 def _unified_diff(before: str, after: str, filename: str) -> str:
@@ -884,99 +1508,3 @@ def _unified_diff(before: str, after: str, filename: str) -> str:
             tofile=f"b/{filename}",
         )
     )
-
-
-def _fuzzy_replace(
-    content: str,
-    old_text: str,
-    new_text: str,
-    replace_all: bool,
-) -> tuple[str, int, str | None, str | None]:
-    if not old_text:
-        return content, 0, None, "old_text cannot be empty"
-    if old_text == new_text:
-        return content, 0, None, "old_text and new_text are identical"
-    strategies = (
-        ("exact", _match_exact),
-        ("trimmed_boundary", _match_trimmed_boundary),
-        ("line_trimmed", _match_line_trimmed),
-        ("whitespace_normalized", _match_whitespace_normalized),
-    )
-    for strategy, matcher in strategies:
-        spans = matcher(content, old_text)
-        if not spans:
-            continue
-        if len(spans) > 1 and not replace_all:
-            return (
-                content,
-                0,
-                None,
-                f"Found {len(spans)} matches for old_text. Provide more context or set replace_all=true.",
-            )
-        selected = spans if replace_all else spans[:1]
-        updated = _replace_spans(content, selected, new_text)
-        return updated, len(selected), strategy, None
-    return content, 0, None, "Could not find a match for old_text in the file"
-
-
-def _match_exact(content: str, old_text: str) -> list[tuple[int, int]]:
-    return _find_literal_spans(content, old_text)
-
-
-def _match_trimmed_boundary(content: str, old_text: str) -> list[tuple[int, int]]:
-    stripped = old_text.strip()
-    if stripped == old_text or not stripped:
-        return []
-    return _find_literal_spans(content, stripped)
-
-
-def _match_line_trimmed(content: str, old_text: str) -> list[tuple[int, int]]:
-    old_lines = old_text.splitlines()
-    if len(old_lines) <= 1:
-        return []
-    target = [line.strip() for line in old_lines]
-    lines = content.splitlines(keepends=True)
-    spans: list[tuple[int, int]] = []
-    starts: list[int] = []
-    cursor = 0
-    for line in lines:
-        starts.append(cursor)
-        cursor += len(line)
-    window = len(target)
-    for index in range(0, len(lines) - window + 1):
-        if [line.strip() for line in lines[index : index + window]] == target:
-            start = starts[index]
-            end = (
-                starts[index + window] if index + window < len(starts) else len(content)
-            )
-            spans.append((start, end))
-    return spans
-
-
-def _match_whitespace_normalized(content: str, old_text: str) -> list[tuple[int, int]]:
-    parts = [part for part in re.split(r"\s+", old_text.strip()) if part]
-    if len(parts) <= 1:
-        return []
-    pattern = r"\s+".join(re.escape(part) for part in parts)
-    return [
-        (match.start(), match.end())
-        for match in re.finditer(pattern, content, flags=re.MULTILINE)
-    ]
-
-
-def _find_literal_spans(content: str, needle: str) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
-    start = 0
-    while True:
-        index = content.find(needle, start)
-        if index == -1:
-            return spans
-        spans.append((index, index + len(needle)))
-        start = index + len(needle)
-
-
-def _replace_spans(content: str, spans: list[tuple[int, int]], replacement: str) -> str:
-    updated = content
-    for start, end in sorted(spans, reverse=True):
-        updated = updated[:start] + replacement + updated[end:]
-    return updated

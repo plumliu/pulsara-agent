@@ -134,6 +134,13 @@ Codex `command` argument. `terminal_process` and `terminal_monitor` are independ
 tool calls, not transparent `write_stdin` continuations of `Bash`. A Hook that
 depends on those vendor transport semantics is not convertible.
 
+For the filesystem hard cut, an `edit_file` Hook receives the native closed
+`path + base_revision + operations` object verbatim. A `write_file` Hook receives
+only the native create-only `path + content` object. The `apply_patch`, `Edit`, and
+`Write` aliases affect matcher selection and the public `tool_name` only: Hook
+dispatch never translates unified diffs, text-search replacements, or vendor
+patch bodies into Pulsara operations.
+
 ## Command Input
 
 Each command receives one JSON object on stdin. Common fields are:

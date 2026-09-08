@@ -708,6 +708,36 @@ def test_round9_2_matcher_aliases_and_no_exact_alternative_bypass(
     }
 
 
+def test_round9_2_edit_alias_preserves_native_line_operation_input() -> None:
+    native_input = {
+        "path": "sample.txt",
+        "base_revision": "sha256:" + "0" * 64,
+        "operations": [
+            {
+                "kind": "replace_lines",
+                "start_line": 1,
+                "end_line": 1,
+                "lines": ["replacement"],
+            }
+        ],
+    }
+    public = PreToolUseInput(
+        session_id="session:1",
+        cwd="/workspace",
+        model="model",
+        turn_id="turn:1",
+        tool_name="apply_patch",
+        tool_use_id="call:1",
+        tool_input=native_input,
+        permission_mode="default",
+        pulsara_tool_name="edit_file",
+    ).to_wire()
+
+    assert public["tool_name"] == "apply_patch"
+    assert public["pulsara_tool_name"] == "edit_file"
+    assert public["tool_input"] == native_input
+
+
 def test_round9_2_single_parser_control_matrix_and_invalid_output(
     tmp_path: Path,
 ) -> None:

@@ -1,6 +1,6 @@
 # Pulsara Content Revision 行锚定编辑与 Create-Only Write Hard-Cut 实施规格
 
-> 状态：**PROPOSED — 尚未实施、尚未激活**
+> 状态：**ACTIVATED — 2026-09-08**
 >
 > 记录日期：2026-09-08
 >
@@ -1150,3 +1150,16 @@ same installed epoch
 ~~~
 
 该终局保留 OMP hashline 最有价值的 grounding 与 stale-write 防护，同时符合 Pulsara 的小型 durability、真实边界 digest、单一权限 owner、单一 tool settlement 和 provider prefix continuity 原则。
+
+---
+
+## 22. Activation 记录
+
+本 hard-cut 已于 2026-09-08 按 Phase A–D 激活。生产实现、builtin catalog、
+Hook 契约、README、focused/full/continuity tests、clean-v0、isolated
+sdist/wheel/launcher 以及真实 provider 的三条工具链均已验证。
+
+精确命令、结果、Git 基线、真实 provider prompts/replies/tool
+arguments/results、删除路径及剩余物理边界记录在：
+
+`benchmarks/suites/core/v1/content_revision_line_edit_hard_cut_activation.json`

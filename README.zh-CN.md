@@ -71,8 +71,11 @@ Kernel 当前支持：
   frontier；每条accepted tool result携带immutable observed time、monotonic
   duration disposition、execution origin及optional trusted duration，tool body
   无法伪造这些outer timing facts；
-- filesystem、`terminal`、`terminal_process`、`terminal_monitor` 与 scoped
-  `artifact_read` tools；
+- revision 锚定的 filesystem tools：`read_file` 返回原始字节的精确 SHA-256
+  revision 并记录 process-local seen lines，`edit_file` 只对该已观察 revision
+  执行确定性行操作，`write_file` 以 atomic no-clobber 方式仅创建新文件；以及
+  `terminal`、`terminal_process`、`terminal_monitor` 与 scoped `artifact_read`
+  tools；
 - exact-run、process-local 的 `todo(items=[...])` 工具：一次原子替换一个
   bounded pending/in_progress/completed snapshot，空list显式清除，ROOT与child
   相互隔离，Host replacement明确不恢复TODO state；

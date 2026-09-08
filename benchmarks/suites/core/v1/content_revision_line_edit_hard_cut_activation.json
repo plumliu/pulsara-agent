@@ -1,0 +1,173 @@
+{
+  "schema_version": "content-revision-line-edit-hard-cut-activation.v1",
+  "status": "ACTIVATED",
+  "activated_at": "2026-09-08",
+  "repository": {
+    "branch": "main",
+    "base_git_commit": "3ba9c548a8bb276ed28ebaf1509301aea4e6cdac",
+    "activation_worktree": "uncommitted hard-cut implementation",
+    "pre_existing_unrelated_change_preserved": "PULSARA_CONVERSATION_FORK_STRUCTURAL_SHARING_RESEARCH.zh.md remained user-deleted"
+  },
+  "implementation": {
+    "filesystem_owner": "src/pulsara_agent/tools/builtins/filesystem.py",
+    "catalog_owner": "src/pulsara_agent/capability/builtin_catalog.py",
+    "content_revision": "sha256 of exact original file bytes",
+    "observation": "one process-local current slot per canonical path with revision-scoped seen intervals",
+    "edit": "one existing file, required base_revision, closed deterministic original-line operations, strict stale and seen rejection, complete in-memory stage, same-directory atomic replace, exact post-write verification",
+    "write": "create-only same-directory staging followed by atomic no-clobber hard-link publication",
+    "unsupported_no_clobber": "typed ATOMIC_NO_CLOBBER_UNAVAILABLE; no os.replace fallback",
+    "provider_projection": "changed windows precede diff and only complete windows within the existing head-preview budget become seen; read results that exceed the generic provider-visible projection budget install zero seen intervals",
+    "durable_topology_change": false,
+    "permission_or_settlement_change": false,
+    "provider_rebase_boundary_added": false
+  },
+  "deleted_paths": [
+    "old_text/new_text/replace_all edit schema and executor path",
+    "exact and fuzzy text-search replacement strategies",
+    "lossy errors=replace decoding from writable read/edit paths",
+    "mtime read_timestamps state",
+    "write_file overwrite behavior",
+    "post-hoc stale-warning overwrite behavior",
+    "old/new compatibility and recovery fallback"
+  ],
+  "verification": {
+    "focused": {
+      "command": ".venv/bin/pytest -q tests/test_content_revision_line_edit.py tests/test_round9_2_hook_subsystem.py tests/test_round3_1_provider_input_prefix_continuity.py tests/test_round5b_long_horizon_context_compaction.py tests/test_fingerprint_subtraction_architecture.py",
+      "result": "148 passed in 2.54s"
+    },
+    "continuity_and_catalog": {
+      "command": ".venv/bin/pytest -q tests/test_round3_1_provider_input_prefix_continuity.py tests/test_round5b_long_horizon_context_compaction.py tests/test_fingerprint_subtraction_architecture.py tests/test_round9_unified_capability_semantics.py tests/test_stage2_direct_model.py",
+      "result": "126 passed in 2.52s"
+    },
+    "full_regression": {
+      "command": ".venv/bin/pytest -q",
+      "result": "1643 passed, 18 aiohttp deprecation warnings in 326.94s"
+    },
+    "lint": {
+      "command": ".venv/bin/ruff check src/pulsara_agent/tools/builtins/filesystem.py src/pulsara_agent/capability/builtin_catalog.py tests/test_content_revision_line_edit.py tests/test_round9_2_hook_subsystem.py tools/run_content_revision_line_edit_dogfood.py",
+      "result": "All checks passed"
+    },
+    "isolated_package": {
+      "commands": [
+        "uv build --sdist --out-dir /tmp/pulsara-content-revision-wheel-final.IvBVwK/sdist",
+        "uv build --wheel --out-dir /tmp/pulsara-content-revision-wheel-final.IvBVwK/wheel /tmp/pulsara-content-revision-wheel-final.IvBVwK/sdist/pulsara_agent-0.1.0.tar.gz",
+        "uv venv /tmp/pulsara-content-revision-wheel-final.IvBVwK/venv",
+        "uv pip install --python /tmp/pulsara-content-revision-wheel-final.IvBVwK/venv/bin/python /tmp/pulsara-content-revision-wheel-final.IvBVwK/wheel/pulsara_agent-0.1.0-py3-none-any.whl",
+        "/tmp/pulsara-content-revision-wheel-final.IvBVwK/venv/bin/pulsara --version",
+        "/tmp/pulsara-content-revision-wheel-final.IvBVwK/venv/bin/python -c \"from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptors as b; d={x.name:x for x in b()}; assert tuple(d['edit_file'].input_schema['required']) == ('path','base_revision','operations'); assert set(d['edit_file'].input_schema['properties']) == {'path','base_revision','operations'}; assert 'without ever overwriting' in d['write_file'].description; print('installed_contract=passed')\""
+      ],
+      "result": "sdist and wheel built; 58 packages installed in isolated venv; launcher returned 0.1.0; installed_contract=passed",
+      "installed_schema_probe": {
+        "edit_required": ["path", "base_revision", "operations"],
+        "edit_properties": ["base_revision", "operations", "path"],
+        "write_create_only": true
+      }
+    },
+    "real_provider": {
+      "command": "uv run python tools/run_content_revision_line_edit_dogfood.py --model openai/gpt-5.6-luna --output /tmp/pulsara-content-revision-dogfood.json",
+      "result": "exit 0; status passed",
+      "clean_v0_ephemeral_database": true,
+      "model_id": "openai/gpt-5.6-luna",
+      "completed_at_utc": "2026-09-07T18:55:18.046027+00:00",
+      "actual_model_replies": [
+        "Updated `chain.txt`: line 2 is `BETA` and line 3 is `GAMMA`.",
+        "Read `stale.txt`; its content revision is `sha256:f1877a5768534ca1da19c3fe258bea6e242abf5d17432aa20c11e4ba34edbe90`, with no edits made.",
+        "The stale edit failed as required, then `stale.txt` was reread and line 2 was successfully changed to `STAY`.",
+        "Created, read, and updated `created.txt`; line 2 is now `EDITED`."
+      ],
+      "actual_tool_trace": [
+        {
+          "tool": "read_file",
+          "arguments": {"path": "chain.txt", "offset": 1, "limit": 2000},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:927c9bb49935d22cfef1df0fd954eb8011420a9b1ec2350d65647accf201bbe9", "content": "1|alpha\n2|beta\n3|gamma\n4|delta"}
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {"path": "chain.txt", "base_revision": "sha256:927c9bb49935d22cfef1df0fd954eb8011420a9b1ec2350d65647accf201bbe9", "operations": [{"kind": "replace_lines", "start_line": 2, "end_line": 2, "lines": ["BETA"]}]},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:2d1a8745bdad293ad22e1bd43a730ea6a6e79dfb25ee4de382dee96633029ff6", "changed_windows": [{"offset": 1, "end_line": 4, "content": "1|alpha\n2|BETA\n3|gamma\n4|delta"}], "diff": "--- a/chain.txt\n+++ b/chain.txt\n@@ -1,4 +1,4 @@\n alpha\n-beta\n+BETA\n gamma\n delta\n"}
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {"path": "chain.txt", "base_revision": "sha256:2d1a8745bdad293ad22e1bd43a730ea6a6e79dfb25ee4de382dee96633029ff6", "operations": [{"kind": "replace_lines", "start_line": 3, "end_line": 3, "lines": ["GAMMA"]}]},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:e3308cb47a5e88efff783a2ef43340ceb84c974cd07eca21ad0286480310b89d", "changed_windows": [{"offset": 1, "end_line": 4, "content": "1|alpha\n2|BETA\n3|GAMMA\n4|delta"}], "diff": "--- a/chain.txt\n+++ b/chain.txt\n@@ -1,4 +1,4 @@\n alpha\n BETA\n-gamma\n+GAMMA\n delta\n"}
+        },
+        {
+          "tool": "read_file",
+          "arguments": {"path": "stale.txt", "offset": 1, "limit": 2000},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:f1877a5768534ca1da19c3fe258bea6e242abf5d17432aa20c11e4ba34edbe90", "content": "1|original\n2|stay"}
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {"path": "stale.txt", "base_revision": "sha256:f1877a5768534ca1da19c3fe258bea6e242abf5d17432aa20c11e4ba34edbe90", "operations": [{"kind": "replace_lines", "start_line": 2, "end_line": 2, "lines": ["STAY"]}]},
+          "state": "APPLICATION_ERROR",
+          "result": {"error": "CONTENT_REVISION_MISMATCH", "current_revision": "sha256:2f5fc01145a458755c113c6c0bfd4bb4ee343d7ad0c8f4558d4a908a4b81af12", "_hint": "Re-read the target range and retry with the new content_revision."}
+        },
+        {
+          "tool": "read_file",
+          "arguments": {"path": "stale.txt", "offset": 1, "limit": 2000},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:2f5fc01145a458755c113c6c0bfd4bb4ee343d7ad0c8f4558d4a908a4b81af12", "content": "1|external\n2|stay"}
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {"path": "stale.txt", "base_revision": "sha256:2f5fc01145a458755c113c6c0bfd4bb4ee343d7ad0c8f4558d4a908a4b81af12", "operations": [{"kind": "replace_lines", "start_line": 2, "end_line": 2, "lines": ["STAY"]}]},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:ee6ac4de5b971384a673e3d29f6cbebaa3f1f37687d96a4599546b016b7843de", "changed_windows": [{"offset": 1, "end_line": 2, "content": "1|external\n2|STAY"}], "diff": "--- a/stale.txt\n+++ b/stale.txt\n@@ -1,2 +1,2 @@\n external\n-stay\n+STAY\n"}
+        },
+        {
+          "tool": "write_file",
+          "arguments": {"path": "created.txt", "content": "created\neditable\n"},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:fbceafa2583a2a8980c389d917312c4d8606c10140d77eded56c4b3151b8cadb", "bytes_written": 17}
+        },
+        {
+          "tool": "read_file",
+          "arguments": {"path": "created.txt", "offset": 1, "limit": 2000},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:fbceafa2583a2a8980c389d917312c4d8606c10140d77eded56c4b3151b8cadb", "content": "1|created\n2|editable"}
+        },
+        {
+          "tool": "edit_file",
+          "arguments": {"path": "created.txt", "base_revision": "sha256:fbceafa2583a2a8980c389d917312c4d8606c10140d77eded56c4b3151b8cadb", "operations": [{"kind": "replace_lines", "start_line": 2, "end_line": 2, "lines": ["EDITED"]}]},
+          "state": "SUCCESS",
+          "result": {"content_revision": "sha256:227ce1201f0051a081dbe1a1afd3e5426352852c02279d0dd44f8845d2d5a5cd", "changed_windows": [{"offset": 1, "end_line": 2, "content": "1|created\n2|EDITED"}], "diff": "--- a/created.txt\n+++ b/created.txt\n@@ -1,2 +1,2 @@\n created\n-editable\n+EDITED\n"}
+        }
+      ],
+      "workspace_outcomes": {
+        "chain.txt": "alpha\nBETA\nGAMMA\ndelta\n",
+        "stale.txt": "external\nSTAY\n",
+        "created.txt": "created\nEDITED\n"
+      },
+      "secret_policy": "only configured model API-key exact values were scrubbed; prompts, replies, tool arguments, results, diffs, and failure context were retained"
+    }
+  },
+  "acceptance": {
+    "old_provider_fields_absent": true,
+    "fuzzy_and_compatibility_paths_absent": true,
+    "exact_revision_and_seen_guard_required": true,
+    "stale_rejected_before_write": true,
+    "raw_byte_revision_variants_tested": true,
+    "revision_confined_to_content_boundary": true,
+    "observation_process_local_and_single_current_slot": true,
+    "write_existing_target_never_clobbered": true,
+    "replace_file_is_only_existing_full_replacement": true,
+    "strict_text_and_mixed_newline_boundaries_tested": true,
+    "permission_path_and_settlement_owners_preserved": true,
+    "stage_precedes_publication": true,
+    "revision_diff_and_changed_windows_returned": true,
+    "physical_unknown_not_retried_or_reclassified": true,
+    "provider_prefix_continuity_passed": true,
+    "durable_oracle_unchanged": true,
+    "all_required_verification_passed": true,
+    "active_docs_describe_one_path": true
+  },
+  "remaining_physical_boundaries": [
+    "content_revision is not a cross-process CAS; external writers are detected best-effort before publication",
+    "filesystems without same-directory hard-link publication return ATOMIC_NO_CLOBBER_UNAVAILABLE",
+    "process exit discards seen-line observations and requires a fresh read_file"
+  ]
+}
