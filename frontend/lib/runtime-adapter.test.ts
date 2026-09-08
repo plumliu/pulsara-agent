@@ -2,13 +2,54 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LocalHttpRuntimeAdapter,
   mergeRuntimeTaskInventory,
-  productVisibleText,
   selectPromptCommand,
   type RuntimeProjection,
 } from './runtime-adapter';
 import type { AgentTask } from './pulsara-types';
 
 afterEach(() => vi.unstubAllGlobals());
+
+const SOURCE_FIDELITY_TEXT = [
+  '',
+  '中文与 `read_file`、edit_file、ROOT、Kernel、HostSession 保持原样。',
+  'path=/tmp/ROOT/edit_file.py url=https://example.test/Kernel?q=read-only',
+  '```python',
+  'from api import read_file, edit_file',
+  'ROOT = "read-only"',
+  'mode = "bypass-permissions"',
+  'exit_code = 0',
+  '```',
+  '{"tool":"edit_file","owner":"HostSession","status":"read-only"}',
+  '',
+].join('\n');
+
+function inlineContent(value: string) {
+  return {
+    kind: 'INLINE',
+    inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))),
+  };
+}
+
+function connectPayload(
+  entries: Record<string, unknown>[] = [],
+  control: Record<string, unknown> = {},
+  liveEvents: Record<string, unknown>[] = [],
+  liveControl: Record<string, unknown> = {},
+) {
+  return {
+    connection_id: 'connection-fidelity', connection_generation: 1,
+    session_id: 'session-1', role: 'controller',
+    live_hello: {
+      live_owner_epoch: '1', live_revision: String(liveEvents.length),
+      live_snapshot: { events: liveEvents },
+    },
+    snapshot: { snapshot: {
+      session_id: 'session-1', writer_generation: '1', event_sequence_cut: String(entries.length),
+      entries, control,
+    } },
+    live_control_snapshot: { snapshot: liveControl },
+  };
+}
 
 it('requests Plugin discovery using only the source directory', async () => {
   const result = {candidates: []};
@@ -1107,16 +1148,372 @@ describe('capability catalog adapter', () => {
   });
 });
 
-describe('productVisibleText', () => {
-  it('translates local runtime vocabulary without rewriting ordinary prose', () => {
-    expect(productVisibleText(
-      'ROOT subagent orchestration requires bypass-permissions mode; create_agent_tasks was rejected.',
-    )).toBe('创建子任务需要在本轮选择“完全访问”权限; 创建子任务 已被拒绝.');
-    expect(productVisibleText('The Linux kernel uses canonical paths.')).toBe(
-      'The Linux kernel uses canonical paths.',
+describe('source text fidelity hard cut', () => {
+  it('preserves accepted user prompts and steers byte-for-byte before rendering', async () => {
+    const entries = ['USER_MESSAGE', 'USER_STEER'].map((entryKind, index) => ({
+      entry_id: `user-${index}`, turn_id: 'turn-user', entry_sequence: String(index + 1),
+      entry_kind: entryKind, scope_kind: 'ROOT', content: inlineContent(SOURCE_FIDELITY_TEXT),
+    }));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages.map((message) => ({
+      body: message.body,
+      userKind: message.userKind,
+    }))).toEqual([
+      { body: SOURCE_FIDELITY_TEXT, userKind: 'prompt' },
+      { body: SOURCE_FIDELITY_TEXT, userKind: 'steer' },
+    ]);
+  });
+
+  it('preserves canonical and imported assistant bodies byte-for-byte', async () => {
+    const entries = ['CANONICAL', 'IMPORTED_HISTORY'].map((owner, index) => ({
+      entry_id: `assistant-${index}`, turn_id: `turn-${index}`, entry_sequence: String(index + 1),
+      entry_kind: 'ASSISTANT_MESSAGE', entry_owner_kind: owner, scope_kind: 'ROOT',
+      blocks: [{
+        block_id: `text-${index}`, block_kind: 'TEXT', content: inlineContent(SOURCE_FIDELITY_TEXT),
+      }],
+    }));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages.map((message) => message.body)).toEqual([
+      SOURCE_FIDELITY_TEXT,
+      SOURCE_FIDELITY_TEXT,
+    ]);
+  });
+
+  it('preserves split live deltas, final text, canonical snapshot, and reconnect content', async () => {
+    const first = '\n中文 read_';
+    const second = 'file /tmp/ROOT Kernel HostSession read-only bypass-permissions exit_code = 0\n';
+    const source = first + second;
+    const canonicalEntry = {
+      entry_id: 'assistant-final', turn_id: 'turn-1', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
+      blocks: [{ block_id: 'text-final', block_kind: 'TEXT', content: inlineContent(source) }],
+    };
+    const responses = [
+      connectPayload([], { active_turns: [{ turn_id: 'turn-1', status: 'RUNNING' }] }, [{
+        live_revision: '1', event_type: 'TEXT_DELTA', draft_identity: 'draft-1',
+        turn_id: 'turn-1', scope_kind: 'ROOT', payload: { text_delta: { delta: first } },
+      }]),
+      { observation: {
+        through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '2',
+        live: [{
+          live_revision: '2', event_type: 'TEXT_DELTA', draft_identity: 'draft-1',
+          turn_id: 'turn-1', scope_kind: 'ROOT', payload: { text_delta: { delta: second } },
+        }],
+      } },
+      { observation: {
+        through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '3',
+        live: [{
+          live_revision: '3', event_type: 'TEXT_END', draft_identity: 'draft-1',
+          turn_id: 'turn-1', scope_kind: 'ROOT', payload: { text_end: { final_text: source } },
+        }],
+      } },
+      { snapshot: { snapshot: {
+        session_id: 'session-1', writer_generation: '1', event_sequence_cut: '1',
+        entries: [canonicalEntry], control: {},
+      } } },
+      connectPayload([canonicalEntry]),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const adapter = new LocalHttpRuntimeAdapter();
+    const connection = await adapter.connect('session-1');
+    expect(connection.current().messages[0]?.body).toBe(first);
+    expect((await connection.observe()).messages[0]?.body).toBe(source);
+    expect((await connection.observe()).messages[0]?.body).toBe(source);
+    expect((await connection.snapshot()).messages[0]?.body).toBe(source);
+    expect((await adapter.connect('session-1')).current().messages[0]?.body).toBe(source);
+  });
+
+  it('preserves canonical and live reasoning while retaining presentation kinds', async () => {
+    const entries = [{
+      entry_id: 'assistant-canonical', turn_id: 'turn-canonical', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
+      blocks: [{ block_id: 'text', block_kind: 'TEXT', content: inlineContent('final') }],
+      reasoning_blocks: [{
+        block_id: 'reasoning-canonical', ordinal: '0',
+        presentation_kind: 'REASONING_PRESENTATION_FULL',
+        content: inlineContent(SOURCE_FIDELITY_TEXT),
+      }],
+    }];
+    const liveEvents = [{
+      live_revision: '1', event_type: 'THINKING_START', draft_identity: 'draft-live',
+      turn_id: 'turn-live', scope_kind: 'ROOT', block_id: 'reasoning-live',
+      payload: { thinking_start: {
+        block_identity: 'reasoning-live',
+        presentation_kind: 'REASONING_PRESENTATION_SUMMARY',
+      } },
+    }, {
+      live_revision: '2', event_type: 'THINKING_DELTA', draft_identity: 'draft-live',
+      turn_id: 'turn-live', scope_kind: 'ROOT', block_id: 'reasoning-live',
+      payload: { thinking_delta: { block_identity: 'reasoning-live', delta: SOURCE_FIDELITY_TEXT } },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(
+      entries,
+      { active_turns: [{ turn_id: 'turn-live', status: 'RUNNING' }] },
+      liveEvents,
+    )), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
+
+    expect(messages.find((message) => message.id === 'assistant-canonical')?.reasoning).toEqual([
+      { id: 'reasoning-canonical', kind: 'full', body: SOURCE_FIDELITY_TEXT },
+    ]);
+    expect(messages.find((message) => message.id === 'live:draft-live')?.reasoning).toEqual([
+      { id: 'reasoning-live', kind: 'summary', body: SOURCE_FIDELITY_TEXT, active: true },
+    ]);
+  });
+
+  it('preserves plan questions and option text without changing option ordinals', async () => {
+    const interaction = {
+      id: 'plan-question-1', kind: 'plan-question' as const,
+      workflowId: 'workflow-1', workflowRevision: 7,
+    };
+    const responses = [connectPayload([], {
+      active_plan_workflow: { workflow_id: 'workflow-1', workflow_revision: '7' },
+      open_plan_interaction: { interaction_id: interaction.id, workflow_id: 'workflow-1', kind: 'QUESTION' },
+    }), {
+      plan_question: {
+        interaction_id: interaction.id,
+        question: SOURCE_FIDELITY_TEXT,
+        options: [{
+          ordinal: '9', label: SOURCE_FIDELITY_TEXT,
+          description: SOURCE_FIDELITY_TEXT, recommended: true,
+        }],
+        allow_free_text: true,
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(await connection.readInteraction(interaction)).toEqual({
+      kind: 'plan-question',
+      question: SOURCE_FIDELITY_TEXT,
+      options: [{
+        ordinal: 9, label: SOURCE_FIDELITY_TEXT,
+        description: SOURCE_FIDELITY_TEXT, recommended: true,
+      }],
+      allowFreeText: true,
+    });
+  });
+
+  it('joins a multi-chunk UTF-8 plan draft exactly while retaining digest and offset checks', async () => {
+    const interaction = {
+      id: 'plan-draft-1', kind: 'plan-draft' as const,
+      workflowId: 'workflow-1', workflowRevision: 7,
+    };
+    const split = SOURCE_FIDELITY_TEXT.indexOf('中文') + 1;
+    const first = SOURCE_FIDELITY_TEXT.slice(0, split);
+    const second = SOURCE_FIDELITY_TEXT.slice(split);
+    const firstBytes = new TextEncoder().encode(first).length;
+    const requests: Record<string, unknown>[] = [];
+    const responses = [connectPayload([], {
+      active_plan_workflow: { workflow_id: 'workflow-1', workflow_revision: '7' },
+      open_plan_interaction: { interaction_id: interaction.id, workflow_id: 'workflow-1', kind: 'DRAFT_REVIEW' },
+    }), {
+      plan_draft: {
+        interaction_id: interaction.id, plan_utf8_digest: 'sha256:plan',
+        offset_utf8_bytes: 0, body: first, next_offset_utf8_bytes: firstBytes, eof: false,
+      },
+    }, {
+      plan_draft: {
+        interaction_id: interaction.id, plan_utf8_digest: 'sha256:plan',
+        offset_utf8_bytes: firstBytes, body: second,
+        next_offset_utf8_bytes: new TextEncoder().encode(SOURCE_FIDELITY_TEXT).length, eof: true,
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(await connection.readInteraction(interaction)).toEqual({
+      kind: 'plan-draft', body: SOURCE_FIDELITY_TEXT,
+    });
+    expect(requests.at(-1)).toMatchObject({
+      interaction_id: interaction.id,
+      offset_utf8_bytes: firstBytes,
+      expected_plan_utf8_digest: 'sha256:plan',
+    });
+  });
+
+  it('still rejects a non-advancing plan draft chunk', async () => {
+    const interaction = {
+      id: 'plan-draft-invalid', kind: 'plan-draft' as const,
+      workflowId: 'workflow-1', workflowRevision: 1,
+    };
+    const responses = [connectPayload(), {
+      plan_draft: {
+        interaction_id: interaction.id, plan_utf8_digest: 'sha256:plan',
+        offset_utf8_bytes: 0, body: 'partial', next_offset_utf8_bytes: 0, eof: false,
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    await expect(connection.readInteraction(interaction)).rejects.toMatchObject({
+      code: 'PLAN_DRAFT_INVALID',
+    });
+  });
+
+  it('preserves task inventory, dependencies, progress, TODOs, results, and child activities', async () => {
+    const task = {
+      id: 'task-1', parent_turn_id: 'turn-root', batch_id: 'batch-1', task_key: 'source-task',
+      label: SOURCE_FIDELITY_TEXT, profile: 'research_worker', display_role: SOURCE_FIDELITY_TEXT,
+      context: { mode: 'LAST_N', last_n_turns: 3 }, objective: SOURCE_FIDELITY_TEXT,
+      status: 'ACTIVE', terminal_public_detail: SOURCE_FIDELITY_TEXT, completion_delivered: false,
+      dependencies: [{
+        task_id: 'task-dependency', task_key: 'dependency', label: SOURCE_FIDELITY_TEXT,
+        status: 'COMPLETED', result_summary: SOURCE_FIDELITY_TEXT,
+      }],
+      result: {
+        id: 'result-1', entry_id: 'entry-result', summary: SOURCE_FIDELITY_TEXT,
+        output_preview: SOURCE_FIDELITY_TEXT, diagnostics: [],
+      },
+    };
+    const rootToolRequest = {
+      entry_id: 'root-create', turn_id: 'turn-root', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'create-block', block_kind: 'TOOL_CALL', tool_call_id: 'create-call',
+        tool_name: 'spawn_agent', tool_arguments_preview: btoa('{}'),
+      }],
+    };
+    const childEntries = [{
+      entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2',
+      entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+      scope_subagent_task_id: 'task-1', content: inlineContent(SOURCE_FIDELITY_TEXT),
+    }, {
+      entry_id: 'child-answer', turn_id: 'turn-child', entry_sequence: '3',
+      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+      scope_subagent_task_id: 'task-1',
+      blocks: [{ block_id: 'child-text', block_kind: 'TEXT', content: inlineContent(SOURCE_FIDELITY_TEXT) }],
+      reasoning_blocks: [{
+        block_id: 'child-reasoning', ordinal: '0',
+        presentation_kind: 'REASONING_PRESENTATION_SUMMARY', content: inlineContent(SOURCE_FIDELITY_TEXT),
+      }],
+    }];
+    const connect = connectPayload(
+      [rootToolRequest, ...childEntries],
+      { subagent_tasks: [{
+        task_id: 'task-1', parent_turn_id: 'turn-root', status: 'ACTIVE',
+        label: SOURCE_FIDELITY_TEXT, display_role: SOURCE_FIDELITY_TEXT,
+        profile: 'research_worker', objective: SOURCE_FIDELITY_TEXT,
+        terminal_public_detail: SOURCE_FIDELITY_TEXT, result_summary: SOURCE_FIDELITY_TEXT,
+      }, {
+        task_id: 'task-default-role', parent_turn_id: 'turn-root', status: 'PENDING_START',
+        label: 'default', profile: 'research_worker', objective: 'default',
+      }] },
+      [{
+        live_revision: '1', event_type: 'SUBAGENT_PROGRESS', turn_id: 'turn-child',
+        scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: 'task-1',
+        payload: { subagent_progress: {
+          task_id: 'task-1', status: 'ACTIVE', public_summary: SOURCE_FIDELITY_TEXT,
+        } },
+      }],
+      { current_todos: [{
+        todo_run_id: 'todo-root', scope_kind: 'ROOT', disposition: 'ACTIVE',
+        ordered_items: [{ ordinal: 0, text: SOURCE_FIDELITY_TEXT, status: 'IN_PROGRESS' }],
+      }] },
     );
-    expect(productVisibleText('使用 read_file 和 terminal 工具。')).toBe(
-      '使用 读取文件 和 终端。',
-    );
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
+      String(input).includes('/tasks?')
+        ? { session_id: 'session-1', tasks: [task], total_count: 1, remaining_count: 0 }
+        : connect,
+    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const adapter = new LocalHttpRuntimeAdapter();
+    const inventory = (await adapter.listSessionTasks('session-1')).tasks[0];
+    const projection = (await adapter.connect('session-1')).current();
+    const liveTask = projection.agentTasks.find((item) => item.id === 'task-1');
+    const run = projection.messages.find((message) => message.id === 'root-create')?.subagentRuns
+      ?.find((item) => item.id === 'task-1');
+
+    expect(inventory).toMatchObject({
+      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT, objective: SOURCE_FIDELITY_TEXT,
+      terminalPublicDetail: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
+      dependencies: [{ label: SOURCE_FIDELITY_TEXT, resultSummary: SOURCE_FIDELITY_TEXT }],
+      result: { summary: SOURCE_FIDELITY_TEXT, outputPreview: SOURCE_FIDELITY_TEXT },
+    });
+    expect(liveTask).toMatchObject({
+      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT, objective: SOURCE_FIDELITY_TEXT,
+      terminalPublicDetail: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
+      progress: SOURCE_FIDELITY_TEXT,
+    });
+    expect(projection.agentTasks.find((item) => item.id === 'task-default-role')?.role).toBe('研究');
+    expect(projection.todo?.items).toEqual([{
+      id: 'todo-root:0', label: SOURCE_FIDELITY_TEXT, status: 'in-progress',
+    }]);
+    expect(run).toMatchObject({
+      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT,
+      objective: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
+    });
+    expect(run?.activities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ body: SOURCE_FIDELITY_TEXT, kind: 'guidance' }),
+      expect.objectContaining({
+        body: SOURCE_FIDELITY_TEXT,
+        reasoning: [{ id: 'child-reasoning', kind: 'summary', body: SOURCE_FIDELITY_TEXT }],
+      }),
+    ]));
+  });
+
+  it('preserves plain and JSON message tool text while keeping typed tool labels', async () => {
+    const request = (id: string, sequence: number, call: string) => ({
+      entry_id: id, turn_id: 'turn-1', entry_sequence: String(sequence),
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: `${id}-block`, block_kind: 'TOOL_CALL', tool_call_id: call,
+        tool_name: 'read_file', tool_arguments_preview: btoa('{}'),
+      }],
+    });
+    const jsonMessage = JSON.stringify({ message: SOURCE_FIDELITY_TEXT });
+    const entries = [
+      request('plain-request', 1, 'plain-call'),
+      {
+        entry_id: 'plain-result', turn_id: 'turn-1', entry_sequence: '2',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(SOURCE_FIDELITY_TEXT),
+        tool_result: { assistant_entry_id: 'plain-request', tool_call_id: 'plain-call', result_state: 'SUCCESS' },
+      },
+      request('json-request', 3, 'json-call'),
+      {
+        entry_id: 'json-result', turn_id: 'turn-1', entry_sequence: '4',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(jsonMessage),
+        tool_result: { assistant_entry_id: 'json-request', tool_call_id: 'json-call', result_state: 'SUCCESS' },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
+    const plain = messages.find((message) => message.id === 'plain-request')?.traces?.[0];
+    const json = messages.find((message) => message.id === 'json-request')?.traces?.[0];
+
+    expect(plain).toMatchObject({
+      title: '读取文件', resultText: SOURCE_FIDELITY_TEXT, output: [SOURCE_FIDELITY_TEXT],
+    });
+    expect(json).toMatchObject({
+      title: '读取文件', resultText: jsonMessage, output: [SOURCE_FIDELITY_TEXT],
+    });
   });
 });

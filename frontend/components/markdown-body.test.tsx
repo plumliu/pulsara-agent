@@ -66,4 +66,33 @@ describe('MarkdownBody math rendering', () => {
     expect(container.querySelector('.katex-error')).toBeNull();
     expect(getByText('后续粗体仍应正常渲染。').tagName).toBe('STRONG');
   });
+
+  it('preserves fenced and inline source text without enabling raw HTML', () => {
+    const body = [
+      '正文 `read_file`、edit_file、ROOT、Kernel、HostSession、read-only、bypass-permissions。',
+      '',
+      '```python',
+      'from api import read_file, edit_file',
+      'ROOT = "read-only"',
+      'exit_code = 0',
+      '```',
+      '',
+      '<script>window.source_fidelity_broken = true</script>',
+      '',
+      '$$E=mc^2$$',
+    ].join('\n');
+
+    const { container } = render(<MarkdownBody body={body} />);
+    const code = Array.from(container.querySelectorAll('pre code'), (node) => node.textContent).join('');
+
+    expect(code).toBe([
+      'from api import read_file, edit_file',
+      'ROOT = "read-only"',
+      'exit_code = 0',
+      '',
+    ].join('\n'));
+    expect(container.querySelector('p code')?.textContent).toBe('read_file');
+    expect(container.querySelector('script')).toBeNull();
+    expect(container.querySelectorAll('.katex-display')).toHaveLength(1);
+  });
 });

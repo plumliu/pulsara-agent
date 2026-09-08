@@ -38,13 +38,24 @@ function MemoryContent({ api, onOpenSource }: Props) {
   const [pendingDetail, setPendingDetail] = useState<MemoryFact | null>(null);
   const [confirmation, setConfirmation] = useState<MemoryRecord[] | null>(null);
   const [additional, setAdditional] = useState<string[]>([]);
-  const [busy, setBusy] = useState(false); const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false); const [loading, setLoading] = useState(true);
   const [error, setError] = useState(''); const [notice, setNotice] = useState(''); const [revision, setRevision] = useState(0);
   const detailRequest = useRef(0);
   const selection: MemorySelection = { view, workspace_id: view === 'project' ? workspace : null };
   const key = `${view}:${workspace}:${kind}:${lifecycle}:${search}:${revision}`;
-  const currentKey = useRef(key); currentKey.current = key;
+  const [previousQuery, setPreviousQuery] = useState({ api, key });
+  const currentKey = useRef(key);
+  useEffect(() => { currentKey.current = key; }, [key]);
   useEffect(() => () => { currentKey.current = ''; detailRequest.current++; }, []);
+
+  // Reset only when the query changes, before committing its new view. A
+  // deferred reset can erase errors already returned by the projects request.
+  if (previousQuery.api !== api || previousQuery.key !== key) {
+    setPreviousQuery({ api, key });
+    setItems([]); setDetail(null); setPendingDetail(null); setConfirmation(null);
+    setAdditional([]); setCursor(null); setError('');
+    setLoading(view !== 'project' || Boolean(workspace));
+  }
 
   useEffect(() => {
     let active = true;
@@ -62,9 +73,10 @@ function MemoryContent({ api, onOpenSource }: Props) {
   }, [api]);
   useEffect(() => {
     let active = true;
-    detailRequest.current++; setItems([]); setDetail(null); setPendingDetail(null); setConfirmation(null); setAdditional([]); setCursor(null); setError('');
-    if (view === 'project' && !workspace) { setLoading(false); return; }
-    setLoading(true);
+    detailRequest.current++;
+    if (view === 'project' && !workspace) {
+      return () => { active = false; };
+    }
     const timer = setTimeout(() => {
       api.catalog({ view, workspace_id: view === 'project' ? workspace : null }, { kind, lifecycle, search }).then(p => { if (active) { setItems(p.items); setCursor(p.next_cursor); } }).catch(e => { if (active) setError(errorText(e)); }).finally(() => { if (active) setLoading(false); });
     }, 180);

@@ -1377,11 +1377,11 @@ class LocalRuntimeConnection implements RuntimeConnection {
       }
       return {
         kind: 'plan-question',
-        question: productVisibleText(question.question ?? ''),
+        question: question.question ?? '',
         options: (question.options ?? []).map((option) => ({
           ordinal: numeric(option.ordinal),
-          label: productVisibleText(option.label ?? ''),
-          description: productVisibleText(option.description ?? ''),
+          label: option.label ?? '',
+          description: option.description ?? '',
           recommended: Boolean(option.recommended),
         })),
         allowFreeText: Boolean(question.allow_free_text),
@@ -1422,7 +1422,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
       }
       offset = nextOffset;
     }
-    return { kind: 'plan-draft', body: productVisibleText(body) };
+    return { kind: 'plan-draft', body };
   }
 
   async resolveInteraction(
@@ -1696,7 +1696,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
         if (taskId) {
           this.taskProgress.set(taskId, {
             status: String(progress.status ?? ''),
-            summary: productVisibleText(String(progress.public_summary ?? '')),
+            summary: String(progress.public_summary ?? ''),
           });
         }
         continue;
@@ -1915,7 +1915,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     const todo = projectTodo(this.liveControl);
     const interaction = projectInteraction(this.liveControl, this.control);
     return {
-      messages: messages.map(productVisibleMessage),
+      messages,
       presentationNotices: this.presentationNotices,
       contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base,
@@ -2738,7 +2738,7 @@ function formatToolResult(content: string): string {
       return `已读取 ${path} · ${value.total_lines} 行${value.truncated ? ' · 内容已截断' : ''}`;
     }
     const message = value.message ?? value.error;
-    if (typeof message === 'string' && message) return productVisibleText(message);
+    if (typeof message === 'string' && message) return message;
     for (const key of ['output', 'stdout', 'stderr', 'content', 'result', 'text', 'summary']) {
       const field = value[key];
       if (typeof field === 'string' && field) return field;
@@ -2747,7 +2747,7 @@ function formatToolResult(content: string): string {
     if (String(value.status ?? '').toLowerCase() === 'success') return '操作已完成。';
     return '操作已完成。';
   } catch {
-    return productVisibleText(content);
+    return content;
   }
 }
 
@@ -2903,7 +2903,7 @@ function projectTodo(control: ProtocolLiveControlSnapshot): TodoRun | undefined 
       const status = item.status.toUpperCase();
       return {
         id: `${run.todo_run_id}:${item.ordinal ?? index}`,
-        label: productVisibleText(item.text),
+        label: item.text,
         status: status === 'COMPLETED'
           ? 'completed'
           : status === 'IN_PROGRESS'
@@ -2973,10 +2973,10 @@ function projectAgentTasks(
     const status = taskStatus(task.status);
     return {
       id: task.task_id,
-      label: productVisibleText(task.label || `子任务 ${index + 1}`),
-      role: productVisibleText(task.display_role || profileLabel(task.profile)),
+      label: task.label || `子任务 ${index + 1}`,
+      role: task.display_role || profileLabel(task.profile),
       profile: task.profile,
-      objective: productVisibleText(task.objective),
+      objective: task.objective,
       status,
       parentId: task.parent_turn_id,
       batchId: task.batch_id,
@@ -2985,17 +2985,17 @@ function projectAgentTasks(
       pendingReason: task.pending_reason || undefined,
       terminalReason: task.terminal_reason || undefined,
       terminalPublicDetail: task.terminal_public_detail
-        ? productVisibleText(task.terminal_public_detail)
+        ? task.terminal_public_detail
         : undefined,
       completionDelivered: Boolean(task.completion_delivered),
       dependencyIds: task.dependency_task_ids ?? [],
-      summary: task.result_summary ? productVisibleText(task.result_summary) : undefined,
+      summary: task.result_summary || undefined,
       progress: !isTerminalTaskStatus(status) && live?.summary
         ? live.summary
         : undefined,
       result: task.result_id ? {
         id: task.result_id,
-        summary: productVisibleText(task.result_summary ?? ''),
+        summary: task.result_summary ?? '',
         diagnostics: [],
       } : undefined,
       color: taskColor(task.task_id),
@@ -3007,18 +3007,18 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
   const dependencies = (task.dependencies ?? []).map((dependency) => ({
     id: String(dependency.task_id ?? ''),
     taskKey: dependency.task_key || undefined,
-    label: dependency.label ? productVisibleText(dependency.label) : undefined,
+    label: dependency.label || undefined,
     status: taskStatus(String(dependency.status ?? '')),
     resultSummary: dependency.result_summary
-      ? productVisibleText(dependency.result_summary)
+      ? dependency.result_summary
       : undefined,
   }));
   const result = task.result?.id ? {
     id: task.result.id,
     entryId: task.result.entry_id || undefined,
-    summary: productVisibleText(task.result.summary ?? ''),
+    summary: task.result.summary ?? '',
     outputPreview: task.result.output_preview
-      ? productVisibleText(task.result.output_preview)
+      ? task.result.output_preview
       : undefined,
     diagnostics: Array.isArray(task.result.diagnostics)
       ? task.result.diagnostics
@@ -3026,10 +3026,10 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
   } : undefined;
   return {
     id: task.id,
-    label: productVisibleText(task.label || task.task_key || '子任务'),
-    role: productVisibleText(task.display_role || profileLabel(task.profile)),
+    label: task.label || task.task_key || '子任务',
+    role: task.display_role || profileLabel(task.profile),
     profile: task.profile,
-    objective: productVisibleText(task.objective ?? ''),
+    objective: task.objective ?? '',
     status: taskStatus(String(task.status ?? '')),
     parentId: task.parent_turn_id,
     batchId: task.batch_id,
@@ -3038,7 +3038,7 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
     pendingReason: task.pending_reason || undefined,
     terminalReason: task.terminal_reason || undefined,
     terminalPublicDetail: task.terminal_public_detail
-      ? productVisibleText(task.terminal_public_detail)
+      ? task.terminal_public_detail
       : undefined,
     completionDelivered: Boolean(task.completion_delivered),
     acceptedAt: task.accepted_at,
@@ -3184,80 +3184,6 @@ function encodeBase64Bytes(value: Uint8Array): string {
     pieces.push(String.fromCharCode(...value.subarray(offset, offset + 0x8000)));
   }
   return btoa(pieces.join(''));
-}
-
-const PRODUCT_TEXT_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/ROOT subagent orchestration requires bypass-permissions mode/gi, '创建子任务需要在本轮选择“完全访问”权限'],
-  [/\bPERMISSION_MODE_BYPASS_PERMISSIONS\b/g, '完全访问'],
-  [/\bbypass-permissions\b/gi, '完全访问'],
-  [/\bPERMISSION_MODE_ACCEPT_EDITS\b/g, '接受编辑'],
-  [/\baccept-edits\b/gi, '接受编辑'],
-  [/\bPERMISSION_MODE_READ_ONLY\b/g, '只读'],
-  [/\bread-only\b/gi, '只读'],
-  [/\bPERMISSION_MODE_ASK_PERMISSIONS\b/g, '每次询问'],
-  [/\bask-permissions\b/gi, '每次询问'],
-  [/\bcreate_agent_tasks\b|\bspawn_agent\b/g, '创建子任务'],
-  [/\bwait_agent\b/g, '等待子任务'],
-  [/\breport_agent_result\b/g, '提交子任务结果'],
-  [/\bsend_agent_message\b/g, '发送子任务消息'],
-  [/\bstop_agent\b/g, '停止子任务'],
-  [/\blist_agents\b/g, '查看子任务'],
-  [/\bSUBAGENT_TASK\b/g, '子任务'],
-  [/使用\s+read_file\s+工具读取文件/gi, '读取'],
-  [/\bread_file\b/g, '读取文件'],
-  [/\bwrite_file\b/g, '写入文件'],
-  [/\bedit_file\b/g, '更新文件'],
-  [/使用\s+terminal\s+tool\b/gi, '使用终端'],
-  [/使用\s+terminal\s+工具/gi, '使用终端'],
-  [/\bterminal\s+tool\b/gi, '终端'],
-  [/\bterminal\s+工具/gi, '终端'],
-  [/处于\s+active\s+状态/gi, '正在运行'],
-  [/处于\s+active(?=[，,。\s])/gi, '正在运行'],
-  [/\bwas rejected\b/gi, '已被拒绝'],
-  [/\bpermission denied\b/gi, '权限已拒绝'],
-  [/\bexit_code\s*=\s*0\b/gi, '退出码为 0'],
-  [/\bexit\s+code\s*0\b/gi, '退出码为 0'],
-  [/\byielded_to_background\s*=\s*false\b/gi, '保持前台运行'],
-  [/\btimed_out\s*=\s*false\b/gi, '未超时'],
-  [/\bsource_coverage\s*=\s*COMPLETE\b/g, '输出完整'],
-  [/\bTerminal Protocol(?: v?\d+)?\b/gi, '本地服务'],
-  [/\bHostSession\b/g, '本地会话'],
-  [/\bKernel\b/g, '本地服务'],
-  [/\bROOT\b/g, '主任务'],
-];
-
-export function productVisibleText(value: string): string {
-  return PRODUCT_TEXT_REPLACEMENTS.reduce(
-    (current, [pattern, replacement]) => current.replace(pattern, replacement),
-    value,
-  );
-}
-
-function productVisibleMessage(message: Message): Message {
-  if (message.role === 'user') return message;
-  return {
-    ...message,
-    body: productVisibleText(message.body),
-    reasoning: message.reasoning?.map((block) => ({
-      ...block,
-      body: productVisibleText(block.body),
-    })),
-    subagentRuns: message.subagentRuns?.map((run) => ({
-      ...run,
-      label: productVisibleText(run.label),
-      role: productVisibleText(run.role),
-      objective: productVisibleText(run.objective),
-      summary: run.summary ? productVisibleText(run.summary) : undefined,
-      activities: run.activities.map((activity) => ({
-        ...activity,
-        body: productVisibleText(activity.body),
-        reasoning: activity.reasoning?.map((block) => ({
-          ...block,
-          body: productVisibleText(block.body),
-        })),
-      })),
-    })),
-  };
 }
 
 function stringField(

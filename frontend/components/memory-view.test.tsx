@@ -1,9 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryView } from './memory-view';
 import { LocalMemoryApi, MemoryApiError, type MemoryDetail, type MemoryFact, type MemoryRecord } from '../lib/memory-api';
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.useRealTimers(); });
 const fact: MemoryFact = { fact_id: 'memory:a', context_id: 'ctx:global', statement: '用户喜欢散步，雨天除外。', kind: 'USER_PROFILE', lifecycle: 'ACTIVE', recorded_at: '2026-09-05T00:00:00Z', updated_at: '2026-09-05T00:00:00Z', context_label: '跨对话' };
 const confirmation: MemoryRecord[] = [{ type: 'HEADER', root: fact.fact_id, view: 'global', workspace_id: null, disposition: 'READY' }, { type: 'FACT_DELETE', fact }, { type: 'END', counts: { HEADER: 1, FACT_DELETE: 1 } }];
 function setup() {
@@ -17,6 +18,75 @@ function setup() {
 }
 
 describe('MemoryView', () => {
+  it.each(['before', 'after'] as const)('retains project errors arriving %s the catalog debounce', async timing => {
+    vi.useFakeTimers();
+    const api = setup();
+    let rejectProjects!: (error: Error) => void;
+    vi.mocked(api.projects).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectProjects = reject; }));
+    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    if (timing === 'after') await act(async () => { await vi.advanceTimersByTimeAsync(180); });
+    await act(async () => { rejectProjects(new Error('项目列表读取失败')); });
+    expect(screen.queryByRole('alert')?.textContent).toBe('项目列表读取失败');
+    await act(async () => { await vi.advanceTimersByTimeAsync(180); });
+    expect(api.catalog).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')?.textContent).toBe('项目列表读取失败');
+    expect(screen.getByRole('button', { name: /用户喜欢散步/ })).toBeTruthy();
+  });
+  it('clears the previous query immediately and ignores its pending detail response', async () => {
+    vi.useFakeTimers();
+    const api = setup();
+    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(180); });
+    let resolveDetail!: (value: MemoryDetail) => void;
+    vi.mocked(api.detail).mockImplementationOnce(() => new Promise(resolve => { resolveDetail = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: /用户喜欢散步/ }));
+    expect(screen.getByRole('complementary', { name: '记忆详情' })).toBeTruthy();
+    const search = screen.getByRole('textbox', { name: '搜索记忆' });
+    search.focus();
+    fireEvent.change(search, { target: { value: '新查询' } });
+    expect(screen.queryByRole('button', { name: /用户喜欢散步/ })).toBeNull();
+    expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
+    expect(screen.getByText('正在读取记忆…')).toBeTruthy();
+    expect(document.activeElement).toBe(search);
+    await act(async () => { resolveDetail({ fact, formation: '', source: null, public_summary: '', relations: [], next_cursor: null }); });
+    expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
+    vi.mocked(api.catalog).mockResolvedValueOnce({ items: [], next_cursor: null });
+    await act(async () => { await vi.advanceTimersByTimeAsync(180); });
+    expect(api.catalog).toHaveBeenLastCalledWith({ view: 'global', workspace_id: null }, { kind: '', lifecycle: 'active', search: '新查询' });
+    expect(screen.getByRole('heading', { name: '没有找到匹配的记忆' })).toBeTruthy();
+  });
+  it('does not let an old catalog response overwrite the current query', async () => {
+    vi.useFakeTimers();
+    const api = setup();
+    let resolveOld!: (value: { items: MemoryFact[]; next_cursor: null }) => void;
+    vi.mocked(api.catalog).mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(180); });
+    fireEvent.change(screen.getByRole('textbox', { name: '搜索记忆' }), { target: { value: '新查询' } });
+    vi.mocked(api.catalog).mockRejectedValueOnce(new Error('当前查询失败'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(180); });
+    expect(screen.getByRole('alert').textContent).toBe('当前查询失败');
+    await act(async () => { resolveOld({ items: [fact], next_cursor: null }); });
+    expect(screen.queryByRole('button', { name: /用户喜欢散步/ })).toBeNull();
+    expect(screen.getByRole('alert').textContent).toBe('当前查询失败');
+  });
+  it('keeps pagination bound to the committed query under StrictMode', async () => {
+    vi.useFakeTimers();
+    const api = setup();
+    const companion = { ...fact, fact_id: 'memory:b', statement: '另一条记忆' };
+    vi.mocked(api.catalog)
+      .mockResolvedValueOnce({ items: [fact], next_cursor: 'next-page' })
+      .mockResolvedValueOnce({ items: [companion], next_cursor: null });
+    render(<StrictMode><MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} /></StrictMode>);
+    await act(async () => { await vi.advanceTimersByTimeAsync(180); });
+    expect(api.catalog).toHaveBeenCalledTimes(1);
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '加载更多记忆' })); });
+    expect(api.catalog).toHaveBeenCalledTimes(2);
+    expect(api.catalog).toHaveBeenLastCalledWith({ view: 'global', workspace_id: null }, { kind: '', lifecycle: 'active', search: '', cursor: 'next-page' });
+    expect(screen.getByRole('button', { name: /用户喜欢散步/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /另一条记忆/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '加载更多记忆' })).toBeNull();
+  });
   it('keeps the same panel mounted while switching, and ignores repeated selection without scrolling', async () => {
     const api = setup();
     const companion = { ...fact, fact_id: 'memory:b', statement: '散步时喜欢经过河边。' };

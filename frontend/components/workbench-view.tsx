@@ -647,6 +647,7 @@ function SubagentGroup({
 }
 
 function UserMessage({ message }: { message: Message }) {
+  const sourceTextStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const;
   if (message.userKind === 'subagent-completion') {
     const helpId = `${message.id}-subagent-completion-help`;
     return (
@@ -675,7 +676,7 @@ function UserMessage({ message }: { message: Message }) {
         <span className="user-steer__icon"><CornerDownRight size={13} /></span>
         <div className="user-steer__content">
           <header><strong>你 · 引导</strong><time>{message.time}</time></header>
-          <p>{message.body}</p>
+          <p style={sourceTextStyle}>{message.body}</p>
         </div>
       </article>
     );
@@ -688,7 +689,7 @@ function UserMessage({ message }: { message: Message }) {
         <span className="user-avatar"><UserRound size={14} /></span>
       </header>
       <div className="user-message">
-        <p>{message.body}</p>
+        <p style={sourceTextStyle}>{message.body}</p>
         <div className="message-foot"><time>{message.time}</time></div>
       </div>
     </article>

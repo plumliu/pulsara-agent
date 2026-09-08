@@ -73,6 +73,27 @@ const initialSession: SessionSummary = {
   },
 };
 
+const SOURCE_FIDELITY_MARKDOWN = [
+  '保留 `read_file`、edit_file、ROOT、Kernel、HostSession、read-only 与 bypass-permissions。',
+  '',
+  '```python',
+  'from api import read_file, edit_file',
+  'ROOT = "read-only"',
+  'exit_code = 0',
+  '```',
+  '',
+].join('\n');
+
+const SOURCE_FIDELITY_USER_TEXT = [
+  'F07-BEGIN',
+  '```python',
+  'from api import read_file, edit_file',
+  'ROOT = "read-only"',
+  '```',
+  '{"tool":"edit_file","url":"https://example.test/Kernel?q=read-only"}',
+  'F07-END',
+].join('\n');
+
 const capabilitySnapshot: CapabilitySnapshot = {
   sessionId: 'session-1',
   workspacePath: '/tmp/pulsara_agent',
@@ -236,6 +257,7 @@ class FakeConnection implements RuntimeConnection {
     readonly sessionId: string,
     value = projection(),
     role: 'controller' | 'observer' = 'controller',
+    private readonly interactionContent?: RuntimeInteractionContent,
   ) {
     this.value = value;
     this.role = role;
@@ -291,6 +313,7 @@ class FakeConnection implements RuntimeConnection {
   });
 
   async readInteraction(interaction: RuntimeInteractionSummary): Promise<RuntimeInteractionContent> {
+    if (this.interactionContent) return this.interactionContent;
     switch (interaction.kind) {
       case 'capability-form':
         return {kind: 'capability-form', form: {action: 'REMOVE_LOCAL_MCP', scope: 'USER', prefill: {server_id: 'fixture'}}};
@@ -326,6 +349,7 @@ class FakeAdapter implements RuntimeAdapter {
   taskInventory: AgentTask[] = [];
   lastConnection?: FakeConnection;
   connectionValue?: RuntimeProjection;
+  interactionContent?: RuntimeInteractionContent;
   connectionRole: 'controller' | 'observer' = 'controller';
   connectCalls: Array<{ sessionId: string; takeover: boolean }> = [];
   createSession = vi.fn(async (selection: SessionWorkspaceSelection) => {
@@ -564,6 +588,7 @@ class FakeAdapter implements RuntimeAdapter {
         ? { ...projection(''), messages: [], isRunning: false, activeTurnId: undefined }
         : this.connectionValue ?? projection(),
       this.connectionRole,
+      this.interactionContent,
     );
     this.lastConnection = connection;
     return connection;
@@ -1497,6 +1522,83 @@ describe('PulsaraApp', () => {
     expect(screen.getAllByRole('button', { name: '复制回复' })).toHaveLength(1);
   });
 
+  it('copies the exact source Markdown instead of rendered or normalized text', async () => {
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal('navigator', Object.create(navigator, {
+      clipboard: { value: { writeText }, configurable: true },
+    }));
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-source', role: 'assistant', assistantKind: 'terminal',
+        time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: '复制回复' }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(SOURCE_FIDELITY_MARKDOWN));
+    expect(await screen.findByText('已复制回复')).toBeTruthy();
+  });
+
+  it('renders accepted user prompts and steers with source line breaks and safe long-token wrapping', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'user-source', role: 'user', userKind: 'prompt',
+        time: '18:10', body: SOURCE_FIDELITY_USER_TEXT, status: 'completed',
+      }, {
+        id: 'user-steer-source', role: 'user', userKind: 'steer',
+        time: '18:11', body: SOURCE_FIDELITY_USER_TEXT, status: 'completed',
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const bodies = [
+      container.querySelector<HTMLElement>('.user-message > p'),
+      container.querySelector<HTMLElement>('.user-steer__content > p'),
+    ];
+
+    for (const body of bodies) {
+      expect(body).toBeTruthy();
+      expect(body?.textContent).toBe(SOURCE_FIDELITY_USER_TEXT);
+      expect(body?.style.whiteSpace).toBe('pre-wrap');
+      expect(body?.style.overflowWrap).toBe('anywhere');
+      expect(body?.querySelector('script')).toBeNull();
+    }
+  });
+
+  it('keeps the existing copy failure feedback when clipboard permission is denied', async () => {
+    const writeText = vi.fn(async () => { throw new Error('denied'); });
+    vi.stubGlobal('navigator', Object.create(navigator, {
+      clipboard: { value: { writeText }, configurable: true },
+    }));
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-source', role: 'assistant', assistantKind: 'terminal',
+        time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: '复制回复' }));
+
+    expect(await screen.findByText('无法复制回复')).toBeTruthy();
+    expect(screen.getByText('浏览器没有授予剪贴板权限')).toBeTruthy();
+  });
+
   it('forks only server-eligible entries with one preselected identity and leaves the parent running', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(''), isRunning: true, messages: [
@@ -2322,6 +2424,7 @@ describe('PulsaraApp', () => {
 
   it('renders a plan draft as Markdown and resolves it through the real interaction surface', async () => {
     const adapter = new FakeAdapter();
+    adapter.interactionContent = { kind: 'plan-draft', body: SOURCE_FIDELITY_MARKDOWN };
     adapter.connectionValue = {
       ...projection(''),
       messages: [],
@@ -2336,8 +2439,9 @@ describe('PulsaraApp', () => {
     };
     render(<PulsaraApp adapter={adapter} />);
 
-    expect(await screen.findByRole('heading', { name: '实施方案' })).toBeTruthy();
-    expect(screen.getByText('检查契约')).toBeTruthy();
+    expect(await screen.findByText(/保留/)).toBeTruthy();
+    expect(screen.getByText('read_file')).toBeTruthy();
+    expect(screen.getByText(/ROOT = "read-only"/)).toBeTruthy();
     expect(screen.queryByLabelText('TODO清单')).toBeNull();
     expect(screen.getByRole('button', { name: '展开TODO清单' }).hasAttribute('disabled')).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /批准并继续/ }));
@@ -2345,6 +2449,42 @@ describe('PulsaraApp', () => {
     await waitFor(() => expect(adapter.lastConnection?.resolveInteraction).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'plan-review-1', kind: 'plan-draft' }),
       { kind: 'plan-draft', decision: 'approve' },
+    ));
+  });
+
+  it.each([
+    ['cancel', '取消规划', { kind: 'plan-draft', decision: 'cancel' }],
+    ['revise', '提交修改意见', {
+      kind: 'plan-draft', decision: 'revise', feedback: '保留 `read_file` 与 ROOT',
+    }],
+  ] as const)('keeps source plan text and interaction identity when choosing %s', async (
+    _name,
+    action,
+    resolution,
+  ) => {
+    const adapter = new FakeAdapter();
+    adapter.interactionContent = { kind: 'plan-draft', body: SOURCE_FIDELITY_MARKDOWN };
+    const interaction = {
+      id: 'plan-review-source', kind: 'plan-draft' as const,
+      workflowId: 'plan-source', workflowRevision: 11,
+    };
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: false, activeTurnId: undefined, interaction,
+    };
+    render(<PulsaraApp adapter={adapter} />);
+
+    expect(await screen.findByText(/ROOT = "read-only"/)).toBeTruthy();
+    if (_name === 'revise') {
+      fireEvent.click(screen.getByRole('button', { name: '提出修改' }));
+      fireEvent.change(screen.getByPlaceholderText('告诉 Pulsara 需要怎样修改方案…'), {
+        target: { value: resolution.feedback },
+      });
+    }
+    fireEvent.click(screen.getByRole('button', { name: action }));
+
+    await waitFor(() => expect(adapter.lastConnection?.resolveInteraction).toHaveBeenCalledWith(
+      interaction,
+      resolution,
     ));
   });
 
