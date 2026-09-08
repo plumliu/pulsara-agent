@@ -29,6 +29,8 @@ class _Connection:
         self.replay = replay
 
     def execute(self, sql: str, _parameters: object) -> _Result:
+        if "executed_status" in sql:
+            return _Result(one={**self.entry, "executed_status": "RUNNING", "executed_final": None})
         if "FROM pulsara_v3.assistant_message_blocks" in sql:
             return _Result(many=())
         if "FROM pulsara_v3.provider_assistant_replay_fragments" in sql:
@@ -64,6 +66,7 @@ def _fixture(reasoning: str) -> tuple[dict[str, object], dict[str, object]]:
     answer = b"answer"
     entry = {
         "id": "entry:assistant",
+        "entry_owner_kind": "EXECUTED_TURN",
         "session_id": "session:test",
         "turn_id": "turn:test",
         "entry_sequence": 1,

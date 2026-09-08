@@ -489,6 +489,8 @@ class LocalHttpServer:
             self._inspect_session_capabilities,
         )
         self._app.router.add_post("/api/sessions", self._create_session)
+        self._app.router.add_get("/api/sessions/{session_id}", self._read_session)
+        self._app.router.add_post("/api/sessions/{session_id}/fork", self._fork_conversation)
         self._app.router.add_put(
             "/api/sessions/{session_id}/model-call-binding",
             self._update_model_call_binding,
@@ -1613,6 +1615,20 @@ class LocalHttpServer:
                 expected_config_identity=body["config_identity"],
             )
         )
+
+    async def _read_session(self, request: web.Request) -> web.Response:
+        return web.json_response({"session": await self.sessions.read_session(request.match_info["session_id"])})
+
+    async def _fork_conversation(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"anchor_entry_id", "child_session_id"} or any(
+            not isinstance(body[key], str) or not body[key] for key in body
+        ):
+            raise HttpPublicError("FORK_REQUEST_INVALID", "分叉需要消息 ID 和预先确定的新会话 ID。", status=400)
+        return web.json_response(await self.sessions.fork_conversation(
+            request.match_info["session_id"], anchor_entry_id=body["anchor_entry_id"],
+            child_session_id=body["child_session_id"],
+        ))
 
     async def _create_session(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)

@@ -280,7 +280,7 @@ class _PlanOperations:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
-                        id, session_id, workspace_id, tool_call_entry_id,
+                        result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
                         tool_call_id, attempt_id, result_origin_kind,
                         control_plan_workflow_id, control_plan_interaction_id,
                         permission_snapshot_fingerprint,
@@ -288,7 +288,7 @@ class _PlanOperations:
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds
-                    ) VALUES (%s, %s, %s, %s, %s, NULL, %s, %s, %s,
+                    ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL, %s, %s, %s,
                               %s, %s, %s, %s, NULL, %s, NULL)
                     """,
                     (
@@ -507,7 +507,7 @@ class _PlanOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_results (
-                    id, session_id, workspace_id, tool_call_entry_id,
+                    result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
                     tool_call_id, attempt_id, result_origin_kind,
                     control_plan_workflow_id, control_plan_interaction_id,
                     permission_snapshot_fingerprint,
@@ -515,7 +515,7 @@ class _PlanOperations:
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
                     tool_reported_duration_microseconds
-                ) VALUES (%s, %s, %s, %s, %s, NULL,
+                ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL,
                           'POLICY_NO_ATTEMPT', NULL, NULL, %s, %s, %s,
                           %s, NULL, 'POLICY', NULL)
                 """,
@@ -718,7 +718,7 @@ class _PlanOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_results (
-                    id, session_id, workspace_id, tool_call_entry_id,
+                    result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
                     tool_call_id, attempt_id, result_origin_kind,
                     control_plan_interaction_id,
                     permission_snapshot_fingerprint,
@@ -726,7 +726,7 @@ class _PlanOperations:
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
                     tool_reported_duration_microseconds
-                ) VALUES (%s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL',
+                ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL',
                           %s, %s, %s, 'SUCCESS', %s, NULL, 'PLAN_CONTROL', NULL)
                 """,
                 (
@@ -1780,7 +1780,7 @@ class _PlanOperations:
                        s.writer_generation, s.writer_lease_owner_id
                 FROM pulsara_v3.turns AS t
                 JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = t.session_id AND e.id = t.initial_entry_id
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = t.session_id AND e.id = t.initial_entry_id
                 JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
                 WHERE t.session_id = %s AND t.id = %s
                 """,
@@ -2252,7 +2252,7 @@ class _PlanOperations:
     ) -> AcceptedPlanToolBatch | None:
         assistant = connection.execute(
             """SELECT * FROM pulsara_v3.transcript_entries
-               WHERE session_id = %s AND id = %s""",
+               WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
             (candidate.session_id, candidate.assistant_entry_id),
         ).fetchone()
         block_rows = connection.execute(
@@ -2315,7 +2315,7 @@ class _PlanOperations:
             None
             if candidate.continuation_entry_id is None
             else connection.execute(
-                "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id = %s AND id = %s",
+                "SELECT * FROM pulsara_v3.transcript_entries WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s",
                 (candidate.session_id, candidate.continuation_entry_id),
             ).fetchone()
         )
@@ -2385,7 +2385,7 @@ class _PlanOperations:
                 entry = connection.execute(
                     """
                     SELECT * FROM pulsara_v3.transcript_entries
-                    WHERE session_id = %s AND id = %s
+                    WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s
                     """,
                     (candidate.session_id, item.result_entry_id),
                 ).fetchone()
@@ -2533,7 +2533,7 @@ class _PlanOperations:
             assert item.result_entry_id is not None
             entry = connection.execute(
                 """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE session_id = %s AND id = %s""",
+                   WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
                 (candidate.session_id, item.result_entry_id),
             ).fetchone()
             if (
@@ -3062,7 +3062,7 @@ class _PlanOperations:
             JOIN pulsara_v3.turns AS t
               ON t.session_id = i.session_id AND t.id = i.origin_turn_id
             LEFT JOIN pulsara_v3.transcript_entries AS e
-              ON e.session_id = i.session_id
+              ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = i.session_id
              AND e.id = i.decision_continuation_entry_id
             WHERE c.session_id = %s AND c.command_id = %s
               AND c.command_kind = 'RESOLVE_PLAN_INTERACTION'
@@ -3099,7 +3099,7 @@ class _PlanOperations:
             ).fetchone()
             result_entry = connection.execute(
                 """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE session_id = %s AND id = %s""",
+                   WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
                 (session_id, expected_result_entry_id),
             ).fetchone()
             frozen_arguments = freeze_json(dict(row["tool_arguments"]))
@@ -3283,7 +3283,7 @@ class _PlanOperations:
         already_claimed = connection.execute(
             """
             SELECT 1 FROM pulsara_v3.transcript_entries
-            WHERE session_id = %s AND source_plan_workflow_id = %s
+            WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND source_plan_workflow_id = %s
               AND source_plan_handoff_kind IN (
                   'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
               )

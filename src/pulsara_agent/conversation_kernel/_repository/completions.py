@@ -111,7 +111,7 @@ class _SubagentCompletionOperations:
                            a.event_sequence, a.payload
                     FROM pulsara_v3.session_commands AS c
                     LEFT JOIN pulsara_v3.transcript_entries AS e
-                      ON e.session_id = c.session_id
+                      ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = c.session_id
                      AND e.id = c.target_entry_id
                     LEFT JOIN pulsara_v3.agent_events AS a
                       ON a.session_id = e.session_id
@@ -345,7 +345,7 @@ class _SubagentCompletionOperations:
               ON a.session_id = e.session_id
              AND a.subject_entry_id = e.id
              AND a.event_type = 'InterAgentMessageAccepted'
-            WHERE e.session_id = %s AND e.source_subagent_task_id = %s
+            WHERE e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = %s AND e.source_subagent_task_id = %s
             """,
             (session_id, task_id),
         ).fetchone()

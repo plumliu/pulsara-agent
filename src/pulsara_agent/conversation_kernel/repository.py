@@ -100,9 +100,11 @@ from ._repository.plans import _PlanOperations
 from ._repository.prompts import _PromptOperations
 from ._repository.subagents import _SubagentOperations
 from ._repository.tools import _ToolOperations
+from ._repository.fork import _ForkOperations
 
 
 class ConversationKernelRepository(
+    _ForkOperations,
     _MatchingOperations,
     _AuthorityOperations,
     _ConversationOperations,

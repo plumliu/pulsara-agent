@@ -126,11 +126,15 @@ class CanonicalConversationQuery:
         through = int(session["latest_entry_sequence"])
         rows = connection.execute(
             """
-                SELECT e.id, e.turn_id, e.entry_sequence, e.entry_kind,
+                SELECT e.id, e.entry_owner_kind,
+                       CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
+                         ELSE e.imported_history_group_id END AS turn_id,
+                       e.entry_sequence, e.entry_kind,
                        e.conversation_scope_kind, e.scope_subagent_task_id,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
-                       e.source_subagent_task_id,
+                       CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.source_subagent_task_id
+                         ELSE e.imported_source_subagent_task_id END AS source_subagent_task_id,
                        e.content_digest, e.content_size, e.content_media_type,
                        e.content_codec, e.accepted_at,
                        COALESCE(

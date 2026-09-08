@@ -212,6 +212,15 @@ class CanonicalProviderInputReader:
             cut, deadline_monotonic=deadline_monotonic
         ).canonical_input
 
+    def read_fork_historical_material(
+        self, connection, source_session_id: str, anchor_entry_id: str,
+        deadline_monotonic: float,
+    ):
+        from pulsara_agent.conversation_kernel.fork_history import read_fork_historical_material
+        return read_fork_historical_material(
+            connection, source_session_id, anchor_entry_id, deadline_monotonic, reader=self
+        )
+
     def read_frozen_compile_snapshot(
         self,
         cut: PreparedProviderInputCut,
@@ -516,7 +525,7 @@ class CanonicalProviderInputReader:
                        context_binding_revision_id,
                        provider_input_through_sequence
                 FROM pulsara_v3.transcript_entries
-                WHERE session_id=%s AND id=%s
+                WHERE session_id=%s AND id=%s AND entry_owner_kind='EXECUTED_TURN'
                 """,
                 (producer_cut.session_id, producer_cut.producer_entry_id),
             ).fetchone()
@@ -601,7 +610,8 @@ class CanonicalProviderInputReader:
                  AND r.turn_id = t.id
                 JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
                 JOIN pulsara_v3.transcript_entries AS initial_entry
-                  ON initial_entry.session_id = t.session_id
+                  ON initial_entry.entry_owner_kind = 'EXECUTED_TURN'
+                 AND initial_entry.session_id = t.session_id
                  AND initial_entry.id = t.initial_entry_id
                  AND initial_entry.turn_id = t.id
                 WHERE t.session_id = %s AND t.id = %s
@@ -716,19 +726,31 @@ class CanonicalProviderInputReader:
 
             entries = connection.execute(
                 """
-                SELECT e.id, e.turn_id, e.entry_sequence, e.entry_kind,
+                SELECT e.id, e.entry_owner_kind, e.imported_history_group_id,
+                       CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
+                            WHEN 'IMPORTED_HISTORY' THEN e.imported_history_group_id END AS turn_id,
+                       e.entry_sequence, e.entry_kind,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
                        e.source_subagent_task_id,
                        e.source_plan_workflow_id,
                        e.source_plan_interaction_id,
                        e.source_plan_handoff_kind,
+                       e.imported_source_subagent_task_id,
+                       e.imported_source_plan_workflow_id,
+                       e.imported_source_plan_interaction_id,
+                       e.imported_source_plan_handoff_kind,
                        e.blob_id, e.content_digest, e.content_size,
                        e.content_media_type, e.content_codec,
-                       t.status AS owning_turn_status
+                       CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN t.status
+                            WHEN 'IMPORTED_HISTORY' THEN g.status END AS owning_turn_status
                 FROM pulsara_v3.transcript_entries AS e
-                JOIN pulsara_v3.turns AS t
+                LEFT JOIN pulsara_v3.turns AS t
                   ON t.session_id = e.session_id AND t.id = e.turn_id
+                 AND e.entry_owner_kind = 'EXECUTED_TURN'
+                LEFT JOIN pulsara_v3.imported_history_groups AS g
+                  ON g.session_id = e.session_id AND g.id = e.imported_history_group_id
+                 AND e.entry_owner_kind = 'IMPORTED_HISTORY'
                 WHERE e.session_id = %s
                   AND e.entry_sequence > %s
                   AND e.entry_sequence <= %s
@@ -823,7 +845,8 @@ class CanonicalProviderInputReader:
             late: list[LateToolOutcomeObservation] = []
             late_items: list[tuple[int, ProviderInputItem]] = []
 
-            for row in entries:
+            for stored_row in entries:
+                row = historical_source_attribution(stored_row)
                 entry_id = str(row["id"])
                 sequence = int(row["entry_sequence"])
                 kind = str(row["entry_kind"])
@@ -1061,6 +1084,8 @@ class CanonicalProviderInputReader:
                         None if result is None else int(result["entry_sequence"])
                     )
                     if result is not None and result_sequence <= target_cut:
+                        if state.get("imported_closure_kind") is not None:
+                            raise ConversationKernelConflict("imported call has both visible result and closure")
                         result_content = self._read_content(
                             _with_inline_payload(
                                 result,
@@ -1092,16 +1117,9 @@ class CanonicalProviderInputReader:
                             )
                         )
                         continue
-                    if state.get("plan_interaction_status") == "ABORTED":
-                        closure_kind = (
-                            ProviderToolResultClosureKind.PLAN_INTERACTION_ABORTED
-                        )
-                    else:
-                        closure_kind = (
-                            ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
-                            if state.get("attempt_id") is not None
-                            else ProviderToolResultClosureKind.INTERRUPTED_BEFORE_DISPATCH
-                        )
+                    closure_kind = historical_tool_closure_kind(
+                        state, owner_kind=str(row["entry_owner_kind"]), target_cut=target_cut
+                    )
                     closure = ProviderToolResultClosure(
                         assistant_entry_id=entry_id,
                         tool_call_id=call.tool_call_id,
@@ -1590,6 +1608,37 @@ class CanonicalProviderInputReader:
         return rows
 
 
+def historical_source_attribution(row: Mapping[str, object]) -> Mapping[str, object]:
+    """Project frozen attribution for pure history decoders, never live lookup."""
+    owner = row["entry_owner_kind"]
+    if owner == "EXECUTED_TURN":
+        return row
+    if owner != "IMPORTED_HISTORY":
+        raise ConversationKernelConflict("unknown transcript entry owner")
+    projected = dict(row)
+    for name in ("subagent_task_id", "plan_workflow_id", "plan_interaction_id", "plan_handoff_kind"):
+        projected["source_" + name] = row["imported_source_" + name]
+    return projected
+
+
+def historical_tool_closure_kind(
+    state: Mapping[str, object], *, owner_kind: str, target_cut: int
+) -> ProviderToolResultClosureKind:
+    if owner_kind == "IMPORTED_HISTORY":
+        if state.get("imported_closure_cut") != target_cut or state.get("imported_closure_kind") is None:
+            raise ConversationKernelConflict("imported tool call lacks its exact historical closure")
+        return ProviderToolResultClosureKind[str(state["imported_closure_kind"])]
+    if owner_kind != "EXECUTED_TURN":
+        raise ConversationKernelConflict("unknown tool call owner")
+    if state.get("plan_interaction_status") == "ABORTED":
+        return ProviderToolResultClosureKind.PLAN_INTERACTION_ABORTED
+    return (
+        ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
+        if state.get("attempt_id") is not None
+        else ProviderToolResultClosureKind.INTERRUPTED_BEFORE_DISPATCH
+    )
+
+
 def _permission_snapshot_from_binding(
     binding: Mapping[str, object],
 ) -> FrozenRunPermissionSnapshot:
@@ -1699,6 +1748,7 @@ def _plan_handoff_compile_facts(
          AND b.assistant_entry_id = i.assistant_entry_id
          AND b.tool_call_id = i.tool_call_id
         WHERE e.session_id = %s AND e.turn_id = %s
+          AND e.entry_owner_kind = 'EXECUTED_TURN'
           AND e.source_plan_handoff_kind IS NOT NULL
           AND e.entry_sequence <= %s
         ORDER BY e.entry_sequence DESC LIMIT 1
@@ -1855,6 +1905,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
              AND t.id = e.turn_id
              AND t.initial_entry_id = e.id
             WHERE e.session_id = %s
+              AND e.entry_owner_kind = 'EXECUTED_TURN'
               AND e.conversation_scope_kind = %s
               AND e.scope_subagent_task_id IS NOT DISTINCT FROM %s
               AND e.entry_sequence < %s
@@ -1925,6 +1976,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             SELECT count(*) AS accepted_assistant_count
             FROM pulsara_v3.transcript_entries
             WHERE session_id = %s AND turn_id = %s
+              AND entry_owner_kind = 'EXECUTED_TURN'
               AND entry_sequence <= %s
               AND entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
             """,
@@ -1941,7 +1993,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
               count(*) FILTER (WHERE a.id IS NOT NULL) AS unknown_count
             FROM pulsara_v3.assistant_message_blocks AS b
             JOIN pulsara_v3.transcript_entries AS ae
-              ON ae.session_id = b.session_id
+              ON ae.entry_owner_kind = 'EXECUTED_TURN' AND ae.session_id = b.session_id
              AND ae.id = b.assistant_entry_id
             LEFT JOIN pulsara_v3.tool_execution_attempts AS a
               ON a.session_id = b.session_id
@@ -1952,7 +2004,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
              AND r.tool_call_entry_id = b.assistant_entry_id
              AND r.tool_call_id = b.tool_call_id
             LEFT JOIN pulsara_v3.transcript_entries AS re
-              ON re.session_id = r.session_id AND re.id = r.result_entry_id
+              ON re.entry_owner_kind = 'EXECUTED_TURN' AND re.session_id = r.session_id AND re.id = r.result_entry_id
             LEFT JOIN pulsara_v3.plan_interactions AS pi
               ON pi.session_id = b.session_id
              AND pi.assistant_entry_id = b.assistant_entry_id
@@ -1975,14 +2027,14 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             SELECT b.tool_name
             FROM pulsara_v3.assistant_message_blocks AS b
             JOIN pulsara_v3.transcript_entries AS ae
-              ON ae.session_id = b.session_id
+              ON ae.entry_owner_kind = 'EXECUTED_TURN' AND ae.session_id = b.session_id
              AND ae.id = b.assistant_entry_id
             LEFT JOIN pulsara_v3.tool_results AS r
               ON r.session_id = b.session_id
              AND r.tool_call_entry_id = b.assistant_entry_id
              AND r.tool_call_id = b.tool_call_id
             LEFT JOIN pulsara_v3.transcript_entries AS re
-              ON re.session_id = r.session_id AND re.id = r.result_entry_id
+              ON re.entry_owner_kind = 'EXECUTED_TURN' AND re.session_id = r.session_id AND re.id = r.result_entry_id
             LEFT JOIN pulsara_v3.plan_interactions AS pi
               ON pi.session_id = b.session_id
              AND pi.assistant_entry_id = b.assistant_entry_id
@@ -2062,6 +2114,8 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             connection.execute(
                 """
                 SELECT b.assistant_entry_id, b.tool_call_id, a.id AS attempt_id,
+                       c.closure_kind AS imported_closure_kind,
+                       c.target_provider_input_through_sequence AS imported_closure_cut,
                        i.kind AS plan_interaction_kind,
                        i.status AS plan_interaction_status,
                        r.session_id AS result_session_id, r.id AS result_id,
@@ -2078,10 +2132,14 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                        e.entry_sequence, e.blob_id,
                        e.content_digest, e.content_size,
                        e.content_media_type, e.content_codec,
-                       e.turn_id AS result_turn_id
+                       CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
+                            WHEN 'IMPORTED_HISTORY' THEN e.imported_history_group_id END AS result_turn_id
                 FROM pulsara_v3.assistant_message_blocks AS b
+                JOIN pulsara_v3.transcript_entries AS call_entry
+                  ON call_entry.session_id = b.session_id AND call_entry.id = b.assistant_entry_id
                 LEFT JOIN pulsara_v3.tool_execution_attempts AS a
                   ON a.session_id = b.session_id
+                 AND call_entry.entry_owner_kind = 'EXECUTED_TURN'
                  AND a.assistant_entry_id = b.assistant_entry_id
                  AND a.tool_call_id = b.tool_call_id
                 LEFT JOIN pulsara_v3.tool_results AS r
@@ -2090,8 +2148,12 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                  AND r.tool_call_id = b.tool_call_id
                 LEFT JOIN pulsara_v3.plan_interactions AS i
                   ON i.session_id = b.session_id
+                 AND call_entry.entry_owner_kind = 'EXECUTED_TURN'
                  AND i.assistant_entry_id = b.assistant_entry_id
                  AND i.tool_call_id = b.tool_call_id
+                LEFT JOIN pulsara_v3.imported_tool_call_closures AS c
+                  ON c.session_id = b.session_id AND c.assistant_entry_id = b.assistant_entry_id
+                 AND c.tool_call_id = b.tool_call_id AND call_entry.entry_owner_kind = 'IMPORTED_HISTORY'
                 LEFT JOIN pulsara_v3.transcript_entries AS e
                   ON e.session_id = r.session_id AND e.id = r.result_entry_id
                 WHERE b.session_id = %s
@@ -2110,6 +2172,8 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                 "attempt_id": row["attempt_id"],
                 "plan_interaction_kind": row["plan_interaction_kind"],
                 "plan_interaction_status": row["plan_interaction_status"],
+                "imported_closure_kind": row["imported_closure_kind"],
+                "imported_closure_cut": row["imported_closure_cut"],
             }
             visible_result = visible_tool_result_at_cut(
                 row,
@@ -2236,6 +2300,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         *,
         deadline_monotonic: float,
         remaining_bytes: _RemainingReadBudget | None = None,
+        connection=None,
     ) -> bytes:
         expected_size = int(row["content_size"])
         if remaining_bytes is not None:
@@ -2243,6 +2308,20 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         expected_digest = str(row["content_digest"])
         if row["inline_content"] is not None:
             content = bytes(row["inline_content"])
+        elif connection is not None:
+            blob = connection.execute(
+                "SELECT body, logical_digest, logical_size, media_type, codec "
+                "FROM pulsara_v3.blobs WHERE id = %s AND workspace_id = %s",
+                (row["blob_id"], row["workspace_id"]),
+            ).fetchone()
+            if blob is None or (
+                blob["logical_digest"] != expected_digest
+                or int(blob["logical_size"]) != expected_size
+                or blob["media_type"] != row["content_media_type"]
+                or blob["codec"] != row["content_codec"]
+            ):
+                raise ConversationKernelConflict("historical blob descriptor does not exact-join")
+            content = bytes(blob["body"])
         else:
             if self._blob_reader is None:
                 raise CanonicalProviderContinuityError(

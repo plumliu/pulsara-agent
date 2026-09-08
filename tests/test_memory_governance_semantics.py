@@ -392,10 +392,10 @@ def _insert_exact_source_entry(
         event_sequence = int(session[2]) + 1
         connection.execute(
             """INSERT INTO pulsara_v3.transcript_entries (
-                   id, session_id, workspace_id, turn_id, entry_sequence,
+                   entry_owner_kind, id, session_id, workspace_id, turn_id, entry_sequence,
                    entry_kind, conversation_scope_kind, inline_content,
                    content_digest, content_size, content_media_type, content_codec
-               ) VALUES (%s,%s,%s,%s,%s,%s,'ROOT',%s,%s,%s,'text/plain','utf-8')""",
+               ) VALUES ('EXECUTED_TURN', %s,%s,%s,%s,%s,%s,'ROOT',%s,%s,%s,'text/plain','utf-8')""",
             (
                 entry_id,
                 lease.guard.session_id,

@@ -21,6 +21,23 @@ from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATI
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# Fork hard cut: these existing SQL consumers now explicitly route executed
+# owners; public signatures remain unchanged. Behavioral rejection is covered
+# by test_conversation_fork, rather than old implementation AST equality.
+_FORK_CHANGED_METHODS = {
+    "accept_explicit_subagent_result", "accept_inter_agent_mailbox_batch", "accept_subagent_task_batch",
+    "confirm_inter_agent_mailbox_batch", "confirm_subagent_task_batch", "confirm_subagent_turn_admission", "confirm_explicit_subagent_result",
+    "list_subagent_tasks", "query_subagent_task", "_accepted_entry", "_initial_context_binding_revision_matches",
+    "_insert_entry", "_insert_initial_context_binding_revision", "_require_provider_safe_turn_in_transaction",
+    "_resolve_event_turn_id", "_read_entry_public_body", "_read_memory_governance_terminal_suffix",
+    "claim_memory_candidate_for_governance", "_require_compaction_target", "confirm_assistant_message_winner",
+    "confirm_root_turn_intent", "confirm_terminal_observation_winner", "query_command", "accept_tool_attempt",
+    "accept_tool_capability_decision", "accept_tool_interaction_decision", "accept_tool_result",
+    "confirm_tool_result_winner", "confirm_prepared_prompt_head_consumption", "confirm_prepared_prompt_steer",
+    "_accepted_completion_row", "accept_subagent_completion_into_root", "_accept_rejected_plan_tool_batch_in_transaction",
+    "_confirm_plan_resolution_in_transaction", "_confirm_plan_tool_batch_in_transaction", "_eligible_plan_handoff",
+    "accept_plan_tool_batch", "inspect_plan_continuation", "resolve_plan_question",
+}
 TOOL = ROOT / "tools/repository_modularization_inventory.py"
 BASELINE = ROOT / "tests/fixtures/repository_modularization_baseline.json"
 _INTERNAL_REPOSITORY_PACKAGE = "pulsara_agent.conversation_kernel._repository"
@@ -759,7 +776,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND8_ADDED_TOP_LEVEL_CLASSES
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_TOP_LEVEL_CLASSES
         | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_CLASSES
-        | {"FrozenMemoryDeletionPlan"}
+        | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation"}
     )
     for key, added, changed in (
         (
@@ -771,7 +788,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
                 | _ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS
                 | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_FUNCTIONS
-                | {"_freeze", "_frozen_rows", "_remaining"}
+                | {"_freeze", "_frozen_rows", "_remaining", "_insert"}
             )
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
             | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS,
@@ -795,6 +812,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _MODEL_UNIVERSE_ADDED_METHODS
                 | {
                     "_management_connection",
+                    "fork_conversation",
                     "_management_context",
                     "_management_labels",
                     "_management_relation",
@@ -816,7 +834,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND10_CHANGED_METHODS
             | _ROUND9_2_CHANGED_METHODS
             | _ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS
-            | _MODEL_UNIVERSE_CHANGED_METHODS,
+            | _MODEL_UNIVERSE_CHANGED_METHODS | _FORK_CHANGED_METHODS,
         ),
     ):
         removed = (
@@ -879,7 +897,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
         - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
     ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_RUNTIME_DATACLASSES | (
-        _MODEL_UNIVERSE_RUNTIME_ADDED_DATACLASSES | {"FrozenMemoryDeletionPlan"}
+        _MODEL_UNIVERSE_RUNTIME_ADDED_DATACLASSES | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation"}
     )
     for name in (
         set(baseline_runtime["dataclasses"])
@@ -916,6 +934,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _MODEL_UNIVERSE_ADDED_METHODS
             | {
                 "_management_connection",
+                "fork_conversation",
                 "_management_context",
                 "_management_labels",
                 "_management_relation",
@@ -1009,6 +1028,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND9_2_CHANGED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
+        | _FORK_CHANGED_METHODS
+        | {"fork_conversation", "_insert"}
     )
     for key in ("database_calls", "physical_checkouts"):
         current_unchanged = _without_source_modules(
@@ -1102,7 +1123,7 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
 
 
 def test_repository_modularization_internal_package_is_not_a_second_public_api() -> (

@@ -30,7 +30,7 @@ Python KernelHostCore
 └── renderer-neutral Protocol v3 gateway
 
 PostgreSQL
-├── pulsara_v3: 25 product relations
+├── pulsara_v3: 28 product relations
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations (universe metadata only)
@@ -60,6 +60,11 @@ runtime-write admission epoch.
 
 The current Kernel supports:
 
+- [Conversation Fork](PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md)
+  from settled final replies: copy the anchor's effective snapshot and retained
+  history into an independent, idle conversation without replaying execution.
+  Fork preserves historical model selection; files and current advisory memory
+  remain shared through the same workspace/domain;
 - OpenAI-compatible Responses and Chat Completions transports;
 - explicit provider-neutral `COMPLETED | OUTPUT_INCOMPLETE | PROVIDER_ERROR`
   model terminals, whole-response atomic assistant acceptance, and exact
@@ -302,7 +307,7 @@ after an answer remains available for one explicit continuation without rerunnin
 the child; success, failure, cancellation, and dependency failure share the same
 delivery path. Round 5B now hands off the same task board during compaction without
 adding a durable inbox, run, receipt, or recovery graph. The current oracle is 29 committed events, 24
-live events, 11 subject slots, one append guard, 25 product relations, and zero
+live events, 11 subject slots, one append guard, 28 product relations, and zero
 durable jobs. Verification is recorded in
 [`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json).
 The asynchronous-completion hard cut and real-provider browser evidence are recorded in

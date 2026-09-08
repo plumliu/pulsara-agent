@@ -42,7 +42,7 @@ from pulsara_agent.storage.postgres_connection_provider import PostgresConnectio
 _PROJECTS = """
 WITH activity AS (
     SELECT s.workspace_id, s.workspace_label, s.workspace_root, s.id,
-           COALESCE((SELECT e.accepted_at FROM pulsara_v3.transcript_entries e
+           GREATEST((SELECT e.accepted_at FROM pulsara_v3.transcript_entries e
                      WHERE e.session_id=s.id ORDER BY e.entry_sequence DESC LIMIT 1),
                     s.created_at) AS last_activity_at
     FROM pulsara_v3.sessions s
@@ -281,7 +281,7 @@ class _MemoryManagementOperations:
                 candidate.decision_public_summary, candidate.origin_workspace_id,
                 candidate.origin_session_id, candidate.producer_entry_id, e.turn_id, s.lifecycle AS source_session_lifecycle
                 FROM pulsara_v3.memory_facts f JOIN pulsara_v3.memory_candidates candidate ON candidate.id=f.source_candidate_id
-                JOIN pulsara_v3.transcript_entries e ON e.id=candidate.producer_entry_id AND e.session_id=candidate.origin_session_id
+                JOIN pulsara_v3.transcript_entries e ON e.entry_owner_kind='EXECUTED_TURN' AND e.id=candidate.producer_entry_id AND e.session_id=candidate.origin_session_id
                 JOIN pulsara_v3.sessions s ON s.id=candidate.origin_session_id
                 WHERE f.memory_domain_id=%s AND f.context_id=%s AND f.id=%s""",
                 (memory_domain_id, context, fact_id),

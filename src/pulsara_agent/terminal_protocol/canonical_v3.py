@@ -507,6 +507,10 @@ class CanonicalProtocolReader:
         return tuple(self._entry(connection, row) for row in rows)
 
     def _entry(self, connection: Any, row: Mapping[str, object]) -> wire.CanonicalEntry:
+        from pulsara_agent.conversation_kernel.fork_history import read_fork_anchor
+        from pulsara_agent.conversation_kernel.reader import historical_source_attribution
+        stored_row = row
+        row = historical_source_attribution(row)
         entry_id = str(row["id"])
         blocks = connection.execute(
             """
@@ -518,7 +522,12 @@ class CanonicalProtocolReader:
         ).fetchall()
         result = wire.CanonicalEntry(
             entry_id=entry_id,
-            turn_id=str(row["turn_id"]),
+            turn_id=str(row["turn_id"] if row["entry_owner_kind"] == "EXECUTED_TURN" else row["imported_history_group_id"]),
+            entry_owner_kind=str(row["entry_owner_kind"]),
+            fork_eligible=(
+                row["entry_kind"] == "ASSISTANT_MESSAGE"
+                and read_fork_anchor(connection, str(row["session_id"]), entry_id) is not None
+            ),
             entry_sequence=int(row["entry_sequence"]),
             entry_kind=_entry_kind(str(row["entry_kind"])),
             scope_kind=_scope_kind(str(row["conversation_scope_kind"])),
@@ -545,7 +554,7 @@ class CanonicalProtocolReader:
                 tool_call_id=str(tool_result["tool_call_id"]),
                 result_state=str(tool_result["result_state"]),
             ))
-        for ordinal, reasoning in enumerate(self._reasoning_blocks(connection, row)):
+        for ordinal, reasoning in enumerate(self._reasoning_blocks(connection, stored_row)):
             content = reasoning.text.encode("utf-8")
             target = result.reasoning_blocks.add(
                 block_id=f"{entry_id}:provider-reasoning:{ordinal}",
@@ -658,7 +667,7 @@ class CanonicalProtocolReader:
             """SELECT a.*, r.result_state, r.result_entry_id
                FROM pulsara_v3.tool_execution_attempts AS a
                JOIN pulsara_v3.transcript_entries AS e
-                 ON e.session_id = a.session_id AND e.id = a.assistant_entry_id
+                 ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = a.session_id AND e.id = a.assistant_entry_id
                JOIN pulsara_v3.turns AS t
                  ON t.session_id = e.session_id AND t.id = e.turn_id
                LEFT JOIN pulsara_v3.tool_results AS r
@@ -679,7 +688,7 @@ class CanonicalProtocolReader:
                  ON c.session_id = t.session_id AND c.task_id = t.id
                 AND c.child_kind = 'RESULT'
                LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                 ON accepted.session_id = t.session_id
+                 ON accepted.entry_owner_kind = 'EXECUTED_TURN' AND accepted.session_id = t.session_id
                 AND accepted.source_subagent_task_id = t.id
                LEFT JOIN LATERAL (
                  SELECT array_agg(edge.dependency_task_id
@@ -738,6 +747,7 @@ class CanonicalProtocolReader:
             LEFT JOIN LATERAL (
                 SELECT id FROM pulsara_v3.transcript_entries
                 WHERE session_id = w.session_id
+                  AND entry_owner_kind = 'EXECUTED_TURN'
                   AND source_plan_workflow_id = w.id
                   AND source_plan_handoff_kind IN (
                       'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
@@ -766,7 +776,7 @@ class CanonicalProtocolReader:
                        SELECT max(entry.entry_sequence)
                        FROM pulsara_v3.agent_events AS prior
                        JOIN pulsara_v3.transcript_entries AS entry
-                         ON entry.session_id = prior.session_id
+                         ON entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = prior.session_id
                         AND entry.id = prior.subject_entry_id
                        WHERE prior.session_id = event.session_id
                          AND prior.event_sequence < event.event_sequence
@@ -791,6 +801,16 @@ class CanonicalProtocolReader:
             session_lifecycle=lifecycle,
             prompt_queue_total_count=queue_total,
         )
+        genesis = connection.execute(
+            "SELECT base_kind, source_through_sequence FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
+            (session_id,),
+        ).fetchone()
+        if genesis is not None:
+            result.initial_context_base.CopyFrom(wire.InitialContextBase(
+                base_kind=str(genesis["base_kind"]),
+                source_through_sequence=int(genesis["source_through_sequence"]),
+                display_after_entry_sequence=int(genesis["source_through_sequence"]),
+            ))
         latest_root = connection.execute(
             """SELECT id, status, terminal_reason FROM pulsara_v3.turns
                WHERE session_id = %s AND conversation_scope_kind = 'ROOT'

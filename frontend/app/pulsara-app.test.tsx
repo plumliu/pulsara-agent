@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalMemoryApi } from '../lib/memory-api';
 import type {
   CommandReceipt,
+  ForkOutcome,
   RuntimeAdapter,
   RuntimeBootstrap,
   ModelCatalogReadModel,
@@ -314,6 +315,11 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  forkConversation = vi.fn(async (_sessionId: string, _entryId: string, childId: string): Promise<ForkOutcome> => {
+    this.sessions = [{ ...initialSession, id: childId }, ...this.sessions];
+    return { outcome: 'CREATED_AND_OPENED' as const, child_session_id: childId };
+  });
+  readSession = vi.fn(async (id: string) => this.sessions.find(session => session.id === id) ?? null);
   memory = new LocalMemoryApi();
   sessions = [initialSession];
   modelConfigurations = [...bootstrap.model_configurations];
@@ -1489,6 +1495,84 @@ describe('PulsaraApp', () => {
     expect(within(intermediate as HTMLElement).queryByText('18:11')).toBeNull();
     expect(within(terminal as HTMLElement).getByText('18:12', { selector: 'time' })).toBeTruthy();
     expect(screen.getAllByRole('button', { name: '复制回复' })).toHaveLength(1);
+  });
+
+  it('forks only server-eligible entries with one preselected identity and leaves the parent running', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = { ...projection(''), isRunning: true, messages: [
+      { id: 'old-intermediate', role: 'assistant', assistantKind: 'terminal', body: '中间正文', time: '18:10', status: 'completed', forkEligible: false },
+      { id: 'canonical-anchor', role: 'assistant', assistantKind: 'terminal', body: '已结算最终回复', time: '18:12', status: 'completed', forkEligible: true },
+    ] };
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    adapter.forkConversation.mockImplementationOnce(async (_source, _anchor, child) => {
+      await gate;
+      adapter.sessions = [{ ...initialSession, id: child }, ...adapter.sessions];
+      return { outcome: 'CREATED_AND_OPENED', child_session_id: child };
+    });
+    render(<PulsaraApp adapter={adapter} />);
+    const button = await screen.findByRole('button', { name: '从此处分叉' });
+    expect(screen.getAllByRole('button', { name: '从此处分叉' })).toHaveLength(1);
+    fireEvent.click(button); fireEvent.click(button);
+    expect(button.getAttribute('aria-busy')).toBe('true');
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(adapter.forkConversation).toHaveBeenCalledExactlyOnceWith(initialSession.id, 'canonical-anchor', expect.stringMatching(/^session:[0-9a-f]{32}$/));
+    release();
+    await screen.findByText('分叉已打开');
+    expect(adapter.connectCalls.at(-1)?.sessionId).toBe(adapter.forkConversation.mock.calls[0][2]);
+  });
+
+  it('queries a lost Fork response without replaying the creation and keeps the parent selected', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = { ...projection(''), initialContextBase: { base_kind: 'SNAPSHOT', display_after_entry_sequence: 0 }, messages: [
+      { id: 'imported-anchor', role: 'assistant', assistantKind: 'terminal', body: '继承的回复', time: '18:12', status: 'completed', forkEligible: true, entryOwnerKind: 'IMPORTED_HISTORY' },
+    ] };
+    adapter.forkConversation.mockImplementationOnce(async (_source, _anchor, child) => {
+      adapter.sessions = [{ ...initialSession, id: child }, ...adapter.sessions];
+      throw new Error('response lost');
+    });
+    render(<PulsaraApp adapter={adapter} />);
+    const button = await screen.findByRole('button', { name: '从此处分叉' });
+    expect(screen.getByRole('separator', { name: '已保留分叉点的有效上下文，压缩前记录请在原会话查看' })).toBeTruthy();
+    fireEvent.click(button);
+    await screen.findByText('分叉已创建，暂未打开');
+    expect(adapter.forkConversation).toHaveBeenCalledTimes(1);
+    expect(adapter.readSession).toHaveBeenCalledWith(adapter.forkConversation.mock.calls[0][2]);
+    expect(adapter.connectCalls.at(-1)?.sessionId).toBe(initialSession.id);
+  });
+
+  it('starts a Fork with empty draft and planning off while retaining the source draft', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = { ...projection(''), isRunning: false, messages: [
+      { id: 'anchor', role: 'assistant', assistantKind: 'terminal', body: '可分叉回复', time: '18:12', status: 'completed', forkEligible: true },
+    ] };
+    render(<PulsaraApp adapter={adapter} />);
+    const textbox = await screen.findByRole('textbox', { name: '发送给 Pulsara' });
+    fireEvent.change(textbox, { target: { value: '父会话未发送草稿' } });
+    fireEvent.click(screen.getByRole('button', { name: '先规划' }));
+    fireEvent.click(screen.getByRole('button', { name: '从此处分叉' }));
+    await screen.findByText('分叉已打开');
+    expect((screen.getByRole('textbox', { name: '发送给 Pulsara' }) as HTMLTextAreaElement).value).toBe('');
+    expect(screen.getByRole('button', { name: '先规划' }).getAttribute('aria-pressed')).toBe('false');
+    const source = screen.getAllByRole('button').find(button => button.textContent?.includes(initialSession.title) && button.textContent?.includes('已载入'));
+    expect(source).toBeTruthy();
+    fireEvent.click(source!);
+    await waitFor(() => expect(adapter.connectCalls.at(-1)?.sessionId).toBe(initialSession.id));
+    expect((screen.getByRole('textbox', { name: '发送给 Pulsara' }) as HTMLTextAreaElement).value).toBe('父会话未发送草稿');
+    expect(screen.getByRole('button', { name: '本轮先规划' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it.each(['CREATED_OPEN_DEFERRED', 'NOT_CREATED'] as const)('keeps the parent selected for %s', async (outcome) => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = { ...projection(''), messages: [
+      { id: 'anchor', role: 'assistant', assistantKind: 'terminal', body: '保留父会话', time: '18:12', status: 'completed', forkEligible: true },
+    ] };
+    adapter.forkConversation.mockResolvedValueOnce({ outcome, child_session_id: 'child' });
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: '从此处分叉' }));
+    await screen.findByText(outcome === 'NOT_CREATED' ? '未创建分叉' : '分叉已创建，暂未打开');
+    expect(adapter.connectCalls.at(-1)?.sessionId).toBe(initialSession.id);
+    expect(adapter.forkConversation).toHaveBeenCalledTimes(1);
   });
 
   it('joins consecutive tool rails only when no visible content separates them', async () => {

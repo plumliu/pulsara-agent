@@ -2,6 +2,14 @@
 
 状态：Active（2026-08-30）
 
+2026-09-08 Conversation Fork 同步：最终回复的复制按钮旁增加“从此处分叉”，只消费
+terminal v3 的 `fork_eligible` / `entry_owner_kind`，不从展示样式推断执行终态。
+`initial_context_base` 展示继承摘要分隔线，不伪造 compaction event。创建使用预定 child ID
+和 `CREATED_AND_OPENED | CREATED_OPEN_DEFERRED | NOT_CREATED`；响应丢失只查询该 ID，
+不盲重发。只有 opened 才导航；父会话未发送草稿/规划选项按 session 保留，child 输入框为空，
+本轮权限恢复普通新请求默认值。完整契约由
+`PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md` 第 7.5、8 节唯一拥有。
+
 2026-09-06 能力管理面同步：导入、凭据、编辑、删除与自动采用的当前契约由
 `PULSARA_CAPABILITY_PAGE_MCP_EDIT_CREDENTIAL_AND_INSTALLABLE_CAPABILITY_DELETION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`
 收敛；本页不另设控制面或兼容路径。

@@ -2,6 +2,14 @@
 
 > 状态：**ACTIVATED**
 >
+> Conversation Fork hard cut（2026-09-08）：当前 carrier 唯一 contract 为
+> `pulsara.context-snapshot-carrier.v3-retained-history`，始终携带 ordered typed
+> `retained_historical_requests`（空列表 `[]`），不接受旧单值/null/缺字段格式。
+> 历史编译/压缩读取 executed 与 imported 两类内容，新 binding/adoption 仍只归真实 executed turn。
+> 只有 adopted summary 输入覆盖整个旧 snapshot base 才清空历史 request 列表；未覆盖则原样保留。
+> Fork genesis 只提供第一轮 revision-zero 的初始基底，不创建 fake turn 或 CompactionAdopted event。
+> 精确表示与 owner-routing 以 `PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md` 为准。
+>
 > Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的same-process DTO fingerprint/proof字段以及所有逐文件、文档与activation evidence SHA门禁；source lineage、canonical adoption与provider-prefix边界的真实digest继续有效。
 >
 > 激活日期：2026-08-21

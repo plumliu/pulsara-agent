@@ -423,7 +423,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
-        == "pulsara.provider-message-lowering.prefix-continuity.v7-subagent-completion-envelope"
+        == "pulsara.provider-message-lowering.prefix-continuity.v8-retained-history"
     )
 
     reader = (ROOT / "src/pulsara_agent/conversation_kernel/reader.py").read_text()

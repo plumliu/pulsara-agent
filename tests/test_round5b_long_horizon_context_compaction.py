@@ -24,6 +24,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionTrigger,
     ExpectedCompactionPredecessorRevision,
     FrozenCompactionActiveRequest,
+    FrozenRetainedHistoricalRequest,
     ResolvedCompactionPolicy,
     build_prepared_compaction_canonical_adoption,
     build_prepared_manual_compaction_command,
@@ -342,7 +343,22 @@ def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> N
     )
     plan = DestinationDialogueProjectionPlan(
         units,
-        ("prior handover", ("quoted request",)),
+        (
+            "prior handover",
+            ("quoted request",),
+            (
+                FrozenRetainedHistoricalRequest(
+                    FrozenProviderInputItemKind.USER,
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    "first retained request",
+                ),
+                FrozenRetainedHistoricalRequest(
+                    FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+                    None,
+                    "second retained request",
+                ),
+            ),
+        ),
     )
 
     candidates = enumerate_destination_backbone_projections(plan)
@@ -350,6 +366,9 @@ def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> N
     assert len(candidates) == 4
     assert [len(candidate.units) for candidate in candidates] == [2, 2, 1, 0]
     assert candidates[0].prior_handoff == plan.prior_handoff
+    assert json.loads(candidates[0].body)["prior_handoff"][
+        "retained_historical_requests"
+    ] == [request.canonical_value() for request in plan.prior_handoff[2]]
     assert all(candidate.prior_handoff is None for candidate in candidates[1:])
     assert json.loads(candidates[-1].body)["turns"] == []
 
@@ -510,7 +529,9 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     decoded = json.loads(projection.body)
 
     assert len(plan.units) == 2
-    assert [tool["name"] for tool in decoded["turns"][0]["entries"][1]["requested_tools"]] == [
+    assert [
+        tool["name"] for tool in decoded["turns"][0]["entries"][1]["requested_tools"]
+    ] == [
         "read_file",
         "read_file",
     ]
@@ -584,6 +605,73 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
         prepare("SNAPSHOT", "snapshot:existing")
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        {},
+        "request",
+        [None],
+        [
+            {
+                "item_kind": "USER",
+                "input_origin": "TERMINAL_OBSERVATION",
+                "text": "wrong origin",
+            }
+        ],
+        [{"item_kind": "USER", "input_origin": "HUMAN_MESSAGE", "text": " "}],
+    ],
+)
+def test_retained_historical_requests_reject_non_list_or_invalid_items(invalid) -> None:
+    from pulsara_agent.primitives.context import canonical_json_bytes
+
+    carrier = build_compaction_snapshot_carrier(
+        summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=65_536),
+        recent_user_messages=(),
+        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
+        active_request=None,
+    )
+    raw = json.loads(carrier.body)
+    raw["retained_historical_requests"] = invalid
+    with pytest.raises(ValueError):
+        parse_compaction_snapshot_carrier(canonical_json_bytes(raw))
+
+
+def test_retained_historical_requests_roundtrip_is_ordered_and_has_no_legacy_parser() -> (
+    None
+):
+    from pulsara_agent.primitives.context import canonical_json_bytes
+
+    requests = (
+        FrozenRetainedHistoricalRequest(
+            FrozenProviderInputItemKind.USER,
+            CanonicalInputOriginKind.HUMAN_MESSAGE,
+            "identical text",
+        ),
+        FrozenRetainedHistoricalRequest(
+            FrozenProviderInputItemKind.TERMINAL_OBSERVATION, None, "identical text"
+        ),
+    )
+    carrier = build_compaction_snapshot_carrier(
+        summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=65_536),
+        recent_user_messages=(),
+        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
+        active_request=None,
+        retained_historical_requests=requests,
+    )
+    assert (
+        parse_compaction_snapshot_carrier(carrier.body).retained_historical_requests
+        == requests
+    )
+    raw = json.loads(carrier.body)
+    del raw["retained_historical_requests"]
+    with pytest.raises(ValueError, match="fields"):
+        parse_compaction_snapshot_carrier(canonical_json_bytes(raw))
+    raw["retained_historical_request"] = requests[0].canonical_value()
+    with pytest.raises(ValueError, match="fields"):
+        parse_compaction_snapshot_carrier(canonical_json_bytes(raw))
+
+
 def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
     raw = (
         "\ufeff<analysis>private scratch</analysis>\r\n"
@@ -609,7 +697,9 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
         "continuation",
         "earlier_context_summary",
         "recent_user_messages",
+        "retained_historical_requests",
     }
+    assert decoded["retained_historical_requests"] == []
     assert decoded["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
     assert decoded["continuation"]["instruction"].startswith(
         "HANDOFF COMPLETE / RESUME NOW"
@@ -2266,7 +2356,7 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
     assert not {
         "durable_jobs",
         "durable_job_attempts",

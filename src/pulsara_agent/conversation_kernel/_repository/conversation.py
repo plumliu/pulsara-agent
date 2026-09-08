@@ -399,7 +399,7 @@ class _ConversationOperations:
             ).fetchone()
             entry = connection.execute(
                 """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE session_id = %s AND id = %s""",
+                   WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
                 (intent.session_id, intent.entry_id),
             ).fetchone()
             if all(row is None for row in (command, turn, revision, entry)):
@@ -811,7 +811,7 @@ class _ConversationOperations:
             entry = connection.execute(
                 """
                 SELECT * FROM pulsara_v3.transcript_entries
-                WHERE session_id = %s AND id = %s
+                WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s
                 """,
                 (guard.session_id, entry_id),
             ).fetchone()
@@ -1224,7 +1224,7 @@ class _ConversationOperations:
                 SELECT t.id
                 FROM pulsara_v3.turns AS t
                 JOIN pulsara_v3.transcript_entries AS initial_entry
-                  ON initial_entry.session_id = t.session_id
+                  ON initial_entry.entry_owner_kind = 'EXECUTED_TURN' AND initial_entry.session_id = t.session_id
                  AND initial_entry.id = t.initial_entry_id
                 WHERE t.session_id = %s
                   AND t.conversation_scope_kind = %s
@@ -1247,7 +1247,7 @@ class _ConversationOperations:
             """
             SELECT 1
             FROM pulsara_v3.transcript_entries
-            WHERE session_id = %s
+            WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s
               AND conversation_scope_kind = %s
               AND scope_subagent_task_id IS NOT DISTINCT FROM %s
               AND entry_sequence > %s
@@ -1267,16 +1267,16 @@ class _ConversationOperations:
             SELECT 1
             FROM pulsara_v3.assistant_message_blocks AS call
             JOIN pulsara_v3.transcript_entries AS request
-              ON request.session_id = call.session_id
+              ON request.entry_owner_kind = 'EXECUTED_TURN' AND request.session_id = call.session_id
              AND request.id = call.assistant_entry_id
             JOIN pulsara_v3.tool_results AS result
               ON result.session_id = call.session_id
              AND result.tool_call_entry_id = call.assistant_entry_id
              AND result.tool_call_id = call.tool_call_id
             JOIN pulsara_v3.transcript_entries AS result_entry
-              ON result_entry.session_id = result.session_id
+              ON result_entry.entry_owner_kind = 'EXECUTED_TURN' AND result_entry.session_id = result.session_id
              AND result_entry.id = result.result_entry_id
-            WHERE request.session_id = %s
+            WHERE request.entry_owner_kind = 'EXECUTED_TURN' AND request.session_id = %s
               AND request.conversation_scope_kind = %s
               AND request.scope_subagent_task_id IS NOT DISTINCT FROM %s
               AND call.block_kind = 'TOOL_CALL'
@@ -1876,7 +1876,7 @@ class _ConversationOperations:
                     'AssistantMessageAccepted',
                     'AssistantToolRequestAccepted'
                  )
-                WHERE e.session_id = %s AND e.id = %s
+                WHERE e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = %s AND e.id = %s
                 """,
                 (guard.session_id, entry_id),
             ).fetchall()
@@ -2313,11 +2313,11 @@ class _ConversationOperations:
                 LEFT JOIN pulsara_v3.prompt_queue_items AS q
                   ON q.session_id = c.session_id AND q.id = c.target_queue_item_id
                 LEFT JOIN pulsara_v3.transcript_entries AS qe
-                  ON qe.session_id = q.session_id AND qe.id = q.consumed_entry_id
+                  ON qe.entry_owner_kind = 'EXECUTED_TURN' AND qe.session_id = q.session_id AND qe.id = q.consumed_entry_id
                 LEFT JOIN pulsara_v3.turns AS qt
                   ON qt.session_id = qe.session_id AND qt.id = qe.turn_id
                 LEFT JOIN pulsara_v3.transcript_entries AS te
-                  ON te.session_id = c.session_id AND te.id = c.target_entry_id
+                  ON te.entry_owner_kind = 'EXECUTED_TURN' AND te.session_id = c.session_id AND te.id = c.target_entry_id
                 LEFT JOIN pulsara_v3.interaction_decisions AS d
                   ON d.session_id = c.session_id
                  AND d.id = c.target_interaction_decision_id
@@ -2331,7 +2331,7 @@ class _ConversationOperations:
                   ON piw.session_id = pi.session_id
                  AND piw.id = pi.plan_workflow_id
                 LEFT JOIN pulsara_v3.transcript_entries AS pce
-                  ON pce.session_id = pi.session_id
+                  ON pce.entry_owner_kind = 'EXECUTED_TURN' AND pce.session_id = pi.session_id
                  AND pce.id = pi.decision_continuation_entry_id
                 WHERE c.session_id = %s AND c.command_id = %s
                 """,

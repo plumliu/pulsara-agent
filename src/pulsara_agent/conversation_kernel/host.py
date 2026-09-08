@@ -4680,13 +4680,13 @@ def _list_resumable_session_rows(
             SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
                    s.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
-                   COALESCE((
+                   GREATEST(s.created_at, (
                        SELECT e.accepted_at
                        FROM pulsara_v3.transcript_entries AS e
                        WHERE e.session_id = s.id
                        ORDER BY e.entry_sequence DESC
                        LIMIT 1
-                   ), s.created_at) AS updated_at,
+                   )) AS updated_at,
                    s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
@@ -4727,13 +4727,13 @@ def _list_resumable_session_rows_across_workspaces(
             SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
                    s.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
-                   COALESCE((
+                   GREATEST(s.created_at, (
                        SELECT e.accepted_at
                        FROM pulsara_v3.transcript_entries AS e
                        WHERE e.session_id = s.id
                        ORDER BY e.entry_sequence DESC
                        LIMIT 1
-                   ), s.created_at) AS updated_at,
+                   )) AS updated_at,
                    s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
@@ -4773,7 +4773,10 @@ def _read_resumable_session_row(
             """
             SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
                    s.workspace_label, s.memory_domain_id, s.lifecycle,
-                   s.writer_generation, s.latest_entry_sequence, s.updated_at,
+                   s.writer_generation, s.latest_entry_sequence,
+                   GREATEST(s.created_at, (SELECT e.accepted_at
+                       FROM pulsara_v3.transcript_entries AS e WHERE e.session_id = s.id
+                       ORDER BY e.entry_sequence DESC LIMIT 1)) AS updated_at,
                    s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
@@ -4975,6 +4978,28 @@ class KernelHostCore:
                 self._blob_gc_loop(), name="kernel-blob-orphan-gc"
             )
         return self._repository
+
+    async def fork_conversation(
+        self, *, source_session_id: str, anchor_entry_id: str,
+        child_session_id: str, memory_domain_id: str,
+    ):
+        """Canonical copy only. Opening the committed child uses ordinary resume."""
+        settlement = await self._admit_session_open()
+        try:
+            repository = await self._ensure_resources()
+            deadline = self._canonical_deadline()
+            worker = asyncio.create_task(asyncio.to_thread(
+                repository.fork_conversation, source_session_id=source_session_id,
+                anchor_entry_id=anchor_entry_id, child_session_id=child_session_id,
+                memory_domain_id=memory_domain_id,
+                deadline_monotonic=deadline,
+            ))
+            _, cancelled, _ = await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
+            if cancelled is not None:
+                raise cancelled
+            return worker.result()
+        finally:
+            await self._settle_session_open(settlement)
 
     async def open_session(
         self,

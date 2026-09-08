@@ -2,15 +2,15 @@
 
 > 日期：2026-09-06。代码核对基线：`3ecb555d`。
 >
-> 状态：产品语义与首版实施表示已定稿，生产代码尚未实现。本文固定产品契约、
-> canonical hard cut、接口结果与验收要求；本次文档修订不修改生产代码或重置数据库。
+> 状态：**ACTIVATED**（2026-09-08；实现与验收结果登记于第 13 节）。
+> 本文固定产品契约、canonical hard cut、接口结果与验收要求。
 > 同日二次代码审阅及独立 critic 已追踪 terminal 提交、idle compaction、历史 reader、
 > carrier、工具 closure/result、artifact、会话创建与 terminal v3/前端投影。第 12 节记录
 > 代码证据；第 7 节给出唯一采用的存储表示，不再把关键 schema 选择留给实施阶段。
 >
 > 2026-09-08 实施前复审增补：固定 Fork 的单事务 `REPEATABLE READ` 边界、
 > `FrozenForkHistoricalMaterial` 纯历史读取 DTO、imported source attribution 的精确列联合、
-> `retained_historical_request` carrier 类型与 lowering、全 consumer owner-routing 矩阵，以及
+> `retained_historical_requests` carrier 类型与 lowering、全 consumer owner-routing 矩阵，以及
 > artifact handle 的 session-scoped 审计要求。以下增补是本文同一 hard-cut 的组成部分，
 > 不形成第二种 Fork 路径或兼容层。
 >
@@ -437,13 +437,13 @@ executed final Fork 时，reader 使用该 entry 自己的历史 binding 走普�
 不得为继承制造 fake turn、fake initial entry 或 `CompactionAdopted` event。
 
 若源 binding 为 SNAPSHOT，Fork 创建新的 child-local snapshot，并把源 carrier 机械转成 settled
-历史载体。carrier contract hard cut 增加可选 `retained_historical_request`：
+历史载体。carrier contract hard cut 增加有序列表 `retained_historical_requests`：
 
-- 源为 `AWAIT_NEXT_USER` 时，保留 summary/recent messages，active request 为空；
+- 源为 `AWAIT_NEXT_USER` 时，保留 summary/recent messages 和完整历史 request 列表，active request 为空；
 - 源为 `RESUME_ACTIVE_TURN` 且 request 位于 canonical suffix 时，request 已作为 imported entry
   复制，carrier 不再重复；
 - 源为 `RESUME_ACTIVE_TURN` 且 request 为 `SNAPSHOT_EXACT` 时，将它的精确 provider-visible text
-  与原 request kind/origin 移入 `retained_historical_request`；它是历史材料，不是 human 新指令；
+  与原 request kind/origin 追加到 `retained_historical_requests` 末尾；保留已有列表，它是历史材料，不是 human 新指令；
 - child continuation 一律改为 `AWAIT_NEXT_USER`，`active_request` 一律为空。
 
 不得把 `SNAPSHOT_EXACT` 文本简单清空，也不得无类型地塞进 `recent_user_messages`，否则 plan、
@@ -455,16 +455,16 @@ child session、本地 cut、settled carrier digest 与其 compiler/prompt/model
 source digest 编入父 scope/binding，绝不照抄；
 不另增 digest registry 或证明图。
 
-#### 7.3.1 `retained_historical_request` 的唯一类型与 carrier contract
+#### 7.3.1 `retained_historical_requests` 的唯一类型与 carrier contract
 
 carrier hard cut 将 `COMPACTION_SNAPSHOT_COMPILER_CONTRACT` 从当前 v2 提升为唯一的新 contract；
 不保留 v2 parser、dual codec 或缺字段兼容。`CompactionSnapshotCarrier` 新增：
 
 ```text
-retained_historical_request: FrozenRetainedHistoricalRequest | None
+retained_historical_requests: tuple[FrozenRetainedHistoricalRequest, ...]
 ```
 
-其 exact value 为：
+列表按请求发生先后排列，每个成员的 exact value 为：
 
 ```text
 FrozenRetainedHistoricalRequest
@@ -495,37 +495,44 @@ canonical JSON 顶层唯一形状为：
     "instruction": "...",
     "active_request": null
   },
-  "retained_historical_request": {
+  "retained_historical_requests": [{
     "item_kind": "USER",
     "input_origin": "HUMAN_MESSAGE",
     "text": "exact historical request"
-  },
+  }],
   "earlier_context_summary": "...",
   "recent_user_messages": []
 }
 ```
 
-字段缺失与显式 `null` 不是两种协议：新 contract 始终写
-`retained_historical_request`，无内容时值为 `null`。canonical bytes 继续由唯一
+新 contract 始终写 `retained_historical_requests`，无内容时值为 `[]`；拒绝缺字段、
+`null`、单值对象和旧的单数 key，不保留兼容 parser。canonical bytes 继续由唯一
 `canonical_json_bytes` builder 产生，`content_digest` 对完整新 body 重算。
 
 producer/consumer 规则固定为：
 
-1. 只有 Fork settled-carrier builder 可以从源 `SNAPSHOT_EXACT active_request` 首次产生 non-null 值；
-2. Fork-of-fork 若 source genesis carrier 已有该值，机械 exact-copy 其 kind/origin/text，不重新分类；
+1. 只有 Fork settled-carrier builder 可以把源 `SNAPSHOT_EXACT active_request` 转为新的历史成员，
+   追加到已有列表末尾，不覆盖旧成员，也不按相同文本去重；
+2. Fork-of-fork 若 source genesis carrier 已有列表，机械 exact-copy 全部成员及顺序，不重新分类；
 3. 普通 compaction parser、prompt、planner 和 lowering 必须理解该字段，不能丢弃；
 4. 在下一次 adopted compaction 的 summary prefix 已覆盖整个 predecessor snapshot base 时，
-   该 request 已被新 summary 吸收，新 carrier 将字段置为 `null`；
+   整个列表已进入 summary 输入并被其吸收，新 carrier 将字段置为 `[]`；
 5. 若某种 projection 没有覆盖 predecessor snapshot base，则必须原样保留，不得只保留 text
    或改成 active request；
 6. 未采用、失败或被丢弃的 compaction 不改变现有 carrier。
+
+2026-09-08 用户批准的表示修订：分叉后的会话切换模型时，Tier-3 的 destination projection
+可能省略旧 snapshot base；此时旧历史请求列表必须保留，而新 carrier 又可能包含本轮
+`SNAPSHOT_EXACT active_request`。之后再 Fork 必须同时保留二者，单值字段会丢失历史。
+因此采用以上唯一有序列表表示，不增加事件、祖先链或列表成员数量上限；资源 admission
+仍使用整个 carrier、canonical input 和 provider composite 的现有字节边界。
 
 lowering 仍把整个 carrier 作为一个 `CONTEXT_SNAPSHOT` user-role runtime handoff，不把 retained
 request 另发成新的 user message。固定 framing 必须明确：
 
 ```text
-retained_historical_request is historical context only;
-it is not the active request and must not be resumed.
+retained_historical_requests are ordered historical context only;
+they are not active requests and must not be resumed.
 ```
 
 `continuation.mode=AWAIT_NEXT_USER` 和 `active_request=null` 仍是 child idle 的唯一控制真值；
@@ -844,7 +851,7 @@ Codex 的结构共享实现只作为旧方案背景，不作为本方案的实�
 | 当前文件/owner | 已核实情况与实施职责 |
 | --- | --- |
 | `storage/migrations/sql/0000_conversation_kernel_baseline.sql` | hard cut entry owner 联合、`imported_history_groups`、`session_context_genesis`、imported result/closure 约束及 session-scoped artifact 唯一性；`turns` 保持 execution-only |
-| `conversation_kernel/compaction/contracts.py`、`prompt.py`、`model_input/lowering.py` | settled carrier 的 `retained_historical_request` 闭合联合、canonical 编解码与降级；普通 compaction 同步使用新 hard-cut contract |
+| `conversation_kernel/compaction/contracts.py`、`prompt.py`、`model_input/lowering.py` | settled carrier 的 `retained_historical_requests` 闭合联合、canonical 编解码与降级；普通 compaction 同步使用新 hard-cut contract |
 | `conversation_kernel/reader.py` | 抽出 final-entry 历史材料读取；按 owner 解码 imported rows，消费 frozen closure、推导 late outcome，并让首轮 genesis binding 使用普通 compile 路径 |
 | `conversation_kernel/query.py` | 单 session canonical pagination；继续保留，不改为 ancestor reader |
 | `conversation_kernel/compaction/planner.py`、`coordinator.py` | 保留窗口、工具组与已采用基底；Fork 不另造窗口选择算法 |
@@ -954,7 +961,7 @@ child 通过自己的 result row 引用同 workspace immutable blob；不复制 
 | 共享 memory 在 Fork 点后变化 | child 新 cold epoch 可见当前合法 memory；测试不把 conversation 的历史 cut 错当 memory 回滚 |
 | 子会话重启后继续及再次压缩 | 不需要父会话或原 live 对象，基底和 suffix 均从本地 canonical 读取 |
 | child 只有复制的 snapshot 与历史，尚未产生新 turn | 第一轮 revision zero 确实采用复制基底，不默默退回 FULL_HISTORY |
-| 源 mid-turn carrier 的 active_request 只存在于摘要 | 精确文本和 typed origin 进入 `retained_historical_request`；continuation 为 AWAIT，不把旧 ID/请求当作 child 当前任务 |
+| 源 mid-turn carrier 的 active_request 只存在于摘要 | 精确文本和 typed origin 进入 `retained_historical_requests`；continuation 为 AWAIT，不把旧 ID/请求当作 child 当前任务 |
 | 无 result 的旧 tool call 曾有 physical attempt | frozen closure 保持 MAY_HAVE_PARTIALLY_EXECUTED，不因 child 无 attempt 降成 BEFORE_DISPATCH |
 | 工具 closure 先出现、真实结果迟到 | target cut 保持原 closure，映射后 result sequence 推出 late outcome；不因复制时已知结果而改写过去，也不另存 late receipt |
 | 工具原始结果 artifact 与 GC | child 中相同 artifact ID/preview 可按 session 读取同一 immutable blob；父子关闭、重启和 GC 后仍可读，无全局唯一键冲突 |
@@ -995,9 +1002,9 @@ child 通过自己的 result row 引用同 workspace immutable blob；不复制 
 复制被摘要覆盖的原文。结构共享也并非错误，只是不值得为当前产品契约引入其读取与删除成本。
 本方案的取舍是：用一次有界于有效历史材料的独立复制，换取之后普通会话的简单生命周期。
 
-## 12. 二次代码核对与 critic 结论：不能跳过的实现边界
+## 12. 实施前二次代码核对与 critic 结论（历史记录）
 
-以下结论来自当前代码的静态链路审阅，不是已通过的 Fork 测试。
+以下结论来自实施前基线代码的静态链路审阅，不是当前实现状态；落地结果见第 13 节。
 原有测试只能说明已有 owner 的契约，不能用来宣称 Fork 已可运行。
 独立 `gpt-5.6-sol / max` critic 在不修改文件的前提下复核了第 2、7、8 节的风险；
 其建议不是新 authority，只有经当前代码再次核验并写入本文的决定才成为实施契约。
@@ -1201,3 +1208,83 @@ Fork 应在现有 repository/Host owner 间提供“先完成 canonical child �
 实施必须先用最小数据样例锁住 entry owner、genesis、carrier、closure 和秩映射，再贯通 terminal/API；
 不得把已经关闭的选择重新交给实现者用 fake execution rows、广泛 nullable、旧基底复制、
 兼容双写或通用 fallback 临场绕过。真实 dogfood 仍是激活条件，不得由静态审阅替代。
+
+## 13. 2026-09-08 实施记录
+
+### 13.1 唯一落地路径
+
+`fork_history.py` 在 Fork writer 提供的同一个 REPEATABLE READ connection 内冻结材料，
+`_repository/fork.py` 是唯一 imported writer。所有 ID/cut 重新绑定到 child，genesis 最后写入，
+deferred constraints 在 commit 前集中验证。canonical 成功后再普通 resume；失败不重做复制。
+
+clean-v0 新增且仅新增 `imported_history_groups`、`session_context_genesis`、
+`imported_tool_call_closures`。当前 oracle 为 **29 committed / 24 live / 11 subjects /
+1 append guard / 28 product relations / 0 durable jobs**。catalog、runtime grants、terminal
+protobuf/schema contract、架构测试和 README 同步；没有在线迁移或祖先关系。
+
+carrier 唯一版本为 `pulsara.context-snapshot-carrier.v3-retained-history`，provider lowering
+为 `pulsara.provider-message-lowering.prefix-continuity.v8-retained-history`。有序 typed 列表的 producer、parser、
+planner、Tier-3 omission 保留和再分叉追加同时切换；空列表与旧单值协议没有兼容双读。
+列表测试包含相同文字的两个不同请求，确保没有靠去重抹掉历史。
+
+### 13.2 生产 consumer 查询清单与 owner-routing
+
+使用以下查询与 Python AST 的函数归属扫描核对实际 SQL；动态 helper 的调用者及模块级 SQL
+也人工纳入，没有将“没有直接出现表名”等同于无需审计：
+
+```sh
+rg -n 'transcript_entries|tool_results|assistant_message_blocks' src/pulsara_agent \
+  --glob '*.py' --glob '!**/generated*/**'
+```
+
+`E` 表示真实 executed-only 的执行/确认，`H` 表示两类 owner 的历史读取，`F` 表示唯一 Fork 写边界。
+
+| 文件 | 实际查询/调用入口与分类 |
+| --- | --- |
+| `_repository/conversation.py` | E：`confirm_root_turn_intent`、`confirm_terminal_observation_winner`、`_require_compaction_target`、`confirm_assistant_message_winner`、`query_command` 的执行 target exact-join；H：`rehydrate_session` 的只读历史投影 |
+| `_repository/kernel.py` | E：`_require_provider_safe_turn_in_transaction`、`_resolve_event_turn_id`、`_insert_entry`、`_insert_assistant_block`、`_accepted_entry`；`_insert_initial_context_binding_revision` / `_initial_context_binding_revision_matches` 仅为真实新 turn 消费 child genesis |
+| `_repository/prompts.py` | E：`confirm_prepared_prompt_head_consumption`、`confirm_prepared_prompt_steer`；队列 consumed entry、steer target 不接受 imported owner |
+| `_repository/tools.py` | E：`accept_tool_capability_decision`、`accept_tool_attempt`、`accept_tool_result`、`confirm_tool_result_winner`、`accept_tool_interaction_decision`；全部 native result 明确 `EXECUTED` |
+| `_repository/plans.py` | E：`accept_plan_tool_batch`、`_accept_rejected_plan_tool_batch_in_transaction`、`resolve_plan_question`、`resolve_plan_draft_review`、`inspect_plan_continuation`、`_plan_interaction_content_row`、`_confirm_plan_tool_batch_in_transaction`、`_confirm_plan_resolution_in_transaction`、`_eligible_plan_handoff` |
+| `_repository/subagents.py` | E：`accept_subagent_task_batch` / `confirm_subagent_task_batch`、`accept_explicit_subagent_result` / `confirm_explicit_subagent_result`、`confirm_subagent_turn_admission`、`query_subagent_task`、`list_subagent_tasks`、`accept_inter_agent_mailbox_batch` / `confirm_inter_agent_mailbox_batch` |
+| `_repository/completions.py` | E：`accept_subagent_completion_into_root`、`_accepted_completion_row`；imported frozen source ID 不连接新 live task |
+| `_repository/memory.py` | E：`claim_memory_candidate_for_governance`、`_read_memory_governance_terminal_candidate` / `_read_memory_governance_terminal_suffix`；`_read_memory_governance_tool_evidence` / `_read_entry_public_body` / `_read_assistant_public_blocks` 读取由真实 candidate/window 选出的证据，不产生 imported occurrence |
+| `_repository/memory_management.py` | H：`_PROJECTS` 的会话 activity；E：`memory_management_detail` 的 candidate provenance exact-join |
+| `memory/recall.py` | E：`provenance` 通过真实 memory candidate 取得 source，不把 imported entry 再生为记忆 |
+| `reader.py` | H：`read_frozen_dispatch`、block metadata/payload、entry payload、`_load_tool_state`；按 owner 分支读 frozen attribution/closure。E：headroom 的当前 turn、`read_memory_governance_historical_snapshot` 的候选来源、`_plan_handoff_compile_facts`、`_load_round7_scope_facts` 的执行前驱/attempt/outcome |
+| `query.py` | H：`_page_entries_on_connection`、`inspect`；单 session 本地序列，不解析祖先 |
+| `fork_history.py` | H：`read_fork_anchor` 对 executed final 或唯一 genesis anchor 核验；`read_fork_historical_material` 读取该 anchor 的有效本地历史；RR + keyset 固定 upper bound |
+| `_repository/fork.py` | F：`fork_conversation` / 本模块私有 `_insert`；imported group/entry/result/closure 与 genesis 同事务发布，无 runtime invoke |
+| `host.py` | H：`_list_resumable_session_rows`、`_list_resumable_session_rows_across_workspaces`、`_read_resumable_session_row` 的 activity；`fork_conversation` 复用 admission/shutdown settlement，只连接 repository F 与普通 resume |
+| `blob.py` | H：`delete_orphans` 检查任一 session 的 canonical 引用；父子 result 任一存在即保留 blob |
+| `tool_artifacts.py` | H：`_fetch` 按 session + workspace + artifact handle exact-join；native/ imported 共用 reader，不新增 alias |
+| `terminal_protocol/canonical_v3.py` | H：`snapshot`、`history_page`、`observe_committed`、`resolve_content_reference`、`_resolve_reasoning_content`、共用 `_entry`；`_control` 的初始 base 读 genesis，其 attempt/task/plan/event targets 仍 E |
+| `model_input/compiler.py`、`ports/artifact.py` | 不直接查询数据库；消费上述 frozen 历史和 scoped artifact 接口，不新增 execution authority |
+| `web_app/session_controller.py` / `http_server.py`、Web adapter | 消费 canonical eligibility、scoped session query 与三类结果；断线不取消已接纳 owner，shutdown 等待 settlement，不从展示状态推导身份 |
+| `storage/migrations/manifest.py` / baseline / grants | 关系与约束的唯一 schema 声明；不是新增的业务 consumer 或 registry |
+
+imported entry 的 execution-target 拒绝同时落在 repository 和数据库约束：turn initial/final、
+event/command target、queue consumed entry、tool attempt、plan interaction、memory candidate
+均不得指向 imported owner。历史结果与调用保持同 group；旧真实 tool result 的权限/attempt/plan
+引用不复制为 child 权威。纯 frozen Plan/terminal/subagent decoder 可读历史，不恢复对应 owner。
+
+### 13.3 验证与已知边界
+
+测试、真实 provider 的完整输入输出、首次失败的夹具诊断以及桌面/窄屏截图见
+[验收记录](dogfood_evidence/conversation_fork/README.zh.md)。
+
+- Fork + compaction focused：`CI=1 .venv/bin/python -m pytest -q tests/test_conversation_fork.py tests/test_round5b_long_horizon_context_compaction.py`，92 passed。
+- 完整回归：`CI=1 .venv/bin/python -m pytest -q`，**1681 passed / 0 skipped / 19 warnings**，431.18 秒；warnings 为已有 aiohttp shutdown timeout 弃用提示。
+- continuity：`CI=1 .venv/bin/python -m pytest -q tests/test_round3_1_provider_input_prefix_continuity.py`，10 passed。
+- 前端：128 passed，TypeScript、修改文件 ESLint、local build 通过。
+- protocol generator `--check`、`uv lock --check`、Ruff 修改文件检查、`git diff --check` 通过。
+- 独立 wheel + 非源码目录 launcher + packaged schema/protobuf/carrier/static 验证通过。
+- 真实 provider：8 次调用，三类分叉全部通过；不把静态/fixture 验证称为真实模型验证。
+
+完整回归中的 64-call long-horizon 夹具原先使用裸 Runner 却没有 Host 的 30 秒 writer lease 续期；
+并行负载下出现 `StaleHostWriter`，同一测试单跑通过。夹具现在在每次 model preflight 前调用现有
+`renew_host_writer`，保留全部 64-call 断言，没有拉长 turn lifetime、加 skip 或改变产品边界。
+
+未改动的 memory-view 全量 lint 两项错误和大 chunk 警告保留并记录。Fork 不隔离实际文件或当前
+advisory memory；不复制父执行图、不保证被原摘要省略的全文信息。旧开发数据库仍需要现有
+reset-only 流程重建；本次只使用临时数据库验收，没有重置用户配置的数据库。

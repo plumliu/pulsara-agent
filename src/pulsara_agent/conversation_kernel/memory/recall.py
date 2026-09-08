@@ -660,7 +660,7 @@ class PostgresMemoryQuery:
                 JOIN pulsara_v3.memory_candidates AS c
                   ON c.id=f.source_candidate_id
                 LEFT JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id=c.origin_session_id
+                  ON e.entry_owner_kind='EXECUTED_TURN' AND e.session_id=c.origin_session_id
                  AND e.id=c.producer_entry_id
                 WHERE f.memory_domain_id=%s AND f.id=%s
                   AND f.context_id=ANY(%s::text[])

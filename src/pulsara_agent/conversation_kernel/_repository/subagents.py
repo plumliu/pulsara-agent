@@ -379,7 +379,7 @@ class _SubagentOperations:
                     AND block.tool_call_id = attempt.tool_call_id
                     AND block.block_kind = 'TOOL_CALL'
                    JOIN pulsara_v3.transcript_entries AS entry
-                     ON entry.session_id = block.session_id
+                     ON entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = block.session_id
                     AND entry.id = block.assistant_entry_id
                    WHERE attempt.session_id = %s AND attempt.id = %s""",
                 (guard.session_id, candidate.source_tool_attempt_id),
@@ -560,7 +560,7 @@ class _SubagentOperations:
                     AND block.tool_call_id = attempt.tool_call_id
                     AND block.block_kind = 'TOOL_CALL'
                    JOIN pulsara_v3.transcript_entries AS entry
-                     ON entry.session_id = block.session_id
+                     ON entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = block.session_id
                     AND entry.id = block.assistant_entry_id
                    WHERE attempt.session_id = %s AND attempt.id = %s""",
                 (candidate.session_id, candidate.source_tool_attempt_id),
@@ -1087,7 +1087,7 @@ class _SubagentOperations:
             )
             connection.execute(
                 """INSERT INTO pulsara_v3.tool_results (
-                       id, session_id, workspace_id,
+                       result_record_kind, id, session_id, workspace_id,
                        tool_call_entry_id, tool_call_id, attempt_id,
                        result_origin_kind, result_entry_id, result_state,
                        permission_snapshot_fingerprint,
@@ -1100,7 +1100,7 @@ class _SubagentOperations:
                        observation_origin_kind,
                        tool_reported_duration_microseconds
                    ) VALUES (
-                       %s, %s, %s, %s, %s, %s, 'PHYSICAL_ATTEMPT', %s, %s,
+                       'EXECUTED', %s, %s, %s, %s, %s, %s, 'PHYSICAL_ATTEMPT', %s, %s,
                        %s, %s, %s, %s, %s, %s, %s, %s,
                        %s, %s, %s, %s, %s
                    )""",
@@ -1220,7 +1220,7 @@ class _SubagentOperations:
         ) as connection:
             self._require_writer(connection, guard, lock=False)
             entry = connection.execute(
-                "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
+                "SELECT * FROM pulsara_v3.transcript_entries WHERE entry_owner_kind='EXECUTED_TURN' AND session_id=%s AND id=%s",
                 (guard.session_id, tool.result_entry_id),
             ).fetchone()
             tool_row = connection.execute(
@@ -1931,7 +1931,7 @@ class _SubagentOperations:
             ).fetchone()
             entry = connection.execute(
                 """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE session_id = %s AND id = %s""",
+                   WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
                 (candidate.session_id, candidate.entry_id),
             ).fetchone()
             event = connection.execute(
@@ -2050,7 +2050,7 @@ class _SubagentOperations:
                   ON c.session_id = t.session_id AND c.task_id = t.id
                  AND c.child_kind = 'RESULT'
                 LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                  ON accepted.session_id = t.session_id
+                  ON accepted.entry_owner_kind = 'EXECUTED_TURN' AND accepted.session_id = t.session_id
                  AND accepted.source_subagent_task_id = t.id
                 WHERE t.session_id = %s AND t.id = %s
                 """,
@@ -2102,7 +2102,7 @@ class _SubagentOperations:
                           ON c.session_id = t.session_id AND c.task_id = t.id
                          AND c.child_kind = 'RESULT'
                         LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                          ON accepted.session_id = t.session_id
+                          ON accepted.entry_owner_kind = 'EXECUTED_TURN' AND accepted.session_id = t.session_id
                          AND accepted.source_subagent_task_id = t.id
                         WHERE t.session_id = %s
                     )
@@ -2434,7 +2434,7 @@ class _SubagentOperations:
                         AND block.assistant_entry_id = attempt.assistant_entry_id
                         AND block.tool_call_id = attempt.tool_call_id
                        JOIN pulsara_v3.transcript_entries AS entry
-                         ON entry.session_id = attempt.session_id
+                         ON entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = attempt.session_id
                         AND entry.id = attempt.assistant_entry_id
                        WHERE attempt.session_id = %s AND attempt.id = %s""",
                     (guard.session_id, item.sender_tool_attempt_id),
@@ -2520,7 +2520,7 @@ class _SubagentOperations:
                      ON event.session_id = entry.session_id
                     AND event.subject_entry_id = entry.id
                     AND event.event_type = 'InterAgentMessageAccepted'
-                   WHERE entry.session_id = %s AND entry.id = ANY(%s)""",
+                   WHERE entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = %s AND entry.id = ANY(%s)""",
                 (guard.session_id, [item.entry_id for item in items]),
             ).fetchall()
             if not rows:

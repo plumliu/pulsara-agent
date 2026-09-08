@@ -168,6 +168,7 @@ export interface RuntimeProjection {
   messages: Message[];
   presentationNotices?: string[];
   contextCompaction?: ContextCompactionBoundary;
+  initialContextBase?: ProtocolCanonicalControl['initial_context_base'];
   isRunning: boolean;
   queuedCount: number;
   planMode: boolean;
@@ -191,6 +192,12 @@ export interface ContextCompactionBoundary {
   adoptedAfterEntrySequence: number;
   acceptedAt: string;
 }
+
+export type ForkOutcome = {
+  outcome: 'CREATED_AND_OPENED' | 'CREATED_OPEN_DEFERRED' | 'NOT_CREATED';
+  child_session_id: string;
+  public_code?: string;
+};
 
 export type RuntimeInteractionSummary =
   | {
@@ -262,6 +269,8 @@ export interface RuntimeAdapter {
   updateModelCallBinding(sessionId: string, binding: ModelCallBindingPayload): Promise<ModelCallBindingUpdate>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection>;
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
+  forkConversation(sessionId: string, anchorEntryId: string, childSessionId: string): Promise<ForkOutcome>;
+  readSession(sessionId: string): Promise<SessionSummary | null>;
   listSessions(): Promise<SessionSummary[]>;
   listSessionTasks(sessionId: string, cursor?: string): Promise<AgentTaskPage>;
   inspectCapabilities(sessionId: string): Promise<CapabilitySnapshot>;
@@ -437,6 +446,8 @@ interface ProtocolReasoningBlock {
 
 interface ProtocolEntry {
   entry_id: string;
+  fork_eligible?: boolean;
+  entry_owner_kind?: 'EXECUTED_TURN' | 'IMPORTED_HISTORY';
   turn_id: string;
   entry_sequence: string | number;
   entry_kind: string;
@@ -527,6 +538,11 @@ interface ProtocolToolAttempt {
 }
 
 export interface ProtocolCanonicalControl {
+  initial_context_base?: {
+    base_kind: 'FULL_HISTORY' | 'SNAPSHOT';
+    source_through_sequence?: string | number;
+    display_after_entry_sequence?: string | number;
+  };
   session_lifecycle?: string;
   latest_root_turn?: { turn_id?: string; status?: string; terminal_reason?: string };
   active_turns?: ProtocolActiveTurn[];
@@ -1152,6 +1168,17 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
 
   async openCapabilityRoot(root: 'agents' | 'pulsara'): Promise<void> {
     await apiRequest(`/api/capabilities/roots/${root}/open`, { method: 'POST' });
+  }
+
+  async forkConversation(sessionId: string, anchorEntryId: string, childSessionId: string): Promise<ForkOutcome> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
+      method: 'POST', body: JSON.stringify({ anchor_entry_id: anchorEntryId, child_session_id: childSessionId }),
+    });
+  }
+
+  async readSession(sessionId: string): Promise<SessionSummary | null> {
+    const payload = await apiRequest<{ session: Record<string, unknown> | null }>(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    return payload.session ? projectSessionSummary(payload.session) : null;
   }
 
   async createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary> {
@@ -1891,6 +1918,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
       messages: messages.map(productVisibleMessage),
       presentationNotices: this.presentationNotices,
       contextCompaction: projectContextCompaction(this.control),
+      initialContextBase: this.control.initial_context_base,
       isRunning: Boolean(activeTurn) || hasActiveDraft,
       queuedCount: numeric(this.control.prompt_queue_total_count),
       planMode: Boolean(
@@ -2398,6 +2426,8 @@ function projectEntries(
         entrySequence: numeric(entry.entry_sequence),
         role: 'assistant',
         assistantKind: entry.entry_kind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
+        forkEligible: entry.fork_eligible === true,
+        entryOwnerKind: entry.entry_owner_kind,
         time: formatTime(entry.accepted_at_utc),
         body: text || (entry.entry_kind === 'ASSISTANT_MESSAGE' ? decodeContent(entry.content) : ''),
         reasoning: reasoning.length ? reasoning : undefined,

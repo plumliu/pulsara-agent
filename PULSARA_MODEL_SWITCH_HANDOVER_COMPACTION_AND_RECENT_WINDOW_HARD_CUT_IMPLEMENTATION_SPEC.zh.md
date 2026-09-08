@@ -2,6 +2,13 @@
 
 > 状态：实施前规范，2026-09-05
 >
+> Conversation Fork 表示补充（2026-09-08）：destination projection 的 prior handoff 包含整个
+> ordered typed `retained_historical_requests`。Tier-3 若省略 predecessor snapshot base，
+> 新 carrier 必须原样保留旧列表，不把未进入 summary 输入的历史当成已吸收；之后 Fork 再将本轮
+> `SNAPSHOT_EXACT` 请求追加到末尾。包含整个 base 的 adopted summary 才将列表清空。
+> 这是 `PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md` 第 7.3.1 节的唯一
+> carrier hard cut，不改变本文三档选择、admission 或合法 provider-prefix rebase 边界。
+>
 > 范围：Conversation Kernel、模型连接切换、provider-input continuity、context compaction、Web 会话页
 >
 > 权威关系：本文扩展

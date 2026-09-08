@@ -418,7 +418,7 @@ def test_round8_closed_taxonomy_tokenizer_and_process_local_architecture() -> No
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
     assert tuple(item.value for item in MemoryRelationKind) == (
         "BASED_ON",
         "SUPERSEDES",

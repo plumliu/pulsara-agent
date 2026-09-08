@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:4a908995f53511fe996bc69250c0332ff77b87d5a512fafb6cb1706d2aef1c01",
+  "observed_catalog_fingerprint": "sha256:4127284f50db86cd6f1cea3733a130b93dc84bd6d23d926708acaecdd7818940",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -17,6 +17,9 @@
     "turns",
     "turn_context_binding_revisions",
     "context_snapshots",
+    "imported_history_groups",
+    "session_context_genesis",
+    "imported_tool_call_closures",
     "transcript_entries",
     "assistant_message_blocks",
     "provider_assistant_replay_fragments",
@@ -41,6 +44,7 @@
   "infrastructure_relations": ["public.pulsara_schema_migrations"],
   "required_functions": [
     "pulsara_v3.enforce_conversation_kernel_invariants",
+    "pulsara_v3.enforce_imported_history_invariants",
     "pulsara_v3.enforce_memory_candidate_lineage",
     "pulsara_v3.memory_terms_to_tsquery",
     "pulsara_v3.seal_memory_fact_search_document"

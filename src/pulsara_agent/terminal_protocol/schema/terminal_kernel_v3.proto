@@ -196,6 +196,8 @@ message CanonicalEntry {
   repeated CanonicalReasoningBlock reasoning_blocks = 12;
   string source_subagent_task_id = 13;
   CanonicalToolResult tool_result = 14;
+  bool fork_eligible = 15;
+  string entry_owner_kind = 16;
 }
 
 message ActiveTurnControl {
@@ -315,6 +317,13 @@ message CanonicalControl {
   PlanHandoffControl latest_plan_handoff = 11;
   ContextCompactionControl latest_context_compaction = 12;
   LatestRootTurnControl latest_root_turn = 13;
+  InitialContextBase initial_context_base = 14;
+}
+
+message InitialContextBase {
+  string base_kind = 1;
+  uint64 source_through_sequence = 2;
+  uint64 display_after_entry_sequence = 3;
 }
 
 message HistoryCursor {

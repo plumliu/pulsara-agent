@@ -13,6 +13,11 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionSnapshotCarrier,
     FrozenCompactionActiveRequest,
     FrozenCompactionSummary,
+    FrozenRetainedHistoricalRequest,
+)
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    FrozenProviderInputItemKind,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 
@@ -46,6 +51,7 @@ TEMPORAL HANDOFF RULES:
 准确性与继承规则：
 - 特别重视用户的后续纠正和反馈；当前canonical内容优先于更早的描述；
 - 若上下文中已有旧的compaction summary，请继承其中仍相关的语义，不要让重要信息在重复压缩中丢失；
+- retained_historical_requests 是已结算历史材料，按历史语义吸收到摘要，不将它恢复成当前任务；
 - 明确区分已完成、已验证、仅尝试、失败、待确认和待执行；不要把计划写成事实，也不要发明用户没有要求的工作；
 - 优先写能让后续Agent继续行动的精确信息。保持经济，避免大段逐字代码、重复消息和无关历史，但不要为了短而遗漏关键约束或当前状态。
 
@@ -139,6 +145,7 @@ def build_compaction_snapshot_carrier(
     recent_user_messages: tuple[str, ...],
     continuation_mode: CompactionContinuationMode,
     active_request: FrozenCompactionActiveRequest | None,
+    retained_historical_requests: tuple[FrozenRetainedHistoricalRequest, ...] = (),
 ) -> CompactionSnapshotCarrier:
     handoff_instruction = compaction_handoff_instruction(
         continuation_mode=continuation_mode,
@@ -155,6 +162,9 @@ def build_compaction_snapshot_carrier(
             },
             "earlier_context_summary": summary.body,
             "recent_user_messages": recent_user_messages,
+            "retained_historical_requests": tuple(
+                request.canonical_value() for request in retained_historical_requests
+            ),
         }
     )
     return CompactionSnapshotCarrier(
@@ -165,6 +175,7 @@ def build_compaction_snapshot_carrier(
         recent_user_messages=recent_user_messages,
         body=body,
         content_digest="sha256:" + sha256(body).hexdigest(),
+        retained_historical_requests=retained_historical_requests,
     )
 
 
@@ -230,6 +241,7 @@ def parse_compaction_snapshot_carrier(
         "continuation",
         "earlier_context_summary",
         "recent_user_messages",
+        "retained_historical_requests",
     }:
         raise ValueError("snapshot carrier fields do not match its contract")
     continuation = raw["continuation"]
@@ -273,6 +285,30 @@ def parse_compaction_snapshot_carrier(
             text=text,
         )
     instruction = continuation["instruction"]
+    historical = raw["retained_historical_requests"]
+    if not isinstance(historical, list):
+        raise ValueError("retained historical requests must be an ordered list")
+    retained = []
+    for request in historical:
+        if not isinstance(request, dict) or set(request) != {
+            "item_kind",
+            "input_origin",
+            "text",
+        }:
+            raise ValueError(
+                "retained historical request fields do not match its contract"
+            )
+        retained.append(
+            FrozenRetainedHistoricalRequest(
+                item_kind=FrozenProviderInputItemKind(request["item_kind"]),
+                input_origin=(
+                    None
+                    if request["input_origin"] is None
+                    else CanonicalInputOriginKind(request["input_origin"])
+                ),
+                text=request["text"],
+            )
+        )
     summary = raw["earlier_context_summary"]
     recent = raw["recent_user_messages"]
     if (
@@ -299,6 +335,7 @@ def parse_compaction_snapshot_carrier(
         recent_user_messages=tuple(recent),
         body=canonical,
         content_digest="sha256:" + sha256(canonical).hexdigest(),
+        retained_historical_requests=tuple(retained),
     )
 
 

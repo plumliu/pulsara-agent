@@ -126,7 +126,9 @@ def lower_canonical_item(
             "[CONTEXT_SNAPSHOT durable Runtime handoff; follow continuation.mode "
             "and continuation.instruction; active_request is mechanically "
             "classified; earlier_context_summary is advisory; current facts and "
-            "later canonical messages take precedence]\n"
+            "later canonical messages take precedence; "
+            "retained_historical_requests are ordered historical context only; "
+            "they are not active requests and must not be resumed.]\n"
         )
         return LoweredCanonicalItem(item, LLMMessage.user(prefix + item.text))
     if kind is FrozenProviderInputItemKind.USER:

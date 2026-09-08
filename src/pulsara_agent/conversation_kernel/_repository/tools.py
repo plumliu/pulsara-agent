@@ -90,7 +90,7 @@ class _ToolOperations:
                        t.permission_snapshot_fingerprint
                 FROM pulsara_v3.assistant_message_blocks AS b
                 JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = b.session_id
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
                  AND e.id = b.assistant_entry_id
                 JOIN pulsara_v3.turns AS t
                   ON t.session_id = e.session_id AND t.id = e.turn_id
@@ -202,7 +202,7 @@ class _ToolOperations:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
-                        id, session_id, workspace_id,
+                        result_record_kind, id, session_id, workspace_id,
                         tool_call_entry_id, tool_call_id,
                         attempt_id, result_origin_kind,
                         permission_snapshot_fingerprint,
@@ -210,7 +210,7 @@ class _ToolOperations:
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds
-                    ) VALUES (%s, %s, %s, %s, %s, NULL,
+                    ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
                               'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL)
                     """,
@@ -283,7 +283,7 @@ class _ToolOperations:
                 SELECT t.workspace_id, t.permission_snapshot_fingerprint
                 FROM pulsara_v3.assistant_message_blocks AS b
                 JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = b.session_id
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
                  AND e.id = b.assistant_entry_id
                 JOIN pulsara_v3.turns AS t
                   ON t.session_id = e.session_id AND t.id = e.turn_id
@@ -512,7 +512,7 @@ class _ToolOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_results (
-                    id, session_id, workspace_id,
+                    result_record_kind, id, session_id, workspace_id,
                     tool_call_entry_id, tool_call_id, attempt_id,
                     result_origin_kind, result_entry_id, result_state,
                     permission_snapshot_fingerprint,
@@ -525,7 +525,7 @@ class _ToolOperations:
                     observation_origin_kind,
                     tool_reported_duration_microseconds
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'EXECUTED', %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s
                 )
@@ -609,7 +609,7 @@ class _ToolOperations:
             entry = connection.execute(
                 """
                 SELECT * FROM pulsara_v3.transcript_entries
-                WHERE session_id = %s AND id = %s
+                WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s
                 """,
                 (guard.session_id, candidate.result_entry_id),
             ).fetchone()
@@ -975,7 +975,7 @@ class _ToolOperations:
                  AND r.tool_call_entry_id = d.subject_tool_call_entry_id
                  AND r.tool_call_id = d.subject_tool_call_id
                 LEFT JOIN pulsara_v3.transcript_entries AS result_entry
-                  ON result_entry.session_id = r.session_id
+                  ON result_entry.entry_owner_kind = 'EXECUTED_TURN' AND result_entry.session_id = r.session_id
                  AND result_entry.id = r.result_entry_id
                 WHERE c.session_id = %s AND c.command_id = %s
                   AND c.command_kind = 'RESOLVE_INTERACTION'
@@ -1019,7 +1019,7 @@ class _ToolOperations:
                        t.permission_snapshot_fingerprint
                 FROM pulsara_v3.assistant_message_blocks AS b
                 JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = b.session_id
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
                  AND e.id = b.assistant_entry_id
                 JOIN pulsara_v3.turns AS t
                   ON t.session_id = e.session_id AND t.id = e.turn_id
@@ -1168,7 +1168,7 @@ class _ToolOperations:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
-                        id, session_id, workspace_id,
+                        result_record_kind, id, session_id, workspace_id,
                         tool_call_entry_id, tool_call_id,
                         attempt_id, result_origin_kind,
                         permission_snapshot_fingerprint,
@@ -1176,7 +1176,7 @@ class _ToolOperations:
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds
-                    ) VALUES (%s, %s, %s, %s, %s, NULL,
+                    ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
                               'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL)
                     """,

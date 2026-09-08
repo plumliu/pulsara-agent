@@ -980,7 +980,7 @@ class _PromptOperations:
             ).fetchone()
             entry = connection.execute(
                 """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE session_id = %s AND id = %s""",
+                   WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
                 (candidate.session_id, candidate.exact_initial_entry_id),
             ).fetchone()
             consumed_event = connection.execute(
@@ -1476,7 +1476,7 @@ class _PromptOperations:
             ).fetchone()
             entry = connection.execute(
                 """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE session_id = %s AND id = %s""",
+                   WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
                 (candidate.session_id, candidate.new_entry_id),
             ).fetchone()
             event_rows = connection.execute(

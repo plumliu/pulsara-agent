@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from time import monotonic
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    FrozenRetainedHistoricalRequest,
     ColdRebuildCompactionProjection,
     CompactionActiveRequestLocation,
     CompactionContinuationMode,
@@ -125,13 +126,17 @@ class RecentDialogueUnit:
 @dataclass(frozen=True, slots=True)
 class DestinationDialogueProjectionPlan:
     units: tuple[RecentDialogueUnit, ...]
-    prior_handoff: tuple[str, tuple[str, ...]] | None
+    prior_handoff: (
+        tuple[str, tuple[str, ...], tuple[FrozenRetainedHistoricalRequest, ...]] | None
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class DestinationDialogueProjection:
     units: tuple[RecentDialogueUnit, ...]
-    prior_handoff: tuple[str, tuple[str, ...]] | None
+    prior_handoff: (
+        tuple[str, tuple[str, ...], tuple[FrozenRetainedHistoricalRequest, ...]] | None
+    )
     retained_result_keys: frozenset[tuple[str, str]]
     body: bytes
 
@@ -299,6 +304,7 @@ def freeze_destination_dialogue_projection_plan(
         prior_handoff = (
             prior.earlier_context_summary,
             prior.recent_user_messages,
+            prior.retained_historical_requests,
         )
     return DestinationDialogueProjectionPlan(tuple(units), prior_handoff)
 
@@ -344,7 +350,10 @@ def retain_destination_tool_evidence(
 def _render_destination_projection(
     *,
     units: tuple[RecentDialogueUnit, ...],
-    prior_handoff: tuple[str, tuple[str, ...]] | None,
+    prior_handoff: tuple[
+        str, tuple[str, ...], tuple[FrozenRetainedHistoricalRequest, ...]
+    ]
+    | None,
     retained_result_keys: frozenset[tuple[str, str]],
 ) -> DestinationDialogueProjection:
     turns: list[dict[str, object]] = []
@@ -386,6 +395,9 @@ def _render_destination_projection(
         else {
             "earlier_context_summary": prior_handoff[0],
             "recent_user_messages": prior_handoff[1],
+            "retained_historical_requests": tuple(
+                request.canonical_value() for request in prior_handoff[2]
+            ),
         }
     )
     body = canonical_json_bytes(
@@ -1067,9 +1079,7 @@ def _safe_summary_boundaries(
             continue
         safe_by_count[count] = sequence
     if not safe_by_count:
-        raise NoSafeCompactionSummaryPrefix(
-            "source view has no safe summary prefix"
-        )
+        raise NoSafeCompactionSummaryPrefix("source view has no safe summary prefix")
     return tuple(sorted(safe_by_count.items(), reverse=True))
 
 

@@ -33,6 +33,7 @@ REPOSITORY_OWNER_CLASSES = {
     "_RepositoryKernel",
     "_AuthorityOperations",
     "_ConversationOperations",
+    "_ForkOperations",
     "_ToolOperations",
     "_PlanOperations",
     "_PromptOperations",

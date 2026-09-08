@@ -654,6 +654,44 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   };
 
+  const forkConversation = async (entryId: string): Promise<void> => {
+    const sourceId = activeSessionIdRef.current;
+    if (!sourceId) return;
+    const childId = `session:${crypto.randomUUID().replaceAll('-', '')}`;
+    let outcome;
+    try {
+      outcome = await adapter.forkConversation(sourceId, entryId, childId);
+    } catch {
+      // Resolve the preselected identity; never replay an uncertain creation.
+      try {
+        const child = await adapter.readSession(childId);
+        if (!child) {
+          notify('尚未确认分叉结果', `请刷新会话列表后确认。新会话 ID：${childId}`, 'warning');
+          return;
+        }
+        outcome = { outcome: 'CREATED_OPEN_DEFERRED' as const };
+      } catch {
+        notify('尚未确认分叉结果', `请恢复连接后查询会话 ${childId}；不会自动重复创建。`, 'warning');
+        return;
+      }
+    }
+    if (outcome.outcome === 'NOT_CREATED') {
+      notify('未创建分叉', outcome.public_code ?? '请选择已完成的最终回复。', 'warning');
+      return;
+    }
+    try { setSessionList(await adapter.listSessions()); } catch { /* child remains canonical */ }
+    if (outcome.outcome === 'CREATED_OPEN_DEFERRED') {
+      notify('分叉已创建，暂未打开', '稍后从会话列表打开即可，无需重新创建。', 'warning');
+      return;
+    }
+    setActiveView('workbench');
+    if (await openRuntimeSession(childId)) {
+      setTurnPermission('bypass-permissions');
+      notify('分叉已打开', '已保留选定回复处的有效上下文。', 'success');
+    }
+    else notify('分叉已创建，暂未连接', '可以从会话列表重新打开。', 'warning');
+  };
+
   const updateModelCallBinding = async (binding: ModelCallBindingPayload): Promise<void> => {
     const sessionId = activeSessionIdRef.current;
     if (!sessionId || connectionRef.current?.role !== 'controller') {
@@ -1251,6 +1289,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           session={activeSession}
           messages={renderedMessages}
           contextCompaction={mergedProjection.contextCompaction}
+          initialContextBase={mergedProjection.initialContextBase}
+          onFork={forkConversation}
           todo={projection.todo}
           activePlanMode={projection.planMode}
           isRunning={projection.isRunning}

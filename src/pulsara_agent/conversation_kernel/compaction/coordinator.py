@@ -87,6 +87,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
 )
 
 from pulsara_agent.conversation_kernel.compaction.prompt import (
+    parse_compaction_snapshot_carrier,
     build_compaction_snapshot_carrier,
     compaction_summary_request,
     freeze_compaction_summary_output,
@@ -1985,6 +1986,9 @@ class CompactionCoordinator:
                         )
                     )
             summary_request = compaction_summary_request()
+            # Installed-prefix summarization includes the whole previous base.
+            # The destination tier may deliberately omit it to fit its budget.
+            summary_includes_previous_base = True
             if model_switch_candidate is not None and model_switch_tier == 3:
                 destination_winner = await self._select_destination_projection_summary(
                     dispatch=dispatch,
@@ -2011,6 +2015,9 @@ class CompactionCoordinator:
                 recent = destination_winner.recent
                 selected_continuation = destination_winner.continuation
                 selected_retained_count = 0
+                summary_includes_previous_base = (
+                    destination_winner.projection.prior_handoff is not None
+                )
             else:
                 installed_winner = await self._select_installed_prefix_summary(
                     dispatch=dispatch,
@@ -2147,6 +2154,21 @@ class CompactionCoordinator:
                 recent_user_messages=tuple(item.text for item in recent),
                 continuation_mode=selected_continuation[0],
                 active_request=selected_continuation[1],
+                retained_historical_requests=(
+                    ()
+                    if summary_includes_previous_base
+                    else next(
+                        (
+                            parse_compaction_snapshot_carrier(
+                                item.text
+                            ).retained_historical_requests
+                            for item in compaction_read.dispatch_read.compile_snapshot.canonical_input.items
+                            if item.item_kind
+                            is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+                        ),
+                        (),
+                    )
+                ),
             )
             content = await self._content(
                 carrier.body,

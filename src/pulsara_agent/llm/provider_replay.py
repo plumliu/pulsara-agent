@@ -577,6 +577,41 @@ def _validate_fragment_fields(
         raise ValueError("provider replay fragment fingerprint mismatch")
 
 
+def rebind_durable_provider_assistant_replay(
+    *, fragment: ProviderAssistantReplayFragment, session_id: str,
+    workspace_id: str, assistant_entry_id: str, wire_api: str,
+) -> PreparedDurableProviderAssistantReplay:
+    """Copy validated history with a local identity and its original wire target.
+
+    No target configuration is resurrected. The payload and public projection
+    are invariant; only the canonical entry identity in fragment metadata moves.
+    """
+    fingerprint = context_fingerprint(
+        "pulsara.provider-assistant-replay-fragment:v2-durable",
+        {
+            "codec": fragment.codec_kind.value,
+            "replay_contract": fragment.provider_replay_contract_fingerprint,
+            "replay_target": fragment.replay_target_fingerprint,
+            "entry": assistant_entry_id,
+            "public": fragment.public_projection_fingerprint,
+            "payload_digest": fragment.payload_digest,
+            "payload_size": fragment.payload_size,
+            "item_count": fragment.item_count,
+        },
+    )
+    return PreparedDurableProviderAssistantReplay(
+        replay_id=provider_replay_id(session_id=session_id, assistant_entry_id=assistant_entry_id, wire_api=wire_api),
+        session_id=session_id, workspace_id=workspace_id, assistant_entry_id=assistant_entry_id,
+        wire_api=wire_api, codec_kind=fragment.codec_kind,
+        provider_replay_contract_fingerprint=fragment.provider_replay_contract_fingerprint,
+        replay_target_fingerprint=fragment.replay_target_fingerprint,
+        public_projection_fingerprint=fragment.public_projection_fingerprint,
+        ordered_items=fragment.ordered_items, payload_bytes=fragment.payload_bytes,
+        payload_digest=fragment.payload_digest, payload_size=fragment.payload_size,
+        item_count=fragment.item_count, fragment_fingerprint=fingerprint,
+    )
+
+
 def _validate_provider_replay_payload_shape(
     codec_kind: ProviderAssistantReplayCodecKind,
     decoded: object,

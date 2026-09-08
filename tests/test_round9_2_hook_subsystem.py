@@ -382,7 +382,7 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
     assert not hasattr(STAGE2_LIMITS, "model_calls_per_turn_hard")
 
 

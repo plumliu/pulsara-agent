@@ -346,11 +346,26 @@ CREATE TABLE pulsara_v3.session_commands (
     )
 );
 
+CREATE TABLE pulsara_v3.imported_history_groups (
+    id text PRIMARY KEY,
+    session_id text NOT NULL,
+    workspace_id text NOT NULL,
+    status text NOT NULL CHECK (status IN ('COMPLETED', 'INTERRUPTED')),
+    final_entry_id text,
+    accepted_at timestamptz NOT NULL,
+    terminal_at timestamptz,
+    UNIQUE (session_id, id),
+    FOREIGN KEY (session_id, workspace_id)
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT
+);
+
 CREATE TABLE pulsara_v3.transcript_entries (
     id text PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
-    turn_id text NOT NULL,
+    entry_owner_kind text NOT NULL CHECK (entry_owner_kind IN ('EXECUTED_TURN', 'IMPORTED_HISTORY')),
+    turn_id text,
+    imported_history_group_id text,
     entry_sequence bigint NOT NULL CHECK (entry_sequence >= 1),
     entry_kind text NOT NULL CHECK (entry_kind IN (
         'USER_MESSAGE', 'USER_STEER', 'ASSISTANT_MESSAGE',
@@ -372,6 +387,13 @@ CREATE TABLE pulsara_v3.transcript_entries (
         'ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
         'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
     )),
+    imported_source_subagent_task_id text,
+    imported_source_plan_workflow_id text,
+    imported_source_plan_interaction_id text,
+    imported_source_plan_handoff_kind text CHECK (imported_source_plan_handoff_kind IN (
+        'ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
+        'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
+    )),
     inline_content bytea,
     blob_id text,
     content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[0-9a-f]{64}$'),
@@ -382,12 +404,12 @@ CREATE TABLE pulsara_v3.transcript_entries (
     UNIQUE (session_id, id),
     UNIQUE (session_id, id, provider_wire_api, provider_replay_fragment_id),
     UNIQUE (session_id, entry_sequence),
-    UNIQUE (session_id, source_subagent_task_id),
-    UNIQUE (session_id, source_inter_agent_tool_attempt_id),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
     FOREIGN KEY (session_id, turn_id)
         REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, imported_history_group_id)
+        REFERENCES pulsara_v3.imported_history_groups (session_id, id) ON DELETE RESTRICT,
     FOREIGN KEY (session_id, scope_subagent_task_id)
         REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT,
     FOREIGN KEY (session_id, context_binding_revision_id)
@@ -395,6 +417,19 @@ CREATE TABLE pulsara_v3.transcript_entries (
     FOREIGN KEY (blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK ((conversation_scope_kind = 'ROOT') = (scope_subagent_task_id IS NULL)),
+    CONSTRAINT ck_entry_owner_exact CHECK (
+        (entry_owner_kind = 'EXECUTED_TURN' AND turn_id IS NOT NULL
+            AND imported_history_group_id IS NULL
+            AND num_nonnulls(imported_source_subagent_task_id,
+                imported_source_plan_workflow_id, imported_source_plan_interaction_id,
+                imported_source_plan_handoff_kind) = 0)
+        OR
+        (entry_owner_kind = 'IMPORTED_HISTORY' AND turn_id IS NULL
+            AND imported_history_group_id IS NOT NULL
+            AND conversation_scope_kind = 'ROOT' AND scope_subagent_task_id IS NULL
+            AND num_nonnulls(source_subagent_task_id, source_inter_agent_tool_attempt_id,
+                source_plan_workflow_id, source_plan_interaction_id, source_plan_handoff_kind) = 0)
+    ),
     CHECK ((inline_content IS NULL) <> (blob_id IS NULL)),
     CONSTRAINT transcript_entries_tool_result_inline_ck CHECK (
         entry_kind <> 'TOOL_RESULT'
@@ -403,8 +438,10 @@ CREATE TABLE pulsara_v3.transcript_entries (
     CHECK (inline_content IS NULL OR octet_length(inline_content) = content_size),
     CHECK (
         (entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
-            AND context_binding_revision_id IS NOT NULL
+            AND ((entry_owner_kind = 'EXECUTED_TURN' AND context_binding_revision_id IS NOT NULL)
+                OR (entry_owner_kind = 'IMPORTED_HISTORY' AND context_binding_revision_id IS NULL))
             AND provider_input_through_sequence IS NOT NULL
+            AND provider_input_through_sequence >= 0
             AND provider_input_through_sequence < entry_sequence
             AND provider_wire_api IN (
                 'openai_chat_completions', 'openai_responses'
@@ -425,7 +462,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
             AND provider_replay_fragment_id IS NULL)
     ),
     CHECK (
-        (entry_kind = 'INTER_AGENT_MESSAGE'
+        entry_owner_kind = 'IMPORTED_HISTORY' OR (entry_kind = 'INTER_AGENT_MESSAGE'
             AND conversation_scope_kind = 'SUBAGENT_TASK'
             AND source_inter_agent_tool_attempt_id IS NOT NULL
             AND source_subagent_task_id IS NULL) OR
@@ -461,18 +498,55 @@ CREATE TABLE pulsara_v3.transcript_entries (
     CHECK (
         source_plan_handoff_kind <> 'ENTERED_PLAN'
         OR source_plan_interaction_id IS NULL
+    ),
+    CONSTRAINT ck_imported_source_exact CHECK (
+        entry_owner_kind = 'EXECUTED_TURN' OR ((
+            ((entry_kind = 'INTER_AGENT_MESSAGE' AND imported_source_subagent_task_id IS NOT NULL)
+                OR (entry_kind <> 'INTER_AGENT_MESSAGE' AND imported_source_subagent_task_id IS NULL))
+            AND (
+                (entry_kind = 'PLAN_CONTINUATION' AND imported_source_plan_workflow_id IS NOT NULL
+                    AND imported_source_plan_handoff_kind IN ('ENTERED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN'))
+                OR (entry_kind = 'USER_MESSAGE' AND imported_source_plan_workflow_id IS NOT NULL
+                    AND imported_source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN'))
+                OR (entry_kind NOT IN ('PLAN_CONTINUATION') AND imported_source_plan_workflow_id IS NULL
+                    AND imported_source_plan_handoff_kind IS NULL AND imported_source_plan_interaction_id IS NULL)
+            )
+            AND (imported_source_plan_handoff_kind IS NULL OR imported_source_plan_handoff_kind NOT IN ('REVISION_REQUESTED', 'APPROVED_PLAN')
+                OR imported_source_plan_interaction_id IS NOT NULL)
+            AND (imported_source_plan_handoff_kind IS NULL OR imported_source_plan_handoff_kind <> 'ENTERED_PLAN' OR imported_source_plan_interaction_id IS NULL)
+        ) IS TRUE)
     )
 );
+CREATE UNIQUE INDEX uq_pulsara_v3_entry_source_subagent
+    ON pulsara_v3.transcript_entries (session_id, source_subagent_task_id)
+    WHERE entry_owner_kind = 'EXECUTED_TURN' AND source_subagent_task_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_pulsara_v3_entry_source_attempt
+    ON pulsara_v3.transcript_entries (session_id, source_inter_agent_tool_attempt_id)
+    WHERE entry_owner_kind = 'EXECUTED_TURN' AND source_inter_agent_tool_attempt_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_pulsara_v3_imported_source_subagent
+    ON pulsara_v3.transcript_entries (session_id, imported_source_subagent_task_id)
+    WHERE entry_owner_kind = 'IMPORTED_HISTORY' AND imported_source_subagent_task_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_pulsara_v3_imported_plan_without_interaction
+    ON pulsara_v3.transcript_entries (session_id, imported_source_plan_workflow_id, imported_source_plan_handoff_kind)
+    WHERE entry_owner_kind = 'IMPORTED_HISTORY' AND imported_source_plan_workflow_id IS NOT NULL
+        AND imported_source_plan_interaction_id IS NULL;
+CREATE UNIQUE INDEX uq_pulsara_v3_imported_plan_with_interaction
+    ON pulsara_v3.transcript_entries (session_id, imported_source_plan_workflow_id, imported_source_plan_handoff_kind, imported_source_plan_interaction_id)
+    WHERE entry_owner_kind = 'IMPORTED_HISTORY' AND imported_source_plan_workflow_id IS NOT NULL
+        AND imported_source_plan_interaction_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_pulsara_v3_imported_plan_terminal_handoff
+    ON pulsara_v3.transcript_entries (session_id, imported_source_plan_workflow_id)
+    WHERE entry_owner_kind = 'IMPORTED_HISTORY' AND imported_source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN');
 CREATE UNIQUE INDEX uq_pulsara_v3_plan_handoff_without_interaction
     ON pulsara_v3.transcript_entries (
         session_id, source_plan_workflow_id, source_plan_handoff_kind
-    ) WHERE source_plan_workflow_id IS NOT NULL
+    ) WHERE entry_owner_kind = 'EXECUTED_TURN' AND source_plan_workflow_id IS NOT NULL
           AND source_plan_interaction_id IS NULL;
 CREATE UNIQUE INDEX uq_pulsara_v3_plan_handoff_with_interaction
     ON pulsara_v3.transcript_entries (
         session_id, source_plan_workflow_id, source_plan_handoff_kind,
         source_plan_interaction_id
-    ) WHERE source_plan_workflow_id IS NOT NULL
+    ) WHERE entry_owner_kind = 'EXECUTED_TURN' AND source_plan_workflow_id IS NOT NULL
           AND source_plan_interaction_id IS NOT NULL;
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_initial_entry_fk
     FOREIGN KEY (session_id, initial_entry_id)
@@ -482,6 +556,33 @@ ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_final_entry_fk
     FOREIGN KEY (session_id, final_entry_id)
     REFERENCES pulsara_v3.transcript_entries (session_id, id)
     ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE pulsara_v3.imported_history_groups ADD CONSTRAINT imported_group_final_fk
+    FOREIGN KEY (session_id, final_entry_id)
+    REFERENCES pulsara_v3.transcript_entries (session_id, id)
+    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+
+CREATE TABLE pulsara_v3.session_context_genesis (
+    session_id text PRIMARY KEY,
+    workspace_id text NOT NULL,
+    anchor_entry_id text NOT NULL,
+    model_call_binding jsonb NOT NULL,
+    base_kind text NOT NULL CHECK (base_kind IN ('FULL_HISTORY', 'SNAPSHOT')),
+    source_through_sequence bigint NOT NULL CHECK (source_through_sequence >= 0),
+    context_snapshot_id text,
+    FOREIGN KEY (session_id, workspace_id)
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, anchor_entry_id)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, context_snapshot_id)
+        REFERENCES pulsara_v3.context_snapshots (session_id, id) ON DELETE RESTRICT,
+    CHECK ((base_kind = 'FULL_HISTORY' AND context_snapshot_id IS NULL AND source_through_sequence = 0)
+        OR (base_kind = 'SNAPSHOT' AND context_snapshot_id IS NOT NULL)),
+    CHECK (jsonb_typeof(model_call_binding) = 'object'
+        AND model_call_binding ? 'connection_id' AND model_call_binding ? 'reasoning'
+        AND model_call_binding - ARRAY['connection_id', 'reasoning']::text[] = '{}'::jsonb
+        AND jsonb_typeof(model_call_binding->'connection_id') = 'string')
+);
 
 CREATE TABLE pulsara_v3.assistant_message_blocks (
     id text PRIMARY KEY,
@@ -614,12 +715,13 @@ CREATE TABLE pulsara_v3.tool_results (
     tool_call_entry_id text NOT NULL,
     tool_call_id text NOT NULL,
     attempt_id text,
+    result_record_kind text NOT NULL CHECK (result_record_kind IN ('EXECUTED', 'IMPORTED_HISTORY')),
     result_origin_kind text NOT NULL CHECK (result_origin_kind IN (
         'PHYSICAL_ATTEMPT', 'POLICY_NO_ATTEMPT', 'PLAN_CONTROL'
     )),
     control_plan_workflow_id text,
     control_plan_interaction_id text,
-    permission_snapshot_fingerprint text NOT NULL CHECK (
+    permission_snapshot_fingerprint text CHECK (
         permission_snapshot_fingerprint ~ '^sha256:[0-9a-f]{64}$'
     ),
     result_entry_id text NOT NULL,
@@ -677,6 +779,16 @@ CREATE TABLE pulsara_v3.tool_results (
     FOREIGN KEY (output_artifact_blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK (
+        (result_record_kind = 'IMPORTED_HISTORY'
+            AND permission_snapshot_fingerprint IS NULL
+            AND attempt_id IS NULL AND control_plan_workflow_id IS NULL
+            AND control_plan_interaction_id IS NULL
+            AND (
+                (result_origin_kind = 'PHYSICAL_ATTEMPT' AND result_state IN ('SUCCESS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED'))
+                OR (result_origin_kind = 'POLICY_NO_ATTEMPT' AND result_state IN ('INVALID_ARGUMENTS', 'PERMISSION_DENIED', 'TOOL_UNAVAILABLE', 'CANCELLED_BEFORE_DISPATCH'))
+                OR (result_origin_kind = 'PLAN_CONTROL' AND result_state IN ('SUCCESS', 'APPLICATION_ERROR'))
+            )) OR
+        (result_record_kind = 'EXECUTED' AND permission_snapshot_fingerprint IS NOT NULL AND (
         (result_origin_kind = 'POLICY_NO_ATTEMPT'
             AND attempt_id IS NULL
             AND control_plan_workflow_id IS NULL
@@ -696,6 +808,7 @@ CREATE TABLE pulsara_v3.tool_results (
             AND num_nonnulls(control_plan_workflow_id, control_plan_interaction_id) = 1
             AND result_state IN ('SUCCESS', 'APPLICATION_ERROR')
         )
+        ))
     ),
     CHECK (
         observation_duration_microseconds IS NULL OR (
@@ -759,8 +872,21 @@ CREATE TABLE pulsara_v3.tool_results (
     )
 );
 CREATE UNIQUE INDEX uq_pulsara_v3_tool_result_output_artifact_id
-    ON pulsara_v3.tool_results (output_artifact_id)
+    ON pulsara_v3.tool_results (session_id, output_artifact_id)
     WHERE output_artifact_id IS NOT NULL;
+
+CREATE TABLE pulsara_v3.imported_tool_call_closures (
+    session_id text NOT NULL,
+    assistant_entry_id text NOT NULL,
+    tool_call_id text NOT NULL,
+    target_provider_input_through_sequence bigint NOT NULL CHECK (target_provider_input_through_sequence >= 0),
+    closure_kind text NOT NULL CHECK (closure_kind IN (
+        'INTERRUPTED_BEFORE_DISPATCH', 'INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED', 'PLAN_INTERACTION_ABORTED'
+    )),
+    PRIMARY KEY (session_id, assistant_entry_id, tool_call_id),
+    FOREIGN KEY (session_id, assistant_entry_id, tool_call_id)
+        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE RESTRICT
+);
 
 CREATE TABLE pulsara_v3.prompt_queue_items (
     id text PRIMARY KEY,
@@ -1118,7 +1244,7 @@ ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_plan
     REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE RESTRICT;
 CREATE UNIQUE INDEX uq_pulsara_v3_entry_plan_terminal_handoff_claim
     ON pulsara_v3.transcript_entries (session_id, source_plan_workflow_id)
-    WHERE source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN');
+    WHERE entry_owner_kind = 'EXECUTED_TURN' AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN');
 ALTER TABLE pulsara_v3.tool_results ADD CONSTRAINT tool_results_plan_workflow_fk
     FOREIGN KEY (session_id, control_plan_workflow_id)
     REFERENCES pulsara_v3.plan_workflows (session_id, id)
@@ -1933,7 +2059,8 @@ BEGIN
                scope_subagent_task_id
           INTO observed_kind, observed_turn_id, observed_scope, observed_task_id
         FROM pulsara_v3.transcript_entries
-        WHERE session_id = NEW.session_id AND id = NEW.initial_entry_id;
+        WHERE session_id = NEW.session_id AND id = NEW.initial_entry_id
+          AND entry_owner_kind = 'EXECUTED_TURN';
         IF observed_turn_id IS DISTINCT FROM NEW.id
            OR observed_scope IS DISTINCT FROM NEW.conversation_scope_kind
            OR observed_task_id IS DISTINCT FROM NEW.scope_subagent_task_id THEN
@@ -1948,6 +2075,17 @@ BEGIN
            OR (NEW.conversation_scope_kind = 'SUBAGENT_TASK'
                 AND observed_kind IS DISTINCT FROM 'USER_MESSAGE') THEN
             RAISE EXCEPTION 'turn initial entry kind is invalid for its scope'
+                USING ERRCODE = '23514';
+        END IF;
+        IF NEW.final_entry_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM pulsara_v3.transcript_entries
+            WHERE session_id = NEW.session_id AND id = NEW.final_entry_id
+              AND entry_owner_kind = 'EXECUTED_TURN' AND turn_id = NEW.id
+              AND workspace_id = NEW.workspace_id
+              AND conversation_scope_kind = NEW.conversation_scope_kind
+              AND scope_subagent_task_id IS NOT DISTINCT FROM NEW.scope_subagent_task_id
+        ) THEN
+            RAISE EXCEPTION 'turn final entry must belong to its exact executed turn'
                 USING ERRCODE = '23514';
         END IF;
         IF NEW.permission_overlay = 'PLAN_READ_ONLY' THEN
@@ -1980,6 +2118,37 @@ BEGIN
     END IF;
 
     IF TG_TABLE_NAME = 'transcript_entries' THEN
+        IF NEW.entry_owner_kind = 'IMPORTED_HISTORY' THEN
+            -- Genesis seals a dense, immutable imported prefix. All positions
+            -- through the anchor are occupied; subsequent inserts cannot append
+            -- imported history or interleave it with executed entries.
+            SELECT a.entry_sequence INTO observed_ordinal
+            FROM pulsara_v3.session_context_genesis AS g
+            JOIN pulsara_v3.transcript_entries AS a
+              ON a.session_id = g.session_id AND a.id = g.anchor_entry_id
+            WHERE g.session_id = NEW.session_id AND g.workspace_id = NEW.workspace_id;
+            IF observed_ordinal IS NULL OR NEW.entry_sequence > observed_ordinal
+               OR EXISTS (SELECT 1 FROM pulsara_v3.transcript_entries
+                    WHERE session_id = NEW.session_id AND entry_owner_kind = 'EXECUTED_TURN'
+                      AND entry_sequence <= observed_ordinal) THEN
+                RAISE EXCEPTION 'imported history must belong to the sealed genesis prefix' USING ERRCODE = '23514';
+            END IF;
+            PERFORM 1 FROM pulsara_v3.imported_history_groups
+            WHERE session_id = NEW.session_id AND workspace_id = NEW.workspace_id
+              AND id = NEW.imported_history_group_id;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'imported entry group does not exact-join' USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END IF;
+        PERFORM 1 FROM pulsara_v3.turns AS t
+        WHERE t.session_id = NEW.session_id AND t.id = NEW.turn_id
+          AND t.workspace_id = NEW.workspace_id
+          AND t.conversation_scope_kind = NEW.conversation_scope_kind
+          AND t.scope_subagent_task_id IS NOT DISTINCT FROM NEW.scope_subagent_task_id;
+        IF NOT FOUND OR NEW.entry_owner_kind <> 'EXECUTED_TURN' THEN
+            RAISE EXCEPTION 'executed entry must exact-join its turn scope' USING ERRCODE = '23514';
+        END IF;
         IF NEW.source_inter_agent_tool_attempt_id IS NOT NULL THEN
             SELECT b.tool_name, e.conversation_scope_kind,
                    b.tool_arguments ->> 'task_id',
@@ -2241,10 +2410,30 @@ BEGIN
     END IF;
 
     IF TG_TABLE_NAME = 'tool_results' THEN
+        IF NEW.result_record_kind = 'IMPORTED_HISTORY' THEN
+            PERFORM 1 FROM pulsara_v3.transcript_entries AS call_entry
+            JOIN pulsara_v3.transcript_entries AS result_entry
+              ON result_entry.session_id = call_entry.session_id
+             AND result_entry.imported_history_group_id = call_entry.imported_history_group_id
+            WHERE call_entry.session_id = NEW.session_id
+              AND call_entry.id = NEW.tool_call_entry_id
+              AND result_entry.id = NEW.result_entry_id
+              AND call_entry.workspace_id = NEW.workspace_id AND result_entry.workspace_id = NEW.workspace_id
+              AND call_entry.entry_owner_kind = 'IMPORTED_HISTORY'
+              AND result_entry.entry_owner_kind = 'IMPORTED_HISTORY'
+              AND call_entry.entry_kind = 'ASSISTANT_TOOL_REQUEST'
+              AND result_entry.entry_kind = 'TOOL_RESULT'
+              AND result_entry.inline_content IS NOT NULL AND result_entry.blob_id IS NULL;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'imported tool result must exact-join its imported call and group' USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END IF;
         SELECT entry_kind, turn_id INTO observed_kind, observed_turn_id
         FROM pulsara_v3.transcript_entries
         WHERE session_id = NEW.session_id AND workspace_id = NEW.workspace_id
           AND id = NEW.result_entry_id
+          AND entry_owner_kind = 'EXECUTED_TURN'
           AND inline_content IS NOT NULL AND blob_id IS NULL;
         IF observed_kind IS DISTINCT FROM 'TOOL_RESULT' THEN
             RAISE EXCEPTION 'tool result relation requires inline TOOL_RESULT entry'
@@ -2256,6 +2445,7 @@ BEGIN
           ON target_turn.session_id = call_entry.session_id
          AND target_turn.id = call_entry.turn_id
         WHERE call_entry.session_id = NEW.session_id
+          AND call_entry.entry_owner_kind = 'EXECUTED_TURN'
           AND call_entry.id = NEW.tool_call_entry_id
           AND call_entry.turn_id = observed_turn_id
           AND target_turn.permission_snapshot_fingerprint
@@ -2294,6 +2484,14 @@ BEGIN
     END IF;
 
     IF TG_TABLE_NAME = 'prompt_queue_items' THEN
+        IF NEW.consumed_entry_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM pulsara_v3.transcript_entries
+            WHERE session_id = NEW.session_id AND id = NEW.consumed_entry_id
+              AND entry_owner_kind = 'EXECUTED_TURN'
+        ) THEN
+            RAISE EXCEPTION 'consumed queue entry must have executed owner'
+                USING ERRCODE = '23514';
+        END IF;
         -- Keep the table discriminator in its own branch.  PL/pgSQL record
         -- field lookup is dynamic and an `AND NEW.target_turn_id ...` guard
         -- can still resolve that field for trigger rows from another table.
@@ -2345,6 +2543,7 @@ BEGIN
             SELECT id INTO observed_turn_id
             FROM pulsara_v3.transcript_entries
             WHERE session_id = NEW.session_id
+              AND entry_owner_kind = 'EXECUTED_TURN'
               AND source_plan_workflow_id = NEW.pending_plan_handoff_workflow_id
               AND source_plan_handoff_kind = NEW.pending_plan_handoff_kind;
             IF FOUND AND (
@@ -2362,7 +2561,8 @@ BEGIN
               INTO observed_workflow_id, observed_interaction_id,
                    observed_handoff_kind
             FROM pulsara_v3.transcript_entries
-            WHERE session_id = NEW.session_id AND id = NEW.consumed_entry_id;
+            WHERE session_id = NEW.session_id AND id = NEW.consumed_entry_id
+              AND entry_owner_kind = 'EXECUTED_TURN';
             IF observed_workflow_id IS DISTINCT FROM
                     NEW.pending_plan_handoff_workflow_id
                OR observed_interaction_id IS DISTINCT FROM
@@ -2380,7 +2580,8 @@ BEGIN
         SELECT conversation_scope_kind, scope_subagent_task_id
           INTO observed_scope, observed_task_id
         FROM pulsara_v3.transcript_entries
-        WHERE session_id = NEW.session_id AND id = NEW.entry_id;
+        WHERE session_id = NEW.session_id AND id = NEW.entry_id
+          AND entry_owner_kind = 'EXECUTED_TURN';
         IF observed_scope IS DISTINCT FROM 'SUBAGENT_TASK'
            OR observed_task_id IS DISTINCT FROM NEW.task_id THEN
             RAISE EXCEPTION 'subagent child entry must belong to its exact task scope'
@@ -2395,7 +2596,8 @@ BEGIN
             FROM pulsara_v3.transcript_entries AS entry
             JOIN pulsara_v3.turns AS turn
               ON turn.session_id = entry.session_id AND turn.id = entry.turn_id
-            WHERE entry.session_id = NEW.session_id AND entry.id = NEW.entry_id;
+            WHERE entry.session_id = NEW.session_id AND entry.id = NEW.entry_id
+              AND entry.entry_owner_kind = 'EXECUTED_TURN';
             IF observed_status IS DISTINCT FROM 'COMPLETED'
                OR observed_kind IS DISTINCT FROM 'COMPLETED'
                OR observed_task_id IS DISTINCT FROM NEW.entry_id THEN
@@ -2438,6 +2640,118 @@ $$;
 
 REVOKE ALL ON FUNCTION pulsara_v3.enforce_conversation_kernel_invariants()
     FROM PUBLIC;
+
+CREATE FUNCTION pulsara_v3.enforce_imported_history_invariants()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    anchor_sequence bigint;
+    history_count bigint;
+    execution_entry text;
+    execution_session text;
+BEGIN
+    -- Occurrence and admission targets cannot point at a copied history row.
+    execution_session := NULL;
+    IF TG_TABLE_NAME = 'agent_events' THEN
+        execution_entry := NEW.subject_entry_id;
+        execution_session := NEW.session_id;
+    ELSIF TG_TABLE_NAME = 'session_commands' THEN
+        execution_entry := NEW.target_entry_id;
+        execution_session := NEW.session_id;
+    ELSIF TG_TABLE_NAME = 'interaction_decisions' THEN
+        execution_entry := NEW.subject_tool_call_entry_id;
+        execution_session := NEW.session_id;
+    ELSIF TG_TABLE_NAME = 'memory_candidates' THEN
+        execution_entry := NEW.producer_entry_id;
+        execution_session := NEW.origin_session_id;
+    END IF;
+    IF execution_entry IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pulsara_v3.transcript_entries
+        WHERE session_id = execution_session AND id = execution_entry
+          AND entry_owner_kind = 'EXECUTED_TURN'
+    ) THEN
+        RAISE EXCEPTION 'execution occurrence cannot target imported history' USING ERRCODE = '23514';
+    END IF;
+    IF TG_TABLE_NAME = 'session_context_genesis' THEN
+        SELECT e.entry_sequence INTO anchor_sequence
+        FROM pulsara_v3.transcript_entries AS e
+        JOIN pulsara_v3.imported_history_groups AS g
+          ON g.session_id = e.session_id AND g.id = e.imported_history_group_id
+        WHERE e.session_id = NEW.session_id AND e.id = NEW.anchor_entry_id
+          AND e.workspace_id = NEW.workspace_id AND e.entry_owner_kind = 'IMPORTED_HISTORY'
+          AND e.entry_kind = 'ASSISTANT_MESSAGE' AND g.final_entry_id = e.id;
+        SELECT count(*) INTO history_count FROM pulsara_v3.transcript_entries
+        WHERE session_id = NEW.session_id AND entry_owner_kind = 'IMPORTED_HISTORY';
+        IF anchor_sequence IS NULL OR history_count <> anchor_sequence
+           OR NEW.source_through_sequence >= anchor_sequence
+           OR EXISTS (SELECT 1 FROM pulsara_v3.transcript_entries
+                      WHERE session_id = NEW.session_id AND entry_owner_kind = 'EXECUTED_TURN') THEN
+            RAISE EXCEPTION 'genesis requires one complete imported prefix and no execution' USING ERRCODE = '23514';
+        END IF;
+        IF NEW.base_kind = 'SNAPSHOT' AND NOT EXISTS (
+            SELECT 1 FROM pulsara_v3.context_snapshots WHERE session_id = NEW.session_id
+            AND id = NEW.context_snapshot_id AND workspace_id = NEW.workspace_id
+            AND source_through_sequence = NEW.source_through_sequence
+        ) THEN
+            RAISE EXCEPTION 'genesis snapshot does not exact-join' USING ERRCODE = '23514';
+        END IF;
+    ELSIF TG_TABLE_NAME = 'imported_history_groups' THEN
+        IF NEW.final_entry_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM pulsara_v3.transcript_entries WHERE session_id = NEW.session_id
+            AND id = NEW.final_entry_id AND imported_history_group_id = NEW.id
+            AND entry_owner_kind = 'IMPORTED_HISTORY'
+        ) THEN
+            RAISE EXCEPTION 'imported group final does not exact-join' USING ERRCODE = '23514';
+        END IF;
+    ELSIF TG_TABLE_NAME = 'imported_tool_call_closures' THEN
+        IF NOT EXISTS (SELECT 1 FROM pulsara_v3.transcript_entries
+            WHERE session_id = NEW.session_id AND id = NEW.assistant_entry_id
+            AND entry_owner_kind = 'IMPORTED_HISTORY' AND entry_kind = 'ASSISTANT_TOOL_REQUEST'
+            AND entry_sequence <= NEW.target_provider_input_through_sequence)
+           OR EXISTS (SELECT 1 FROM pulsara_v3.tool_results AS r
+                JOIN pulsara_v3.transcript_entries AS e ON e.session_id = r.session_id AND e.id = r.result_entry_id
+                WHERE r.session_id = NEW.session_id AND r.tool_call_entry_id = NEW.assistant_entry_id
+                AND r.tool_call_id = NEW.tool_call_id AND e.entry_sequence <= NEW.target_provider_input_through_sequence) THEN
+            RAISE EXCEPTION 'imported closure requires an imported call without a visible result' USING ERRCODE = '23514';
+        END IF;
+    ELSIF TG_TABLE_NAME = 'tool_execution_attempts' THEN
+        IF NOT EXISTS (SELECT 1 FROM pulsara_v3.transcript_entries AS e
+            JOIN pulsara_v3.turns AS t ON t.session_id = e.session_id AND t.id = e.turn_id
+            WHERE e.session_id = NEW.session_id AND e.id = NEW.assistant_entry_id
+            AND e.entry_owner_kind = 'EXECUTED_TURN'
+            AND t.permission_snapshot_fingerprint = NEW.permission_snapshot_fingerprint) THEN
+            RAISE EXCEPTION 'physical attempt requires an executed call and permission' USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_genesis_integrity
+AFTER INSERT ON pulsara_v3.session_context_genesis DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
+REVOKE ALL ON FUNCTION pulsara_v3.enforce_imported_history_invariants() FROM PUBLIC;
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_imported_group_integrity
+AFTER INSERT ON pulsara_v3.imported_history_groups DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_imported_closure_integrity
+AFTER INSERT ON pulsara_v3.imported_tool_call_closures DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_attempt_execution_owner
+AFTER INSERT ON pulsara_v3.tool_execution_attempts DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
+
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_event_execution_owner
+AFTER INSERT ON pulsara_v3.agent_events DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_command_execution_owner
+AFTER INSERT ON pulsara_v3.session_commands DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_decision_execution_owner
+AFTER INSERT ON pulsara_v3.interaction_decisions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_memory_execution_owner
+AFTER INSERT ON pulsara_v3.memory_candidates DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
 
 CREATE CONSTRAINT TRIGGER trg_pulsara_v3_entry_source_integrity
 AFTER INSERT ON pulsara_v3.transcript_entries

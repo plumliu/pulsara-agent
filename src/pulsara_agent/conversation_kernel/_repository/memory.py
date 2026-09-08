@@ -168,7 +168,7 @@ class _MemoryOperations(_MemoryManagementOperations):
                            turn.model_call_binding
                     FROM pulsara_v3.memory_candidates AS c
                     JOIN pulsara_v3.transcript_entries AS source
-                      ON source.session_id=c.origin_session_id
+                      ON source.entry_owner_kind = 'EXECUTED_TURN' AND source.session_id =c.origin_session_id
                      AND source.id=c.producer_entry_id
                     JOIN pulsara_v3.turns AS turn
                       ON turn.session_id=source.session_id AND turn.id=source.turn_id
@@ -597,7 +597,7 @@ class _MemoryOperations(_MemoryManagementOperations):
                       AND event_type='InterAgentMessageAccepted')
                   )
             ) AS occurrence ON TRUE
-            WHERE e.session_id=%s AND e.turn_id=%s
+            WHERE e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id =%s AND e.turn_id=%s
               AND e.entry_sequence>%s
             ORDER BY occurrence.event_sequence NULLS LAST, e.entry_sequence, e.id
             """,
@@ -871,7 +871,7 @@ class _MemoryOperations(_MemoryManagementOperations):
             FROM pulsara_v3.transcript_entries AS e
             LEFT JOIN pulsara_v3.blobs AS b
               ON b.id=e.blob_id AND b.workspace_id=e.workspace_id
-            WHERE e.session_id=%s AND e.id=%s
+            WHERE e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id =%s AND e.id=%s
             """,
             (maximum_bytes + 4, session_id, entry_id),
         ).fetchone()
@@ -2603,7 +2603,7 @@ def _read_memory_governance_terminal_candidate(
                turn.model_call_binding
         FROM pulsara_v3.memory_candidates AS c
         JOIN pulsara_v3.transcript_entries AS source
-          ON source.session_id=c.origin_session_id
+          ON source.entry_owner_kind = 'EXECUTED_TURN' AND source.session_id =c.origin_session_id
          AND source.id=c.producer_entry_id
         JOIN pulsara_v3.turns AS turn
           ON turn.session_id=source.session_id AND turn.id=source.turn_id

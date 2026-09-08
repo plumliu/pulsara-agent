@@ -78,7 +78,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:175bcba427143930a6969f38b8feeb642fffe21d7486654cbbde8821e677f87b"
+    "sha256:3fa9eefbd33f5b5fda4faae0892c00f1f5aacae52231e471eac4875130797492"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms

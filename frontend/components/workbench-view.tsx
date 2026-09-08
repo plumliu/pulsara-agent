@@ -39,6 +39,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ContextCompactionBoundary,
+  ProtocolCanonicalControl,
   ModelCallBindingPayload,
   ModelConfigurationSummary,
   ReasoningSelectionPayload,
@@ -56,6 +57,8 @@ interface WorkbenchViewProps {
   session: SessionSummary;
   messages: Message[];
   contextCompaction?: ContextCompactionBoundary;
+  initialContextBase?: ProtocolCanonicalControl['initial_context_base'];
+  onFork: (entryId: string) => Promise<void>;
   todo?: TodoRun;
   activePlanMode: boolean;
   isRunning: boolean;
@@ -718,6 +721,7 @@ function AssistantMessage({
   skills,
   mcpToolRefs,
   onNotify,
+  onFork,
 }: {
   message: Message;
   startsAssistantRun: boolean;
@@ -729,7 +733,10 @@ function AssistantMessage({
   skills: SkillCapability[];
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   onNotify: WorkbenchViewProps['onNotify'];
+  onFork: WorkbenchViewProps['onFork'];
 }) {
+  const [forking, setForking] = useState(false);
+  const forkInFlight = useRef(false);
   const hasNaturalLanguage = Boolean(message.body.trim());
   const canCopyResponse = hasNaturalLanguage
     && message.assistantKind === 'terminal'
@@ -760,7 +767,7 @@ function AssistantMessage({
           {!startsAssistantRun && <AssistantHeading message={message} response />}
           <div className="assistant-copy">
             <div className="assistant-markdown"><MarkdownBody body={message.body} /></div>
-            {canCopyResponse && (
+            {(canCopyResponse || message.forkEligible) && (
               <div className="response-actions">
                 <button
                   onClick={() => {
@@ -771,6 +778,16 @@ function AssistantMessage({
                   }}
                   aria-label="复制回复"
                 ><Copy size={13} /></button>
+                {message.forkEligible && (
+                  <button aria-label="从此处分叉" title="从此处分叉" disabled={forking} aria-busy={forking}
+                    onClick={() => {
+                      if (forkInFlight.current) return;
+                      forkInFlight.current = true;
+                      setForking(true);
+                      void onFork(message.id).finally(() => { forkInFlight.current = false; setForking(false); });
+                    }}
+                  >{forking ? <LoaderCircle size={13} /> : <GitFork size={13} />}</button>
+                )}
                 <time className="response-time">{message.time}</time>
               </div>
             )}
@@ -978,15 +995,16 @@ function InteractionCard({
   );
 }
 
-function ContextCompactionDivider() {
+function ContextCompactionDivider({ inherited = false }: { inherited?: boolean }) {
+  const label = inherited ? '已保留分叉点的有效上下文，压缩前记录请在原会话查看' : '上下文已压缩';
   return (
     <div
       className="context-compaction-divider"
       role="separator"
-      aria-label="上下文已压缩"
+      aria-label={label}
     >
       <span className="context-compaction-divider__line" aria-hidden="true" />
-      <span>上下文已压缩</span>
+      <span>{label}</span>
       <span className="context-compaction-divider__line" aria-hidden="true" />
     </div>
   );
@@ -1017,6 +1035,8 @@ export function WorkbenchView({
   session,
   messages,
   contextCompaction,
+  initialContextBase,
+  onFork,
   todo,
   activePlanMode,
   isRunning,
@@ -1049,8 +1069,18 @@ export function WorkbenchView({
   onNotify,
   onPermissionChange,
 }: WorkbenchViewProps) {
-  const [draft, setDraft] = useState('');
-  const [requestPlan, setRequestPlan] = useState(false);
+  // Drafts are window-local and session-owned, never imported Fork material.
+  // Keep the source draft available when returning from a newly opened child.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [planRequests, setPlanRequests] = useState<Record<string, boolean>>({});
+  const draft = drafts[session.id] ?? '';
+  const requestPlan = planRequests[session.id] ?? false;
+  const setDraft = useCallback((value: string | ((current: string) => string)) => {
+    setDrafts(current => ({ ...current, [session.id]: typeof value === 'function' ? value(current[session.id] ?? '') : value }));
+  }, [session.id]);
+  const setRequestPlan = useCallback((value: boolean | ((current: boolean) => boolean)) => {
+    setPlanRequests(current => ({ ...current, [session.id]: typeof value === 'function' ? value(current[session.id] ?? false) : value }));
+  }, [session.id]);
   const [submitting, setSubmitting] = useState(false);
   const [compacting, setCompacting] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
@@ -1145,7 +1175,7 @@ export function WorkbenchView({
     setSkillOpen(false);
     setOptionsOpen(false);
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
-  }, []);
+  }, [setDraft]);
 
   const updateJumpPosition = useCallback(() => {
     const workbench = workbenchRef.current;
@@ -1366,6 +1396,7 @@ export function WorkbenchView({
               <span>{session.id ? '在下方输入目标，Pulsara 会立即开始处理。' : '新建会话后，任务进展和回复会持续显示在这里。'}</span>
             </div>
           )}
+          {initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
           {messages.map((message, index) => (
             <div key={message.id} data-memory-entry={message.id} style={{ display: 'contents' }}>
               {contextCompactionIndex === index && contextCompaction && (
@@ -1385,6 +1416,7 @@ export function WorkbenchView({
                     skills={skills}
                     mcpToolRefs={mcpToolRefs}
                     onNotify={onNotify}
+                    onFork={onFork}
                   />
                 )}
             </div>

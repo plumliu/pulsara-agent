@@ -549,7 +549,7 @@ class _RepositoryKernel:
                   AND r.id IS NULL
                   AND EXISTS (
                     SELECT 1 FROM pulsara_v3.transcript_entries AS e
-                    WHERE e.session_id = b.session_id
+                    WHERE e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
                       AND e.id = b.assistant_entry_id
                       AND e.turn_id = t.id
                   )
@@ -717,13 +717,13 @@ class _RepositoryKernel:
             return identity
         query: str | None = None
         if slot is SubjectSlot.ENTRY:
-            query = "SELECT turn_id FROM pulsara_v3.transcript_entries WHERE id = %s"
+            query = "SELECT turn_id FROM pulsara_v3.transcript_entries WHERE entry_owner_kind = 'EXECUTED_TURN' AND id = %s"
         elif slot is SubjectSlot.TOOL_ATTEMPT:
             query = """
                 SELECT e.turn_id
                 FROM pulsara_v3.tool_execution_attempts AS a
                 JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = a.session_id AND e.id = a.assistant_entry_id
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = a.session_id AND e.id = a.assistant_entry_id
                 WHERE a.id = %s
             """
         elif slot is SubjectSlot.QUEUE_ITEM:
@@ -731,7 +731,7 @@ class _RepositoryKernel:
                 SELECT coalesce(q.target_turn_id, e.turn_id) AS turn_id
                 FROM pulsara_v3.prompt_queue_items AS q
                 LEFT JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = q.session_id AND e.id = q.consumed_entry_id
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = q.session_id AND e.id = q.consumed_entry_id
                 WHERE q.id = %s
             """
         elif slot is SubjectSlot.INTERACTION_DECISION:
@@ -739,7 +739,7 @@ class _RepositoryKernel:
                 SELECT coalesce(d.subject_turn_id, e.turn_id) AS turn_id
                 FROM pulsara_v3.interaction_decisions AS d
                 LEFT JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = d.session_id
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = d.session_id
                  AND e.id = d.subject_tool_call_entry_id
                 WHERE d.id = %s
             """
@@ -755,7 +755,7 @@ class _RepositoryKernel:
                 SELECT e.turn_id
                 FROM pulsara_v3.subagent_task_children AS c
                 JOIN pulsara_v3.transcript_entries AS e
-                  ON e.session_id = c.session_id AND e.id = c.entry_id
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = c.session_id AND e.id = c.entry_id
                 WHERE c.id = %s
             """
         elif slot is SubjectSlot.PLAN_WORKFLOW:
@@ -825,7 +825,7 @@ class _RepositoryKernel:
         connection.execute(
             """
             INSERT INTO pulsara_v3.transcript_entries (
-                id, session_id, workspace_id, turn_id, entry_sequence,
+                entry_owner_kind, id, session_id, workspace_id, turn_id, entry_sequence,
                 entry_kind, conversation_scope_kind, scope_subagent_task_id,
                 context_binding_revision_id, provider_input_through_sequence,
                 provider_wire_api, provider_replay_disposition,
@@ -835,7 +835,7 @@ class _RepositoryKernel:
                 source_plan_handoff_kind,
                 inline_content, blob_id, content_digest, content_size,
                 content_media_type, content_codec
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s)
             """,
@@ -944,7 +944,7 @@ class _RepositoryKernel:
                    r.source_through_sequence
             FROM pulsara_v3.turns AS t
             JOIN pulsara_v3.transcript_entries AS initial
-              ON initial.session_id = t.session_id
+              ON initial.entry_owner_kind = 'EXECUTED_TURN' AND initial.session_id = t.session_id
              AND initial.id = t.initial_entry_id
             JOIN pulsara_v3.turn_context_binding_revisions AS r
               ON r.session_id = t.session_id
@@ -957,6 +957,12 @@ class _RepositoryKernel:
             """,
             (session_id, turn_id, scope_kind.value, scope_subagent_task_id),
         ).fetchone()
+        if predecessor is None and scope_kind is ConversationScopeKind.ROOT:
+            predecessor = connection.execute(
+                "SELECT base_kind, context_snapshot_id, source_through_sequence "
+                "FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
+                (session_id,),
+            ).fetchone()
         if predecessor is not None and str(predecessor["base_kind"]) == "SNAPSHOT":
             base_kind = "SNAPSHOT"
             snapshot_id = str(predecessor["context_snapshot_id"])
@@ -1002,7 +1008,7 @@ class _RepositoryKernel:
                    r.source_through_sequence
             FROM pulsara_v3.turns AS t
             JOIN pulsara_v3.transcript_entries AS initial
-              ON initial.session_id = t.session_id
+              ON initial.entry_owner_kind = 'EXECUTED_TURN' AND initial.session_id = t.session_id
              AND initial.id = t.initial_entry_id
             JOIN pulsara_v3.turn_context_binding_revisions AS r
               ON r.session_id = t.session_id
@@ -1022,6 +1028,12 @@ class _RepositoryKernel:
                 initial_entry_sequence,
             ),
         ).fetchone()
+        if predecessor is None and scope_kind is ConversationScopeKind.ROOT:
+            predecessor = connection.execute(
+                "SELECT base_kind, context_snapshot_id, source_through_sequence "
+                "FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
+                (session_id,),
+            ).fetchone()
         inherited = predecessor is not None and str(predecessor["base_kind"]) == "SNAPSHOT"
         expected_kind = "SNAPSHOT" if inherited else "FULL_HISTORY"
         expected_snapshot = (
@@ -1057,7 +1069,7 @@ class _RepositoryKernel:
             JOIN pulsara_v3.agent_events AS a
               ON a.session_id = e.session_id
              AND a.subject_entry_id = e.id
-            WHERE e.session_id = %s AND e.id = %s
+            WHERE e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = %s AND e.id = %s
             """,
             (session_id, entry_id),
         ).fetchone()

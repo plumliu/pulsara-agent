@@ -4148,7 +4148,7 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 25
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

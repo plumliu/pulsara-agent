@@ -30,7 +30,7 @@ Python KernelHostCore
 └── renderer-neutral Protocol v3 gateway
 
 PostgreSQL
-├── pulsara_v3：25 张产品关系
+├── pulsara_v3：28 张产品关系
 ├── selective agent_events occurrence journal
 ├── public.vector capability
 └── public.pulsara_schema_migrations（只保存 universe metadata）
@@ -58,6 +58,9 @@ epoch。
 
 Kernel 当前支持：
 
+- 从已结算最终回复发起[会话分叉](PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md)：
+  把分叉点当时的有效摘要与保留历史复制到独立、空闲的新会话，不重跑原来的执行。
+  保留该点的历史模型选择；文件与当前 advisory memory 仍共享同一 workspace/domain；
 - OpenAI-compatible Responses 与 Chat Completions transport；
 - 显式provider-neutral `COMPLETED | OUTPUT_INCOMPLETE | PROVIDER_ERROR`
   model terminal、whole-response atomic assistant acceptance，以及不依赖
@@ -255,7 +258,7 @@ process-local。四child只是physical concurrency，不是task graph生命周�
 accepted work保持`PENDING_START`，capacity释放后继续启动。Direct dependency result只
 传播一条edge，ROOT通过list/wait/accept显式观察result。Round 5B compaction handoff复用
 同一task board，不增加durable inbox、run、receipt或recovery graph。当前oracle为29类
-Committed event、24类Live event、11个subject slot、1个append guard、25张product
+Committed event、24类Live event、11个subject slot、1个append guard、28张product
 relation和0类durable job。验证记录在
 [`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json)。
 Fingerprint subtraction hard-cut一次性删除same-process self hash、重复的

@@ -155,6 +155,7 @@ class LocalSessionController:
         self._by_session: dict[str, HostSessionHandle] = {}
         self._by_host: dict[str, HostSessionHandle] = {}
         self._resumes: dict[str, asyncio.Task[HostSessionHandle]] = {}
+        self._forks: set[asyncio.Task[dict[str, object]]] = set()
         self._lock = asyncio.Lock()
         self._capability_mutation_lock = core.mcp_management.lane
         self._closing = False
@@ -1023,6 +1024,41 @@ class LocalSessionController:
             )
             raise
 
+    async def read_session(self, session_id: str) -> dict[str, object] | None:
+        summary = await self.core.read_resumable_session(
+            session_id, memory_domain_id=self.workspace_input.memory_domain_id,
+        )
+        return None if summary is None else self._summary_payload(summary, session_id in self._by_session)
+
+    async def fork_conversation(
+        self, source_session_id: str, *, anchor_entry_id: str, child_session_id: str,
+    ) -> dict[str, object]:
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Local Web application is draining")
+            task = asyncio.create_task(self._fork_owner(source_session_id, anchor_entry_id, child_session_id),
+                                       name=f"local-web-fork:{child_session_id}")
+            self._forks.add(task)
+            task.add_done_callback(self._forks.discard)
+        # A disconnected browser must not cancel a commit or turn an open failure
+        # into a false NOT_CREATED. Shutdown joins this same settlement owner.
+        return await asyncio.shield(task)
+
+    async def _fork_owner(self, source_session_id: str, anchor_entry_id: str, child_session_id: str) -> dict[str, object]:
+        creation = await self.core.fork_conversation(
+            source_session_id=source_session_id, anchor_entry_id=anchor_entry_id,
+            child_session_id=child_session_id, memory_domain_id=self.workspace_input.memory_domain_id,
+        )
+        if not creation.created:
+            return {"outcome": "NOT_CREATED", "child_session_id": child_session_id,
+                    "public_code": creation.public_code}
+        try:
+            await self.resume_session(child_session_id)
+        except Exception as error:
+            return {"outcome": "CREATED_OPEN_DEFERRED", "child_session_id": child_session_id,
+                    "public_code": f"CHILD_OPEN_DEFERRED: {error}"}
+        return {"outcome": "CREATED_AND_OPENED", "child_session_id": child_session_id}
+
     async def resume_session(self, session_id: str) -> HostSessionHandle:
         if not session_id:
             raise ValueError("session_id is required")
@@ -1191,7 +1227,7 @@ class LocalSessionController:
     async def _close_owner(self) -> None:
         async with self._lock:
             self._closing = True
-            resumes = tuple(self._resumes.values())
+            resumes = (*self._resumes.values(), *self._forks)
         if resumes:
             await asyncio.gather(
                 *(asyncio.shield(task) for task in resumes), return_exceptions=True

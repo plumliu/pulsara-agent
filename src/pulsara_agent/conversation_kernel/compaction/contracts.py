@@ -22,6 +22,8 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     SubjectSlot,
 )
 from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    FrozenProviderInputItemKind,
     FrozenProviderInputItem,
     LateToolOutcomeObservation,
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
@@ -51,7 +53,7 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 COMPACTION_SOURCE_LINEAGE_CONTRACT = "pulsara.compaction-source-lineage.v1"
 COMPACTION_CANONICAL_RANGE_CONTRACT = "pulsara.compaction-canonical-range.v1"
 COMPACTION_SNAPSHOT_COMPILER_CONTRACT = (
-    "pulsara.context-snapshot-carrier.v2-durable-continuation"
+    "pulsara.context-snapshot-carrier.v3-retained-history"
 )
 COMPACTION_SUMMARY_PROMPT_CONTRACT = (
     "pulsara.context-compaction-summary.v4-temporal-handoff"
@@ -1018,6 +1020,51 @@ class FrozenCompactionActiveRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenRetainedHistoricalRequest:
+    """Exact historical request, without an execution identity or authority."""
+
+    item_kind: FrozenProviderInputItemKind
+    input_origin: CanonicalInputOriginKind | None
+    text: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        origins = {
+            FrozenProviderInputItemKind.USER: {
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.HUMAN_STEER,
+                CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
+            },
+            FrozenProviderInputItemKind.PLAN_CONTINUATION: {
+                CanonicalInputOriginKind.PLAN_CONTINUATION
+            },
+            FrozenProviderInputItemKind.INTER_AGENT_MESSAGE: {
+                CanonicalInputOriginKind.INTER_AGENT_MESSAGE
+            },
+            FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {None},
+        }
+        if (
+            self.item_kind not in origins
+            or self.input_origin not in origins[self.item_kind]
+        ):
+            raise ValueError("retained historical request kind/origin union is invalid")
+        if not isinstance(self.text, str) or not self.text.strip():
+            raise ValueError("retained historical request is empty")
+        if len(self.text.encode("utf-8")) > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
+            raise ValueError(
+                "retained historical request exceeds canonical input bound"
+            )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "item_kind": self.item_kind.value,
+            "input_origin": None
+            if self.input_origin is None
+            else self.input_origin.value,
+            "text": self.text,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CompactionSnapshotCarrier:
     continuation_mode: CompactionContinuationMode
     handoff_instruction: str = field(repr=False)
@@ -1026,8 +1073,16 @@ class CompactionSnapshotCarrier:
     recent_user_messages: tuple[str, ...] = field(repr=False)
     body: bytes = field(repr=False)
     content_digest: str
+    retained_historical_requests: tuple[FrozenRetainedHistoricalRequest, ...] = field(
+        default=(), repr=False
+    )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.retained_historical_requests, tuple) or any(
+            not isinstance(request, FrozenRetainedHistoricalRequest)
+            for request in self.retained_historical_requests
+        ):
+            raise ValueError("retained historical requests must be a typed tuple")
         resume = self.continuation_mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
         if resume != (self.active_request is not None):
             raise ValueError("snapshot continuation/active-request union is invalid")
@@ -1047,6 +1102,10 @@ class CompactionSnapshotCarrier:
                 },
                 "earlier_context_summary": self.earlier_context_summary,
                 "recent_user_messages": self.recent_user_messages,
+                "retained_historical_requests": tuple(
+                    request.canonical_value()
+                    for request in self.retained_historical_requests
+                ),
             }
         )
         if self.body != expected:
