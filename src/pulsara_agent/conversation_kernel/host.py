@@ -331,6 +331,14 @@ class KernelSessionSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class KernelPromptDelivery:
+    queue_item_id: str
+    queue_status: str
+    consumed_entry_id: str | None
+    delivery_mode: str
+
+
+@dataclass(frozen=True, slots=True)
 class KernelCommandOutcome:
     command_id: str
     status: str
@@ -343,6 +351,7 @@ class KernelCommandOutcome:
     plan_workflow_revision: int | None = None
     plan_draft_decision: PlanDraftDecision | None = None
     plan_continuation_turn_id: str | None = None
+    prompt_delivery: KernelPromptDelivery | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -2593,6 +2602,12 @@ class KernelHostSession:
                 if accepted.reasoning_preference_reset
                 else f"Prompt accepted at queue sequence {accepted.queue_sequence}."
             ),
+            prompt_delivery=KernelPromptDelivery(
+                queue_item_id=queue_item_id,
+                queue_status="PENDING",
+                consumed_entry_id=None,
+                delivery_mode=delivery_mode.value,
+            ),
         )
 
     async def steer_active_turn(
@@ -3916,11 +3931,18 @@ class KernelHostSession:
         target = str(row.get("target_turn_id") or "")
         if row.get("target_queue_item_id") is not None:
             queue_status = str(row.get("queue_status") or "")
+            prompt_delivery = KernelPromptDelivery(
+                queue_item_id=str(row["target_queue_item_id"]),
+                queue_status=queue_status,
+                consumed_entry_id=(str(row.get("consumed_entry_id") or "") or None),
+                delivery_mode=str(row.get("queue_delivery_mode") or ""),
+            )
             target = str(row.get("consumed_turn_id") or row["target_queue_item_id"])
             status = str(row.get("consumed_turn_status") or "")
             if queue_status == "PENDING":
                 return KernelCommandOutcome(
-                    command_id, "PENDING", target, "PROMPT_QUEUED", "Prompt is queued."
+                    command_id, "PENDING", target, "PROMPT_QUEUED", "Prompt is queued.",
+                    prompt_delivery=prompt_delivery,
                 )
             if queue_status in {"CANCELLED", "REJECTED"}:
                 return KernelCommandOutcome(
@@ -3929,6 +3951,7 @@ class KernelHostSession:
                     target,
                     str(row.get("queue_terminal_reason") or queue_status),
                     "The queued prompt was not delivered.",
+                    prompt_delivery=prompt_delivery,
                 )
             if queue_status == "CONSUMED" and not status:
                 return KernelCommandOutcome(
@@ -3937,10 +3960,12 @@ class KernelHostSession:
                     target,
                     "PROMPT_CONSUMED",
                     "Prompt was accepted into a canonical turn.",
+                    prompt_delivery=prompt_delivery,
                 )
         if status == "COMPLETED":
             return KernelCommandOutcome(
-                command_id, "SUCCEEDED", target, "TURN_COMPLETED", "Reply accepted."
+                command_id, "SUCCEEDED", target, "TURN_COMPLETED", "Reply accepted.",
+                prompt_delivery=(prompt_delivery if row.get("target_queue_item_id") is not None else None),
             )
         if status == "INTERRUPTED":
             return KernelCommandOutcome(
@@ -3949,9 +3974,11 @@ class KernelHostSession:
                 target,
                 str(row.get("terminal_reason") or "TURN_INTERRUPTED"),
                 "The turn was interrupted and will not be replayed.",
+                prompt_delivery=(prompt_delivery if row.get("target_queue_item_id") is not None else None),
             )
         return KernelCommandOutcome(
-            command_id, "PENDING", target, "TURN_RUNNING", "The turn is running."
+            command_id, "PENDING", target, "TURN_RUNNING", "The turn is running.",
+            prompt_delivery=(prompt_delivery if row.get("target_queue_item_id") is not None else None),
         )
 
     def attach_controller(self, attachment_id: str) -> bool:

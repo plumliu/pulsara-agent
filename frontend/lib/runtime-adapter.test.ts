@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   LocalHttpRuntimeAdapter,
@@ -24,10 +25,53 @@ const SOURCE_FIDELITY_TEXT = [
 ].join('\n');
 
 function inlineContent(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  return inlineBytes(bytes);
+}
+
+function inlineBytes(bytes: Uint8Array) {
+  const pieces: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    pieces.push(String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)));
+  }
   return {
     kind: 'INLINE',
-    inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))),
+    inline_content: btoa(pieces.join('')),
   };
+}
+
+function sha256Digest(bytes: Uint8Array): string {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function blobBytes(bytes: Uint8Array) {
+  return {
+    kind: 'CANONICAL_BLOB',
+    digest: sha256Digest(bytes),
+    size: String(bytes.length),
+    media_type: 'text/plain',
+    codec: 'utf-8',
+  };
+}
+
+function blobContent(value: string) {
+  return blobBytes(new TextEncoder().encode(value));
+}
+
+function contentBytes(bytes: Uint8Array, digest = sha256Digest(bytes)) {
+  return {
+    content: {
+      digest,
+      complete_size: String(bytes.length),
+      offset_bytes: '0',
+      content: inlineBytes(bytes).inline_content,
+      complete: true,
+    },
+  };
+}
+
+function contentChunk(value: string) {
+  return contentBytes(new TextEncoder().encode(value));
 }
 
 function connectPayload(
@@ -577,7 +621,7 @@ describe('selectPromptCommand', () => {
 
   it('hydrates a large historical reasoning block through the content reader', async () => {
     const reasoning = 'large provider reasoning';
-    const digest = `sha256:${'3'.repeat(64)}`;
+    const digest = blobContent(reasoning).digest;
     const requests: Array<Record<string, unknown>> = [];
     const responses = [
       {
@@ -623,6 +667,202 @@ describe('selectPromptCommand', () => {
     expect(connection.current().messages[0].reasoning?.[0].body).toBe(reasoning);
     expect(requests.at(-1)).toMatchObject({
       entry_id: 'assistant-1', block_id: 'assistant-1:provider-reasoning:0', offset_bytes: 0,
+    });
+  });
+
+  it('hydrates canonical blob entry, assistant block, and tool result bodies after reload', async () => {
+    const queuedBody = '消费后的大正文🙂\n'.repeat(6_000);
+    const assistantBody = '模型保真正文';
+    const toolBody = JSON.stringify({ status: 'ok', content: '工具保真正文' });
+    expect(new TextEncoder().encode(queuedBody).length).toBeGreaterThan(65_536);
+    const entries = [{
+      entry_id: 'consumed-prompt', turn_id: 'turn-blob', entry_sequence: '1',
+      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: blobContent(queuedBody),
+      input_source: {
+        queue_item_id: 'queue-blob', command_id: 'command-blob', delivery_mode: 'NEW_TURN',
+      },
+    }, {
+      entry_id: 'assistant-blob', turn_id: 'turn-blob', entry_sequence: '2',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'assistant-text', block_kind: 'TEXT', content: blobContent(assistantBody),
+      }, {
+        block_id: 'assistant-call', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-blob', tool_name: 'read_file',
+      }],
+    }, {
+      entry_id: 'result-blob', turn_id: 'turn-blob', entry_sequence: '3',
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: blobContent(toolBody),
+      tool_result: {
+        assistant_entry_id: 'assistant-blob', tool_call_id: 'call-blob', result_state: 'SUCCESS',
+      },
+    }];
+    const responses = [
+      connectPayload(entries),
+      contentChunk(queuedBody),
+      contentChunk(assistantBody),
+      contentChunk(toolBody),
+    ];
+    const reads: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/read-content')) {
+        reads.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      }
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+
+    expect(projection.messages.find((message) => message.id === 'consumed-prompt')?.body).toBe(queuedBody);
+    expect(projection.messages.find((message) => message.id === 'assistant-blob')?.body).toBe(assistantBody);
+    expect(projection.messages.find((message) => message.id === 'assistant-blob')?.traces?.[0].resultText)
+      .toBe(toolBody);
+    expect(reads).toEqual([
+      expect.objectContaining({ entry_id: 'consumed-prompt' }),
+      expect.objectContaining({ entry_id: 'assistant-blob', block_id: 'assistant-text' }),
+      expect.objectContaining({ entry_id: 'result-blob' }),
+    ]);
+  });
+
+  it('refreshes an exact consumed entry when a blob queue item is consumed during hydration', async () => {
+    const body = '读取中被消费🙂\n'.repeat(6_000);
+    const pending = {
+      prompt_queue_total_count: '1',
+      prompt_queue: [{
+        queue_item_id: 'queue-race', command_id: 'command-race', queue_sequence: '1',
+        status: 'PENDING', delivery_mode: 'NEW_TURN', content: blobContent(body),
+      }],
+    };
+    const consumed = {
+      entry_id: 'entry-race', turn_id: 'turn-race', entry_sequence: '1',
+      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: blobContent(body),
+      input_source: {
+        queue_item_id: 'queue-race', command_id: 'command-race', delivery_mode: 'NEW_TURN',
+      },
+    };
+    const responses = [
+      connectPayload([], pending),
+      { error: { stable_code: 'CONTENT_QUEUE_NOT_PENDING', public_message: 'Queue item is no longer pending.' } },
+      { snapshot: { snapshot: {
+        session_id: 'session-1', writer_generation: '1', event_sequence_cut: '1',
+        entries: [consumed], control: { prompt_queue_total_count: '0', prompt_queue: [] },
+      } } },
+      contentChunk(body),
+    ];
+    const operations: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      operations.push(String(input).split('/').at(-1) ?? '');
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+
+    expect(projection.queuedPrompts).toEqual([]);
+    expect(projection.messages).toEqual([
+      expect.objectContaining({
+        id: 'entry-race', body,
+        inputSource: expect.objectContaining({ queueItemId: 'queue-race', commandId: 'command-race' }),
+      }),
+    ]);
+    expect(operations.slice(1)).toEqual(['read-content', 'snapshot', 'read-content']);
+  });
+
+  it.each([
+    ['CANCELLED', 'cancelled', 'USER_CANCELLED'],
+    ['REJECTED', 'rejected', 'PROMPT_REJECTED'],
+  ] as const)(
+    'preserves an exact %s queue terminal when initial blob hydration loses pending authorization',
+    async (queueStatus, expectedStatus, publicCode) => {
+      const body = '尚未完成读取的大队列正文🙂\n'.repeat(6_000);
+      const pending = {
+        prompt_queue_total_count: '1',
+        prompt_queue: [{
+          queue_item_id: 'queue-terminal-race', command_id: 'command-terminal-race',
+          queue_sequence: '7', status: 'PENDING', delivery_mode: 'STEER_ACTIVE_TURN',
+          target_turn_id: 'turn-target',
+          permission: { effective_mode: 'PERMISSION_MODE_READ_ONLY' },
+          content: blobContent(body),
+        }],
+      };
+      const detail = `Queue became ${queueStatus.toLowerCase()} before hydration completed.`;
+      const responses = [
+        connectPayload([], pending),
+        { error: { stable_code: 'CONTENT_QUEUE_NOT_PENDING', public_message: 'Queue item is no longer pending.' } },
+        { snapshot: { snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: { prompt_queue_total_count: '0', prompt_queue: [] },
+        } } },
+        { query_command: { found: true, outcome: {
+          command_id: 'command-terminal-race', status: 'REJECTED',
+          public_code: publicCode, public_message: detail,
+          prompt_delivery: {
+            queue_item_id: 'queue-terminal-race', queue_status: queueStatus,
+            delivery_mode: 'STEER_ACTIVE_TURN',
+          },
+        } } },
+      ];
+      const operations: string[] = [];
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+        operations.push(String(input).split('/').at(-1) ?? '');
+        return new Response(JSON.stringify(responses.shift()), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }));
+
+      const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+      expect(projection.queuedPrompts).toEqual([]);
+      expect(projection.promptTransitions).toEqual([expect.objectContaining({
+        sessionId: 'session-1', connectionGeneration: 1,
+        queueItemId: 'queue-terminal-race', commandId: 'command-terminal-race',
+        deliveryMode: 'steer', targetTurnId: 'turn-target', permission: 'read-only',
+        body: '', bodyUnavailable: true, status: expectedStatus,
+        outcomeCode: publicCode, detail,
+      })]);
+      expect(operations.slice(1)).toEqual(['read-content', 'snapshot', 'query-command']);
+    },
+  );
+
+  it('rejects same-length canonical blob corruption even when the server echoes the descriptor digest', async () => {
+    const expected = new TextEncoder().encode('trusted bytes');
+    const tampered = new TextEncoder().encode('altered bytes');
+    expect(tampered.length).toBe(expected.length);
+    const reference = blobBytes(expected);
+    const responses = [
+      connectPayload([{
+        entry_id: 'entry-corrupt', turn_id: 'turn-corrupt', entry_sequence: '1',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: reference,
+      }]),
+      contentBytes(tampered, reference.digest),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    await expect(new LocalHttpRuntimeAdapter().connect('session-1')).rejects.toMatchObject({
+      code: 'CONTENT_INTEGRITY_INVALID',
+    });
+  });
+
+  it('rejects canonical blob bytes that are not valid UTF-8', async () => {
+    const invalidUtf8 = new Uint8Array([0xc3, 0x28]);
+    const reference = blobBytes(invalidUtf8);
+    const responses = [
+      connectPayload([{
+        entry_id: 'entry-invalid-utf8', turn_id: 'turn-invalid-utf8', entry_sequence: '1',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: reference,
+      }]),
+      contentBytes(invalidUtf8),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    await expect(new LocalHttpRuntimeAdapter().connect('session-1')).rejects.toMatchObject({
+      code: 'CONTENT_INTEGRITY_INVALID',
     });
   });
 
@@ -883,6 +1123,250 @@ describe('selectPromptCommand', () => {
     expect(connection.current().isRunning).toBe(false);
     expect(connection.current().messages).toEqual([]);
   });
+
+  it('associates interleaved live tool results by exact attempt and preserves an empty final result', async () => {
+    const entries = [{
+      entry_id: 'assistant-live', turn_id: 'turn-live', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [
+        { block_id: 'block-a', block_kind: 'TOOL_CALL', tool_call_id: 'call-a', tool_name: 'read_file' },
+        { block_id: 'block-b', block_kind: 'TOOL_CALL', tool_call_id: 'call-b', tool_name: 'search_files' },
+      ],
+    }];
+    const control = {
+      active_turns: [{ turn_id: 'turn-live', status: 'RUNNING', scope_kind: 'ROOT' }],
+      tool_attempts: [
+        { attempt_id: 'attempt-a', assistant_entry_id: 'assistant-live', tool_call_id: 'call-a' },
+        { attempt_id: 'attempt-b', assistant_entry_id: 'assistant-live', tool_call_id: 'call-b' },
+      ],
+    };
+    const liveEvents = [
+      {
+        live_revision: '1', event_type: 'TOOL_RESULT_START', turn_id: 'turn-live', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-a', channel_tool_call_id: 'call-a',
+        payload: { tool_result_start: { tool_call_id: 'call-a' } },
+      },
+      {
+        live_revision: '2', event_type: 'TOOL_RESULT_START', turn_id: 'turn-live', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-b', channel_tool_call_id: 'call-b',
+        payload: { tool_result_start: { tool_call_id: 'call-b' } },
+      },
+      {
+        live_revision: '3', event_type: 'TOOL_RESULT_END', turn_id: 'turn-live', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-a', channel_tool_call_id: 'call-a',
+        payload: { tool_result_end: { tool_call_id: 'call-a', result_state: 'SUCCESS', final_text: '' } },
+      },
+      {
+        live_revision: '4', event_type: 'TOOL_RESULT_END', turn_id: 'turn-live', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-b', channel_tool_call_id: 'call-b',
+        payload: { tool_result_end: { tool_call_id: 'call-b', result_state: 'APPLICATION_ERROR', final_text: 'b failed' } },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(
+      connectPayload(entries, control, liveEvents),
+    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const traces = (await new LocalHttpRuntimeAdapter().connect('session-1'))
+      .current().messages.find((message) => message.id === 'assistant-live')?.traces;
+    expect(traces?.find((trace) => trace.id === 'call-a')).toMatchObject({
+      status: 'completed', resultText: '',
+    });
+    expect(traces?.find((trace) => trace.id === 'call-b')).toMatchObject({
+      status: 'failed', resultText: 'b failed',
+    });
+  });
+
+  it('reconciles one pending live result when its exact attempt mapping arrives later', async () => {
+    const request = {
+      entry_id: 'assistant-late', turn_id: 'turn-late', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'block-late', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-late', tool_name: 'read_file',
+      }],
+    };
+    const live = [{
+      live_revision: '1', event_type: 'TOOL_RESULT_START', turn_id: 'turn-late', scope_kind: 'ROOT',
+      channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-late',
+      payload: { tool_result_start: { attempt_id: 'attempt-late' } },
+    }, {
+      live_revision: '2', event_type: 'TOOL_RESULT_END', turn_id: 'turn-late', scope_kind: 'ROOT',
+      channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-late',
+      payload: { tool_result_end: { result_state: 'SUCCESS', final_text: 'late exact result' } },
+    }];
+    const responses = [
+      connectPayload([request], {
+        active_turns: [{ turn_id: 'turn-late', status: 'RUNNING', scope_kind: 'ROOT' }],
+      }, live),
+      { observation: {
+        through_event_sequence: '2', live_owner_epoch: '1', through_live_revision: '2',
+        committed: [{
+          projection_kind: 'CURRENT_CONTROL',
+          current_control: {
+            active_turns: [{ turn_id: 'turn-late', status: 'RUNNING', scope_kind: 'ROOT' }],
+            tool_attempts: [{
+              attempt_id: 'attempt-late', assistant_entry_id: 'assistant-late', tool_call_id: 'call-late',
+            }],
+          },
+        }],
+      } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages).toHaveLength(2);
+
+    const projection = await connection.observe();
+    expect(projection.messages).toHaveLength(1);
+    expect(projection.messages[0]).toMatchObject({ id: 'assistant-late' });
+    expect(projection.messages[0].traces).toEqual([
+      expect.objectContaining({ id: 'call-late', resultText: 'late exact result', status: 'completed' }),
+    ]);
+  });
+
+  it('settles the pending live-result identity after an attempt mapping arrives in the same observation', async () => {
+    const request = {
+      entry_id: 'assistant-settle', turn_id: 'turn-settle', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'block-settle', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-settle', tool_name: 'read_file',
+      }],
+    };
+    const responses = [
+      connectPayload([request], {
+        active_turns: [{ turn_id: 'turn-settle', status: 'RUNNING', scope_kind: 'ROOT' }],
+      }, [{
+        live_revision: '1', event_type: 'TOOL_RESULT_END', turn_id: 'turn-settle', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-settle',
+        payload: { tool_result_end: { result_state: 'SUCCESS', final_text: 'settled preview' } },
+      }]),
+      { observation: {
+        through_event_sequence: '2', live_owner_epoch: '1', through_live_revision: '2',
+        committed: [{
+          projection_kind: 'CURRENT_CONTROL',
+          current_control: {
+            active_turns: [{ turn_id: 'turn-settle', status: 'RUNNING', scope_kind: 'ROOT' }],
+            tool_attempts: [{
+              attempt_id: 'attempt-settle', assistant_entry_id: 'assistant-settle', tool_call_id: 'call-settle',
+            }],
+          },
+        }],
+        settlements: [{
+          kind: 'COMMITTED', channel_kind: 'TOOL_RESULT',
+          channel_attempt_id: 'attempt-settle', channel_tool_call_id: 'call-settle',
+        }],
+      } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages).toHaveLength(2);
+
+    const projection = await connection.observe();
+    expect(projection.messages).toHaveLength(1);
+    expect(projection.messages[0].traces?.[0]).not.toHaveProperty('resultText');
+  });
+
+  it('settles one interleaved result before mappings arrive and later binds only its sibling', async () => {
+    const request = {
+      entry_id: 'assistant-interleaved', turn_id: 'turn-interleaved', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'block-a', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-a', tool_name: 'read_file',
+      }, {
+        block_id: 'block-b', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-b', tool_name: 'read_file',
+      }],
+    };
+    const live = ['a', 'b'].map((suffix, index) => ({
+      live_revision: String(index + 1), event_type: 'TOOL_RESULT_END',
+      turn_id: 'turn-interleaved', scope_kind: 'ROOT', channel_kind: 'TOOL_RESULT',
+      channel_attempt_id: `attempt-${suffix}`, channel_tool_call_id: `call-${suffix}`,
+      proposed_entry_id: `result-${suffix}`, draft_identity: `result-${suffix}`,
+      generation_id: `generation-${suffix}`, block_id: `result-block-${suffix}`,
+      payload: { tool_result_end: { result_state: 'SUCCESS', final_text: `result ${suffix}` } },
+    }));
+    const responses = [
+      connectPayload([request], {
+        active_turns: [{ turn_id: 'turn-interleaved', status: 'RUNNING', scope_kind: 'ROOT' }],
+      }, live),
+      { observation: {
+        through_event_sequence: '1', live_owner_epoch: '1', through_live_revision: '3',
+        settlements: [{
+          kind: 'COMMITTED', channel_kind: 'TOOL_RESULT',
+          channel_attempt_id: 'attempt-a', channel_tool_call_id: 'call-a',
+          proposed_entry_id: 'result-a', draft_identity: 'result-a',
+          generation_id: 'generation-a',
+        }],
+      } },
+      { observation: {
+        through_event_sequence: '2', live_owner_epoch: '1', through_live_revision: '3',
+        committed: [{
+          projection_kind: 'CURRENT_CONTROL',
+          current_control: {
+            active_turns: [{ turn_id: 'turn-interleaved', status: 'RUNNING', scope_kind: 'ROOT' }],
+            tool_attempts: [{
+              attempt_id: 'attempt-a', assistant_entry_id: 'assistant-interleaved', tool_call_id: 'call-a',
+            }, {
+              attempt_id: 'attempt-b', assistant_entry_id: 'assistant-interleaved', tool_call_id: 'call-b',
+            }],
+          },
+        }],
+      } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages).toHaveLength(3);
+    expect((await connection.observe()).messages).toHaveLength(2);
+
+    const projection = await connection.observe();
+    expect(projection.messages).toHaveLength(1);
+    expect(projection.messages[0].traces?.find((trace) => trace.id === 'call-a'))
+      .not.toHaveProperty('resultText');
+    expect(projection.messages[0].traces?.find((trace) => trace.id === 'call-b'))
+      .toMatchObject({ resultText: 'result b', status: 'completed' });
+  });
+
+  it('projects identical queued prompt bodies by queue and command identity in queue order', async () => {
+    const control = {
+      prompt_queue_total_count: '2',
+      prompt_queue: [
+        {
+          queue_item_id: 'queue-2', command_id: 'command-2', queue_sequence: '2',
+          status: 'PENDING', delivery_mode: 'NEW_TURN', content: inlineContent('相同正文'),
+        },
+        {
+          queue_item_id: 'queue-1', command_id: 'command-1', queue_sequence: '1',
+          status: 'PENDING', delivery_mode: 'STEER_ACTIVE_TURN', target_turn_id: 'turn-1',
+          content: inlineContent('相同正文'),
+        },
+      ],
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(
+      connectPayload([], control),
+    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    expect((await new LocalHttpRuntimeAdapter().connect('session-1')).current().queuedPrompts)
+      .toEqual([
+        expect.objectContaining({
+          queueItemId: 'queue-1', commandId: 'command-1', body: '相同正文',
+          deliveryMode: 'steer', targetTurnId: 'turn-1',
+        }),
+        expect.objectContaining({
+          queueItemId: 'queue-2', commandId: 'command-2', body: '相同正文',
+          deliveryMode: 'new-turn',
+        }),
+      ]);
+  });
 });
 
 describe('LocalHttpRuntimeAdapter connection ownership', () => {
@@ -1042,7 +1526,7 @@ describe('session task inventory', () => {
       summary: '中断前的最后结果',
     }];
     const projection: RuntimeProjection = {
-      messages: [], isRunning: true, queuedCount: 0, planMode: false,
+      messages: [], isRunning: true, queuedCount: 0, queuedPrompts: [], promptTransitions: [], planMode: false,
       control: {}, liveControl: {}, todo: undefined,
       agentTasks: [{
         ...durable[0], status: 'running', progress: '仍在运行', summary: undefined,
@@ -1478,15 +1962,17 @@ describe('source text fidelity hard cut', () => {
   });
 
   it('preserves plain and JSON message tool text while keeping typed tool labels', async () => {
-    const request = (id: string, sequence: number, call: string) => ({
+    const request = (id: string, sequence: number, call: string, toolName = 'read_file') => ({
       entry_id: id, turn_id: 'turn-1', entry_sequence: String(sequence),
       entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
       blocks: [{
         block_id: `${id}-block`, block_kind: 'TOOL_CALL', tool_call_id: call,
-        tool_name: 'read_file', tool_arguments_preview: btoa('{}'),
+        tool_name: toolName, tool_arguments_preview: btoa('{}'),
       }],
     });
     const jsonMessage = JSON.stringify({ message: SOURCE_FIDELITY_TEXT });
+    const editDiff = '@@ -1,2 +1,2 @@\n-old-001\n+new-001\n unchanged';
+    const editResult = JSON.stringify({ status: 'success', diff: editDiff });
     const entries = [
       request('plain-request', 1, 'plain-call'),
       {
@@ -1500,6 +1986,12 @@ describe('source text fidelity hard cut', () => {
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(jsonMessage),
         tool_result: { assistant_entry_id: 'json-request', tool_call_id: 'json-call', result_state: 'SUCCESS' },
       },
+      request('edit-request', 5, 'edit-call', 'edit_file'),
+      {
+        entry_id: 'edit-result', turn_id: 'turn-1', entry_sequence: '6',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(editResult),
+        tool_result: { assistant_entry_id: 'edit-request', tool_call_id: 'edit-call', result_state: 'SUCCESS' },
+      },
     ];
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
       status: 200, headers: { 'Content-Type': 'application/json' },
@@ -1508,12 +2000,63 @@ describe('source text fidelity hard cut', () => {
     const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
     const plain = messages.find((message) => message.id === 'plain-request')?.traces?.[0];
     const json = messages.find((message) => message.id === 'json-request')?.traces?.[0];
+    const edit = messages.find((message) => message.id === 'edit-request')?.traces?.[0];
 
-    expect(plain).toMatchObject({
-      title: '读取文件', resultText: SOURCE_FIDELITY_TEXT, output: [SOURCE_FIDELITY_TEXT],
+    expect(plain).toMatchObject({ title: '读取文件', resultText: SOURCE_FIDELITY_TEXT });
+    expect(json).toMatchObject({ title: '读取文件', resultText: jsonMessage });
+    expect(edit).toMatchObject({ title: '更新文件', resultText: editResult, resultSummary: editDiff });
+    expect(plain).not.toHaveProperty('output');
+    expect(json).not.toHaveProperty('output');
+  });
+
+  it('applies filesystem result summaries only to exact builtin tool names', async () => {
+    const request = (id: string, sequence: number, call: string, toolName: string) => ({
+      entry_id: id, turn_id: 'turn-tools', entry_sequence: String(sequence),
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: `${id}-block`, block_kind: 'TOOL_CALL', tool_call_id: call,
+        tool_name: toolName, tool_arguments_preview: btoa('{}'),
+      }],
     });
-    expect(json).toMatchObject({
-      title: '读取文件', resultText: jsonMessage, output: [SOURCE_FIDELITY_TEXT],
+    const result = (
+      id: string,
+      sequence: number,
+      assistantEntryId: string,
+      toolCallId: string,
+      value: Record<string, unknown>,
+    ) => ({
+      entry_id: id, turn_id: 'turn-tools', entry_sequence: String(sequence),
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(JSON.stringify(value)),
+      tool_result: {
+        assistant_entry_id: assistantEntryId, tool_call_id: toolCallId, result_state: 'SUCCESS',
+      },
     });
+    const entries = [
+      request('read-request', 1, 'read-call', 'read_file'),
+      result('read-result', 2, 'read-request', 'read-call', {
+        status: 'ok', path: 'notes.txt', offset: 20, limit: 2, total_lines: 100,
+        truncated: true, content: '20|甲\n21|乙',
+      }),
+      request('write-request', 3, 'write-call', 'write_file'),
+      result('write-result', 4, 'write-request', 'write-call', {
+        status: 'ok', path: 'created.txt', bytes_written: 9,
+      }),
+      request('mcp-request', 5, 'mcp-call', 'mcp__external__report'),
+      result('mcp-result', 6, 'mcp-request', 'mcp-call', {
+        status: 'success', path: 'remote.txt', bytes_written: 99,
+        total_lines: 800, diff: '@@ remote data, not a filesystem edit @@',
+      }),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
+    expect(messages.find((message) => message.id === 'read-request')?.traces?.[0].resultSummary)
+      .toBe('notes.txt · 返回第 20–21 行 · 文件共 100 行 · 还有后续内容');
+    expect(messages.find((message) => message.id === 'write-request')?.traces?.[0].resultSummary)
+      .toBe('已创建 created.txt · 9 字节');
+    expect(messages.find((message) => message.id === 'mcp-request')?.traces?.[0].resultSummary)
+      .toBeUndefined();
   });
 });

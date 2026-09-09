@@ -46,6 +46,7 @@ _ATTACHED_FIELDS: Final = frozenset(
         "command",
         "query_command",
         "read_content",
+        "read_tool_artifact",
         "heartbeat",
         "live_control_snapshot",
         "resolve_interaction",

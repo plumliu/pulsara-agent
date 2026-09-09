@@ -549,6 +549,7 @@ class LocalHttpServer:
             "read-plan-question",
             "read-plan-draft",
             "read-content",
+            "read-tool-artifact",
         ):
             self._app.router.add_post(
                 f"/api/connections/{{connection_id}}/{operation}",
@@ -1746,6 +1747,9 @@ class LocalHttpServer:
                     connection_id, body
                 ),
                 "read-content": lambda: self.bridge.read_content(connection_id, body),
+                "read-tool-artifact": lambda: self.bridge.read_tool_artifact(
+                    connection_id, body
+                ),
             }
             return web.json_response(await methods[operation]())
 

@@ -18,6 +18,10 @@ from google.protobuf.message import DecodeError, Message
 
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.host import KernelHostSession
+from pulsara_agent.conversation_kernel.tool_artifacts import (
+    ARTIFACT_READ_HARD_CHARS,
+    PostgresToolArtifactReadPort,
+)
 from pulsara_agent.conversation_kernel.live import LiveObservationKind
 from pulsara_agent.conversation_kernel.live import LiveSettlementKind
 from pulsara_agent.ports.live_agent_event import (
@@ -57,6 +61,7 @@ from pulsara_agent.terminal_protocol.canonical_v3 import (
     CanonicalProtocolReader,
     CanonicalProtocolGap,
     CanonicalProtocolResourceExhausted,
+    CanonicalQueueContentNotPending,
     MAXIMUM_HISTORY_PAGE_BYTES,
     MAXIMUM_OBSERVATION_EVENTS,
     MAXIMUM_SNAPSHOT_BYTES,
@@ -66,6 +71,7 @@ from pulsara_agent.conversation_kernel.repository import (
     PlanDraftIdentityConflict,
     PlanQuestionAnswer,
 )
+from pulsara_agent.ports.artifact import ArtifactContentError
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
     PlanDraftDecision,
@@ -78,7 +84,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:3fa9eefbd33f5b5fda4faae0892c00f1f5aacae52231e471eac4875130797492"
+    "sha256:63a5c3a0833b5fa25ba814c48e7d0cb05fd69dac00e530c71e8e4b10bd841aea"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -255,6 +261,8 @@ class TerminalKernelProtocolServer:
             return await self._query_command(state, request)
         if kind == "read_content":
             return await self._read_content(state, request)
+        if kind == "read_tool_artifact":
+            return await self._read_tool_artifact(state, request)
         if kind == "heartbeat":
             return wire.ServerFrame(
                 heartbeat=wire.HeartbeatResponse(
@@ -979,14 +987,22 @@ class TerminalKernelProtocolServer:
     ) -> wire.ServerFrame:
         if not 1 <= request.limit_bytes <= 1 << 20:
             return _error(request.request_id, "CONTENT_RANGE_INVALID")
+        target = request.WhichOneof("target")
+        if target is None or (target == "queue_item_id" and request.block_id):
+            return _error(request.request_id, "CONTENT_TARGET_INVALID")
         try:
             reference = await asyncio.to_thread(
                 state.protocol_reader.resolve_content_reference,
                 session_id=state.host_session.session_id,
-                entry_id=request.entry_id,
+                entry_id=request.entry_id if target == "entry_id" else None,
+                queue_item_id=(
+                    request.queue_item_id if target == "queue_item_id" else None
+                ),
                 block_id=request.block_id or None,
                 deadline_monotonic=monotonic() + 10.0,
             )
+        except CanonicalQueueContentNotPending:
+            return _error(request.request_id, "CONTENT_QUEUE_NOT_PENDING")
         except KeyError:
             return _error(request.request_id, "CONTENT_REFERENCE_MISSING")
         except ConversationKernelConflict:
@@ -1049,6 +1065,73 @@ class TerminalKernelProtocolServer:
                 offset_bytes=value.offset,
                 content=value.content,
                 complete=not value.has_more,
+            )
+        )
+
+    async def _read_tool_artifact(
+        self, state: _Connection, request: wire.ReadToolArtifactRequest
+    ) -> wire.ServerFrame:
+        if (
+            not request.result_entry_id
+            or not 1 <= request.max_chars <= ARTIFACT_READ_HARD_CHARS
+        ):
+            return _error(request.request_id, "TOOL_ARTIFACT_RANGE_INVALID")
+        try:
+            reference = await asyncio.to_thread(
+                state.protocol_reader.resolve_tool_artifact_reference,
+                session_id=state.host_session.session_id,
+                result_entry_id=request.result_entry_id,
+                deadline_monotonic=monotonic() + 10.0,
+            )
+        except KeyError:
+            return _error(request.request_id, "TOOL_RESULT_MISSING")
+        disposition = str(reference["output_artifact_disposition"])
+        if disposition not in {"AVAILABLE", "INCOMPLETE"}:
+            return _error(request.request_id, "TOOL_ARTIFACT_UNAVAILABLE")
+        artifact_id = str(reference["output_artifact_id"] or "")
+        if not artifact_id:
+            return _error(request.request_id, "TOOL_ARTIFACT_CORRUPT")
+        port = PostgresToolArtifactReadPort(
+            state.host_session.repository.connection_provider,
+            session_id=state.host_session.session_id,
+            workspace_id=str(reference["workspace_id"]),
+        )
+        try:
+            page = await asyncio.to_thread(
+                port.read_text,
+                artifact_id,
+                offset_chars=request.offset_chars,
+                max_chars=request.max_chars,
+            )
+        except ValueError:
+            return _error(request.request_id, "TOOL_ARTIFACT_RANGE_INVALID")
+        except KeyError:
+            return _error(request.request_id, "TOOL_ARTIFACT_MISSING")
+        except (ArtifactContentError, ConversationKernelConflict):
+            return _error(request.request_id, "TOOL_ARTIFACT_CORRUPT")
+        return wire.ServerFrame(
+            tool_artifact=wire.ToolArtifactTextChunk(
+                request_id=request.request_id,
+                result_entry_id=request.result_entry_id,
+                artifact_disposition=page.record.artifact_disposition.value,
+                source_coverage=page.record.source_coverage.value,
+                display_kind=page.record.display_kind.value,
+                source_coverage_reason=(
+                    page.record.source_coverage_reason.value
+                    if page.record.source_coverage_reason is not None
+                    else ""
+                ),
+                artifact_unavailability_reason=(
+                    page.record.artifact_unavailability_reason.value
+                    if page.record.artifact_unavailability_reason is not None
+                    else ""
+                ),
+                text=page.text,
+                offset_chars=page.offset_chars,
+                returned_chars=page.returned_chars,
+                total_chars=page.total_chars,
+                has_more=page.has_more,
+                next_offset_chars=page.next_offset_chars or 0,
             )
         )
 
@@ -1478,7 +1561,7 @@ def _outcome_to_wire(request_id: str, outcome: object) -> wire.CommandOutcome:
         "REJECTED": wire.REJECTED,
         "PENDING": wire.PENDING,
     }[outcome.status]
-    return wire.CommandOutcome(
+    result = wire.CommandOutcome(
         request_id=request_id,
         command_id=outcome.command_id,
         status=status,
@@ -1501,6 +1584,14 @@ def _outcome_to_wire(request_id: str, outcome: object) -> wire.CommandOutcome:
         }[outcome.plan_draft_decision],
         plan_continuation_turn_id=outcome.plan_continuation_turn_id or "",
     )
+    if outcome.prompt_delivery is not None:
+        result.prompt_delivery.CopyFrom(wire.PromptDelivery(
+            queue_item_id=outcome.prompt_delivery.queue_item_id,
+            queue_status=outcome.prompt_delivery.queue_status,
+            consumed_entry_id=outcome.prompt_delivery.consumed_entry_id or "",
+            delivery_mode=outcome.prompt_delivery.delivery_mode,
+        ))
+    return result
 
 
 def _error(request_id: str, code: str) -> wire.ServerFrame:

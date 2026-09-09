@@ -875,6 +875,45 @@ def test_catalog_schema_is_single_closed_line_edit_path() -> None:
     )
 
 
+def test_file_tool_descriptions_explain_line_locators_without_changing_edit_semantics() -> None:
+    read_description = builtin_tool_catalog_entry("read_file").descriptor.description
+    edit_descriptor = builtin_tool_catalog_entry("edit_file").descriptor
+    edit_description = edit_descriptor.description
+    combined = f"{read_description}\n{edit_description}"
+
+    assert "read_file displays: 2|预算=360" in combined
+    assert '"kind":"replace_lines"' in combined
+    assert '"lines":["预算=400"]' in combined
+    assert "The leading 2| is a display locator, not replacement text." in combined
+    assert "Do not copy the display prefix" in combined
+    assert "1|2|预算=360" in combined
+    assert "replace_file" in edit_description
+    assert "does not require the full file" in edit_description
+
+    variants = edit_descriptor.input_schema["properties"]["operations"]["items"][
+        "oneOf"
+    ]
+    replace_lines = next(
+        item
+        for item in variants
+        if item["properties"]["kind"].get("const") == "replace_lines"
+    )
+    logical_lines = replace_lines["properties"]["lines"]
+    assert "display locator" in logical_lines["description"]
+    assert "Do not copy" in logical_lines["items"]["description"]
+    assert "1|2|预算=360" in logical_lines["description"]
+
+    replace_file = next(
+        item
+        for item in variants
+        if item["properties"]["kind"].get("const") == "replace_file"
+    )
+    replace_content = replace_file["properties"]["content"]["description"]
+    assert "complete original target text" in replace_content
+    assert "display locator" in replace_content
+    assert "does not require the full file to have been displayed" in replace_content
+
+
 def test_filesystem_state_has_no_timestamp_or_revision_registry() -> None:
     fields = filesystem._WorkspaceFileState.__dataclass_fields__
     assert "read_timestamps" not in fields

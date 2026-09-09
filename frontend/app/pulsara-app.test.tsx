@@ -1,9 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalMemoryApi } from '../lib/memory-api';
+import { RuntimeApiError } from '../lib/runtime-adapter';
 import type {
   CommandReceipt,
   ForkOutcome,
+  LocalPromptSubmission,
   RuntimeAdapter,
   RuntimeBootstrap,
   ModelCatalogReadModel,
@@ -21,6 +23,16 @@ import type {
   UserCapabilitySnapshot,
 } from '../lib/pulsara-types';
 import PulsaraApp from './pulsara-app';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 afterEach(cleanup);
 
@@ -227,6 +239,8 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
     }],
     isRunning: true,
     queuedCount: 0,
+    queuedPrompts: [],
+    promptTransitions: [],
     planMode: false,
     activeTurnId: 'turn-1',
     control: {},
@@ -249,18 +263,22 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
 
 class FakeConnection implements RuntimeConnection {
   readonly role: 'controller' | 'observer';
-  readonly generation = 1;
+  readonly generation: number;
   private value: RuntimeProjection;
   private observer?: (value: RuntimeProjection) => void;
+  private closed = false;
 
   constructor(
     readonly sessionId: string,
     value = projection(),
     role: 'controller' | 'observer' = 'controller',
     private readonly interactionContent?: RuntimeInteractionContent,
+    generation = 1,
+    private readonly queryCommandResult?: CommandReceipt,
   ) {
     this.value = value;
     this.role = role;
+    this.generation = generation;
   }
 
   current() {
@@ -288,12 +306,12 @@ class FakeConnection implements RuntimeConnection {
     observer?.(value);
   }
 
-  submitPrompt = vi.fn(async (): Promise<CommandReceipt> => {
-    return { commandId: 'command-1', status: 'succeeded', publicMessage: '任务已经开始。' };
+  submitPrompt = vi.fn(async (commandId: string): Promise<CommandReceipt> => {
+    return { commandId, status: 'succeeded', publicMessage: '任务已经开始。' };
   });
 
-  async steerActiveTurn(): Promise<CommandReceipt> {
-    return { commandId: 'command-2', status: 'succeeded' };
+  async steerActiveTurn(commandId: string): Promise<CommandReceipt> {
+    return { commandId, status: 'succeeded' };
   }
 
   async stopActiveTurn(): Promise<CommandReceipt> {
@@ -326,15 +344,36 @@ class FakeConnection implements RuntimeConnection {
     }
   }
 
-  resolveInteraction = vi.fn(async (): Promise<CommandReceipt> => {
-    return { commandId: 'command-6', status: 'succeeded' };
+  resolveInteraction = vi.fn(async (
+    _interaction: RuntimeInteractionSummary,
+    resolution: Parameters<RuntimeConnection['resolveInteraction']>[1],
+  ): Promise<CommandReceipt> => {
+    return {
+      commandId: 'command-6', status: 'succeeded',
+      ...(resolution.kind === 'plan-draft'
+        ? {
+          planDraftDecision: resolution.decision,
+          ...(resolution.decision === 'cancel' ? {} : { planContinuationTurnId: 'turn-plan-next' }),
+        }
+        : {}),
+    };
   });
 
-  async queryCommand(): Promise<CommandReceipt | undefined> {
-    return undefined;
-  }
+  readToolArtifact = vi.fn(async () => {
+    return {
+      resultEntryId: 'result-1', text: '', offsetChars: 0, returnedChars: 0,
+      totalChars: 0, hasMore: false,
+    };
+  });
 
-  async close() {}
+  queryCommand = vi.fn(async (): Promise<CommandReceipt | undefined> => {
+    if (this.closed) {
+      throw new RuntimeApiError('CONNECTION_CLOSED', '本地连接已经关闭。', true);
+    }
+    return this.queryCommandResult;
+  });
+
+  async close() { this.closed = true; }
 }
 
 class FakeAdapter implements RuntimeAdapter {
@@ -351,6 +390,8 @@ class FakeAdapter implements RuntimeAdapter {
   connectionValue?: RuntimeProjection;
   interactionContent?: RuntimeInteractionContent;
   connectionRole: 'controller' | 'observer' = 'controller';
+  queryCommandResult?: CommandReceipt;
+  connectionValues = new Map<string, RuntimeProjection>();
   connectCalls: Array<{ sessionId: string; takeover: boolean }> = [];
   createSession = vi.fn(async (selection: SessionWorkspaceSelection) => {
     const created: SessionSummary = {
@@ -584,11 +625,13 @@ class FakeAdapter implements RuntimeAdapter {
     ));
     const connection = new FakeConnection(
       sessionId,
-      sessionId === 'session-2'
+      this.connectionValues.get(sessionId) ?? (sessionId === 'session-2'
         ? { ...projection(''), messages: [], isRunning: false, activeTurnId: undefined }
-        : this.connectionValue ?? projection(),
+        : this.connectionValue ?? projection()),
       this.connectionRole,
       this.interactionContent,
+      this.connectCalls.length,
+      this.queryCommandResult,
     );
     this.lastConnection = connection;
     return connection;
@@ -1398,7 +1441,7 @@ describe('PulsaraApp', () => {
         traces: [{
           id: 'trace-terminal', kind: 'terminal', toolName: 'terminal', title: '运行命令',
           subtitle: '已完成', status: 'completed', command: 'printf "visible command"',
-          output: ['visible command'], meta: '操作完成',
+          resultText: 'visible command', meta: '操作完成',
         }],
       }],
       isRunning: false,
@@ -1415,6 +1458,190 @@ describe('PulsaraApp', () => {
     expect(container.querySelector('.terminal-command')?.textContent).toContain('printf "visible command"');
   });
 
+  it('shows the real edit diff in a bounded output region without a redundant diff-copy button', async () => {
+    const adapter = new FakeAdapter();
+    const diff = ['@@ -1,40 +1,40 @@', '-old-001', '+new-001', ...Array.from(
+      { length: 80 }, (_, index) => ` context-${String(index).padStart(3, '0')}`,
+    )].join('\n');
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-edit-diff', role: 'assistant', time: '18:11', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-edit-diff', kind: 'edit', toolName: 'edit_file', title: '更新文件',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+          resultSummary: '操作已完成。', resultText: JSON.stringify({ status: 'success', diff }),
+        }],
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: /展开工具详情：edit_file/ }));
+
+    const diffOutput = screen.getByLabelText('文件差异');
+    expect(diffOutput.textContent).toBe(diff);
+    expect(diffOutput.classList.contains('tool-result-diff')).toBe(true);
+    expect(screen.queryByText('操作已完成。')).toBeNull();
+    expect(screen.queryByRole('button', { name: '复制工具差异' })).toBeNull();
+    expect(screen.getByRole('button', { name: '复制工具原始结果' })).toBeTruthy();
+    expect(container.querySelector('.tool-result-raw pre')?.classList.contains('tool-output-scroll')).toBe(true);
+  });
+
+  it('does not render diff-shaped MCP data as a builtin file difference', async () => {
+    const adapter = new FakeAdapter();
+    const resultText = JSON.stringify({
+      status: 'success', path: 'remote.txt', bytes_written: 42,
+      diff: '@@ external report, not edit_file @@',
+    });
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-mcp-diff', role: 'assistant', time: '18:11', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-mcp-diff', kind: 'mcp', toolName: 'mcp__external__report', title: '使用工具',
+          subtitle: '已完成', status: 'completed', meta: '操作完成',
+          resultText, resultSummary: '@@ external report, not edit_file @@',
+        }],
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: /展开工具详情：mcp__external__report/ }));
+
+    expect(screen.queryByLabelText('文件差异')).toBeNull();
+    expect(screen.getByLabelText('工具原始结果').textContent).toContain(resultText);
+  });
+
+  it('collapses retained artifact content independently from the tool card', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-artifact', role: 'assistant', time: '18:03', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-artifact', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search', title: '搜索内容',
+          subtitle: '已完成', status: 'completed', resultEntryId: 'result-1', resultText: '{"content":[]}',
+          artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'COMPLETE' },
+          meta: '操作完成',
+        }],
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    render(<PulsaraApp adapter={adapter} />);
+    const expand = await screen.findByRole('button', { name: /展开工具详情/ });
+    fireEvent.click(expand);
+
+    const collapse = screen.getByRole('button', { name: /收起工具详情/ });
+    expect(collapse.textContent).not.toContain('收起详情');
+    const artifactTrigger = screen.getByRole('button', { name: '查看完整输出' });
+    expect(artifactTrigger.classList.contains('tool-artifact__trigger')).toBe(true);
+    fireEvent.click(artifactTrigger);
+
+    const end = await screen.findByRole('status', { name: '完整输出读取状态' });
+    expect(end.textContent).toContain('已到末页');
+    expect(screen.getByLabelText('完整工具输出').classList.contains('is-open')).toBe(true);
+    expect(screen.getByRole('button', { name: '复制当前工具输出页' }).getAttribute('title')).toBe('复制当前页');
+
+    fireEvent.click(screen.getByRole('button', { name: '收起完整输出' }));
+    expect(screen.queryByRole('button', { name: '复制当前工具输出页' })).toBeNull();
+    expect(screen.getByRole('button', { name: '查看完整输出' })).toBeTruthy();
+    expect(screen.getByLabelText('工具原始结果')).toBeTruthy();
+
+    fireEvent.click(collapse);
+    expect(screen.queryByLabelText('工具原始结果')).toBeNull();
+  });
+
+  it('invalidates an in-flight artifact page when the whole tool card is collapsed', async () => {
+    const adapter = new FakeAdapter();
+    const page = deferred<Awaited<ReturnType<RuntimeConnection['readToolArtifact']>>>();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-artifact-race', role: 'assistant', time: '18:03', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-artifact-race', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search',
+          title: '搜索内容', subtitle: '已完成', resultEntryId: 'result-race', resultText: '{}',
+          artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'COMPLETE' },
+          meta: '操作完成',
+        }],
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    render(<PulsaraApp adapter={adapter} />);
+    const expand = await screen.findByRole('button', { name: /展开工具详情/ });
+    const active = adapter.lastConnection!;
+    active.readToolArtifact.mockImplementationOnce(() => page.promise);
+    fireEvent.click(expand);
+    fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
+    await waitFor(() => expect(active.readToolArtifact).toHaveBeenCalledWith('result-race', 0));
+    fireEvent.click(screen.getByRole('button', { name: /收起工具详情/ }));
+
+    await act(async () => page.resolve({
+      resultEntryId: 'result-race', text: '不应落回的迟到页', offsetChars: 0,
+      returnedChars: 9, totalChars: 9, hasMore: false,
+    }));
+    fireEvent.click(screen.getByRole('button', { name: /展开工具详情/ }));
+
+    expect(screen.queryByText('不应落回的迟到页')).toBeNull();
+    expect(screen.getByRole('button', { name: '查看完整输出' })).toBeTruthy();
+  });
+
+  it('does not apply an old-session artifact page to a reused trace identity', async () => {
+    const adapter = new FakeAdapter();
+    const oldPage = deferred<Awaited<ReturnType<RuntimeConnection['readToolArtifact']>>>();
+    const secondSession: SessionSummary = {
+      ...initialSession,
+      id: 'session-2',
+      title: '另一个会话',
+      live: false,
+    };
+    adapter.sessions = [initialSession, secondSession];
+    const artifactProjection = (resultText: string): RuntimeProjection => ({
+      ...projection(''),
+      messages: [{
+        id: 'assistant-shared', role: 'assistant', time: '18:03', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-shared', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search',
+          title: '搜索内容', subtitle: '已完成', resultEntryId: 'result-shared', resultText,
+          artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'COMPLETE' },
+          meta: '操作完成',
+        }],
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    });
+    adapter.connectionValues.set('session-1', artifactProjection('{"session":"A"}'));
+    adapter.connectionValues.set('session-2', artifactProjection('{"session":"B"}'));
+
+    render(<PulsaraApp adapter={adapter} />);
+    const expand = await screen.findByRole('button', { name: /展开工具详情/ });
+    const first = adapter.lastConnection!;
+    first.readToolArtifact.mockImplementationOnce(() => oldPage.promise);
+    fireEvent.click(expand);
+    fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
+    await waitFor(() => expect(first.readToolArtifact).toHaveBeenCalledWith('result-shared', 0));
+
+    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    await screen.findByRole('heading', { name: '另一个会话' });
+    await act(async () => oldPage.resolve({
+      resultEntryId: 'result-shared', text: '会话 A 的迟到 artifact', offsetChars: 0,
+      returnedChars: 17, totalChars: 17, hasMore: false,
+    }));
+    const summary = screen.getByRole('button', { name: /工具详情：mcp__firecrawl__firecrawl_search/ });
+    if (summary.getAttribute('aria-expanded') !== 'true') fireEvent.click(summary);
+
+    expect(screen.queryByText('会话 A 的迟到 artifact')).toBeNull();
+    expect(screen.getByRole('button', { name: '查看完整输出' })).toBeTruthy();
+  });
+
   it('explains MCP meta-tool routing and identifies exact Skill documents', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
@@ -1424,13 +1651,12 @@ describe('PulsaraApp', () => {
         traces: [{
           id: 'trace-reload', kind: 'artifact', toolName: 'reload_capabilities', title: '刷新能力',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
-          argumentsJson: '{}', resultText: '{"status":"RELOADED"}', output: ['操作已完成。'],
+          argumentsJson: '{}', resultText: '{"status":"RELOADED"}',
         }, {
           id: 'trace-skill', kind: 'read', toolName: 'read_file', title: '读取文件',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
           argumentsJson: JSON.stringify({ path: '/opt/pulsara/bundled_skills/pdf/SKILL.md' }),
           resultText: JSON.stringify({ path: '/opt/pulsara/bundled_skills/pdf/SKILL.md', total_lines: 42 }),
-          output: ['已读取 /opt/pulsara/bundled_skills/pdf/SKILL.md · 42 行'],
         }, {
           id: 'trace-list', kind: 'mcp', toolName: 'list_mcp_servers', title: '浏览 MCP 服务',
           subtitle: '已完成', status: 'completed', meta: '操作完成', argumentsJson: '{}',
@@ -1440,7 +1666,6 @@ describe('PulsaraApp', () => {
               server_id: 'local-docs', public_status: 'CONNECTING', tool_count: 1,
             }],
           }),
-          output: ['操作已完成。'],
         }, {
           id: 'trace-inspect', kind: 'mcp', toolName: 'inspect_new_mcp_tool', title: '检查 MCP 工具',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
@@ -1451,14 +1676,13 @@ describe('PulsaraApp', () => {
             description: '搜索公开网页。', tool_ref: 'mcpref_firecrawl_search',
             input_schema: { type: 'object', properties: { query: { type: 'string' } } },
           }),
-          output: ['操作已完成。'],
         }, {
           id: 'trace-use', kind: 'mcp', toolName: 'use_new_mcp_tool', title: '调用 MCP 工具',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
           argumentsJson: JSON.stringify({
             tool_ref: 'mcpref_firecrawl_search', arguments: { query: 'Pulsara' },
           }),
-          resultText: JSON.stringify({ content: '搜索完成' }), output: ['搜索完成'],
+          resultText: JSON.stringify({ content: '搜索完成' }),
         }],
       }],
       isRunning: false,
@@ -2376,7 +2600,9 @@ describe('PulsaraApp', () => {
 
     expect(await screen.findByText('验证新的前端任务')).toBeTruthy();
     expect(adapter.lastConnection?.enterPlan).toHaveBeenCalledWith('验证新的前端任务', 'read-only');
-    expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith('验证新的前端任务', 'read-only');
+    expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith(
+      expect.stringMatching(/^command:web:/), '验证新的前端任务', 'read-only',
+    );
     expect(screen.getByRole('button', { name: /完全访问/ })).toBeTruthy();
   });
 
@@ -2406,7 +2632,7 @@ describe('PulsaraApp', () => {
 
     expect(fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })).toBe(false);
     await waitFor(() => expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith(
-      'biruzhey',
+      expect.stringMatching(/^command:web:/), 'biruzhey',
       'bypass-permissions',
     ));
   });
@@ -2450,6 +2676,7 @@ describe('PulsaraApp', () => {
       expect.objectContaining({ id: 'plan-review-1', kind: 'plan-draft' }),
       { kind: 'plan-draft', decision: 'approve' },
     ));
+    expect(await screen.findByText('已创建按批准方案继续处理的任务。')).toBeTruthy();
   });
 
   it.each([
@@ -2486,6 +2713,302 @@ describe('PulsaraApp', () => {
       interaction,
       resolution,
     ));
+    expect(await screen.findByText(_name === 'revise'
+      ? '已创建继续修订方案的任务。'
+      : '未因本次取消启动这份方案的实施。你可以发送新任务。')).toBeTruthy();
+  });
+
+  it('shows exact duplicate queued bodies in queue order to an observer', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionRole = 'observer';
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: true, queuedCount: 2,
+      queuedPrompts: [{
+        queueItemId: 'queue-1', commandId: 'command-1', sequence: 1, status: 'pending',
+        deliveryMode: 'steer', targetTurnId: 'turn-1', body: '相同\n正文', permission: 'read-only',
+      }, {
+        queueItemId: 'queue-2', commandId: 'command-2', sequence: 2, status: 'pending',
+        deliveryMode: 'new-turn', body: '相同\n正文',
+      }],
+    };
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+
+    const queue = await screen.findByRole('region', { name: '等待处理的输入' });
+    expect([...queue.querySelectorAll('pre')].map((item) => item.textContent))
+      .toEqual(['相同\n正文', '相同\n正文']);
+    expect([...queue.querySelectorAll('article')].map((item) => item.dataset.queueItemId))
+      .toEqual(['queue-1', 'queue-2']);
+    expect(within(queue).getByText('目标轮次：turn-1')).toBeTruthy();
+    expect(within(queue).getByText('适用权限：只读')).toBeTruthy();
+    expect(within(queue).getByText('适用权限：未知')).toBeTruthy();
+    expect(container.querySelectorAll('.user-turn')).toHaveLength(0);
+  });
+
+  it('keeps an observed queue item visible when it reaches a terminal state', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionRole = 'observer';
+    adapter.queryCommandResult = {
+      commandId: 'command-observed', status: 'rejected', publicCode: 'USER_CANCELLED',
+      publicMessage: 'Observed queue item was cancelled.',
+      promptDelivery: {
+        queueItemId: 'queue-observed', queueStatus: 'CANCELLED', deliveryMode: 'steer',
+      },
+    };
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: true, eventSequence: 1,
+      queuedCount: 1,
+      queuedPrompts: [{
+        queueItemId: 'queue-observed', commandId: 'command-observed', sequence: 1,
+        status: 'pending', deliveryMode: 'steer', targetTurnId: 'turn-observed',
+        body: '观察者看到的队列正文', permission: 'ask-permissions',
+      }],
+    };
+    render(<PulsaraApp adapter={adapter} />);
+    expect(await screen.findByText('观察者看到的队列正文')).toBeTruthy();
+    const active = adapter.lastConnection!;
+
+    active.emit({
+      ...projection(''), messages: [], isRunning: true, eventSequence: 2,
+      queuedCount: 0, queuedPrompts: [],
+    });
+
+    await waitFor(() => expect(active.queryCommand).toHaveBeenCalledWith('command-observed'));
+    expect(await screen.findByText('队列已取消')).toBeTruthy();
+    expect(screen.getByText('观察者看到的队列正文')).toBeTruthy();
+    expect(screen.getByText('目标轮次：turn-observed')).toBeTruthy();
+    expect(screen.getByText('适用权限：每次询问')).toBeTruthy();
+    expect(screen.getByText('Observed queue item was cancelled.')).toBeTruthy();
+  });
+
+  it.each([
+    ['cancelled', '队列已取消'],
+    ['rejected', '队列已拒绝'],
+  ] as const)('shows an initial-hydration %s terminal without a local submission', async (
+    status,
+    label,
+  ) => {
+    const adapter = new FakeAdapter();
+    const transition: LocalPromptSubmission = {
+      sessionId: 'session-1', connectionGeneration: 1,
+      commandId: `command-${status}`, queueItemId: `queue-${status}`,
+      body: '', bodyUnavailable: true,
+      deliveryMode: 'steer', targetTurnId: 'turn-race', permission: 'read-only',
+      status, detail: `Queue ${status} before hydration completed.`,
+    };
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: true, queuedCount: 0, queuedPrompts: [],
+      promptTransitions: [transition],
+    };
+
+    render(<PulsaraApp adapter={adapter} />);
+
+    expect(await screen.findByText(label)).toBeTruthy();
+    expect(screen.getByText('正文未能在队列终止前完成读取。')).toBeTruthy();
+    expect(screen.getByText('目标轮次：turn-race')).toBeTruthy();
+    expect(screen.getByText('适用权限：只读')).toBeTruthy();
+    expect(screen.getByText(`Queue ${status} before hydration completed.`)).toBeTruthy();
+  });
+
+  it('separates consumed input delivery from an interrupted turn outcome', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
+    };
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    adapter.lastConnection?.submitPrompt.mockResolvedValueOnce({
+      commandId: 'ignored-by-mock',
+      status: 'rejected',
+      publicCode: 'TURN_INTERRUPTED',
+      publicMessage: 'The turn was interrupted and will not be replayed.',
+      promptDelivery: {
+        queueItemId: 'queue-consumed', queueStatus: 'CONSUMED',
+        consumedEntryId: 'entry-consumed', deliveryMode: 'new-turn',
+      },
+    });
+
+    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
+      target: { value: '已经被消费的输入' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByText('输入已接收，执行已中断')).toBeTruthy();
+    expect(screen.queryByText('输入被拒绝')).toBeNull();
+    const queue = screen.getByRole('region', { name: '等待处理的输入' });
+    expect(within(queue).getByText('已接收 · 执行已中断')).toBeTruthy();
+    expect(within(queue).getByText('已经被消费的输入')).toBeTruthy();
+  });
+
+  it('keeps and reconciles a queued submission when its canonical pending row disappears', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: true, queuedCount: 0, queuedPrompts: [],
+    };
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const active = adapter.lastConnection!;
+    active.submitPrompt.mockResolvedValueOnce({
+      commandId: 'ignored-by-mock', status: 'pending',
+      promptDelivery: {
+        queueItemId: 'queue-terminal', queueStatus: 'PENDING', deliveryMode: 'new-turn',
+      },
+    });
+    active.queryCommand.mockResolvedValue({
+      commandId: 'ignored-by-mock', status: 'rejected', publicCode: 'USER_CANCELLED',
+      publicMessage: 'The queued prompt was cancelled.',
+      promptDelivery: {
+        queueItemId: 'queue-terminal', queueStatus: 'CANCELLED', deliveryMode: 'new-turn',
+      },
+    });
+
+    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
+      target: { value: '随后被取消的输入' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '排队发送' }));
+    const commandId = active.submitPrompt.mock.calls[0]?.[0] as string;
+
+    active.emit({
+      ...projection(''), messages: [], isRunning: true, eventSequence: 2,
+      queuedCount: 1,
+      queuedPrompts: [{
+        queueItemId: 'queue-terminal', commandId, sequence: 1, status: 'pending',
+        deliveryMode: 'new-turn', body: '随后被取消的输入', permission: 'accept-edits',
+      }],
+    });
+    expect(await screen.findByText('适用权限：接受编辑')).toBeTruthy();
+
+    active.emit({
+      ...projection(''), messages: [], isRunning: true, eventSequence: 3,
+      queuedCount: 0, queuedPrompts: [],
+    });
+
+    await waitFor(() => expect(active.queryCommand).toHaveBeenCalledWith(commandId));
+    expect(await screen.findByText('队列已取消')).toBeTruthy();
+    expect(screen.getByText('The queued prompt was cancelled.')).toBeTruthy();
+  });
+
+  it('queries the original command on the replacement connection after transport failure', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
+    };
+    adapter.queryCommandResult = {
+      commandId: 'resolved-by-query', status: 'rejected', publicCode: 'TURN_INTERRUPTED',
+      promptDelivery: {
+        queueItemId: 'queue-network', queueStatus: 'CONSUMED',
+        consumedEntryId: 'entry-network', deliveryMode: 'new-turn',
+      },
+    };
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const original = adapter.lastConnection!;
+    original.submitPrompt.mockRejectedValueOnce(
+      new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', '连接断开。', true),
+    );
+
+    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
+      target: { value: '网络未知输入' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    const commandId = original.submitPrompt.mock.calls[0]?.[0] as string;
+
+    await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
+    await waitFor(() => expect(adapter.lastConnection?.queryCommand).toHaveBeenCalledWith(commandId));
+    expect(original.queryCommand).not.toHaveBeenCalled();
+    expect(adapter.lastConnection?.submitPrompt).not.toHaveBeenCalled();
+    expect(await screen.findByText('输入已接收，执行已中断')).toBeTruthy();
+  });
+
+  it('does not publish a late prompt receipt from an old session onto the new session', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [initialSession, { ...initialSession, id: 'session-2', title: '另一个会话', live: false }];
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
+    };
+    const receipt = deferred<CommandReceipt>();
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const first = adapter.lastConnection!;
+    first.submitPrompt.mockImplementationOnce(() => receipt.promise);
+
+    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
+      target: { value: '会话 A 的延迟输入' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(first.submitPrompt).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    await screen.findByRole('heading', { name: '另一个会话' });
+
+    const commandId = first.submitPrompt.mock.calls[0]![0];
+    await act(async () => receipt.resolve({
+      commandId, status: 'succeeded',
+      promptDelivery: {
+        queueItemId: 'queue-old-success', queueStatus: 'PENDING', deliveryMode: 'new-turn',
+      },
+    }));
+
+    expect(screen.queryByText('输入已接受')).toBeNull();
+    expect(screen.queryByText('会话 A 的延迟输入')).toBeNull();
+    expect(adapter.connectCalls).toHaveLength(2);
+  });
+
+  it('does not reconnect the new session when an old-session prompt fails late', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [initialSession, { ...initialSession, id: 'session-2', title: '另一个会话', live: false }];
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
+    };
+    const receipt = deferred<CommandReceipt>();
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const first = adapter.lastConnection!;
+    first.submitPrompt.mockImplementationOnce(() => receipt.promise);
+
+    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
+      target: { value: '会话 A 的失败输入' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(first.submitPrompt).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    await screen.findByRole('heading', { name: '另一个会话' });
+
+    await act(async () => receipt.reject(
+      new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', '会话 A 连接断开。', true),
+    ));
+
+    expect(adapter.connectCalls).toHaveLength(2);
+    expect(adapter.lastConnection?.sessionId).toBe('session-2');
+    expect(screen.queryByText('提交状态未知')).toBeNull();
+    expect(screen.queryByText('会话 A 连接断开。')).toBeNull();
+  });
+
+  it('does not publish a late interaction decision from an old session', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [initialSession, { ...initialSession, id: 'session-2', title: '另一个会话', live: false }];
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
+      interaction: {
+        id: 'plan-old-session', kind: 'plan-draft', workflowId: 'workflow-old', workflowRevision: 1,
+      },
+    };
+    const decision = deferred<CommandReceipt>();
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByText('检查契约');
+    const first = adapter.lastConnection!;
+    first.resolveInteraction.mockImplementationOnce(() => decision.promise);
+
+    fireEvent.click(screen.getByRole('button', { name: '取消规划' }));
+    await waitFor(() => expect(first.resolveInteraction).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+    await screen.findByRole('heading', { name: '另一个会话' });
+
+    await act(async () => decision.resolve({
+      commandId: 'command-old-decision', status: 'succeeded',
+      planDraftDecision: 'cancel',
+    }));
+
+    expect(screen.queryByText('规划已取消')).toBeNull();
+    expect(adapter.connectCalls).toHaveLength(2);
   });
 
   it('shows real child execution inline and expands its details', async () => {
@@ -2513,7 +3036,7 @@ describe('PulsaraApp', () => {
             status: 'completed',
             traces: [{
               id: 'trace-readme', kind: 'read', title: '读取文件', subtitle: '已完成',
-              status: 'completed', meta: '操作完成', output: ['已读取 README.md · 1 行'],
+              status: 'completed', meta: '操作完成', resultText: '已读取 README.md · 1 行',
             }],
           }],
         }],

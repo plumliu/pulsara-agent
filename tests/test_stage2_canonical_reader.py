@@ -10,8 +10,10 @@ import pytest
 
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
+    PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.cancellation import stable_subagent_turn_id
+from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
@@ -72,7 +74,10 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
+from pulsara_agent.terminal_protocol.canonical_v3 import (
+    CanonicalProtocolReader,
+    CanonicalQueueContentNotPending,
+)
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
@@ -81,7 +86,13 @@ from pulsara_agent.primitives.tool_result_projection import (
     ToolResultFullDeliveryReason,
 )
 from tests.support.postgres import verified_postgres_provider
-from tests.support.model_config import bind_test_session, start_test_root_turn
+from tests.support.model_config import (
+    bind_test_session,
+    enqueue_test_prompt,
+    start_test_root_turn,
+    test_model_binding,
+    test_model_runtime,
+)
 from tests.support.subagents import accept_active_subagent_fixture
 
 
@@ -124,6 +135,175 @@ def _permission_fingerprint(repository, lease, turn_id: str) -> str:
         ).fetchone()
     assert row is not None
     return str(row[0])
+
+
+def test_protocol_reader_reauthorizes_only_pending_queue_content_in_session(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    deadline = monotonic() + 30
+    workspace_id = _id("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=workspace_id,
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    queue_item_id = _id("queue")
+    content = InlineContent.from_bytes("同文队列🙂".encode())
+    enqueue_test_prompt(
+        repository,
+        lease.guard,
+        command_id=_id("command"),
+        queue_item_id=queue_item_id,
+        client_submission_id=_id("submission"),
+        delivery_mode=PromptDeliveryMode.NEW_TURN,
+        target_turn_id=None,
+        permission_snapshot_id=_id("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
+        content=content,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+    reader = CanonicalProtocolReader(provider)
+    reference = reader.resolve_content_reference(
+        session_id=lease.guard.session_id,
+        queue_item_id=queue_item_id,
+        deadline_monotonic=deadline,
+    )
+    assert bytes(reference["inline_content"]) == content.canonical_bytes
+    assert reference["blob_id"] is None
+    assert reference["content_digest"] == content.digest
+    assert reference["content_size"] == content.size
+
+    other = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=_id("workspace"),
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    for session_id, target in (
+        (other.guard.session_id, queue_item_id),
+        (lease.guard.session_id, _id("queue")),
+    ):
+        with pytest.raises(KeyError):
+            reader.resolve_content_reference(
+                session_id=session_id,
+                queue_item_id=target,
+                deadline_monotonic=deadline,
+            )
+    with pytest.raises(ValueError, match="queue content has no block target"):
+        reader.resolve_content_reference(
+            session_id=lease.guard.session_id,
+            queue_item_id=queue_item_id,
+            block_id=_id("block"),
+            deadline_monotonic=deadline,
+        )
+
+    assert repository.cancel_prompt(
+        lease.guard,
+        queue_item_id=queue_item_id,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    ) == "CANCELLED"
+    with pytest.raises(CanonicalQueueContentNotPending) as terminal:
+        reader.resolve_content_reference(
+            session_id=lease.guard.session_id,
+            queue_item_id=queue_item_id,
+            deadline_monotonic=deadline,
+        )
+    assert terminal.value.queue_item_id == queue_item_id
+    assert terminal.value.status == "CANCELLED"
+    assert terminal.value.consumed_entry_id is None
+
+
+def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    deadline = monotonic() + 30
+    workspace_id = _id("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=workspace_id,
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    queue_item_id = _id("queue")
+    content_bytes = ("大正文🙂\n" * 12_000).encode()
+    content = PostgresCanonicalBlobStore(provider).publish(
+        workspace_id=workspace_id,
+        content=content_bytes,
+        media_type="text/plain",
+        codec="utf-8",
+        deadline_monotonic=deadline,
+    )
+    assert content.size > 64 << 10
+    enqueue_test_prompt(
+        repository,
+        lease.guard,
+        command_id=_id("command"),
+        queue_item_id=queue_item_id,
+        client_submission_id=_id("submission"),
+        delivery_mode=PromptDeliveryMode.NEW_TURN,
+        target_turn_id=None,
+        permission_snapshot_id=_id("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
+        content=content,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+    reader = CanonicalProtocolReader(provider)
+    pending = reader.resolve_content_reference(
+        session_id=lease.guard.session_id,
+        queue_item_id=queue_item_id,
+        deadline_monotonic=deadline,
+    )
+    assert pending["inline_content"] is None
+    assert pending["blob_id"] is not None
+    assert pending["content_digest"] == content.digest
+
+    candidate = repository.prepare_prompt_head_consumption(
+        session_id=lease.guard.session_id,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="runtime:test",
+        deadline_monotonic=deadline,
+    )
+    assert candidate is not None and candidate.queue_item_id == queue_item_id
+    consumed = repository.consume_prepared_prompt_head(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=deadline,
+    )
+    assert consumed is not None and consumed.accepted is not None
+
+    with pytest.raises(CanonicalQueueContentNotPending) as terminal:
+        reader.resolve_content_reference(
+            session_id=lease.guard.session_id,
+            queue_item_id=queue_item_id,
+            deadline_monotonic=deadline,
+        )
+    assert terminal.value.status == "CONSUMED"
+    assert terminal.value.consumed_entry_id == candidate.exact_initial_entry_id
+    entry = reader.resolve_content_reference(
+        session_id=lease.guard.session_id,
+        entry_id=terminal.value.consumed_entry_id,
+        deadline_monotonic=deadline,
+    )
+    assert entry["inline_content"] is None
+    assert entry["blob_id"] is not None
+    assert entry["content_digest"] == content.digest
+    assert entry["content_size"] == content.size
 
 
 class _BrokenBlobReader:

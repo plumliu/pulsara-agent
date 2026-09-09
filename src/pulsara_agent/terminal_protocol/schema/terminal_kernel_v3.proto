@@ -179,6 +179,17 @@ message CanonicalToolResult {
   string assistant_entry_id = 1;
   string tool_call_id = 2;
   string result_state = 3;
+  string artifact_disposition = 4;
+  string source_coverage = 5;
+  string display_kind = 6;
+  string source_coverage_reason = 7;
+  string artifact_unavailability_reason = 8;
+}
+
+message CanonicalInputSource {
+  string queue_item_id = 1;
+  string command_id = 2;
+  string delivery_mode = 3;
 }
 
 message CanonicalEntry {
@@ -198,6 +209,7 @@ message CanonicalEntry {
   CanonicalToolResult tool_result = 14;
   bool fork_eligible = 15;
   string entry_owner_kind = 16;
+  CanonicalInputSource input_source = 17;
 }
 
 message ActiveTurnControl {
@@ -217,6 +229,7 @@ message PromptQueueControl {
   string target_turn_id = 5;
   CanonicalContentReference content = 6;
   RunPermissionProjection permission = 7;
+  string command_id = 8;
 }
 
 message PlanWorkflowControl {
@@ -746,6 +759,14 @@ message CommandOutcome {
   uint64 plan_workflow_revision = 10;
   PlanDraftDecision plan_draft_decision = 11;
   string plan_continuation_turn_id = 12;
+  PromptDelivery prompt_delivery = 13;
+}
+
+message PromptDelivery {
+  string queue_item_id = 1;
+  string queue_status = 2;
+  string consumed_entry_id = 3;
+  string delivery_mode = 4;
 }
 
 message QueryCommandRequest {
@@ -878,10 +899,38 @@ message ReadContentRequest {
   string request_id = 1;
   string attachment_id = 2;
   uint64 attachment_generation = 3;
-  string entry_id = 4;
+  oneof target {
+    string entry_id = 4;
+    string queue_item_id = 8;
+  }
   string block_id = 5;
   uint64 offset_bytes = 6;
   uint32 limit_bytes = 7;
+}
+
+message ReadToolArtifactRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string result_entry_id = 4;
+  uint64 offset_chars = 5;
+  uint32 max_chars = 6;
+}
+
+message ToolArtifactTextChunk {
+  string request_id = 1;
+  string result_entry_id = 2;
+  string artifact_disposition = 3;
+  string source_coverage = 4;
+  string display_kind = 5;
+  string source_coverage_reason = 6;
+  string artifact_unavailability_reason = 7;
+  string text = 8;
+  uint64 offset_chars = 9;
+  uint64 returned_chars = 10;
+  uint64 total_chars = 11;
+  bool has_more = 12;
+  uint64 next_offset_chars = 13;
 }
 
 message CanonicalContentChunk {
@@ -919,6 +968,7 @@ message ClientFrame {
     ResolvePlanInteractionRequest resolve_plan_interaction = 11;
     ReadPlanQuestionContentRequest read_plan_question = 12;
     ReadPlanDraftTextChunkRequest read_plan_draft = 13;
+    ReadToolArtifactRequest read_tool_artifact = 14;
   }
 }
 
@@ -943,5 +993,6 @@ message ServerFrame {
     ResolvePlanInteractionResponse resolve_plan_interaction = 11;
     PlanQuestionContent plan_question = 12;
     PlanDraftTextChunk plan_draft = 13;
+    ToolArtifactTextChunk tool_artifact = 14;
   }
 }

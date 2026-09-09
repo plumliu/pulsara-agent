@@ -171,6 +171,8 @@ export interface RuntimeProjection {
   initialContextBase?: ProtocolCanonicalControl['initial_context_base'];
   isRunning: boolean;
   queuedCount: number;
+  queuedPrompts: QueuedPrompt[];
+  promptTransitions: LocalPromptSubmission[];
   planMode: boolean;
   activeTurnId?: string;
   control: ProtocolCanonicalControl;
@@ -183,6 +185,46 @@ export interface RuntimeProjection {
   liveControlOwnerEpoch: number;
   liveControlRevision: number;
   interaction?: RuntimeInteractionSummary;
+}
+
+export interface QueuedPrompt {
+  queueItemId: string;
+  commandId: string;
+  sequence: number;
+  status: 'pending';
+  deliveryMode: 'new-turn' | 'steer';
+  targetTurnId?: string;
+  body: string;
+  permission?: PermissionMode;
+}
+
+export interface ToolArtifactPage {
+  resultEntryId: string;
+  text: string;
+  offsetChars: number;
+  returnedChars: number;
+  totalChars: number;
+  hasMore: boolean;
+  nextOffsetChars?: number;
+}
+
+export interface LocalPromptSubmission {
+  sessionId: string;
+  connectionGeneration: number;
+  commandId: string;
+  body: string;
+  bodyUnavailable?: boolean;
+  deliveryMode: 'new-turn' | 'steer';
+  targetTurnId?: string;
+  permission?: PermissionMode;
+  queueItemId?: string;
+  consumedEntryId?: string;
+  observedPending?: boolean;
+  lastCheckedEventSequence?: number;
+  lastCheckedConnectionGeneration?: number;
+  status: 'sending' | 'synchronizing' | 'queued' | 'unknown' | 'consumed' | 'rejected' | 'cancelled';
+  outcomeCode?: string;
+  detail?: string;
 }
 
 export interface ContextCompactionBoundary {
@@ -372,8 +414,8 @@ export interface RuntimeConnection {
   current(): RuntimeProjection;
   snapshot(): Promise<RuntimeProjection>;
   observe(signal?: AbortSignal): Promise<RuntimeProjection>;
-  submitPrompt(text: string, permission: PermissionMode): Promise<CommandReceipt>;
-  steerActiveTurn(text: string, targetTurnId: string): Promise<CommandReceipt>;
+  submitPrompt(commandId: string, text: string, permission: PermissionMode): Promise<CommandReceipt>;
+  steerActiveTurn(commandId: string, text: string, targetTurnId: string): Promise<CommandReceipt>;
   stopActiveTurn(): Promise<CommandReceipt>;
   compactContext(targetTurnId?: string): Promise<CommandReceipt>;
   acceptSubagentCompletion(taskId: string, permission: PermissionMode): Promise<CommandReceipt>;
@@ -384,6 +426,7 @@ export interface RuntimeConnection {
     resolution: RuntimeInteractionResolution,
   ): Promise<CommandReceipt | { submitted: boolean }>;
   queryCommand(commandId: string): Promise<CommandReceipt | undefined>;
+  readToolArtifact(resultEntryId: string, offsetChars: number, maxChars?: number): Promise<ToolArtifactPage>;
   close(): Promise<void>;
 }
 
@@ -393,6 +436,14 @@ export interface CommandReceipt {
   targetId?: string;
   publicCode?: string;
   publicMessage?: string;
+  promptDelivery?: {
+    queueItemId: string;
+    queueStatus: string;
+    consumedEntryId?: string;
+    deliveryMode: 'new-turn' | 'steer';
+  };
+  planDraftDecision?: 'approve' | 'revise' | 'cancel';
+  planContinuationTurnId?: string;
 }
 
 export type RuntimeCommandKind =
@@ -458,7 +509,12 @@ interface ProtocolEntry {
   reasoning_blocks?: ProtocolReasoningBlock[];
   accepted_at_utc?: string;
   source_subagent_task_id?: string;
-  tool_result?: { assistant_entry_id?: string; tool_call_id?: string; result_state?: string };
+  tool_result?: {
+    assistant_entry_id?: string; tool_call_id?: string; result_state?: string;
+    artifact_disposition?: string; source_coverage?: string; display_kind?: string;
+    source_coverage_reason?: string; artifact_unavailability_reason?: string;
+  };
+  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string };
 }
 
 interface ProtocolActiveTurn {
@@ -546,7 +602,11 @@ export interface ProtocolCanonicalControl {
   session_lifecycle?: string;
   latest_root_turn?: { turn_id?: string; status?: string; terminal_reason?: string };
   active_turns?: ProtocolActiveTurn[];
-  prompt_queue?: Array<Record<string, unknown>>;
+  prompt_queue?: Array<{
+    queue_item_id?: string; command_id?: string; queue_sequence?: string | number;
+    status?: string; delivery_mode?: string; target_turn_id?: string;
+    content?: ProtocolContent; permission?: { requested_mode?: string; effective_mode?: string };
+  }>;
   prompt_queue_total_count?: string | number;
   tool_attempts?: ProtocolToolAttempt[];
   subagent_tasks?: ProtocolSubagentTask[];
@@ -570,6 +630,10 @@ interface ProtocolLiveEvent {
   draft_identity?: string;
   generation_id?: string;
   block_id?: string;
+  channel_kind?: string;
+  channel_tool_call_id?: string;
+  channel_attempt_id?: string;
+  proposed_entry_id?: string;
   payload?: Record<string, Record<string, unknown>>;
 }
 
@@ -577,6 +641,10 @@ interface ProtocolSettlement {
   kind: string;
   draft_identity?: string;
   generation_id?: string;
+  channel_kind?: string;
+  channel_tool_call_id?: string;
+  channel_attempt_id?: string;
+  proposed_entry_id?: string;
 }
 
 interface ProtocolLiveSnapshot {
@@ -678,6 +746,24 @@ interface LiveTaskProgress {
   summary: string;
 }
 
+interface LiveToolResult {
+  id: string;
+  turnId: string;
+  scopeKind: string;
+  taskId: string;
+  draftIdentity?: string;
+  generationId?: string;
+  blockId?: string;
+  assistantEntryId?: string;
+  toolCallId?: string;
+  attemptId?: string;
+  proposedEntryId?: string;
+  text: string;
+  hasText: boolean;
+  ended: boolean;
+  resultState?: string;
+}
+
 interface ProtocolError {
   stable_code: string;
   public_message?: string;
@@ -689,6 +775,12 @@ interface ProtocolCommandOutcome {
   target_id?: string;
   public_code?: string;
   public_message?: string;
+  prompt_delivery?: {
+    queue_item_id?: string; queue_status?: string; consumed_entry_id?: string;
+    delivery_mode?: string;
+  };
+  plan_draft_decision?: string;
+  plan_continuation_turn_id?: string;
 }
 
 export function selectPromptCommand(isTurnActive: boolean, steer: boolean): RuntimeCommandKind {
@@ -1215,6 +1307,8 @@ class LocalRuntimeConnection implements RuntimeConnection {
   private readonly connectionId: string;
   private entries = new Map<string, ProtocolEntry>();
   private drafts = new Map<string, LiveDraft>();
+  private liveResults = new Map<string, LiveToolResult>();
+  private promptTransitions = new Map<string, LocalPromptSubmission>();
   private taskProgress = new Map<string, LiveTaskProgress>();
   private control: ProtocolCanonicalControl = {};
   private liveControl: ProtocolLiveControlSnapshot = {};
@@ -1245,7 +1339,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
 
   async initialize(): Promise<void> {
     await this.backfillOlderHistory();
-    await this.hydrateReasoningContent();
+    await this.hydrateProjectionContent();
   }
 
   current(): RuntimeProjection {
@@ -1263,7 +1357,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     }
     this.replaceSnapshot(frame.snapshot.snapshot);
     await this.backfillOlderHistory();
-    await this.hydrateReasoningContent();
+    await this.hydrateProjectionContent();
     return this.project();
   }
 
@@ -1304,16 +1398,16 @@ class LocalRuntimeConnection implements RuntimeConnection {
     this.liveRevision = numeric(observation.through_live_revision ?? this.liveRevision);
     this.liveControlOwnerEpoch = numeric(observation.live_control_owner_epoch ?? this.liveControlOwnerEpoch);
     this.liveControlRevision = numeric(observation.through_live_control_revision ?? this.liveControlRevision);
-    await this.hydrateReasoningContent();
+    await this.hydrateProjectionContent();
     return this.project();
   }
 
-  submitPrompt(text: string, permission: PermissionMode): Promise<CommandReceipt> {
-    return this.command('SUBMIT_PROMPT', { text, requested_permission_mode: protocolPermissionModes[permission] });
+  submitPrompt(commandId: string, text: string, permission: PermissionMode): Promise<CommandReceipt> {
+    return this.command('SUBMIT_PROMPT', { text, requested_permission_mode: protocolPermissionModes[permission] }, commandId);
   }
 
-  steerActiveTurn(text: string, targetTurnId: string): Promise<CommandReceipt> {
-    return this.command('STEER_ACTIVE_TURN', { text, target_turn_id: targetTurnId });
+  steerActiveTurn(commandId: string, text: string, targetTurnId: string): Promise<CommandReceipt> {
+    return this.command('STEER_ACTIVE_TURN', { text, target_turn_id: targetTurnId }, commandId);
   }
 
   stopActiveTurn(): Promise<CommandReceipt> {
@@ -1487,6 +1581,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
         command_id?: string;
         interaction_status?: string;
         continuation_turn_id?: string;
+        draft_decision?: string;
       };
       error?: ProtocolError;
     }>('resolve-plan-interaction', {
@@ -1502,11 +1597,30 @@ class LocalRuntimeConnection implements RuntimeConnection {
     if (!outcome || outcome.command_id !== commandId) {
       throw new RuntimeApiError('INTERACTION_RESPONSE_INVALID', '本地服务没有返回规划结果。', true);
     }
+    if (resolution.kind === 'plan-draft') {
+      const observedDecision = {
+        PLAN_DRAFT_APPROVE: 'approve',
+        PLAN_DRAFT_REVISE: 'revise',
+        PLAN_DRAFT_CANCEL: 'cancel',
+      }[outcome.draft_decision ?? ''];
+      const continuationTurnId = outcome.continuation_turn_id || undefined;
+      if (
+        observedDecision !== resolution.decision
+        || (resolution.decision !== 'cancel') !== Boolean(continuationTurnId)
+      ) {
+        throw new RuntimeApiError('INTERACTION_RESPONSE_INVALID', '规划结果与本次选择不一致。', true);
+      }
+      return {
+        commandId,
+        status: 'succeeded',
+        planDraftDecision: resolution.decision,
+        planContinuationTurnId: continuationTurnId,
+      };
+    }
     return {
       commandId,
       status: 'succeeded',
       targetId: outcome.continuation_turn_id || interaction.workflowId,
-      publicMessage: '你的选择已接受。',
     };
   }
 
@@ -1518,6 +1632,37 @@ class LocalRuntimeConnection implements RuntimeConnection {
     assertProtocolFrame(frame);
     if (!frame.query_command?.found || !frame.query_command.outcome) return undefined;
     return projectCommand(frame.query_command.outcome);
+  }
+
+  async readToolArtifact(
+    resultEntryId: string,
+    offsetChars: number,
+    maxChars = 32_000,
+  ): Promise<ToolArtifactPage> {
+    const frame = await this.post<{
+      tool_artifact?: {
+        result_entry_id?: string; text?: string; offset_chars?: string | number;
+        returned_chars?: string | number; total_chars?: string | number;
+        has_more?: boolean; next_offset_chars?: string | number;
+      };
+      error?: ProtocolError;
+    }>('read-tool-artifact', {
+      result_entry_id: resultEntryId, offset_chars: offsetChars, max_chars: maxChars,
+    });
+    assertProtocolFrame(frame);
+    const page = frame.tool_artifact;
+    if (!page || page.result_entry_id !== resultEntryId || numeric(page.offset_chars) !== offsetChars) {
+      throw new RuntimeApiError('TOOL_ARTIFACT_RESPONSE_INVALID', '工具原始输出暂时无法读取。', true);
+    }
+    return {
+      resultEntryId,
+      text: page.text ?? '',
+      offsetChars,
+      returnedChars: numeric(page.returned_chars),
+      totalChars: numeric(page.total_chars),
+      hasMore: Boolean(page.has_more),
+      nextOffsetChars: page.has_more ? numeric(page.next_offset_chars) : undefined,
+    };
   }
 
   async close(): Promise<void> {
@@ -1536,8 +1681,9 @@ class LocalRuntimeConnection implements RuntimeConnection {
   private async command(
     kind: RuntimeCommandKind,
     fields: Record<string, unknown> = {},
+    suppliedCommandId?: string,
   ): Promise<CommandReceipt> {
-    const commandId = `command:web:${crypto.randomUUID()}`;
+    const commandId = suppliedCommandId ?? `command:web:${crypto.randomUUID()}`;
     const frame = await this.post<{
       command_outcome?: ProtocolCommandOutcome;
       error?: ProtocolError;
@@ -1614,73 +1760,212 @@ class LocalRuntimeConnection implements RuntimeConnection {
     }
   }
 
-  private async hydrateReasoningContent(): Promise<void> {
+  private async hydrateProjectionContent(): Promise<void> {
+    while (true) {
+      await this.hydrateCanonicalContent();
+      const transitioned = await this.hydrateQueuedPromptContent();
+      if (!transitioned) return;
+      await this.refreshCanonicalAfterQueueTransition();
+      await this.reconcilePromptQueueTransition(transitioned);
+    }
+  }
+
+  private async refreshCanonicalAfterQueueTransition(): Promise<void> {
+    const frame = await this.post<{
+      snapshot?: { snapshot?: ProtocolCanonicalSnapshot };
+      error?: ProtocolError;
+    }>('snapshot', {});
+    assertProtocolFrame(frame);
+    if (!frame.snapshot?.snapshot) {
+      throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务返回的数据不完整。', true);
+    }
+    this.replaceSnapshot(frame.snapshot.snapshot);
+    await this.backfillOlderHistory();
+  }
+
+  private async hydrateCanonicalContent(): Promise<void> {
     for (const entry of this.entries.values()) {
+      await this.hydrateContentReference(
+        entry.content,
+        { entry_id: entry.entry_id },
+        '这条会话内容暂时无法完整读取。',
+      );
+      for (const block of entry.blocks ?? []) {
+        await this.hydrateContentReference(
+          block.content,
+          { entry_id: entry.entry_id, block_id: block.block_id },
+          '这条模型回复暂时无法完整读取。',
+        );
+      }
       for (const block of entry.reasoning_blocks ?? []) {
-        const reference = block.content;
-        if (!reference || reference.inline_content || numeric(reference.size) === 0) continue;
-        const expectedSize = numeric(reference.size);
-        const expectedDigest = reference.digest ?? '';
-        const chunks: Uint8Array[] = [];
-        let offset = 0;
-        while (true) {
-          const frame = await this.post<{
-            content?: {
-              digest?: string;
-              complete_size?: string | number;
-              offset_bytes?: string | number;
-              content?: string;
-              complete?: boolean;
-            };
-            error?: ProtocolError;
-          }>('read-content', {
-            entry_id: entry.entry_id,
-            block_id: block.block_id,
-            offset_bytes: offset,
-            limit_bytes: 1 << 20,
-          });
-          assertProtocolFrame(frame);
-          const chunk = frame.content;
-          if (
-            !chunk
-            || chunk.digest !== expectedDigest
-            || numeric(chunk.complete_size) !== expectedSize
-            || numeric(chunk.offset_bytes) !== offset
-          ) {
-            throw new RuntimeApiError(
-              'CONTENT_REFERENCE_INVALID',
-              '这段思考内容暂时无法完整读取。',
-              true,
-            );
-          }
-          const bytes = decodeBase64Bytes(chunk.content ?? '');
-          chunks.push(bytes);
-          offset += bytes.length;
-          if (chunk.complete) break;
-          if (bytes.length === 0 || offset >= expectedSize) {
-            throw new RuntimeApiError(
-              'CONTENT_REFERENCE_INVALID',
-              '这段思考内容暂时无法完整读取。',
-              true,
-            );
-          }
-        }
-        if (offset !== expectedSize) {
-          throw new RuntimeApiError(
-            'CONTENT_REFERENCE_INVALID',
-            '这段思考内容暂时无法完整读取。',
-            true,
-          );
-        }
-        const complete = new Uint8Array(expectedSize);
-        let cursor = 0;
-        for (const chunk of chunks) {
-          complete.set(chunk, cursor);
-          cursor += chunk.length;
-        }
-        reference.inline_content = encodeBase64Bytes(complete);
+        await this.hydrateContentReference(
+          block.content,
+          { entry_id: entry.entry_id, block_id: block.block_id },
+          '这段思考内容暂时无法完整读取。',
+        );
       }
     }
+  }
+
+  private async hydrateQueuedPromptContent(): Promise<
+    NonNullable<ProtocolCanonicalControl['prompt_queue']>[number] | undefined
+  > {
+    for (const item of this.control.prompt_queue ?? []) {
+      try {
+        await this.hydrateContentReference(
+          item.content,
+          { queue_item_id: item.queue_item_id },
+          '等待处理的输入暂时无法完整读取。',
+        );
+      } catch (error) {
+        if (error instanceof RuntimeApiError && error.code === 'CONTENT_QUEUE_NOT_PENDING') {
+          return item;
+        }
+        throw error;
+      }
+    }
+    return undefined;
+  }
+
+  private async reconcilePromptQueueTransition(
+    item: NonNullable<ProtocolCanonicalControl['prompt_queue']>[number],
+  ): Promise<void> {
+    const commandId = item.command_id ?? '';
+    const queueItemId = item.queue_item_id ?? '';
+    if (!commandId || !queueItemId) {
+      throw new RuntimeApiError(
+        'PROMPT_TRANSITION_IDENTITY_INVALID',
+        '等待处理的输入缺少可核对的身份。',
+        true,
+      );
+    }
+    const consumed = [...this.entries.values()].some((entry) => (
+      entry.input_source?.command_id === commandId
+      && entry.input_source?.queue_item_id === queueItemId
+    ));
+    const pending = (this.control.prompt_queue ?? []).some((candidate) => (
+      candidate.command_id === commandId
+      && candidate.queue_item_id === queueItemId
+      && candidate.status === 'PENDING'
+    ));
+    if (consumed || pending) {
+      this.promptTransitions.delete(commandId);
+      return;
+    }
+
+    const receipt = await this.queryCommand(commandId);
+    if (!receipt) {
+      this.promptTransitions.set(commandId, this.queueTransitionSubmission(
+        item,
+        'unknown',
+        undefined,
+        '本地服务尚未返回这条输入的最终状态。',
+      ));
+      return;
+    }
+    if (
+      receipt.commandId !== commandId
+      || receipt.promptDelivery?.queueItemId !== queueItemId
+    ) {
+      throw new RuntimeApiError(
+        'PROMPT_TRANSITION_IDENTITY_INVALID',
+        '等待处理的输入返回了不一致的身份。',
+        true,
+      );
+    }
+    const queueStatus = receipt.promptDelivery.queueStatus.toUpperCase();
+    const status: LocalPromptSubmission['status'] = queueStatus === 'CONSUMED'
+      ? 'consumed'
+      : queueStatus === 'CANCELLED'
+        ? 'cancelled'
+        : queueStatus === 'REJECTED'
+          ? 'rejected'
+          : 'unknown';
+    this.promptTransitions.set(commandId, this.queueTransitionSubmission(
+      item,
+      status,
+      receipt.publicCode,
+      receipt.publicMessage,
+      receipt.promptDelivery.consumedEntryId,
+    ));
+  }
+
+  private queueTransitionSubmission(
+    item: NonNullable<ProtocolCanonicalControl['prompt_queue']>[number],
+    status: LocalPromptSubmission['status'],
+    outcomeCode?: string,
+    detail?: string,
+    consumedEntryId?: string,
+  ): LocalPromptSubmission {
+    const hasInlineBody = item.content?.inline_content !== undefined;
+    return {
+      sessionId: this.sessionId,
+      connectionGeneration: this.generation,
+      commandId: item.command_id!,
+      queueItemId: item.queue_item_id!,
+      consumedEntryId,
+      body: hasInlineBody ? decodeContent(item.content) : '',
+      bodyUnavailable: !hasInlineBody,
+      deliveryMode: deliveryMode(item.delivery_mode),
+      targetTurnId: item.target_turn_id || undefined,
+      permission: protocolPermission(item.permission?.effective_mode),
+      observedPending: true,
+      status,
+      outcomeCode,
+      detail,
+    };
+  }
+
+  private async hydrateContentReference(
+    reference: ProtocolContent | undefined,
+    target: { entry_id: string; block_id?: string } | { queue_item_id: string },
+    publicMessage: string,
+  ): Promise<void> {
+    if (!reference || reference.inline_content !== undefined || numeric(reference.size) === 0) return;
+    const expectedSize = numeric(reference.size);
+    const expectedDigest = reference.digest ?? '';
+    const chunks: Uint8Array[] = [];
+    let offset = 0;
+    while (true) {
+      const frame = await this.post<{
+        content?: {
+          digest?: string; complete_size?: string | number; offset_bytes?: string | number;
+          content?: string; complete?: boolean;
+        };
+        error?: ProtocolError;
+      }>('read-content', {
+        ...target,
+        offset_bytes: offset,
+        limit_bytes: 1 << 20,
+      });
+      assertProtocolFrame(frame);
+      const chunk = frame.content;
+      if (
+        !chunk || chunk.digest !== expectedDigest
+        || numeric(chunk.complete_size) !== expectedSize
+        || numeric(chunk.offset_bytes) !== offset
+      ) {
+        throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
+      }
+      const bytes = decodeBase64Bytes(chunk.content ?? '');
+      chunks.push(bytes);
+      offset += bytes.length;
+      if (chunk.complete) break;
+      if (bytes.length === 0 || offset >= expectedSize) {
+        throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
+      }
+    }
+    if (offset !== expectedSize) {
+      throw new RuntimeApiError('CONTENT_REFERENCE_INVALID', publicMessage, true);
+    }
+    const complete = new Uint8Array(expectedSize);
+    let cursor = 0;
+    for (const chunk of chunks) {
+      complete.set(chunk, cursor);
+      cursor += chunk.length;
+    }
+    await verifyContentIntegrity(complete, expectedDigest, publicMessage);
+    reference.inline_content = encodeBase64Bytes(complete);
   }
 
   private applyLive(events: ProtocolLiveEvent[], settlements: ProtocolSettlement[]) {
@@ -1699,6 +1984,10 @@ class LocalRuntimeConnection implements RuntimeConnection {
             summary: String(progress.public_summary ?? ''),
           });
         }
+        continue;
+      }
+      if (event.event_type.startsWith('TOOL_RESULT_')) {
+        this.applyLiveToolResult(event, payload);
         continue;
       }
       const identity = event.draft_identity || event.generation_id || event.turn_id || `revision:${event.live_revision}`;
@@ -1764,8 +2053,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
       if (event.event_type === 'TOOL_CALL_END') {
         const item = payload.tool_call_end ?? {};
         const toolCallId = String(item.tool_call_id ?? '');
-        const trace = current.traces.find((candidate) => candidate.id === toolCallId)
-          ?? current.traces.at(-1);
+        const trace = current.traces.find((candidate) => candidate.id === toolCallId);
         if (trace) {
           const toolName = String(item.tool_name ?? trace.toolName ?? 'tool');
           const argumentsJson = String(item.arguments_json ?? '');
@@ -1777,29 +2065,6 @@ class LocalRuntimeConnection implements RuntimeConnection {
           trace.command = terminalCommand(toolName, argumentsJson);
         }
       }
-      if (event.event_type === 'TOOL_RESULT_DELTA') {
-        const text = stringField(payload.tool_result_delta, 'text');
-        const trace = current.traces.at(-1);
-        if (trace && text) trace.output = [...(trace.output ?? []), text];
-      }
-      if (event.event_type === 'TOOL_RESULT_END') {
-        const item = payload.tool_result_end ?? {};
-        const trace = current.traces.at(-1);
-        if (trace) {
-          const resultState = String(item.result_state ?? '').toUpperCase();
-          trace.status = resultState === 'SUCCESS'
-            ? 'completed'
-            : resultState === 'CANCELLED' || resultState === 'CANCELLED_BEFORE_DISPATCH'
-              ? 'cancelled'
-              : 'failed';
-          trace.subtitle = trace.status === 'completed' ? '已完成' : toolFailureLabel(resultState);
-          const finalText = String(item.final_text ?? '');
-          if (finalText) {
-            trace.resultText = finalText;
-            trace.output = [formatToolResult(finalText)];
-          }
-        }
-      }
       if (
         event.event_type.startsWith('TEXT_')
         || event.event_type.startsWith('THINKING_')
@@ -1808,10 +2073,122 @@ class LocalRuntimeConnection implements RuntimeConnection {
         this.drafts.set(identity, current);
       }
     }
+    this.reconcileLiveToolResults();
     for (const settlement of settlements) {
       const identity = settlement.draft_identity || settlement.generation_id;
-      if (identity) this.drafts.delete(identity);
+      if (settlement.channel_kind?.includes('TOOL_RESULT')) {
+        for (const [key, result] of this.liveResults) {
+          if (this.liveResultMatches(result, settlement)) this.liveResults.delete(key);
+        }
+      } else if (identity) {
+        this.drafts.delete(identity);
+      }
     }
+  }
+
+  private liveResultStableKey(event: ProtocolLiveEvent): string | undefined {
+    const exactChannel = event.channel_attempt_id || event.proposed_entry_id;
+    const fallbackParts = [
+        event.scope_kind ?? '', event.scope_subagent_task_id ?? '', event.turn_id ?? '',
+        event.draft_identity ?? event.generation_id ?? '', event.block_id ?? '',
+        event.channel_tool_call_id ?? '',
+    ];
+    const channelIdentity = exactChannel || (fallbackParts.some(Boolean) ? fallbackParts.join(':') : '');
+    return channelIdentity ? `live-result:${channelIdentity}` : undefined;
+  }
+
+  private reconcileLiveToolResults(): void {
+    for (const result of this.liveResults.values()) {
+      const attempt = result.attemptId
+        ? (this.control.tool_attempts ?? []).find((item) => item.attempt_id === result.attemptId)
+        : undefined;
+      const proposed = result.proposedEntryId ? this.entries.get(result.proposedEntryId) : undefined;
+      const assistantEntryId = attempt?.assistant_entry_id ?? proposed?.tool_result?.assistant_entry_id;
+      const toolCallId = attempt?.tool_call_id ?? proposed?.tool_result?.tool_call_id;
+      if (assistantEntryId) result.assistantEntryId = assistantEntryId;
+      if (toolCallId) result.toolCallId = toolCallId;
+    }
+  }
+
+  private liveResultMatches(result: LiveToolResult, event: ProtocolSettlement): boolean {
+    if (event.channel_attempt_id && result.attemptId === event.channel_attempt_id) return true;
+    if (event.proposed_entry_id && result.proposedEntryId === event.proposed_entry_id) return true;
+    if (event.draft_identity && result.draftIdentity === event.draft_identity) return true;
+    if (event.generation_id && result.generationId === event.generation_id) return true;
+    const attempt = event.channel_attempt_id
+      ? (this.control.tool_attempts ?? []).find((item) => item.attempt_id === event.channel_attempt_id)
+      : undefined;
+    const proposed = event.proposed_entry_id ? this.entries.get(event.proposed_entry_id) : undefined;
+    const assistantEntryId = attempt?.assistant_entry_id ?? proposed?.tool_result?.assistant_entry_id;
+    const toolCallId = event.channel_tool_call_id
+      || attempt?.tool_call_id
+      || proposed?.tool_result?.tool_call_id;
+    return Boolean(
+      assistantEntryId && toolCallId
+      && result.assistantEntryId === assistantEntryId
+      && result.toolCallId === toolCallId,
+    );
+  }
+
+  private applyLiveToolResult(event: ProtocolLiveEvent, payload: Record<string, Record<string, unknown>>) {
+    const item = event.event_type === 'TOOL_RESULT_START'
+      ? payload.tool_result_start ?? {}
+      : event.event_type === 'TOOL_RESULT_DELTA'
+        ? payload.tool_result_delta ?? {}
+        : payload.tool_result_end ?? {};
+    const payloadCallId = String(item.tool_call_id ?? '');
+    const payloadAttemptId = String(item.attempt_id ?? '');
+    const augmented = {
+      ...event,
+      channel_tool_call_id: event.channel_tool_call_id || payloadCallId || undefined,
+      channel_attempt_id: event.channel_attempt_id || payloadAttemptId || undefined,
+    };
+    const key = this.liveResultStableKey(augmented);
+    if (!key) return;
+    const attempt = augmented.channel_attempt_id
+      ? (this.control.tool_attempts ?? []).find((candidate) => candidate.attempt_id === augmented.channel_attempt_id)
+      : undefined;
+    const proposed = augmented.proposed_entry_id ? this.entries.get(augmented.proposed_entry_id) : undefined;
+    const matched = [...this.liveResults.entries()].find(([, candidate]) => (
+      (augmented.channel_attempt_id && candidate.attemptId === augmented.channel_attempt_id)
+      || (augmented.proposed_entry_id && candidate.proposedEntryId === augmented.proposed_entry_id)
+      || (augmented.draft_identity && candidate.draftIdentity === augmented.draft_identity)
+      || (augmented.generation_id && candidate.generationId === augmented.generation_id)
+    ));
+    const current = matched?.[1] ?? this.liveResults.get(key) ?? {
+      id: key,
+      turnId: augmented.turn_id ?? '',
+      scopeKind: augmented.scope_kind ?? '',
+      taskId: augmented.scope_subagent_task_id ?? '',
+      draftIdentity: augmented.draft_identity,
+      generationId: augmented.generation_id,
+      blockId: augmented.block_id,
+      assistantEntryId: attempt?.assistant_entry_id ?? proposed?.tool_result?.assistant_entry_id,
+      toolCallId: augmented.channel_tool_call_id || attempt?.tool_call_id || proposed?.tool_result?.tool_call_id,
+      attemptId: augmented.channel_attempt_id,
+      proposedEntryId: augmented.proposed_entry_id,
+      text: '', hasText: false, ended: false,
+    };
+    if (matched && matched[0] !== key) this.liveResults.delete(matched[0]);
+    current.draftIdentity ||= augmented.draft_identity;
+    current.generationId ||= augmented.generation_id;
+    current.blockId ||= augmented.block_id;
+    current.attemptId ||= augmented.channel_attempt_id;
+    current.proposedEntryId ||= augmented.proposed_entry_id;
+    current.assistantEntryId ||= attempt?.assistant_entry_id ?? proposed?.tool_result?.assistant_entry_id;
+    current.toolCallId ||= augmented.channel_tool_call_id || attempt?.tool_call_id || proposed?.tool_result?.tool_call_id;
+    if (event.event_type === 'TOOL_RESULT_DELTA') {
+      current.text += String(item.text ?? '');
+      current.hasText = true;
+    } else if (event.event_type === 'TOOL_RESULT_END') {
+      current.resultState = String(item.result_state ?? '').toUpperCase();
+      current.text = Object.prototype.hasOwnProperty.call(item, 'final_text')
+        ? String(item.final_text ?? '')
+        : current.text;
+      current.hasText = true;
+      current.ended = true;
+    }
+    this.liveResults.set(key, current);
   }
 
   private applyTodoSnapshot(
@@ -1859,6 +2236,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
   }
 
   private project(): RuntimeProjection {
+    this.reconcileLiveToolResults();
     const canonical = [...this.entries.values()].sort(
       (a, b) => numeric(a.entry_sequence) - numeric(b.entry_sequence),
     );
@@ -1908,6 +2286,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
         visibleDrafts,
       ),
     );
+    this.applyProjectedLiveResults(messages, activeTurnIds);
     const hasActiveDraft = visibleDrafts.length > 0;
     const activeTurn = (this.control.active_turns ?? []).find(
       (turn) => turn.scope_kind !== 'SUBAGENT_TASK',
@@ -1921,6 +2300,8 @@ class LocalRuntimeConnection implements RuntimeConnection {
       initialContextBase: this.control.initial_context_base,
       isRunning: Boolean(activeTurn) || hasActiveDraft,
       queuedCount: numeric(this.control.prompt_queue_total_count),
+      queuedPrompts: projectQueuedPrompts(this.control),
+      promptTransitions: this.projectPromptTransitions(),
       planMode: Boolean(
         this.control.active_plan_workflow
         && Object.keys(this.control.active_plan_workflow).length,
@@ -1937,6 +2318,72 @@ class LocalRuntimeConnection implements RuntimeConnection {
       liveControlRevision: this.liveControlRevision,
       interaction,
     };
+  }
+
+  private projectPromptTransitions(): LocalPromptSubmission[] {
+    const consumedCommands = new Set([...this.entries.values()].flatMap((entry) => (
+      entry.input_source?.command_id ? [entry.input_source.command_id] : []
+    )));
+    const pendingCommands = new Set((this.control.prompt_queue ?? []).flatMap((item) => (
+      item.status === 'PENDING' && item.command_id ? [item.command_id] : []
+    )));
+    for (const commandId of this.promptTransitions.keys()) {
+      if (consumedCommands.has(commandId) || pendingCommands.has(commandId)) {
+        this.promptTransitions.delete(commandId);
+      }
+    }
+    return [...this.promptTransitions.values()];
+  }
+
+  private applyProjectedLiveResults(messages: Message[], activeTurnIds: Set<string>) {
+    const traceTargets = new Map<string, ToolTrace>();
+    for (const message of messages) {
+      for (const trace of message.traces ?? []) traceTargets.set(`${message.id}:${trace.id}`, trace);
+      for (const run of message.subagentRuns ?? []) {
+        for (const activity of run.activities) {
+          for (const trace of activity.traces ?? []) traceTargets.set(`${activity.id}:${trace.id}`, trace);
+        }
+      }
+    }
+    for (const result of this.liveResults.values()) {
+      const trace = result.assistantEntryId && result.toolCallId
+        ? traceTargets.get(`${result.assistantEntryId}:${result.toolCallId}`)
+        : undefined;
+      if (trace && !trace.resultEntryId) {
+        if (result.hasText) trace.resultText = result.text;
+        trace.resultState = result.resultState;
+        trace.status = result.ended ? toolResultStatus(result.resultState) : 'running';
+        trace.subtitle = result.ended
+          ? trace.status === 'completed' ? '已完成' : toolFailureLabel(result.resultState)
+          : '正在接收结果';
+        continue;
+      }
+      if (trace || !activeTurnIds.has(result.turnId)) continue;
+      const detachedTrace: ToolTrace = {
+        id: result.id,
+        kind: 'artifact',
+        title: '操作结果',
+        subtitle: '调用信息尚未加载',
+        status: result.ended ? toolResultStatus(result.resultState) : 'running',
+        associationPending: true,
+        resultState: result.resultState,
+        ...(result.hasText ? { resultText: result.text } : {}),
+      };
+      if (result.taskId) {
+        const run = messages.flatMap((message) => message.subagentRuns ?? [])
+          .find((candidate) => candidate.id === result.taskId);
+        if (run) {
+          run.activities.push({
+            id: `live-result:${result.id}`, time: '现在', body: '', status: 'running', traces: [detachedTrace],
+          });
+        }
+      } else {
+        messages.push({
+          id: `live-result:${result.id}`, turnId: result.turnId, role: 'assistant',
+          assistantKind: 'tool-request', time: '现在', body: '', status: 'running', traces: [detachedTrace],
+        });
+      }
+    }
   }
 }
 
@@ -2404,6 +2851,13 @@ function projectEntries(
         body: entry.entry_kind === 'PLAN_CONTINUATION'
           ? projectPlanContinuation(decodeContent(entry.content))
           : decodeContent(entry.content),
+        inputSource: entry.input_source?.queue_item_id && entry.input_source.command_id
+          ? {
+            queueItemId: entry.input_source.queue_item_id,
+            commandId: entry.input_source.command_id,
+            deliveryMode: deliveryMode(entry.input_source.delivery_mode),
+          }
+          : undefined,
       });
       continue;
     }
@@ -2450,10 +2904,11 @@ function projectEntries(
           || resultState === 'CANCELLED_BEFORE_DISPATCH';
         pendingTrace.status = succeeded ? 'completed' : cancelled ? 'cancelled' : 'failed';
         pendingTrace.subtitle = succeeded ? '已完成' : toolFailureLabel(resultState);
-        if (result) {
-          pendingTrace.resultText = result;
-          pendingTrace.output = [formatToolResult(result)];
-        }
+        pendingTrace.resultText = result;
+        pendingTrace.resultEntryId = entry.entry_id;
+        pendingTrace.resultState = resultState;
+        pendingTrace.resultSummary = summarizeToolResult(pendingTrace.toolName, result);
+        pendingTrace.artifact = projectToolArtifact(resultRef);
         pendingTrace.meta = succeeded ? '操作完成' : cancelled ? '操作已取消' : '操作未完成';
         continue;
       }
@@ -2462,9 +2917,13 @@ function projectEntries(
         kind: 'artifact',
         title: '操作结果',
         subtitle: '已记录',
-        status: resultRef?.result_state === 'SUCCESS' ? 'completed' : 'failed',
+        status: toolResultStatus(resultRef?.result_state),
         resultText: decodeContent(entry.content),
-        output: [formatToolResult(decodeContent(entry.content))].filter(Boolean),
+        resultEntryId: entry.entry_id,
+        resultState: resultRef?.result_state,
+        resultSummary: summarizeToolResult(undefined, decodeContent(entry.content)),
+        artifact: projectToolArtifact(resultRef),
+        associationPending: true,
       };
       messages.push({
         id: entry.entry_id,
@@ -2487,7 +2946,7 @@ function projectEntries(
         title: '命令进展',
         subtitle: '已记录',
         status: 'completed',
-        output: [decodeContent(entry.content)].filter(Boolean),
+        resultText: decodeContent(entry.content),
       };
       if (target) target.traces = [...(target.traces ?? []), trace];
       else {
@@ -2616,10 +3075,11 @@ function projectSubagentRuns(
           || resultState === 'CANCELLED_BEFORE_DISPATCH';
         pendingTrace.status = succeeded ? 'completed' : cancelled ? 'cancelled' : 'failed';
         pendingTrace.subtitle = succeeded ? '已完成' : toolFailureLabel(resultState);
-        if (content) {
-          pendingTrace.resultText = content;
-          pendingTrace.output = [formatToolResult(content)];
-        }
+        pendingTrace.resultText = content;
+        pendingTrace.resultEntryId = entry.entry_id;
+        pendingTrace.resultState = resultState;
+        pendingTrace.resultSummary = summarizeToolResult(pendingTrace.toolName, content);
+        pendingTrace.artifact = projectToolArtifact(resultRef);
         pendingTrace.meta = succeeded ? '操作完成' : cancelled ? '操作已取消' : '操作未完成';
       } else {
         // The request can be outside a paginated history window. Keep this
@@ -2628,8 +3088,11 @@ function projectSubagentRuns(
           id: entry.entry_id, time: formatTime(entry.accepted_at_utc), body: '', status: 'completed',
           traces: [{
             id: entry.entry_id, kind: 'artifact', title: '操作结果', subtitle: '已记录',
-            status: resultRef?.result_state === 'SUCCESS' ? 'completed' : 'failed',
-            resultText: content, output: [formatToolResult(content)].filter(Boolean),
+            status: toolResultStatus(resultRef?.result_state),
+            resultText: content, resultEntryId: entry.entry_id,
+            resultState: resultRef?.result_state,
+            resultSummary: summarizeToolResult(undefined, content),
+            artifact: projectToolArtifact(resultRef), associationPending: true,
           }],
         });
       }
@@ -2643,7 +3106,7 @@ function projectSubagentRuns(
         title: '命令进展',
         subtitle: '已记录',
         status: 'completed',
-        output: [content].filter(Boolean),
+        resultText: content,
       };
       if (target) target.traces = [...(target.traces ?? []), trace];
       else run.activities.push({
@@ -2724,18 +3187,27 @@ function attachSubagentRuns(messages: Message[], runs: SubagentRun[]): void {
   }
 }
 
-function formatToolResult(content: string): string {
+function summarizeToolResult(toolName: string | undefined, content: string): string | undefined {
+  if (!content) return undefined;
   try {
     const value = JSON.parse(content) as Record<string, unknown>;
     const planControl = String(value.plan_control ?? '');
     if (planControl === 'QUESTION_ANSWERED') return '已记录你的选择。';
     if (planControl === 'DRAFT_SUBMITTED_FOR_REVIEW') return '方案已提交，等待你的确认。';
+    if (toolName === 'edit_file' && typeof value.diff === 'string' && value.diff) return value.diff;
     const path = typeof value.path === 'string' ? value.path : '';
-    if (path && typeof value.bytes_written === 'number') {
-      return `已写入 ${path} · ${value.bytes_written} 字节`;
+    if (toolName === 'write_file' && path && typeof value.bytes_written === 'number') {
+      return `已创建 ${path} · ${value.bytes_written} 字节`;
     }
-    if (path && typeof value.total_lines === 'number') {
-      return `已读取 ${path} · ${value.total_lines} 行${value.truncated ? ' · 内容已截断' : ''}`;
+    if (toolName === 'read_file' && path && typeof value.total_lines === 'number') {
+      const offset = typeof value.offset === 'number' ? value.offset : 1;
+      const returnedLines = typeof value.content === 'string' && value.content
+        ? value.content.split('\n').length
+        : 0;
+      const window = returnedLines
+        ? `返回第 ${offset}–${offset + returnedLines - 1} 行`
+        : '本次窗口为空';
+      return `${path} · ${window} · 文件共 ${value.total_lines} 行${value.truncated ? ' · 还有后续内容' : ''}`;
     }
     const message = value.message ?? value.error;
     if (typeof message === 'string' && message) return message;
@@ -2743,12 +3215,68 @@ function formatToolResult(content: string): string {
       const field = value[key];
       if (typeof field === 'string' && field) return field;
     }
-    if (typeof value.exit_code === 'number') return `命令已结束，退出码 ${value.exit_code}。`;
-    if (String(value.status ?? '').toLowerCase() === 'success') return '操作已完成。';
-    return '操作已完成。';
+    if ((toolName === 'terminal' || toolName === 'terminal_process') && typeof value.exit_code === 'number') {
+      return `命令已结束，退出码 ${value.exit_code}。`;
+    }
+    return undefined;
   } catch {
-    return content;
+    return undefined;
   }
+}
+
+function toolResultStatus(state?: string): ToolTrace['status'] {
+  if (state === 'SUCCESS') return 'completed';
+  if (state === 'CANCELLED' || state === 'CANCELLED_BEFORE_DISPATCH') return 'cancelled';
+  return state ? 'failed' : 'running';
+}
+
+function projectToolArtifact(
+  value?: ProtocolEntry['tool_result'],
+): ToolTrace['artifact'] | undefined {
+  const disposition = value?.artifact_disposition;
+  const coverage = value?.source_coverage;
+  const display = value?.display_kind;
+  if (
+    !['NOT_REQUIRED', 'AVAILABLE', 'INCOMPLETE', 'UNAVAILABLE'].includes(disposition ?? '')
+    || !['COMPLETE', 'RETAINED_SNAPSHOT'].includes(coverage ?? '')
+    || !['COMPLETE', 'HEAD_TAIL'].includes(display ?? '')
+  ) return undefined;
+  return {
+    disposition: disposition as NonNullable<ToolTrace['artifact']>['disposition'],
+    sourceCoverage: coverage as NonNullable<ToolTrace['artifact']>['sourceCoverage'],
+    displayKind: display as NonNullable<ToolTrace['artifact']>['displayKind'],
+    sourceCoverageReason: value?.source_coverage_reason || undefined,
+    unavailabilityReason: value?.artifact_unavailability_reason || undefined,
+  };
+}
+
+function deliveryMode(value?: string): 'new-turn' | 'steer' {
+  return value === 'STEER_ACTIVE_TURN' ? 'steer' : 'new-turn';
+}
+
+function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[] {
+  return [...(control.prompt_queue ?? [])]
+    .filter((item) => item.queue_item_id && item.command_id && item.status === 'PENDING')
+    .sort((left, right) => numeric(left.queue_sequence) - numeric(right.queue_sequence))
+    .map((item) => ({
+      queueItemId: item.queue_item_id!,
+      commandId: item.command_id!,
+      sequence: numeric(item.queue_sequence),
+      status: 'pending' as const,
+      deliveryMode: deliveryMode(item.delivery_mode),
+      targetTurnId: item.target_turn_id || undefined,
+      body: decodeContent(item.content),
+      permission: protocolPermission(item.permission?.effective_mode),
+    }));
+}
+
+function protocolPermission(value?: string): PermissionMode | undefined {
+  return ({
+    PERMISSION_MODE_READ_ONLY: 'read-only',
+    PERMISSION_MODE_ASK_PERMISSIONS: 'ask-permissions',
+    PERMISSION_MODE_ACCEPT_EDITS: 'accept-edits',
+    PERMISSION_MODE_BYPASS_PERMISSIONS: 'bypass-permissions',
+  } as Record<string, PermissionMode>)[value ?? ''];
 }
 
 function projectPlanContinuation(content: string): string {
@@ -3150,12 +3678,27 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
     : value.status === 'PENDING'
       ? 'pending'
       : 'rejected';
+  const prompt = value.prompt_delivery;
   return {
     commandId: value.command_id,
     status,
     targetId: value.target_id || undefined,
     publicCode: value.public_code || undefined,
     publicMessage: value.public_message || undefined,
+    promptDelivery: prompt?.queue_item_id
+      ? {
+        queueItemId: prompt.queue_item_id,
+        queueStatus: prompt.queue_status ?? '',
+        consumedEntryId: prompt.consumed_entry_id || undefined,
+        deliveryMode: deliveryMode(prompt.delivery_mode),
+      }
+      : undefined,
+    planDraftDecision: ({
+      PLAN_DRAFT_APPROVE: 'approve',
+      PLAN_DRAFT_REVISE: 'revise',
+      PLAN_DRAFT_CANCEL: 'cancel',
+    } as const)[value.plan_draft_decision as 'PLAN_DRAFT_APPROVE' | 'PLAN_DRAFT_REVISE' | 'PLAN_DRAFT_CANCEL'] ?? undefined,
+    planContinuationTurnId: value.plan_continuation_turn_id || undefined,
   };
 }
 
@@ -3167,9 +3710,30 @@ function decodeContent(content?: ProtocolContent): string {
 function decodeBase64(value: string): string {
   if (!value) return '';
   try {
-    return new TextDecoder().decode(decodeBase64Bytes(value));
+    return new TextDecoder('utf-8', { fatal: true }).decode(decodeBase64Bytes(value));
   } catch {
-    return '';
+    throw new RuntimeApiError(
+      'CONTENT_INTEGRITY_INVALID',
+      '会话内容没有通过完整性校验。',
+      true,
+    );
+  }
+}
+
+async function verifyContentIntegrity(
+  bytes: Uint8Array,
+  expectedDigest: string,
+  publicMessage: string,
+): Promise<void> {
+  try {
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    const actualDigest = `sha256:${[...new Uint8Array(digest)]
+      .map((value) => value.toString(16).padStart(2, '0'))
+      .join('')}`;
+    if (actualDigest !== expectedDigest) throw new Error('digest mismatch');
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', publicMessage, true);
   }
 }
 

@@ -151,11 +151,18 @@ def _edit_operation_schema() -> dict[str, Any]:
         "minItems": 1,
         "items": {
             "type": "string",
-            "description": "One logical line without CR, LF, or NUL characters.",
+            "description": (
+                "One complete original target line without CR, LF, or NUL characters. "
+                "Do not copy a read_file display locator such as N| into the line unless "
+                "those characters are intended file content."
+            ),
         },
         "description": (
-            "Complete replacement or insertion logical lines. Array items do not "
-            "include newline characters; blank strings represent blank lines."
+            "Complete replacement or insertion logical lines containing original target "
+            "text, not read_file display locators. Array items do not include newline "
+            "characters; blank strings represent blank lines. For example, read_file "
+            "shows a literal first line 2|预算=360 as 1|2|预算=360; use 2|预算=360, "
+            "without the leading display locator 1|, when that literal text is desired."
         ),
     }
     inclusive_range = {
@@ -217,8 +224,11 @@ def _edit_operation_schema() -> dict[str, Any]:
                     "content": {
                         "type": "string",
                         "description": (
-                            "Complete desired UTF-8 text. This is the only operation "
-                            "that may replace or empty the whole existing file."
+                            "The complete original target text desired for the UTF-8 file, "
+                            "without read_file display locator prefixes such as N| unless "
+                            "they are intended content. This is the only operation that may "
+                            "replace or empty the whole existing file, and it does not "
+                            "require the full file to have been displayed."
                         ),
                     },
                 },
@@ -916,7 +926,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "Read the exact current bytes of one local UTF-8 text file and return a "
             "SHA-256 content_revision plus requested lines as line_number|text. Copy "
             "that revision unchanged into edit_file and edit only lines shown by this "
-            "tool. Relative paths start in the current "
+            "tool. The line_number| prefix is a display locator, not file content. "
+            "For example, read_file displays: 2|预算=360; replace_lines uses "
+            '{"kind":"replace_lines","start_line":2,"end_line":2,'
+            '"lines":["预算=400"]}. The leading 2| is a display locator, not '
+            "replacement text. Do not copy the display prefix unless those characters "
+            "are intended file content. A literal first line 2|预算=360 is displayed "
+            "as 1|2|预算=360. Relative paths start in the current "
             "workspace. Absolute paths, paths beginning with ~, and ${PULSARA_HOME}/... "
             "locations copied from the Skill catalog are also accepted for read-only "
             "text access. This tool does not read directories, blocked device paths, or "
@@ -1055,6 +1071,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "the call never shift later anchors. A stale revision, unseen anchor, invalid "
             "range, overlap, mixed line endings, or no-op fails before writing. Use "
             "replace_file as the sole operation for an explicit complete replacement. "
+            "replace_file still requires the exact base_revision, a current read_file "
+            "observation, and write permission, but does not require the full file to "
+            "have been displayed. Displayed N| prefixes are locators and must not be "
+            "copied into replacement text unless they are intended file content. "
             "The tool stages in memory, atomically replaces, verifies exact persisted "
             "bytes, and returns a diff, new revision, and changed line windows. Use "
             "write_file only to create a path that does not exist."

@@ -14,9 +14,10 @@
 
 | PR | 实施文档 | 范围 | 状态 |
 | --- | --- | --- | --- |
-| PR01 | [原文保真 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR01_SOURCE_TEXT_FIDELITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F07；删除原文全局中文化，保留 typed UI 标签 | READY_FOR_IMPLEMENTATION，尚未实施 |
+| PR01 | [原文保真 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR01_SOURCE_TEXT_FIDELITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F07；删除原文全局中文化，保留 typed UI 标签 | 实现已提交于 2212804e；验收待补，未 ACTIVATED |
+| PR02 | [工具结果、输入队列与反馈 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR02_TOOL_RESULTS_QUEUE_AND_FEEDBACK_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F01/F02/F03/F05/M03；结果详情、exact live 关联、提交身份与队列、取消反馈、文件工具说明 | ACTIVATED — 2026-09-10 第二轮审查闭环（工作树，未提交） |
 
-F01/F02/F03 的关联与展示修复、F06 的 exact-target stop，以及其他问题仍按下文保留优先级；尚未创建其实施规格。本索引不会因 PR01 单项完成而宣称 Batch A 完成。
+2026-09-10 索引更新：PR01 的实现已提交，但不因此宣称其 activation 完成；其规格仍待补齐验收记录。PR02 已按用户要求把 F01/F02/F03/F05/M03 作为一个 hard cut 完成自动化、隔离 wheel、真实 provider 与浏览器验收；两轮审查指出的大 blob queue 消费/终态竞态、prompt delivery 状态机、late live binding、跨会话异步 owner、迟到 artifact 页、浏览器实际 digest/fatal UTF-8、builtin-only 文件解释、queue 权限/steer target 和 M03 schema 字段说明均已先补红灯再闭环。`edit_file` 的最终产品语义是直接显示真实 unified diff，不提供独立“复制差异”按钮；完整 diff 通过“复制结果原文”取得。用户接受沿用上一轮真实 provider 行为证据；最终安装包另行复验既有 canonical 会话及受影响浏览器 UI。PR02 继续在未提交工作树中保持 ACTIVATED。F06 的 exact-target stop 及 F04/M01/M02/M04 等其他问题仍保留原状态，尚未创建其实施规格。本索引不会因 PR02 激活而宣称 Batch A 全部完成；下文原始调查与旧行号保留为历史诊断依据，实施以对应 PR 规格和当前代码为准。
 
 ## 1. 我的总体判断
 
@@ -306,7 +307,7 @@ replace_lines 的 lines：['预算=400']
 
 ### 8.3 两项需要诚实表达的例外
 
-- `_stage_edit`（1042）对 replace_file 走独立分支，不检查全文件 seen intervals；外层仍要求有效 revision 和当前 observation。这是现有显式完整替换语义，不能因为负例都通过就宣称所有改动都必须逐行看过。当前 active line-edit spec 的9.2也明确这一例外；此处查规格仅用于确认它不是意外遗漏。
+- `_stage_edit`（1042）对 replace_file 走独立分支，不检查全文件 seen intervals；外层仍要求有效 revision 和当前 observation。这是现有显式完整替换语义，不能因为负例都通过就宣称所有改动都必须逐行看过。当前 active line-edit spec 的 replace_file 定义与9.1明确这一例外，9.2规定 observation 缺失必须重读；此处查规格仅用于确认它不是意外遗漏。
 - `_state_for_workspace`（194）按 resolve 后的 workspace root 取得模块级状态，observations 再按 canonical path 存；没有 session、subagent 或 provider-context owner。相同 workspace 的另一次读取可能扩大此进程的 seen ranges。它防“未曾观察过的范围”，不证明“当前模型请求确实看见过每一行”，更不是权限 token。
 
 建议首批修清 descriptor 和对外承诺：用准确的“当前 runtime 的读取观察 + exact revision”，明确 replace_file 例外。若产品要更强的“每个模型上下文都亲自见过”，应另定 observation scope，复用已有 scope identity、保持 process-local，并处理子任务、fork、compaction、返回 changed windows 后的资格。不要偷偷加 session/epoch hash 或 durable observation。这是后续语义增强，不是已证实的权限绕过修复。
@@ -315,7 +316,7 @@ replace_lines 的 lines：['预算=400']
 
 ### Batch A：展示准确性与停止目标
 
-F01/F02/F03/F05/F06/F07 属于首批修复；按上方实施文档索引拆分 PR，每个已选边界均须带回归完整落地。PR01 先完成 F07 原文边界；后续 F01/F02/F03 仍成组设计，F06 单独闭合控制目标契约。主线所有生产修改应保持单一路径。
+F01/F02/F03/F05/F06/F07 属于首批修复；按上方实施文档索引拆分 PR，每个已选边界均须带回归完整落地。PR01 先修 F07 原文边界；PR02 成组完成 F01/F02/F03/F05，并按用户追加要求提前纳入 M03 描述修正，F06 单独闭合控制目标契约。主线所有生产修改应保持单一路径。
 
 删除/替换：
 
@@ -337,7 +338,7 @@ F01/F02/F03/F05/F06/F07 属于首批修复；按上方实施文档索引拆分 P
 
 ### Batch C：descriptor 与组合回归
 
-补 `N|` 规则、replace_file 例外、observer/后台状态说明，验证修改不改变 provider-prefix 连续性。
+`N|` 规则与 replace_file 例外的 M03 描述修正已提前纳入 PR02，不在本批重复实施。observer/后台状态说明和未定的 M04 observation scope 仍分开处理；组合回归继续验证 provider-prefix 连续性。
 
 descriptor 改动属于 provider-visible tool contract：使用已有 cold epoch/明确采用的 compaction successor 安装新根；不得在已有 epoch 内通过“更新 UI”重写 SYSTEM/tools。测试用新冷会话验证新说明，用已有会话验证旧 prefix 不被重建。
 

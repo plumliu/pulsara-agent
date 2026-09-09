@@ -11,6 +11,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleStop,
   Copy,
   CornerDownRight,
@@ -46,6 +47,9 @@ import type {
   RuntimeInteractionContent,
   RuntimeInteractionResolution,
   RuntimeInteractionSummary,
+  QueuedPrompt,
+  LocalPromptSubmission,
+  ToolArtifactPage,
 } from '../lib/runtime-adapter';
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
@@ -64,6 +68,8 @@ interface WorkbenchViewProps {
   isRunning: boolean;
   inspectorOpen: boolean;
   queuedCount: number;
+  queuedPrompts: QueuedPrompt[];
+  localSubmissions: LocalPromptSubmission[];
   runtimeStatus: RuntimeStatus;
   runtimeError?: string;
   modelConfigurations: ModelConfigurationSummary[];
@@ -98,6 +104,8 @@ interface WorkbenchViewProps {
     interaction: RuntimeInteractionSummary,
     resolution: RuntimeInteractionResolution,
   ) => Promise<boolean>;
+  artifactOwnerKey: string;
+  onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onNotify: (title: string, detail?: string) => void;
   onPermissionChange: (permission: PermissionMode) => void;
 }
@@ -321,21 +329,82 @@ function TraceCard({
   trace,
   skills,
   mcpToolRefs,
+  artifactOwnerKey,
+  onReadToolArtifact,
 }: {
   trace: ToolTrace;
   skills: SkillCapability[];
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
+  artifactOwnerKey: string;
+  onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
+  const [artifactBusy, setArtifactBusy] = useState(false);
+  const [artifactError, setArtifactError] = useState('');
+  const artifactRequestRevision = useRef(0);
+  const artifactOwnerKeyRef = useRef(artifactOwnerKey);
+  const artifactResultEntryIdRef = useRef(trace.resultEntryId);
+  useEffect(() => {
+    artifactRequestRevision.current += 1;
+    return () => { artifactRequestRevision.current += 1; };
+  }, []);
   const Icon = traceIcons[trace.kind];
   const skill = traceSkill(trace, skills);
   const mcpDetail = mcpTraceDetail(trace, mcpToolRefs);
   const purpose = skill ? `正在使用 ${skill.name} Skill` : trace.title;
   const subtitle = mcpDetail?.subtitle ?? trace.subtitle;
-  const output = mcpDetail?.suppressGenericSuccess
-    ? trace.output?.filter((line) => line !== '操作已完成。')
-    : trace.output;
-  const expandable = Boolean(trace.command || output?.length || mcpDetail);
+  const hasRawResult = Object.prototype.hasOwnProperty.call(trace, 'resultText');
+  const parsedResult = parseJsonObject(trace.resultText);
+  const diffText = trace.toolName === 'edit_file' ? stringValue(parsedResult?.diff) : '';
+  const canReadArtifact = Boolean(
+    trace.resultEntryId
+    && (trace.artifact?.disposition === 'AVAILABLE' || trace.artifact?.disposition === 'INCOMPLETE'),
+  );
+  const expandable = Boolean(trace.command || hasRawResult || mcpDetail || canReadArtifact);
+  const artifactAtEnd = Boolean(artifactPage && !artifactPage.hasMore);
+  const artifactIsSinglePage = Boolean(
+    artifactAtEnd
+    && artifactPage?.offsetChars === 0
+    && artifactPage.returnedChars === artifactPage.totalChars,
+  );
+  const closeArtifactPage = () => {
+    artifactRequestRevision.current += 1;
+    setArtifactPage(undefined);
+    setArtifactBusy(false);
+    setArtifactError('');
+  };
+  const readArtifactPage = (offsetChars: number) => {
+    const expectedOwnerKey = artifactOwnerKey;
+    const expectedResultEntryId = trace.resultEntryId!;
+    const requestRevision = ++artifactRequestRevision.current;
+    setArtifactBusy(true);
+    setArtifactError('');
+    void onReadToolArtifact(expectedResultEntryId, offsetChars).then(
+      (page) => {
+        if (
+          requestRevision !== artifactRequestRevision.current
+          || artifactOwnerKeyRef.current !== expectedOwnerKey
+          || artifactResultEntryIdRef.current !== expectedResultEntryId
+        ) return;
+        setArtifactPage(page);
+      },
+      () => {
+        if (
+          requestRevision !== artifactRequestRevision.current
+          || artifactOwnerKeyRef.current !== expectedOwnerKey
+          || artifactResultEntryIdRef.current !== expectedResultEntryId
+        ) return;
+        setArtifactError('完整输出暂时无法读取。');
+      },
+    ).finally(() => {
+      if (
+        requestRevision === artifactRequestRevision.current
+        && artifactOwnerKeyRef.current === expectedOwnerKey
+        && artifactResultEntryIdRef.current === expectedResultEntryId
+      ) setArtifactBusy(false);
+    });
+  };
   const summary = (
     <>
       <span className={`trace-icon trace-icon--${trace.kind}`}><Icon size={14} /></span>
@@ -362,19 +431,106 @@ function TraceCard({
         {expandable ? (
           <button
             className="trace-card__summary"
-            onClick={() => setExpanded((value) => !value)}
+            onClick={() => {
+              if (expanded) closeArtifactPage();
+              setExpanded((value) => !value);
+            }}
             aria-expanded={expanded}
+            aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
         ) : <div className="trace-card__summary">{summary}</div>}
         {expanded && (
           <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
             {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
-            {output?.map((line, index) => (
-              <div className={index === output.length - 1 ? 'terminal-success' : ''} key={`${trace.id}-${line}`}>
-                {line}{index === output.length - 1 && trace.status === 'running' ? <span className="terminal-cursor" /> : null}
-              </div>
-            ))}
+            {diffText
+              ? <pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre>
+              : trace.resultSummary && <div className="tool-result-summary">{trace.resultSummary}</div>}
+            {hasRawResult && (
+              <section className="tool-result-raw" aria-label="工具原始结果">
+                <header>
+                  <strong>原始结果</strong>
+                  <button type="button" aria-label="复制工具原始结果" onClick={() => void navigator.clipboard.writeText(trace.resultText ?? '')}><Copy size={12} /></button>
+                </header>
+                <pre className="tool-output-scroll">{trace.resultText === '' ? <span className="empty-result">（空字符串）</span> : trace.resultText}</pre>
+              </section>
+            )}
+            {canReadArtifact && trace.resultEntryId && (
+              <section className={`tool-artifact-page${artifactPage ? ' is-open' : ''}`} aria-label="完整工具输出">
+                {trace.artifact?.sourceCoverage === 'RETAINED_SNAPSHOT' && (
+                  <p className="tool-artifact-page__notice"><TriangleAlert size={12} />仅保留快照；页码相对于保留内容。</p>
+                )}
+                {artifactPage ? (
+                  <>
+                    <header className="tool-artifact-page__header">
+                      <div className="tool-artifact-page__title">
+                        <span className="tool-artifact-page__icon"><BookOpenText size={13} /></span>
+                        <strong>完整输出</strong>
+                        <span className="tool-artifact-page__range">
+                          {artifactPage.offsetChars + 1}–{artifactPage.offsetChars + artifactPage.returnedChars} / {artifactPage.totalChars}
+                        </span>
+                      </div>
+                      <div className="tool-artifact-page__actions">
+                        <button
+                          type="button"
+                          className="tool-artifact-page__icon-button"
+                          aria-label="复制当前工具输出页"
+                          title="复制当前页"
+                          onClick={() => void navigator.clipboard.writeText(artifactPage.text)}
+                        ><Copy size={13} /></button>
+                        <button
+                          type="button"
+                          className="tool-artifact-page__icon-button"
+                          disabled={artifactBusy}
+                          aria-label="收起完整输出"
+                          title="收起完整输出"
+                          onClick={closeArtifactPage}
+                        ><ChevronUp size={14} /></button>
+                      </div>
+                    </header>
+                    <pre className="tool-output-scroll">{artifactPage.text}</pre>
+                    <footer className="tool-artifact-page__footer">
+                      <span className="tool-artifact-page__coverage">
+                        <i />{trace.artifact?.sourceCoverage === 'RETAINED_SNAPSHOT' ? '保留快照' : '完整保留'}
+                      </span>
+                      {artifactAtEnd ? (
+                        <span
+                          className="tool-artifact-page__complete"
+                          role="status"
+                          aria-label="完整输出读取状态"
+                          title={artifactIsSinglePage ? '完整输出只有这一页' : '已读取到完整输出末页'}
+                        ><Check size={12} />已到末页</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="tool-artifact-page__next"
+                          disabled={artifactBusy}
+                          aria-label={artifactBusy ? '正在读取完整输出' : '读取下一页'}
+                          onClick={() => readArtifactPage(artifactPage.nextOffsetChars)}
+                        >{artifactBusy ? <LoaderCircle className="is-spinning" size={13} /> : <ArrowDown size={13} />}{artifactBusy ? '正在读取…' : '继续读取'}</button>
+                      )}
+                    </footer>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="tool-artifact__trigger"
+                    disabled={artifactBusy}
+                    aria-label={artifactBusy ? '正在读取完整输出' : artifactError ? '重新读取完整输出' : '查看完整输出'}
+                    onClick={() => readArtifactPage(0)}
+                  >
+                    <span className="tool-artifact__trigger-icon">
+                      {artifactBusy ? <LoaderCircle className="is-spinning" size={13} /> : <BookOpenText size={13} />}
+                    </span>
+                    <span className="tool-artifact__trigger-copy">
+                      <strong>{artifactBusy ? '正在读取…' : artifactError ? '重新读取完整输出' : '查看完整输出'}</strong>
+                      <small>{artifactError || '按需加载保留的工具结果'}</small>
+                    </span>
+                    <ChevronRight size={13} />
+                  </button>
+                )}
+              </section>
+            )}
             {trace.meta && <footer><span>{trace.meta}</span></footer>}
           </div>
         )}
@@ -556,11 +712,15 @@ function SubagentRunCard({
   focused,
   skills,
   mcpToolRefs,
+  artifactOwnerKey,
+  onReadToolArtifact,
 }: {
   run: SubagentRun;
   focused: boolean;
   skills: SkillCapability[];
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
+  artifactOwnerKey: string;
+  onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
 }) {
   const [expanded, setExpanded] = useState(
     focused || run.status === 'running' || run.status === 'waiting' || run.status === 'pending',
@@ -599,7 +759,7 @@ function SubagentRunCard({
                   <div className="assistant-markdown"><MarkdownBody body={activity.body} /></div>
                 </div>
               ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} /></div>)}
-              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={trace.id} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} />)}</div> : null}
+              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} />)}</div> : null}
             </section>
           ))}
           {showSummary && run.summary && (
@@ -618,6 +778,8 @@ function SubagentGroup({
   focusTaskHighlighted,
   skills,
   mcpToolRefs,
+  artifactOwnerKey,
+  onReadToolArtifact,
 }: {
   runs: SubagentRun[];
   focusTaskId?: string;
@@ -625,6 +787,8 @@ function SubagentGroup({
   focusTaskHighlighted: boolean;
   skills: SkillCapability[];
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
+  artifactOwnerKey: string;
+  onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
 }) {
   const settled = runs.filter((run) => !['pending', 'running', 'waiting'].includes(run.status)).length;
   return (
@@ -640,6 +804,8 @@ function SubagentGroup({
           focused={focusTaskHighlighted && focusTaskId === run.id}
           skills={skills}
           mcpToolRefs={mcpToolRefs}
+          artifactOwnerKey={artifactOwnerKey}
+          onReadToolArtifact={onReadToolArtifact}
         />
       ))}</div>
     </section>
@@ -723,6 +889,8 @@ function AssistantMessage({
   mcpToolRefs,
   onNotify,
   onFork,
+  artifactOwnerKey,
+  onReadToolArtifact,
 }: {
   message: Message;
   startsAssistantRun: boolean;
@@ -735,6 +903,8 @@ function AssistantMessage({
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   onNotify: WorkbenchViewProps['onNotify'];
   onFork: WorkbenchViewProps['onFork'];
+  artifactOwnerKey: string;
+  onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
 }) {
   const [forking, setForking] = useState(false);
   const forkInFlight = useRef(false);
@@ -800,9 +970,9 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={trace.id} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} />)}</div>}
       {message.subagentRuns?.length ? (
-        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} />
+        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} />
       ) : null}
     </article>
   );
@@ -1043,6 +1213,8 @@ export function WorkbenchView({
   isRunning,
   inspectorOpen,
   queuedCount,
+  queuedPrompts,
+  localSubmissions,
   runtimeStatus,
   runtimeError,
   modelConfigurations,
@@ -1067,6 +1239,8 @@ export function WorkbenchView({
   onCompact,
   onReadInteraction,
   onResolveInteraction,
+  artifactOwnerKey,
+  onReadToolArtifact,
   onNotify,
   onPermissionChange,
 }: WorkbenchViewProps) {
@@ -1418,12 +1592,63 @@ export function WorkbenchView({
                     mcpToolRefs={mcpToolRefs}
                     onNotify={onNotify}
                     onFork={onFork}
+                    artifactOwnerKey={artifactOwnerKey}
+                    onReadToolArtifact={onReadToolArtifact}
                   />
                 )}
             </div>
           ))}
           {contextCompactionIndex === messages.length && contextCompaction && (
             <ContextCompactionDivider />
+          )}
+          {(queuedPrompts.length > 0 || localSubmissions.length > 0) && (
+            <section className="prompt-queue" aria-label="等待处理的输入">
+              <header><MessageSquarePlus size={13} /><strong>等待处理的输入</strong></header>
+              {queuedPrompts.map((item) => (
+                <article key={item.queueItemId} data-queue-item-id={item.queueItemId}>
+                  <div className="prompt-queue__meta">
+                    <span>{item.deliveryMode === 'steer' ? '补充当前任务' : '下一轮任务'}</span>
+                    {item.deliveryMode === 'steer' && (
+                      <span>目标轮次：{item.targetTurnId ?? '未知'}</span>
+                    )}
+                    <span>适用权限：{item.permission ? permissionLabels[item.permission] : '未知'}</span>
+                  </div>
+                  <pre>{item.body}</pre>
+                </article>
+              ))}
+              {localSubmissions.map((item) => (
+                <article key={item.commandId} data-command-id={item.commandId} className="is-local">
+                  <div className="prompt-queue__meta">
+                    <span>{item.status === 'sending'
+                      ? '正在发送'
+                      : item.status === 'queued'
+                        ? '已进入队列'
+                        : item.status === 'synchronizing'
+                          ? '正在核对投递状态'
+                          : item.status === 'consumed'
+                            ? item.outcomeCode === 'TURN_INTERRUPTED'
+                              ? '已接收 · 执行已中断'
+                              : '输入已接收'
+                            : item.status === 'cancelled'
+                              ? '队列已取消'
+                              : item.status === 'rejected'
+                                ? '队列已拒绝'
+                                : '提交状态未知'}</span>
+                    <span>投递类型：{item.deliveryMode === 'steer' ? '补充当前任务' : '下一轮任务'}</span>
+                    {item.deliveryMode === 'steer' && (
+                      <span>目标轮次：{item.targetTurnId ?? '未知'}</span>
+                    )}
+                    <span>适用权限：{item.permission
+                      ? permissionLabels[item.permission]
+                      : item.deliveryMode === 'steer' ? '继承当前轮次' : '未知'}</span>
+                  </div>
+                  {item.bodyUnavailable
+                    ? <p className="prompt-queue__detail">正文未能在队列终止前完成读取。</p>
+                    : <pre>{item.body}</pre>}
+                  {item.detail && <p className="prompt-queue__detail">{item.detail}</p>}
+                </article>
+              ))}
+            </section>
           )}
           {canControl && interaction && (
             <InteractionCard

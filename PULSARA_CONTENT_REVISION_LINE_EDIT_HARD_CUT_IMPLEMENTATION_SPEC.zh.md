@@ -1163,3 +1163,7 @@ sdist/wheel/launcher 以及真实 provider 的三条工具链均已验证。
 arguments/results、删除路径及剩余物理边界记录在：
 
 `benchmarks/suites/core/v1/content_revision_line_edit_hard_cut_activation.json`
+
+### 2026-09-08 PR02 descriptor clarification
+
+浏览器 dogfood PR02 仅澄清 provider tool descriptor：`read_file` 返回的 `N|` 是显示定位符，不是文件内容；`edit_file.replace_lines.lines` 必须提交不含该定位符的真实替换文本，并以 `1|2|预算=360` 说明看似前缀的字面内容仍须原样保留。完整替换继续使用既有 `replace_file` operation、exact `base_revision` 和 seen authorization。执行器、Hook、effect settlement、stale/partial-seen 语义均未改变，也没有增加自动剥除或猜测修复；新文案只进入新 cold epoch 或已批准的 compaction successor，不改写既有 epoch 的 provider prefix。

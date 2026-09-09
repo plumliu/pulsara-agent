@@ -22,6 +22,8 @@ import {
   type RuntimeInteractionResolution,
   type RuntimeInteractionSummary,
   type RuntimeProjection,
+  type LocalPromptSubmission,
+  type CommandReceipt,
 } from '../lib/runtime-adapter';
 import type {
   PluginImportOptions,
@@ -31,7 +33,6 @@ import type {
   McpEditInput,
   McpImportSelection,
   McpServerCapability,
-  Message,
   PermissionMode,
   RuntimeStatus,
   SessionSummary,
@@ -69,6 +70,8 @@ const emptyProjection: RuntimeProjection = {
   messages: [],
   isRunning: false,
   queuedCount: 0,
+  queuedPrompts: [],
+  promptTransitions: [],
   planMode: false,
   control: {},
   liveControl: {},
@@ -124,6 +127,33 @@ function productMessage(message: string | undefined, fallback: string): string {
   return message;
 }
 
+function submissionFromReceipt(
+  submission: LocalPromptSubmission,
+  receipt: CommandReceipt,
+): LocalPromptSubmission {
+  const queueStatus = receipt.promptDelivery?.queueStatus.toUpperCase();
+  const shared = {
+    ...submission,
+    queueItemId: receipt.promptDelivery?.queueItemId ?? submission.queueItemId,
+    consumedEntryId: receipt.promptDelivery?.consumedEntryId ?? submission.consumedEntryId,
+    deliveryMode: receipt.promptDelivery?.deliveryMode ?? submission.deliveryMode,
+    outcomeCode: receipt.publicCode,
+    detail: receipt.publicMessage,
+  };
+  if (queueStatus === 'CONSUMED') return { ...shared, status: 'consumed' };
+  if (queueStatus === 'CANCELLED') return { ...shared, status: 'cancelled' };
+  if (queueStatus === 'REJECTED') return { ...shared, status: 'rejected' };
+  if (queueStatus === 'PENDING') return { ...shared, status: 'synchronizing' };
+  return { ...shared, status: receipt.status === 'rejected' ? 'rejected' : 'synchronizing' };
+}
+
+function promptWasAccepted(receipt: CommandReceipt): boolean {
+  const queueStatus = receipt.promptDelivery?.queueStatus.toUpperCase();
+  if (queueStatus === 'CONSUMED' || queueStatus === 'PENDING') return true;
+  if (queueStatus === 'CANCELLED' || queueStatus === 'REJECTED') return false;
+  return receipt.status !== 'rejected';
+}
+
 interface PulsaraAppProps {
   adapter?: RuntimeAdapter;
 }
@@ -156,9 +186,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const connectionRef = useRef<RuntimeConnection | undefined>(undefined);
   const activeSessionIdRef = useRef('');
   const connectionAttempt = useRef(0);
+  const promptReconciliationInFlight = useRef(new Set<string>());
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('starting');
   const [runtimeError, setRuntimeError] = useState<string>();
-  const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
+  const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
   const [inspectorOpen, setInspectorOpen] = useState(readInitialInspectorVisibility);
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -178,6 +209,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const databaseState = bootstrap?.database_state;
   const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
 
+  const ownsConnection = useCallback((expected: RuntimeConnection): boolean => (
+    connectionRef.current === expected
+    && activeSessionIdRef.current === expected.sessionId
+    && connectionRef.current.generation === expected.generation
+  ), []);
+
   useEffect(() => () => {
     if (focusTaskTimerRef.current !== undefined) window.clearTimeout(focusTaskTimerRef.current);
   }, []);
@@ -195,13 +232,111 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     );
   }, []);
 
-  const publishProjection = useCallback((next: RuntimeProjection) => {
+  const notifyPromptReceipt = useCallback((
+    receipt: CommandReceipt,
+    acceptedTitle: string,
+    acceptedDetail: string,
+  ) => {
+    const queueStatus = receipt.promptDelivery?.queueStatus.toUpperCase();
+    if (queueStatus === 'CONSUMED' && receipt.publicCode === 'TURN_INTERRUPTED') {
+      notify(
+        '输入已接收，执行已中断',
+        productMessage(receipt.publicMessage, '输入已写入会话，但对应任务已中断。'),
+        'warning',
+      );
+      return;
+    }
+    if (queueStatus === 'CONSUMED') {
+      notify('输入已接受', productMessage(receipt.publicMessage, '输入已写入会话。'), 'success');
+      return;
+    }
+    if (queueStatus === 'CANCELLED') {
+      notify('输入未投递', productMessage(receipt.publicMessage, '等待处理的输入已取消。'), 'warning');
+      return;
+    }
+    if (queueStatus === 'REJECTED' || (!queueStatus && receipt.status === 'rejected')) {
+      notify('输入被拒绝', productMessage(receipt.publicMessage, '本地服务没有接受这条输入。'), 'warning');
+      return;
+    }
+    notify(acceptedTitle, acceptedDetail, 'success');
+  }, [notify]);
+
+  const publishProjection = useCallback((next: RuntimeProjection, owner?: RuntimeConnection) => {
     setProjection(next);
-    setOptimisticMessages((current) => current.filter((optimistic) => (
-      !next.messages.some((message) => (
-        message.role === optimistic.role && message.body === optimistic.body
-      ))
+    const consumedCommandIds = new Set(next.messages.flatMap((message) => (
+      message.inputSource?.commandId ? [message.inputSource.commandId] : []
     )));
+    const queuedByCommand = new Map(next.queuedPrompts.map((item) => [item.commandId, item]));
+    const transitionByCommand = new Map(next.promptTransitions.map((item) => (
+      [item.commandId, item]
+    )));
+    setLocalSubmissions((current) => {
+      const projected: LocalPromptSubmission[] = current.flatMap((item) => {
+        if (owner && item.sessionId !== owner.sessionId) return [item];
+        if (consumedCommandIds.has(item.commandId)) return [];
+        const queued = queuedByCommand.get(item.commandId);
+        if (queued) {
+          return [{
+            ...item,
+            connectionGeneration: owner?.generation ?? item.connectionGeneration,
+            status: 'queued' as const,
+            observedPending: true,
+            queueItemId: queued.queueItemId,
+            deliveryMode: queued.deliveryMode,
+            targetTurnId: queued.targetTurnId,
+            permission: queued.permission,
+          }];
+        }
+        const transition = transitionByCommand.get(item.commandId);
+        if (transition) {
+          return [{
+            ...item,
+            ...transition,
+            body: transition.bodyUnavailable && item.body ? item.body : transition.body,
+          }];
+        }
+        if (
+          owner
+          && item.connectionGeneration !== owner.generation
+          && (item.status === 'sending' || item.status === 'synchronizing' || item.status === 'queued')
+        ) {
+          return [{
+            ...item,
+            connectionGeneration: owner.generation,
+            status: 'unknown' as const,
+            lastCheckedEventSequence: undefined,
+            lastCheckedConnectionGeneration: undefined,
+          }];
+        }
+        if (item.status === 'queued') return [{ ...item, status: 'synchronizing' as const }];
+        return [item];
+      });
+      if (!owner) return projected;
+      for (const queued of next.queuedPrompts) {
+        if (projected.some((item) => (
+          item.sessionId === owner.sessionId && item.commandId === queued.commandId
+        ))) continue;
+        projected.push({
+          sessionId: owner.sessionId,
+          connectionGeneration: owner.generation,
+          commandId: queued.commandId,
+          queueItemId: queued.queueItemId,
+          body: queued.body,
+          deliveryMode: queued.deliveryMode,
+          targetTurnId: queued.targetTurnId,
+          permission: queued.permission,
+          observedPending: true,
+          status: 'queued',
+        });
+      }
+      for (const transition of next.promptTransitions) {
+        if (transition.sessionId !== owner.sessionId || projected.some((item) => (
+          item.sessionId === owner.sessionId && item.commandId === transition.commandId
+        ))) continue;
+        projected.push(transition);
+      }
+      return projected;
+    });
     setSessionList((current) => current.map((session) => (
       session.id === activeSessionIdRef.current
         ? {
@@ -359,11 +494,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       setConnection(next);
       setActiveSessionId(sessionId);
       saveSessionId(sessionId);
-      setOptimisticMessages([]);
       setSessionList((current) => current.map((session) => (
         session.id === sessionId ? { ...session, live: true } : session
       )));
-      publishProjection(next.current());
+      publishProjection(next.current(), next);
       setRuntimeStatus('online');
       void adapter.listSessions().then((refreshed) => {
         if (attempt !== connectionAttempt.current) return;
@@ -390,14 +524,17 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter, publishProjection]);
 
-  const recoverConnectionAfterOperation = useCallback((error: unknown) => {
-    if (!(error instanceof RuntimeApiError) || !error.retryable) return;
-    const active = connectionRef.current;
-    if (!active) return;
+  const recoverConnectionAfterOperation = useCallback(async (
+    error: unknown,
+    expectedConnection: RuntimeConnection,
+  ) => {
+    if (!ownsConnection(expectedConnection)) return undefined;
+    if (!(error instanceof RuntimeApiError) || !error.retryable) return expectedConnection;
     setRuntimeStatus('reconnecting');
     setRuntimeError(productMessage(error.message, '连接已中断，正在重新连接。'));
-    void openRuntimeSession(active.sessionId, true);
-  }, [openRuntimeSession]);
+    const recovered = await openRuntimeSession(expectedConnection.sessionId, true);
+    return recovered && ownsConnection(recovered) ? recovered : undefined;
+  }, [openRuntimeSession, ownsConnection]);
 
   const refreshConfiguration = useCallback(async () => {
     const boot = await adapter.bootstrap();
@@ -457,17 +594,18 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       while (active && !abort.signal.aborted) {
         try {
           const next = await connection.observe(abort.signal);
-          publishProjection(next);
+          if (!active || connectionRef.current !== connection) return;
+          publishProjection(next, connection);
           for (const notice of next.presentationNotices ?? []) {
             notify(notice);
           }
           setRuntimeStatus('online');
         } catch (error) {
-          if (abort.signal.aborted || !active) return;
+          if (abort.signal.aborted || !active || !ownsConnection(connection)) return;
           setRuntimeStatus('reconnecting');
           setRuntimeError(productMessage(error instanceof Error ? error.message : undefined, '连接已中断。'));
           window.setTimeout(() => {
-            if (active) void openRuntimeSession(connection.sessionId, true);
+            if (active && ownsConnection(connection)) void openRuntimeSession(connection.sessionId, true);
           }, 450);
           return;
         }
@@ -477,7 +615,96 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       active = false;
       abort.abort();
     };
-  }, [connection, notify, openRuntimeSession, publishProjection]);
+  }, [connection, notify, openRuntimeSession, ownsConnection, publishProjection]);
+
+  useEffect(() => {
+    if (!connection || connection.sessionId !== activeSessionId) return;
+    const candidate = localSubmissions.find((item) => (
+      item.sessionId === connection.sessionId
+      && (
+        (item.status === 'synchronizing' && item.observedPending)
+        || item.status === 'unknown'
+      )
+      && (
+        item.lastCheckedEventSequence !== projection.eventSequence
+        || item.lastCheckedConnectionGeneration !== connection.generation
+      )
+      && !promptReconciliationInFlight.current.has(
+        `${item.sessionId}:${connection.generation}:${item.commandId}:${projection.eventSequence}`,
+      )
+    ));
+    if (!candidate) return;
+    const reconciliationKey = `${candidate.sessionId}:${connection.generation}:${candidate.commandId}:${projection.eventSequence}`;
+    promptReconciliationInFlight.current.add(reconciliationKey);
+    void (async () => {
+      try {
+        const receipt = await connection.queryCommand(candidate.commandId);
+        if (connectionRef.current !== connection) return;
+        if (!receipt) {
+          setLocalSubmissions((current) => current.map((item) => (
+            item.sessionId === candidate.sessionId
+            && item.connectionGeneration === candidate.connectionGeneration
+            && item.commandId === candidate.commandId
+              ? {
+                ...item,
+                status: 'unknown',
+                lastCheckedEventSequence: projection.eventSequence,
+                lastCheckedConnectionGeneration: connection.generation,
+                detail: '本地服务尚未返回这条输入的最终状态。',
+              }
+              : item
+          )));
+          return;
+        }
+        setLocalSubmissions((current) => current.map((item) => (
+          item.sessionId === candidate.sessionId
+          && item.connectionGeneration === candidate.connectionGeneration
+          && item.commandId === candidate.commandId
+            ? submissionFromReceipt(
+              {
+                ...item,
+                lastCheckedEventSequence: projection.eventSequence,
+                lastCheckedConnectionGeneration: connection.generation,
+              },
+              receipt,
+            )
+            : item
+        )));
+        if (receipt.promptDelivery?.queueStatus.toUpperCase() !== 'PENDING') {
+          notifyPromptReceipt(receipt, '输入状态已核对', '已按原始输入身份同步本地服务状态。');
+        }
+        const next = await connection.snapshot();
+        if (connectionRef.current === connection) publishProjection(next, connection);
+      } catch (error) {
+        if (connectionRef.current !== connection) return;
+        setLocalSubmissions((current) => current.map((item) => (
+          item.sessionId === candidate.sessionId
+          && item.connectionGeneration === candidate.connectionGeneration
+          && item.commandId === candidate.commandId
+            ? {
+              ...item,
+              status: 'unknown',
+              lastCheckedEventSequence: projection.eventSequence,
+              lastCheckedConnectionGeneration: connection.generation,
+              detail: productMessage(
+                error instanceof Error ? error.message : undefined,
+                '暂时无法核对这条输入；Pulsara 不会自动重发。',
+              ),
+            }
+            : item
+        )));
+      } finally {
+        promptReconciliationInFlight.current.delete(reconciliationKey);
+      }
+    })();
+  }, [
+    activeSessionId,
+    connection,
+    localSubmissions,
+    notifyPromptReceipt,
+    projection.eventSequence,
+    publishProjection,
+  ]);
 
   const taskRefreshKey = useMemo(() => projection.agentTasks.map((task) => (
     `${task.id}:${task.status}:${task.result?.id ?? ''}:${task.completionDelivered ? '1' : '0'}`
@@ -611,10 +838,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     projection,
     taskInventorySessionId === activeSessionId ? taskInventory : [],
   ), [activeSessionId, projection, taskInventory, taskInventorySessionId]);
-  const renderedMessages = useMemo(
-    () => [...mergedProjection.messages, ...optimisticMessages],
-    [mergedProjection.messages, optimisticMessages],
-  );
+  const renderedMessages = mergedProjection.messages;
 
   const navigate = (view: AppView) => {
     setActiveView(view);
@@ -693,11 +917,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   };
 
   const updateModelCallBinding = async (binding: ModelCallBindingPayload): Promise<void> => {
+    const active = connectionRef.current;
     const sessionId = activeSessionIdRef.current;
-    if (!sessionId || connectionRef.current?.role !== 'controller') {
+    if (!sessionId || !active || active.role !== 'controller') {
       throw new Error('当前窗口没有修改这个会话的权限。');
     }
     const accepted = await adapter.updateModelCallBinding(sessionId, binding);
+    if (!ownsConnection(active)) return;
     setSessionList((current) => current.map((session) => session.id === sessionId
       ? { ...session, modelCallBinding: accepted.modelCallBinding }
       : session));
@@ -725,6 +951,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       notify('这个会话正在另一个窗口中操作', '选择“在此窗口继续”后即可发送新指令。', 'warning');
       return false;
     }
+    const commandId = `command:web:${crypto.randomUUID()}`;
+    const deliveryMode = projection.isRunning && steer ? 'steer' as const : 'new-turn' as const;
     try {
       if (requestPlan && projection.isRunning) {
         notify('当前运行结束后才能先规划', '先规划只作用于一条尚未开始的新输入。', 'warning');
@@ -732,45 +960,76 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       }
       if (requestPlan && !projection.planMode) {
         const plan = await active.enterPlan(text, permission);
+        if (!ownsConnection(active)) return false;
         if (plan.status === 'rejected') {
           notify('无法为本轮启用规划', productMessage(plan.publicMessage, '请稍后重试。'), 'warning');
           return false;
         }
       }
+      setLocalSubmissions((current) => [...current, {
+        sessionId: active.sessionId,
+        connectionGeneration: active.generation,
+        commandId,
+        body: text,
+        deliveryMode,
+        targetTurnId: deliveryMode === 'steer' ? projection.activeTurnId : undefined,
+        permission: deliveryMode === 'new-turn' ? permission : undefined,
+        status: 'sending',
+      }]);
       const receipt = projection.isRunning && steer
         ? projection.activeTurnId
-          ? await active.steerActiveTurn(text, projection.activeTurnId)
+          ? await active.steerActiveTurn(commandId, text, projection.activeTurnId)
           : undefined
-        : await active.submitPrompt(text, permission);
+        : await active.submitPrompt(commandId, text, permission);
+      if (!ownsConnection(active)) return false;
       if (!receipt) {
+        setLocalSubmissions((current) => current.filter((item) => item.commandId !== commandId));
         notify('暂时无法引导当前任务', '当前没有可以接收补充指令的任务。', 'warning');
         return false;
       }
-      if (receipt.status === 'rejected') {
-        notify('输入被拒绝', productMessage(receipt.publicMessage, '本地服务没有接受这条输入。'), 'warning');
-        return false;
-      }
-      setOptimisticMessages((current) => [...current, {
-        id: `optimistic:${receipt.commandId}`,
-        role: 'user',
-        userKind: projection.isRunning && steer ? 'steer' : 'prompt',
-        time: '现在',
-        body: text,
-        status: 'waiting',
-      }]);
-      notify(
+      setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
+        ? submissionFromReceipt(item, receipt)
+        : item));
+      notifyPromptReceipt(
+        receipt,
         requestPlan ? '本轮将先制定计划' : projection.isRunning && !steer ? '输入将在下一轮处理' : steer ? '补充指令已接受' : '输入已接受',
         projection.isRunning && !steer
           ? '会在当前轮完成后自动开始。'
           : steer
             ? '当前任务会在安全位置接收这条补充指令。'
             : '已送达本地服务。',
-        'success',
       );
-      return true;
+      return promptWasAccepted(receipt);
     } catch (error) {
-      recoverConnectionAfterOperation(error);
-      notify('提交失败', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
+      if (!ownsConnection(active)) return false;
+      const recoveredConnection = await recoverConnectionAfterOperation(error, active);
+      if (!recoveredConnection || !ownsConnection(recoveredConnection)) return false;
+      try {
+        const recovered = await recoveredConnection.queryCommand(commandId);
+        if (!ownsConnection(recoveredConnection)) return false;
+        if (recovered) {
+          setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
+            ? submissionFromReceipt(item, recovered)
+            : item));
+          notifyPromptReceipt(recovered, '输入已接受', '正在同步本地服务中的精确队列状态。');
+          const next = await recoveredConnection.snapshot();
+          if (!ownsConnection(recoveredConnection)) return false;
+          publishProjection(next, recoveredConnection);
+          return promptWasAccepted(recovered);
+        }
+      } catch {
+        if (!ownsConnection(recoveredConnection)) return false;
+        // The original command identity remains visible as unknown; it is never resent.
+      }
+      setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
+        ? {
+          ...item,
+          status: 'unknown',
+          lastCheckedEventSequence: projection.eventSequence,
+          lastCheckedConnectionGeneration: recoveredConnection?.generation,
+        }
+        : item));
+      notify('提交状态未知', productMessage(error instanceof Error ? error.message : undefined, '可重新连接查看，Pulsara 不会自动重发。'), 'warning');
       return false;
     }
   };
@@ -780,13 +1039,15 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (!active || active.role !== 'controller') return;
     try {
       const receipt = await active.stopActiveTurn();
+      if (!ownsConnection(active)) return;
       notify(
         receipt.status === 'rejected' ? '没有可停止的运行' : '停止请求已送达',
         receipt.status === 'rejected' ? '当前没有可停止的任务。' : '正在停止当前任务。',
         receipt.status === 'rejected' ? 'warning' : 'success',
       );
     } catch (error) {
-      recoverConnectionAfterOperation(error);
+      const recovered = await recoverConnectionAfterOperation(error, active);
+      if (!recovered || !ownsConnection(recovered)) return;
       notify('停止失败', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
     }
   };
@@ -796,6 +1057,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (!active || active.role !== 'controller') return;
     try {
       const receipt = await active.compactContext(projection.activeTurnId);
+      if (!ownsConnection(active)) return;
       const alreadyCompact = receipt.status === 'succeeded' && receipt.publicCode === 'NOT_NEEDED';
       notify(
         alreadyCompact ? '无需整理上下文' : receipt.status === 'rejected' ? '暂时无法整理上下文' : '上下文整理请求已提交',
@@ -807,7 +1069,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         receipt.status === 'rejected' ? 'warning' : 'success',
       );
     } catch (error) {
-      recoverConnectionAfterOperation(error);
+      const recovered = await recoverConnectionAfterOperation(error, active);
+      if (!recovered || !ownsConnection(recovered)) return;
       notify('上下文整理失败', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
     }
   };
@@ -817,6 +1080,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (!active || active.role !== 'controller' || task.completionDelivered) return;
     try {
       const receipt = await active.acceptSubagentCompletion(task.id, turnPermission);
+      if (!ownsConnection(active)) return;
       if (receipt.status === 'rejected') {
         if (receipt.publicCode === 'ROOT_TURN_ALREADY_RUNNING') {
           notify('主任务已经开始处理', '这项工作会在合适的时机自动交给 Pulsara。', 'success');
@@ -838,7 +1102,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       );
       void loadSessionTasks(active.sessionId);
     } catch (error) {
-      recoverConnectionAfterOperation(error);
+      const recovered = await recoverConnectionAfterOperation(error, active);
+      if (!recovered || !ownsConnection(recovered)) return;
       notify('暂时无法继续处理', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
     }
   };
@@ -861,8 +1126,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const readInteraction = useCallback(async (interaction: RuntimeInteractionSummary) => {
     const active = connectionRef.current;
     if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
-    return active.readInteraction(interaction);
-  }, []);
+    const content = await active.readInteraction(interaction);
+    if (!ownsConnection(active)) {
+      throw new RuntimeApiError('INTERACTION_OWNER_CHANGED', '这项确认所属的会话已经改变。', true);
+    }
+    return content;
+  }, [ownsConnection]);
 
   const resolveInteraction = useCallback(async (
     interaction: RuntimeInteractionSummary,
@@ -879,6 +1148,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
     try {
       const receipt = await active.resolveInteraction(interaction, resolution);
+      if (!ownsConnection(active)) return false;
       if ('submitted' in receipt) {
         if (!receipt.submitted) return false;
         notify(resolution.kind === 'capability' && resolution.decision === 'CANCEL' ? '已取消本次配置' : '配置已提交', 'Pulsara 将继续处理。', 'success');
@@ -888,19 +1158,31 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         notify('这项选择没有被接受', productMessage(receipt.publicMessage, '内容可能已经更新，请查看最新状态。'), 'warning');
         return false;
       }
+      if (resolution.kind === 'plan-draft') {
+        if (receipt.planDraftDecision !== resolution.decision) {
+          notify('无法确认规划结果', '本地服务返回的决策身份不一致，请刷新后重试。', 'warning');
+          return false;
+        }
+        const copy = {
+          approve: ['方案已批准', '已创建按批准方案继续处理的任务。'],
+          revise: ['修改意见已提交', '已创建继续修订方案的任务。'],
+          cancel: ['规划已取消', '未因本次取消启动这份方案的实施。你可以发送新任务。'],
+        } as const;
+        notify(copy[receipt.planDraftDecision][0], copy[receipt.planDraftDecision][1], 'success');
+        return true;
+      }
       const title = resolution.kind === 'tool'
         ? resolution.decision === 'allow' ? '已允许本次操作' : '已拒绝本次操作'
-        : resolution.kind === 'plan-draft'
-          ? resolution.decision === 'approve' ? '方案已批准' : resolution.decision === 'revise' ? '修改意见已提交' : '规划已取消'
-          : '回答已提交';
+        : '回答已提交';
       notify(title, 'Pulsara 将继续处理。', 'success');
       return true;
     } catch (error) {
-      recoverConnectionAfterOperation(error);
+      const recovered = await recoverConnectionAfterOperation(error, active);
+      if (!recovered || !ownsConnection(recovered)) return false;
       notify('无法完成这项选择', productMessage(error instanceof Error ? error.message : undefined, '内容可能已经更新，请稍后重试。'), 'warning');
       return false;
     }
-  }, [notify, recoverConnectionAfterOperation]);
+  }, [notify, ownsConnection, recoverConnectionAfterOperation]);
 
   const installDeviceSkill = useCallback(async (input: SkillImportInput): Promise<boolean> => {
     try {
@@ -1296,6 +1578,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           isRunning={projection.isRunning}
           inspectorOpen={inspectorOpen}
           queuedCount={projection.queuedCount}
+          queuedPrompts={projection.queuedPrompts}
+          localSubmissions={localSubmissions.filter((item) => (
+            item.sessionId === activeSession.id
+            && !projection.queuedPrompts.some((queued) => queued.commandId === item.commandId)
+            && !projection.messages.some((message) => message.inputSource?.commandId === item.commandId)
+          ))}
           runtimeStatus={runtimeStatus}
           runtimeError={runtimeError}
           modelConfigurations={bootstrap?.model_configurations ?? []}
@@ -1322,6 +1610,16 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onCompact={compact}
           onReadInteraction={readInteraction}
           onResolveInteraction={resolveInteraction}
+          artifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
+          onReadToolArtifact={async (resultEntryId, offsetChars) => {
+            const active = connectionRef.current;
+            if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
+            const page = await active.readToolArtifact(resultEntryId, offsetChars);
+            if (!ownsConnection(active)) {
+              throw new RuntimeApiError('TOOL_ARTIFACT_OWNER_CHANGED', '工具输出所属的会话已经改变。', true);
+            }
+            return page;
+          }}
           onNotify={notify}
           permission={turnPermission}
           onPermissionChange={setTurnPermission}

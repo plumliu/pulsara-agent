@@ -322,8 +322,13 @@ class LocalBrowserBridge:
         self, connection_id: str, body: dict[str, object]
     ) -> dict[str, object]:
         connection = await self._connection(connection_id)
+        entry_id = body.get("entry_id")
+        queue_item_id = body.get("queue_item_id")
+        if (isinstance(entry_id, str) and bool(entry_id)) == (
+            isinstance(queue_item_id, str) and bool(queue_item_id)
+        ):
+            raise ValueError("exactly one content target is required")
         request = wire.ReadContentRequest(
-            entry_id=_required_string(body, "entry_id"),
             block_id=str(body.get("block_id", "")),
             offset_bytes=_uint(body.get("offset_bytes", 0), "offset_bytes"),
             limit_bytes=_bounded_uint(
@@ -333,8 +338,30 @@ class LocalBrowserBridge:
                 maximum=1 << 20,
             ),
         )
+        if isinstance(entry_id, str) and entry_id:
+            request.entry_id = entry_id
+        else:
+            request.queue_item_id = str(queue_item_id)
         return protobuf_json(
             await connection.controller.request("read_content", request)
+        )
+
+    async def read_tool_artifact(
+        self, connection_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        connection = await self._connection(connection_id)
+        request = wire.ReadToolArtifactRequest(
+            result_entry_id=_required_string(body, "result_entry_id"),
+            offset_chars=_uint(body.get("offset_chars", 0), "offset_chars"),
+            max_chars=_bounded_uint(
+                body.get("max_chars", 32_000),
+                "max_chars",
+                minimum=1,
+                maximum=32_000,
+            ),
+        )
+        return protobuf_json(
+            await connection.controller.request("read_tool_artifact", request)
         )
 
     async def resolve_interaction(

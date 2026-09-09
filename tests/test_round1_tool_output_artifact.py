@@ -100,6 +100,7 @@ from pulsara_agent.ports.tool_execution import (
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.memory.scope import CTX_GLOBAL
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.terminal_process.output import TerminalOutputOwner
 from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
 from tests.support.postgres import verified_postgres_provider
@@ -1141,6 +1142,31 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
+    protocol_reader = CanonicalProtocolReader(provider)
+    browser_reference = protocol_reader.resolve_tool_artifact_reference(
+        session_id=lease.guard.session_id,
+        result_entry_id=result_entry_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert browser_reference == {
+        "workspace_id": workspace_id,
+        "output_artifact_id": projection.artifact_id,
+        "output_artifact_disposition": "AVAILABLE",
+        "output_source_coverage": "COMPLETE",
+        "output_display_kind": "HEAD_TAIL",
+        "output_source_coverage_reason": None,
+        "output_artifact_unavailability_reason": None,
+    }
+    for session_id, browser_result_entry_id in (
+        (other_session.guard.session_id, result_entry_id),
+        (lease.guard.session_id, _name("entry")),
+    ):
+        with pytest.raises(KeyError):
+            protocol_reader.resolve_tool_artifact_reference(
+                session_id=session_id,
+                result_entry_id=browser_result_entry_id,
+                deadline_monotonic=monotonic() + 30,
+            )
     with pytest.raises(KeyError):
         PostgresToolArtifactReadPort(
             provider,

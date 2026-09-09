@@ -2283,6 +2283,7 @@ class _ConversationOperations:
                 SELECT c.*, t.status AS turn_status, t.final_entry_id,
                        t.terminal_reason,
                        q.status AS queue_status,
+                       q.delivery_mode AS queue_delivery_mode,
                        q.terminal_reason AS queue_terminal_reason,
                        q.consumed_entry_id,
                        qe.turn_id AS consumed_turn_id,

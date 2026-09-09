@@ -64,6 +64,22 @@ class CanonicalProtocolGap(RuntimeError):
     """The requested committed suffix cannot be returned completely."""
 
 
+class CanonicalQueueContentNotPending(KeyError):
+    """An exact queue item exists, but no longer authorizes pending-body reads."""
+
+    def __init__(
+        self,
+        *,
+        queue_item_id: str,
+        status: str,
+        consumed_entry_id: str | None,
+    ) -> None:
+        super().__init__(queue_item_id)
+        self.queue_item_id = queue_item_id
+        self.status = status
+        self.consumed_entry_id = consumed_entry_id
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalObservationBatch:
     through_event_sequence: int
@@ -401,14 +417,40 @@ class CanonicalProtocolReader:
         self,
         *,
         session_id: str,
-        entry_id: str,
-        block_id: str | None,
         deadline_monotonic: float,
+        entry_id: str | None = None,
+        queue_item_id: str | None = None,
+        block_id: str | None = None,
     ) -> Mapping[str, object]:
         """Re-authorize an exact entry/block content edge before blob hydration."""
+        if (entry_id is None) == (queue_item_id is None):
+            raise ValueError("exactly one content target is required")
+        if queue_item_id is not None and block_id is not None:
+            raise ValueError("queue content has no block target")
         with self._connection(deadline_monotonic) as connection:
             self._session(connection, session_id)
-            if block_id:
+            if queue_item_id is not None:
+                row = connection.execute(
+                    """
+                    SELECT inline_content, blob_id, content_digest, content_size,
+                           content_media_type, content_codec, status,
+                           consumed_entry_id
+                    FROM pulsara_v3.prompt_queue_items
+                    WHERE session_id = %s AND id = %s
+                    """,
+                    (session_id, queue_item_id),
+                ).fetchone()
+                if row is not None and str(row["status"]) != "PENDING":
+                    raise CanonicalQueueContentNotPending(
+                        queue_item_id=queue_item_id,
+                        status=str(row["status"]),
+                        consumed_entry_id=(
+                            str(row["consumed_entry_id"])
+                            if row["consumed_entry_id"] is not None
+                            else None
+                        ),
+                    )
+            elif block_id:
                 row = connection.execute(
                     """
                     SELECT b.inline_content, b.blob_id, b.content_digest,
@@ -439,6 +481,31 @@ class CanonicalProtocolReader:
                     if derived is not None:
                         return derived
                 raise KeyError(entry_id if not block_id else block_id)
+            return dict(row)
+
+    def resolve_tool_artifact_reference(
+        self,
+        *,
+        session_id: str,
+        result_entry_id: str,
+        deadline_monotonic: float,
+    ) -> Mapping[str, object]:
+        """Resolve one browser-visible result entry to its canonical artifact edge."""
+        with self._connection(deadline_monotonic) as connection:
+            self._session(connection, session_id)
+            row = connection.execute(
+                """
+                SELECT workspace_id, output_artifact_id,
+                       output_artifact_disposition, output_source_coverage,
+                       output_display_kind, output_source_coverage_reason,
+                       output_artifact_unavailability_reason
+                FROM pulsara_v3.tool_results
+                WHERE session_id = %s AND result_entry_id = %s
+                """,
+                (session_id, result_entry_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(result_entry_id)
             return dict(row)
 
     def _resolve_reasoning_content(
@@ -542,7 +609,10 @@ class CanonicalProtocolReader:
         )
         if row["entry_kind"] == "TOOL_RESULT":
             tool_result = connection.execute(
-                """SELECT tool_call_entry_id, tool_call_id, result_state
+                """SELECT tool_call_entry_id, tool_call_id, result_state,
+                          output_artifact_disposition, output_source_coverage,
+                          output_display_kind, output_source_coverage_reason,
+                          output_artifact_unavailability_reason
                    FROM pulsara_v3.tool_results
                    WHERE session_id=%s AND result_entry_id=%s""",
                 (row["session_id"], entry_id),
@@ -553,7 +623,30 @@ class CanonicalProtocolReader:
                 assistant_entry_id=str(tool_result["tool_call_entry_id"]),
                 tool_call_id=str(tool_result["tool_call_id"]),
                 result_state=str(tool_result["result_state"]),
+                artifact_disposition=str(tool_result["output_artifact_disposition"]),
+                source_coverage=str(tool_result["output_source_coverage"]),
+                display_kind=str(tool_result["output_display_kind"]),
+                source_coverage_reason=str(tool_result["output_source_coverage_reason"] or ""),
+                artifact_unavailability_reason=str(tool_result["output_artifact_unavailability_reason"] or ""),
             ))
+        if (
+            row["entry_owner_kind"] == "EXECUTED_TURN"
+            and row["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}
+        ):
+            source = connection.execute(
+                """
+                SELECT id, command_id, delivery_mode
+                FROM pulsara_v3.prompt_queue_items
+                WHERE session_id = %s AND consumed_entry_id = %s
+                """,
+                (row["session_id"], entry_id),
+            ).fetchone()
+            if source is not None:
+                result.input_source.CopyFrom(wire.CanonicalInputSource(
+                    queue_item_id=str(source["id"]),
+                    command_id=str(source["command_id"]),
+                    delivery_mode=str(source["delivery_mode"]),
+                ))
         for ordinal, reasoning in enumerate(self._reasoning_blocks(connection, stored_row)):
             content = reasoning.text.encode("utf-8")
             target = result.reasoning_blocks.add(
@@ -841,6 +934,7 @@ class CanonicalProtocolReader:
                 delivery_mode=str(row["delivery_mode"]),
                 target_turn_id=str(row["target_turn_id"] or ""),
                 content=_content_reference(row),
+                command_id=str(row["command_id"]),
             )
             if row["permission_snapshot_id"] is not None:
                 target.permission.CopyFrom(_permission_projection(row))

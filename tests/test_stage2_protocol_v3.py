@@ -18,6 +18,7 @@ from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.terminal_protocol.canonical_v3 import (
     COMMITTED_PROJECTION_BRANCH_BY_TYPE,
+    CanonicalQueueContentNotPending,
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType
 from pulsara_agent.conversation_kernel.live_control import (
@@ -126,6 +127,69 @@ def _state(*, role: int) -> _Connection:
         granted_role=role,
         authenticated=True,
     )
+
+
+def test_pr02_protocol_carries_exact_result_queue_and_prompt_delivery_identity() -> None:
+    tool_result = wire.CanonicalToolResult.DESCRIPTOR.fields_by_name
+    assert {
+        "assistant_entry_id",
+        "tool_call_id",
+        "result_state",
+        "artifact_disposition",
+        "source_coverage",
+        "display_kind",
+        "source_coverage_reason",
+        "artifact_unavailability_reason",
+    } <= set(tool_result)
+
+    entry = wire.CanonicalEntry.DESCRIPTOR.fields_by_name
+    assert "input_source" in entry
+    assert {
+        "queue_item_id",
+        "command_id",
+        "delivery_mode",
+    } <= set(entry["input_source"].message_type.fields_by_name)
+
+    queue = wire.PromptQueueControl.DESCRIPTOR.fields_by_name
+    assert "command_id" in queue
+    outcome = wire.CommandOutcome.DESCRIPTOR.fields_by_name
+    assert "prompt_delivery" in outcome
+    assert {
+        "queue_item_id",
+        "queue_status",
+        "consumed_entry_id",
+        "delivery_mode",
+    } <= set(outcome["prompt_delivery"].message_type.fields_by_name)
+
+    read_content = wire.ReadContentRequest.DESCRIPTOR
+    assert read_content.oneofs_by_name["target"].fields[0].name == "entry_id"
+    assert read_content.oneofs_by_name["target"].fields[1].name == "queue_item_id"
+    assert "read_tool_artifact" in wire.ClientFrame.DESCRIPTOR.fields_by_name
+    assert "tool_artifact" in wire.ServerFrame.DESCRIPTOR.fields_by_name
+
+
+def test_pr02_read_content_reports_an_exact_queue_transition_separately_from_missing() -> None:
+    class _QueueTransitionReader:
+        def resolve_content_reference(self, **kwargs):
+            raise CanonicalQueueContentNotPending(
+                queue_item_id=str(kwargs["queue_item_id"]),
+                status="CONSUMED",
+                consumed_entry_id="entry:consumed",
+            )
+
+    state = _state(role=wire.ATTACHMENT_ROLE_OBSERVER)
+    state.protocol_reader = _QueueTransitionReader()  # type: ignore[assignment]
+    response = asyncio.run(_server()._read_content(
+        state,
+        wire.ReadContentRequest(
+            request_id="request:queue-transition",
+            queue_item_id="queue:consumed",
+            offset_bytes=0,
+            limit_bytes=1024,
+        ),
+    ))
+
+    assert response.error.stable_code == "CONTENT_QUEUE_NOT_PENDING"
 
 
 class _PresentationNoticeInteractions:

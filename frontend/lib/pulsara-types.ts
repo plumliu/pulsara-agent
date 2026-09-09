@@ -331,8 +331,18 @@ export interface ToolTrace {
   duration?: string;
   argumentsJson?: string;
   resultText?: string;
+  resultEntryId?: string;
+  resultState?: string;
+  resultSummary?: string;
+  associationPending?: boolean;
+  artifact?: {
+    disposition: 'NOT_REQUIRED' | 'AVAILABLE' | 'INCOMPLETE' | 'UNAVAILABLE';
+    sourceCoverage: 'COMPLETE' | 'RETAINED_SNAPSHOT';
+    displayKind: 'COMPLETE' | 'HEAD_TAIL';
+    sourceCoverageReason?: string;
+    unavailabilityReason?: string;
+  };
   command?: string;
-  output?: string[];
   meta?: string;
 }
 
@@ -373,6 +383,11 @@ export interface Message {
   entrySequence?: number;
   role: 'user' | 'assistant';
   userKind?: 'prompt' | 'steer' | 'plan-continuation' | 'subagent-completion';
+  inputSource?: {
+    queueItemId: string;
+    commandId: string;
+    deliveryMode: 'new-turn' | 'steer';
+  };
   assistantKind?: 'terminal' | 'tool-request' | 'live';
   sourceSubagentTaskId?: string;
   time: string;
