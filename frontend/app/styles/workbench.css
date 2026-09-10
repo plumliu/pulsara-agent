@@ -129,8 +129,8 @@
 .thread-column > .assistant-turn:last-child { margin-bottom: 0; }
 .thread-column > .assistant-turn:last-child > .assistant-copy:last-child { margin-bottom: 0; }
 .assistant-markdown { min-width: 0; overflow-wrap: anywhere; color: var(--ink-soft); font-size: var(--type-body); line-height: 1.78; }
-.assistant-markdown > :first-child { margin-top: 0; }
-.assistant-markdown > :last-child { margin-bottom: 0; }
+.assistant-markdown > :first-child, .assistant-markdown > .markdown-copy-surface > :first-child { margin-top: 0; }
+.assistant-markdown > :last-child, .assistant-markdown > .markdown-copy-surface > :last-child { margin-bottom: 0; }
 .assistant-markdown p { margin: 0 0 10px; }
 .assistant-markdown h1, .assistant-markdown h2, .assistant-markdown h3 { margin: 18px 0 8px; color: var(--ink); font-family: var(--serif); line-height: 1.35; }
 .assistant-markdown h1 { font-size: var(--type-heading); }.assistant-markdown h2 { font-size: var(--type-title-large); }.assistant-markdown h3 { font-size: var(--type-title-small); }
@@ -145,6 +145,19 @@
 .assistant-markdown th, .assistant-markdown td { padding: 6px 8px; border: 1px solid var(--line); text-align: left; }
 .assistant-markdown .katex { font-size: 1.04em; }
 .assistant-markdown .katex-display { max-width: 100%; margin: 12px 0 14px; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
+.markdown-copy-surface { display: contents; }
+.math-copy-target { position: relative; outline: none; cursor: pointer; transition: background-color .14s ease, border-color .14s ease, box-shadow .14s ease; }
+.math-copy-target--inline { display: inline-block; border-radius: 5px; }
+.math-copy-target--display { display: block; max-width: 100%; margin: 12px 0 14px; padding: 4px 7px; border: 1px solid transparent; border-radius: 7px; }
+.math-copy-target--display .katex-display { max-width: 100%; margin: 0; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
+@media (hover: hover) {
+  .math-copy-target:hover { background: color-mix(in srgb, var(--paper-deep) 58%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--line-strong) 68%, transparent); }
+  .math-copy-target--display:hover { border-color: color-mix(in srgb, var(--line-strong) 58%, transparent); box-shadow: none; }
+}
+.math-copy-target:focus-visible { background: color-mix(in srgb, var(--paper-deep) 68%, transparent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--line-strong) 72%, transparent); }
+.math-copy-target--display:focus-visible { border-color: var(--line-strong); box-shadow: 0 0 0 2px color-mix(in srgb, var(--line-strong) 24%, transparent); }
+.math-copy-target:active { background: color-mix(in srgb, var(--paper-darker) 34%, transparent); }
+@media (prefers-reduced-motion: reduce) { .math-copy-target { transition: none; } }
 .response-actions { display: flex; width: 100%; align-items: flex-end; gap: 6px; margin-top: 6px; line-height: 1; }
 .response-actions button { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 6px; background: transparent; color: var(--faint); }
 .response-actions button svg { display: block; }

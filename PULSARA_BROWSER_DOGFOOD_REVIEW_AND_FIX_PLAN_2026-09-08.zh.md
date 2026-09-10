@@ -19,6 +19,12 @@
 
 2026-09-10 索引更新：PR01 的实现已提交，但不因此宣称其 activation 完成；其规格仍待补齐验收记录。PR02 已按用户要求把 F01/F02/F03/F05/M03 作为一个 hard cut 完成自动化、隔离 wheel、真实 provider 与浏览器验收；两轮审查指出的大 blob queue 消费/终态竞态、prompt delivery 状态机、late live binding、跨会话异步 owner、迟到 artifact 页、浏览器实际 digest/fatal UTF-8、builtin-only 文件解释、queue 权限/steer target 和 M03 schema 字段说明均已先补红灯再闭环。`edit_file` 的最终产品语义是直接显示真实 unified diff，不提供独立“复制差异”按钮；完整 diff 通过“复制结果原文”取得。用户接受沿用上一轮真实 provider 行为证据；最终安装包另行复验既有 canonical 会话及受影响浏览器 UI。PR02 继续在未提交工作树中保持 ACTIVATED。F06 的 exact-target stop 及 F04/M01/M02/M04 等其他问题仍保留原状态，尚未创建其实施规格。本索引不会因 PR02 激活而宣称 Batch A 全部完成；下文原始调查与旧行号保留为历史诊断依据，实施以对应 PR 规格和当前代码为准。
 
+### 下一轮控制语义讨论
+
+2026-09-10 新增：[用户停止、子任务取消与后台命令控制：最新版产品契约](PULSARA_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md)。基线为已提交的 `b9adc8b8`。该文整理 F06/M01 的最新讨论：前端不单独暴露 monitor，按后台 process 展示；人工终止组合取消关联监视与终止进程；活动 ROOT 获得控制反馈，idle 不因此新增唤醒。本文第 6 节中更早的前端动作/通知建议若与新文冲突，以新文为准。
+
+新文不是 ACTIVATED 实施规格；反馈载体、接纳边界等仍须按其第 14 节闭合。没有据此修改 F06/M01 的实现状态，F04/M02/M04 仍在原范围外。
+
 ## 1. 我的总体判断
 
 当前问题不是“核心执行器普遍不可靠”，而是**执行事实与用户能够看见、能够控制的事实之间存在断层**。这个断层不能当作单纯的界面润色：用户看不到 diff、待执行输入或批准过的方案，就很难判断下一次授权是否合适。

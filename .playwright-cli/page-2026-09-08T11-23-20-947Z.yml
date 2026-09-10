@@ -1,0 +1,59 @@
+- main [ref=f6e3]:
+  - navigation "主要功能" [ref=f6e4]:
+    - generic [ref=f6e5]:
+      - button "总览" [ref=f6e6] [cursor=pointer]
+      - button "会话" [ref=f6e10] [cursor=pointer]
+      - button "能力" [ref=f6e13] [cursor=pointer]
+      - button "记忆" [ref=f6e17] [cursor=pointer]
+    - button "设置" [ref=f6e27] [cursor=pointer]
+  - button "关闭会话侧栏"
+  - region "会话工作台" [ref=f6e31]:
+    - generic [ref=f6e32]:
+      - generic [ref=f6e33]:
+        - button "打开会话侧栏" [ref=f6e34] [cursor=pointer]
+        - generic [ref=f6e36]: 草稿
+        - generic [ref=f6e37]:
+          - heading "尚未选择会话" [level=2] [ref=f6e38]
+          - paragraph [ref=f6e39]: 指定目录 · 正在连接…
+      - button "切换检查器" [ref=f6e41] [cursor=pointer]
+    - generic [ref=f6e44]: 正在连接本地服务…
+    - generic [ref=f6e47]:
+      - generic [ref=f6e50]:
+        - generic [ref=f6e55]:
+          - strong [ref=f6e56]: 创建或选择会话后开始
+          - generic [ref=f6e57]: 模型、推理、规划和本轮权限都会跟随当前会话。
+        - button "创建会话" [ref=f6e58] [cursor=pointer]
+      - paragraph [ref=f6e61]: 当前没有活动会话
+  - complementary "当前会话详情":
+    - generic:
+      - generic:
+        - strong: 当前会话
+        - generic: 尚未选择会话
+      - button "关闭检查器"
+      - navigation "详情视图":
+        - button "子任务"
+        - button "项目能力": 能力
+    - generic:
+      - generic:
+        - generic: 任务概览
+        - generic:
+          - generic:
+            - strong: "0"
+            - generic: 全部
+          - generic:
+            - strong: "0"
+            - generic: 进行中
+          - generic:
+            - strong: "0"
+            - generic: 需留意
+          - generic:
+            - strong: —
+            - generic: TODO清单
+      - generic:
+        - generic: 子任务
+        - tablist "筛选子任务":
+          - tab "全部" [selected]
+          - tab "进行中"
+          - tab "需留意"
+          - tab "已结束"
+        - generic: 这个会话还没有子任务

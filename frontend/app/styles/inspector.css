@@ -104,8 +104,8 @@
 .session-task__dependencies > span,
 .session-task__progress > span { display: inline-flex; align-items: center; gap: 4px; margin-bottom: 4px; color: var(--faint); font-family: var(--mono); font-size: var(--type-micro); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
 .session-task__markdown { min-width: 0; color: var(--ink-soft); font-size: var(--type-label); line-height: 1.58; overflow-wrap: anywhere; }
-.session-task__markdown > :first-child { margin-top: 0; }
-.session-task__markdown > :last-child { margin-bottom: 0; }
+.session-task__markdown > :first-child, .session-task__markdown > .markdown-copy-surface > :first-child { margin-top: 0; }
+.session-task__markdown > :last-child, .session-task__markdown > .markdown-copy-surface > :last-child { margin-bottom: 0; }
 .session-task__markdown p { margin: 0 0 7px; }
 .session-task__markdown ul,
 .session-task__markdown ol { margin: 5px 0 7px 16px; padding: 0; }

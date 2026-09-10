@@ -1769,6 +1769,29 @@ describe('PulsaraApp', () => {
     expect(await screen.findByText('已复制回复')).toBeTruthy();
   });
 
+  it('copies one formula as LaTeX and reports through the shared toast stack', async () => {
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal('navigator', Object.create(navigator, {
+      clipboard: { value: { writeText }, configurable: true },
+    }));
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [{
+        id: 'assistant-formula', role: 'assistant', assistantKind: 'terminal',
+        time: '18:12', body: '能量关系为 $E=mc^2$。', status: 'completed',
+      }],
+      isRunning: false,
+      activeTurnId: undefined,
+    };
+
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByRole('button', { name: '复制 LaTeX 公式' }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith('E=mc^2'));
+    expect(await screen.findByText('公式已复制')).toBeTruthy();
+  });
+
   it('renders accepted user prompts and steers with source line breaks and safe long-token wrapping', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {

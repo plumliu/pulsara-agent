@@ -50,7 +50,7 @@ import type {
   TodoRun,
 } from '../lib/pulsara-types';
 import { permissionLabels } from '../lib/pulsara-types';
-import { MarkdownBody } from './markdown-body';
+import { MarkdownBody, type MarkdownNotify } from './markdown-body';
 
 interface InspectorPanelProps {
   projectMcpForms: ProjectMcpForms;
@@ -81,6 +81,7 @@ interface InspectorPanelProps {
   onRemoveProjectMcp: (server: McpServerCapability) => Promise<void>;
   onReconnectProjectMcp: (server: McpServerCapability) => Promise<void>;
   onOpenUserCapabilities: () => void;
+  onNotify: MarkdownNotify;
   onClose: () => void;
 }
 
@@ -461,6 +462,7 @@ function TaskCard({
   permission,
   onLocate,
   onAcceptCompletion,
+  onNotify,
 }: {
   task: AgentTask;
   canControl: boolean;
@@ -468,6 +470,7 @@ function TaskCard({
   permission: PermissionMode;
   onLocate: (taskId: string) => void;
   onAcceptCompletion: (task: AgentTask) => void;
+  onNotify: MarkdownNotify;
 }) {
   const [expanded, setExpanded] = useState(
     task.status === 'running' || task.status === 'waiting' || needsAttention(task.status),
@@ -509,7 +512,7 @@ function TaskCard({
         <div className="session-task__detail">
           <section className="session-task__objective">
             <span>目标</span>
-            <div className="session-task__markdown"><MarkdownBody body={task.objective || '未提供单独目标。'} /></div>
+            <div className="session-task__markdown"><MarkdownBody body={task.objective || '未提供单独目标。'} onNotify={onNotify} /></div>
           </section>
 
           <dl className="session-task__facts">
@@ -523,7 +526,7 @@ function TaskCard({
           {task.terminalPublicDetail && (
             <section className="session-task__progress">
               <span><AlertTriangle size={11} /> 发生了什么</span>
-              <div className="session-task__markdown"><MarkdownBody body={task.terminalPublicDetail} /></div>
+              <div className="session-task__markdown"><MarkdownBody body={task.terminalPublicDetail} onNotify={onNotify} /></div>
             </section>
           )}
 
@@ -555,11 +558,11 @@ function TaskCard({
                 <span><CheckCircle2 size={12} /> 任务结果</span>
                 {task.completionDelivered && <small><Check size={10} /> 已用于对话</small>}
               </header>
-              {task.result.summary && <div className="session-task__markdown"><MarkdownBody body={task.result.summary} /></div>}
+              {task.result.summary && <div className="session-task__markdown"><MarkdownBody body={task.result.summary} onNotify={onNotify} /></div>}
               {task.result.outputPreview && (
                 <details>
                   <summary>查看输出摘录</summary>
-                  <div className="session-task__markdown"><MarkdownBody body={task.result.outputPreview} /></div>
+                  <div className="session-task__markdown"><MarkdownBody body={task.result.outputPreview} onNotify={onNotify} /></div>
                 </details>
               )}
               {diagnostics.length ? (
@@ -628,6 +631,7 @@ export function InspectorPanel({
   onRemoveProjectMcp,
   onReconnectProjectMcp,
   onOpenUserCapabilities,
+  onNotify,
   onClose,
 }: InspectorPanelProps) {
   const [view, setView] = useState<InspectorView>('tasks');
@@ -711,7 +715,7 @@ export function InspectorPanel({
                   <span>{tasks[0]?.batchId ? <Layers3 size={11} /> : <GitFork size={11} />}<strong>第 {index + 1} 组</strong></span>
                   <small>{tasks.length} 项 · {tasks.filter((task) => isActive(task.status)).length} 项进行中</small>
                 </header>
-                <div>{tasks.map((task) => <TaskCard key={task.id} task={task} canControl={canControl} isRunning={isRunning} permission={permission} onLocate={onLocate} onAcceptCompletion={onAcceptCompletion} />)}</div>
+                <div>{tasks.map((task) => <TaskCard key={task.id} task={task} canControl={canControl} isRunning={isRunning} permission={permission} onLocate={onLocate} onAcceptCompletion={onAcceptCompletion} onNotify={onNotify} />)}</div>
               </section>
             ))}
           </div>

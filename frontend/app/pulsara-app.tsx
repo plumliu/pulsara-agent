@@ -1672,6 +1672,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onRemoveProjectMcp={removeProjectMcp}
           onReconnectProjectMcp={reconnectProjectMcp}
           onOpenUserCapabilities={() => setActiveView('capabilities')}
+          onNotify={notify}
           onClose={() => setInspectorOpen(false)}
         />
       )}

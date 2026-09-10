@@ -53,7 +53,7 @@ import type {
 } from '../lib/runtime-adapter';
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
-import { MarkdownBody, MarkdownInline } from './markdown-body';
+import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
 
 interface WorkbenchViewProps {
   focusMemoryEntry?: { sessionId: string; entryId: string };
@@ -106,7 +106,7 @@ interface WorkbenchViewProps {
   ) => Promise<boolean>;
   artifactOwnerKey: string;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
-  onNotify: (title: string, detail?: string) => void;
+  onNotify: MarkdownNotify;
   onPermissionChange: (permission: PermissionMode) => void;
 }
 
@@ -656,7 +656,7 @@ function reasoningPreview(body: string, running: boolean): string {
   return (running ? lines.at(-1) : lines[0]) ?? body.trim();
 }
 
-function ReasoningRow({ block }: { block: ReasoningBlock }) {
+function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: MarkdownNotify }) {
   const [expanded, setExpanded] = useState(false);
   const title = block.kind === 'summary' ? '思考摘要' : '思考';
   const running = Boolean(block.active);
@@ -671,26 +671,28 @@ function ReasoningRow({ block }: { block: ReasoningBlock }) {
         <span className="reasoning-row__icon"><Sparkles size={11} /></span>
         <span className="reasoning-row__copy">
           <strong>{title}</strong>
-          {!expanded && <small><MarkdownInline body={reasoningPreview(block.body, running)} /></small>}
+          {!expanded && <small><MarkdownInline body={reasoningPreview(block.body, running)} onNotify={onNotify} /></small>}
         </span>
         {running && <span className="reasoning-row__live"><i />思考中</span>}
         <ChevronRight className="reasoning-row__chevron" size={12} />
       </button>
-      {expanded && <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} /></div>}
+      {expanded && <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} /></div>}
     </section>
   );
 }
 
 function ReasoningDisclosure({
   blocks,
+  onNotify,
   nested = false,
 }: {
   blocks: ReasoningBlock[];
+  onNotify: MarkdownNotify;
   nested?: boolean;
 }) {
   return (
     <div className={`reasoning-disclosure${nested ? ' reasoning-disclosure--nested' : ''}`}>
-      {blocks.map((block) => <ReasoningRow key={block.id} block={block} />)}
+      {blocks.map((block) => <ReasoningRow key={block.id} block={block} onNotify={onNotify} />)}
     </div>
   );
 }
@@ -714,6 +716,7 @@ function SubagentRunCard({
   mcpToolRefs,
   artifactOwnerKey,
   onReadToolArtifact,
+  onNotify,
 }: {
   run: SubagentRun;
   focused: boolean;
@@ -721,6 +724,7 @@ function SubagentRunCard({
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  onNotify: MarkdownNotify;
 }) {
   const [expanded, setExpanded] = useState(
     focused || run.status === 'running' || run.status === 'waiting' || run.status === 'pending',
@@ -750,20 +754,21 @@ function SubagentRunCard({
               {activity.reasoning?.length ? (
                 <ReasoningDisclosure
                   blocks={activity.reasoning}
+                  onNotify={onNotify}
                   nested
                 />
               ) : null}
               {activity.body && (activity.kind === 'guidance' ? (
                 <div className="subagent-guidance">
                   <span><CornerDownRight size={11} /> 主任务补充</span>
-                  <div className="assistant-markdown"><MarkdownBody body={activity.body} /></div>
+                  <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>
                 </div>
-              ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} /></div>)}
+              ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>)}
               {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} />)}</div> : null}
             </section>
           ))}
           {showSummary && run.summary && (
-            <section className="subagent-summary"><span>结果</span><div className="assistant-markdown"><MarkdownBody body={run.summary} /></div></section>
+            <section className="subagent-summary"><span>结果</span><div className="assistant-markdown"><MarkdownBody body={run.summary} onNotify={onNotify} /></div></section>
           )}
         </div>
       )}
@@ -780,6 +785,7 @@ function SubagentGroup({
   mcpToolRefs,
   artifactOwnerKey,
   onReadToolArtifact,
+  onNotify,
 }: {
   runs: SubagentRun[];
   focusTaskId?: string;
@@ -789,6 +795,7 @@ function SubagentGroup({
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  onNotify: MarkdownNotify;
 }) {
   const settled = runs.filter((run) => !['pending', 'running', 'waiting'].includes(run.status)).length;
   return (
@@ -806,6 +813,7 @@ function SubagentGroup({
           mcpToolRefs={mcpToolRefs}
           artifactOwnerKey={artifactOwnerKey}
           onReadToolArtifact={onReadToolArtifact}
+          onNotify={onNotify}
         />
       ))}</div>
     </section>
@@ -930,14 +938,14 @@ function AssistantMessage({
       {startsAssistantRun && <AssistantHeading message={message} response={hasNaturalLanguage} />}
 
       {message.reasoning?.length ? (
-        <ReasoningDisclosure blocks={message.reasoning} />
+        <ReasoningDisclosure blocks={message.reasoning} onNotify={onNotify} />
       ) : null}
 
       {hasNaturalLanguage && (
         <>
           {!startsAssistantRun && <AssistantHeading message={message} response />}
           <div className="assistant-copy">
-            <div className="assistant-markdown"><MarkdownBody body={message.body} /></div>
+            <div className="assistant-markdown"><MarkdownBody body={message.body} onNotify={onNotify} /></div>
             {(canCopyResponse || message.forkEligible) && (
               <div className="response-actions">
                 <button
@@ -972,7 +980,7 @@ function AssistantMessage({
 
       {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} />)}</div>}
       {message.subagentRuns?.length ? (
-        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} />
+        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onNotify={onNotify} />
       ) : null}
     </article>
   );
@@ -1042,10 +1050,12 @@ function InteractionCard({
   interaction,
   onRead,
   onResolve,
+  onNotify,
 }: {
   interaction: RuntimeInteractionSummary;
   onRead: WorkbenchViewProps['onReadInteraction'];
   onResolve: WorkbenchViewProps['onResolveInteraction'];
+  onNotify: MarkdownNotify;
 }) {
   const [content, setContent] = useState<RuntimeInteractionContent>();
   const [loadError, setLoadError] = useState('');
@@ -1142,7 +1152,7 @@ function InteractionCard({
 
       {content?.kind === 'plan-draft' && (
         <>
-          <div className="plan-draft-body"><MarkdownBody body={content.body} /></div>
+          <div className="plan-draft-body"><MarkdownBody body={content.body} onNotify={onNotify} /></div>
           {revisionOpen ? (
             <div className="interaction-text-answer interaction-text-answer--revision">
               <textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="告诉 Pulsara 需要怎样修改方案…" rows={3} autoFocus />
@@ -1656,6 +1666,7 @@ export function WorkbenchView({
               interaction={interaction}
               onRead={onReadInteraction}
               onResolve={onResolveInteraction}
+              onNotify={onNotify}
             />
           )}
         </div>
