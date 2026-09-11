@@ -2,12 +2,12 @@ import {
   ArrowRight,
   Bot,
   Database,
+  ListFilter,
   MessageCircle,
   Plus,
   Radio,
+  Search,
   Sparkles,
-  TerminalSquare,
-  Waypoints,
 } from 'lucide-react';
 import type {
   AgentTask,
@@ -15,7 +15,11 @@ import type {
   RuntimeStatus,
   SessionSummary,
 } from '../lib/pulsara-types';
-import type { DatabaseDataPlaneState } from '../lib/runtime-adapter';
+import type {
+  DatabaseDataPlaneState,
+  LocalSettingsSummary,
+  ModelConfigurationSummary,
+} from '../lib/runtime-adapter';
 import { BrandMark } from './brand-mark';
 import { DatabaseSetupGuide } from './database-setup-guide';
 import {
@@ -30,6 +34,8 @@ interface OverviewViewProps {
   runtimeStatus: RuntimeStatus;
   databaseState?: DatabaseDataPlaneState;
   agentTasks: AgentTask[];
+  localSettings?: LocalSettingsSummary;
+  modelConfigurations: ModelConfigurationSummary[];
   onNavigate: (view: AppView) => void;
   onOpenSession: (id: string) => void;
   onNewSession: () => void;
@@ -43,31 +49,25 @@ const connectionLabels: Record<RuntimeStatus, string> = {
   failed: '连接失败',
 };
 
-const shortConnectionLabels: Record<RuntimeStatus, string> = {
-  starting: '连接中',
-  online: '正常',
-  reconnecting: '重连中',
-  offline: '已断开',
-  failed: '失败',
-};
-
 export function OverviewView({
   sessions,
   activeSessionId,
   runtimeStatus,
   databaseState,
   agentTasks,
+  localSettings,
+  modelConfigurations,
   onNavigate,
   onOpenSession,
   onNewSession,
 }: OverviewViewProps) {
   const runningTasks = agentTasks.filter((task) => task.status === 'running').length;
-  const active = sessions.find((session) => session.id === activeSessionId)
-    ?? sessions.find((session) => session.status === 'running')
-    ?? sessions[0];
-  const activePresence = active ? getSessionPresence(active, activeSessionId) : undefined;
   const connected = runtimeStatus === 'online';
   const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
+  const readyModelConfigurations = modelConfigurations.filter((configuration) => configuration.status === 'ready').length;
+  const unavailableModelConfigurations = modelConfigurations.length - readyModelConfigurations;
+  const embeddingConfigured = localSettings?.dashscope_credentials.embedding_configured === true;
+  const rerankConfigured = localSettings?.dashscope_credentials.rerank_configured === true;
 
   return (
     <section className="surface-view overview-view">
@@ -118,30 +118,6 @@ export function OverviewView({
         </section>
 
         <div className="overview-columns">
-          <section className="overview-card active-mission-card">
-            <header className="overview-card__header"><div><span className="page-kicker">当前工作</span><h2>正在发生</h2></div><button onClick={() => onNavigate('workbench')}>打开工作台 <ArrowRight size={12} /></button></header>
-            {active && activePresence ? (
-              <button className="active-mission" onClick={() => onOpenSession(active.id)}>
-                <span className={`mission-presence-column mission-presence-column--${activePresence}`}><SessionPresenceGlyph presence={activePresence} /><b>{sessionPresenceLabels[activePresence]}</b></span>
-                <span className="mission-copy"><strong>{active.title}</strong><small>{active.subtitle}</small><span className="mission-detail"><span><TerminalSquare size={10} /> 保存在本机</span></span></span>
-                <ArrowRight size={15} />
-              </button>
-            ) : (
-              <div className="empty-state"><Sparkles size={22} /><h3>还没有任务</h3><p>创建第一个会话后，进度会在这里出现。</p></div>
-            )}
-          </section>
-
-          <section className="overview-card activity-card">
-            <header className="overview-card__header"><div><span className="page-kicker">连接状态</span><h2>本地运行</h2></div><span className="trend-chip">{shortConnectionLabels[runtimeStatus]}</span></header>
-            <div className="system-map">
-              <div className="system-node"><Waypoints size={14} /><span><strong>Pulsara 服务</strong><small>负责会话和任务</small></span><b>{shortConnectionLabels[runtimeStatus]}</b></div>
-              <div className="system-line" />
-              <div className="system-node"><TerminalSquare size={14} /><span><strong>当前页面</strong><small>自动保持连接</small></span><b>{connected ? '已连接' : '等待中'}</b></div>
-            </div>
-          </section>
-        </div>
-
-        <div className="overview-columns overview-columns--lower">
           <section className="overview-card recent-card">
             <header className="overview-card__header"><div><span className="page-kicker">最近记录</span><h2>最近会话</h2></div><button onClick={() => onNavigate('workbench')}>查看全部</button></header>
             <div className="recent-table">
@@ -158,15 +134,14 @@ export function OverviewView({
           </section>
 
           <section className="overview-card system-card">
-            <header className="overview-card__header"><div><span className="page-kicker">这台设备</span><h2>本地工作空间</h2></div></header>
+            <header className="overview-card__header"><div><span className="page-kicker">本机设置</span><h2>当前配置</h2></div></header>
             <div className="system-map">
-              <div className="system-node"><Waypoints size={14} /><span><strong>任务服务</strong><small>运行你的会话</small></span><b>{shortConnectionLabels[runtimeStatus]}</b></div>
+              <div className="system-node"><Bot size={14} /><span><strong>模型配置</strong><small>{readyModelConfigurations} 组可用{unavailableModelConfigurations > 0 ? ` · ${unavailableModelConfigurations} 组不可用` : ''}</small></span><b className={modelConfigurations.length === 0 ? 'is-inactive' : undefined}>{modelConfigurations.length} 组</b></div>
               <div className="system-line" />
-              <div className="system-node"><Database size={14} /><span><strong>会话数据</strong><small>保存在本机</small></span><b>{connected ? '就绪' : '等待'}</b></div>
+              <div className="system-node"><Search size={14} /><span><strong>记忆检索</strong><small>DashScope Embedding</small></span><b className={embeddingConfigured ? undefined : 'is-inactive'}>{embeddingConfigured ? '已配置' : '未配置'}</b></div>
               <div className="system-line" />
-              <div className="system-node"><TerminalSquare size={14} /><span><strong>浏览器连接</strong><small>自动恢复</small></span><b>{connected ? '正常' : '未连接'}</b></div>
+              <div className="system-node"><ListFilter size={14} /><span><strong>结果重排</strong><small>DashScope Rerank</small></span><b className={rerankConfigured ? undefined : 'is-inactive'}>{rerankConfigured ? '已配置' : '未配置'}</b></div>
             </div>
-            <footer><code>仅限这台设备</code></footer>
           </section>
         </div>
         </>}

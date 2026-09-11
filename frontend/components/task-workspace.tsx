@@ -9,15 +9,13 @@ import {
   LoaderCircle,
   Maximize2,
   Scan,
-  Sparkles,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import type { AgentTask, PermissionMode, SkillCapability, SubagentActivity, TaskStatus } from '../lib/pulsara-types';
-import { permissionLabels } from '../lib/pulsara-types';
+import type { AgentTask, SkillCapability, SubagentActivity, TaskStatus } from '../lib/pulsara-types';
 import { MarkdownBody, type MarkdownNotify } from './markdown-body';
 import type {
   AgentTaskActivityRecord,
@@ -109,10 +107,7 @@ function layoutTaskGraph(tasks: AgentTask[], edges: TaskGraphEdge[]) {
 function TaskGraphDialog({
   tasks,
   canControl,
-  isRunning,
-  permission,
   onCancel,
-  onAcceptCompletion,
   onNotify,
   activities,
   loadActivities,
@@ -125,10 +120,7 @@ function TaskGraphDialog({
 }: {
   tasks: AgentTask[];
   canControl: boolean;
-  isRunning: boolean;
-  permission: PermissionMode;
   onCancel: (task: AgentTask) => Promise<void>;
-  onAcceptCompletion: (task: AgentTask) => void;
   onNotify: MarkdownNotify;
   activities: ReadonlyMap<string, SubagentActivity[]>;
   loadActivities: (taskId: string, cursor?: string) => Promise<{ activities: AgentTaskActivityRecord[]; nextCursor?: string }>;
@@ -382,11 +374,6 @@ function TaskGraphDialog({
             <aside className="task-node-detail" aria-label={`${selected.label} 详情`}>
               <header><span><Bot size={13} /><strong>{selected.label}</strong></span><small>{labels[selected.status]}</small></header>
               {selected.dependencies?.length ? <section><h4>依赖</h4><ul>{selected.dependencies.map((dependency) => <li key={dependency.id}><span>{dependency.label || dependency.taskKey || dependency.id}</span><small>{labels[dependency.status]}</small></li>)}</ul></section> : null}
-              {(downstream.length > 0 || associatedProcesses.length > 0 || processError) && <section className="is-attention"><h4>取消影响</h4>
-                {downstream.length > 0 && <p>下游任务：{downstream.map((task) => task.label || task.taskKey || task.id).join('、')}；实际依赖结果由 kernel 结算。</p>}
-                {associatedProcesses.length > 0 && <p>关联后台命令：{associatedProcesses.map((process) => process.command).join('、')}；取消任务不会自动终止这些命令。</p>}
-                {processError && <p>{processError}</p>}
-              </section>}
               {selected.progress && <section><h4>最新进展</h4><p>{selected.progress}</p></section>}
               <section className="task-node-detail__activities">
                 <h4>任务对话{conversationMessages.length ? ` · ${conversationMessages.length} 条消息` : ''}</h4>
@@ -410,18 +397,23 @@ function TaskGraphDialog({
                 <h4>任务诊断</h4>
                 {selected.result.diagnostics?.length ? <ul>{selected.result.diagnostics.map((diagnostic, index) => <li key={`${selected.result?.id}:diagnostic:${index}`}><span>{typeof diagnostic.message === 'string' ? diagnostic.message : JSON.stringify(diagnostic.message)}</span></li>)}</ul> : null}
               </section> : null}
-              <footer>
-                {!active(selected.status) && <small>{selected.completionAccepted ? '结果已加入主对话。' : '结果尚未加入主对话。'}</small>}
-                {canControl && active(selected.status) && <button className="is-danger" type="button" onClick={() => {
-                  const hasImpact = downstream.length > 0 || associatedProcesses.length > 0;
-                  if (hasImpact && !window.confirm(
-                    `取消“${selected.label || selected.taskKey || selected.id}”？依赖影响由 kernel 结算，关联后台命令不会自动终止。`,
+              {canControl && active(selected.status) && <footer>
+                <button className="is-danger" type="button" onClick={() => {
+                  const impact = [
+                    downstream.length > 0
+                      ? `下游任务：${downstream.map((task) => task.label || task.taskKey || task.id).join('、')}；实际依赖结果由 kernel 结算。`
+                      : undefined,
+                    associatedProcesses.length > 0
+                      ? `关联后台命令：${associatedProcesses.map((process) => process.command).join('、')}；取消任务不会自动终止这些命令。`
+                      : undefined,
+                    processError ? `关联后台命令状态暂时无法确认：${processError}` : undefined,
+                  ].filter((item): item is string => Boolean(item));
+                  if (impact.length > 0 && !window.confirm(
+                    `取消“${selected.label || selected.taskKey || selected.id}”？\n\n${impact.join('\n')}`,
                   )) return;
                   void onCancel(selected);
-                }}><Ban size={12} /> 取消任务</button>}
-                {canControl && !active(selected.status) && !isRunning && !selected.completionAccepted && <button className="is-primary" type="button" onClick={() => onAcceptCompletion(selected)}><Sparkles size={12} /> {selected.status === 'completed' ? '用这份结果继续' : '让 Pulsara 处理这个问题'}</button>}
-                {!active(selected.status) && !selected.completionAccepted && <small>启动主助手继续处理，不会重新运行子任务；使用“{permissionLabels[permission]}”权限。</small>}
-              </footer>
+                }}><Ban size={12} /> 取消任务</button>
+              </footer>}
             </aside>
           )}
         </div>
@@ -436,11 +428,8 @@ export function TaskWorkspace({
   loading,
   error,
   canControl,
-  isRunning,
-  permission,
   onRetry,
   onCancel,
-  onAcceptCompletion,
   onNotify,
   activities,
   loadActivities,
@@ -453,11 +442,8 @@ export function TaskWorkspace({
   loading: boolean;
   error?: string;
   canControl: boolean;
-  isRunning: boolean;
-  permission: PermissionMode;
   onRetry: () => void;
   onCancel: (task: AgentTask) => Promise<void>;
-  onAcceptCompletion: (task: AgentTask) => void;
   onNotify: MarkdownNotify;
   activities: ReadonlyMap<string, SubagentActivity[]>;
   loadActivities: (taskId: string, cursor?: string) => Promise<{ activities: AgentTaskActivityRecord[]; nextCursor?: string }>;
@@ -497,6 +483,6 @@ export function TaskWorkspace({
         <ChevronRight size={14} />
       </button>;
     })}
-    {selected && <TaskGraphDialog tasks={selected} canControl={canControl} isRunning={isRunning} permission={permission} onCancel={onCancel} onAcceptCompletion={onAcceptCompletion} onNotify={onNotify} activities={activities} loadActivities={loadActivities} loadBackgroundProcesses={loadBackgroundProcesses} skills={skills} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} opener={opener} onClose={() => setOpenGroup(undefined)} />}
+    {selected && <TaskGraphDialog tasks={selected} canControl={canControl} onCancel={onCancel} onNotify={onNotify} activities={activities} loadActivities={loadActivities} loadBackgroundProcesses={loadBackgroundProcesses} skills={skills} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} opener={opener} onClose={() => setOpenGroup(undefined)} />}
   </div>;
 }

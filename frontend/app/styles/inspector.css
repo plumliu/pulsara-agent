@@ -102,6 +102,7 @@
 .task-node-detail > header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--type-small); }
 .task-node-detail > header small { color: var(--faint); font-size: var(--type-micro); }
 .task-node-detail > section { min-width: 0; padding: 13px 14px; border-bottom: 1px solid var(--line); color: var(--ink-soft); font-size: var(--type-label); line-height: 1.55; overflow-wrap: anywhere; }
+.task-node-detail > section:last-child { border-bottom: 0; }
 .task-node-detail > section.is-attention { background: var(--red-soft); }
 .task-node-detail > section > h4 { margin: 0 0 7px; color: var(--faint); font-family: var(--mono); font-size: var(--type-micro); letter-spacing: .08em; text-transform: uppercase; }
 .task-node-detail > section > p { margin: 0; }
@@ -126,8 +127,6 @@
 .task-node-detail > footer { display: flex; flex-wrap: wrap; gap: 7px; padding: 14px; }
 .task-node-detail > footer button { min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); font-size: var(--type-caption); }
 .task-node-detail > footer button.is-danger { color: var(--red); }
-.task-node-detail > footer button.is-primary { color: var(--violet); background: var(--violet-soft); }
-.task-node-detail > footer small { flex-basis: 100%; color: var(--faint); font-size: var(--type-micro); line-height: 1.45; }
 
 .background-terminal-panel { display: grid; gap: 8px; padding: 13px; }
 .background-process { overflow: hidden; border: 1px solid var(--line); border-radius: 11px; background: var(--paper-solid); box-shadow: var(--shadow-sm); }

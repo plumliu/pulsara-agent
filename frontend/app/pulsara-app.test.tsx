@@ -2534,7 +2534,7 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('button', { name: /推理 medium/ })).toBeTruthy();
   });
 
-  it('uses shared session presence and the simplified local overview chrome', async () => {
+  it('uses shared session presence and shows useful local configuration facts', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [
       initialSession,
@@ -2565,17 +2565,52 @@ describe('PulsaraApp', () => {
     const runtimeHealth = container.querySelector('.runtime-health');
     expect(runtimeHealth?.textContent).toBe('本地服务已连接');
     expect(runtimeHealth?.querySelector('small')).toBeNull();
-    expect(container.querySelectorAll('.active-mission .session-presence--current')).toHaveLength(1);
-    expect(container.querySelector('.mission-presence-column')?.textContent).toBe('当前会话');
+    expect(screen.queryByText('正在发生')).toBeNull();
+    expect(screen.queryByText('本地运行')).toBeNull();
+    expect(container.querySelector('.active-mission-card')).toBeNull();
+    expect(container.querySelector('.activity-card')).toBeNull();
     expect(container.querySelectorAll('.recent-table .session-presence--current')).toHaveLength(1);
     expect(container.querySelectorAll('.recent-table .session-presence--loaded')).toHaveLength(1);
     expect(container.querySelectorAll('.recent-table .session-presence--resumable')).toHaveLength(1);
     expect(Array.from(container.querySelectorAll('.recent-table .table-state'), (node) => node.textContent))
       .toEqual(['当前会话', '已载入', '可恢复']);
     const systemCard = container.querySelector('.system-card');
-    expect(systemCard?.querySelector('.healthy-dot')).toBeNull();
-    expect(systemCard?.querySelector('footer span')).toBeNull();
-    expect(systemCard?.querySelector('footer')?.textContent).toBe('仅限这台设备');
+    expect(systemCard?.textContent).toContain('当前配置');
+    expect(systemCard?.textContent).toContain('模型配置1 组可用1 组');
+    expect(systemCard?.textContent).toContain('记忆检索DashScope Embedding未配置');
+    expect(systemCard?.textContent).toContain('结果重排DashScope Rerank未配置');
+    expect(systemCard?.querySelector('footer')).toBeNull();
+  });
+
+  it('reports configured retrieval services and the exact model configuration count', async () => {
+    const adapter = new FakeAdapter();
+    adapter.modelConfigurations = [
+      ...adapter.modelConfigurations,
+      {
+        ...adapter.modelConfigurations[0],
+        id: 'model-connection:11111111111111111111111111111111',
+        route_id: 'backup',
+        model_id: 'backup-model',
+        display_name: 'backup-model',
+      },
+    ];
+    adapter.bootstrap = vi.fn(async () => ({
+      ...bootstrap,
+      local_settings: {
+        ...bootstrap.local_settings,
+        dashscope_credentials: { embedding_configured: true, rerank_configured: true },
+      },
+      model_configurations: adapter.modelConfigurations,
+    }));
+
+    const { container } = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '总览' }));
+
+    const systemCard = container.querySelector('.system-card');
+    expect(systemCard?.textContent).toContain('模型配置2 组可用2 组');
+    expect(systemCard?.textContent).toContain('记忆检索DashScope Embedding已配置');
+    expect(systemCard?.textContent).toContain('结果重排DashScope Rerank已配置');
   });
 
   it('refreshes loaded session facts and distinguishes the current page connection', async () => {
@@ -3218,13 +3253,8 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('heading', { name: '研究结论' })).toBeTruthy();
     expect(within(dialog).getByText('目视检查通过')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /完全访问/ }));
-    fireEvent.click(screen.getByRole('button', { name: /只读/ }));
-    const continueButton = within(dialog).getByRole('button', { name: '用这份结果继续' });
-    expect(within(dialog).getByText(/不会重新运行子任务/)).toBeTruthy();
-    fireEvent.click(continueButton);
-    await waitFor(() => expect(adapter.lastConnection?.acceptSubagentCompletion).toHaveBeenCalledWith('task-complete', 'read-only'));
-    expect(await screen.findByText('Pulsara 已收到结果')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /完全访问/ })).toBeTruthy();
+    expect(within(dialog).queryByText('结果尚未加入主对话。')).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: '用这份结果继续' })).toBeNull();
+    expect(within(dialog).queryByText(/不会重新运行子任务/)).toBeNull();
   });
 });

@@ -11,7 +11,7 @@
 }
 
 @media (max-width: 980px) {
-  .overview-columns, .overview-columns--lower { grid-template-columns: 1fr; }
+  .overview-columns { grid-template-columns: 1fr; }
   .overview-hero { grid-template-columns: 1fr .7fr; }
   .metric-grid { grid-template-columns: repeat(2,1fr); }
   .agent-detail-card { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }

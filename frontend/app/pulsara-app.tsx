@@ -1132,39 +1132,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   };
 
-  const acceptTaskCompletion = async (task: AgentTask): Promise<void> => {
-    const active = connectionRef.current;
-    if (!active || active.role !== 'controller' || task.completionAccepted) return;
-    try {
-      const receipt = await active.acceptSubagentCompletion(task.id, turnPermission);
-      if (!ownsConnection(active)) return;
-      if (receipt.status === 'rejected') {
-        if (receipt.publicCode === 'ROOT_TURN_ALREADY_RUNNING') {
-          notify('主任务已经开始处理', '这项工作会在合适的时机自动交给 Pulsara。', 'success');
-          void loadSessionTasks(active.sessionId);
-          return;
-        }
-        notify('暂时无法继续处理', productMessage(receipt.publicMessage, '请刷新任务状态后重试。'), 'warning');
-        return;
-      }
-      setTaskInventory((current) => current.map((item) => item.id === task.id ? {
-        ...item,
-        completionAccepted: true,
-      } : item));
-      setTurnPermission('bypass-permissions');
-      notify(
-        task.status === 'completed' ? 'Pulsara 已收到结果' : 'Pulsara 已收到这项问题',
-        '已经开始新一轮处理；子任务不会重新运行。',
-        'success',
-      );
-      void loadSessionTasks(active.sessionId);
-    } catch (error) {
-      const recovered = await recoverConnectionAfterOperation(error, active);
-      if (!recovered || !ownsConnection(recovered)) return;
-      notify('暂时无法继续处理', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
-    }
-  };
-
   const cancelTask = async (task: AgentTask): Promise<void> => {
     const active = connectionRef.current;
     if (!active || active.role !== 'controller') return;
@@ -1680,6 +1647,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           runtimeStatus={runtimeStatus}
           databaseState={databaseState}
           agentTasks={mergedProjection.agentTasks}
+          localSettings={bootstrap?.local_settings}
+          modelConfigurations={bootstrap?.model_configurations ?? []}
           onNavigate={navigate}
           onOpenSession={openSession}
           onNewSession={openNewSession}
@@ -1793,15 +1762,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           }}
           loading={taskInventoryLoading}
           canControl={canControl}
-          isRunning={projection.isRunning}
-          permission={turnPermission}
           capabilities={capabilities}
           capabilityLoading={capabilityLoading}
           capabilityError={capabilityError}
           capabilityBusy={capabilityBusy}
           error={taskInventoryError}
           onRetry={() => activeSessionId && void loadSessionTasks(activeSessionId)}
-          onAcceptCompletion={(task) => void acceptTaskCompletion(task)}
           onCancelTask={cancelTask}
           backgroundOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}:${projection.hostSessionId ?? ''}`}
           backgroundHostSessionId={projection.hostSessionId}

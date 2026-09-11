@@ -32,11 +32,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       })]}
       loading={false}
       canControl
-      isRunning={false}
-      permission="read-only"
       onRetry={vi.fn()}
       onCancel={vi.fn()}
-      onAcceptCompletion={vi.fn()}
       onNotify={vi.fn()}
       activities={new Map()}
       loadActivities={vi.fn(async () => ({ activities: [] }))}
@@ -44,8 +41,10 @@ describe('TaskWorkspace PR03 hard cut', () => {
     />);
 
     fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
-    expect(screen.getByText('结果尚未加入主对话。')).toBeTruthy();
     const detail = screen.getByLabelText('精确子任务 详情');
+    expect(within(detail).queryByText('结果尚未加入主对话。')).toBeNull();
+    expect(within(detail).queryByRole('button', { name: '用这份结果继续' })).toBeNull();
+    expect(within(detail).queryByText(/启动主助手继续处理/)).toBeNull();
     await waitFor(() => expect(within(detail).getByText('UI_SLOW_DONE')).toBeTruthy());
     expect(within(detail).queryByRole('heading', { name: '任务结果' })).toBeNull();
     expect(within(detail).getByRole('heading', { name: '任务对话 · 2 条消息' })).toBeTruthy();
@@ -90,11 +89,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       tasks={[task()]}
       loading={false}
       canControl
-      isRunning={false}
-      permission="read-only"
       onRetry={vi.fn()}
       onCancel={vi.fn()}
-      onAcceptCompletion={vi.fn()}
       onNotify={vi.fn()}
       activities={new Map()}
       loadActivities={loadActivities}
@@ -128,11 +124,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       tasks={[task()]}
       loading={false}
       canControl
-      isRunning={false}
-      permission="read-only"
       onRetry={vi.fn()}
       onCancel={vi.fn()}
-      onAcceptCompletion={vi.fn()}
       onNotify={vi.fn()}
       activities={new Map([['task-a', [{ id: 'entry-a', time: '现在', body: '规范活动正文' }]]])}
       loadActivities={loadActivities}
@@ -154,11 +147,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       tasks={[task({ batchId: undefined })]}
       loading={false}
       canControl
-      isRunning={false}
-      permission="read-only"
       onRetry={vi.fn()}
       onCancel={vi.fn()}
-      onAcceptCompletion={vi.fn()}
       onNotify={vi.fn()}
       activities={new Map()}
       loadActivities={vi.fn(async () => ({ activities: [] }))}
@@ -196,11 +186,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       tasks={[one, two, three, four, five]}
       loading={false}
       canControl
-      isRunning={false}
-      permission="read-only"
       onRetry={vi.fn()}
       onCancel={vi.fn()}
-      onAcceptCompletion={vi.fn()}
       onNotify={vi.fn()}
       activities={new Map()}
       loadActivities={vi.fn(async () => ({ activities: [] }))}
@@ -254,11 +241,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       ]}
       loading={false}
       canControl
-      isRunning={false}
-      permission="read-only"
       onRetry={vi.fn()}
       onCancel={cancel}
-      onAcceptCompletion={vi.fn()}
       onNotify={vi.fn()}
       activities={new Map()}
       loadActivities={loadActivities}
@@ -295,11 +279,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       ]}
       loading={false}
       canControl
-      isRunning={false}
-      permission="read-only"
       onRetry={vi.fn()}
       onCancel={cancel}
-      onAcceptCompletion={vi.fn()}
       onNotify={vi.fn()}
       activities={new Map()}
       loadActivities={vi.fn(async () => ({ activities: [] }))}
@@ -315,10 +296,13 @@ describe('TaskWorkspace PR03 hard cut', () => {
     fireEvent.click(screen.getByRole('button', { name: /子任务组/ }));
     const dialog = screen.getByRole('dialog', { name: /子任务组/ });
     fireEvent.click(within(dialog).getByRole('button', { name: /被取消节点/ }));
-    expect(await within(dialog).findByText(/下游任务：真实下游/)).toBeTruthy();
-    expect(within(dialog).getByText(/关联后台命令：python retained.py/)).toBeTruthy();
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: '取消任务' })).toBeTruthy());
+    expect(within(dialog).queryByText(/下游任务：真实下游/)).toBeNull();
+    expect(within(dialog).queryByText(/关联后台命令：python retained.py/)).toBeNull();
     fireEvent.click(within(dialog).getByRole('button', { name: '取消任务' }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('关联后台命令不会自动终止'));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('下游任务：真实下游'));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('关联后台命令：python retained.py'));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('取消任务不会自动终止'));
     expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ id: 'task-a' }));
   });
 });

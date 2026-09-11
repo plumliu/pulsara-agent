@@ -33,7 +33,6 @@ import type {
   McpConnectionTestResult,
   McpServerCapability,
   UserMcpServerCapability,
-  PermissionMode,
   SessionSummary,
   SkillCatalogIssue,
   SkillCapability,
@@ -60,15 +59,12 @@ interface InspectorPanelProps {
   agentTasks: AgentTask[];
   loading: boolean;
   canControl: boolean;
-  isRunning: boolean;
-  permission: PermissionMode;
   capabilities?: CapabilitySnapshot;
   capabilityLoading: boolean;
   capabilityError?: string;
   capabilityBusy?: string;
   error?: string;
   onRetry: () => void;
-  onAcceptCompletion: (task: AgentTask) => void;
   taskActivities: ReadonlyMap<string, SubagentActivity[]>;
   onLoadTaskActivities: (taskId: string, cursor?: string) => ReturnType<import('../lib/runtime-adapter').RuntimeAdapter['listSessionTaskActivities']>;
   taskArtifactOwnerKey: string;
@@ -412,15 +408,12 @@ export function InspectorPanel({
   agentTasks,
   loading,
   canControl,
-  isRunning,
-  permission,
   capabilities,
   capabilityLoading,
   capabilityError,
   capabilityBusy,
   error,
   onRetry,
-  onAcceptCompletion,
   taskActivities,
   onLoadTaskActivities,
   taskArtifactOwnerKey,
@@ -468,11 +461,8 @@ export function InspectorPanel({
             loading={loading}
             error={error}
             canControl={canControl}
-            isRunning={isRunning}
-            permission={permission}
             onRetry={onRetry}
             onCancel={onCancelTask}
-            onAcceptCompletion={onAcceptCompletion}
             onNotify={onNotify}
             activities={taskActivities}
             loadActivities={onLoadTaskActivities}
