@@ -70,6 +70,65 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
 }
 
 describe('WorkbenchView PR03 control and raw-result contract', () => {
+  it('grows the composer to a bounded height and keeps TODO and latest controls anchored above it', async () => {
+    let composerTop = 650;
+    const rect = (top: number, height: number): DOMRect => ({
+      x: 0, y: top, top, bottom: top + height, left: 0, right: 800,
+      width: 800, height, toJSON: () => ({}),
+    });
+    const geometry = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function box(this: HTMLElement) {
+        if (this.classList.contains('workbench')) return rect(0, 800);
+        if (this.classList.contains('composer-wrap')) return rect(composerTop, 800 - composerTop);
+        if (this.classList.contains('todo-dock__trigger')) return rect(composerTop - 16, 31);
+        if (this.classList.contains('todo-dock__popover')) return rect(composerTop - 180, 164);
+        return rect(0, 0);
+      });
+    try {
+      const view = render(<WorkbenchView {...props({
+        todo: {
+          id: 'todo-one',
+          items: [{ id: 'todo-one:0', label: '验证输入框高度', status: 'in-progress' }],
+        },
+      })} />);
+      const composer = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+      let contentHeight = 56;
+      Object.defineProperty(composer, 'scrollHeight', {
+        configurable: true,
+        get: () => contentHeight,
+      });
+      const thread = view.container.querySelector('.thread-scroll') as HTMLDivElement;
+      Object.defineProperties(thread, {
+        scrollHeight: { configurable: true, value: 1200 },
+        clientHeight: { configurable: true, value: 400 },
+        scrollTop: { configurable: true, writable: true, value: 0 },
+      });
+      fireEvent.scroll(thread);
+
+      fireEvent.change(composer, { target: { value: '第一行\n第二行' } });
+      await waitFor(() => expect(composer.style.height).toBe('56px'));
+      expect(composer.style.overflowY).toBe('hidden');
+      const todo = screen.getByRole('button', { name: '收起TODO清单' });
+      expect(todo.closest('.composer-frame')).toBe(composer.closest('.composer-frame'));
+      const latest = await screen.findByRole('button', { name: '回到最新' });
+      await waitFor(() => expect(latest.style.bottom).toBe('342px'));
+
+      contentHeight = 280;
+      composerTop = 530;
+      fireEvent.change(composer, { target: { value: Array.from({ length: 20 }, (_, index) => `第 ${index + 1} 行`).join('\n') } });
+      await waitFor(() => expect(composer.style.height).toBe('250px'));
+      expect(composer.style.overflowY).toBe('auto');
+      await waitFor(() => expect(latest.style.bottom).toBe('462px'));
+
+      contentHeight = 34;
+      fireEvent.change(composer, { target: { value: '缩短' } });
+      await waitFor(() => expect(composer.style.height).toBe('34px'));
+      expect(composer.style.overflowY).toBe('hidden');
+    } finally {
+      geometry.mockRestore();
+    }
+  });
+
   it('labels STOP narrowly and preserves the existing producer/observer split', () => {
     const stop = vi.fn();
     const view = render(<WorkbenchView {...props({ onStop: stop })} />);
@@ -82,6 +141,27 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.queryByRole('button', { name: '停止本轮运行' })).toBeNull();
     expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
     expect(screen.getByText('这个会话正在另一个窗口中操作')).toBeTruthy();
+  });
+
+  it('renders current, previous, and earlier ROOT completion acceptance precisely', () => {
+    render(<WorkbenchView {...props({
+      isRunning: false,
+      messages: [{
+        id: 'accepted-current', role: 'user', userKind: 'subagent-completion', time: '18:01', body: '',
+        sourceSubagentTaskId: 'task-current', sourceSubagentLabel: 'builder', sourceSubagentRelation: 'current',
+      }, {
+        id: 'accepted-previous', role: 'user', userKind: 'subagent-completion', time: '18:02', body: '',
+        sourceSubagentTaskId: 'task-previous', sourceSubagentLabel: 'reader', sourceSubagentRelation: 'previous',
+      }, {
+        id: 'accepted-earlier', role: 'user', userKind: 'subagent-completion', time: '18:03', body: '',
+        sourceSubagentTaskId: 'task-earlier', sourceSubagentLabel: 'reviewer', sourceSubagentRelation: 'earlier',
+      }],
+    })} />);
+
+    expect(screen.getByLabelText('builder 的结果已加入本轮对话')).toBeTruthy();
+    expect(screen.getByLabelText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
+    expect(screen.getByLabelText('此前 reviewer 的结果已加入本轮对话')).toBeTruthy();
+    expect(screen.queryByText(/主任务会结合|用于当前处理|模型已收到/)).toBeNull();
   });
 
   it('keeps exact raw text/copy, exact edit diff, and paginates the retained artifact', async () => {

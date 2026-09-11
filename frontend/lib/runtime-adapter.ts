@@ -862,7 +862,7 @@ interface ProtocolSubagentTask {
   terminal_reason?: string;
   terminal_public_detail?: string;
   result_id?: string;
-  completion_delivered?: boolean;
+  completion_accepted?: boolean;
   result_summary?: string;
   dependency_task_ids?: string[];
 }
@@ -881,7 +881,7 @@ interface ProtocolTaskInventoryRecord {
   pending_reason?: string | null;
   terminal_reason?: string | null;
   terminal_public_detail?: string | null;
-  completion_delivered?: boolean;
+  completion_accepted?: boolean;
   accepted_at?: string;
   terminal_at?: string | null;
   dependencies?: Array<{
@@ -2900,6 +2900,11 @@ class LocalRuntimeConnection implements RuntimeConnection {
       canonical,
       activeTurnIds,
     );
+    annotateSubagentCompletionSources(
+      messages,
+      agentTasks,
+      orderedRootTurnIdsFromEntries(canonical),
+    );
     for (const draft of visibleDrafts) {
       if (draft.scopeKind === 'SUBAGENT_TASK' || draft.taskId) continue;
       messages.push({
@@ -3804,7 +3809,28 @@ function settleHistoricalTrace(trace: ToolTrace): void {
 
 function createsSubagentTasks(trace: ToolTrace): boolean {
   const name = trace.toolName?.toLowerCase() ?? '';
-  return name.includes('create_agent_tasks') || name.includes('spawn_agent');
+  return name === 'create_agent_tasks' || name === 'spawn_agent';
+}
+
+function createdSubagentTaskIds(trace: ToolTrace): ReadonlySet<string> | undefined {
+  if (!createsSubagentTasks(trace)) return new Set();
+  if (trace.resultState === undefined) return undefined;
+  if (trace.resultState !== 'SUCCESS') return new Set();
+  if (!trace.resultText) return undefined;
+  try {
+    const result = JSON.parse(trace.resultText) as Record<string, unknown>;
+    if (trace.toolName?.toLowerCase() === 'spawn_agent') {
+      return new Set(typeof result.task_id === 'string' ? [result.task_id] : []);
+    }
+    if (!Array.isArray(result.tasks)) return new Set();
+    return new Set(result.tasks.flatMap((task) => {
+      if (!task || typeof task !== 'object' || Array.isArray(task)) return [];
+      const taskId = (task as Record<string, unknown>).task_id;
+      return typeof taskId === 'string' ? [taskId] : [];
+    }));
+  } catch {
+    return undefined;
+  }
 }
 
 function attachSubagentRuns(messages: Message[], runs: SubagentRun[]): void {
@@ -3816,16 +3842,24 @@ function attachSubagentRuns(messages: Message[], runs: SubagentRun[]): void {
   }
   for (const [parentId, group] of groups) {
     if (!parentId) continue;
-    const creator = messages.find((message) => (
-      message.role === 'assistant'
-      && message.turnId === parentId
-      && message.traces?.some(createsSubagentTasks)
-    ));
-    const target = creator ?? messages.find((message) => (
-      message.role === 'assistant' && message.turnId === parentId
-    ));
-    if (!target) continue;
-    target.subagentRuns = [...(target.subagentRuns ?? []), ...group];
+    const creators = messages.flatMap((message) => {
+      if (message.role !== 'assistant' || message.turnId !== parentId) return [];
+      return (message.traces ?? [])
+        .filter(createsSubagentTasks)
+        .map((trace) => ({ message, taskIds: createdSubagentTaskIds(trace) }));
+    });
+    for (const run of group) {
+      const exact = creators.find((creator) => creator.taskIds?.has(run.id));
+      const unresolvedMessages = [...new Set(
+        creators
+          .filter((creator) => creator.taskIds === undefined)
+          .map((creator) => creator.message),
+      )];
+      const target = exact?.message
+        ?? (unresolvedMessages.length === 1 ? unresolvedMessages[0] : undefined);
+      if (!target) continue;
+      target.subagentRuns = [...(target.subagentRuns ?? []), run];
+    }
   }
 }
 
@@ -4157,7 +4191,7 @@ function projectAgentTasks(
       terminalPublicDetail: task.terminal_public_detail
         ? task.terminal_public_detail
         : undefined,
-      completionDelivered: Boolean(task.completion_delivered),
+      completionAccepted: Boolean(task.completion_accepted),
       dependencyIds: task.dependency_task_ids ?? [],
       summary: task.result_summary || undefined,
       progress: !isTerminalTaskStatus(status) && live?.summary
@@ -4210,7 +4244,7 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
     terminalPublicDetail: task.terminal_public_detail
       ? task.terminal_public_detail
       : undefined,
-    completionDelivered: Boolean(task.completion_delivered),
+    completionAccepted: Boolean(task.completion_accepted),
     acceptedAt: task.accepted_at,
     terminalAt: task.terminal_at || undefined,
     dependencyIds: dependencies.map((dependency) => dependency.id),
@@ -4247,6 +4281,59 @@ function taskColor(taskId: string): AgentTask['color'] {
   return (['blue', 'amber', 'violet', 'green'] as const)[hash % 4];
 }
 
+function orderedRootTurnIdsFromEntries(entries: ProtocolEntry[]): string[] {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const entry of entries) {
+    if (entry.scope_kind !== 'ROOT' || !entry.turn_id || seen.has(entry.turn_id)) continue;
+    seen.add(entry.turn_id);
+    ordered.push(entry.turn_id);
+  }
+  return ordered;
+}
+
+function orderedRootTurnIdsFromMessages(messages: Message[]): string[] {
+  const canonical = messages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => message.turnId && message.entrySequence !== undefined)
+    .sort((left, right) => (
+      (left.message.entrySequence ?? 0) - (right.message.entrySequence ?? 0)
+      || left.index - right.index
+    ));
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  for (const { message } of canonical) {
+    if (!message.turnId || seen.has(message.turnId)) continue;
+    seen.add(message.turnId);
+    ordered.push(message.turnId);
+  }
+  return ordered;
+}
+
+function annotateSubagentCompletionSources(
+  messages: Message[],
+  tasks: AgentTask[],
+  rootTurnIds: string[],
+): void {
+  const taskById = new Map(tasks.map((task) => [task.id, task]));
+  const turnIndex = new Map(rootTurnIds.map((turnId, index) => [turnId, index]));
+  for (const message of messages) {
+    if (message.userKind !== 'subagent-completion' || !message.sourceSubagentTaskId) continue;
+    const source = taskById.get(message.sourceSubagentTaskId);
+    if (!source) continue;
+    message.sourceSubagentLabel = source.label;
+    if (!source.parentId || !message.turnId) continue;
+    if (source.parentId === message.turnId) {
+      message.sourceSubagentRelation = 'current';
+      continue;
+    }
+    const sourceIndex = turnIndex.get(source.parentId);
+    const targetIndex = turnIndex.get(message.turnId);
+    if (sourceIndex === undefined || targetIndex === undefined || sourceIndex >= targetIndex) continue;
+    message.sourceSubagentRelation = sourceIndex + 1 === targetIndex ? 'previous' : 'earlier';
+  }
+}
+
 export function mergeRuntimeTaskInventory(
   projection: RuntimeProjection,
   inventory: AgentTask[],
@@ -4281,6 +4368,11 @@ export function mergeRuntimeTaskInventory(
       activities: [...run.activities],
     })),
   }));
+  annotateSubagentCompletionSources(
+    messages,
+    merged,
+    orderedRootTurnIdsFromMessages(messages),
+  );
   const runById = new Map<string, SubagentRun>();
   for (const message of messages) {
     for (const run of message.subagentRuns ?? []) runById.set(run.id, run);

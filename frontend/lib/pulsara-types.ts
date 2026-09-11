@@ -390,6 +390,8 @@ export interface Message {
   };
   assistantKind?: 'terminal' | 'tool-request' | 'live';
   sourceSubagentTaskId?: string;
+  sourceSubagentLabel?: string;
+  sourceSubagentRelation?: 'current' | 'previous' | 'earlier';
   time: string;
   body: string;
   reasoning?: ReasoningBlock[];
@@ -416,7 +418,7 @@ export interface AgentTask {
   pendingReason?: string;
   terminalReason?: string;
   terminalPublicDetail?: string;
-  completionDelivered: boolean;
+  completionAccepted: boolean;
   acceptedAt?: string;
   terminalAt?: string;
   dependencyIds: string[];

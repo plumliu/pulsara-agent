@@ -718,7 +718,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   ]);
 
   const taskRefreshKey = useMemo(() => projection.agentTasks.map((task) => (
-    `${task.id}:${task.status}:${task.result?.id ?? ''}:${task.completionDelivered ? '1' : '0'}`
+    `${task.id}:${task.status}:${task.result?.id ?? ''}:${task.completionAccepted ? '1' : '0'}`
   )).join('|'), [projection.agentTasks]);
 
   useEffect(() => {
@@ -1134,7 +1134,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   const acceptTaskCompletion = async (task: AgentTask): Promise<void> => {
     const active = connectionRef.current;
-    if (!active || active.role !== 'controller' || task.completionDelivered) return;
+    if (!active || active.role !== 'controller' || task.completionAccepted) return;
     try {
       const receipt = await active.acceptSubagentCompletion(task.id, turnPermission);
       if (!ownsConnection(active)) return;
@@ -1149,7 +1149,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       }
       setTaskInventory((current) => current.map((item) => item.id === task.id ? {
         ...item,
-        completionDelivered: true,
+        completionAccepted: true,
       } : item));
       setTurnPermission('bypass-permissions');
       notify(

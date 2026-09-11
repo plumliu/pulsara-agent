@@ -77,14 +77,13 @@
 .task-graph-controls { position: sticky; top: -38px; z-index: 4; display: flex; gap: 3px; width: max-content; margin: -38px 0 10px auto; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb,var(--paper-raised) 90%,transparent); box-shadow: var(--shadow-sm); backdrop-filter: blur(8px); }
 .task-graph-controls button { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 6px; color: var(--muted); }
 .task-graph-controls button:hover { background: var(--paper-deep); color: var(--ink); }
-.task-graph-stage { position: relative; width: 320px; min-height: 100%; margin-inline: auto; transform-origin: top center; transition: transform .16s ease; }
-.task-graph-edges { position: absolute; inset: 0; z-index: 0; width: 320px; height: 100%; overflow: visible; pointer-events: none; }
+.task-graph-stage { position: relative; margin: 18px auto 0; transform-origin: top center; transition: transform .16s ease; }
+.task-graph-edges { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 .task-graph-edges > path { fill: none; stroke: color-mix(in srgb,var(--faint) 58%,transparent); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .task-graph-edges > path.is-selected { stroke: var(--violet); stroke-width: 2; stroke-dasharray: 5 4; animation: task-edge-flow .75s linear infinite; }
 .task-graph-edges defs path { fill: var(--faint); }
-.task-graph-nodes { position: relative; z-index: 1; display: grid; align-content: start; gap: 18px; min-height: 100%; }
-.task-graph-nodes.is-single { place-content: center; }
-.task-node { position: relative; display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 9px; align-items: center; width: 258px; min-height: 58px; margin-right: auto; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper-solid); box-shadow: var(--shadow-sm); text-align: left; }
+.task-graph-nodes { position: absolute; inset: 0; z-index: 1; }
+.task-node { position: absolute; display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 9px; align-items: center; width: 240px; min-height: 58px; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper-solid); box-shadow: var(--shadow-sm); text-align: left; }
 .task-node.is-selected { border-color: color-mix(in srgb,var(--violet) 55%,var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb,var(--violet) 12%,transparent); }
 .task-node.is-connected:not(.is-selected) { border-color: color-mix(in srgb,var(--violet) 28%,var(--line)); }
 .task-node__icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--paper-deep); color: var(--muted); }

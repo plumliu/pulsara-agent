@@ -6,7 +6,7 @@
 
 新入口：[group-modal.html](./group-modal.html)，保留上一版不覆盖。
 
-**2026-09-11 最终采用白名单：** 仅参考侧栏“任务”（生产 tab 完整替换，含组图/节点详情）、“后台终端”（新增 tab），以及 create_agent_tasks **原始结果区的艺术风格**（推广到其他工具）。Demo 的其他地方一律不参考，包含能力页、root 主对话、创建工具半详细摘要/跳转、输入框、左栏和设置。以[PR03 实施规格第 16–20 节](../../PULSARA_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md)为准；页面保留此前探索状态，不为了本次规格修订改页面。
+**2026-09-11 最终采用白名单：** 仅参考侧栏“任务”（生产 tab 完整替换，含组图/节点详情）、“后台终端”（新增 tab），以及 create_agent_tasks **原始结果区的艺术风格**（推广到其他工具）。Demo 的其他地方一律不参考，包含能力页、root 主对话、创建工具半详细摘要/跳转、输入框、左栏和设置。以[PR03 实施规格第 16–20 节](../../PULSARA_BROWSER_DOGFOOD_PR03_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh)为准；页面保留此前探索状态，不为了本次规格修订改页面。
 
 - 参考当前生产 `frontend/components/inspector-panel.tsx` 及 `frontend/app/styles/base.css`、`shell.css`、`inspector.css` 的布局、配色、标题与分段切换样式。
 - 右侧顶部依次为「能力／任务／后台终端」，默认选择任务。
@@ -44,7 +44,7 @@ node design/sidebar-demos/build-production-preview.mjs
 
 子任务工具展开摘要是本地提案，不是已有生产能力。当前 `TraceCard` 未导出且没有展开体的 renderer 注入点，因此预览构建脚本只在内存中替换这一处 JSX 展开入口，并导入 `subagent-tool-summary.tsx`；不复制整套卡片、不写入生产源码、不在运行时改 DOM。构建会检查入口恰好出现一次，生产结构改变时明确失败。普通工具仍走原有展开体。摘要仅识别两个精确 builtin 名称；成功结果按 `batch_id` 或 `task_id` 定位外层现有夹具，失败或无法解析时保留原始结果，不伪造成功摘要。
 
-2026-09-11 用户确认（仅艺术风格，不采用额外折叠层级或创建摘要）：原始结果采用本 Demo 的暖灰棕 `--paper-deep` 背景和 `--ink-soft` 正文，后续替换生产浅色主题中现有的黑底浅字，并推广到其他工具的同类结果区域。已记入[根目录产品契约第 16 节](../../PULSARA_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md)，当前只记录决定，不修改生产样式。
+2026-09-11 用户确认（仅艺术风格，不采用额外折叠层级或创建摘要）：原始结果采用本 Demo 的暖灰棕 `--paper-deep` 背景和 `--ink-soft` 正文，后续替换生产浅色主题中现有的黑底浅字，并推广到其他工具的同类结果区域。已记入[根目录产品契约第 16 节](../../PULSARA_BROWSER_DOGFOOD_PR03_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh)，当前只记录决定，不修改生产样式。
 
 节点名称可以对接现有 kernel 字段：`create_agent_tasks.tasks[].label` 是可选的可读名称，允许中文，由派发任务的模型填写，保存后由 session controller 返回。单独调用 `spawn_agent` 的可选 `task_name` 只允许小写英文字母开头的英文、数字、下划线和连字符短名，内部会同时赋给 `task_key` 与 `label`。当前生产前端使用 `label || task_key || '子任务'`。本页名称仍是模拟数据，不是从实际任务生成或读取；无须为这些图节点另加命名机制。
 

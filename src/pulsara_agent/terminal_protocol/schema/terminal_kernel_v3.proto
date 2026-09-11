@@ -289,7 +289,7 @@ message SubagentTaskControl {
   string objective = 4;
   string result_id = 5;
   string result_entry_id = 6;
-  bool completion_delivered = 7;
+  bool completion_accepted = 7;
   string batch_id = 8;
   string task_key = 9;
   string label = 10;

@@ -83,6 +83,12 @@ _ASYNC_SUBAGENT_COMPLETION_RETIRED_PYTEST_NODES = {
         "test_stage2_controller_can_accept_external_results_into_a_new_root"
     ),
 }
+_SUBAGENT_WAIT_REFINEMENT_RETIRED_PYTEST_NODES = {
+    (
+        "tests/test_stage2_conversation_runner.py::"
+        "test_round3_1_expired_steer_planning_consumes_nothing_and_io_closes"
+    ),
+}
 _MEMORY_TAXONOMY_HARD_CUT_RETIRED_PYTEST_NODES = {
     (
         "tests/test_host_identity.py::"
@@ -153,6 +159,9 @@ _PR03_ADDED_METHODS = {
     "list_subagent_task_activities",
     "list_subagent_task_groups",
 }
+_PR03_CHANGED_METHODS = {
+    "interrupt_turn",
+}
 _MODEL_UNIVERSE_CHANGED_METHODS = {
     "confirm_prompt_ingress",
     "enqueue_prompt",
@@ -184,6 +193,9 @@ _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS = {
     "_completion_accepted_entry",
     "_completion_source_row",
     "_prepare_completion_target",
+}
+_SUBAGENT_WAIT_REFINEMENT_ADDED_METHODS = {
+    "validate_host_writer",
 }
 _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS = {
     "_prepare_external_result_target",
@@ -816,6 +828,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _ROUND10_ADDED_METHODS
                 | _ROUND9_2_ADDED_METHODS
                 | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
+                | _SUBAGENT_WAIT_REFINEMENT_ADDED_METHODS
                 | _MODEL_UNIVERSE_ADDED_METHODS
                 | _PR03_ADDED_METHODS
                 | {
@@ -842,6 +855,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND10_CHANGED_METHODS
             | _ROUND9_2_CHANGED_METHODS
             | _ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS
+            | _PR03_CHANGED_METHODS
             | _MODEL_UNIVERSE_CHANGED_METHODS | _FORK_CHANGED_METHODS,
         ),
     ):
@@ -939,6 +953,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND10_ADDED_METHODS
             | _ROUND9_2_ADDED_METHODS
             | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
+            | _SUBAGENT_WAIT_REFINEMENT_ADDED_METHODS
             | _MODEL_UNIVERSE_ADDED_METHODS
             | _PR03_ADDED_METHODS
             | {
@@ -977,6 +992,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
         - _MODEL_UNIVERSE_REMOVED_METHODS
         - _MODEL_UNIVERSE_CHANGED_METHODS
+        - _PR03_CHANGED_METHODS
     ):
         assert current_runtime["methods"][name] == baseline_runtime["methods"][name]
     assert set(
@@ -1020,6 +1036,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND10_ADDED_METHODS
         | _ROUND10_CHANGED_METHODS
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
+        | _SUBAGENT_WAIT_REFINEMENT_ADDED_METHODS
         | _ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS
         | _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
@@ -1030,6 +1047,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND9_2_CHANGED_METHODS
         | _MODEL_UNIVERSE_ADDED_METHODS
         | _PR03_ADDED_METHODS
+        | _PR03_CHANGED_METHODS
         | _MODEL_UNIVERSE_CHANGED_METHODS
         | _MODEL_UNIVERSE_REMOVED_METHODS
         | _ROUND10_REMOVED_METHODS
@@ -1075,6 +1093,7 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
         _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES
         | _ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES
         | _ASYNC_SUBAGENT_COMPLETION_RETIRED_PYTEST_NODES
+        | _SUBAGENT_WAIT_REFINEMENT_RETIRED_PYTEST_NODES
         | _MEMORY_TAXONOMY_HARD_CUT_RETIRED_PYTEST_NODES
         | _PERMISSION_HOST_SCOPE_HARD_CUT_RETIRED_PYTEST_NODES
         | _MODEL_UNIVERSE_HARD_CUT_RETIRED_PYTEST_NODES

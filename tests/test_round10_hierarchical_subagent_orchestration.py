@@ -32,6 +32,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    StaleHostWriter,
 )
 from pulsara_agent.conversation_kernel.runner import KernelRunResult
 from pulsara_agent.conversation_kernel.turn_admission import (
@@ -41,6 +42,7 @@ from pulsara_agent.conversation_kernel.subagent import (
     ROOT_ORCHESTRATION_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
     KernelSubagentManager,
+    RootCompletionReadiness,
 )
 from pulsara_agent.conversation_kernel.subagents.launch import (
     CanonicalSubagentLaunchPreparationPort,
@@ -71,6 +73,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
 )
+from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
@@ -161,6 +164,46 @@ def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
         )
 
 
+def test_round10_subagent_guidance_is_complete_and_product_facing() -> None:
+    descriptions = {
+        entry.name: entry.descriptor.description
+        for entry in builtin_tool_catalog()
+        if entry.name in SUBAGENT_TOOL_NAMES
+    }
+    parent_guidance = "\n".join(
+        descriptions[name] for name in sorted(ROOT_ORCHESTRATION_TOOL_NAMES)
+    )
+    delegated_prompt = DEFAULT_SYSTEM_PROMPT.split("Delegated work:\n", 1)[1].split(
+        "\n\nCommunication:", 1
+    )[0]
+
+    assert "does not start a new model reply" in descriptions["spawn_agent"]
+    assert "later user request or an explicit continuation" in descriptions["spawn_agent"]
+    assert "does not wait for the tasks" in descriptions["create_agent_tasks"]
+    assert "separate conversation messages after this tool call finishes" in descriptions[
+        "wait_agent"
+    ]
+    assert "does not mean that every task succeeded" in descriptions["wait_agent"]
+    assert "Do not repeatedly call list_agents to poll" in descriptions["list_agents"]
+    assert "does not undo files or external side effects" in descriptions["stop_agent"]
+    assert "does not prove that the agent has read it" in descriptions[
+        "send_agent_message"
+    ]
+    assert "Do not promise that you will return automatically" in delegated_prompt
+    assert "wait once before giving the final answer" in delegated_prompt
+
+    for internal_term in (
+        "ROOT",
+        "canonical",
+        "inbox",
+        "safe point",
+        "legal input boundary",
+        "exact-turn",
+    ):
+        assert internal_term not in parent_guidance
+        assert internal_term not in delegated_prompt
+
+
 def test_round10_wait_is_level_triggered_input_barrier_without_result_transport() -> (
     None
 ):
@@ -206,11 +249,391 @@ def test_round10_wait_is_level_triggered_input_barrier_without_result_transport(
             {"timeout_seconds": 30}, context
         )
         assert json.loads(immediate.content) == {
-            "outcome": "input_available",
+            "outcome": "completion_available",
             "satisfied_task_ids": [],
             "pending_task_ids": [],
         }
         assert b"result" not in immediate.content.lower()
+
+    asyncio.run(exercise())
+
+
+def test_round10_targeted_all_ignores_partial_and_unrelated_completions() -> None:
+    class _InlineIO:
+        async def run(self, function, *args: object, **kwargs: object):
+            return function(*args, **kwargs)
+
+    class _Repository:
+        def __init__(self) -> None:
+            self.statuses = {
+                "task:a": "COMPLETED",
+                "task:b": "ACTIVE",
+            }
+
+        @staticmethod
+        def validate_host_writer(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def read_pending_prompt_steer_facts(**_kwargs: object):
+            return ()
+
+        def query_subagent_task(self, *, task_id: str, **_kwargs: object):
+            return {
+                "id": task_id,
+                "status": self.statuses[task_id],
+                "accepted_root_entry_id": None,
+            }
+
+    async def exercise() -> None:
+        repository = _Repository()
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=repository,  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=_InlineIO(),  # type: ignore[arg-type]
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test",
+                owner_epoch="todo:test",
+            ),
+        )
+        await manager.open_root_completion_delivery("turn:root")
+        assert await manager.offer_subagent_completion("task:unrelated")
+
+        waiter = asyncio.create_task(
+            manager._wait(  # noqa: SLF001
+                {
+                    "task_ids": ["task:a", "task:b"],
+                    "settle": "all",
+                    "timeout_seconds": 1,
+                },
+                SimpleNamespace(turn_id="turn:root", session_id="session:test"),
+            )
+        )
+        await asyncio.sleep(0)
+        assert not waiter.done()
+
+        repository.statuses["task:b"] = "COMPLETED"
+        await manager.notify_root_input_activity()
+        result = await asyncio.wait_for(waiter, timeout=1)
+        assert json.loads(result.content) == {
+            "outcome": "predicate_satisfied",
+            "satisfied_task_ids": ["task:a", "task:b"],
+            "pending_task_ids": [],
+        }
+        assert await manager.snapshot_pending_root_completions("turn:root") == (
+            "task:unrelated",
+            "task:a",
+            "task:b",
+        )
+
+    asyncio.run(exercise())
+
+
+def test_round10_targeted_wait_claims_terminal_source_before_success() -> None:
+    class _InlineIO:
+        async def run(self, function, *args: object, **kwargs: object):
+            return function(*args, **kwargs)
+
+    class _Repository:
+        @staticmethod
+        def validate_host_writer(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def read_pending_prompt_steer_facts(**_kwargs: object):
+            return ()
+
+        @staticmethod
+        def query_subagent_task(*, task_id: str, **_kwargs: object):
+            return {
+                "id": task_id,
+                "status": "COMPLETED",
+                "accepted_root_entry_id": None,
+            }
+
+    async def exercise() -> None:
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=_Repository(),  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=_InlineIO(),  # type: ignore[arg-type]
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test",
+                owner_epoch="todo:test",
+            ),
+        )
+        await manager.open_root_completion_delivery("turn:root")
+        result = await manager._wait(  # noqa: SLF001
+            {"task_ids": ["task:done"], "timeout_seconds": 0.001},
+            SimpleNamespace(turn_id="turn:root", session_id="session:test"),
+        )
+        assert json.loads(result.content)["outcome"] == "predicate_satisfied"
+        assert await manager.snapshot_pending_root_completions("turn:root") == (
+            "task:done",
+        )
+
+    asyncio.run(exercise())
+
+
+def test_round10_wait_exact_steer_precedes_join_and_untargeted_completion() -> None:
+    class _InlineIO:
+        async def run(self, function, *args: object, **kwargs: object):
+            return function(*args, **kwargs)
+
+    class _Repository:
+        @staticmethod
+        def validate_host_writer(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def read_pending_prompt_steer_facts(**kwargs: object):
+            assert kwargs["target_turn_id"] == "turn:root"
+            return ({"queue_item_id": "steer:exact"},)
+
+        @staticmethod
+        def query_subagent_task(*, task_id: str, **_kwargs: object):
+            return {
+                "id": task_id,
+                "status": "COMPLETED",
+                "accepted_root_entry_id": None,
+            }
+
+    async def exercise() -> None:
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=_Repository(),  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=_InlineIO(),  # type: ignore[arg-type]
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test", owner_epoch="todo:test"
+            ),
+        )
+        await manager.open_root_completion_delivery("turn:root")
+        assert await manager.offer_subagent_completion("task:unrelated")
+        context = SimpleNamespace(turn_id="turn:root", session_id="session:test")
+
+        targeted = await manager._wait(  # noqa: SLF001
+            {"task_ids": ["task:done"], "settle": "all", "timeout_seconds": 0},
+            context,
+        )
+        assert json.loads(targeted.content) == {
+            "outcome": "steer_available",
+            "satisfied_task_ids": ["task:done"],
+            "pending_task_ids": [],
+        }
+        untargeted = await manager._wait(  # noqa: SLF001
+            {"timeout_seconds": 0}, context
+        )
+        assert json.loads(untargeted.content)["outcome"] == "steer_available"
+
+    asyncio.run(exercise())
+
+
+def test_round10_wait_deadline_performs_final_exact_predicate_check() -> None:
+    class _InlineIO:
+        async def run(self, function, *args: object, **kwargs: object):
+            return function(*args, **kwargs)
+
+    class _Repository:
+        query_count = 0
+
+        @staticmethod
+        def validate_host_writer(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def read_pending_prompt_steer_facts(**_kwargs: object):
+            return ()
+
+        def query_subagent_task(self, *, task_id: str, **_kwargs: object):
+            self.query_count += 1
+            return {
+                "id": task_id,
+                "status": "ACTIVE" if self.query_count == 1 else "COMPLETED",
+                "accepted_root_entry_id": None,
+            }
+
+    async def exercise() -> None:
+        repository = _Repository()
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=repository,  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=_InlineIO(),  # type: ignore[arg-type]
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test", owner_epoch="todo:test"
+            ),
+        )
+        await manager.open_root_completion_delivery("turn:root")
+        result = await manager._wait(  # noqa: SLF001
+            {"task_ids": ["task:done"], "timeout_seconds": 0.001},
+            SimpleNamespace(turn_id="turn:root", session_id="session:test"),
+        )
+        assert json.loads(result.content)["outcome"] == "predicate_satisfied"
+        assert repository.query_count >= 2
+
+    asyncio.run(exercise())
+
+
+def test_round10_join_readiness_rejects_seal_race_without_enqueuing() -> None:
+    class _InlineIO:
+        async def run(self, function, *args: object, **kwargs: object):
+            if asyncio.iscoroutinefunction(function):
+                return await function(*args, **kwargs)
+            return function(*args, **kwargs)
+
+    class _Repository:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        @staticmethod
+        def validate_host_writer(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def read_pending_prompt_steer_facts(**_kwargs: object):
+            return ()
+
+        async def query_subagent_task(self, *, task_id: str, **_kwargs: object):
+            self.entered.set()
+            await self.release.wait()
+            return {
+                "id": task_id,
+                "status": "COMPLETED",
+                "accepted_root_entry_id": None,
+            }
+
+    async def exercise() -> None:
+        repository = _Repository()
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=repository,  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=_InlineIO(),  # type: ignore[arg-type]
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test", owner_epoch="todo:test"
+            ),
+        )
+        await manager.open_root_completion_delivery("turn:root")
+        wait = asyncio.create_task(
+            manager._wait(  # noqa: SLF001
+                {"task_ids": ["task:done"], "timeout_seconds": 30},
+                SimpleNamespace(turn_id="turn:root", session_id="session:test"),
+            )
+        )
+        await repository.entered.wait()
+        await manager.seal_root_completion_delivery("turn:root")
+        repository.release.set()
+        result = await wait
+        assert result.state == "APPLICATION_ERROR"
+        assert json.loads(result.content) == {"error": "wait_target_not_open"}
+        assert tuple(manager._root_completion_queue) == ()  # noqa: SLF001
+
+    asyncio.run(exercise())
+
+
+def test_round10_join_readiness_rechecks_owner_after_canonical_reads() -> None:
+    class _InlineIO:
+        async def run(self, function, *args: object, **kwargs: object):
+            return function(*args, **kwargs)
+
+    class _Repository:
+        validations = 0
+
+        def validate_host_writer(self, *_args: object, **_kwargs: object) -> None:
+            self.validations += 1
+            if self.validations == 2:
+                raise StaleHostWriter("dogfood owner takeover")
+
+        @staticmethod
+        def query_subagent_task(*, task_id: str, **_kwargs: object):
+            return {
+                "id": task_id,
+                "status": "COMPLETED",
+                "accepted_root_entry_id": None,
+            }
+
+    async def exercise() -> None:
+        repository = _Repository()
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=repository,  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=_InlineIO(),  # type: ignore[arg-type]
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test", owner_epoch="todo:test"
+            ),
+        )
+        await manager.open_root_completion_delivery("turn:root")
+        readiness = await manager.ensure_root_completion_ready(
+            session_id="session:test",
+            root_turn_id="turn:root",
+            task_ids=("task:done",),
+        )
+        assert readiness is RootCompletionReadiness.OWNER_UNAVAILABLE
+        assert repository.validations == 2
+        assert tuple(manager._root_completion_queue) == ()  # noqa: SLF001
+
+    asyncio.run(exercise())
+
+
+def test_round10_join_readiness_preserves_fifo_and_skips_accepted_sources() -> None:
+    class _InlineIO:
+        async def run(self, function, *args: object, **kwargs: object):
+            return function(*args, **kwargs)
+
+    class _Repository:
+        @staticmethod
+        def validate_host_writer(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def query_subagent_task(*, task_id: str, **_kwargs: object):
+            return {
+                "id": task_id,
+                "status": "FAILED" if task_id == "task:new" else "COMPLETED",
+                "accepted_root_entry_id": (
+                    "entry:accepted" if task_id == "task:accepted" else None
+                ),
+            }
+
+    async def exercise() -> None:
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(),
+            repository=_Repository(),  # type: ignore[arg-type]
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=_InlineIO(),  # type: ignore[arg-type]
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test", owner_epoch="todo:test"
+            ),
+        )
+        await manager.open_root_completion_delivery("turn:root")
+        assert await manager.offer_subagent_completion("task:existing")
+        readiness = await manager.ensure_root_completion_ready(
+            session_id="session:test",
+            root_turn_id="turn:root",
+            task_ids=("task:accepted", "task:existing", "task:new"),
+        )
+        assert readiness is RootCompletionReadiness.READY
+        assert await manager.snapshot_pending_root_completions("turn:root") == (
+            "task:existing",
+            "task:new",
+        )
 
     asyncio.run(exercise())
 
@@ -1710,22 +2133,17 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
         )
         assert created.state == "SUCCESS"
         task_ids = [item["task_id"] for item in json.loads(created.content)["tasks"]]
-        while True:
-            waited = await manager.invoke(
-                tool_name="wait_agent",
-                arguments={
-                    "task_ids": task_ids,
-                    "settle": "all",
-                    "timeout_seconds": 10,
-                },
-                invocation_context=context,
-            )
-            payload = json.loads(waited.content)
-            if payload["outcome"] == "predicate_satisfied":
-                break
-            assert payload["outcome"] == "input_available"
-            for offered in tuple(manager._root_completion_queue):
-                await manager.retire_root_completion(offered)
+        await manager.open_root_completion_delivery(context.turn_id)
+        waited = await manager.invoke(
+            tool_name="wait_agent",
+            arguments={
+                "task_ids": task_ids,
+                "settle": "all",
+                "timeout_seconds": 10,
+            },
+            invocation_context=context,
+        )
+        payload = json.loads(waited.content)
         assert payload["pending_task_ids"] == []
         assert payload["outcome"] == "predicate_satisfied"
         assert payload["satisfied_task_ids"] == task_ids
@@ -1810,6 +2228,7 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
             todo_owner,
         )
         manager.bind_runner_factory(lambda _scope: blocker)  # type: ignore[arg-type]
+        await manager.open_root_completion_delivery(context.turn_id)
         created = await manager.invoke(
             tool_name="create_agent_tasks",
             arguments=arguments,
@@ -1985,6 +2404,7 @@ def test_round10_wait_agent_waits_for_dormant_dependency_terminalization(
         )
         blocker = _CountingBlockingChildRunner()
         manager.bind_runner_factory(lambda _scope: blocker)  # type: ignore[arg-type]
+        await manager.open_root_completion_delivery(context.turn_id)
         created = await manager.invoke(
             tool_name="create_agent_tasks",
             arguments=arguments,

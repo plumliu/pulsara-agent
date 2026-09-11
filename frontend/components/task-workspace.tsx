@@ -54,6 +54,58 @@ function statusIcon(status: TaskStatus) {
   return <span className="task-node__dot" />;
 }
 
+const TASK_GRAPH_NODE_WIDTH = 240;
+const TASK_GRAPH_NODE_HEIGHT = 58;
+const TASK_GRAPH_COLUMN_GAP = 88;
+const TASK_GRAPH_ROW_GAP = 22;
+
+interface TaskGraphEdge {
+  from: string;
+  to: string;
+}
+
+function layoutTaskGraph(tasks: AgentTask[], edges: TaskGraphEdge[]) {
+  const incoming = new Map<string, string[]>();
+  for (const edge of edges) {
+    incoming.set(edge.to, [...(incoming.get(edge.to) ?? []), edge.from]);
+  }
+  const depths = new Map<string, number>();
+  const depthOf = (taskId: string, visiting = new Set<string>()): number => {
+    const known = depths.get(taskId);
+    if (known !== undefined) return known;
+    if (visiting.has(taskId)) return 0;
+    const nextVisiting = new Set(visiting).add(taskId);
+    const depth = (incoming.get(taskId) ?? []).reduce(
+      (maximum, dependencyId) => Math.max(maximum, depthOf(dependencyId, nextVisiting) + 1),
+      0,
+    );
+    depths.set(taskId, depth);
+    return depth;
+  };
+  const levels = new Map<number, AgentTask[]>();
+  for (const task of tasks) {
+    const depth = depthOf(task.id);
+    levels.set(depth, [...(levels.get(depth) ?? []), task]);
+  }
+  const columnCount = Math.max(0, ...levels.keys()) + 1;
+  const maximumRows = Math.max(1, ...[...levels.values()].map((level) => level.length));
+  const width = columnCount * TASK_GRAPH_NODE_WIDTH
+    + (columnCount - 1) * TASK_GRAPH_COLUMN_GAP;
+  const height = maximumRows * TASK_GRAPH_NODE_HEIGHT
+    + (maximumRows - 1) * TASK_GRAPH_ROW_GAP;
+  const positions = new Map<string, { x: number; y: number }>();
+  for (const [depth, level] of levels) {
+    const levelHeight = level.length * TASK_GRAPH_NODE_HEIGHT
+      + (level.length - 1) * TASK_GRAPH_ROW_GAP;
+    const offsetY = (height - levelHeight) / 2;
+    level.forEach((task, row) => positions.set(task.id, {
+      x: depth * (TASK_GRAPH_NODE_WIDTH + TASK_GRAPH_COLUMN_GAP),
+      y: offsetY + row * (TASK_GRAPH_NODE_HEIGHT + TASK_GRAPH_ROW_GAP),
+    }));
+  }
+  return { width, height, positions };
+}
+
 function TaskGraphDialog({
   tasks,
   canControl,
@@ -161,12 +213,13 @@ function TaskGraphDialog({
   const downstream = selectedId
     ? tasks.filter((task) => task.dependencies?.some((dependency) => dependency.id === selectedId))
     : [];
-  const taskIndex = new Map(tasks.map((task, index) => [task.id, index]));
+  const taskIds = new Set(tasks.map((task) => task.id));
   const edges = tasks.flatMap((task) => (
     (task.dependencies ?? [])
-      .filter((dependency) => taskIndex.has(dependency.id))
+      .filter((dependency) => taskIds.has(dependency.id))
       .map((dependency) => ({ from: dependency.id, to: task.id }))
   ));
+  const graph = layoutTaskGraph(tasks, edges);
   const selectedEdges = selectedId
     ? new Set(edges.filter((edge) => edge.from === selectedId || edge.to === selectedId)
       .map((edge) => `${edge.from}:${edge.to}`))
@@ -276,28 +329,44 @@ function TaskGraphDialog({
               <button type="button" aria-label="适应任务图" onClick={() => setZoom(1)}><Scan size={13} /></button>
               <button type="button" aria-label="放大任务图" onClick={() => setZoom((value) => Math.min(1.3, value + .1))}><ZoomIn size={13} /></button>
             </div>
-            <div className="task-graph-stage" style={{ transform: `scale(${zoom})` }}>
-              {edges.length > 0 && <svg className="task-graph-edges" viewBox={`0 0 320 ${Math.max(58, tasks.length * 76 - 18)}`} preserveAspectRatio="none" aria-label="任务依赖关系">
+            <div className="task-graph-stage" style={{
+              width: graph.width,
+              height: graph.height,
+              transform: `scale(${zoom})`,
+            }}>
+              {edges.length > 0 && <svg className="task-graph-edges" viewBox={`0 0 ${graph.width} ${graph.height}`} aria-label="任务依赖关系">
                 <defs><marker id={markerId} markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" /></marker></defs>
                 {edges.map((edge) => {
-                  const from = taskIndex.get(edge.from)!;
-                  const to = taskIndex.get(edge.to)!;
+                  const from = graph.positions.get(edge.from)!;
+                  const to = graph.positions.get(edge.to)!;
+                  const outgoing = edges.filter((candidate) => candidate.from === edge.from);
+                  const incomingEdges = edges.filter((candidate) => candidate.to === edge.to);
+                  const fromOffset = (outgoing.indexOf(edge) - (outgoing.length - 1) / 2) * 7;
+                  const toOffset = (incomingEdges.indexOf(edge) - (incomingEdges.length - 1) / 2) * 7;
+                  const fromX = from.x + TASK_GRAPH_NODE_WIDTH;
+                  const fromY = from.y + TASK_GRAPH_NODE_HEIGHT / 2 + fromOffset;
+                  const toX = to.x;
+                  const toY = to.y + TASK_GRAPH_NODE_HEIGHT / 2 + toOffset;
+                  const controlX = (fromX + toX) / 2;
                   const key = `${edge.from}:${edge.to}`;
-                  return <path key={key} className={selectedEdges.has(key) ? 'is-selected' : ''} d={`M 258 ${from * 76 + 29} C 310 ${from * 76 + 29}, 310 ${to * 76 + 29}, 258 ${to * 76 + 29}`} markerEnd={`url(#${markerId})`} />;
+                  return <path key={key} className={selectedEdges.has(key) ? 'is-selected' : ''} d={`M ${fromX} ${fromY} C ${controlX} ${fromY}, ${controlX} ${toY}, ${toX} ${toY}`} markerEnd={`url(#${markerId})`} />;
                 })}
               </svg>}
-              <div className={`task-graph-nodes${tasks.length === 1 ? ' is-single' : ''}`}>
+              <div className="task-graph-nodes">
               {tasks.map((task) => {
                 const connected = selectedId && edges.some((edge) => (
                   (edge.from === selectedId && edge.to === task.id)
                   || (edge.to === selectedId && edge.from === task.id)
                 ));
+                const position = graph.positions.get(task.id)!;
                 return (
                 <button
                   type="button"
                   key={task.id}
+                  data-task-id={task.id}
                   className={`task-node task-node--${task.status}${selectedId === task.id ? ' is-selected' : ''}${connected ? ' is-connected' : ''}`}
                   aria-pressed={selectedId === task.id}
+                  style={{ left: position.x, top: position.y }}
                   onClick={() => setSelectedId(task.id)}
                 >
                   <span className="task-node__icon">{statusIcon(task.status)}</span>
@@ -342,6 +411,7 @@ function TaskGraphDialog({
                 {selected.result.diagnostics?.length ? <ul>{selected.result.diagnostics.map((diagnostic, index) => <li key={`${selected.result?.id}:diagnostic:${index}`}><span>{typeof diagnostic.message === 'string' ? diagnostic.message : JSON.stringify(diagnostic.message)}</span></li>)}</ul> : null}
               </section> : null}
               <footer>
+                {!active(selected.status) && <small>{selected.completionAccepted ? '结果已加入主对话。' : '结果尚未加入主对话。'}</small>}
                 {canControl && active(selected.status) && <button className="is-danger" type="button" onClick={() => {
                   const hasImpact = downstream.length > 0 || associatedProcesses.length > 0;
                   if (hasImpact && !window.confirm(
@@ -349,8 +419,8 @@ function TaskGraphDialog({
                   )) return;
                   void onCancel(selected);
                 }}><Ban size={12} /> 取消任务</button>}
-                {canControl && !active(selected.status) && !isRunning && !selected.completionDelivered && <button className="is-primary" type="button" onClick={() => onAcceptCompletion(selected)}><Sparkles size={12} /> {selected.status === 'completed' ? '用这份结果继续' : '让 Pulsara 处理这个问题'}</button>}
-                {!active(selected.status) && !selected.completionDelivered && <small>启动主助手继续处理，不会重新运行子任务；使用“{permissionLabels[permission]}”权限。</small>}
+                {canControl && !active(selected.status) && !isRunning && !selected.completionAccepted && <button className="is-primary" type="button" onClick={() => onAcceptCompletion(selected)}><Sparkles size={12} /> {selected.status === 'completed' ? '用这份结果继续' : '让 Pulsara 处理这个问题'}</button>}
+                {!active(selected.status) && !selected.completionAccepted && <small>启动主助手继续处理，不会重新运行子任务；使用“{permissionLabels[permission]}”权限。</small>}
               </footer>
             </aside>
           )}

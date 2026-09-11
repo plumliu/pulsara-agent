@@ -251,6 +251,12 @@ class SubagentCancelDisposition(StrEnum):
     TARGET_UNAVAILABLE = "TARGET_UNAVAILABLE"
 
 
+class RootCompletionReadiness(StrEnum):
+    READY = "READY"
+    TARGET_NOT_OPEN = "TARGET_NOT_OPEN"
+    OWNER_UNAVAILABLE = "OWNER_UNAVAILABLE"
+
+
 @dataclass(frozen=True, slots=True)
 class SubagentCancelResult:
     disposition: SubagentCancelDisposition
@@ -326,6 +332,13 @@ class KernelSubagentManager:
         self._state_revision += 1
         self._state_changed.notify_all()
 
+    def _enqueue_root_completion_locked(self, task_id: str) -> bool:
+        if task_id in self._root_completion_set:
+            return False
+        self._root_completion_set.add(task_id)
+        self._root_completion_queue.append(task_id)
+        return True
+
     async def offer_subagent_completion(self, task_id: str) -> bool:
         """Offer one durable terminal task to this HostSession's ROOT inbox."""
 
@@ -334,10 +347,82 @@ class KernelSubagentManager:
         async with self._state_changed:
             if self._closed or task_id in self._root_completion_set:
                 return False
-            self._root_completion_set.add(task_id)
-            self._root_completion_queue.append(task_id)
+            self._enqueue_root_completion_locked(task_id)
             self._notify_state_changed_locked()
             return True
+
+    async def ensure_root_completion_ready(
+        self,
+        *,
+        session_id: str,
+        root_turn_id: str,
+        task_ids: tuple[str, ...],
+    ) -> RootCompletionReadiness:
+        """Hand exact terminal join sources to this ROOT's existing inbox."""
+
+        async with self._state_changed:
+            if self._closed:
+                return RootCompletionReadiness.OWNER_UNAVAILABLE
+            if session_id != self._guard.session_id:
+                return RootCompletionReadiness.OWNER_UNAVAILABLE
+            if (
+                self._root_completion_turn_id != root_turn_id
+                or not self._root_completion_delivery_open
+            ):
+                return RootCompletionReadiness.TARGET_NOT_OPEN
+
+        try:
+            await self._io.run(
+                self._repository.validate_host_writer,
+                self._guard,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            rows = tuple(
+                [
+                    await self._io.run(
+                        self._repository.query_subagent_task,
+                        session_id=session_id,
+                        task_id=task_id,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    for task_id in task_ids
+                ]
+            )
+            await self._io.run(
+                self._repository.validate_host_writer,
+                self._guard,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+        except StaleHostWriter:
+            return RootCompletionReadiness.OWNER_UNAVAILABLE
+        if any(row is None for row in rows):
+            unknown = task_ids[rows.index(None)]
+            raise ConversationKernelConflict(f"unknown subagent task: {unknown}")
+        for task_id, row in zip(task_ids, rows, strict=True):
+            if str(row["id"]) != task_id or not SubagentTaskStatus(
+                str(row["status"])
+            ).terminal:
+                raise ConversationKernelConflict(
+                    f"subagent completion source is not terminal: {task_id}"
+                )
+
+        async with self._state_changed:
+            if self._closed:
+                return RootCompletionReadiness.OWNER_UNAVAILABLE
+            if session_id != self._guard.session_id:
+                return RootCompletionReadiness.OWNER_UNAVAILABLE
+            if (
+                self._root_completion_turn_id != root_turn_id
+                or not self._root_completion_delivery_open
+            ):
+                return RootCompletionReadiness.TARGET_NOT_OPEN
+            changed = False
+            for task_id, row in zip(task_ids, rows, strict=True):
+                if row.get("accepted_root_entry_id") is None:
+                    changed = self._enqueue_root_completion_locked(task_id) or changed
+            if changed:
+                self._notify_state_changed_locked()
+            return RootCompletionReadiness.READY
 
     async def open_root_completion_delivery(self, turn_id: str) -> None:
         """Open the exact ROOT turn's ordinary pending-input phase."""
@@ -2092,7 +2177,7 @@ class KernelSubagentManager:
                     "result_id": item.get("result_id"),
                     "result_source": item.get("result_source"),
                     "result_summary": item.get("result_summary"),
-                    "completion_delivered": (
+                    "completion_accepted": (
                         item.get("accepted_root_entry_id") is not None
                     ),
                     "pending_message_count": mailbox_counts[task_id],
@@ -2142,6 +2227,11 @@ class KernelSubagentManager:
             async with self._lock:
                 observed_revision = self._state_revision
                 completion_pending = bool(self._root_completion_queue)
+                owner_closed = self._closed
+            if owner_closed:
+                return _result(
+                    "APPLICATION_ERROR", {"error": "wait_owner_unavailable"}
+                )
             pending_steer = bool(
                 await self._io.run(
                     self._repository.read_pending_prompt_steer_facts,
@@ -2180,7 +2270,29 @@ class KernelSubagentManager:
             predicate_satisfied = bool(task_ids) and (
                 (settle == "first" and bool(satisfied)) or not pending
             )
+            if pending_steer:
+                return _result(
+                    "SUCCESS",
+                    {
+                        "outcome": "steer_available",
+                        "satisfied_task_ids": list(satisfied),
+                        "pending_task_ids": list(pending),
+                    },
+                )
             if predicate_satisfied:
+                readiness = await self.ensure_root_completion_ready(
+                    session_id=self._guard.session_id,
+                    root_turn_id=invocation_context.turn_id,
+                    task_ids=satisfied,
+                )
+                if readiness is RootCompletionReadiness.TARGET_NOT_OPEN:
+                    return _result(
+                        "APPLICATION_ERROR", {"error": "wait_target_not_open"}
+                    )
+                if readiness is RootCompletionReadiness.OWNER_UNAVAILABLE:
+                    return _result(
+                        "APPLICATION_ERROR", {"error": "wait_owner_unavailable"}
+                    )
                 return _result(
                     "SUCCESS",
                     {
@@ -2189,11 +2301,11 @@ class KernelSubagentManager:
                         "pending_task_ids": list(pending),
                     },
                 )
-            if completion_pending or pending_steer:
+            if not task_ids and completion_pending:
                 return _result(
                     "SUCCESS",
                     {
-                        "outcome": "input_available",
+                        "outcome": "completion_available",
                         "satisfied_task_ids": list(satisfied),
                         "pending_task_ids": list(pending),
                     },
@@ -2236,14 +2348,9 @@ class KernelSubagentManager:
                 try:
                     await asyncio.wait_for(self._state_changed.wait(), remaining)
                 except TimeoutError:
-                    return _result(
-                        "SUCCESS",
-                        {
-                            "outcome": "timeout",
-                            "satisfied_task_ids": list(satisfied),
-                            "pending_task_ids": list(pending),
-                        },
-                    )
+                    # Re-read exact steer, task terminality, and inbox state once
+                    # at the deadline before choosing the timeout outcome.
+                    continue
 
     async def _stop(self, arguments: Mapping[str, object]) -> KernelToolResult:
         task_id = str(arguments.get("task_id") or "")

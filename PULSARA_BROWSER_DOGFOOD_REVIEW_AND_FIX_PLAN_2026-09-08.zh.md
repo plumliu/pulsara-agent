@@ -1,6 +1,6 @@
 # Pulsara 浏览器 dogfood 复盘与后续修复方案
 
-日期：2026-09-08。状态：**实施中；PR02 已 ACTIVATED；PR03 已完成两轮 reviewer kernel 时序修正及 kernel 全量重验，待按修订合同重新完成前端、wheel 与真实 provider/browser activation；其他批次按各自规格推进。**
+日期：2026-09-08。状态：**实施中；PR02 与子任务等待/完成语义修订已 ACTIVATED；PR03 已完成两轮 reviewer kernel 时序修正及 kernel 全量重验，待按修订合同重新完成前端、wheel 与真实 provider/browser activation；其他批次按各自规格推进。**
 
 依据：完整阅读 `PULSARA_REAL_BROWSER_DOGFOOD_BUG_REPORT_2026-09-08.zh.md`，以当前工作树生产代码为主要事实来源。Git 基线为 `7e2ec332`。原报告保留，不把本次静态发现倒填成此前真实浏览器已复现的问题。
 
@@ -16,13 +16,19 @@
 | --- | --- | --- | --- |
 | PR01 | [原文保真 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR01_SOURCE_TEXT_FIDELITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F07；删除原文全局中文化，保留 typed UI 标签 | 实现已提交于 2212804e；验收待补，未 ACTIVATED |
 | PR02 | [工具结果、输入队列与反馈 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR02_TOOL_RESULTS_QUEUE_AND_FEEDBACK_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F01/F02/F03/F05/M03；结果详情、exact live 关联、提交身份与队列、取消反馈、文件工具说明 | ACTIVATED — 2026-09-10 第二轮审查闭环（工作树，未提交） |
-| PR03 | [精确运行控制、后台命令与任务侧栏 Hard Cut 实施规格](PULSARA_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md) | F06/M01；exact STOP、子任务取消、后台查看/终止、控制反馈事件、任务 tab 替换/后台终端新增、原始结果艺术风格 | IMPLEMENTED，REACTIVATION PENDING — 两轮 reviewer 指出的 kernel 正常结束/watchdog/seal、compaction 观察、closing 乱序证据与终态竞态已修，kernel 全量 `1734 passed`；修订后的前端、wheel 与真实 provider/browser 门槛尚待重验（工作树，未提交） |
+| PR03 | [精确运行控制、后台命令与任务侧栏 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR03_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh) | F06/M01；exact STOP、子任务取消、后台查看/终止、控制反馈事件、任务 tab 替换/后台终端新增、原始结果艺术风格 | IMPLEMENTED，REACTIVATION PENDING — 两轮 reviewer 指出的 kernel 正常结束/watchdog/seal、compaction 观察、closing 乱序证据与终态竞态已修，kernel 全量 `1734 passed`；修订后的前端、wheel 与真实 provider/browser 门槛尚待重验（工作树，未提交） |
+| PR04 | [输入队列、即时引导与 Composer Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR04_PROMPT_QUEUE_STEER_COMPOSER_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | 运行中输入统一排队、exact 队列项发送/编辑/删除、同 turn successor round、服务端接纳后的即时“引导”展示 | READY FOR IMPLEMENTATION — 设计已冻结，尚未实施 |
+| Subagent-R1 | [子任务等待与完成语义修订](PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md) | strict first/all、exact 输入中断、turn-bound readiness、`completion_accepted` hard cut、当前/上一/此前 ROOT 提示 | ACTIVATED — 2026-09-11；自动化、真实 OpenRouter、最终 wheel 与浏览器验收完成（工作树，未提交） |
 
 2026-09-11 索引更新：PR01 的实现已提交，但不因此宣称其 activation 完成；其规格仍待补齐验收记录。PR02 已按用户要求把 F01/F02/F03/F05/M03 作为一个 hard cut 完成自动化、隔离 wheel、真实 provider 与浏览器验收；两轮审查指出的大 blob queue 消费/终态竞态、prompt delivery 状态机、late live binding、跨会话异步 owner、迟到 artifact 页、浏览器实际 digest/fatal UTF-8、builtin-only 文件解释、queue 权限/steer target 和 M03 schema 字段说明均已先补红灯再闭环。`edit_file` 的最终产品语义是直接显示真实 unified diff，不提供独立“复制差异”按钮；完整 diff 通过“复制结果原文”取得。PR02 继续在未提交工作树中保持 ACTIVATED。PR03 原 activation 证据位于 `output/playwright/pr03-dogfood/`；reviewer 后续确认正常 ROOT 结束协调、未知提交确认、请求/transport 乱序、Host closing 接纳、子任务取消终态与进程终止 disposition 六处 kernel 时序缺口，现已修订唯一合同并完成实现，旧证据仅作历史，修订后的第 20 节重验完成前不标 ACTIVATED。F04/M02/M04 仍保留原状态。本索引不会因 PR02 激活而宣称其他批次全部完成；下文原始调查与旧行号保留为历史诊断依据，实施以对应 PR 规格和当前代码为准。
 
+2026-09-11 子任务语义更新：`PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md` 已完成 Phase A–D。带 targets 的 `first/all` 不再被任意 inbox activity 提前结束，五种 wait outcome、exact steer/NEW_TURN 矩阵、terminal→现有 inbox 的 turn-bound readiness、工具闭合后 safe-point 接纳与 `completion_accepted` 字段 hard cut 均已实现。主时间线按 exact source/target ROOT 显示本轮、上一轮或此前结果；不新增 provider-included UI、durable delivery、receipt、scheduler、handoff 扩张或 fingerprint。完整回归为 `1743 passed`，最终 OpenRouter、isolated wheel 与真实浏览器证据见 `output/playwright/subagent-wait-refinement/activation-evidence.md`。该 activation 不改变 PR01、PR03 或 F04/M02/M04 的独立状态。
+
+2026-09-12 队列引导 UX 冻结：PR04 规定运行中的 composer 输入先成为 canonical NEW_TURN 队列项，再由用户对 exact 项选择发送为当前轮引导、编辑回 composer 或删除。发送必须由 kernel 单事务把 source 取消并创建 replacement steer，与 ROOT settlement 形成唯一赢家；服务端接纳后 UI 可立即显示“引导”，但不宣称模型已读。未操作项继续由既有 FIFO owner 在 loop 结束后逐条处理。该规格吸收 Codex 同 turn/multi-round 与 PendingSteer 的优点，同时明确不复制其 accepted steer 可能落成 leftover input 的窄竞态。当前状态仅为 READY FOR IMPLEMENTATION，不改变任何 activation 结论。
+
 ### PR03 控制语义与实施范围
 
-2026-09-11：原[用户停止与后台命令产品契约](PULSARA_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md)已在原路径升级为 PR03 唯一实施规格，起始核对基线 `f6f52f5c`。接口、CLI、有限 process-local attempt 的提交期限/退役、后台读取、真实反馈类别/事务/provider 投影、任务完整读取与结果继续入口均已实现。两轮 reviewer kernel 时序复核后的修订也已落地：第二轮补齐 watchdog 全分支截止、ROOT completion seal/settle、预装 compaction successor 纳入观察和 closing 早到证据合并；kernel 全量 `1734 passed, 19 warnings`。新增验收尚未完成真实 provider/browser 与 isolated wheel 重验，因此 F06/M01 当前为 IMPLEMENTED、REACTIVATION PENDING；旧证据见 `output/playwright/pr03-dogfood/activation-evidence.md`。
+2026-09-11：原[用户停止与后台命令产品契约](PULSARA_BROWSER_DOGFOOD_PR03_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh)已在原路径升级为 PR03 唯一实施规格，起始核对基线 `f6f52f5c`。接口、CLI、有限 process-local attempt 的提交期限/退役、后台读取、真实反馈类别/事务/provider 投影、任务完整读取与结果继续入口均已实现。两轮 reviewer kernel 时序复核后的修订也已落地：第二轮补齐 watchdog 全分支截止、ROOT completion seal/settle、预装 compaction successor 纳入观察和 closing 早到证据合并；kernel 全量 `1734 passed, 19 warnings`。新增验收尚未完成真实 provider/browser 与 isolated wheel 重验，因此 F06/M01 当前为 IMPLEMENTED、REACTIVATION PENDING；旧证据见 `output/playwright/pr03-dogfood/activation-evidence.md`。
 
 Demo 只允许参考侧栏“任务”（完整替换，含组图/节点详情）、“后台终端”（新增 tab）和 create_agent_tasks 原始结果区的艺术风格；能力、root 主对话/创建摘要跳转、输入框、左栏及其他 Demo 区域一律不参考。生产能力和主对话结构保留。
 

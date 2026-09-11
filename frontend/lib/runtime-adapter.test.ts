@@ -353,7 +353,10 @@ describe('selectPromptCommand', () => {
             source_subagent_task_id: 'task-1',
             content: content('{"status":"accepted"}'),
           }],
-          control: {},
+          control: { subagent_tasks: [{
+            task_id: 'task-1', parent_turn_id: 'turn-1', label: 'reader',
+            objective: '读取文件', status: 'COMPLETED', completion_accepted: true,
+          }] },
         },
       },
       live_control_snapshot: { snapshot: {} },
@@ -370,6 +373,10 @@ describe('selectPromptCommand', () => {
       { body: '', userKind: 'subagent-completion' },
     ]);
     expect(connection.current().messages[2]?.sourceSubagentTaskId).toBe('task-1');
+    expect(connection.current().messages[2]).toMatchObject({
+      sourceSubagentLabel: 'reader',
+      sourceSubagentRelation: 'previous',
+    });
   });
 
   it('loads every older history page before exposing a resumed connection', async () => {
@@ -1052,7 +1059,7 @@ describe('selectPromptCommand', () => {
       }],
     });
     const entries = [
-      toolRequest(1, 'root-create', 'spawn_agent', 'call-create'),
+      toolRequest(1, 'root-create', 'create_agent_tasks', 'call-create'),
       {
         entry_id: 'task-objective', turn_id: 'turn-task-1', entry_sequence: '2',
         entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
@@ -1067,7 +1074,10 @@ describe('selectPromptCommand', () => {
         entry_id: 'create-result', turn_id: 'turn-root', entry_sequence: '4',
         tool_result: { assistant_entry_id: 'root-create', tool_call_id: 'call-create', result_state: 'SUCCESS' },
         entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-        content: content(JSON.stringify({ tasks: [{ task_id: 'task-1', status: 'active' }] })),
+        content: content(JSON.stringify({ tasks: [
+          { task_id: 'task-1', status: 'active' },
+          { task_id: 'task-2', status: 'pending_start' },
+        ] })),
       },
       toolRequest(5, 'task-read', 'read_file', 'call-read', 'SUBAGENT_TASK', 'task-1'),
       {
@@ -1171,7 +1181,7 @@ describe('selectPromptCommand', () => {
 
     expect(create?.assistantKind).toBe('tool-request');
     expect(create?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
-    expect(create?.traces?.[0].toolName).toBe('spawn_agent');
+    expect(create?.traces?.[0].toolName).toBe('create_agent_tasks');
     expect(wait?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
     expect(denied?.traces?.[0]).toMatchObject({ status: 'failed', subtitle: '已拒绝' });
     expect(userDenied?.traces?.[0]).toMatchObject({
@@ -1203,6 +1213,66 @@ describe('selectPromptCommand', () => {
     });
     expect(projected.isRunning).toBe(false);
     expect(JSON.stringify(create?.subagentRuns)).not.toContain('stale live text');
+  });
+
+  it('attaches child execution to the successful creator instead of an earlier failed call', async () => {
+    const entries = [{
+      entry_id: 'create-invalid', turn_id: 'turn-root', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'invalid-block', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-invalid', tool_name: 'create_agent_tasks',
+        tool_arguments_preview: btoa('{}'),
+      }],
+    }, {
+      entry_id: 'result-invalid', turn_id: 'turn-root', entry_sequence: '2',
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+      tool_result: {
+        assistant_entry_id: 'create-invalid', tool_call_id: 'call-invalid',
+        result_state: 'INVALID_ARGUMENTS',
+      },
+      content: inlineContent(JSON.stringify({ error: 'dependency reference is unknown' })),
+    }, {
+      entry_id: 'create-success', turn_id: 'turn-root', entry_sequence: '3',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'success-block', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-success', tool_name: 'create_agent_tasks',
+        tool_arguments_preview: btoa('{}'),
+      }],
+    }, {
+      entry_id: 'result-success', turn_id: 'turn-root', entry_sequence: '4',
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+      tool_result: {
+        assistant_entry_id: 'create-success', tool_call_id: 'call-success',
+        result_state: 'SUCCESS',
+      },
+      content: inlineContent(JSON.stringify({
+        batch_id: 'batch-success',
+        tasks: [{ task_id: 'task-success', status: 'active' }],
+      })),
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(
+      entries,
+      { subagent_tasks: [{
+        task_id: 'task-success', parent_turn_id: 'turn-root', batch_id: 'batch-success',
+        status: 'COMPLETED', label: 'reader', display_role: '通用协作',
+        objective: 'Read the target file.', result_summary: 'done',
+      }] },
+    )), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    const invalid = projection.messages.find((message) => message.id === 'create-invalid');
+    const success = projection.messages.find((message) => message.id === 'create-success');
+
+    expect(invalid?.traces?.[0]).toMatchObject({
+      resultState: 'INVALID_ARGUMENTS', status: 'failed',
+    });
+    expect(invalid?.subagentRuns).toBeUndefined();
+    expect(success?.traces?.[0]).toMatchObject({ resultState: 'SUCCESS', status: 'completed' });
+    expect(success?.subagentRuns).toEqual([
+      expect.objectContaining({ id: 'task-success', label: 'reader', status: 'completed' }),
+    ]);
   });
 
   it('keeps exact MCP meta-tool arguments and results for structured UI projection', async () => {
@@ -1644,7 +1714,7 @@ describe('session task inventory', () => {
         task_key: 'verify', label: '验证结果', profile: 'verification_worker',
         display_role: '验证', context: { mode: 'LAST_N', last_n_turns: 4 },
         objective: '确认结果可以使用。', status: 'BLOCKED_DEPENDENCY_FAILED',
-        terminal_public_detail: '前置任务未能完成。', completion_delivered: true,
+        terminal_public_detail: '前置任务未能完成。', completion_accepted: true,
         accepted_at: '2026-08-30T12:00:00Z', terminal_at: '2026-08-30T12:01:00Z',
         dependencies: [{
           task_id: 'task-failed', task_key: 'build', label: '生成结果',
@@ -1667,7 +1737,7 @@ describe('session task inventory', () => {
     expect(page).toMatchObject({ totalCount: 51, remainingCount: 50, nextCursor: 'page-2' });
     expect(page.tasks[0]).toMatchObject({
       id: 'task-blocked', status: 'blocked', role: '验证',
-      terminalPublicDetail: '前置任务未能完成。', completionDelivered: true,
+      terminalPublicDetail: '前置任务未能完成。', completionAccepted: true,
       context: { mode: 'last-n', lastNTurns: 4 },
       dependencyIds: ['task-failed'],
       dependencies: [{ id: 'task-failed', status: 'failed', label: '生成结果' }],
@@ -1682,7 +1752,7 @@ describe('session task inventory', () => {
     const durable: AgentTask[] = [{
       id: 'task-1', label: '持久任务', role: '研究', objective: '完成检查',
       status: 'interrupted', dependencyIds: [], color: 'blue',
-      completionDelivered: false,
+      completionAccepted: false,
       summary: '中断前的最后结果',
     }];
     const projection: RuntimeProjection = {
@@ -1701,6 +1771,40 @@ describe('session task inventory', () => {
       status: 'interrupted', progress: undefined, summary: '中断前的最后结果',
     });
     expect(merged.messages).toEqual([]);
+  });
+
+  it('classifies completion sources by exact canonical ROOT order', () => {
+    const baseTask = {
+      role: '研究', objective: '检查结果', status: 'completed' as const,
+      completionAccepted: true, dependencyIds: [], color: 'blue' as const,
+    };
+    const projection: RuntimeProjection = {
+      messages: [
+        { id: 'root-1', turnId: 'turn-1', entrySequence: 1, role: 'user', time: '1', body: '一' },
+        { id: 'root-2', turnId: 'turn-2', entrySequence: 2, role: 'user', time: '2', body: '二' },
+        { id: 'root-3', turnId: 'turn-3', entrySequence: 3, role: 'user', time: '3', body: '三' },
+        { id: 'accepted-old', turnId: 'turn-3', entrySequence: 4, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-old' },
+        { id: 'accepted-previous', turnId: 'turn-3', entrySequence: 5, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-previous' },
+        { id: 'accepted-current', turnId: 'turn-3', entrySequence: 6, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-current' },
+      ],
+      isRunning: false, queuedCount: 0, queuedPrompts: [], promptTransitions: [], planMode: false,
+      control: {}, liveControl: {}, agentTasks: [], eventSequence: 6,
+      liveOwnerEpoch: 1, liveRevision: 1, liveControlOwnerEpoch: 1, liveControlRevision: 1,
+    };
+    const merged = mergeRuntimeTaskInventory(projection, [
+      { ...baseTask, id: 'task-old', label: '旧任务', parentId: 'turn-1' },
+      { ...baseTask, id: 'task-previous', label: '上一任务', parentId: 'turn-2' },
+      { ...baseTask, id: 'task-current', label: '当前任务', parentId: 'turn-3' },
+    ]);
+
+    expect(merged.messages.slice(-3).map((message) => ({
+      label: message.sourceSubagentLabel,
+      relation: message.sourceSubagentRelation,
+    }))).toEqual([
+      { label: '旧任务', relation: 'earlier' },
+      { label: '上一任务', relation: 'previous' },
+      { label: '当前任务', relation: 'current' },
+    ]);
   });
 });
 
@@ -2025,7 +2129,7 @@ describe('source text fidelity hard cut', () => {
       id: 'task-1', parent_turn_id: 'turn-root', batch_id: 'batch-1', task_key: 'source-task',
       label: SOURCE_FIDELITY_TEXT, profile: 'research_worker', display_role: SOURCE_FIDELITY_TEXT,
       context: { mode: 'LAST_N', last_n_turns: 3 }, objective: SOURCE_FIDELITY_TEXT,
-      status: 'ACTIVE', terminal_public_detail: SOURCE_FIDELITY_TEXT, completion_delivered: false,
+      status: 'ACTIVE', terminal_public_detail: SOURCE_FIDELITY_TEXT, completion_accepted: false,
       dependencies: [{
         task_id: 'task-dependency', task_key: 'dependency', label: SOURCE_FIDELITY_TEXT,
         status: 'COMPLETED', result_summary: SOURCE_FIDELITY_TEXT,

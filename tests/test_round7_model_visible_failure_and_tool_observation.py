@@ -1109,6 +1109,7 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
             invocation_context=context,
         )
         assert json.loads(stopped.content)["status"] == "completed"
+        await manager.open_root_completion_delivery(parent_turn_id)
         waited = await manager.invoke(
             tool_name="wait_agent",
             arguments={

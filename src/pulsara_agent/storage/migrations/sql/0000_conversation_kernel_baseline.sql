@@ -785,7 +785,7 @@ CREATE TABLE pulsara_v3.tool_results (
             AND attempt_id IS NULL AND control_plan_workflow_id IS NULL
             AND control_plan_interaction_id IS NULL
             AND (
-                (result_origin_kind = 'PHYSICAL_ATTEMPT' AND result_state IN ('SUCCESS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED'))
+                (result_origin_kind = 'PHYSICAL_ATTEMPT' AND result_state IN ('SUCCESS', 'INVALID_ARGUMENTS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED'))
                 OR (result_origin_kind = 'POLICY_NO_ATTEMPT' AND result_state IN ('INVALID_ARGUMENTS', 'PERMISSION_DENIED', 'TOOL_UNAVAILABLE', 'CANCELLED_BEFORE_DISPATCH'))
                 OR (result_origin_kind = 'PLAN_CONTROL' AND result_state IN ('SUCCESS', 'APPLICATION_ERROR'))
             )) OR
@@ -802,7 +802,7 @@ CREATE TABLE pulsara_v3.tool_results (
             AND control_plan_workflow_id IS NULL
             AND control_plan_interaction_id IS NULL
             AND result_state IN (
-            'SUCCESS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED'
+            'SUCCESS', 'INVALID_ARGUMENTS', 'APPLICATION_ERROR', 'SYSTEM_ERROR', 'CANCELLED'
         )) OR
         (result_origin_kind = 'PLAN_CONTROL'
             AND attempt_id IS NULL

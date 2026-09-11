@@ -1,9 +1,9 @@
 """Run the Round 10 real-provider orchestration activation dogfood.
 
-The probe owns an ephemeral clean-v0 PostgreSQL database.  Raw prompts and
-model-visible public result text may be printed while diagnosing this local
-probe, but credentials are never read into the report.  The machine activation
-evidence is produced separately and contains only closed states/counts/hashes.
+The probe reads one exact saved model connection, owns an ephemeral clean-v0
+PostgreSQL database, and keeps the saved settings read-only. Raw prompts and
+model-visible public result text may be retained for diagnosis; configured
+credential values are scrubbed from the report.
 """
 
 from __future__ import annotations
@@ -21,9 +21,6 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 from uuid import uuid4
 
-import psycopg
-from psycopg import sql
-from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import yaml
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -31,7 +28,10 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
+from pulsara_agent.conversation_kernel.repository import (
+    AssistantTextBlock,
+    build_prepared_root_turn_intent,
+)
 from pulsara_agent.conversation_kernel.subagents import SubagentTaskStatus
 from pulsara_agent.mcp_config import load_mcp_server_configs
 from pulsara_agent.model_input.continuity import (
@@ -39,74 +39,36 @@ from pulsara_agent.model_input.continuity import (
     decode_runtime_observation,
 )
 from pulsara_agent.model_input.contracts import ContextSourceKind, ModelInputScopeKind
+from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
+from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.settings import PulsaraSettings, StorageConfig, load_env_file
-from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
+from pulsara_agent.settings import LocalPostgresConfig, LocalSettings, LocalSettingsStore
 from pulsara_agent.workspace_identity import HostWorkspaceInput
+
+from run_content_revision_line_edit_dogfood import _scrub
+from run_model_switch_handover_dogfood import (
+    _ReadOnlySettingsStore,
+    _binding,
+    _create_database,
+    _drop_database,
+)
 
 
 _MCP_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "round9_mcp_server.py"
 
 
-def _dsn_with_database(dsn: str, database_name: str) -> str:
-    values = conninfo_to_dict(dsn)
-    values["dbname"] = database_name
-    return make_conninfo(**values)
-
-
-def _require_loopback_pulsara(dsn: str, *, label: str) -> None:
-    values = conninfo_to_dict(dsn)
-    host = str(values.get("host", "")).strip().lower()
-    database = str(values.get("dbname", "")).strip()
-    if host not in {"localhost", "127.0.0.1", "::1"} or database != "pulsara":
-        raise RuntimeError(f"{label} must target exact loopback database pulsara")
-
-
-def _drop_database(admin_root_dsn: str, database_name: str) -> None:
-    with psycopg.connect(admin_root_dsn, autocommit=True) as connection:
-        connection.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
-                sql.Identifier(database_name)
-            )
-        )
-
-
-def _create_database(settings: PulsaraSettings) -> tuple[str, str, str]:
-    admin_root_dsn = os.getenv("PULSARA_POSTGRES_ADMIN_DSN", "").strip()
-    if not admin_root_dsn:
-        raise RuntimeError("PULSARA_POSTGRES_ADMIN_DSN is required")
-    _require_loopback_pulsara(admin_root_dsn, label="admin DSN")
-    _require_loopback_pulsara(settings.storage.postgres_dsn, label="runtime DSN")
-    database_name = f"pulsara_round10_{os.getpid()}_{uuid4().hex[:10]}"
-    admin_dsn = _dsn_with_database(admin_root_dsn, database_name)
-    runtime_dsn = _dsn_with_database(settings.storage.postgres_dsn, database_name)
-    with psycopg.connect(admin_root_dsn, autocommit=True) as connection:
-        connection.execute(
-            sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database_name))
-        )
-    try:
-        runner = PostgresMigrationRunner(
-            admin_dsn=admin_dsn,
-            runtime_dsn=runtime_dsn,
-        )
-        first = runner.migrate(deadline_monotonic=monotonic() + 240)
-        second = runner.migrate(deadline_monotonic=monotonic() + 240)
-        if first.applied_versions != (0,) or second.applied_versions != ():
-            raise RuntimeError("ephemeral clean-v0 migration was not repeatable")
-    except BaseException:
-        _drop_database(admin_root_dsn, database_name)
-        raise
-    return admin_root_dsn, database_name, runtime_dsn
-
-
-def _runtime_settings(env_file: str, runtime_dsn: str) -> PulsaraSettings:
-    load_env_file(env_file, override=False)
-    os.environ["PULSARA_MEMORY_AUTO_DENSE"] = "false"
-    os.environ["PULSARA_MEMORY_EXPLICIT_RERANK"] = "false"
-    return replace(
-        PulsaraSettings.from_env(),
-        storage=StorageConfig(postgres_dsn=runtime_dsn),
+def _saved_connection(settings: LocalSettings, connection_id: str):
+    matches = tuple(
+        connection
+        for connection in settings.model_connections
+        if connection.id.value == connection_id
     )
+    if len(matches) != 1:
+        raise RuntimeError(f"saved connection {connection_id!r} is unavailable")
+    connection = matches[0]
+    if settings.model_api_key(connection.id) is None:
+        raise RuntimeError(f"saved connection {connection_id!r} has no API key")
+    return connection
 
 
 async def _task_rows(session) -> tuple[dict[str, object], ...]:
@@ -231,6 +193,31 @@ async def _wait_for_capacity_frontier(
         await asyncio.sleep(0.01)
 
 
+async def _wait_for_root_tool(
+    session,
+    *,
+    turn_id: str,
+    tool_name: str,
+    timeout_seconds: float,
+    require_result: bool = False,
+) -> dict[str, object]:
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        rows = await session._io.run(  # noqa: SLF001
+            _read_root_tool_rows,
+            session.repository.connection_provider,
+            session_id=session.session_id,
+            turn_id=turn_id,
+            tool_name=tool_name,
+            deadline_monotonic=monotonic() + 30,
+        )
+        if rows and (not require_result or rows[-1].get("result_state") is not None):
+            return rows[-1]
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError(f"ROOT tool {tool_name!r} was not accepted")
+        await asyncio.sleep(0.05)
+
+
 async def _active_root_turn_id(session, *, timeout_seconds: float) -> str:
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while True:
@@ -262,8 +249,8 @@ def _seed_completed_history(session, *, segments: int = 5) -> None:
     for index in range(segments):
         suffix = uuid4().hex
         turn_id = f"turn:round10-seed:{suffix}"
-        repository.start_root_turn(
-            guard,
+        intent = build_prepared_root_turn_intent(
+            session_id=session.session_id,
             command_id=f"command:round10-seed:{suffix}",
             turn_id=turn_id,
             entry_id=f"entry:round10-seed-user:{suffix}",
@@ -275,6 +262,13 @@ def _seed_completed_history(session, *, segments: int = 5) -> None:
             ),
             occurred_at=datetime.now(timezone.utc),
             actor_id="round10-dogfood",
+        )
+        repository.accept_root_turn_intent(
+            guard,
+            intent=intent,
+            model_resolution_snapshot=(
+                session._model_runtime.freeze_resolution_snapshot()  # noqa: SLF001
+            ),
             deadline_monotonic=monotonic() + 60,
         )
         cut = repository.prepare_provider_input_cut(
@@ -448,8 +442,55 @@ def _read_child_tool_rows(
         )
 
 
+def _read_root_tool_rows(
+    provider,
+    *,
+    session_id: str,
+    turn_id: str,
+    tool_name: str,
+    deadline_monotonic: float,
+) -> tuple[dict[str, object], ...]:
+    from psycopg.rows import dict_row
+
+    from pulsara_agent.storage.postgres_connection_provider import (
+        PostgresConnectionLane,
+    )
+
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline_monotonic,
+    ) as connection:
+        return tuple(
+            dict(row)
+            for row in connection.execute(
+                """SELECT b.tool_call_id, b.tool_arguments,
+                          r.result_state,
+                          result_entry.inline_content AS result_content
+                   FROM pulsara_v3.assistant_message_blocks AS b
+                   JOIN pulsara_v3.transcript_entries AS e
+                     ON e.session_id = b.session_id
+                    AND e.id = b.assistant_entry_id
+                   LEFT JOIN pulsara_v3.tool_execution_attempts AS a
+                     ON a.session_id = b.session_id
+                    AND a.assistant_entry_id = b.assistant_entry_id
+                    AND a.tool_call_id = b.tool_call_id
+                   LEFT JOIN pulsara_v3.tool_results AS r
+                     ON r.session_id = a.session_id AND r.attempt_id = a.id
+                   LEFT JOIN pulsara_v3.transcript_entries AS result_entry
+                     ON result_entry.session_id = r.session_id
+                    AND result_entry.id = r.result_entry_id
+                   WHERE b.session_id = %s
+                     AND e.turn_id = %s
+                     AND b.tool_name = %s
+                   ORDER BY e.entry_sequence, b.block_ordinal""",
+                (session_id, turn_id, tool_name),
+            ).fetchall()
+        )
+
+
 async def _run_graph(session) -> dict[str, object]:
-    prompt = """Use create_agent_tasks exactly once to create this six-task graph. After dispatching it, continue useful independent work by reading pyproject.toml and identifying the project version. Do not call list_agents or poll task status. Use wait_agent only if the current response is genuinely blocked on delegated work. A wait may return input_available to deliver a partial completion while other tasks continue in the background; if that happens, synthesize the delivered completion and accurately report any remaining work. It is valid for those background tasks to outlive this foreground response.
+    prompt = """Use create_agent_tasks exactly once to create this six-task graph. After dispatching it, continue useful independent work by reading pyproject.toml and identifying the project version. Do not call list_agents or poll task status. Use wait_agent only if the current response is genuinely blocked on delegated work. A targeted settle=all wait remains suspended through partial and unrelated completions, and returns only when every exact target is terminal, an exact-turn steer arrives, or the timeout expires. It is valid for background tasks to outlive this foreground response.
 
 Chain:
 - key a, default context (omit context): call report_agent_result alone with summary A_EXPLICIT_OK.
@@ -619,6 +660,247 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
         "worker_result_source": final.get("result_source"),
         "worker_result_summary": summary,
         "inter_agent_entry_count": message_entries,
+    }
+
+
+async def _run_wait_input_matrix(session, workspace: Path) -> dict[str, object]:
+    release_path = workspace / ".round10-wait-input-release"
+    release_path.unlink(missing_ok=True)
+    hold_command = (
+        f"while [ ! -f {shlex.quote(os.fspath(release_path))} ]; "
+        "do sleep 0.1; done; echo WAIT_INPUT_CHILD_DONE"
+    )
+    prompt = f"""Create exactly one general_worker task with task_key wait_input_child. Its objective must call terminal once with command {hold_command!r}; after the command completes it must call report_agent_result alone with summary WAIT_INPUT_CHILD_DONE. After create_agent_tasks succeeds, call wait_agent exactly once for its exact task ID with settle=all and timeout_seconds=120. If that wait is interrupted by an exact steer, acknowledge the exact steer marker and finish this ROOT without calling wait again. Do not return before create_agent_tasks and wait_agent have both been called."""
+    root_run = asyncio.create_task(
+        session.run_turn(
+            prompt,
+            command_id="command:round10:wait-input-root",
+            requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        )
+    )
+    turn_id = await _active_root_turn_id(session, timeout_seconds=10)
+    task = await _wait_for_task_key(
+        session, task_key="wait_input_child", timeout_seconds=60
+    )
+    wait_row = await _wait_for_root_tool(
+        session,
+        turn_id=turn_id,
+        tool_name="wait_agent",
+        timeout_seconds=60,
+    )
+    queued = await session.submit_prompt(
+        command_id="command:round10:wait-input-next-turn",
+        text="NEXT_TURN_WAIT_SENTINEL: reply only NEXT_TURN_WAIT_PROCESSED.",
+        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+    )
+    await asyncio.sleep(0.75)
+    queued_left_wait_suspended = not root_run.done()
+    steer = await session.steer_active_turn(
+        command_id="command:round10:wait-input-steer",
+        text=(
+            "EXACT_WAIT_STEER_SENTINEL: acknowledge this exact marker, do not call "
+            "wait_agent again, and finish the current ROOT."
+        ),
+        target_turn_id=turn_id,
+    )
+    try:
+        root_result = await asyncio.wait_for(root_run, timeout=120)
+    finally:
+        release_path.touch()
+    final_task = await _wait_for_task_status(
+        session,
+        task_id=str(task["id"]),
+        expected=frozenset({"COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"}),
+        timeout_seconds=120,
+    )
+    settled_wait = await _wait_for_root_tool(
+        session,
+        turn_id=turn_id,
+        tool_name="wait_agent",
+        timeout_seconds=10,
+        require_result=True,
+    )
+    raw_result = settled_wait.get("result_content")
+    if isinstance(raw_result, memoryview):
+        raw_result = raw_result.tobytes()
+    if isinstance(raw_result, bytes):
+        wait_result_text = raw_result.decode("utf-8")
+    else:
+        wait_result_text = "" if raw_result is None else str(raw_result)
+    next_turn = await session.query_command("command:round10:wait-input-next-turn")
+    passed = (
+        queued.status == "PENDING"
+        and queued.prompt_delivery is not None
+        and queued.prompt_delivery.delivery_mode == "NEW_TURN"
+        and queued_left_wait_suspended
+        and steer.status == "PENDING"
+        and steer.prompt_delivery is not None
+        and steer.prompt_delivery.delivery_mode == "STEER_ACTIVE_TURN"
+        and '"outcome":"steer_available"' in wait_result_text.replace(" ", "")
+        and "EXACT_WAIT_STEER_SENTINEL" in root_result.final_text
+        and str(final_task["status"]) == "COMPLETED"
+        and next_turn is not None
+    )
+    return {
+        "passed": passed,
+        "root_turn_id": turn_id,
+        "task_id": str(task["id"]),
+        "wait_tool_call_id": wait_row["tool_call_id"],
+        "wait_result": wait_result_text,
+        "queued_command": {
+            "status": queued.status,
+            "delivery_mode": queued.prompt_delivery.delivery_mode
+            if queued.prompt_delivery is not None
+            else None,
+            "left_wait_suspended": queued_left_wait_suspended,
+        },
+        "steer_command": {
+            "status": steer.status,
+            "delivery_mode": steer.prompt_delivery.delivery_mode
+            if steer.prompt_delivery is not None
+            else None,
+        },
+        "root_model_calls": root_result.model_call_count,
+        "root_tool_calls": root_result.tool_call_count,
+        "root_final_text": root_result.final_text,
+        "child_status": final_task["status"],
+        "next_turn_command_status": next_turn.status if next_turn is not None else None,
+        "next_turn_queue_status": (
+            next_turn.prompt_delivery.queue_status
+            if next_turn is not None and next_turn.prompt_delivery is not None
+            else None
+        ),
+    }
+
+
+async def _run_untargeted_completion_wait(
+    session, workspace: Path
+) -> dict[str, object]:
+    waker_release = workspace / ".round10-untargeted-waker-release"
+    blockers_release = workspace / ".round10-untargeted-blockers-release"
+    waker_release.unlink(missing_ok=True)
+    blockers_release.unlink(missing_ok=True)
+    waker_command = (
+        f"while [ ! -f {shlex.quote(os.fspath(waker_release))} ]; "
+        "do sleep 0.1; done; echo UNTARGETED_WAKER_DONE"
+    )
+    blocker_command = (
+        f"while [ ! -f {shlex.quote(os.fspath(blockers_release))} ]; "
+        "do sleep 0.1; done; echo UNTARGETED_BLOCKER_DONE"
+    )
+    spawn_result = await session.run_turn(
+        f"""Use create_agent_tasks exactly once to create five independent general_worker tasks in this exact order. Task untargeted_waker must call terminal once with command {waker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_WAKER_DONE. Tasks untargeted_blocker1, untargeted_blocker2, untargeted_blocker3, and untargeted_blocker4 must each call terminal once with command {blocker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_BLOCKER_DONE. Return immediately after creation. Do not call wait_agent or list_agents.""",
+        command_id="command:round10:untargeted-spawn",
+        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+    )
+    waker = await _wait_for_task_key(
+        session, task_key="untargeted_waker", timeout_seconds=60
+    )
+    blockers = tuple(
+        [
+            await _wait_for_task_key(
+                session,
+                task_key=f"untargeted_blocker{index}",
+                timeout_seconds=60,
+            )
+            for index in range(1, 5)
+        ]
+    )
+    await _wait_for_task_status(
+        session,
+        task_id=str(waker["id"]),
+        expected=frozenset({"ACTIVE"}),
+        timeout_seconds=30,
+    )
+    await _wait_for_task_status(
+        session,
+        task_id=str(blockers[0]["id"]),
+        expected=frozenset({"ACTIVE"}),
+        timeout_seconds=30,
+    )
+    wait_run = asyncio.create_task(
+        session.run_turn(
+            "Call wait_agent exactly once with no task_ids and timeout_seconds=120. "
+            "After it returns, use only the completion message delivered after the "
+            "tool closes and quote the exact child summary. Do not call list_agents.",
+            command_id="command:round10:untargeted-wait",
+            requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        )
+    )
+    wait_turn_id = await _active_root_turn_id(session, timeout_seconds=10)
+    await _wait_for_root_tool(
+        session,
+        turn_id=wait_turn_id,
+        tool_name="wait_agent",
+        timeout_seconds=60,
+    )
+    # The canonical tool block precedes physical dispatch. Let the real tool
+    # future enter its condition wait before completing the child, so this
+    # probes completion wake-up rather than the accepted-block/dispatch gap.
+    await asyncio.sleep(0.75)
+    waker_release.touch()
+    try:
+        wait_result = await asyncio.wait_for(wait_run, timeout=120)
+    finally:
+        blockers_release.touch()
+    settled_wait = await _wait_for_root_tool(
+        session,
+        turn_id=wait_turn_id,
+        tool_name="wait_agent",
+        timeout_seconds=10,
+        require_result=True,
+    )
+    raw_result = settled_wait.get("result_content")
+    if isinstance(raw_result, memoryview):
+        raw_result = raw_result.tobytes()
+    if isinstance(raw_result, bytes):
+        wait_result_text = raw_result.decode("utf-8")
+    else:
+        wait_result_text = "" if raw_result is None else str(raw_result)
+    final_waker = await _wait_for_task_status(
+        session,
+        task_id=str(waker["id"]),
+        expected=frozenset({"COMPLETED", "FAILED", "INTERRUPTED", "CANCELLED"}),
+        timeout_seconds=30,
+    )
+    await _wait_for_tasks_to_settle(
+        session,
+        task_ids=tuple(str(item["id"]) for item in blockers),
+        timeout_seconds=120,
+    )
+    final_blockers = tuple(
+        row
+        for row in await _task_rows(session)
+        if row.get("task_key")
+        in {
+            "untargeted_blocker1",
+            "untargeted_blocker2",
+            "untargeted_blocker3",
+            "untargeted_blocker4",
+        }
+    )
+    passed = (
+        '"outcome":"completion_available"'
+        in wait_result_text.replace(" ", "")
+        and "UNTARGETED_WAKER_DONE" in wait_result.final_text
+        and str(final_waker["status"]) == "COMPLETED"
+        and len(final_blockers) == 4
+        and all(str(item["status"]) == "COMPLETED" for item in final_blockers)
+    )
+    return {
+        "passed": passed,
+        "spawn_model_calls": spawn_result.model_call_count,
+        "spawn_tool_calls": spawn_result.tool_call_count,
+        "spawn_final_text": spawn_result.final_text,
+        "wait_turn_id": wait_turn_id,
+        "wait_tool_call_id": settled_wait["tool_call_id"],
+        "wait_result": wait_result_text,
+        "wait_model_calls": wait_result.model_call_count,
+        "wait_tool_calls": wait_result.tool_call_count,
+        "wait_final_text": wait_result.final_text,
+        "waker_task_id": str(waker["id"]),
+        "waker_status": final_waker["status"],
+        "blocker_tasks": tuple(_public_task_row(item) for item in final_blockers),
     }
 
 
@@ -812,9 +1094,20 @@ def _count_inter_agent_entries(
 
 
 async def _run(
-    settings: PulsaraSettings, workspace: Path, *, scenario: str
+    settings: LocalSettings,
+    workspace: Path,
+    *,
+    scenario: str,
+    connection_id: str,
 ) -> dict[str, object]:
-    core = KernelHostCore.production(settings=settings)
+    connection = _saved_connection(settings, connection_id)
+    catalog = ModelCatalogOwner(ModelsDevCatalogClient())
+    await catalog.refresh()
+    delegate = ModelRuntime.production(
+        settings=_ReadOnlySettingsStore(settings),
+        catalog=catalog,
+    )
+    core = KernelHostCore.production(model_runtime=delegate)
     try:
         session = await core.open_session(
             HostWorkspaceInput(
@@ -829,12 +1122,21 @@ async def _run(
                 "results. Keep the final prose concise."
             ),
         )
+        await session.update_model_call_binding(_binding(delegate, connection))
         results: dict[str, dict[str, object]] = {}
         if scenario in {"all", "graph"}:
             results["graph"] = await _run_graph(session)
         if scenario in {"all", "context"}:
             results["last_n_and_message"] = await _run_last_n_and_message(
                 session, workspace
+            )
+        if scenario in {"all", "wait-input"}:
+            results["wait_input_matrix"] = await _run_wait_input_matrix(
+                session, workspace
+            )
+        if scenario in {"all", "untargeted"}:
+            results["untargeted_completion_wait"] = (
+                await _run_untargeted_completion_wait(session, workspace)
             )
         if scenario in {"all", "capacity"}:
             results["capacity_mcp_compaction"] = await _run_capacity_mcp_compaction(
@@ -843,8 +1145,9 @@ async def _run(
         report: dict[str, object] = {
             "schema_version": "round10-subagent-dogfood.v1",
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
-            "provider_api": settings.llm.api,
-            "provider_model": settings.llm.pro.model_id,
+            "connection_id": connection.id.value,
+            "provider_api": connection.target.wire_api.value,
+            "provider_model": connection.target.model_id,
             "scenario": scenario,
             **results,
             "status": "passed"
@@ -858,23 +1161,38 @@ async def _run(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--connection-id", required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--scenario",
-        choices=("all", "graph", "context", "capacity"),
+        choices=(
+            "all",
+            "graph",
+            "context",
+            "wait-input",
+            "untargeted",
+            "capacity",
+        ),
         default="all",
     )
     args = parser.parse_args()
-    load_env_file(args.env_file, override=False)
-    initial = PulsaraSettings.from_env()
-    admin_root_dsn, database_name, runtime_dsn = _create_database(initial)
+    saved = LocalSettingsStore().read()
+    secrets = tuple(item.value for item in saved.model_api_keys)
+    database_name, _admin_root, ephemeral_admin, ephemeral_runtime = _create_database(
+        saved
+    )
     try:
         with TemporaryDirectory(prefix="pulsara-round10-") as directory:
+            runtime_settings = replace(
+                saved,
+                postgres=LocalPostgresConfig(ephemeral_runtime, ephemeral_admin),
+            )
             report = asyncio.run(
                 _run(
-                    _runtime_settings(args.env_file, runtime_dsn),
+                    runtime_settings,
                     Path(directory),
                     scenario=args.scenario,
+                    connection_id=args.connection_id,
                 )
             )
     except BaseException as exc:
@@ -887,8 +1205,16 @@ def main() -> int:
             "failure_traceback": traceback.format_exc(limit=16),
         }
     finally:
-        _drop_database(admin_root_dsn, database_name)
-    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+        _drop_database(saved, database_name)
+    scrubbed = _scrub(report, secrets)
+    encoded = json.dumps(scrubbed, ensure_ascii=False, indent=2, sort_keys=True)
+    if any(secret and secret in encoded for secret in secrets):
+        raise RuntimeError("Round 10 dogfood report retained a configured API key")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "real-provider.json").write_text(
+        encoded + "\n", encoding="utf-8"
+    )
+    print(encoded)
     return 0 if report["status"] == "passed" else 2
 
 

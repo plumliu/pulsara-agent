@@ -1,0 +1,164 @@
+- main [ref=e3]:
+  - navigation "主要功能" [ref=e4]:
+    - button "返回 Pulsara 总览" [ref=e5] [cursor=pointer]
+    - generic [ref=e9]:
+      - button "总览" [ref=e10] [cursor=pointer]
+      - button "会话" [ref=e14] [cursor=pointer]
+      - button "能力" [ref=e17] [cursor=pointer]
+      - button "记忆" [ref=e21] [cursor=pointer]
+    - generic [ref=e30]:
+      - button "命令面板" [ref=e31] [cursor=pointer]: 命令面板 ⌘K
+      - button "设置" [ref=e34] [cursor=pointer]
+      - generic "本地用户" [ref=e38]: PL
+  - complementary [ref=e39]:
+    - generic [ref=e40]:
+      - generic [ref=e42]:
+        - paragraph [ref=e43]: 本地智能工作台
+        - heading "Pulsara" [level=1] [ref=e44]
+      - generic "已连接本地服务" [ref=e45]
+    - button "搜索与命令 ⌘ K" [ref=e46] [cursor=pointer]:
+      - generic [ref=e50]: 搜索与命令
+      - generic [ref=e51]: ⌘ K
+    - button "新建会话 ⌘ N" [ref=e52] [cursor=pointer]:
+      - generic [ref=e54]: 新建会话
+      - generic [ref=e55]: ⌘ N
+    - region "会话目录" [ref=e56]:
+      - generic [ref=e57]:
+        - region "从目录中打开" [ref=e58]:
+          - button [expanded] [ref=e59] [cursor=pointer]:
+            - strong [ref=e60]: 从目录中打开
+          - generic [ref=e63]: 还没有从目录中打开的会话
+        - region "快速开始" [ref=e65]:
+          - button [expanded] [ref=e66] [cursor=pointer]:
+            - strong [ref=e67]: 快速开始
+          - generic [ref=e70]:
+            - button "会话 b29ba118 57 条记录 · 已载入 6 个子任务" [ref=e739] [cursor=pointer]:
+              - generic [ref=e114]:
+                - strong [ref=e115]: 会话 b29ba118
+                - generic [ref=e116]: 57 条记录 · 已载入
+                - generic [ref=e117]: 6 个子任务
+            - button "会话 f0c0d255 7 条记录 · 可恢复" [ref=e123] [cursor=pointer]:
+              - generic [ref=e125]:
+                - strong [ref=e126]: 会话 f0c0d255
+                - generic [ref=e127]: 7 条记录 · 可恢复
+            - button "会话 a2616ad5 13 条记录 · 当前会话 1 个子任务" [ref=e740] [cursor=pointer]:
+              - generic [ref=e130]:
+                - strong [ref=e131]: 会话 a2616ad5
+                - generic [ref=e132]: 13 条记录 · 当前会话
+                - generic [ref=e133]: 1 个子任务
+    - generic [ref=e72]:
+      - generic [ref=e73]:
+        - generic [ref=e75]: 已连接本地服务
+        - code [ref=e76]: 本机
+      - generic [ref=e77]: 数据保存在这台设备上
+  - region "会话工作台" [ref=e79]:
+    - generic [ref=e80]:
+      - generic [ref=e81]:
+        - generic [ref=e82]: 已完成
+        - generic [ref=e83]:
+          - heading "会话 a2616ad5" [level=2] [ref=e741]
+          - paragraph [ref=e85]: 快速开始 · /Users/plumliu/.pulsara/workspaces/quick-20260911-180349-e8aa9070
+      - generic [ref=e86]:
+        - button "压缩上下文" [ref=e742] [cursor=pointer]
+        - button "切换检查器" [ref=e87] [cursor=pointer]
+    - generic [ref=e91]:
+      - article [ref=e747]:
+        - strong [ref=e749]: 你
+        - generic [ref=e754]:
+          - paragraph [ref=e755]: "这是错误恢复测试。请先调用 create_agent_tasks，第一次参数必须逐字使用：{\"tasks\":[{\"task_key\":\"reader\",\"task\":\"test semantic validation\",\"depends_on\":[\"task:missing-task\"]}]}。不要预先修正它。收到 INVALID_ARGUMENTS 后，请自行反思并再次调用 create_agent_tasks，把 depends_on 改为 []；第二次成功后只回复 RETRY_RECOVERED。"
+          - time [ref=e757]: 18:04
+      - article [ref=e759]:
+        - strong [ref=e764]: Pulsara
+        - button "展开思考" [ref=e767] [cursor=pointer]:
+          - generic [ref=e772]:
+            - strong [ref=e773]: 思考
+            - strong [ref=e776]: Considering user request
+        - article [ref=e782]:
+          - button "展开工具详情：create_agent_tasks" [ref=e783] [cursor=pointer]:
+            - generic [ref=e788]:
+              - generic [ref=e789]:
+                - strong [ref=e790]: create_agent_tasks
+                - generic [ref=e791]: 创建子任务
+              - generic [ref=e792]: 参数有误
+            - generic [ref=e793]: 操作未完成
+      - article [ref=e797]:
+        - article [ref=e801]:
+          - button "展开工具详情：create_agent_tasks" [ref=e802] [cursor=pointer]:
+            - generic [ref=e807]:
+              - generic [ref=e808]:
+                - strong [ref=e809]: create_agent_tasks
+                - generic [ref=e810]: 创建子任务
+              - generic [ref=e811]: 已完成
+            - generic [ref=e812]: 操作完成
+        - region "子任务执行" [ref=e815]:
+          - generic [ref=e816]:
+            - strong [ref=e823]: 子任务执行
+            - generic [ref=e824]: 1 / 1 已结束
+          - article [ref=e826]:
+            - button "reader 通用协作 已完成" [expanded] [ref=e827] [cursor=pointer]:
+              - generic [ref=e832]:
+                - strong [ref=e833]: reader
+                - generic [ref=e834]: 通用协作
+              - generic [ref=e835]: 已完成
+            - generic [ref=e869]:
+              - generic [ref=e870]:
+                - text: 目标
+                - paragraph [ref=e871]: test semantic validation
+              - generic [ref=e968]:
+                - text: 结果
+                - paragraph [ref=e971]:
+                  - text: Semantic-validation check completed. The current workspace
+                  - code [ref=e972]: /Users/plumliu/.pulsara/workspaces/quick-20260911-180349-e8aa9070
+                  - text: exists but is empty (no source files, tests, or project metadata), so there was no implementation or test suite available to execute. No files were changed.
+      - article [ref=e841]:
+        - strong [ref=e846]: Pulsara
+        - generic [ref=e847]:
+          - paragraph [ref=e850]: RETRY_RECOVERED
+          - generic [ref=e851]:
+            - button "复制回复" [ref=e852] [cursor=pointer]
+            - button "从此处分叉" [ref=e856] [cursor=pointer]
+            - time [ref=e862]: 18:04
+      - article "上一轮 reader 的结果已加入本轮对话" [ref=e1162]:
+        - generic [ref=e1169]:
+          - strong [ref=e1170]: 上一轮 reader 的结果已加入本轮对话
+          - generic [ref=e1171]: 子任务结果已记录到当前对话
+        - time [ref=e1172]: 21:35
+        - tooltip "该结果已记录到当前对话；这不是你发送的新消息，也不会重新运行子任务。"
+      - article [ref=e1185]:
+        - strong [ref=e1190]: Pulsara
+        - generic [ref=e1191]:
+          - paragraph [ref=e1194]: 委托检查已完成：当前工作区为空，没有可执行的项目文件或测试，也未修改任何文件。
+          - generic [ref=e1195]:
+            - button "复制回复" [ref=e1196] [cursor=pointer]
+            - button "从此处分叉" [ref=e1200] [cursor=pointer]
+            - time [ref=e1206]: 21:35
+    - generic [ref=e97]:
+      - generic [ref=e684]:
+        - textbox "发送给 Pulsara" [ref=e689]:
+          - /placeholder: 让 Pulsara 处理复杂工作…
+        - generic [ref=e690]:
+          - generic [ref=e691]:
+            - button "OpenRouter · GPT-5.6 Luna · Chat" [ref=e693] [cursor=pointer]
+            - generic [ref=e700]:
+              - button "推理 high" [ref=e702] [cursor=pointer]
+              - button "选择技能" [ref=e864] [cursor=pointer]: 技能
+              - button "先规划" [ref=e723] [cursor=pointer]
+              - button "完全访问" [ref=e728] [cursor=pointer]
+          - button "发送" [disabled] [ref=e734]
+      - paragraph [ref=e738]: Enter 发送 · Shift Enter 换行 · 规划与权限只作用于本轮
+  - complementary "当前会话详情":
+    - generic:
+      - generic:
+        - strong: 当前会话
+        - generic: 会话 a2616ad5
+      - button "关闭检查器"
+      - navigation "详情视图":
+        - button "项目能力": 能力
+        - button "任务"
+        - button "后台终端"
+    - generic:
+      - generic:
+        - button "reader 1 已完成 · 0 进行中" [active]:
+          - generic:
+            - strong: reader
+            - generic: 1 已完成 · 0 进行中

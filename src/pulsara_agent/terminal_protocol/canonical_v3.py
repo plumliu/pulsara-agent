@@ -990,7 +990,7 @@ class CanonicalProtocolReader:
                 objective=str(row["objective"]),
                 result_id=str(row["result_id"] or ""),
                 result_entry_id=str(row["result_entry_id"] or ""),
-                completion_delivered=row["accepted_root_entry_id"] is not None,
+                completion_accepted=row["accepted_root_entry_id"] is not None,
                 batch_id=str(row["batch_id"] or ""),
                 task_key=str(row["task_key"] or ""),
                 label=str(row["label"] or ""),

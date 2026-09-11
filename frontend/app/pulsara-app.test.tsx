@@ -1448,24 +1448,34 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''),
       messages: [{
-        id: 'user-prompt', role: 'user', userKind: 'prompt', time: '18:10',
+        id: 'user-prompt', turnId: 'turn-one', role: 'user', userKind: 'prompt', time: '18:10',
         body: '检查完整流程。', status: 'completed',
       }, {
-        id: 'assistant-tool', role: 'assistant', time: '18:11', body: '', status: 'completed',
+        id: 'assistant-tool', turnId: 'turn-one', role: 'assistant', time: '18:11', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-before-tool', kind: 'full', body: '先读取文件。' }],
         traces: [{
           id: 'trace-read', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: '已完成',
           status: 'completed', meta: '操作完成',
         }],
       }, {
-        id: 'user-steer', role: 'user', userKind: 'steer', time: '18:12',
+        id: 'user-steer', turnId: 'turn-one', role: 'user', userKind: 'steer', time: '18:12',
         body: '也检查真实页面。', status: 'waiting',
       }, {
-        id: 'assistant-tool-after-steer', role: 'assistant', time: '18:12', body: '', status: 'completed',
+        id: 'completion-one', turnId: 'turn-one', role: 'user', userKind: 'subagent-completion', time: '18:12',
+        body: '', status: 'completed', sourceSubagentTaskId: 'task-one',
+        sourceSubagentLabel: 'reader', sourceSubagentRelation: 'current',
+      }, {
+        id: 'assistant-tool-after-steer', turnId: 'turn-one', role: 'assistant', time: '18:12', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-after-steer', kind: 'full', body: '继续检查真实页面。' }],
       }, {
-        id: 'assistant-final', role: 'assistant', time: '18:13', body: '检查已经完成。', status: 'completed',
+        id: 'assistant-final', turnId: 'turn-one', role: 'assistant', time: '18:13', body: '检查已经完成。', status: 'completed',
         reasoning: [{ id: 'reasoning-after-tool', kind: 'summary', body: '整理检查结果。' }],
+      }, {
+        id: 'user-prompt-two', turnId: 'turn-two', role: 'user', userKind: 'prompt', time: '18:14',
+        body: '继续下一项。', status: 'completed',
+      }, {
+        id: 'assistant-final-two', turnId: 'turn-two', role: 'assistant', time: '18:15',
+        body: '第二项也已经完成。', status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -1474,13 +1484,16 @@ describe('PulsaraApp', () => {
     const { container } = render(<PulsaraApp adapter={adapter} />);
     expect(await screen.findByText('检查已经完成。')).toBeTruthy();
 
-    expect(container.querySelectorAll('.user-heading')).toHaveLength(1);
-    const userHeading = container.querySelector('.user-heading');
-    expect(userHeading?.textContent).toContain('你');
-    expect(userHeading?.firstElementChild?.tagName).toBe('STRONG');
-    expect(userHeading?.lastElementChild?.classList.contains('user-avatar')).toBe(true);
+    expect(container.querySelectorAll('.user-heading')).toHaveLength(2);
+    for (const userHeading of container.querySelectorAll('.user-heading')) {
+      expect(userHeading.textContent).toContain('你');
+      expect(userHeading.firstElementChild?.tagName).toBe('STRONG');
+      expect(userHeading.lastElementChild?.classList.contains('user-avatar')).toBe(true);
+    }
     expect(container.querySelectorAll('.user-steer')).toHaveLength(1);
-    expect(screen.getByText('你 · 引导')).toBeTruthy();
+    expect(screen.getByText('引导')).toBeTruthy();
+    expect(screen.queryByText('你 · 引导')).toBeNull();
+    expect(screen.getByLabelText('reader 的结果已加入本轮对话')).toBeTruthy();
     expect(container.querySelectorAll('.assistant-heading')).toHaveLength(2);
     expect(container.querySelectorAll('.assistant-heading--run-start')).toHaveLength(1);
     expect(container.querySelectorAll('.assistant-heading--response')).toHaveLength(1);
@@ -1490,7 +1503,7 @@ describe('PulsaraApp', () => {
 
     const finalTurn = container.querySelector('.assistant-turn--response-with-reasoning');
     expect(finalTurn?.firstElementChild?.classList.contains('reasoning-disclosure')).toBe(true);
-    expect(finalTurn?.children[1]?.classList.contains('assistant-heading--response')).toBe(true);
+    expect(finalTurn?.children[1]?.classList.contains('assistant-copy')).toBe(true);
   });
 
   it('shows the exact tool name and keeps a terminal command inside its expanded output', async () => {
@@ -2029,7 +2042,7 @@ describe('PulsaraApp', () => {
     expect(turns[2].classList.contains('assistant-turn--tool-chain-before')).toBe(false);
   });
 
-  it('renders a delivered subtask completion as a neutral continuation event', async () => {
+  it('renders an accepted previous-root subtask completion without implying provider use', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''),
@@ -2037,6 +2050,8 @@ describe('PulsaraApp', () => {
         id: 'accepted-result', role: 'user', userKind: 'subagent-completion', time: '18:14',
         body: '{"status":"accepted","task_id":"internal"}',
         sourceSubagentTaskId: 'task-internal',
+        sourceSubagentLabel: 'reader',
+        sourceSubagentRelation: 'previous',
         status: 'completed',
       }, {
         id: 'assistant-after-result', role: 'assistant', time: '18:15',
@@ -2047,9 +2062,10 @@ describe('PulsaraApp', () => {
     };
 
     const { container } = render(<PulsaraApp adapter={adapter} />);
-    expect(await screen.findByLabelText('Pulsara 已收到子任务进展')).toBeTruthy();
-    expect(screen.getByText('Pulsara 已收到子任务进展')).toBeTruthy();
-    expect(screen.getByRole('tooltip').textContent).toContain('Pulsara 已把这项工作的进展用于当前处理');
+    expect(await screen.findByLabelText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
+    expect(screen.getByText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
+    expect(screen.getByRole('tooltip').textContent).toContain('已记录到当前对话');
+    expect(screen.queryByText(/用于当前处理|会结合这项工作的结果/)).toBeNull();
     expect(screen.queryByText(/"status":"accepted"/)).toBeNull();
     expect(container.querySelectorAll('.user-heading')).toHaveLength(0);
     expect(container.querySelectorAll('.assistant-turn--run-start')).toHaveLength(1);
@@ -3162,7 +3178,7 @@ describe('PulsaraApp', () => {
       objective: '### 汇总目标\n\n整理可见结果。', status: 'completed',
       parentId: 'turn-1', batchId: 'batch-1', taskKey: 'research',
       context: { mode: 'last-n', lastNTurns: 4 }, dependencyIds: [],
-      completionDelivered: false,
+      completionAccepted: false,
       acceptedAt: '2026-08-30T12:00:00Z', terminalAt: '2026-08-30T12:01:00Z',
       summary: '### 研究结论\n\n页面符合契约。', color: 'blue',
       result: {
@@ -3172,12 +3188,12 @@ describe('PulsaraApp', () => {
     }, {
       id: 'task-interrupted', label: '中断检查', role: '验证', objective: '验证重启边界。',
       status: 'interrupted', parentId: 'turn-2', batchId: 'batch-2', dependencyIds: [], color: 'amber',
-      completionDelivered: false,
+      completionAccepted: false,
     }, {
       id: 'task-blocked', label: '等待产物', role: '整合', objective: '整合前置产物。',
       status: 'blocked', parentId: 'turn-1', batchId: 'batch-1', dependencyIds: ['task-interrupted'],
       dependencies: [{ id: 'task-interrupted', label: '中断检查', status: 'interrupted' }], color: 'violet',
-      completionDelivered: false,
+      completionAccepted: false,
     }];
 
     render(<PulsaraApp adapter={adapter} />);

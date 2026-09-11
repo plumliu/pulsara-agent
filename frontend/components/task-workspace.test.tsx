@@ -14,7 +14,7 @@ const task = (overrides: Partial<AgentTask> = {}): AgentTask => ({
   parentId: 'turn-root',
   batchId: 'batch-a',
   taskKey: 'verify',
-  completionDelivered: false,
+  completionAccepted: false,
   dependencyIds: [],
   color: 'blue',
   ...overrides,
@@ -44,6 +44,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     />);
 
     fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
+    expect(screen.getByText('结果尚未加入主对话。')).toBeTruthy();
     const detail = screen.getByLabelText('精确子任务 详情');
     await waitFor(() => expect(within(detail).getByText('UI_SLOW_DONE')).toBeTruthy());
     expect(within(detail).queryByRole('heading', { name: '任务结果' })).toBeNull();
@@ -165,6 +166,58 @@ describe('TaskWorkspace PR03 hard cut', () => {
     />);
     expect(screen.getByText(/TASK_BATCH_DATA_INCOMPLETE：task-a/)).toBeTruthy();
     expect(screen.queryByText('子任务组')).toBeNull();
+  });
+
+  it('lays out a dependency DAG in distinct horizontal levels', () => {
+    const one = task({ id: 'task-1', label: 'subagent-1', taskKey: 'one', status: 'completed' });
+    const three = task({ id: 'task-3', label: 'subagent-3', taskKey: 'three', status: 'completed' });
+    const two = task({
+      id: 'task-2', label: 'subagent-2', taskKey: 'two', status: 'completed',
+      dependencyIds: ['task-1'],
+      dependencies: [{ id: 'task-1', label: 'subagent-1', status: 'completed' }],
+    });
+    const four = task({
+      id: 'task-4', label: 'subagent-4', taskKey: 'four', status: 'completed',
+      dependencyIds: ['task-1', 'task-3'],
+      dependencies: [
+        { id: 'task-1', label: 'subagent-1', status: 'completed' },
+        { id: 'task-3', label: 'subagent-3', status: 'completed' },
+      ],
+    });
+    const five = task({
+      id: 'task-5', label: 'subagent-5', taskKey: 'five', status: 'completed',
+      dependencyIds: ['task-2', 'task-4'],
+      dependencies: [
+        { id: 'task-2', label: 'subagent-2', status: 'completed' },
+        { id: 'task-4', label: 'subagent-4', status: 'completed' },
+      ],
+    });
+    render(<TaskWorkspace
+      tasks={[one, two, three, four, five]}
+      loading={false}
+      canControl
+      isRunning={false}
+      permission="read-only"
+      onRetry={vi.fn()}
+      onCancel={vi.fn()}
+      onAcceptCompletion={vi.fn()}
+      onNotify={vi.fn()}
+      activities={new Map()}
+      loadActivities={vi.fn(async () => ({ activities: [] }))}
+      loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
+    />);
+
+    fireEvent.click(screen.getByRole('button', { name: /子任务组/ }));
+    const dialog = screen.getByRole('dialog', { name: /子任务组/ });
+    const left = (label: string) => Number.parseFloat(
+      (within(dialog).getByRole('button', { name: new RegExp(label) }) as HTMLElement).style.left,
+    );
+
+    expect(dialog.querySelectorAll('.task-graph-edges > path')).toHaveLength(5);
+    expect(left('subagent-1')).toBe(left('subagent-3'));
+    expect(left('subagent-2')).toBe(left('subagent-4'));
+    expect(left('subagent-2')).toBeGreaterThan(left('subagent-1'));
+    expect(left('subagent-5')).toBeGreaterThan(left('subagent-2'));
   });
 
   it('draws only exact dependencies and reads every canonical activity page for the selected node', async () => {

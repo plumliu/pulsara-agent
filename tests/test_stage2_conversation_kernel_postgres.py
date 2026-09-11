@@ -1476,8 +1476,8 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
         actor_id="runtime:test",
         deadline_monotonic=deadline,
     )
-    # One coalesced wake rejects the entire consecutive stale-steer prefix,
-    # then consumes the next global NEW_TURN head in the same call.
+    # The terminal transition has already rejected every steer bound to the
+    # interrupted ROOT; the next global NEW_TURN remains independently consumable.
     candidate = repository.prepare_prompt_head_consumption(
         session_id=session_id,
         occurred_at=datetime.now(timezone.utc),
@@ -1512,6 +1512,82 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
             (second_item, "REJECTED", "TARGET_TURN_TERMINAL"),
             (third_item, "CONSUMED", "CONSUMED"),
         ]
+
+
+def test_stage2_interrupt_turn_immediately_rejects_steer_without_future_turn(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    deadline = monotonic() + 30
+    session_id = _name("session")
+    lease = repository.acquire_host_writer(
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=deadline,
+    )
+    root_turn = _name("turn")
+    _start_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=root_turn,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        content=InlineContent.from_bytes(b"first"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+    )
+    queue_item_id = _name("queue")
+    _enqueue_prompt(
+        repository,
+        lease.guard,
+        command_id=_name("command"),
+        queue_item_id=queue_item_id,
+        client_submission_id=_name("client"),
+        delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+        target_turn_id=root_turn,
+        content=InlineContent.from_bytes(b"steer"),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user",
+        deadline_monotonic=deadline,
+    )
+
+    assert repository.interrupt_turn(
+        lease.guard,
+        turn_id=root_turn,
+        reason="TEST_TARGET_TERMINAL",
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="runtime:test",
+        deadline_monotonic=deadline,
+    )
+
+    with verified_postgres_provider(
+        stage2_migrated_postgres_database.runtime_dsn
+    ).connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=deadline,
+    ) as connection:
+        queue_row = connection.execute(
+            """
+            SELECT status, terminal_reason
+            FROM pulsara_v3.prompt_queue_items
+            WHERE session_id = %s AND id = %s
+            """,
+            (session_id, queue_item_id),
+        ).fetchone()
+        rejected_event = connection.execute(
+            """
+            SELECT payload->>'reason'
+            FROM pulsara_v3.agent_events
+            WHERE session_id = %s AND subject_queue_item_id = %s
+              AND event_type = 'PromptRejected'
+            """,
+            (session_id, queue_item_id),
+        ).fetchone()
+    assert queue_row == ("REJECTED", "TARGET_TURN_TERMINAL")
+    assert rejected_event == ("TARGET_TURN_TERMINAL",)
 
 
 def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(

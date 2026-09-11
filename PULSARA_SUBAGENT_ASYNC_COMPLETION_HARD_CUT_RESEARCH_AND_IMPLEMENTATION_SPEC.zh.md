@@ -15,6 +15,11 @@
 > Round 10 中关于“ROOT 如何收到 terminal outcome”、
 > `wait_agent*`、ROOT completion mailbox、result acceptance 与对应 UI 的条款，其余 task graph、
 > dependency、profile、context、permission、capacity、child result 和 restart 边界继续有效。
+>
+> 2026-09-11 修订：等待谓词、输入中断、terminal→inbox readiness、完成提示与
+> `completion_accepted` 命名以
+> `PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md` 为唯一后续 authority；
+> 本文其余已激活的异步完成、依赖、权限、容量和重启边界保持有效。
 
 ---
 
@@ -520,7 +525,7 @@ clean-v0：
 - 唯一约束改为 `(session_id, source_subagent_task_id)`；
 - source task 仅允许 ROOT-scope `INTER_AGENT_MESSAGE`；
 - child-scope `INTER_AGENT_MESSAGE` 继续要求 source tool attempt；
-- protocol projection 的 `result_accepted` 改为 `completion_delivered`，通过 source task join 推导。
+- protocol projection 的 `result_accepted` 改为 `completion_accepted`，通过 source task join 推导。
 
 成功 completion 的 result lineage 通过 task 的唯一 RESULT join 获得，无需把完整 frozen result
 再冗余复制成 DTO fingerprint 或第二个 FK。
@@ -873,7 +878,7 @@ descriptor 新增：每个 terminal outcome 会独立自动送回 ROOT；不要�
 
 ```json
 {
-  "outcome": "input_available | predicate_satisfied | nothing_pending | timeout",
+  "outcome": "predicate_satisfied | steer_available | completion_available | nothing_pending | timeout",
   "satisfied_task_ids": ["..."],
   "pending_task_ids": ["..."]
 }
@@ -881,7 +886,12 @@ descriptor 新增：每个 terminal outcome 会独立自动送回 ROOT；不要�
 
 语义：
 
-- pending completion、exact-turn durable pending steer 或已满足 task predicate 存在时立即返回；
+- exact-turn durable pending steer 优先返回 `steer_available`；
+- 无 targets 且 pending completion 存在时返回 `completion_available`；
+- 有 targets 时，`first` 只在任一 exact target terminal 后满足，`all` 只在全部 exact targets
+  terminal 后满足；部分或无关 completion 不结束 targeted all；
+- targeted predicate 返回前，当前 turn-bound manager 必须把尚未 canonical accepted 的
+  satisfied sources 接管进现有 completion inbox；
 - 无 targets、没有 pending input 且不存在任何 nonterminal worker 时，立即返回 `nothing_pending`；
 - user steer 到达时中断 predicate join，让 ROOT 优先处理用户输入；
 - timeout 只结束本次 wait，不取消 worker；
@@ -1000,8 +1010,8 @@ Terminal Protocol、command kind、schema version 或内部 reason code。公开
 ### 12.3 手动按钮
 
 - active ROOT 且 completion 等待当前 safe point：不显示“带入会话”按钮，避免与自动路径竞争；
-- completion 已 canonical delivered：显示只读“已用于对话”；
-- ROOT idle 且 terminal task 尚未 delivered：显示“用这份结果继续”；
+- completion 已 canonical accepted：显示只读“已加入主对话”；
+- ROOT idle 且 terminal task 尚未 accepted：显示“用这份结果继续”；
 - failure completion 的对应动作显示“让 Pulsara 处理这个问题”；
 - 按钮 hover 解释：会启动新一轮，让 Pulsara 基于该 task 的结果或失败继续，不会重新运行
   worker；
@@ -1012,11 +1022,11 @@ automatic/manual race 由 canonical unique source task 决胜；loser 刷新为�
 
 UI projection 的 authority 必须明确分层：
 
-- durable task DTO 顶层提供 `completionDelivered`，由 source-task transcript join 推导，覆盖所有
+- durable task DTO 顶层提供 `completionAccepted`，由 source-task transcript join 推导，覆盖所有
   terminal status，不再嵌在 success-only `result` 内；
 - `completionPendingNow/rootDeliveryPhase` 若展示，只能来自独立、non-fingerprinted、可丢失的 Host
   live overlay，不能塞进 canonical snapshot 充当 durable truth；
-- overlay 缺失时，前端只根据 `terminal + !completionDelivered + active/idle ROOT` 保守显示，不声称
+- overlay 缺失时，前端只根据 `terminal + !completionAccepted + active/idle ROOT` 保守显示，不声称
   知道 inbox 的 exact 状态；
 - manual action 始终发送 `task_id`，由后端 exact revalidation 决定 disposition；failure task 不依赖
   `task.result` 才能操作。
@@ -1201,7 +1211,7 @@ ROOT model 不因 UI 可见就自动读取 child 全量 trace。terminal summary
 工作：
 
 - command/task projection hard-cut；
-- 顶层 durable `completionDelivered` 与独立 non-fingerprinted Host live overlay；
+- 顶层 durable `completionAccepted` 与独立 non-fingerprinted Host live overlay；
 - overlay 缺失时保守推导，所有 manual action 后端 exact revalidate；
 - 删除旧“带入 result id”路径；
 - hover detail、failure action、race refresh；
@@ -1413,7 +1423,9 @@ Canonical 数据库核对结果：
 | `7e4d50f3` | 1 | 6 | 6 | 0 | 1 |
 | `293baa55` | 1 | 0 | 0 | 0 | 0 |
 
-`7e4d50f3` 唯一一次 wait 返回 `input_available`、3 个 satisfied task 和 3 个 pending task；payload
+`7e4d50f3` 是修订前 dogfood；其唯一一次 wait 当时返回已删除的旧 outcome
+`input_available`、3 个 satisfied task 和 3 个 pending task。该记录仅证明旧基线；新等待合同不
+沿用该返回值。payload
 没有 task result body。随后全部 6 个 task 都以 terminal task source 唯一交付。`f14af271` 的
 canonical task 为 `CANCELLED`，有面向产品的失败说明且 completion 已交付。`54c66b51` 的第二个
 ROOT turn 由手动 completion continuation 创建；worker 只有一个 task/turn，没有重跑。

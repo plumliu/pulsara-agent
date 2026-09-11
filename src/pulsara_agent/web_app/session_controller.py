@@ -2350,7 +2350,7 @@ def _task_payload(
         "pending_reason": task.get("pending_reason"),
         "terminal_reason": task.get("terminal_reason"),
         "terminal_public_detail": task.get("terminal_public_detail"),
-        "completion_delivered": task.get("accepted_root_entry_id") is not None,
+        "completion_accepted": task.get("accepted_root_entry_id") is not None,
         "accepted_at": accepted_at.isoformat(),
         "terminal_at": (
             terminal_at.isoformat() if isinstance(terminal_at, datetime) else None

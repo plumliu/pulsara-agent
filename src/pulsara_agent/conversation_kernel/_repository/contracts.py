@@ -500,7 +500,13 @@ class PreparedToolResultAcceptance:
             raise ValueError("prepared tool result identity is incomplete")
         if not isinstance(self.canonical_preview_content, InlineContent):
             raise TypeError("prepared tool result preview must be inline")
-        attempted_states = {"SUCCESS", "APPLICATION_ERROR", "SYSTEM_ERROR", "CANCELLED"}
+        attempted_states = {
+            "SUCCESS",
+            "INVALID_ARGUMENTS",
+            "APPLICATION_ERROR",
+            "SYSTEM_ERROR",
+            "CANCELLED",
+        }
         no_attempt_states = {
             "INVALID_ARGUMENTS",
             "PERMISSION_DENIED",

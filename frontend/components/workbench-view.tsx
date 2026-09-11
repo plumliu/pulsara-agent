@@ -37,7 +37,7 @@ import {
   WandSparkles,
   Zap,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   ContextCompactionBoundary,
   ProtocolCanonicalControl,
@@ -54,6 +54,8 @@ import type {
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
+
+const COMPOSER_INPUT_MAX_HEIGHT = 250;
 
 interface WorkbenchViewProps {
   focusMemoryEntry?: { sessionId: string; entryId: string };
@@ -828,21 +830,29 @@ function UserMessage({ message, label = '你' }: { message: Message; label?: str
   const sourceTextStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const;
   if (message.userKind === 'subagent-completion') {
     const helpId = `${message.id}-subagent-completion-help`;
+    const sourceResult = message.sourceSubagentLabel
+      ? `${message.sourceSubagentLabel} 的结果`
+      : '子任务结果';
+    const title = message.sourceSubagentRelation === 'previous'
+      ? `上一轮 ${sourceResult}已加入本轮对话`
+      : message.sourceSubagentRelation === 'earlier'
+        ? `此前 ${sourceResult}已加入本轮对话`
+        : `${sourceResult}已加入本轮对话`;
     return (
       <article
         className="subagent-completion-event"
-        aria-label="Pulsara 已收到子任务进展"
+        aria-label={title}
         aria-describedby={helpId}
         tabIndex={0}
       >
         <span className="subagent-completion-event__icon"><GitFork size={13} /></span>
         <div className="subagent-completion-event__copy">
-          <strong>Pulsara 已收到子任务进展</strong>
-          <small>主任务会结合这项工作的结果继续处理</small>
+          <strong>{title}</strong>
+          <small>子任务结果已记录到当前对话</small>
         </div>
         <time>{message.time}</time>
         <span id={helpId} className="subagent-completion-event__tooltip" role="tooltip">
-          Pulsara 已把这项工作的进展用于当前处理；这不是你发送的新消息，也不会重新运行子任务。
+          该结果已记录到当前对话；这不是你发送的新消息，也不会重新运行子任务。
         </span>
       </article>
     );
@@ -850,10 +860,10 @@ function UserMessage({ message, label = '你' }: { message: Message; label?: str
 
   if (message.userKind === 'steer') {
     return (
-      <article className="user-steer" aria-label="你的引导">
+      <article className="user-steer" aria-label="引导">
         <span className="user-steer__icon"><CornerDownRight size={13} /></span>
         <div className="user-steer__content">
-          <header><strong>{label} · 引导</strong><time>{message.time}</time></header>
+          <header><strong>引导</strong><time>{message.time}</time></header>
           <p style={sourceTextStyle}>{message.body}</p>
         </div>
       </article>
@@ -949,7 +959,6 @@ function AssistantMessage({
 
       {hasNaturalLanguage && (
         <>
-          {!startsAssistantRun && <AssistantHeading message={message} response label={assistantLabel} />}
           <div className="assistant-copy">
             <div className="assistant-markdown"><MarkdownBody body={message.body} onNotify={onNotify} /></div>
             {(canCopyResponse || message.forkEligible) && (
@@ -997,15 +1006,25 @@ function findAssistantRunStarts(
   contextCompactionIndex = -1,
 ): ReadonlySet<string> {
   const starts = new Set<string>();
-  let assistantRunOpen = false;
+  const seenTurnIds = new Set<string>();
+  let unkeyedRunOpen = false;
   for (const [index, message] of messages.entries()) {
-    if (index === contextCompactionIndex) assistantRunOpen = false;
+    if (index === contextCompactionIndex) unkeyedRunOpen = false;
     if (message.role === 'user') {
-      if (message.userKind !== 'steer') assistantRunOpen = false;
+      if (message.userKind !== 'steer' && message.userKind !== 'subagent-completion') {
+        unkeyedRunOpen = false;
+      }
       continue;
     }
-    if (!assistantRunOpen) starts.add(message.id);
-    assistantRunOpen = true;
+    if (message.turnId) {
+      if (!seenTurnIds.has(message.turnId)) {
+        starts.add(message.id);
+        seenTurnIds.add(message.turnId);
+      }
+    } else if (!unkeyedRunOpen) {
+      starts.add(message.id);
+    }
+    unkeyedRunOpen = true;
   }
   return starts;
 }
@@ -1430,6 +1449,25 @@ export function WorkbenchView({
     const next = Math.min(maximum, Math.max(112, requested));
     setJumpBottom((current) => current === next ? current : next);
   }, []);
+
+  const resizeComposerInput = useCallback(() => {
+    const input = composerInputRef.current;
+    if (!input) return;
+    input.style.height = '0px';
+    const contentHeight = input.scrollHeight;
+    if (contentHeight <= 0) {
+      input.style.height = '';
+      input.style.overflowY = 'hidden';
+      return;
+    }
+    input.style.height = `${Math.min(contentHeight, COMPOSER_INPUT_MAX_HEIGHT)}px`;
+    input.style.overflowY = contentHeight > COMPOSER_INPUT_MAX_HEIGHT ? 'auto' : 'hidden';
+    updateJumpPosition();
+  }, [updateJumpPosition]);
+
+  useLayoutEffect(() => {
+    resizeComposerInput();
+  }, [draft, resizeComposerInput]);
 
   const composerHint = useMemo(() => {
     if (!isRunning) return 'Enter 发送 · Shift Enter 换行';

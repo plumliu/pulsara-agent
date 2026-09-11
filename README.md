@@ -302,7 +302,10 @@ a task-graph lifetime cap: additional admitted work stays `PENDING_START` and
 starts when capacity frees. Direct dependency results propagate one edge only;
 the main agent keeps doing useful work while children run, and completed work is
 automatically folded into the conversation at a safe response boundary. Waiting
-is only a synchronization choice, not the result-delivery path. Work that finishes
+is only a synchronization choice, not the result-delivery path: targeted `first`
+and `all` use strict predicates, only exact-turn steer interrupts them, and a
+successful join hands every exact terminal source to the existing completion
+inbox before the tool closes. Work that finishes
 after an answer remains available for one explicit continuation without rerunning
 the child; success, failure, cancellation, and dependency failure share the same
 delivery path. Round 5B now hands off the same task board during compaction without
@@ -312,6 +315,8 @@ durable jobs. Verification is recorded in
 [`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json).
 The asynchronous-completion hard cut and real-provider browser evidence are recorded in
 [`PULSARA_SUBAGENT_ASYNC_COMPLETION_HARD_CUT_RESEARCH_AND_IMPLEMENTATION_SPEC.zh.md`](PULSARA_SUBAGENT_ASYNC_COMPLETION_HARD_CUT_RESEARCH_AND_IMPLEMENTATION_SPEC.zh.md)
+and its current semantic refinement
+[`PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md`](PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md)
 and [`dogfood_evidence/async_completion/README.zh.md`](dogfood_evidence/async_completion/README.zh.md).
 The fingerprint-subtraction hard cut removes same-process self hashes,
 duplicate child/parent proof fields, fingerprint-based continuity/settlement

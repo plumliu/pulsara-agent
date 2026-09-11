@@ -900,6 +900,17 @@ class _DenyingTool(_AssertingTool):
         )
 
 
+class _SemanticInvalidArgumentsThenSuccessTool(_AssertingTool):
+    async def invoke(self, **kwargs):
+        result = await super().invoke(**kwargs)
+        if len(self.invocations) == 1:
+            return KernelToolResult(
+                state="INVALID_ARGUMENTS",
+                content=b'{"error":"dependency reference is unknown"}',
+            )
+        return result
+
+
 class _ConfirmationWithoutControllerTool(_AssertingTool):
     async def authorize(self, **kwargs):
         del kwargs
@@ -1580,6 +1591,161 @@ def test_capability_adoption_runs_before_each_unprepared_dispatch(
     assert len(observations) == 2
     assert observations[0] == ()
     assert len(observations[1]) == 1
+
+
+def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_completes(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    tool = _SemanticInvalidArgumentsThenSuccessTool(provider, session_id)
+    command_id = _name("command")
+    turn_id = _stable_id("turn", session_id, command_id)
+    steer_command_id = _name("steer-command")
+    steer_queue_item_id = _name("steer-queue")
+    steer_text = "steer between the invalid result and corrected retry"
+    steer_injected = False
+
+    async def inject_steer_before_retry() -> bool:
+        nonlocal steer_injected
+        if len(tool.invocations) == 1 and not steer_injected:
+            enqueue_test_prompt(
+                repository,
+                lease.guard,
+                command_id=steer_command_id,
+                queue_item_id=steer_queue_item_id,
+                client_submission_id=steer_command_id,
+                delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
+                target_turn_id=turn_id,
+                permission_snapshot_id=None,
+                requested_permission_mode=None,
+                model_call_binding=None,
+                content=InlineContent.from_bytes(steer_text.encode("utf-8")),
+                occurred_at=datetime.now(timezone.utc),
+                actor_id="test",
+                deadline_monotonic=monotonic() + 10,
+            )
+            steer_injected = True
+        return True
+
+    model = _ScriptedModel(
+        [
+            _named_tool_stream(
+                tool_name="create_agent_tasks",
+                tool_call_id="call:semantic-invalid",
+                arguments={
+                    "tasks": [
+                        {
+                            "task_key": "reader",
+                            "task": "read an unknown dependency",
+                            "depends_on": ["task:missing-task"],
+                        }
+                    ]
+                },
+            ),
+            _named_tool_stream(
+                tool_name="create_agent_tasks",
+                tool_call_id="call:semantic-corrected",
+                arguments={
+                    "tasks": [
+                        {
+                            "task_key": "reader",
+                            "task": "read without an unknown dependency",
+                            "depends_on": [],
+                        }
+                    ]
+                },
+            ),
+            _text_stream("invalid arguments were reported without interrupting"),
+        ]
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(tool, tool_names=("create_agent_tasks",)),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        before_provider_preparation=inject_steer_before_retry,
+    )
+
+    result = asyncio.run(
+        runner.run_turn("create the dependent task", command_id=command_id)
+    )
+
+    assert result.final_text == "invalid arguments were reported without interrupting"
+    assert result.model_call_count == 3
+    assert len(tool.invocations) == 2
+    first_input, retry_input, final_input = (
+        request.compiled_input for request in model.requests
+    )
+    assert retry_input.system_prompt == first_input.system_prompt
+    assert retry_input.tools == first_input.tools
+    assert retry_input.messages[: len(first_input.messages)] == first_input.messages
+    assert final_input.messages[: len(retry_input.messages)] == retry_input.messages
+    retry_tool_results = tuple(
+        message
+        for message in retry_input.messages
+        if message.role is MessageRole.TOOL_RESULT
+    )
+    assert len(retry_tool_results) == 1
+    assert "dependency reference is unknown" in retry_tool_results[0].content[0]
+    assert any(
+        message.role is MessageRole.USER
+        and message.content
+        and message.content[0] == steer_text
+        for message in retry_input.messages
+    )
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        result_rows = connection.execute(
+            """
+            SELECT tool_call_id, result_state, attempt_id
+            FROM pulsara_v3.tool_results
+            WHERE session_id = %s
+              AND tool_call_id IN (%s, %s)
+            ORDER BY accepted_at, tool_call_id
+            """,
+            (
+                session_id,
+                "call:semantic-invalid",
+                "call:semantic-corrected",
+            ),
+        ).fetchall()
+        turn_row = connection.execute(
+            """
+            SELECT status, terminal_reason
+            FROM pulsara_v3.turns
+            WHERE session_id = %s AND id = %s
+            """,
+            (session_id, result.turn_id),
+        ).fetchone()
+        steer_row = connection.execute(
+            "SELECT status, consumed_entry_id "
+            "FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, steer_queue_item_id),
+        ).fetchone()
+    assert result_rows == [
+        ("call:semantic-invalid", "INVALID_ARGUMENTS", tool.invocations[0]),
+        ("call:semantic-corrected", "SUCCESS", tool.invocations[1]),
+    ]
+    assert turn_row == ("COMPLETED", "COMPLETED")
+    assert steer_row is not None
+    assert steer_row[0] == "CONSUMED"
+    assert steer_row[1] is not None
 
 
 def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
@@ -5107,7 +5273,7 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
     assert all(status == "PENDING" for _queue_id, status in rows[1:])
 
 
-def test_round3_1_expired_steer_planning_consumes_nothing_and_io_closes(
+def test_round3_1_expired_steer_planning_rejects_terminal_steer_and_io_closes(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -5172,10 +5338,11 @@ def test_round3_1_expired_steer_planning_consumes_nothing_and_io_closes(
         deadline_monotonic=monotonic() + 10,
     ) as connection:
         assert connection.execute(
-            "SELECT status, consumed_entry_id FROM pulsara_v3.prompt_queue_items "
+            "SELECT status, consumed_entry_id, terminal_reason "
+            "FROM pulsara_v3.prompt_queue_items "
             "WHERE session_id = %s AND id = %s",
             (session_id, steer_queue),
-        ).fetchone() == ("PENDING", None)
+        ).fetchone() == ("REJECTED", None, "TARGET_TURN_TERMINAL")
         assert connection.execute(
             "SELECT status FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
             (session_id, turn_id),

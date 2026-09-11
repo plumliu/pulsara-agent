@@ -20,6 +20,20 @@ from .contracts import (
 )
 
 class _AuthorityOperations:
+    def validate_host_writer(
+        self,
+        guard: HostWriterGuard,
+        *,
+        deadline_monotonic: float,
+    ) -> None:
+        """Confirm that an exact Host writer still owns the open session."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+
     def read_session_model_call_binding(
         self,
         guard: HostWriterGuard,

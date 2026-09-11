@@ -1001,8 +1001,7 @@ class _ConversationOperations:
             if (
                 str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != candidate.target_root_turn_id
-                or str(entry["entry_kind"])
-                != EntryKind.USER_CONTROL_FEEDBACK.value
+                or str(entry["entry_kind"]) != EntryKind.USER_CONTROL_FEEDBACK.value
                 or str(entry["conversation_scope_kind"])
                 != ConversationScopeKind.ROOT.value
                 or entry["scope_subagent_task_id"] is not None
@@ -2299,6 +2298,12 @@ class _ConversationOperations:
                         payload={"reason": reason},
                     ),
                 ),
+            )
+            self._reject_terminal_prompt_steer_heads(
+                connection,
+                guard,
+                occurred_at=occurred_at,
+                actor_id=actor_id,
             )
             return True
 
