@@ -4,6 +4,8 @@ import { LocalMemoryApi } from '../lib/memory-api';
 import { RuntimeApiError } from '../lib/runtime-adapter';
 import type {
   CommandReceipt,
+  BackgroundProcessLog,
+  BackgroundProcessPage,
   ForkOutcome,
   LocalPromptSubmission,
   RuntimeAdapter,
@@ -13,6 +15,7 @@ import type {
   RuntimeInteractionContent,
   RuntimeInteractionSummary,
   RuntimeProjection,
+  UserControlQueryResult,
 } from '../lib/runtime-adapter';
 import type {
   AgentTask,
@@ -318,6 +321,30 @@ class FakeConnection implements RuntimeConnection {
     return { commandId: 'command-3', status: 'succeeded' };
   }
 
+  async cancelSubagentTask(): Promise<CommandReceipt> {
+    return { commandId: 'command-cancel-task', status: 'succeeded' };
+  }
+
+  async terminateBackgroundProcess(): Promise<CommandReceipt> {
+    return { commandId: 'command-terminate-process', status: 'succeeded' };
+  }
+
+  async queryControlCommand(): Promise<UserControlQueryResult> {
+    return { status: 'RESULT_UNAVAILABLE' };
+  }
+
+  async listBackgroundProcesses(): Promise<BackgroundProcessPage> {
+    return { processes: [] };
+  }
+
+  async readBackgroundProcessLog(): Promise<BackgroundProcessLog> {
+    throw new Error('No background process fixture');
+  }
+
+  async readCanonicalEntryContent(): Promise<string> {
+    throw new Error('No canonical task activity fixture');
+  }
+
   async compactContext(): Promise<CommandReceipt> {
     return { commandId: 'command-4', status: 'succeeded' };
   }
@@ -483,11 +510,45 @@ class FakeAdapter implements RuntimeAdapter {
 
   listSessions = vi.fn(async () => this.sessions.map((session) => ({ ...session })));
 
-  listSessionTasks = vi.fn(async () => ({
-    tasks: this.taskInventory.map((task) => ({ ...task })),
-    totalCount: this.taskInventory.length,
-    remainingCount: 0,
-  }));
+  listSessionTaskGroups = vi.fn(async () => {
+    const batches = new Map<string, typeof this.taskInventory>();
+    for (const task of this.taskInventory) {
+      if (!task.batchId) continue;
+      batches.set(task.batchId, [...(batches.get(task.batchId) ?? []), task]);
+    }
+    return {
+      groups: [...batches].map(([id, tasks]) => ({
+        id,
+        parentTurnId: tasks[0]?.parentId ?? '',
+        firstAcceptedAt: tasks[0]?.acceptedAt ?? '',
+        taskCount: tasks.length,
+        statusCounts: {
+          pending: 0,
+          active: tasks.filter((task) => task.status === 'running').length,
+          waiting: tasks.filter((task) => task.status === 'waiting').length,
+          completed: tasks.filter((task) => task.status === 'completed').length,
+          cancelled: tasks.filter((task) => task.status === 'cancelled').length,
+          failed: tasks.filter((task) => task.status === 'failed').length,
+          interrupted: tasks.filter((task) => task.status === 'interrupted').length,
+          blocked: tasks.filter((task) => task.status === 'blocked').length,
+        },
+        singleTaskLabel: tasks.length === 1 ? tasks[0]?.label : undefined,
+      })),
+      totalCount: batches.size,
+      remainingCount: 0,
+    };
+  });
+
+  listSessionTasks = vi.fn(async (_sessionId: string, _cursor?: string, batchId?: string) => {
+    const tasks = this.taskInventory.filter((task) => !batchId || task.batchId === batchId);
+    return {
+      tasks: tasks.map((task) => ({ ...task })),
+      totalCount: tasks.length,
+      remainingCount: 0,
+    };
+  });
+
+  listSessionTaskActivities = vi.fn(async () => ({ activities: [] }));
 
   inspectCapabilities = vi.fn(async (sessionId: string) => ({
     ...capabilitySnapshot,
@@ -660,7 +721,7 @@ describe('PulsaraApp', () => {
     expect(await screen.findByRole('heading', { name: '准备发布' })).toBeTruthy();
     expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();
     expect(await screen.findByLabelText('TODO清单')).toBeTruthy();
-    expect(screen.getAllByText('TODO清单')).toHaveLength(2);
+    expect(screen.getAllByText('TODO清单')).toHaveLength(1);
     expect(screen.getByRole('button', { name: '收起TODO清单' }).textContent).toContain('第 2 / 2 步');
     expect(screen.getByText('检查实现')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '收起TODO清单' }));
@@ -1566,6 +1627,7 @@ describe('PulsaraApp', () => {
         id: 'assistant-artifact-race', role: 'assistant', time: '18:03', body: '', status: 'completed',
         traces: [{
           id: 'trace-artifact-race', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search',
+          status: 'completed',
           title: '搜索内容', subtitle: '已完成', resultEntryId: 'result-race', resultText: '{}',
           artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'COMPLETE' },
           meta: '操作完成',
@@ -1610,6 +1672,7 @@ describe('PulsaraApp', () => {
         id: 'assistant-shared', role: 'assistant', time: '18:03', body: '', status: 'completed',
         traces: [{
           id: 'trace-shared', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search',
+          status: 'completed',
           title: '搜索内容', subtitle: '已完成', resultEntryId: 'result-shared', resultText,
           artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'COMPLETE' },
           meta: '操作完成',
@@ -3108,7 +3171,7 @@ describe('PulsaraApp', () => {
       },
     }, {
       id: 'task-interrupted', label: '中断检查', role: '验证', objective: '验证重启边界。',
-      status: 'interrupted', parentId: 'turn-2', dependencyIds: [], color: 'amber',
+      status: 'interrupted', parentId: 'turn-2', batchId: 'batch-2', dependencyIds: [], color: 'amber',
       completionDelivered: false,
     }, {
       id: 'task-blocked', label: '等待产物', role: '整合', objective: '整合前置产物。',
@@ -3117,47 +3180,35 @@ describe('PulsaraApp', () => {
       completionDelivered: false,
     }];
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    render(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     await waitFor(() => expect(adapter.listSessionTasks).toHaveBeenCalled());
 
-    expect(screen.queryByRole('button', { name: '任务' })).toBeNull();
-    expect(await screen.findByText('2 项需留意')).toBeTruthy();
-    expect(screen.getAllByText('已中断').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('依赖未完成').length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/第 \d+ 组/)).toHaveLength(2);
-
-    const taskCard = [...container.querySelectorAll<HTMLElement>('.session-task')]
-      .find((element) => element.textContent?.includes('汇总研究'))!;
-    fireEvent.click(within(taskCard).getByRole('button', { name: /汇总研究/ }));
-    expect(screen.getByRole('heading', { name: '汇总目标' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '项目能力' }).classList.contains('is-active')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '任务' }));
+    expect(screen.getByRole('button', { name: '任务' }).classList.contains('is-active')).toBe(true);
+    expect(await screen.findByText(/1 已完成 · 0 进行中 · 1 需留意/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /中断检查/ })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /子任务组/ }));
+    const dialog = await screen.findByRole('dialog', { name: /子任务组/ });
+    expect(within(dialog).getByRole('button', { name: /等待产物/ })).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: /汇总研究/ }));
+    const taskConversation = dialog.querySelector('.task-conversation');
+    expect(taskConversation).toBeTruthy();
+    expect(within(taskConversation as HTMLElement).getByText('主任务')).toBeTruthy();
+    expect(taskConversation?.querySelectorAll('.user-turn')).toHaveLength(1);
+    expect(taskConversation?.querySelector('.user-turn')?.textContent).toContain('### 汇总目标\n\n整理可见结果。');
+    expect(within(dialog).queryByRole('heading', { name: '汇总目标' })).toBeNull();
     expect(screen.getByRole('heading', { name: '研究结论' })).toBeTruthy();
-    expect(within(taskCard).getByText('目视检查通过')).toBeTruthy();
+    expect(within(dialog).getByText('目视检查通过')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /完全访问/ }));
     fireEvent.click(screen.getByRole('button', { name: /只读/ }));
-    const continueButton = within(taskCard).getByRole('button', { name: '用这份结果继续' });
-    expect(within(taskCard).getByRole('tooltip').textContent).toContain('启动新一轮，让 Pulsara 基于这项工作的结果继续处理');
+    const continueButton = within(dialog).getByRole('button', { name: '用这份结果继续' });
+    expect(within(dialog).getByText(/不会重新运行子任务/)).toBeTruthy();
     fireEvent.click(continueButton);
     await waitFor(() => expect(adapter.lastConnection?.acceptSubagentCompletion).toHaveBeenCalledWith('task-complete', 'read-only'));
     expect(await screen.findByText('Pulsara 已收到结果')).toBeTruthy();
     expect(screen.getByRole('button', { name: /完全访问/ })).toBeTruthy();
-
-    vi.useFakeTimers();
-    try {
-      fireEvent.click(within(taskCard).getByRole('button', { name: '在对话中查看' }));
-      const focusedRun = container.querySelector('.subagent-run.is-focused[data-task-id="task-complete"]');
-      expect(focusedRun).toBeTruthy();
-      expect(focusedRun?.classList.contains('is-expanded')).toBe(true);
-
-      await act(async () => vi.advanceTimersByTimeAsync(2600));
-
-      const settledRun = container.querySelector('.subagent-run[data-task-id="task-complete"]');
-      expect(settledRun?.classList.contains('is-focused')).toBe(false);
-      expect(settledRun?.classList.contains('is-expanded')).toBe(true);
-      expect(document.activeElement).not.toBe(settledRun?.querySelector('.subagent-run__header'));
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

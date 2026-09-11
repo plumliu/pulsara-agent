@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  createUserControlCommandRef,
   LocalHttpRuntimeAdapter,
   mergeRuntimeTaskInventory,
   selectPromptCommand,
@@ -94,6 +95,165 @@ function connectPayload(
     live_control_snapshot: { snapshot: liveControl },
   };
 }
+
+it('preserves PR03 exact control/query identities and typed query retirement states', async () => {
+  vi.stubGlobal('crypto', {
+    ...globalThis.crypto,
+    randomUUID: () => '66666666-6666-4666-8666-666666666666',
+  });
+  const responses = [
+    connectPayload([], {}, [], {
+      host_session_id: 'host:one',
+      active_root_turn_id: 'turn:A',
+      control_admission_deadline_ms: '9000',
+    }),
+    { command_outcome: {
+      command_id: 'command:control:9000:66666666-6666-4666-8666-666666666666',
+      status: 'PENDING',
+      target_id: 'turn:A',
+      public_code: 'CONTROL_ACCEPTED',
+      user_control: {
+        accepted: true,
+        execution: 'USER_CONTROL_RUNNING',
+        target: { kind: 'USER_CONTROL_ROOT_TURN', target_id: 'turn:A' },
+      },
+    } },
+    { query_command: {
+      found: false,
+      control_query_status: 'CONTROL_QUERY_RESULT_UNAVAILABLE',
+    } },
+    { query_command: {
+      found: false,
+      control_query_status: 'CONTROL_QUERY_OWNER_UNAVAILABLE',
+    } },
+    { query_command: {
+      found: true,
+      control_query_status: 'CONTROL_QUERY_FOUND',
+      outcome: {
+        command_id: 'command:control:9000:66666666-6666-4666-8666-666666666666',
+        status: 'SUCCEEDED',
+        target_id: 'turn:A',
+        user_control: {
+          accepted: true,
+          execution: 'USER_CONTROL_FINISHED',
+        },
+      },
+    } },
+  ];
+  const requests: Array<{ operation: string; body: Record<string, unknown> }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const operation = String(input).split('/').at(-1) ?? '';
+    if (operation !== 'connections') {
+      requests.push({
+        operation,
+        body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>,
+      });
+    }
+    return new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }));
+
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const projection = connection.current();
+  const reference = createUserControlCommandRef(
+    projection, 'session-1', 'STOP_ACTIVE_TURN', 'ROOT_TURN', 'turn:A',
+  );
+  const accepted = await connection.stopActiveTurn(reference);
+  expect(accepted).toMatchObject({
+    status: 'pending',
+    targetId: 'turn:A',
+    userControl: { accepted: true, execution: 'RUNNING' },
+  });
+  expect(await connection.queryControlCommand(reference)).toEqual({
+    status: 'RESULT_UNAVAILABLE',
+  });
+  expect(await connection.queryControlCommand(reference)).toEqual({
+    status: 'OWNER_UNAVAILABLE',
+  });
+  expect(await connection.queryControlCommand(reference)).toMatchObject({
+    status: 'FOUND',
+    receipt: { status: 'succeeded', userControl: { execution: 'FINISHED' } },
+  });
+  expect(requests[0]).toEqual({
+    operation: 'command',
+    body: {
+      command_id: reference.commandId,
+      command_kind: 'STOP_ACTIVE_TURN',
+      client_submission_id: '',
+      expected_session_id: 'session-1',
+      expected_host_session_id: 'host:one',
+      target_turn_id: 'turn:A',
+    },
+  });
+  expect(requests.slice(1).every((request) => (
+    request.operation === 'query-command'
+    && (request.body.expected_control as Record<string, unknown>).target_id === 'turn:A'
+  ))).toBe(true);
+});
+
+it('binds PR03 background list and log reads to the exact Host and process', async () => {
+  const responses = [
+    connectPayload([], {}, [], { host_session_id: 'host:one' }),
+    { background_processes: {
+      session_id: 'session-1',
+      host_session_id: 'host:one',
+      processes: [{
+        process_id: 'process:one', command: 'printf exact', cwd: '/tmp',
+        status: 'running', physical_state: 'RUNNING', output_cursor: 'cursor:1',
+        retained_from_cursor: 'cursor:0', origin: { turn_id: 'turn:A' },
+      }],
+      next_cursor: 'page:next',
+    } },
+    { background_process_log: {
+      session_id: 'session-1', host_session_id: 'host:one',
+      process: {
+        process_id: 'process:one', command: 'printf exact', cwd: '/tmp',
+        status: 'running', physical_state: 'RUNNING', output_cursor: 'cursor:2',
+        retained_from_cursor: 'cursor:0', origin: { turn_id: 'turn:A' },
+      },
+      output: '逐字输出🙂', output_cursor: 'cursor:2', retained_from_cursor: 'cursor:0',
+      gap_before_output: false, truncated_by_response_bound: false,
+      source_coverage: 'COMPLETE',
+    } },
+  ];
+  const calls: Array<{ operation: string; body: Record<string, unknown> }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const operation = String(input).split('/').at(-1) ?? '';
+    if (operation !== 'connections') calls.push({
+      operation,
+      body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  }));
+
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(await connection.listBackgroundProcesses('page:old')).toMatchObject({
+    processes: [{ processId: 'process:one', command: 'printf exact' }],
+    nextCursor: 'page:next',
+  });
+  expect(await connection.readBackgroundProcessLog('process:one', 'cursor:1'))
+    .toMatchObject({ output: '逐字输出🙂', outputCursor: 'cursor:2' });
+  expect(calls).toEqual([
+    {
+      operation: 'list-background-processes',
+      body: {
+        expected_session_id: 'session-1', expected_host_session_id: 'host:one',
+        cursor: 'page:old', maximum_items: 50,
+      },
+    },
+    {
+      operation: 'read-background-process-log',
+      body: {
+        expected_session_id: 'session-1', expected_host_session_id: 'host:one',
+        process_id: 'process:one', output_cursor: 'cursor:1', max_output_chars: 32000,
+      },
+    },
+  ]);
+});
 
 it('requests Plugin discovery using only the source directory', async () => {
   const result = {candidates: []};

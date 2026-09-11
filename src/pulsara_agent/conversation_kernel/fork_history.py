@@ -46,6 +46,10 @@ from pulsara_agent.model_input.provider_replay import (
     manifest_cut_metadata_bytes,
     quote_provider_dispatch_composite_bytes,
 )
+from pulsara_agent.ports.user_control_feedback import (
+    USER_CONTROL_FEEDBACK_MEDIA_TYPE,
+    project_user_control_feedback_for_provider,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
@@ -286,6 +290,10 @@ def read_fork_historical_material(
                     FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
                     None,
                 ),
+                "USER_CONTROL_FEEDBACK": (
+                    FrozenProviderInputItemKind.USER,
+                    CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
+                ),
             }
             if (
                 initial["entry_kind"] not in kinds
@@ -398,6 +406,12 @@ def read_fork_historical_material(
                     _project_plan_continuation_storage(attributed, text)
                 elif raw["entry_kind"] == "TERMINAL_OBSERVATION":
                     _validate_terminal_observation_content(body)
+                elif raw["entry_kind"] == "USER_CONTROL_FEEDBACK":
+                    if raw["content_media_type"] != USER_CONTROL_FEEDBACK_MEDIA_TYPE:
+                        raise ConversationKernelConflict(
+                            "Fork user control feedback descriptor is invalid"
+                        )
+                    project_user_control_feedback_for_provider(body)
                 elif raw["entry_kind"] == "INTER_AGENT_MESSAGE":
                     completion = validate_subagent_completion_storage_body(body)
                     if completion["task_id"] != attributed["source_subagent_task_id"]:

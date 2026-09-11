@@ -854,6 +854,7 @@ def _provider_item_product_kind(item: FrozenProviderInputItem) -> str:
             CanonicalInputOriginKind.SUBAGENT_OBJECTIVE: "子任务目标",
             CanonicalInputOriginKind.PLAN_CONTINUATION: "计划运行时续接",
             CanonicalInputOriginKind.INTER_AGENT_MESSAGE: "代理协作消息",
+            CanonicalInputOriginKind.USER_CONTROL_FEEDBACK: "用户控制反馈",
         }[item.input_origin]
     return {
         FrozenProviderInputItemKind.CONTEXT_SNAPSHOT: "已采用的上下文摘要",

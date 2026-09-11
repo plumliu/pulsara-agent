@@ -720,7 +720,7 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
     # Fork spec §7.6 adds groups, genesis, and irreducible historical closures.
     assert len(CONVERSATION_KERNEL_RELATIONS) == 28
     assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 28
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1

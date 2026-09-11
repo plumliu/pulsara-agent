@@ -28,6 +28,8 @@ from pulsara_agent.terminal_process.models import (
     TerminalResult,
     TerminalSessionState,
     TerminalStatus,
+    TerminalTerminationDisposition,
+    TerminalTerminationResult,
 )
 from pulsara_agent.terminal_process.output import (
     OutputSubscriber,
@@ -104,12 +106,14 @@ class _ProcessState:
     started_at: float
     cwd_probe_path: Path | None
     deadline_timer: Timer | None = None
-    timed_out: bool = False
-    killed: bool = False
+    termination_intent: TerminalStatus | None = None
+    final_status: TerminalStatus | None = None
+    final_exit_code: int | None = None
     stdin_closed: bool = False
     ended_at: float | None = None
     physical_state: TerminalPhysicalState = TerminalPhysicalState.RUNNING
     yield_decision: bool | None = None
+    background_adopted: bool = False
     completion_offered: bool = False
     reader_started: bool = False
     watcher_started: bool = False
@@ -121,6 +125,14 @@ class _ProcessState:
         code = self.process.poll()
         if code is not None and self.physical_state is TerminalPhysicalState.RUNNING:
             self.physical_state = TerminalPhysicalState.TERMINALIZING
+
+    @property
+    def timed_out(self) -> bool:
+        return self.termination_intent is TerminalStatus.TIMEOUT
+
+    @property
+    def killed(self) -> bool:
+        return self.termination_intent is TerminalStatus.KILLED
 
 
 class ProcessRegistry:
@@ -280,14 +292,16 @@ class ProcessRegistry:
             if decision_aborted:
                 with state.lock:
                     state.yield_decision = True
-                state.killed = state.killed or _process_is_live(state)
+                _accept_termination_intent(state, TerminalStatus.KILLED)
                 _terminate_process_group(state)
                 if not _join_physical(state, timeout=2.0):
                     raise ProcessPhysicalJoinError(
                         "terminal decision abort did not physically join"
                     )
                 self._mark_foreground_decision_result_ready(
-                    decision_handle.attempt_id, state.process_id
+                    decision_handle.attempt_id,
+                    state.process_id,
+                    background_adopted=False,
                 )
                 return state, False, None
             if yield_time_ms > 0:
@@ -298,22 +312,34 @@ class ProcessRegistry:
                 with state.lock:
                     if state.yield_decision is None:
                         state.yield_decision = True
-                state.killed = state.killed or _process_is_live(state)
+                _accept_termination_intent(state, TerminalStatus.KILLED)
                 _terminate_process_group(state)
                 if not _join_physical(state, timeout=2.0):
                     raise ProcessPhysicalJoinError(
                         "terminal decision watchdog did not physically join"
                     )
                 self._mark_foreground_decision_result_ready(
-                    decision_handle.attempt_id, state.process_id
+                    decision_handle.attempt_id,
+                    state.process_id,
+                    background_adopted=False,
                 )
                 return state, False, None
             state.refresh()
             yielded = not state.physical_completion.is_set()
             final_cwd = self.finalize_yield_decision(state, yielded=yielded)
-            self._mark_foreground_decision_result_ready(
-                decision_handle.attempt_id, state.process_id
+            published = self._mark_foreground_decision_result_ready(
+                decision_handle.attempt_id,
+                state.process_id,
+                background_adopted=yielded,
             )
+            if yielded and not published:
+                _accept_termination_intent(state, TerminalStatus.KILLED)
+                _terminate_process_group(state)
+                if not _join_physical(state, timeout=2.0):
+                    raise ProcessPhysicalJoinError(
+                        "terminal decision abort did not physically join"
+                    )
+                return state, False, None
             return state, yielded, final_cwd
         except BaseException as error:
             # No caller received this process identity, so it must not remain
@@ -323,7 +349,7 @@ class ProcessRegistry:
             with state.lock:
                 if state.yield_decision is None:
                     state.yield_decision = True
-            state.killed = state.killed or _process_is_live(state)
+            _accept_termination_intent(state, TerminalStatus.KILLED)
             _terminate_process_group(state)
             if not _join_physical(state, timeout=2.0):
                 # Preserve the still-physical owner for Host close rather than
@@ -394,7 +420,7 @@ class ProcessRegistry:
             if attempt.process_id is not None:
                 state = self._states.get(attempt.process_id)
         if state is not None:
-            state.killed = state.killed or _process_is_live(state)
+            _accept_termination_intent(state, TerminalStatus.KILLED)
             _terminate_process_group(state)
 
     def _foreground_decision_abort_requested(self, attempt_id: str) -> bool:
@@ -406,17 +432,34 @@ class ProcessRegistry:
             )
 
     def _mark_foreground_decision_result_ready(
-        self, attempt_id: str, process_id: str
-    ) -> None:
+        self,
+        attempt_id: str,
+        process_id: str,
+        *,
+        background_adopted: bool,
+    ) -> bool:
         with self._launch_condition:
             attempt = self._decision_attempts.get(attempt_id)
             if attempt is None:
                 raise RuntimeError("terminal foreground decision attempt is absent")
+            state = self._states.get(process_id)
+            adoption_published = bool(
+                background_adopted
+                and attempt.adoption_allowed
+                and attempt.state
+                is not TerminalForegroundDecisionState.ABORT_REQUESTED
+                and state is not None
+                and state.yield_decision is True
+            )
+            if adoption_published:
+                with state.lock:
+                    state.background_adopted = True
             attempt.process_id = process_id
             attempt.state = TerminalForegroundDecisionState.RESULT_READY
             if attempt.timer is not None:
                 attempt.timer.cancel()
                 attempt.timer = None
+            return adoption_published or not background_adopted
 
     def _settle_foreground_decision_locked(self, attempt_id: str) -> None:
         attempt = self._decision_attempts.get(attempt_id)
@@ -600,8 +643,8 @@ class ProcessRegistry:
             sleep(0.01)
         with state.lock:
             state.ended_at = monotonic()
-        status = _status(state)
-        state.output.finalize(status=status.value, exit_code=code)
+            status, exit_code = _freeze_final_outcome_locked(state, code=code)
+        state.output.finalize(status=status.value, exit_code=exit_code)
         if state.deadline_timer is not None:
             state.deadline_timer.cancel()
         self._cleanup_disallowed_cwd_probe(state)
@@ -759,12 +802,63 @@ class ProcessRegistry:
     def kill(
         self, process_id: str, *, max_output_chars: int, owner_host_session_id: str
     ) -> TerminalResult:
-        state = self._owned(process_id, owner_host_session_id)
-        state.killed = True
-        _terminate_process_group(state)
-        if not _join_physical(state, timeout=2.0):
+        termination = self.terminate_if_running(
+            process_id,
+            max_output_chars=max_output_chars,
+            owner_host_session_id=owner_host_session_id,
+        )
+        if (
+            termination.disposition
+            is TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
+        ):
             raise ProcessPhysicalJoinError("terminal process did not physically join")
-        return _snapshot(state, max_output_chars)
+        return termination.result
+
+    def terminate_if_running(
+        self,
+        process_id: str,
+        *,
+        max_output_chars: int,
+        owner_host_session_id: str,
+        join_timeout_seconds: float = 2.0,
+    ) -> TerminalTerminationResult:
+        state = self._owned(process_id, owner_host_session_id)
+        with state.lock:
+            already_terminal = (
+                state.final_status is not None and state.physical_completion.is_set()
+            )
+        if already_terminal:
+            return TerminalTerminationResult(
+                TerminalTerminationDisposition.ALREADY_TERMINAL,
+                _snapshot(state, max_output_chars),
+                state.physical_state.value,
+                False,
+            )
+
+        accepted = _accept_termination_intent(state, TerminalStatus.KILLED)
+        termination_attempted = accepted or _process_is_live(state)
+        if termination_attempted:
+            _terminate_process_group(state)
+        joined = _join_physical(state, timeout=join_timeout_seconds)
+        group_alive = _process_is_live(state)
+        if joined and not termination_attempted:
+            # A naturally terminal process, or a process already owned by an
+            # earlier terminal settlement, received neither a new intent nor
+            # a signal attempt from this invocation.  Physical joining cannot
+            # be used as evidence that this request performed termination.
+            disposition = TerminalTerminationDisposition.ALREADY_TERMINAL
+        elif joined:
+            disposition = TerminalTerminationDisposition.TERMINATION_COMPLETED
+        else:
+            disposition = (
+                TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
+            )
+        return TerminalTerminationResult(
+            disposition,
+            _snapshot(state, max_output_chars),
+            state.physical_state.value,
+            group_alive,
+        )
 
     def list_processes(
         self,
@@ -786,6 +880,19 @@ class ProcessRegistry:
             if running and include_running or not running and include_finished:
                 result.append(_info(state))
         return sorted(result, key=lambda item: item.started_at_monotonic)
+
+    def list_background_processes(
+        self, *, owner_host_session_id: str
+    ) -> list[TerminalProcessInfo]:
+        return [
+            item
+            for item in self.list_processes(
+                owner_host_session_id=owner_host_session_id,
+                include_finished=True,
+                include_running=True,
+            )
+            if item.background_adopted
+        ]
 
     def freeze_compaction_handoff(
         self, *, owner_host_session_id: str
@@ -899,7 +1006,7 @@ class ProcessRegistry:
                 if state.owner_host_session_id == owner
             ]
         for state in states:
-            state.killed = state.killed or _process_is_live(state)
+            _accept_termination_intent(state, TerminalStatus.KILLED)
             _terminate_process_group(state)
         results: list[TerminalResult] = []
         for state in states:
@@ -945,7 +1052,7 @@ class ProcessRegistry:
                 if state.owner_host_session_id == owner
             ]
         for state in states:
-            state.killed = state.killed or _process_is_live(state)
+            _accept_termination_intent(state, TerminalStatus.KILLED)
             _terminate_process_group(state)
         results: list[TerminalResult] = []
         for state in states:
@@ -982,7 +1089,7 @@ class ProcessRegistry:
             state = self._states.get(process_id)
         if state is None or not _process_is_live(state):
             return
-        state.timed_out = True
+        _accept_termination_intent(state, TerminalStatus.TIMEOUT)
         _terminate_process_group(state)
 
     def _prune_locked(self) -> None:
@@ -1267,6 +1374,14 @@ class TerminalSessionManager:
     def kill_process(self, process_id: str, **kwargs):
         return self.process_registry.kill(process_id, **kwargs)
 
+    def terminate_process_if_running(self, process_id: str, **kwargs):
+        return self.process_registry.terminate_if_running(process_id, **kwargs)
+
+    def list_background_processes(self, *, owner_host_session_id: str):
+        return self.process_registry.list_background_processes(
+            owner_host_session_id=owner_host_session_id
+        )
+
     def live_process_count(self, *, owner_host_session_id: str) -> int:
         return self.process_registry.live_count(
             owner_host_session_id=owner_host_session_id
@@ -1459,6 +1574,45 @@ def _process_is_live(state: _ProcessState) -> bool:
     return state.process.poll() is None or _process_group_exists(state.process.pid)
 
 
+def _accept_termination_intent(
+    state: _ProcessState, reason: TerminalStatus
+) -> bool:
+    """Linearize one terminal intent without overwriting a frozen outcome."""
+
+    if reason not in {TerminalStatus.KILLED, TerminalStatus.TIMEOUT}:
+        raise ValueError("terminal termination intent is invalid")
+    with state.lock:
+        if state.final_status is not None or not _process_is_live(state):
+            if state.final_status is None:
+                _freeze_final_outcome_locked(state, code=state.process.poll())
+            return False
+        if state.termination_intent is None:
+            state.termination_intent = reason
+            return True
+        return False
+
+
+def _freeze_final_outcome_locked(
+    state: _ProcessState, *, code: int | None
+) -> tuple[TerminalStatus, int]:
+    """Freeze the sole status/exit pair while ``state.lock`` is held."""
+
+    if state.final_status is None:
+        if state.termination_intent is TerminalStatus.TIMEOUT:
+            state.final_status = TerminalStatus.TIMEOUT
+            state.final_exit_code = _TIMEOUT_EXIT_CODE
+        elif state.termination_intent is TerminalStatus.KILLED:
+            state.final_status = TerminalStatus.KILLED
+            state.final_exit_code = -1 if code is None else code
+        else:
+            state.final_status = (
+                TerminalStatus.SUCCESS if code == 0 else TerminalStatus.ERROR
+            )
+            state.final_exit_code = -1 if code is None else code
+    assert state.final_exit_code is not None
+    return state.final_status, state.final_exit_code
+
+
 def _occupies_live_capacity(state: _ProcessState) -> bool:
     """Retain capacity until the complete process-local physical boundary."""
 
@@ -1466,20 +1620,26 @@ def _occupies_live_capacity(state: _ProcessState) -> bool:
 
 
 def _status(state: _ProcessState) -> TerminalStatus:
-    code = state.process.poll()
     if _process_is_live(state):
         return TerminalStatus.RUNNING
-    if state.timed_out:
-        return TerminalStatus.TIMEOUT
-    if state.killed:
-        return TerminalStatus.KILLED
-    return TerminalStatus.SUCCESS if code == 0 else TerminalStatus.ERROR
+    with state.lock:
+        status, _exit_code = _freeze_final_outcome_locked(
+            state, code=state.process.poll()
+        )
+        return status
 
 
 def _info(state: _ProcessState) -> TerminalProcessInfo:
     state.refresh()
     output = state.output.snapshot(maximum_chars=1)
     ended = state.ended_at
+    status = _status(state)
+    exit_code: int | None = None
+    if status is not TerminalStatus.RUNNING:
+        with state.lock:
+            _frozen_status, exit_code = _freeze_final_outcome_locked(
+                state, code=state.process.poll()
+            )
     return TerminalProcessInfo(
         process_id=state.process_id,
         terminal_session_id=state.terminal_session_id,
@@ -1487,8 +1647,8 @@ def _info(state: _ProcessState) -> TerminalProcessInfo:
         cwd=str(state.cwd),
         backend_type="local",
         io_mode=state.io_mode.value,
-        status=_status(state).value,
-        exit_code=None if _process_is_live(state) else state.process.poll(),
+        status=status.value,
+        exit_code=exit_code,
         timed_out=state.timed_out,
         stdin_closed=state.stdin_closed,
         started_at_monotonic=state.started_at,
@@ -1501,6 +1661,7 @@ def _info(state: _ProcessState) -> TerminalProcessInfo:
         output_cursor=output.output_cursor,
         retained_from_cursor=output.retained_from_cursor,
         physical_state=state.physical_state.value,
+        background_adopted=state.background_adopted,
     )
 
 
@@ -1513,6 +1674,9 @@ def _snapshot(
     state.refresh()
     status = _status(state)
     code = state.process.poll()
+    if status is not TerminalStatus.RUNNING:
+        with state.lock:
+            _frozen_status, code = _freeze_final_outcome_locked(state, code=code)
     snapshot, artifact_candidate = state.output.snapshot_with_artifact_candidate(
         maximum_chars=maximum_chars,
         since_cursor=since_cursor,
@@ -1521,11 +1685,7 @@ def _snapshot(
         status=status,
         output=snapshot.text,
         exit_code=(
-            _TIMEOUT_EXIT_CODE
-            if state.timed_out
-            else code
-            if not _process_is_live(state) and code is not None
-            else -1
+            code if status is not TerminalStatus.RUNNING and code is not None else -1
         ),
         cwd=str(state.cwd),
         timed_out=state.timed_out,

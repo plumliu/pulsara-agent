@@ -55,6 +55,10 @@ from pulsara_agent.ports.terminal_observation import (
     NewTurnInstallation,
     TerminalObservationInstallationAttempt,
 )
+from pulsara_agent.ports.user_control_feedback import (
+    USER_CONTROL_FEEDBACK_MEDIA_TYPE,
+    UserControlFeedbackInstallationAttempt,
+)
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     freeze_json,
@@ -888,6 +892,136 @@ class _ConversationOperations:
             return AcceptedEntry(
                 entry_id=entry_id,
                 turn_id=turn_id,
+                entry_sequence=int(entry["entry_sequence"]),
+                event_sequence=int(event["event_sequence"]),
+            )
+
+    def accept_user_control_feedback(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: UserControlFeedbackInstallationAttempt,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry:
+        """Atomically append one exact user-control fact to its running ROOT."""
+
+        if candidate.session_id != guard.session_id:
+            raise ValueError("user control feedback belongs to another session")
+        if candidate.writer_generation != guard.writer_generation:
+            raise StaleHostWriter("user control feedback writer generation is stale")
+        content = InlineContent.from_bytes(
+            candidate.content.canonical_bytes(),
+            media_type=USER_CONTROL_FEEDBACK_MEDIA_TYPE,
+            codec="utf-8",
+        )
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            turn = self._require_provider_safe_turn_in_transaction(
+                connection,
+                session_id=guard.session_id,
+                turn_id=candidate.target_root_turn_id,
+                lock=True,
+            )
+            workspace_id = self._workspace_id(connection, guard.session_id)
+            if (
+                str(turn["workspace_id"]) != workspace_id
+                or workspace_id != candidate.workspace_id
+                or str(turn["conversation_scope_kind"])
+                != ConversationScopeKind.ROOT.value
+            ):
+                raise ConversationKernelConflict(
+                    "user control feedback target is not the bound ROOT"
+                )
+            entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
+            self._insert_entry(
+                connection,
+                session_id=guard.session_id,
+                workspace_id=workspace_id,
+                turn_id=candidate.target_root_turn_id,
+                entry_id=candidate.entry_id,
+                entry_sequence=entry_sequence,
+                entry_kind=EntryKind.USER_CONTROL_FEEDBACK,
+                scope_kind=ConversationScopeKind.ROOT,
+                scope_task_id=None,
+                content=content,
+            )
+            event = self._append_events(
+                connection,
+                guard,
+                workspace_id=workspace_id,
+                drafts=(self._user_control_feedback_event(candidate),),
+            )[0]
+            return AcceptedEntry(
+                entry_id=candidate.entry_id,
+                turn_id=candidate.target_root_turn_id,
+                entry_sequence=entry_sequence,
+                event_sequence=event.event_sequence,
+            )
+
+    def confirm_user_control_feedback_winner(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: UserControlFeedbackInstallationAttempt,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        """Confirm only the exact entry/event pair after an ambiguous commit."""
+
+        content = InlineContent.from_bytes(
+            candidate.content.canonical_bytes(),
+            media_type=USER_CONTROL_FEEDBACK_MEDIA_TYPE,
+            codec="utf-8",
+        )
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            entry = connection.execute(
+                """
+                SELECT * FROM pulsara_v3.transcript_entries
+                WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s
+                """,
+                (guard.session_id, candidate.entry_id),
+            ).fetchone()
+            event_draft = self._user_control_feedback_event(candidate)
+            events = connection.execute(
+                "SELECT * FROM pulsara_v3.agent_events WHERE event_id = %s",
+                (event_draft.event_id,),
+            ).fetchall()
+            if entry is None and not events:
+                return None
+            if entry is None or len(events) != 1:
+                raise ConversationKernelConflict(
+                    "user control feedback winner is partially installed"
+                )
+            if (
+                str(entry["workspace_id"]) != candidate.workspace_id
+                or str(entry["turn_id"]) != candidate.target_root_turn_id
+                or str(entry["entry_kind"])
+                != EntryKind.USER_CONTROL_FEEDBACK.value
+                or str(entry["conversation_scope_kind"])
+                != ConversationScopeKind.ROOT.value
+                or entry["scope_subagent_task_id"] is not None
+                or entry["context_binding_revision_id"] is not None
+                or entry["provider_input_through_sequence"] is not None
+                or self._content_from_row(entry) != content
+            ):
+                raise ConversationKernelConflict(
+                    "user control feedback identity names another entry"
+                )
+            event = self._exact_event_for_confirmation(
+                connection,
+                event_draft,
+                session_id=guard.session_id,
+                workspace_id=candidate.workspace_id,
+            )
+            return AcceptedEntry(
+                entry_id=candidate.entry_id,
+                turn_id=candidate.target_root_turn_id,
                 entry_sequence=int(entry["entry_sequence"]),
                 event_sequence=int(event["event_sequence"]),
             )
@@ -2482,4 +2616,27 @@ class _ConversationOperations:
                 "entry_kind": EntryKind.TERMINAL_OBSERVATION.value,
                 "observation_kind": candidate.content.observation_kind.value,
             },
+        )
+
+    @staticmethod
+    def _user_control_feedback_event(
+        candidate: UserControlFeedbackInstallationAttempt,
+    ) -> CommittedEventDraft:
+        return CommittedEventDraft(
+            event_id=_stable_identity(
+                "event",
+                candidate.entry_id,
+                CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED.value,
+            ),
+            event_type=CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED,
+            subject=CommittedEventSubject(
+                slot=SubjectSlot.ENTRY,
+                subject_id=candidate.entry_id,
+            ),
+            actor_kind="user",
+            actor_id=candidate.actor_id,
+            sensitivity_class="S1",
+            projection_profile="IMMUTABLE_ENTRY",
+            occurred_at=candidate.occurred_at,
+            payload={"entry_kind": EntryKind.USER_CONTROL_FEEDBACK.value},
         )

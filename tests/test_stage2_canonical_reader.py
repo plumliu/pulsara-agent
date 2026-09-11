@@ -1275,6 +1275,8 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         assert envelope["message_type"] == "FINAL_ANSWER"
         assert envelope["sender"] == {"kind": "SUBAGENT_TASK", "task_id": task_id}
         assert envelope["content"]["result"]["summary"] == child_result_text
+        assert "schema_version" not in envelope["content"]
+        assert "pulsara.subagent-completion.v1" not in materialized.items[-1].text
         assert (
             materialized.items[-1].input_origin
             is CanonicalInputOriginKind.INTER_AGENT_MESSAGE

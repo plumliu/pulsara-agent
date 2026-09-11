@@ -146,6 +146,13 @@ _MODEL_UNIVERSE_ADDED_METHODS = {
     "reject_prepared_prompt_head_model_unavailable",
     "update_session_model_call_binding",
 }
+_PR03_ADDED_METHODS = {
+    "_user_control_feedback_event",
+    "accept_user_control_feedback",
+    "confirm_user_control_feedback_winner",
+    "list_subagent_task_activities",
+    "list_subagent_task_groups",
+}
 _MODEL_UNIVERSE_CHANGED_METHODS = {
     "confirm_prompt_ingress",
     "enqueue_prompt",
@@ -810,6 +817,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _ROUND9_2_ADDED_METHODS
                 | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
                 | _MODEL_UNIVERSE_ADDED_METHODS
+                | _PR03_ADDED_METHODS
                 | {
                     "_management_connection",
                     "fork_conversation",
@@ -932,6 +940,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND9_2_ADDED_METHODS
             | _ASYNC_SUBAGENT_COMPLETION_ADDED_METHODS
             | _MODEL_UNIVERSE_ADDED_METHODS
+            | _PR03_ADDED_METHODS
             | {
                 "_management_connection",
                 "fork_conversation",
@@ -1020,6 +1029,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND9_2_ADDED_METHODS
         | _ROUND9_2_CHANGED_METHODS
         | _MODEL_UNIVERSE_ADDED_METHODS
+        | _PR03_ADDED_METHODS
         | _MODEL_UNIVERSE_CHANGED_METHODS
         | _MODEL_UNIVERSE_REMOVED_METHODS
         | _ROUND10_REMOVED_METHODS
@@ -1119,7 +1129,7 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert ConversationKernelRepository.__module__ == (
         "pulsara_agent.conversation_kernel.repository"
     )
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1

@@ -52,7 +52,7 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1

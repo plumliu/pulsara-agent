@@ -80,9 +80,11 @@ class _TaskCore:
         maximum_items: int,
         after_accepted_at: datetime | None,
         after_task_id: str | None,
+        batch_id: str | None,
     ):
         assert session_id == "session-1"
         assert maximum_items == 2
+        assert batch_id is None
         self.calls.append((after_accepted_at, after_task_id))
         start = 0
         if after_task_id is not None:

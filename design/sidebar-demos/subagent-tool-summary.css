@@ -1,0 +1,40 @@
+.demo-task-result {
+  border-top: 1px solid var(--line);
+  background: var(--paper-raised);
+  color: var(--ink-soft);
+}
+
+.demo-task-result__jump {
+  display: block;
+  width: 100%;
+  padding: 16px 18px;
+  background: transparent;
+  text-align: left;
+  transition: background .15s;
+}
+
+.demo-task-result__jump:hover { background: var(--paper-solid); }
+.demo-task-result__jump:focus-visible { outline-offset: -3px; }
+.demo-task-result__heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.demo-task-result__heading strong { font-size: 14px; font-weight: 600; }
+.demo-task-result__link { display: inline-flex; align-items: center; gap: 6px; color: var(--violet); font-size: 13px; }
+.demo-task-result__link svg { transition: transform .15s; }
+.demo-task-result__jump:hover .demo-task-result__link svg { transform: translateX(3px); }
+.demo-task-result__names { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 10px 24px; margin-top: 14px; }
+.demo-task-result__name { display: flex; align-items: baseline; gap: 9px; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.demo-task-result__number { color: var(--muted); font: 12px var(--mono); flex-shrink: 0; }
+
+.demo-task-result__raw { border-top: 1px solid var(--line); }
+.demo-task-result__raw > summary { display: flex; align-items: center; gap: 6px; padding: 9px 18px; list-style: none; color: var(--muted); font-size: 12px; cursor: pointer; }
+.demo-task-result__raw > summary::-webkit-details-marker { display: none; }
+.demo-task-result__raw > summary:hover { color: var(--ink); }
+.demo-task-result__raw[open] > summary svg { transform: rotate(90deg); }
+.demo-task-result__raw-body { padding: 0 18px 14px; }
+.demo-task-result__raw-body button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--paper-solid); font-size: 12px; }
+.demo-task-result__raw-body [role='status'] { margin-left: 8px; color: var(--red); font-size: 12px; }
+.demo-task-result__raw-body pre { max-height: 260px; overflow: auto; margin: 9px 0 0; padding: 12px; border-radius: 6px; background: var(--paper-deep); color: var(--ink-soft); font: 12px/1.75 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+@media (prefers-reduced-motion: reduce) {
+  .demo-task-result__jump, .demo-task-result__link svg { transition: none; }
+  .demo-task-result__jump:hover .demo-task-result__link svg { transform: none; }
+}

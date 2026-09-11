@@ -201,11 +201,14 @@ class LocalSessionController:
         *,
         maximum_items: int = _TASK_PAGE_MAXIMUM,
         cursor: str | None = None,
+        batch_id: str | None = None,
     ) -> dict[str, object]:
         """Cold-read one session's complete durable task inventory by page."""
 
         if not 1 <= maximum_items <= _TASK_PAGE_MAXIMUM:
             raise ValueError("task page size is out of bounds")
+        if batch_id is not None and not batch_id:
+            raise ValueError("task batch id is invalid")
         summary = await self.core.read_resumable_session(
             session_id,
             memory_domain_id=self.workspace_input.memory_domain_id,
@@ -219,12 +222,14 @@ class LocalSessionController:
             after_accepted_at, after_task_id, seen_count = _decode_task_cursor(
                 cursor,
                 session_id=session_id,
+                batch_id=batch_id,
             )
         durable, dependency_rows = await self.core.read_subagent_task_page(
             session_id=session_id,
             maximum_items=maximum_items,
             after_accepted_at=after_accepted_at,
             after_task_id=after_task_id,
+            batch_id=batch_id,
         )
         has_more = len(durable) > maximum_items
         page = durable[:maximum_items]
@@ -257,6 +262,7 @@ class LocalSessionController:
                 accepted_at=accepted_at,
                 task_id=str(last["id"]),
                 seen_count=next_seen_count,
+                batch_id=batch_id,
             )
         return {
             "session_id": session_id,
@@ -264,6 +270,184 @@ class LocalSessionController:
             "total_count": total_count,
             "page_count": len(tasks),
             "remaining_count": max(0, total_count - next_seen_count),
+            "next_cursor": next_cursor,
+        }
+
+    async def list_session_task_groups(
+        self,
+        session_id: str,
+        *,
+        maximum_items: int = _TASK_PAGE_MAXIMUM,
+        cursor: str | None = None,
+    ) -> dict[str, object]:
+        """Cold-read one page of exact durable task batches."""
+
+        if not 1 <= maximum_items <= _TASK_PAGE_MAXIMUM:
+            raise ValueError("task group page size is out of bounds")
+        summary = await self.core.read_resumable_session(
+            session_id,
+            memory_domain_id=self.workspace_input.memory_domain_id,
+        )
+        if summary is None:
+            raise KeyError(session_id)
+        after_at: datetime | None = None
+        after_batch_id: str | None = None
+        seen_count = 0
+        if cursor is not None:
+            after_at, after_batch_id, seen_count = _decode_task_group_cursor(
+                cursor, session_id=session_id
+            )
+        durable = await self.core.read_subagent_task_group_page(
+            session_id=session_id,
+            maximum_items=maximum_items,
+            after_first_accepted_at=after_at,
+            after_batch_id=after_batch_id,
+        )
+        has_more = len(durable) > maximum_items
+        page = durable[:maximum_items]
+        total_count = int(page[0]["total_count"]) if page else seen_count
+        next_seen_count = seen_count + len(page)
+        groups = []
+        for row in page:
+            first = row["first_accepted_at"]
+            if not isinstance(first, datetime):
+                raise RuntimeError("task group lacks its ordering timestamp")
+            groups.append(
+                {
+                    "group_id": str(row["batch_id"]),
+                    "parent_turn_id": str(row["parent_turn_id"]),
+                    "first_accepted_at": first.isoformat(),
+                    "task_count": int(row["task_count"]),
+                    "status_counts": {
+                        "pending": int(row["pending_count"]),
+                        "active": int(row["active_count"]),
+                        "waiting": int(row["waiting_count"]),
+                        "completed": int(row["completed_count"]),
+                        "cancelled": int(row["cancelled_count"]),
+                        "failed": int(row["failed_count"]),
+                        "interrupted": int(row["interrupted_count"]),
+                        "blocked": int(row["blocked_count"]),
+                    },
+                    "single_task_label": row.get("single_task_label"),
+                }
+            )
+        next_cursor = None
+        if has_more:
+            last = page[-1]
+            first = last["first_accepted_at"]
+            if not isinstance(first, datetime):
+                raise RuntimeError("task group lacks its ordering timestamp")
+            next_cursor = _encode_task_group_cursor(
+                session_id=session_id,
+                first_accepted_at=first,
+                batch_id=str(last["batch_id"]),
+                seen_count=next_seen_count,
+            )
+        return {
+            "session_id": session_id,
+            "groups": groups,
+            "total_count": total_count,
+            "page_count": len(groups),
+            "remaining_count": max(0, total_count - next_seen_count),
+            "next_cursor": next_cursor,
+        }
+
+    async def list_session_task_activities(
+        self,
+        session_id: str,
+        task_id: str,
+        *,
+        maximum_items: int = _TASK_PAGE_MAXIMUM,
+        cursor: str | None = None,
+    ) -> dict[str, object]:
+        """Read canonical activity identities without activating a Host."""
+
+        if not 1 <= maximum_items <= _TASK_PAGE_MAXIMUM:
+            raise ValueError("task activity page size is out of bounds")
+        summary = await self.core.read_resumable_session(
+            session_id,
+            memory_domain_id=self.workspace_input.memory_domain_id,
+        )
+        if summary is None:
+            raise KeyError(session_id)
+        after_sequence = 0
+        if cursor is not None:
+            after_sequence = _decode_task_activity_cursor(
+                cursor, session_id=session_id, task_id=task_id
+            )
+        entries, blocks, results, has_more = (
+            await self.core.read_subagent_task_activity_page(
+                session_id=session_id,
+                task_id=task_id,
+                maximum_items=maximum_items,
+                after_entry_sequence=after_sequence,
+            )
+        )
+        blocks_by_entry: dict[str, list[dict[str, object]]] = {}
+        for block in blocks:
+            blocks_by_entry.setdefault(str(block["assistant_entry_id"]), []).append(
+                {
+                    "block_id": str(block["id"]),
+                    "ordinal": int(block["block_ordinal"]),
+                    "kind": str(block["block_kind"]),
+                    "tool_call_id": block.get("tool_call_id"),
+                    "tool_name": block.get("tool_name"),
+                }
+            )
+        results_by_entry: dict[str, list[dict[str, object]]] = {}
+        for result in results:
+            result_payload = {
+                "attempt_id": result.get("attempt_id"),
+                "assistant_entry_id": str(result["assistant_entry_id"]),
+                "tool_call_id": str(result["tool_call_id"]),
+                "result_entry_id": str(result["result_entry_id"]),
+                "result_state": str(result["result_state"]),
+            }
+            results_by_entry.setdefault(
+                str(result["assistant_entry_id"]), []
+            ).append(result_payload)
+            results_by_entry.setdefault(str(result["result_entry_id"]), []).append(
+                result_payload
+            )
+        activities = []
+        for entry in entries:
+            inline = entry.get("inline_content")
+            content = {
+                "kind": "INLINE" if inline is not None else "CANONICAL_BLOB",
+                "digest": str(entry["content_digest"]),
+                "size": int(entry["content_size"]),
+                "media_type": str(entry["content_media_type"]),
+                "codec": str(entry["content_codec"]),
+            }
+            if inline is not None:
+                content["inline_content"] = base64.b64encode(bytes(inline)).decode(
+                    "ascii"
+                )
+            entry_id = str(entry["id"])
+            activities.append(
+                {
+                    "entry_id": entry_id,
+                    "turn_id": str(entry["turn_id"]),
+                    "entry_sequence": int(entry["entry_sequence"]),
+                    "entry_kind": str(entry["entry_kind"]),
+                    "accepted_at": entry["accepted_at"].isoformat(),
+                    "objective": str(entry["task_objective"]),
+                    "content": content,
+                    "blocks": blocks_by_entry.get(entry_id, []),
+                    "tool_results": results_by_entry.get(entry_id, []),
+                }
+            )
+        next_cursor = None
+        if has_more and activities:
+            next_cursor = _encode_task_activity_cursor(
+                session_id=session_id,
+                task_id=task_id,
+                after_entry_sequence=int(activities[-1]["entry_sequence"]),
+            )
+        return {
+            "session_id": session_id,
+            "task_id": task_id,
+            "activities": activities,
             "next_cursor": next_cursor,
         }
 
@@ -2182,11 +2366,14 @@ def _encode_task_cursor(
     accepted_at: datetime,
     task_id: str,
     seen_count: int,
+    batch_id: str | None,
 ) -> str:
     body = json.dumps(
         {
             "v": 1,
+            "kind": "tasks",
             "session_id": session_id,
+            "batch_id": batch_id,
             "accepted_at": accepted_at.isoformat(),
             "task_id": task_id,
             "seen_count": seen_count,
@@ -2202,6 +2389,7 @@ def _decode_task_cursor(
     cursor: str,
     *,
     session_id: str,
+    batch_id: str | None,
 ) -> tuple[datetime, str, int]:
     if not cursor or len(cursor.encode("utf-8")) > _TASK_CURSOR_MAXIMUM_BYTES:
         raise ValueError("task cursor is invalid")
@@ -2212,13 +2400,20 @@ def _decode_task_cursor(
         raise ValueError("task cursor is invalid") from exc
     if not isinstance(value, dict) or set(value) != {
         "v",
+        "kind",
         "session_id",
+        "batch_id",
         "accepted_at",
         "task_id",
         "seen_count",
     }:
         raise ValueError("task cursor is invalid")
-    if value["v"] != 1 or value["session_id"] != session_id:
+    if (
+        value["v"] != 1
+        or value["kind"] != "tasks"
+        or value["session_id"] != session_id
+        or value["batch_id"] != batch_id
+    ):
         raise ValueError("task cursor is invalid")
     task_id = value["task_id"]
     seen_count = value["seen_count"]
@@ -2237,6 +2432,127 @@ def _decode_task_cursor(
     if accepted_at.tzinfo is None:
         raise ValueError("task cursor is invalid")
     return accepted_at, task_id, seen_count
+
+
+def _encode_task_group_cursor(
+    *,
+    session_id: str,
+    first_accepted_at: datetime,
+    batch_id: str,
+    seen_count: int,
+) -> str:
+    body = json.dumps(
+        {
+            "v": 1,
+            "kind": "task-groups",
+            "session_id": session_id,
+            "first_accepted_at": first_accepted_at.isoformat(),
+            "batch_id": batch_id,
+            "seen_count": seen_count,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(body).rstrip(b"=").decode("ascii")
+
+
+def _decode_task_group_cursor(
+    cursor: str,
+    *,
+    session_id: str,
+) -> tuple[datetime, str, int]:
+    if not cursor or len(cursor.encode("utf-8")) > _TASK_CURSOR_MAXIMUM_BYTES:
+        raise ValueError("task group cursor is invalid")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(cursor + padding))
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("task group cursor is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {
+        "v",
+        "kind",
+        "session_id",
+        "first_accepted_at",
+        "batch_id",
+        "seen_count",
+    }:
+        raise ValueError("task group cursor is invalid")
+    if (
+        value["v"] != 1
+        or value["kind"] != "task-groups"
+        or value["session_id"] != session_id
+    ):
+        raise ValueError("task group cursor is invalid")
+    batch_id = value["batch_id"]
+    seen_count = value["seen_count"]
+    if not isinstance(batch_id, str) or not batch_id:
+        raise ValueError("task group cursor is invalid")
+    if (
+        not isinstance(seen_count, int)
+        or isinstance(seen_count, bool)
+        or seen_count < 0
+    ):
+        raise ValueError("task group cursor is invalid")
+    try:
+        first_accepted_at = datetime.fromisoformat(
+            str(value["first_accepted_at"])
+        )
+    except ValueError as exc:
+        raise ValueError("task group cursor is invalid") from exc
+    if first_accepted_at.tzinfo is None:
+        raise ValueError("task group cursor is invalid")
+    return first_accepted_at, batch_id, seen_count
+
+
+def _encode_task_activity_cursor(
+    *, session_id: str, task_id: str, after_entry_sequence: int
+) -> str:
+    body = json.dumps(
+        {
+            "v": 1,
+            "kind": "task-activities",
+            "session_id": session_id,
+            "task_id": task_id,
+            "after_entry_sequence": after_entry_sequence,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(body).rstrip(b"=").decode("ascii")
+
+
+def _decode_task_activity_cursor(
+    cursor: str, *, session_id: str, task_id: str
+) -> int:
+    if not cursor or len(cursor.encode("utf-8")) > _TASK_CURSOR_MAXIMUM_BYTES:
+        raise ValueError("task activity cursor is invalid")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(cursor + padding))
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("task activity cursor is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {
+        "v",
+        "kind",
+        "session_id",
+        "task_id",
+        "after_entry_sequence",
+    }:
+        raise ValueError("task activity cursor is invalid")
+    sequence = value["after_entry_sequence"]
+    if (
+        value["v"] != 1
+        or value["kind"] != "task-activities"
+        or value["session_id"] != session_id
+        or value["task_id"] != task_id
+        or not isinstance(sequence, int)
+        or isinstance(sequence, bool)
+        or sequence < 1
+    ):
+        raise ValueError("task activity cursor is invalid")
+    return sequence
 
 
 __all__ = [

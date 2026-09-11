@@ -1695,6 +1695,7 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
     host._lock = asyncio.Lock()
     host._closing = False
     host._pending_root_successor = None
+    host._user_control_attempts = {}
     host._active_turn_id = "turn:terminal"
     host._active_cancellation_intent = None
     host._active_command_id = "command:turn"
@@ -2352,7 +2353,7 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
 
 
 def test_round5b_architecture_and_oracle_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert APPEND_GUARDS == ("HostWriterGuard",)

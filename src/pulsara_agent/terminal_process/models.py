@@ -44,6 +44,12 @@ class TerminalPhysicalState(StrEnum):
     PRUNABLE = "PRUNABLE"
 
 
+class TerminalTerminationDisposition(StrEnum):
+    ALREADY_TERMINAL = "ALREADY_TERMINAL"
+    TERMINATION_COMPLETED = "TERMINATION_COMPLETED"
+    PHYSICAL_SETTLEMENT_INCOMPLETE = "PHYSICAL_SETTLEMENT_INCOMPLETE"
+
+
 @dataclass(frozen=True, slots=True)
 class TerminalProcessOrigin:
     """Process-local attribution for live Terminal lifecycle events."""
@@ -109,6 +115,14 @@ class TerminalResult:
 
 
 @dataclass(frozen=True, slots=True)
+class TerminalTerminationResult:
+    disposition: TerminalTerminationDisposition
+    result: TerminalResult
+    physical_state: str
+    group_alive: bool
+
+
+@dataclass(frozen=True, slots=True)
 class TerminalProcessInfo:
     process_id: str
     terminal_session_id: str
@@ -130,6 +144,7 @@ class TerminalProcessInfo:
     output_cursor: str = ""
     retained_from_cursor: str = ""
     physical_state: str = TerminalPhysicalState.RUNNING.value
+    background_adopted: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return {

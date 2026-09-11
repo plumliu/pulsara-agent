@@ -2066,6 +2066,7 @@ class _SubagentOperations:
         deadline_monotonic: float,
         after_accepted_at: datetime | None = None,
         after_task_id: str | None = None,
+        batch_id: str | None = None,
         include_lookahead: bool = False,
     ) -> tuple[Mapping[str, object], ...]:
         if not 1 <= maximum_items <= 50:
@@ -2105,6 +2106,7 @@ class _SubagentOperations:
                           ON accepted.entry_owner_kind = 'EXECUTED_TURN' AND accepted.session_id = t.session_id
                          AND accepted.source_subagent_task_id = t.id
                         WHERE t.session_id = %s
+                          AND (%s::text IS NULL OR t.batch_id = %s)
                     )
                     SELECT * FROM inventory
                     WHERE %s::timestamptz IS NULL
@@ -2113,12 +2115,157 @@ class _SubagentOperations:
                     """,
                     (
                         session_id,
+                        batch_id,
+                        batch_id,
                         after_accepted_at,
                         after_accepted_at,
                         after_task_id,
                         maximum_items + int(include_lookahead),
                     ),
                 ).fetchall()
+            )
+
+    def list_subagent_task_groups(
+        self,
+        *,
+        session_id: str,
+        maximum_items: int,
+        deadline_monotonic: float,
+        after_first_accepted_at: datetime | None = None,
+        after_batch_id: str | None = None,
+        include_lookahead: bool = False,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Read one keyset page of real batch rows without creating a Host."""
+
+        if not 1 <= maximum_items <= 50:
+            raise ValueError("subagent group page bound is invalid")
+        if (after_first_accepted_at is None) != (after_batch_id is None):
+            raise ValueError("subagent group cursor is incomplete")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            incomplete = connection.execute(
+                """SELECT id FROM pulsara_v3.subagent_tasks
+                   WHERE session_id = %s AND batch_id IS NULL
+                   ORDER BY accepted_at, id LIMIT 50""",
+                (session_id,),
+            ).fetchall()
+            if incomplete:
+                ids = ",".join(str(row["id"]) for row in incomplete)
+                raise ValueError(f"TASK_BATCH_DATA_INCOMPLETE:{ids}")
+            return tuple(
+                dict(row)
+                for row in connection.execute(
+                    """
+                    WITH groups AS (
+                        SELECT batch_id, min(parent_turn_id) AS parent_turn_id,
+                               min(accepted_at) AS first_accepted_at,
+                               count(*) AS task_count,
+                               count(*) FILTER (WHERE status = 'PENDING_START') AS pending_count,
+                               count(*) FILTER (WHERE status = 'ACTIVE') AS active_count,
+                               count(*) FILTER (WHERE status = 'WAITING_DEPENDENCY') AS waiting_count,
+                               count(*) FILTER (WHERE status = 'COMPLETED') AS completed_count,
+                               count(*) FILTER (WHERE status = 'CANCELLED') AS cancelled_count,
+                               count(*) FILTER (WHERE status = 'FAILED') AS failed_count,
+                               count(*) FILTER (WHERE status = 'INTERRUPTED') AS interrupted_count,
+                               count(*) FILTER (WHERE status = 'BLOCKED_DEPENDENCY_FAILED') AS blocked_count,
+                               CASE WHEN count(*) = 1
+                                    THEN max(COALESCE(label, task_key, '子任务'))
+                                    ELSE NULL END AS single_task_label,
+                               count(*) OVER () AS total_count
+                        FROM pulsara_v3.subagent_tasks
+                        WHERE session_id = %s
+                        GROUP BY batch_id
+                    )
+                    SELECT * FROM groups
+                    WHERE %s::timestamptz IS NULL
+                       OR (first_accepted_at, batch_id) > (%s::timestamptz, %s::text)
+                    ORDER BY first_accepted_at, batch_id LIMIT %s
+                    """,
+                    (
+                        session_id,
+                        after_first_accepted_at,
+                        after_first_accepted_at,
+                        after_batch_id,
+                        maximum_items + int(include_lookahead),
+                    ),
+                ).fetchall()
+            )
+
+    def list_subagent_task_activities(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        maximum_items: int,
+        after_entry_sequence: int,
+        deadline_monotonic: float,
+    ) -> tuple[
+        tuple[Mapping[str, object], ...],
+        tuple[Mapping[str, object], ...],
+        tuple[Mapping[str, object], ...],
+        bool,
+    ]:
+        """Read canonical entry/block/result identities for one exact task."""
+
+        if not task_id or not 1 <= maximum_items <= 50 or after_entry_sequence < 0:
+            raise ValueError("subagent activity page is invalid")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            task = connection.execute(
+                "SELECT objective FROM pulsara_v3.subagent_tasks WHERE session_id = %s AND id = %s",
+                (session_id, task_id),
+            ).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            entries = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE entry_owner_kind = 'EXECUTED_TURN'
+                     AND session_id = %s
+                     AND conversation_scope_kind = 'SUBAGENT_TASK'
+                     AND scope_subagent_task_id = %s
+                     AND entry_sequence > %s
+                   ORDER BY entry_sequence, id LIMIT %s""",
+                (session_id, task_id, after_entry_sequence, maximum_items + 1),
+            ).fetchall()
+            selected = entries[:maximum_items]
+            entry_ids = [str(row["id"]) for row in selected]
+            if not entry_ids:
+                return (), (), (), False
+            blocks = connection.execute(
+                """SELECT id, assistant_entry_id, block_ordinal, block_kind,
+                          tool_call_id, tool_name
+                   FROM pulsara_v3.assistant_message_blocks
+                   WHERE session_id = %s AND assistant_entry_id = ANY(%s)
+                   ORDER BY assistant_entry_id, block_ordinal""",
+                (session_id, entry_ids),
+            ).fetchall()
+            results = connection.execute(
+                """SELECT attempt_id, tool_call_entry_id AS assistant_entry_id,
+                          tool_call_id, result_entry_id, result_state
+                   FROM pulsara_v3.tool_results
+                   WHERE session_id = %s
+                     AND (tool_call_entry_id = ANY(%s) OR result_entry_id = ANY(%s))
+                   ORDER BY accepted_at, id""",
+                (session_id, entry_ids, entry_ids),
+            ).fetchall()
+            enriched = []
+            for row in selected:
+                value = dict(row)
+                value["task_objective"] = task["objective"]
+                enriched.append(value)
+            return (
+                tuple(enriched),
+                tuple(dict(row) for row in blocks),
+                tuple(dict(row) for row in results),
+                len(entries) > maximum_items,
             )
 
     def read_subagent_task_board(

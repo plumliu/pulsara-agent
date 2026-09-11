@@ -48,8 +48,8 @@ def _imports(path: Path) -> tuple[str, ...]:
 
 
 def test_stage3_5_final_oracles_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
-    assert len({item.event_type for item in COMMITTED_EVENT_DESCRIPTORS}) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
+    assert len({item.event_type for item in COMMITTED_EVENT_DESCRIPTORS}) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1

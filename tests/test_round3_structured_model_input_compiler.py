@@ -2035,7 +2035,6 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
             "message_type": "FINAL_ANSWER",
             "sender": {"kind": "SUBAGENT_TASK", "task_id": "task:worker"},
             "content": {
-                "schema_version": "pulsara.subagent-completion.v1",
                 "message_type": "FINAL_ANSWER",
                 "task_id": "task:worker",
                 "task_key": "worker",
@@ -2076,6 +2075,7 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
     carrier = json.loads(provider_text)["pulsara_inter_agent_message"]
     assert carrier["message_type"] == "FINAL_ANSWER"
     assert carrier["content"]["result"]["summary"] == "exact delegated summary"
+    assert "schema_version" not in carrier["content"]
     assert "not a human instruction" in carrier["handling"]
 
     human = FrozenProviderInputItem(
@@ -2130,6 +2130,34 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
         if variant.mode is ToolResultProviderRenderMode.COMPACT
     )
     assert "If the omitted content is necessary" in with_read_compact.message.content[0]
+
+
+def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
+    closure = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE,
+        None,
+        None,
+        None,
+        canonical_json_bytes(
+            {
+                "schema_version": "provider_tool_result_closure.v1",
+                "tool_call_id": "call:closed",
+                "disposition": "interrupted_before_dispatch",
+            }
+        ).decode("utf-8"),
+        tool_call_id="call:closed",
+        tool_request_entry_id="entry:request",
+    )
+    lowered = lower_canonical_item(
+        closure,
+        artifact_read_available=False,
+        limits=StructuredModelInputLimits(),
+    )
+    assert lowered.fixed_message is not None
+    assert json.loads(lowered.fixed_message.content[0]) == {
+        "disposition": "interrupted_before_dispatch"
+    }
+    assert "schema_version" not in lowered.fixed_message.content[0]
 
 
 def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
@@ -3610,7 +3638,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-            "sha256:3fde05bf5a06bf29e82155acb8de30e9aeb1e300ca4a093271d1c4338d0d6340"
+        "sha256:298b4e4d10ad2513c51052549b20a776b219cb0fa67a42e97a3161e835185e0b"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

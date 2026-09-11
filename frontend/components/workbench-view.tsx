@@ -506,7 +506,11 @@ function TraceCard({
                           className="tool-artifact-page__next"
                           disabled={artifactBusy}
                           aria-label={artifactBusy ? '正在读取完整输出' : '读取下一页'}
-                          onClick={() => readArtifactPage(artifactPage.nextOffsetChars)}
+                          onClick={() => {
+                            if (artifactPage.nextOffsetChars !== undefined) {
+                              void readArtifactPage(artifactPage.nextOffsetChars);
+                            }
+                          }}
                         >{artifactBusy ? <LoaderCircle className="is-spinning" size={13} /> : <ArrowDown size={13} />}{artifactBusy ? '正在读取…' : '继续读取'}</button>
                       )}
                     </footer>
@@ -820,7 +824,7 @@ function SubagentGroup({
   );
 }
 
-function UserMessage({ message }: { message: Message }) {
+function UserMessage({ message, label = '你' }: { message: Message; label?: string }) {
   const sourceTextStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const;
   if (message.userKind === 'subagent-completion') {
     const helpId = `${message.id}-subagent-completion-help`;
@@ -849,7 +853,7 @@ function UserMessage({ message }: { message: Message }) {
       <article className="user-steer" aria-label="你的引导">
         <span className="user-steer__icon"><CornerDownRight size={13} /></span>
         <div className="user-steer__content">
-          <header><strong>你 · 引导</strong><time>{message.time}</time></header>
+          <header><strong>{label} · 引导</strong><time>{message.time}</time></header>
           <p style={sourceTextStyle}>{message.body}</p>
         </div>
       </article>
@@ -859,7 +863,7 @@ function UserMessage({ message }: { message: Message }) {
   return (
     <article className="user-turn">
       <header className="user-heading">
-        <strong>你</strong>
+        <strong>{label}</strong>
         <span className="user-avatar"><UserRound size={14} /></span>
       </header>
       <div className="user-message">
@@ -870,12 +874,12 @@ function UserMessage({ message }: { message: Message }) {
   );
 }
 
-function AssistantHeading({ message, response }: { message: Message; response: boolean }) {
+function AssistantHeading({ message, response, label = 'Pulsara' }: { message: Message; response: boolean; label?: string }) {
   return (
     <header className={`assistant-heading${response ? ' assistant-heading--response' : ' assistant-heading--run-start'}`}>
       <div className="assistant-avatar"><span /></div>
       <div className="assistant-identity">
-        <strong>Pulsara</strong>
+        <strong>{label}</strong>
         {message.status === 'running' && (
           <span className="thinking-label"><i /> {response ? '正在回复' : '正在执行'}</span>
         )}
@@ -899,6 +903,7 @@ function AssistantMessage({
   onFork,
   artifactOwnerKey,
   onReadToolArtifact,
+  assistantLabel,
 }: {
   message: Message;
   startsAssistantRun: boolean;
@@ -913,6 +918,7 @@ function AssistantMessage({
   onFork: WorkbenchViewProps['onFork'];
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  assistantLabel?: string;
 }) {
   const [forking, setForking] = useState(false);
   const forkInFlight = useRef(false);
@@ -935,7 +941,7 @@ function AssistantMessage({
 
   return (
     <article className={className}>
-      {startsAssistantRun && <AssistantHeading message={message} response={hasNaturalLanguage} />}
+      {startsAssistantRun && <AssistantHeading message={message} response={hasNaturalLanguage} label={assistantLabel} />}
 
       {message.reasoning?.length ? (
         <ReasoningDisclosure blocks={message.reasoning} onNotify={onNotify} />
@@ -943,7 +949,7 @@ function AssistantMessage({
 
       {hasNaturalLanguage && (
         <>
-          {!startsAssistantRun && <AssistantHeading message={message} response />}
+          {!startsAssistantRun && <AssistantHeading message={message} response label={assistantLabel} />}
           <div className="assistant-copy">
             <div className="assistant-markdown"><MarkdownBody body={message.body} onNotify={onNotify} /></div>
             {(canCopyResponse || message.forkEligible) && (
@@ -1027,6 +1033,53 @@ function findToolChainConnections(messages: Message[], contextCompactionIndex = 
     before.add(current.id);
   }
   return { before, after };
+}
+
+export function ConversationMessages({
+  messages,
+  skills = [],
+  artifactOwnerKey,
+  onReadToolArtifact,
+  onNotify,
+  onFork = async () => undefined,
+  userLabel = '你',
+  assistantLabel = 'Pulsara',
+}: {
+  messages: Message[];
+  skills?: SkillCapability[];
+  artifactOwnerKey: string;
+  onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
+  onNotify: MarkdownNotify;
+  onFork?: (entryId: string) => Promise<void>;
+  userLabel?: string;
+  assistantLabel?: string;
+}) {
+  const assistantRunStarts = useMemo(() => findAssistantRunStarts(messages), [messages]);
+  const toolChainConnections = useMemo(() => findToolChainConnections(messages), [messages]);
+  const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
+  return messages.map((message) => (
+    <div key={message.id} data-memory-entry={message.id} style={{ display: 'contents' }}>
+      {message.role === 'user'
+        ? <UserMessage message={message} label={userLabel} />
+        : (
+          <AssistantMessage
+            message={message}
+            startsAssistantRun={assistantRunStarts.has(message.id)}
+            joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
+            joinsNextToolChain={toolChainConnections.after.has(message.id)}
+            focusTaskRevision={0}
+            focusTaskHighlighted={false}
+            skills={skills}
+            mcpToolRefs={mcpToolRefs}
+            onNotify={onNotify}
+            onFork={onFork}
+            artifactOwnerKey={artifactOwnerKey}
+            onReadToolArtifact={onReadToolArtifact}
+            assistantLabel={assistantLabel}
+          />
+        )}
+    </div>
+  ));
 }
 
 function permissionPrompt(prompt: string): string {
@@ -1842,7 +1895,12 @@ export function WorkbenchView({
             </div>
             <div>
               {isRunning && !draft ? (
-                <button className="send-button is-stop" onClick={onStop} aria-label="停止当前运行"><CircleStop size={15} /></button>
+                <button
+                  className="send-button is-stop"
+                  onClick={onStop}
+                  aria-label="停止本轮运行"
+                  title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，子任务、排队输入和后台命令不会自动取消。"
+                ><CircleStop size={15} /></button>
               ) : (
                 <button className="send-button" onClick={() => void submit(false)} disabled={!draft.trim() || submitting || runtimeStatus !== 'online' || !session.id || !modelReady} aria-label={isRunning ? '排队发送' : '发送'}>
                   {isRunning ? <Play size={14} fill="currentColor" /> : <Send size={14} />}

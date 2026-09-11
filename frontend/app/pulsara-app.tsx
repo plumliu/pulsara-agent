@@ -13,6 +13,7 @@ import { SettingsView } from '../components/settings-view';
 import { WorkbenchView } from '../components/workbench-view';
 import {
   LocalHttpRuntimeAdapter,
+  createUserControlCommandRef,
   mergeRuntimeTaskInventory,
   RuntimeApiError,
   type RuntimeAdapter,
@@ -120,7 +121,6 @@ function saveSessionId(sessionId: string): void {
 }
 
 const internalLanguage = /terminal(?:\s+protocol)?|protocol\s*v?\d*|kernel|canonical|generation|authority|projection|epoch|hostsession|runtime|attachment|owner|provider\s+prefix/i;
-const TASK_FOCUS_DURATION_MS = 2600;
 
 function productMessage(message: string | undefined, fallback: string): string {
   if (!message || internalLanguage.test(message) || !/[\u3400-\u9fff]/u.test(message)) return fallback;
@@ -179,9 +179,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [userCapabilityLoading, setUserCapabilityLoading] = useState(false);
   const [userCapabilityError, setUserCapabilityError] = useState<string>();
   const userCapabilityAttempt = useRef(0);
-  const [focusedTask, setFocusedTask] = useState<{ id: string; revision: number; highlighted: boolean }>();
-  const focusTaskRevisionRef = useRef(0);
-  const focusTaskTimerRef = useRef<number | undefined>(undefined);
   const [connection, setConnection] = useState<RuntimeConnection>();
   const connectionRef = useRef<RuntimeConnection | undefined>(undefined);
   const activeSessionIdRef = useRef('');
@@ -214,10 +211,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     && activeSessionIdRef.current === expected.sessionId
     && connectionRef.current.generation === expected.generation
   ), []);
-
-  useEffect(() => () => {
-    if (focusTaskTimerRef.current !== undefined) window.clearTimeout(focusTaskTimerRef.current);
-  }, []);
 
   const notify = useCallback((
     title: string,
@@ -357,20 +350,43 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     setTaskInventoryError(undefined);
     try {
       const tasks: AgentTask[] = [];
-      const seenCursors = new Set<string>();
-      let cursor: string | undefined;
+      const groups: Array<{ id: string; taskCount: number }> = [];
+      const seenGroupCursors = new Set<string>();
+      let groupCursor: string | undefined;
       do {
-        const page = await adapter.listSessionTasks(sessionId, cursor);
+        const page = await adapter.listSessionTaskGroups(sessionId, groupCursor);
         if (attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
-        tasks.push(...page.tasks);
-        cursor = page.nextCursor;
-        if (cursor) {
-          if (seenCursors.has(cursor)) {
-            throw new RuntimeApiError('TASK_PAGE_LOOP', '子任务清单暂时无法完整读取。', true);
+        groups.push(...page.groups.map((group) => ({ id: group.id, taskCount: group.taskCount })));
+        groupCursor = page.nextCursor;
+        if (groupCursor) {
+          if (seenGroupCursors.has(groupCursor)) {
+            throw new RuntimeApiError('TASK_GROUP_PAGE_LOOP', '任务组清单暂时无法完整读取。', true);
           }
-          seenCursors.add(cursor);
+          seenGroupCursors.add(groupCursor);
         }
-      } while (cursor);
+      } while (groupCursor);
+
+      for (const group of groups) {
+        const seenTaskCursors = new Set<string>();
+        let taskCursor: string | undefined;
+        let loaded = 0;
+        do {
+          const page = await adapter.listSessionTasks(sessionId, taskCursor, group.id);
+          if (attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
+          tasks.push(...page.tasks);
+          loaded += page.tasks.length;
+          taskCursor = page.nextCursor;
+          if (taskCursor) {
+            if (seenTaskCursors.has(taskCursor)) {
+              throw new RuntimeApiError('TASK_PAGE_LOOP', '子任务清单暂时无法完整读取。', true);
+            }
+            seenTaskCursors.add(taskCursor);
+          }
+        } while (taskCursor);
+        if (loaded !== group.taskCount) {
+          throw new RuntimeApiError('TASK_GROUP_CHANGED', '任务组在读取期间发生变化，请刷新后重试。', true);
+        }
+      }
 
       const uniqueTasks = [...new Map(tasks.map((task) => [task.id, task])).values()];
       setTaskInventory(uniqueTasks);
@@ -472,11 +488,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     setCapabilities(undefined);
     setCapabilityError(undefined);
     setCapabilityLoading(Boolean(sessionId));
-    if (focusTaskTimerRef.current !== undefined) {
-      window.clearTimeout(focusTaskTimerRef.current);
-      focusTaskTimerRef.current = undefined;
-    }
-    setFocusedTask(undefined);
     setRuntimeStatus(reconnecting ? 'reconnecting' : 'starting');
     setRuntimeError(undefined);
     const previous = connectionRef.current;
@@ -838,6 +849,17 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     projection,
     taskInventorySessionId === activeSessionId ? taskInventory : [],
   ), [activeSessionId, projection, taskInventory, taskInventorySessionId]);
+  const taskActivities = useMemo(() => {
+    const activities = new Map<string, NonNullable<(typeof mergedProjection.messages)[number]['subagentRuns']>[number]['activities']>();
+    for (const message of mergedProjection.messages) {
+      for (const run of message.subagentRuns ?? []) {
+        const byId = new Map((activities.get(run.id) ?? []).map((item) => [item.id, item]));
+        for (const item of run.activities) byId.set(item.id, item);
+        activities.set(run.id, [...byId.values()]);
+      }
+    }
+    return activities;
+  }, [mergedProjection]);
   const renderedMessages = mergedProjection.messages;
 
   const navigate = (view: AppView) => {
@@ -1036,9 +1058,21 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   const stopRun = async () => {
     const active = connectionRef.current;
-    if (!active || active.role !== 'controller') return;
+    const targetTurnId = projection.activeTurnId;
+    if (!active || active.role !== 'controller' || !targetTurnId) return;
+    if (!projection.hostSessionId || !projection.controlAdmissionDeadlineMs) {
+      notify('暂时无法停止', '当前 Host 的控制身份尚未确认，请等待刷新后重试。', 'warning');
+      return;
+    }
+    const reference = createUserControlCommandRef(
+      projection,
+      active.sessionId,
+      'STOP_ACTIVE_TURN',
+      'ROOT_TURN',
+      targetTurnId,
+    );
     try {
-      const receipt = await active.stopActiveTurn();
+      const receipt = await active.stopActiveTurn(reference);
       if (!ownsConnection(active)) return;
       notify(
         receipt.status === 'rejected' ? '没有可停止的运行' : '停止请求已送达',
@@ -1048,7 +1082,30 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     } catch (error) {
       const recovered = await recoverConnectionAfterOperation(error, active);
       if (!recovered || !ownsConnection(recovered)) return;
-      notify('停止失败', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
+      try {
+        const query = await recovered.queryControlCommand(reference);
+        if (!ownsConnection(recovered)) return;
+        const receipt = query.receipt;
+        if (query.status === 'FOUND' && receipt) {
+          notify(
+            receipt.status === 'pending' ? '正在停止本轮运行' : '停止状态已确认',
+            receipt.publicMessage || '已按原操作身份恢复精确状态。',
+            receipt.status === 'failed' || receipt.status === 'rejected' ? 'warning' : 'success',
+          );
+          return;
+        }
+        notify(
+          query.status === 'OWNER_UNAVAILABLE' ? '原会话已不可控制' : '停止结果不可确认',
+          query.status === 'OWNER_UNAVAILABLE'
+            ? '原 Host 已失效；Pulsara 不会把这次操作改投新的 Host。'
+            : '原操作结果已不在当前 Host 的保留窗口内；Pulsara 不会自动重发。',
+          'warning',
+        );
+        return;
+      } catch {
+        if (!ownsConnection(recovered)) return;
+      }
+      notify('停止结果待确认', productMessage(error instanceof Error ? error.message : undefined, '重新连接后可按原操作身份查询；Pulsara 不会自动重发。'), 'warning');
     }
   };
 
@@ -1108,19 +1165,72 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   };
 
-  const locateTask = (taskId: string) => {
-    const revision = ++focusTaskRevisionRef.current;
-    if (focusTaskTimerRef.current !== undefined) window.clearTimeout(focusTaskTimerRef.current);
-    setActiveView('workbench');
-    setFocusedTask({ id: taskId, revision, highlighted: true });
-    focusTaskTimerRef.current = window.setTimeout(() => {
-      setFocusedTask((current) => (
-        current?.id === taskId && current.revision === revision
-          ? { ...current, highlighted: false }
-          : current
-      ));
-      focusTaskTimerRef.current = undefined;
-    }, TASK_FOCUS_DURATION_MS);
+  const cancelTask = async (task: AgentTask): Promise<void> => {
+    const active = connectionRef.current;
+    if (!active || active.role !== 'controller') return;
+    if (!projection.hostSessionId || !projection.controlAdmissionDeadlineMs) {
+      notify('暂时无法取消', '当前 Host 的控制身份尚未确认，请等待刷新后重试。', 'warning');
+      return;
+    }
+    const reference = createUserControlCommandRef(
+      projection,
+      active.sessionId,
+      'CANCEL_SUBAGENT_TASK',
+      'SUBAGENT_TASK',
+      task.id,
+    );
+    try {
+      const receipt = await active.cancelSubagentTask(reference);
+      if (!ownsConnection(active)) return;
+      if (receipt.status === 'rejected') {
+        notify(
+          '无法取消这项任务',
+          productMessage(receipt.publicMessage, '任务身份或当前 Host 已经改变。'),
+          'warning',
+        );
+        return;
+      }
+      notify(
+        receipt.status === 'pending' ? '正在取消任务' : '任务状态已更新',
+        receipt.publicMessage || (receipt.status === 'pending'
+          ? '已由当前 Host 接管；任务仍可能正在完成已启动操作的收尾。'
+          : '已保留任务的真实终态和依赖结果。'),
+        receipt.status === 'failed' ? 'warning' : 'success',
+      );
+      void loadSessionTasks(active.sessionId);
+    } catch (error) {
+      const recovered = await recoverConnectionAfterOperation(error, active);
+      if (!recovered || !ownsConnection(recovered)) return;
+      try {
+        const query = await recovered.queryControlCommand(reference);
+        if (!ownsConnection(recovered)) return;
+        const receipt = query.receipt;
+        if (query.status === 'FOUND' && receipt) {
+          notify(
+            receipt.status === 'pending' ? '正在取消任务' : '任务状态已确认',
+            receipt.publicMessage || '已按原操作身份恢复精确状态。',
+            receipt.status === 'failed' || receipt.status === 'rejected' ? 'warning' : 'success',
+          );
+          void loadSessionTasks(recovered.sessionId);
+          return;
+        }
+        notify(
+          query.status === 'OWNER_UNAVAILABLE' ? '原会话已不可控制' : '取消结果不可确认',
+          query.status === 'OWNER_UNAVAILABLE'
+            ? '原 Host 已失效；Pulsara 不会把这次取消改投新的 Host。'
+            : '原操作结果已不在当前 Host 的保留窗口内；Pulsara 不会自动重发。',
+          'warning',
+        );
+        return;
+      } catch {
+        if (!ownsConnection(recovered)) return;
+      }
+      notify(
+        '取消结果待确认',
+        productMessage(error instanceof Error ? error.message : undefined, '重新连接后可按原操作身份查询；Pulsara 不会自动重发。'),
+        'warning',
+      );
+    }
   };
 
   const readInteraction = useCallback(async (interaction: RuntimeInteractionSummary) => {
@@ -1533,6 +1643,16 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter, adoptCapabilityMutation, notify]);
 
+  const readToolArtifact = useCallback(async (resultEntryId: string, offsetChars: number) => {
+    const active = connectionRef.current;
+    if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
+    const page = await active.readToolArtifact(resultEntryId, offsetChars);
+    if (!ownsConnection(active)) {
+      throw new RuntimeApiError('TOOL_ARTIFACT_OWNER_CHANGED', '工具输出所属的会话已经改变。', true);
+    }
+    return page;
+  }, [ownsConnection]);
+
   return (
     <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} onOpenCommand={() => setCommandOpen(true)} />
@@ -1594,10 +1714,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           skills={(capabilities?.skills.items ?? []).filter(
             (skill) => skill.enabled && skill.effective,
           )}
-          focusTaskId={focusedTask?.id}
+          focusTaskId={undefined}
           focusMemoryEntry={focusMemoryEntry}
-          focusTaskRevision={focusedTask?.revision ?? 0}
-          focusTaskHighlighted={focusedTask?.highlighted ?? false}
+          focusTaskRevision={0}
+          focusTaskHighlighted={false}
           onReconnect={() => activeSessionId && void openRuntimeSession(activeSessionId, true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
           onOpenSidebar={() => setSidebarOpen(true)}
@@ -1611,15 +1731,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onReadInteraction={readInteraction}
           onResolveInteraction={resolveInteraction}
           artifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
-          onReadToolArtifact={async (resultEntryId, offsetChars) => {
-            const active = connectionRef.current;
-            if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
-            const page = await active.readToolArtifact(resultEntryId, offsetChars);
-            if (!ownsConnection(active)) {
-              throw new RuntimeApiError('TOOL_ARTIFACT_OWNER_CHANGED', '工具输出所属的会话已经改变。', true);
-            }
-            return page;
-          }}
+          onReadToolArtifact={readToolArtifact}
           onNotify={notify}
           permission={turnPermission}
           onPermissionChange={setTurnPermission}
@@ -1648,7 +1760,37 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           session={activeSession}
           isOpen={inspectorOpen}
           agentTasks={mergedProjection.agentTasks}
-          todo={projection.todo}
+          taskActivities={taskActivities}
+          taskArtifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
+          onReadToolArtifact={readToolArtifact}
+          onLoadTaskActivities={async (taskId, cursor) => {
+            const sessionId = activeSession.id;
+            const page = await adapter.listSessionTaskActivities(sessionId, taskId, cursor);
+            if (activeSessionIdRef.current !== sessionId) {
+              throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
+            }
+            const active = connectionRef.current;
+            if (!active || active.sessionId !== sessionId) {
+              throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
+            }
+            const activities = [];
+            for (const activity of page.activities) {
+              if (activity.body !== undefined || activity.contentSize === 0) {
+                activities.push({ ...activity, body: activity.body ?? '' });
+                continue;
+              }
+              const body = await active.readCanonicalEntryContent(
+                activity.entryId,
+                activity.contentDigest,
+                activity.contentSize,
+              );
+              if (!ownsConnection(active)) {
+                throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
+              }
+              activities.push({ ...activity, body });
+            }
+            return { ...page, activities };
+          }}
           loading={taskInventoryLoading}
           canControl={canControl}
           isRunning={projection.isRunning}
@@ -1659,8 +1801,43 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           capabilityBusy={capabilityBusy}
           error={taskInventoryError}
           onRetry={() => activeSessionId && void loadSessionTasks(activeSessionId)}
-          onLocate={locateTask}
           onAcceptCompletion={(task) => void acceptTaskCompletion(task)}
+          onCancelTask={cancelTask}
+          backgroundOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}:${projection.hostSessionId ?? ''}`}
+          backgroundHostSessionId={projection.hostSessionId}
+          backgroundControlAdmissionDeadlineMs={projection.controlAdmissionDeadlineMs}
+          onLoadBackgroundProcesses={async (cursor) => {
+            const active = connectionRef.current;
+            if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
+            const page = await active.listBackgroundProcesses(cursor);
+            if (!ownsConnection(active)) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
+            return page;
+          }}
+          onReadBackgroundProcessLog={async (processId, cursor) => {
+            const active = connectionRef.current;
+            if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
+            const page = await active.readBackgroundProcessLog(processId, cursor);
+            if (!ownsConnection(active)) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
+            return page;
+          }}
+          onTerminateBackgroundProcess={async (reference) => {
+            const active = connectionRef.current;
+            if (!active || active.role !== 'controller') throw new RuntimeApiError('CONTROL_UNAVAILABLE', '当前窗口没有控制权限。', false);
+            const receipt = await active.terminateBackgroundProcess(reference);
+            if (!ownsConnection(active)) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
+            return receipt;
+          }}
+          onQueryControl={async (reference) => {
+            const active = connectionRef.current;
+            if (!active || active.role !== 'controller') {
+              throw new RuntimeApiError('CONTROL_UNAVAILABLE', '当前窗口没有控制权限。', false);
+            }
+            const query = await active.queryControlCommand(reference);
+            if (!ownsConnection(active)) {
+              throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
+            }
+            return query;
+          }}
           onRetryCapabilities={() => activeSessionId && void loadCapabilities(activeSessionId)}
           onToggleProjectSkill={toggleProjectSkill}
           onInstallProjectSkill={installProjectSkill}

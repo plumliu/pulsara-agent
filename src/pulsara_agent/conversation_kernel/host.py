@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
@@ -155,6 +155,30 @@ from pulsara_agent.conversation_kernel.runner import (
 )
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
+from pulsara_agent.conversation_kernel.subagent import (
+    SubagentCancelDisposition,
+)
+from pulsara_agent.conversation_kernel.user_control import (
+    CONTROL_ADMISSION_WINDOW_MS,
+    CONTROL_RESULT_RETENTION_MS,
+    ControlQueryStatus,
+    FeedbackCanonicalStatus,
+    FeedbackInclusionStatus,
+    FeedbackOwnerAvailability,
+    FeedbackTransportResult,
+    MonitorControlResult,
+    ProcessControlResult,
+    RootControlResult,
+    SubagentControlResult,
+    UserControlExecution,
+    UserControlFeedbackState,
+    UserControlOperation,
+    UserControlOutcome,
+    UserControlRequest,
+    UserControlTarget,
+    UserControlTargetKind,
+    parse_control_command_deadline_ms,
+)
 from pulsara_agent.conversation_kernel.subagents.launch import (
     CanonicalSubagentLaunchPreparationPort,
 )
@@ -199,6 +223,14 @@ from pulsara_agent.ports.terminal_observation import (
     ExistingTurnInstallation,
     NewTurnInstallation,
 )
+from pulsara_agent.ports.user_control_feedback import (
+    UserControlFeedbackContentV1,
+    UserControlFeedbackInstallationAttempt,
+    UserControlMonitorFact,
+    UserControlProcessFact,
+    project_user_control_feedback_for_provider,
+)
+from pulsara_agent.terminal_process.models import TerminalProcessInfo
 from pulsara_agent.mcp_config import McpServerConfig
 from pulsara_agent.capability.mcp_management import LocalMcpManagementService
 from pulsara_agent.conversation_kernel.mcp import McpHostSupervisor
@@ -352,6 +384,37 @@ class KernelCommandOutcome:
     plan_draft_decision: PlanDraftDecision | None = None
     plan_continuation_turn_id: str | None = None
     prompt_delivery: KernelPromptDelivery | None = None
+    user_control: UserControlOutcome | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KernelControlQueryResult:
+    status: ControlQueryStatus
+    outcome: KernelCommandOutcome | None
+
+
+@dataclass(slots=True)
+class _UserControlAttempt:
+    request: UserControlRequest
+    outcome: KernelCommandOutcome
+    task: asyncio.Task[None] | None = None
+    finished_monotonic_ms: int | None = None
+    retain_until_monotonic_ms: int | None = None
+    feedback_target_turn_id: str | None = None
+    feedback_candidate: UserControlFeedbackInstallationAttempt | None = None
+    feedback_provider_text: str | None = None
+    feedback_candidate_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    feedback_canonical_settled: asyncio.Event = field(default_factory=asyncio.Event)
+    feedback_install_attempted: bool = False
+    feedback_commit_outcome_unknown: bool = False
+    normal_end_coordination_fenced: bool = False
+    normal_end_coordination_exhausted: bool = False
+    normal_end_coordination_deadline: float | None = None
+    provider_input_observations: set[tuple[str, str, int]] = field(default_factory=set)
+    transport_observations: dict[tuple[str, str, int], FeedbackTransportResult] = field(
+        default_factory=dict
+    )
+    process_at_admission: TerminalProcessInfo | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,9 +561,11 @@ class KernelHostSession:
         initial_plugin_view: FrozenEnabledPluginView,
         credential_boundary: ProcessCredentialBoundary,
         mcp_management: LocalMcpManagementService,
-        capability_change_notifier: Callable[[Path | None], Awaitable[int]] | None = None,
+        capability_change_notifier: Callable[[Path | None], Awaitable[int]]
+        | None = None,
         local_mcp_configs: tuple[McpServerConfig, ...] = (),
         mcp_configs: tuple[McpServerConfig, ...] = (),
+        control_monotonic: Callable[[], float] = monotonic,
     ) -> None:
         self._model_runtime = model_runtime
         self.mcp_management = mcp_management
@@ -527,6 +592,7 @@ class KernelHostSession:
         )
         self._io = io_owner
         self._deadlines = deadline_factory
+        self._control_monotonic = control_monotonic
         self._lease = writer_lease
         self._memory_domain_id = workspace.memory_domain.memory_domain_id
         self.live_control = SessionLiveControlOwner(
@@ -607,13 +673,20 @@ class KernelHostSession:
         self._tools.bind_interaction_port(self._interactions)
         self._tools.bind_capability_reload_port(self)
         from .capability_management import CapabilityManagementPreparation
-        self._tools.bind_capability_management(CapabilityManagementPreparation(
-            mcp=mcp_management,
-            plugins=PluginManagementService(credential_boundary=credential_boundary,
-                pulsara_home_resolution=pulsara_home_resolution),
-            workspace_root=workspace.workspace_root,
-            deadline=lambda: self._deadlines.deadline(KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION),
-        ))
+
+        self._tools.bind_capability_management(
+            CapabilityManagementPreparation(
+                mcp=mcp_management,
+                plugins=PluginManagementService(
+                    credential_boundary=credential_boundary,
+                    pulsara_home_resolution=pulsara_home_resolution,
+                ),
+                workspace_root=workspace.workspace_root,
+                deadline=lambda: self._deadlines.deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+                ),
+            )
+        )
         self._subagents = KernelSubagentManager(
             repository=repository,
             guard=self._lease.guard,
@@ -699,6 +772,9 @@ class KernelHostSession:
             model_runtime=model_runtime,
             usage_observer=self._observe_provider_usage,
             timeout_policy=self._deadlines.policy.foreground_transport,
+            transport_invocation_observer=(
+                self._observe_user_control_transport_invocation
+            ),
         )
         display_timezone = datetime.now().astimezone().tzinfo
         if display_timezone is None:
@@ -720,6 +796,15 @@ class KernelHostSession:
             tools=self._tools,
             live_bus=self.live_bus,
             before_provider_preparation=self._adopt_capabilities_if_requested,
+            root_control_preparation_barrier=(
+                self._await_user_control_feedback_before_root_provider
+            ),
+            root_control_completion_fence=(
+                self._coordinate_user_control_feedback_at_root_completion
+            ),
+            root_control_completion_settlement=(
+                self._settle_user_control_feedback_root_completion
+            ),
             io_owner=self._io,
             context_source_collector=self._context_sources,
             model_resolution_snapshot_provider=(
@@ -742,6 +827,12 @@ class KernelHostSession:
             hook_scope=self._hook_root_scope,
             session_start_source=session_start_source,
             presentation_notice_sink=self._offer_presentation_notice,
+            provider_input_installed_observer=(
+                self._observe_user_control_provider_input_install
+            ),
+            provider_input_failure_observer=(
+                self._record_user_control_provider_input_failure
+            ),
         )
         self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
@@ -750,12 +841,14 @@ class KernelHostSession:
         self._active_command_id: str | None = None
         self._active_root_phase: RootChainPhase | None = None
         self._pending_root_successor: _PendingRootSuccessorHandoff | None = None
+        self._control_completion_sealed_turn_id: str | None = None
         self._external_new_turn_accepting = False
         self._plan_exit_fence = False
         self._terminal_new_turn_observation_id: str | None = None
         self._external_new_turn_settled = asyncio.Event()
         self._external_new_turn_settled.set()
         self._command_failures: dict[str, KernelCommandOutcome] = {}
+        self._user_control_attempts: dict[str, _UserControlAttempt] = {}
         self._lock = asyncio.Lock()
         self._capability_reload_settlement_lock = asyncio.Lock()
         self._capability_refresh_requested_revision = 0
@@ -975,8 +1068,12 @@ class KernelHostSession:
         await self.request_capability_refresh()
         await self._adopt_capabilities_if_requested()
         attention = bool(self.capability_refresh_attention)
-        return {"status": "PARTIAL" if attention else "RELOADED", "reloaded_sessions": int(not attention),
-                "pending_sessions": max(0, pending - 1), "attention_sessions": int(attention)}
+        return {
+            "status": "PARTIAL" if attention else "RELOADED",
+            "reloaded_sessions": int(not attention),
+            "pending_sessions": max(0, pending - 1),
+            "attention_sessions": int(attention),
+        }
 
     async def request_capability_refresh(self) -> int:
         """Mark the next unprepared dispatch; do not wake an otherwise idle turn."""
@@ -1817,6 +1914,8 @@ class KernelHostSession:
                     scope_subagent_task_id=None,
                     turn_id=continuation_turn_id,
                 )
+                if self._control_completion_sealed_turn_id == pending.origin_turn_id:
+                    self._control_completion_sealed_turn_id = None
                 self._active_turn_id = continuation_turn_id
                 cancellation_intent = ActiveTurnCancellationIntent(
                     continuation_turn_id, ModelInputScopeKind.ROOT, None
@@ -1946,6 +2045,8 @@ class KernelHostSession:
                 if manual is None and active_turn_id is not None:
                     self._tools.todo_owner.mark_root_idle(exact_turn_id=active_turn_id)
                 if manual is None:
+                    if active_turn_id is not None:
+                        self._mark_feedback_target_ended_locked(active_turn_id)
                     self._clear_active_root_locked()
         if manual is None:
             return
@@ -1976,6 +2077,7 @@ class KernelHostSession:
                         self._tools.todo_owner.mark_root_idle(
                             exact_turn_id=active_turn_id
                         )
+                        self._mark_feedback_target_ended_locked(active_turn_id)
                     self._clear_active_root_locked()
 
     async def _finalize_todo_run_activation(
@@ -2015,6 +2117,11 @@ class KernelHostSession:
     def _clear_active_root_locked(self) -> None:
         if self._pending_root_successor is not None:
             raise RuntimeError("ROOT slot cleared with an unsettled successor handoff")
+        active_turn_id = self._active_turn_id
+        if active_turn_id is not None:
+            self._mark_feedback_target_ended_locked(active_turn_id)
+        if getattr(self, "_control_completion_sealed_turn_id", None) == active_turn_id:
+            self._control_completion_sealed_turn_id = None
         self._active_task = None
         self._active_turn_id = None
         self._active_cancellation_intent = None
@@ -3838,6 +3945,1524 @@ class KernelHostSession:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    def control_admission_deadline_ms(self) -> int:
+        """Return the current Host's bounded monotonic admission frontier."""
+
+        return int(self._control_monotonic() * 1000) + CONTROL_ADMISSION_WINDOW_MS
+
+    def active_root_turn_id(self) -> str | None:
+        """Project the exact process-local ROOT target without mutating it."""
+
+        task = self._active_task
+        return self._active_turn_id if task is not None and not task.done() else None
+
+    def _control_rejection(
+        self,
+        request: UserControlRequest,
+        code: str,
+        message: str,
+    ) -> KernelCommandOutcome:
+        return KernelCommandOutcome(
+            request.command_id,
+            "REJECTED",
+            request.target.target_id,
+            code,
+            message,
+            user_control=UserControlOutcome(
+                operation=request.operation,
+                session_id=request.session_id,
+                host_session_id=request.host_session_id,
+                target=request.target,
+                accepted=False,
+                execution=UserControlExecution.NOT_STARTED,
+            ),
+        )
+
+    def _validate_new_control_request_locked(
+        self, request: UserControlRequest
+    ) -> KernelCommandOutcome | None:
+        expected_target_kind = {
+            UserControlOperation.STOP_ACTIVE_TURN: UserControlTargetKind.ROOT_TURN,
+            UserControlOperation.CANCEL_SUBAGENT_TASK: (
+                UserControlTargetKind.SUBAGENT_TASK
+            ),
+            UserControlOperation.TERMINATE_BACKGROUND_PROCESS: (
+                UserControlTargetKind.BACKGROUND_PROCESS
+            ),
+        }[request.operation]
+        if (
+            not request.command_id
+            or not request.session_id
+            or not request.host_session_id
+            or not request.target.target_id
+            or request.target.kind is not expected_target_kind
+        ):
+            return self._control_rejection(
+                request,
+                "CONTROL_REQUEST_INVALID",
+                "The exact control owner and target are required.",
+            )
+        if (
+            request.session_id != self.session_id
+            or request.host_session_id != self.host_session_id
+        ):
+            return self._control_rejection(
+                request,
+                "OWNER_UNAVAILABLE",
+                "The requested Host owner is not current.",
+            )
+        if self._closing or self._closed:
+            return self._control_rejection(
+                request,
+                "OWNER_UNAVAILABLE",
+                "The requested Host owner is closing or closed.",
+            )
+        deadline_ms = parse_control_command_deadline_ms(request.command_id)
+        now_ms = int(self._control_monotonic() * 1000)
+        if deadline_ms is None or deadline_ms > now_ms + CONTROL_ADMISSION_WINDOW_MS:
+            return self._control_rejection(
+                request,
+                "CONTROL_REQUEST_INVALID",
+                "The control command identity is invalid.",
+            )
+        if now_ms >= deadline_ms:
+            return self._control_rejection(
+                request,
+                "CONTROL_REQUEST_EXPIRED",
+                "The control command admission deadline has expired.",
+            )
+        return None
+
+    def _retire_control_attempts_locked(self) -> None:
+        now_ms = int(self._control_monotonic() * 1000)
+        for command_id, attempt in tuple(self._user_control_attempts.items()):
+            if attempt.task is not None and not attempt.task.done():
+                continue
+            control = attempt.outcome.user_control
+            feedback = None if control is None else control.feedback
+            if feedback is not None and (
+                feedback.canonical_status is FeedbackCanonicalStatus.PENDING
+                or feedback.inclusion_status is FeedbackInclusionStatus.PENDING
+                or (
+                    feedback.inclusion_status is FeedbackInclusionStatus.INCLUDED
+                    and not feedback.transport.invocation_attempted
+                    and feedback.target_root_turn_id == self._active_turn_id
+                    and self._active_task is not None
+                    and not self._active_task.done()
+                )
+            ):
+                continue
+            if (
+                attempt.retain_until_monotonic_ms is not None
+                and now_ms >= attempt.retain_until_monotonic_ms
+            ):
+                self._user_control_attempts.pop(command_id, None)
+
+    def _existing_control_outcome_locked(
+        self, request: UserControlRequest
+    ) -> KernelCommandOutcome | None:
+        self._retire_control_attempts_locked()
+        attempt = self._user_control_attempts.get(request.command_id)
+        if attempt is None:
+            return None
+        if attempt.request != request:
+            return self._control_rejection(
+                request,
+                "CONTROL_COMMAND_CONFLICT",
+                "The control command identity is already bound to another request.",
+            )
+        return attempt.outcome
+
+    def _install_control_attempt_locked(
+        self,
+        request: UserControlRequest,
+        pending: KernelCommandOutcome,
+        *,
+        feedback_target_turn_id: str | None = None,
+        process_at_admission: TerminalProcessInfo | None = None,
+    ) -> _UserControlAttempt:
+        attempt = _UserControlAttempt(
+            request=request,
+            outcome=pending,
+            feedback_target_turn_id=feedback_target_turn_id,
+            process_at_admission=process_at_admission,
+        )
+        self._user_control_attempts[request.command_id] = attempt
+        return attempt
+
+    def _finish_control_attempt_locked(
+        self, attempt: _UserControlAttempt, outcome: KernelCommandOutcome
+    ) -> None:
+        current = self._user_control_attempts.get(attempt.request.command_id)
+        if current is not attempt:
+            return
+        attempt.outcome = outcome
+        finished_ms = int(self._control_monotonic() * 1000)
+        attempt.finished_monotonic_ms = finished_ms
+        deadline_ms = parse_control_command_deadline_ms(attempt.request.command_id)
+        assert deadline_ms is not None
+        attempt.retain_until_monotonic_ms = max(
+            deadline_ms,
+            finished_ms + CONTROL_RESULT_RETENTION_MS,
+        )
+        control = outcome.user_control
+        feedback = None if control is None else control.feedback
+        if (
+            feedback is None
+            or feedback.canonical_status is not FeedbackCanonicalStatus.PENDING
+        ):
+            attempt.feedback_candidate_ready.set()
+        if (
+            feedback is None
+            or feedback.canonical_status is not FeedbackCanonicalStatus.PENDING
+        ):
+            attempt.feedback_canonical_settled.set()
+
+    @staticmethod
+    def _user_control_request_identity(
+        request: KernelModelExecutionRequest,
+    ) -> tuple[str, str, int]:
+        return (
+            request.turn_id,
+            request.cut.context_binding_revision_id,
+            request.model_call_index,
+        )
+
+    def _reconcile_control_feedback_observations_locked(
+        self,
+        attempt: _UserControlAttempt,
+        feedback: UserControlFeedbackState,
+    ) -> UserControlFeedbackState:
+        if feedback.canonical_status is not FeedbackCanonicalStatus.ACCEPTED:
+            return feedback
+        if feedback.inclusion_status is FeedbackInclusionStatus.INCLUDED:
+            if (
+                feedback.context_binding_revision_id is None
+                or feedback.model_call_index is None
+            ):
+                return feedback
+            transport = attempt.transport_observations.get(
+                (
+                    feedback.target_root_turn_id or "",
+                    feedback.context_binding_revision_id,
+                    feedback.model_call_index,
+                )
+            )
+            return (
+                feedback
+                if transport is None
+                else replace(feedback, transport=transport)
+            )
+        if (
+            feedback.inclusion_status is not FeedbackInclusionStatus.PENDING
+            or feedback.entry_id is None
+        ):
+            return feedback
+        if not attempt.provider_input_observations:
+            return feedback
+        request_identity = min(
+            attempt.provider_input_observations,
+            key=lambda value: (value[2], value[1]),
+        )
+        transport = attempt.transport_observations.get(
+            request_identity, feedback.transport
+        )
+        return replace(
+            feedback,
+            inclusion_status=FeedbackInclusionStatus.INCLUDED,
+            context_binding_revision_id=request_identity[1],
+            model_call_index=request_identity[2],
+            transport=transport,
+            reason=None,
+        )
+
+    def _replace_control_feedback_locked(
+        self,
+        attempt: _UserControlAttempt,
+        feedback: UserControlFeedbackState,
+    ) -> None:
+        control = attempt.outcome.user_control
+        if control is None:
+            raise RuntimeError("user-control attempt lacks typed outcome")
+        feedback = self._reconcile_control_feedback_observations_locked(
+            attempt, feedback
+        )
+        attempt.outcome = replace(
+            attempt.outcome,
+            user_control=replace(control, feedback=feedback),
+        )
+        if feedback.canonical_status is not FeedbackCanonicalStatus.PENDING:
+            attempt.feedback_canonical_settled.set()
+        feedback_owner_still_advancing = (
+            feedback.canonical_status is FeedbackCanonicalStatus.PENDING
+            or feedback.inclusion_status is FeedbackInclusionStatus.PENDING
+            or (
+                feedback.inclusion_status is FeedbackInclusionStatus.INCLUDED
+                and not feedback.transport.invocation_attempted
+                and feedback.target_root_turn_id == self._active_turn_id
+                and self._active_task is not None
+                and not self._active_task.done()
+            )
+        )
+        if (
+            attempt.finished_monotonic_ms is not None
+            and not feedback_owner_still_advancing
+        ):
+            now_ms = int(self._control_monotonic() * 1000)
+            attempt.retain_until_monotonic_ms = max(
+                attempt.retain_until_monotonic_ms or 0,
+                now_ms + CONTROL_RESULT_RETENTION_MS,
+            )
+
+    def _mark_feedback_target_ended_locked(self, turn_id: str) -> None:
+        for attempt in self._user_control_attempts.values():
+            if attempt.feedback_target_turn_id != turn_id:
+                continue
+            control = attempt.outcome.user_control
+            feedback = None if control is None else control.feedback
+            if feedback is None:
+                continue
+            canonical_status = feedback.canonical_status
+            inclusion_status = feedback.inclusion_status
+            reason = feedback.reason
+            if canonical_status is FeedbackCanonicalStatus.PENDING:
+                if attempt.feedback_commit_outcome_unknown:
+                    # The immutable candidate may already be committed.  Its
+                    # owner must exact-confirm before target closure can be
+                    # interpreted as a failed canonical write.
+                    continue
+                canonical_status = FeedbackCanonicalStatus.FAILED
+                inclusion_status = FeedbackInclusionStatus.NOT_APPLICABLE
+                reason = "TARGET_CLOSED"
+            elif (
+                canonical_status is FeedbackCanonicalStatus.ACCEPTED
+                and inclusion_status is FeedbackInclusionStatus.PENDING
+            ):
+                inclusion_status = FeedbackInclusionStatus.TARGET_ENDED_BEFORE_INCLUSION
+                reason = "TARGET_CLOSED"
+            self._replace_control_feedback_locked(
+                attempt,
+                replace(
+                    feedback,
+                    canonical_status=canonical_status,
+                    inclusion_status=inclusion_status,
+                    reason=reason,
+                ),
+            )
+
+    def _root_feedback_attempts_locked(
+        self, turn_id: str
+    ) -> tuple[_UserControlAttempt, ...]:
+        return tuple(
+            attempt
+            for attempt in self._user_control_attempts.values()
+            if attempt.feedback_target_turn_id == turn_id
+            and not attempt.normal_end_coordination_exhausted
+            and attempt.outcome.user_control is not None
+            and attempt.outcome.user_control.feedback is not None
+        )
+
+    async def _coordinate_user_control_feedback_at_root_completion(
+        self, turn_id: str
+    ) -> bool:
+        """Fence a normal ROOT answer until bound control facts are ready.
+
+        The existing foreground canonical watchdog bounds waiting for a physical
+        control result.  Once an immutable feedback candidate exists, the
+        runner keeps the turn open so that the safe-point owner can install it
+        before the next provider request.  Idle sessions never enter this path.
+        """
+
+        while True:
+            async with self._lock:
+                sealed_turn_id = getattr(
+                    self, "_control_completion_sealed_turn_id", None
+                )
+                if sealed_turn_id not in {None, turn_id}:
+                    raise RuntimeError(
+                        "another ROOT control-completion phase is still sealed"
+                    )
+                self._control_completion_sealed_turn_id = turn_id
+                attempts = self._root_feedback_attempts_locked(turn_id)
+                wait_events: list[asyncio.Event] = []
+                deadlines: list[float] = []
+                should_fence = False
+                now = monotonic()
+                for attempt in attempts:
+                    control = attempt.outcome.user_control
+                    assert control is not None and control.feedback is not None
+                    feedback = control.feedback
+                    if attempt.normal_end_coordination_deadline is None:
+                        attempt.normal_end_coordination_deadline = (
+                            self._canonical_deadline()
+                        )
+                    deadline = attempt.normal_end_coordination_deadline
+                    if now >= deadline:
+                        attempt.normal_end_coordination_exhausted = True
+                        continue
+                    if (
+                        feedback.canonical_status is FeedbackCanonicalStatus.PENDING
+                        and attempt.feedback_candidate is None
+                    ):
+                        wait_events.append(attempt.feedback_candidate_ready)
+                        deadlines.append(deadline)
+                    elif feedback.canonical_status is FeedbackCanonicalStatus.PENDING:
+                        attempt.normal_end_coordination_fenced = True
+                        should_fence = True
+                    elif (
+                        feedback.canonical_status is FeedbackCanonicalStatus.ACCEPTED
+                        and feedback.inclusion_status is FeedbackInclusionStatus.PENDING
+                    ):
+                        # No future request can be observed while this reply is
+                        # itself waiting to complete.  Keep the ROOT open so
+                        # the runner prepares the exact next request instead
+                        # of timing out on an inclusion event with no producer.
+                        attempt.normal_end_coordination_fenced = True
+                        should_fence = True
+                if wait_events:
+                    deadline = min(deadlines)
+                elif should_fence:
+                    return True
+                else:
+                    return False
+            remaining = max(0.0, deadline - monotonic())
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(event.wait() for event in wait_events)),
+                    timeout=remaining,
+                )
+            except TimeoutError:
+                # Give callbacks already queued on this loop one final chance
+                # before applying the existing watchdog boundary.
+                await asyncio.sleep(0)
+                async with self._lock:
+                    now = monotonic()
+                    for attempt in self._root_feedback_attempts_locked(turn_id):
+                        attempt_deadline = attempt.normal_end_coordination_deadline
+                        if attempt_deadline is not None and now >= attempt_deadline:
+                            attempt.normal_end_coordination_exhausted = True
+
+    async def _settle_user_control_feedback_root_completion(
+        self, turn_id: str, *, turn_completed: bool
+    ) -> None:
+        """Settle the exact control-feedback admission seal with the answer."""
+
+        async with self._lock:
+            if getattr(self, "_control_completion_sealed_turn_id", None) != turn_id:
+                return
+            if not turn_completed:
+                self._control_completion_sealed_turn_id = None
+
+    async def _await_user_control_feedback_before_root_provider(
+        self, turn_id: str
+    ) -> None:
+        """Wait for fenced candidates at the next legal input boundary."""
+
+        while True:
+            async with self._lock:
+                waiting = tuple(
+                    attempt
+                    for attempt in self._root_feedback_attempts_locked(turn_id)
+                    if attempt.normal_end_coordination_fenced
+                    and attempt.outcome.user_control is not None
+                    and attempt.outcome.user_control.feedback is not None
+                    and attempt.outcome.user_control.feedback.canonical_status
+                    is FeedbackCanonicalStatus.PENDING
+                )
+                if not waiting:
+                    return
+                deadline = min(
+                    attempt.normal_end_coordination_deadline
+                    for attempt in waiting
+                    if attempt.normal_end_coordination_deadline is not None
+                )
+                events = tuple(
+                    attempt.feedback_canonical_settled for attempt in waiting
+                )
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*(event.wait() for event in events)),
+                    timeout=max(0.0, deadline - monotonic()),
+                )
+            except TimeoutError:
+                await asyncio.sleep(0)
+                async with self._lock:
+                    now = monotonic()
+                    for attempt in waiting:
+                        if (
+                            attempt.normal_end_coordination_deadline is not None
+                            and now >= attempt.normal_end_coordination_deadline
+                        ):
+                            attempt.normal_end_coordination_exhausted = True
+                return
+
+    def _pending_control_outcome(
+        self,
+        request: UserControlRequest,
+        *,
+        feedback: UserControlFeedbackState | None = None,
+    ) -> KernelCommandOutcome:
+        return KernelCommandOutcome(
+            request.command_id,
+            "PENDING",
+            request.target.target_id,
+            "CONTROL_ACCEPTED",
+            "The exact control request was accepted.",
+            user_control=UserControlOutcome(
+                operation=request.operation,
+                session_id=request.session_id,
+                host_session_id=request.host_session_id,
+                target=request.target,
+                accepted=True,
+                execution=UserControlExecution.RUNNING,
+                feedback=feedback,
+            ),
+        )
+
+    async def request_stop_turn(
+        self,
+        *,
+        command_id: str,
+        expected_session_id: str,
+        expected_host_session_id: str,
+        target_turn_id: str,
+    ) -> KernelCommandOutcome:
+        request = UserControlRequest(
+            UserControlOperation.STOP_ACTIVE_TURN,
+            command_id,
+            expected_session_id,
+            expected_host_session_id,
+            UserControlTarget(UserControlTargetKind.ROOT_TURN, target_turn_id),
+        )
+        async with self._lock:
+            existing = self._existing_control_outcome_locked(request)
+            if existing is not None:
+                return existing
+            rejection = self._validate_new_control_request_locked(request)
+            if rejection is not None:
+                return rejection
+            self._retire_done_active_root_locked()
+            task = self._active_task
+            intent = self._active_cancellation_intent
+            if (
+                task is not None
+                and not task.done()
+                and self._active_turn_id == target_turn_id
+            ):
+                if intent is None:
+                    raise RuntimeError("active ROOT task lacks cancellation intent")
+                intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
+                pending = self._pending_control_outcome(request)
+                attempt = self._install_control_attempt_locked(request, pending)
+                attempt.task = asyncio.create_task(
+                    self._execute_stop_turn_attempt(attempt, task),
+                    name=f"kernel-user-stop:{target_turn_id}",
+                )
+                return pending
+            active_drifted = self._active_turn_id is not None
+        terminal = await self._io.run(
+            self.repository.read_turn_terminal_outcome,
+            session_id=self.session_id,
+            turn_id=target_turn_id,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        async with self._lock:
+            existing = self._existing_control_outcome_locked(request)
+            if existing is not None:
+                return existing
+            if terminal is None or not str(terminal.get("status") or ""):
+                return self._control_rejection(
+                    request,
+                    "CONTROL_TARGET_NOT_CURRENT"
+                    if active_drifted
+                    else "CONTROL_TARGET_UNAVAILABLE",
+                    "The target ROOT turn is not the current running turn.",
+                )
+            root = RootControlResult(
+                str(terminal["status"]),
+                str(terminal.get("terminal_reason") or "") or None,
+            )
+            outcome = KernelCommandOutcome(
+                command_id,
+                "SUCCEEDED",
+                target_turn_id,
+                "CONTROL_ALREADY_TERMINAL",
+                "The target ROOT turn had already reached a terminal state.",
+                user_control=UserControlOutcome(
+                    request.operation,
+                    request.session_id,
+                    request.host_session_id,
+                    request.target,
+                    False,
+                    UserControlExecution.FINISHED,
+                    root=root,
+                ),
+            )
+            attempt = self._install_control_attempt_locked(request, outcome)
+            self._finish_control_attempt_locked(attempt, outcome)
+            return outcome
+
+    async def _execute_stop_turn_attempt(
+        self, attempt: _UserControlAttempt, task: asyncio.Task[KernelRunResult]
+    ) -> None:
+        try:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await self._settle_active_root_task(task)
+            terminal = await self._io.run(
+                self.repository.read_turn_terminal_outcome,
+                session_id=self.session_id,
+                turn_id=attempt.request.target.target_id,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            outcome = KernelCommandOutcome(
+                attempt.request.command_id,
+                "FAILED",
+                attempt.request.target.target_id,
+                "CONTROL_FAILED",
+                "The ROOT control owner failed before confirming interruption.",
+                user_control=UserControlOutcome(
+                    attempt.request.operation,
+                    attempt.request.session_id,
+                    attempt.request.host_session_id,
+                    attempt.request.target,
+                    True,
+                    UserControlExecution.FINISHED,
+                ),
+            )
+            async with self._lock:
+                self._finish_control_attempt_locked(attempt, outcome)
+            return
+        root = RootControlResult(
+            None if terminal is None else str(terminal.get("status") or "") or None,
+            None
+            if terminal is None
+            else str(terminal.get("terminal_reason") or "") or None,
+        )
+        succeeded = root.status == "INTERRUPTED"
+        outcome = KernelCommandOutcome(
+            attempt.request.command_id,
+            "SUCCEEDED" if succeeded else "FAILED",
+            attempt.request.target.target_id,
+            "ROOT_STOPPED" if succeeded else "CONTROL_FAILED",
+            "The target ROOT turn was stopped."
+            if succeeded
+            else "The target ROOT turn did not confirm interruption.",
+            user_control=UserControlOutcome(
+                attempt.request.operation,
+                attempt.request.session_id,
+                attempt.request.host_session_id,
+                attempt.request.target,
+                True,
+                UserControlExecution.FINISHED,
+                root=root,
+            ),
+        )
+        async with self._lock:
+            self._finish_control_attempt_locked(attempt, outcome)
+
+    async def request_cancel_subagent(
+        self,
+        *,
+        command_id: str,
+        expected_session_id: str,
+        expected_host_session_id: str,
+        task_id: str,
+    ) -> KernelCommandOutcome:
+        request = UserControlRequest(
+            UserControlOperation.CANCEL_SUBAGENT_TASK,
+            command_id,
+            expected_session_id,
+            expected_host_session_id,
+            UserControlTarget(UserControlTargetKind.SUBAGENT_TASK, task_id),
+        )
+        async with self._lock:
+            existing = self._existing_control_outcome_locked(request)
+            if existing is not None:
+                return existing
+            rejection = self._validate_new_control_request_locked(request)
+            if rejection is not None:
+                return rejection
+        preflight = await self._subagents.preflight_cancel_task(task_id)
+        async with self._lock:
+            existing = self._existing_control_outcome_locked(request)
+            if existing is not None:
+                return existing
+            rejection = self._validate_new_control_request_locked(request)
+            if rejection is not None:
+                return rejection
+            if preflight is not None:
+                if (
+                    preflight.disposition
+                    is SubagentCancelDisposition.TARGET_UNAVAILABLE
+                ):
+                    return self._control_rejection(
+                        request,
+                        "CONTROL_TARGET_UNAVAILABLE",
+                        "The subagent target is unavailable.",
+                    )
+                outcome = KernelCommandOutcome(
+                    request.command_id,
+                    "SUCCEEDED",
+                    request.target.target_id,
+                    "CONTROL_ALREADY_TERMINAL",
+                    "The subagent task was already terminal.",
+                    user_control=UserControlOutcome(
+                        request.operation,
+                        request.session_id,
+                        request.host_session_id,
+                        request.target,
+                        False,
+                        UserControlExecution.FINISHED,
+                        subagent=SubagentControlResult(
+                            preflight.disposition.value,
+                            preflight.status,
+                            preflight.reason,
+                        ),
+                    ),
+                )
+                attempt = self._install_control_attempt_locked(request, outcome)
+                self._finish_control_attempt_locked(attempt, outcome)
+                return outcome
+            pending = self._pending_control_outcome(request)
+            attempt = self._install_control_attempt_locked(request, pending)
+            attempt.task = asyncio.create_task(
+                self._execute_cancel_subagent_attempt(attempt),
+                name=f"kernel-user-cancel-subagent:{task_id}",
+            )
+            return pending
+
+    async def _execute_cancel_subagent_attempt(
+        self, attempt: _UserControlAttempt
+    ) -> None:
+        try:
+            result = await self._subagents.cancel_task(attempt.request.target.target_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            outcome = KernelCommandOutcome(
+                attempt.request.command_id,
+                "FAILED",
+                attempt.request.target.target_id,
+                "CONTROL_FAILED",
+                "The subagent control owner failed before confirming cancellation.",
+                user_control=UserControlOutcome(
+                    attempt.request.operation,
+                    attempt.request.session_id,
+                    attempt.request.host_session_id,
+                    attempt.request.target,
+                    True,
+                    UserControlExecution.FINISHED,
+                ),
+            )
+            async with self._lock:
+                self._finish_control_attempt_locked(attempt, outcome)
+            return
+        unavailable = result.disposition is SubagentCancelDisposition.TARGET_UNAVAILABLE
+        already = result.disposition is SubagentCancelDisposition.ALREADY_TERMINAL
+        outcome = KernelCommandOutcome(
+            attempt.request.command_id,
+            "REJECTED" if unavailable else "SUCCEEDED",
+            attempt.request.target.target_id,
+            "CONTROL_TARGET_UNAVAILABLE"
+            if unavailable
+            else "CONTROL_ALREADY_TERMINAL"
+            if already
+            else "SUBAGENT_CANCELLED",
+            "The subagent target is unavailable."
+            if unavailable
+            else "The subagent task was already terminal."
+            if already
+            else "The subagent task was cancelled.",
+            user_control=UserControlOutcome(
+                attempt.request.operation,
+                attempt.request.session_id,
+                attempt.request.host_session_id,
+                attempt.request.target,
+                not unavailable and not already,
+                UserControlExecution.FINISHED,
+                subagent=SubagentControlResult(
+                    result.disposition.value,
+                    result.status,
+                    result.reason,
+                ),
+            ),
+        )
+        async with self._lock:
+            self._finish_control_attempt_locked(attempt, outcome)
+
+    async def request_terminate_background_process(
+        self,
+        *,
+        command_id: str,
+        expected_session_id: str,
+        expected_host_session_id: str,
+        process_id: str,
+    ) -> KernelCommandOutcome:
+        request = UserControlRequest(
+            UserControlOperation.TERMINATE_BACKGROUND_PROCESS,
+            command_id,
+            expected_session_id,
+            expected_host_session_id,
+            UserControlTarget(UserControlTargetKind.BACKGROUND_PROCESS, process_id),
+        )
+        async with self._lock:
+            existing = self._existing_control_outcome_locked(request)
+            if existing is not None:
+                return existing
+            rejection = self._validate_new_control_request_locked(request)
+            if rejection is not None:
+                return rejection
+            process = next(
+                (
+                    item
+                    for item in self._tools.list_background_terminal_processes()
+                    if item.process_id == process_id
+                ),
+                None,
+            )
+            if process is None:
+                return self._control_rejection(
+                    request,
+                    "CONTROL_TARGET_UNAVAILABLE",
+                    "The background process is unavailable in this Host.",
+                )
+            self._retire_done_active_root_locked()
+            active_feedback_target = (
+                self._active_turn_id
+                if self._active_task is not None and not self._active_task.done()
+                else None
+            )
+            feedback_target = (
+                None
+                if active_feedback_target
+                == getattr(self, "_control_completion_sealed_turn_id", None)
+                else active_feedback_target
+            )
+            feedback_reason = (
+                None
+                if feedback_target is not None
+                else "TARGET_CLOSED"
+                if active_feedback_target is not None
+                else "IDLE_AT_ADMISSION"
+            )
+            feedback = UserControlFeedbackState(
+                FeedbackCanonicalStatus.PENDING
+                if feedback_target is not None
+                else FeedbackCanonicalStatus.NOT_REQUIRED,
+                FeedbackInclusionStatus.PENDING
+                if feedback_target is not None
+                else FeedbackInclusionStatus.NOT_APPLICABLE,
+                FeedbackOwnerAvailability.AVAILABLE,
+                reason=feedback_reason,
+                target_root_turn_id=feedback_target,
+            )
+            pending = self._pending_control_outcome(request, feedback=feedback)
+            attempt = self._install_control_attempt_locked(
+                request,
+                pending,
+                feedback_target_turn_id=feedback_target,
+                process_at_admission=process,
+            )
+            attempt.task = asyncio.create_task(
+                self._execute_terminate_process_attempt(attempt),
+                name=f"kernel-user-terminate-process:{process_id}",
+            )
+            return pending
+
+    def list_background_processes(
+        self, *, expected_session_id: str, expected_host_session_id: str
+    ) -> tuple[TerminalProcessInfo, ...]:
+        self._require_open()
+        if (
+            expected_session_id != self.session_id
+            or expected_host_session_id != self.host_session_id
+        ):
+            raise KeyError("background process owner is unavailable")
+        return tuple(self._tools.list_background_terminal_processes())
+
+    def read_background_process_log(
+        self,
+        *,
+        expected_session_id: str,
+        expected_host_session_id: str,
+        process_id: str,
+        maximum_chars: int,
+        since_cursor: str | None,
+    ):
+        self._require_open()
+        if (
+            expected_session_id != self.session_id
+            or expected_host_session_id != self.host_session_id
+        ):
+            raise KeyError("background process owner is unavailable")
+        if not any(
+            item.process_id == process_id
+            for item in self._tools.list_background_terminal_processes()
+        ):
+            raise KeyError("background process is unavailable")
+        return self._tools.read_background_terminal_log(
+            process_id,
+            maximum_chars=maximum_chars,
+            since_cursor=since_cursor,
+        )
+
+    async def _execute_terminate_process_attempt(
+        self, attempt: _UserControlAttempt
+    ) -> None:
+        try:
+            monitor_result = (
+                self._tools.terminal_monitor_coordinator.cancel_for_process(
+                    attempt.request.target.target_id
+                )
+            )
+        except Exception:
+            monitor_result = None
+            monitor_failure_detail = "The monitor owner failed during cancellation."
+        else:
+            monitor_failure_detail = None
+        try:
+            result = await self._io.run(
+                self._tools.terminate_background_terminal_process,
+                attempt.request.target.target_id,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            process = ProcessControlResult(
+                result.disposition.value,
+                result.result.status.value,
+                result.result.exit_code,
+                result.physical_state,
+                result.group_alive,
+            )
+            physical_failed = (
+                result.disposition.value == "PHYSICAL_SETTLEMENT_INCOMPLETE"
+            )
+        except Exception as exc:
+            process = ProcessControlResult(
+                "OWNER_UNAVAILABLE",
+                "unknown",
+                None,
+                "unknown",
+                None,
+            )
+            physical_failed = True
+            physical_detail = str(exc)
+        else:
+            physical_detail = None
+        monitor = (
+            None
+            if monitor_result is None
+            else MonitorControlResult(
+                monitor_result.monitor_id,
+                monitor_result.outcome.value,
+                monitor_result.in_flight_observation_ids,
+                monitor_result.detail,
+            )
+        )
+        monitor_failed = monitor_failure_detail is not None or (
+            monitor is not None and monitor.outcome == "FAILED"
+        )
+        new_control_attempt = (
+            result.disposition.value != "ALREADY_TERMINAL"
+            if physical_detail is None
+            else True
+        ) or monitor_result is not None
+        feedback_required = (
+            attempt.feedback_target_turn_id is not None and new_control_attempt
+        )
+        admission_control = attempt.outcome.user_control
+        admission_feedback = (
+            None if admission_control is None else admission_control.feedback
+        )
+        feedback = UserControlFeedbackState(
+            FeedbackCanonicalStatus.PENDING
+            if feedback_required
+            else FeedbackCanonicalStatus.NOT_REQUIRED,
+            FeedbackInclusionStatus.PENDING
+            if feedback_required
+            else FeedbackInclusionStatus.NOT_APPLICABLE,
+            FeedbackOwnerAvailability.AVAILABLE,
+            reason=(
+                None
+                if feedback_required
+                else "NO_NEW_CONTROL_EFFECT"
+                if not new_control_attempt
+                else (
+                    admission_feedback.reason
+                    if admission_feedback is not None
+                    and admission_feedback.reason is not None
+                    else "IDLE_AT_ADMISSION"
+                )
+            ),
+            target_root_turn_id=attempt.feedback_target_turn_id,
+        )
+        failed = physical_failed or monitor_failed
+        outcome = KernelCommandOutcome(
+            attempt.request.command_id,
+            "FAILED" if failed else "SUCCEEDED",
+            attempt.request.target.target_id,
+            "CONTROL_PARTIAL_FAILURE"
+            if failed
+            else "CONTROL_ALREADY_TERMINAL"
+            if not new_control_attempt
+            else "BACKGROUND_CONTROL_COMPLETED",
+            physical_detail
+            or monitor_failure_detail
+            or (monitor.detail if monitor_failed and monitor is not None else None)
+            or (
+                "The background process control completed."
+                if not failed
+                else "The background process control was only partially completed."
+            ),
+            user_control=UserControlOutcome(
+                attempt.request.operation,
+                attempt.request.session_id,
+                attempt.request.host_session_id,
+                attempt.request.target,
+                new_control_attempt,
+                UserControlExecution.FINISHED,
+                process=process,
+                monitor=monitor,
+                feedback=feedback,
+            ),
+        )
+        async with self._lock:
+            self._finish_control_attempt_locked(attempt, outcome)
+        if feedback_required:
+            try:
+                await self._install_user_control_feedback_for_attempt(
+                    attempt,
+                    process=process,
+                    monitor=monitor,
+                    public_code=outcome.public_code,
+                    public_detail=outcome.public_message,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                async with self._lock:
+                    control = attempt.outcome.user_control
+                    feedback = None if control is None else control.feedback
+                    if feedback is not None:
+                        self._replace_control_feedback_locked(
+                            attempt,
+                            replace(
+                                feedback,
+                                canonical_status=(
+                                    FeedbackCanonicalStatus.FAILED
+                                    if feedback.canonical_status
+                                    is FeedbackCanonicalStatus.PENDING
+                                    else feedback.canonical_status
+                                ),
+                                inclusion_status=(
+                                    FeedbackInclusionStatus.NOT_APPLICABLE
+                                    if feedback.inclusion_status
+                                    is FeedbackInclusionStatus.PENDING
+                                    else feedback.inclusion_status
+                                ),
+                                reason=feedback.reason or "FEEDBACK_OWNER_FAILED",
+                            ),
+                        )
+
+    async def _install_user_control_feedback_for_attempt(
+        self,
+        attempt: _UserControlAttempt,
+        *,
+        process: ProcessControlResult,
+        monitor: MonitorControlResult | None,
+        public_code: str,
+        public_detail: str,
+    ) -> None:
+        target_turn_id = attempt.feedback_target_turn_id
+        process_info = attempt.process_at_admission
+        if target_turn_id is None or process_info is None:
+            raise RuntimeError("feedback attempt lost its frozen target or process")
+        candidate = UserControlFeedbackInstallationAttempt(
+            session_id=self.session_id,
+            workspace_id=self.workspace.workspace_key,
+            writer_generation=self._lease.guard.writer_generation,
+            target_root_turn_id=target_turn_id,
+            entry_id=f"entry:user-control:{uuid4().hex}",
+            content=UserControlFeedbackContentV1(
+                command_id=attempt.request.command_id,
+                session_id=self.session_id,
+                host_session_id=self.host_session_id,
+                process_id=process_info.process_id,
+                command=process_info.command,
+                cwd=process_info.cwd,
+                origin_turn_id=process_info.origin.turn_id,
+                origin_subagent_task_id=(process_info.origin.scope_subagent_task_id),
+                target_root_turn_id=target_turn_id,
+                process=UserControlProcessFact(
+                    process.disposition,
+                    process.status,
+                    process.exit_code,
+                    process.physical_state,
+                    process.group_alive,
+                ),
+                monitor=(
+                    None
+                    if monitor is None
+                    else UserControlMonitorFact(
+                        monitor.monitor_id,
+                        monitor.outcome,
+                        monitor.in_flight_observation_ids,
+                        monitor.detail,
+                    )
+                ),
+                public_code=public_code,
+                public_detail=public_detail,
+            ),
+            occurred_at=datetime.now().astimezone(),
+            actor_id=self.host_session_id,
+        )
+        provider_text = project_user_control_feedback_for_provider(
+            candidate.content.canonical_bytes()
+        )
+        async with self._lock:
+            if (
+                self._user_control_attempts.get(attempt.request.command_id)
+                is not attempt
+            ):
+                return
+            attempt.feedback_candidate = candidate
+            attempt.feedback_provider_text = provider_text
+            attempt.feedback_candidate_ready.set()
+        delay_seconds = 0.02
+        while True:
+            target_ended_with_unknown_commit = False
+            closing_with_unknown_commit = False
+            async with self._lock:
+                if self._closing or self._closed:
+                    if attempt.feedback_commit_outcome_unknown:
+                        closing_with_unknown_commit = True
+                    else:
+                        control = attempt.outcome.user_control
+                        feedback = None if control is None else control.feedback
+                        if feedback is not None:
+                            self._replace_control_feedback_locked(
+                                attempt,
+                                replace(
+                                    feedback,
+                                    canonical_status=(
+                                        FeedbackCanonicalStatus.UNKNOWN
+                                        if feedback.canonical_status
+                                        is FeedbackCanonicalStatus.PENDING
+                                        else feedback.canonical_status
+                                    ),
+                                    inclusion_status=(
+                                        FeedbackInclusionStatus.UNKNOWN
+                                        if feedback.inclusion_status
+                                        is FeedbackInclusionStatus.PENDING
+                                        else feedback.inclusion_status
+                                    ),
+                                    owner_availability=(
+                                        FeedbackOwnerAvailability.UNAVAILABLE
+                                    ),
+                                    reason=feedback.reason or "OWNER_LOST",
+                                ),
+                            )
+                        return
+                elif (
+                    self._active_turn_id != target_turn_id
+                    or self._active_task is None
+                    or self._active_task.done()
+                ):
+                    if attempt.feedback_commit_outcome_unknown:
+                        target_ended_with_unknown_commit = True
+                    else:
+                        self._mark_feedback_target_ended_locked(target_turn_id)
+                        return
+            if target_ended_with_unknown_commit or closing_with_unknown_commit:
+                try:
+                    confirmed = await self._runner.confirm_user_control_feedback(
+                        attempt=candidate,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    async with self._lock:
+                        control = attempt.outcome.user_control
+                        feedback = None if control is None else control.feedback
+                        if feedback is not None:
+                            self._replace_control_feedback_locked(
+                                attempt,
+                                replace(
+                                    feedback,
+                                    canonical_status=(FeedbackCanonicalStatus.UNKNOWN),
+                                    inclusion_status=(FeedbackInclusionStatus.UNKNOWN),
+                                    owner_availability=(
+                                        FeedbackOwnerAvailability.UNAVAILABLE
+                                        if closing_with_unknown_commit
+                                        else feedback.owner_availability
+                                    ),
+                                    reason="CANONICAL_COMMIT_UNKNOWN",
+                                ),
+                            )
+                    return
+                async with self._lock:
+                    attempt.feedback_commit_outcome_unknown = False
+                    control = attempt.outcome.user_control
+                    feedback = None if control is None else control.feedback
+                    if feedback is None:
+                        raise RuntimeError("feedback confirmation lost typed state")
+                    if confirmed is None:
+                        self._replace_control_feedback_locked(
+                            attempt,
+                            replace(
+                                feedback,
+                                canonical_status=FeedbackCanonicalStatus.FAILED,
+                                inclusion_status=(
+                                    FeedbackInclusionStatus.NOT_APPLICABLE
+                                ),
+                                owner_availability=(
+                                    FeedbackOwnerAvailability.UNAVAILABLE
+                                    if closing_with_unknown_commit
+                                    else feedback.owner_availability
+                                ),
+                                reason=(
+                                    "OWNER_LOST"
+                                    if closing_with_unknown_commit
+                                    else "TARGET_CLOSED"
+                                ),
+                            ),
+                        )
+                    else:
+                        self._replace_control_feedback_locked(
+                            attempt,
+                            replace(
+                                feedback,
+                                canonical_status=FeedbackCanonicalStatus.ACCEPTED,
+                                inclusion_status=FeedbackInclusionStatus.PENDING,
+                                entry_id=confirmed.entry_id,
+                                reason=None,
+                            ),
+                        )
+                        if closing_with_unknown_commit:
+                            reconciled_control = attempt.outcome.user_control
+                            reconciled = (
+                                None
+                                if reconciled_control is None
+                                else reconciled_control.feedback
+                            )
+                            if reconciled is None:
+                                raise RuntimeError(
+                                    "feedback reconciliation lost typed state"
+                                )
+                            self._replace_control_feedback_locked(
+                                attempt,
+                                replace(
+                                    reconciled,
+                                    inclusion_status=(
+                                        reconciled.inclusion_status
+                                        if reconciled.inclusion_status
+                                        is FeedbackInclusionStatus.INCLUDED
+                                        else FeedbackInclusionStatus.UNKNOWN
+                                    ),
+                                    owner_availability=(
+                                        FeedbackOwnerAvailability.UNAVAILABLE
+                                    ),
+                                    reason=(
+                                        reconciled.reason
+                                        if reconciled.inclusion_status
+                                        is FeedbackInclusionStatus.INCLUDED
+                                        else "OWNER_LOST"
+                                    ),
+                                ),
+                            )
+                        else:
+                            self._mark_feedback_target_ended_locked(target_turn_id)
+                return
+            async with self._lock:
+                attempt.feedback_install_attempted = True
+                # Until the exact write owner answers, target closure cannot
+                # infer rollback from the absence of a Host-local ACK.
+                attempt.feedback_commit_outcome_unknown = True
+            try:
+                accepted = await self._runner.install_user_control_feedback(
+                    attempt=candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except ExternalSourceNotAtSafePoint:
+                async with self._lock:
+                    attempt.feedback_commit_outcome_unknown = False
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(delay_seconds * 2, 0.5)
+                continue
+            except ConversationKernelConflict as exc:
+                async with self._lock:
+                    attempt.feedback_commit_outcome_unknown = False
+                if str(exc) == "turn is not at a provider safe point":
+                    await asyncio.sleep(delay_seconds)
+                    delay_seconds = min(delay_seconds * 2, 0.5)
+                    continue
+                async with self._lock:
+                    control = attempt.outcome.user_control
+                    feedback = None if control is None else control.feedback
+                    if feedback is not None:
+                        self._replace_control_feedback_locked(
+                            attempt,
+                            replace(
+                                feedback,
+                                canonical_status=FeedbackCanonicalStatus.FAILED,
+                                inclusion_status=(
+                                    FeedbackInclusionStatus.NOT_APPLICABLE
+                                ),
+                                reason="CANONICAL_REJECTED",
+                            ),
+                        )
+                return
+            except StaleHostWriter:
+                async with self._lock:
+                    attempt.feedback_commit_outcome_unknown = False
+                    control = attempt.outcome.user_control
+                    feedback = None if control is None else control.feedback
+                    if feedback is not None:
+                        self._replace_control_feedback_locked(
+                            attempt,
+                            replace(
+                                feedback,
+                                canonical_status=FeedbackCanonicalStatus.UNKNOWN,
+                                inclusion_status=FeedbackInclusionStatus.UNKNOWN,
+                                owner_availability=(
+                                    FeedbackOwnerAvailability.UNAVAILABLE
+                                ),
+                                reason="OWNER_LOST",
+                            ),
+                        )
+                return
+            except (ValueError, TypeError, AssertionError):
+                async with self._lock:
+                    attempt.feedback_commit_outcome_unknown = False
+                    control = attempt.outcome.user_control
+                    feedback = None if control is None else control.feedback
+                    if feedback is not None:
+                        self._replace_control_feedback_locked(
+                            attempt,
+                            replace(
+                                feedback,
+                                canonical_status=FeedbackCanonicalStatus.FAILED,
+                                inclusion_status=(
+                                    FeedbackInclusionStatus.NOT_APPLICABLE
+                                ),
+                                reason="CANONICAL_REJECTED",
+                            ),
+                        )
+                return
+            except Exception:
+                # The safe-point owner exact-confirms this same immutable
+                # candidate before any retry, including an ambiguous commit.
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(delay_seconds * 2, 0.5)
+                continue
+            async with self._lock:
+                attempt.feedback_commit_outcome_unknown = False
+                control = attempt.outcome.user_control
+                feedback = None if control is None else control.feedback
+                if feedback is None:
+                    raise RuntimeError("feedback installation lost typed state")
+                self._replace_control_feedback_locked(
+                    attempt,
+                    replace(
+                        feedback,
+                        canonical_status=FeedbackCanonicalStatus.ACCEPTED,
+                        inclusion_status=FeedbackInclusionStatus.PENDING,
+                        entry_id=accepted.entry_id,
+                        reason=None,
+                    ),
+                )
+                if (
+                    self._active_turn_id != target_turn_id
+                    or self._active_task is None
+                    or self._active_task.done()
+                ):
+                    self._mark_feedback_target_ended_locked(target_turn_id)
+            return
+
+    def _observe_user_control_provider_input_install(
+        self, request: KernelModelExecutionRequest
+    ) -> None:
+        self._event_loop.call_soon(
+            lambda: asyncio.create_task(
+                self._record_user_control_provider_input_install(request),
+                name=f"kernel-user-control-provider-input:{request.turn_id}",
+            )
+        )
+
+    async def _record_user_control_provider_input_install(
+        self, request: KernelModelExecutionRequest
+    ) -> None:
+        if (
+            request.session_id != self.session_id
+            or request.compiled_input.canonical_input_identity.conversation_scope_kind
+            is not ModelInputScopeKind.ROOT
+        ):
+            return
+        async with self._lock:
+            for attempt in self._user_control_attempts.values():
+                control = attempt.outcome.user_control
+                feedback = None if control is None else control.feedback
+                candidate_entry_id = (
+                    None
+                    if attempt.feedback_candidate is None
+                    else attempt.feedback_candidate.entry_id
+                )
+                if (
+                    feedback is None
+                    or feedback.canonical_status
+                    not in {
+                        FeedbackCanonicalStatus.PENDING,
+                        FeedbackCanonicalStatus.ACCEPTED,
+                    }
+                    or feedback.inclusion_status is not FeedbackInclusionStatus.PENDING
+                    or (feedback.entry_id or candidate_entry_id) is None
+                    or attempt.feedback_provider_text is None
+                    or feedback.target_root_turn_id != request.turn_id
+                ):
+                    continue
+                exact_entry_id = feedback.entry_id or candidate_entry_id
+                exact_matches = tuple(
+                    message
+                    for message, placement in zip(
+                        request.compiled_input.messages,
+                        request.compiled_input.message_placements,
+                        strict=True,
+                    )
+                    if placement.origin_entry_id == exact_entry_id
+                    and message.content == (attempt.feedback_provider_text,)
+                )
+                if len(exact_matches) != 1:
+                    continue
+                attempt.provider_input_observations.add(
+                    self._user_control_request_identity(request)
+                )
+                self._replace_control_feedback_locked(
+                    attempt,
+                    feedback,
+                )
+
+    async def _record_user_control_provider_input_failure(
+        self, turn_id: str, reason: str
+    ) -> None:
+        if reason not in {"INPUT_COMPILE_FAILED", "INPUT_ADMISSION_FAILED"}:
+            raise ValueError("user-control provider-input failure reason is invalid")
+        async with self._lock:
+            for attempt in self._user_control_attempts.values():
+                control = attempt.outcome.user_control
+                feedback = None if control is None else control.feedback
+                if (
+                    feedback is None
+                    or feedback.canonical_status is not FeedbackCanonicalStatus.ACCEPTED
+                    or feedback.inclusion_status is not FeedbackInclusionStatus.PENDING
+                    or feedback.target_root_turn_id != turn_id
+                ):
+                    continue
+                self._replace_control_feedback_locked(
+                    attempt,
+                    replace(
+                        feedback,
+                        inclusion_status=FeedbackInclusionStatus.FAILED,
+                        reason=reason,
+                    ),
+                )
+
+    def _observe_user_control_transport_invocation(
+        self,
+        request: KernelModelExecutionRequest,
+        succeeded: bool,
+        detail: str | None,
+    ) -> None:
+        self._event_loop.call_soon(
+            lambda: asyncio.create_task(
+                self._record_user_control_transport_invocation(
+                    request, succeeded=succeeded, detail=detail
+                ),
+                name=f"kernel-user-control-transport:{request.turn_id}",
+            )
+        )
+
+    async def _record_user_control_transport_invocation(
+        self,
+        request: KernelModelExecutionRequest,
+        *,
+        succeeded: bool,
+        detail: str | None,
+    ) -> None:
+        if (
+            request.session_id != self.session_id
+            or request.compiled_input.canonical_input_identity.conversation_scope_kind
+            is not ModelInputScopeKind.ROOT
+        ):
+            return
+        async with self._lock:
+            for attempt in self._user_control_attempts.values():
+                control = attempt.outcome.user_control
+                feedback = None if control is None else control.feedback
+                if (
+                    feedback is None
+                    or feedback.target_root_turn_id != request.turn_id
+                    or (
+                        attempt.feedback_candidate is None
+                        and feedback.inclusion_status
+                        is not FeedbackInclusionStatus.INCLUDED
+                    )
+                ):
+                    continue
+                request_identity = self._user_control_request_identity(request)
+                if (
+                    feedback.inclusion_status is FeedbackInclusionStatus.INCLUDED
+                    and request_identity
+                    != (
+                        feedback.target_root_turn_id,
+                        feedback.context_binding_revision_id,
+                        feedback.model_call_index,
+                    )
+                ):
+                    continue
+                attempt.transport_observations[request_identity] = (
+                    FeedbackTransportResult(
+                        invocation_attempted=True,
+                        invocation_succeeded=succeeded,
+                        detail=detail,
+                    )
+                )
+                self._replace_control_feedback_locked(
+                    attempt,
+                    feedback,
+                )
+
+    async def query_control_command(
+        self, request: UserControlRequest
+    ) -> KernelControlQueryResult:
+        if (
+            request.session_id != self.session_id
+            or request.host_session_id != self.host_session_id
+        ):
+            return KernelControlQueryResult(ControlQueryStatus.OWNER_UNAVAILABLE, None)
+        async with self._lock:
+            self._retire_control_attempts_locked()
+            attempt = self._user_control_attempts.get(request.command_id)
+            if attempt is not None:
+                if attempt.request != request:
+                    return KernelControlQueryResult(
+                        ControlQueryStatus.FOUND,
+                        self._control_rejection(
+                            request,
+                            "CONTROL_COMMAND_CONFLICT",
+                            "The control command identity conflicts.",
+                        ),
+                    )
+                return KernelControlQueryResult(
+                    ControlQueryStatus.FOUND, attempt.outcome
+                )
+        return KernelControlQueryResult(ControlQueryStatus.RESULT_UNAVAILABLE, None)
+
     async def query_command(self, command_id: str) -> KernelCommandOutcome | None:
         failure = self._command_failures.get(command_id)
         row = await self._query_command_row(command_id)
@@ -3941,7 +5566,11 @@ class KernelHostSession:
             status = str(row.get("consumed_turn_status") or "")
             if queue_status == "PENDING":
                 return KernelCommandOutcome(
-                    command_id, "PENDING", target, "PROMPT_QUEUED", "Prompt is queued.",
+                    command_id,
+                    "PENDING",
+                    target,
+                    "PROMPT_QUEUED",
+                    "Prompt is queued.",
                     prompt_delivery=prompt_delivery,
                 )
             if queue_status in {"CANCELLED", "REJECTED"}:
@@ -3964,8 +5593,16 @@ class KernelHostSession:
                 )
         if status == "COMPLETED":
             return KernelCommandOutcome(
-                command_id, "SUCCEEDED", target, "TURN_COMPLETED", "Reply accepted.",
-                prompt_delivery=(prompt_delivery if row.get("target_queue_item_id") is not None else None),
+                command_id,
+                "SUCCEEDED",
+                target,
+                "TURN_COMPLETED",
+                "Reply accepted.",
+                prompt_delivery=(
+                    prompt_delivery
+                    if row.get("target_queue_item_id") is not None
+                    else None
+                ),
             )
         if status == "INTERRUPTED":
             return KernelCommandOutcome(
@@ -3974,11 +5611,21 @@ class KernelHostSession:
                 target,
                 str(row.get("terminal_reason") or "TURN_INTERRUPTED"),
                 "The turn was interrupted and will not be replayed.",
-                prompt_delivery=(prompt_delivery if row.get("target_queue_item_id") is not None else None),
+                prompt_delivery=(
+                    prompt_delivery
+                    if row.get("target_queue_item_id") is not None
+                    else None
+                ),
             )
         return KernelCommandOutcome(
-            command_id, "PENDING", target, "TURN_RUNNING", "The turn is running.",
-            prompt_delivery=(prompt_delivery if row.get("target_queue_item_id") is not None else None),
+            command_id,
+            "PENDING",
+            target,
+            "TURN_RUNNING",
+            "The turn is running.",
+            prompt_delivery=(
+                prompt_delivery if row.get("target_queue_item_id") is not None else None
+            ),
         )
 
     def attach_controller(self, attachment_id: str) -> bool:
@@ -4040,46 +5687,40 @@ class KernelHostSession:
         )
 
     def read_capability_form(
-        self, *, attachment_id: str, interaction_id: str,
-        expected_owner_epoch: int, expected_live_revision: int,
+        self,
+        *,
+        attachment_id: str,
+        interaction_id: str,
+        expected_owner_epoch: int,
+        expected_live_revision: int,
     ):
         self._require_open()
         return self._interactions.current_capability_form(
-            attachment_id=attachment_id, interaction_id=interaction_id,
+            attachment_id=attachment_id,
+            interaction_id=interaction_id,
             expected_owner_epoch=expected_owner_epoch,
             expected_live_revision=expected_live_revision,
         )
 
     async def resolve_capability_form(
-        self, *, attachment_id: str, interaction_id: str,
-        expected_owner_epoch: int, expected_live_revision: int,
-        decision: str, submission: dict[str, object] | None = None,
+        self,
+        *,
+        attachment_id: str,
+        interaction_id: str,
+        expected_owner_epoch: int,
+        expected_live_revision: int,
+        decision: str,
+        submission: dict[str, object] | None = None,
     ) -> None:
         self._require_open()
         await self._interactions.resolve_capability_form(
-            attachment_id=attachment_id, interaction_id=interaction_id,
+            attachment_id=attachment_id,
+            interaction_id=interaction_id,
             expected_owner_epoch=expected_owner_epoch,
             expected_live_revision=expected_live_revision,
-            decision=decision, submission=submission,
+            decision=decision,
+            submission=submission,
         )
-
-    async def stop_current_turn(self) -> bool:
-        async with self._lock:
-            task = self._active_task
-            intent = self._active_cancellation_intent
-            if task is not None and not task.done():
-                if intent is None:
-                    raise RuntimeError("active ROOT task lacks cancellation intent")
-                intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
-        if task is None or task.done():
-            return False
-        task.cancel()
-        try:
-            await task
-        except BaseException:
-            pass
-        await self._settle_active_root_task(task)
-        return True
 
     async def accept_subagent_completion(
         self,
@@ -4393,6 +6034,48 @@ class KernelHostSession:
                     close_error = close_error or exc
             if task is not None:
                 await self._settle_active_root_task(task)
+            async with self._lock:
+                control_tasks = tuple(
+                    attempt.task
+                    for attempt in self._user_control_attempts.values()
+                    if attempt.task is not None and not attempt.task.done()
+                )
+            for control_task in control_tasks:
+                try:
+                    if await _join_close_task(
+                        control_task, deadline_monotonic=deadline
+                    ):
+                        close_error = close_error or TimeoutError(
+                            "user-control settlement exited after close deadline"
+                        )
+                except BaseException as exc:
+                    close_error = close_error or exc
+            async with self._lock:
+                for attempt in self._user_control_attempts.values():
+                    control = attempt.outcome.user_control
+                    feedback = None if control is None else control.feedback
+                    if feedback is None:
+                        continue
+                    self._replace_control_feedback_locked(
+                        attempt,
+                        replace(
+                            feedback,
+                            canonical_status=(
+                                FeedbackCanonicalStatus.UNKNOWN
+                                if feedback.canonical_status
+                                is FeedbackCanonicalStatus.PENDING
+                                else feedback.canonical_status
+                            ),
+                            inclusion_status=(
+                                FeedbackInclusionStatus.UNKNOWN
+                                if feedback.inclusion_status
+                                is FeedbackInclusionStatus.PENDING
+                                else feedback.inclusion_status
+                            ),
+                            owner_availability=FeedbackOwnerAvailability.UNAVAILABLE,
+                            reason=feedback.reason or "OWNER_LOST",
+                        ),
+                    )
             try:
                 # The exact ROOT runner and its shielded ToolResult settlement
                 # owner have already joined. A retained token now has no
@@ -4898,17 +6581,27 @@ class KernelHostCore:
             request=request,
         )
 
-    async def install_user_plugin(self, source_path: Path, *, source_format="native", import_classifications=(), import_public_values=()) -> PluginInstallOutcome:
+    async def install_user_plugin(
+        self,
+        source_path: Path,
+        *,
+        source_format="native",
+        import_classifications=(),
+        import_public_values=(),
+    ) -> PluginInstallOutcome:
         """Install one local package into the user Plugin store, initially disabled."""
 
         request = InstallLocalPluginRequest(
             source_path=source_path,
             scope=PluginScopeKind.USER,
             deadline_monotonic=self._canonical_deadline(),
-            source_format=source_format, import_classifications=import_classifications, import_public_values=import_public_values,
+            source_format=source_format,
+            import_classifications=import_classifications,
+            import_public_values=import_public_values,
         )
         return await self._plugin_management().install_local_plugin(
-            request, connections=self.mcp_management,
+            request,
+            connections=self.mcp_management,
         )
 
     async def set_user_plugin_enabled(
@@ -4937,7 +6630,9 @@ class KernelHostCore:
             request=request,
         )
 
-    async def remove_user_plugin(self, plugin_id: str, package_install_id: str) -> PluginRemovalOutcome:
+    async def remove_user_plugin(
+        self, plugin_id: str, package_install_id: str
+    ) -> PluginRemovalOutcome:
         """Remove one user Plugin state reference."""
 
         request = RemoveLocalPluginRequest(
@@ -4947,7 +6642,8 @@ class KernelHostCore:
             expected_current_package_install_id=package_install_id,
         )
         return await self._plugin_management().remove_local_plugin(
-            request, connections=self.mcp_management,
+            request,
+            connections=self.mcp_management,
         )
 
     @classmethod
@@ -5007,21 +6703,31 @@ class KernelHostCore:
         return self._repository
 
     async def fork_conversation(
-        self, *, source_session_id: str, anchor_entry_id: str,
-        child_session_id: str, memory_domain_id: str,
+        self,
+        *,
+        source_session_id: str,
+        anchor_entry_id: str,
+        child_session_id: str,
+        memory_domain_id: str,
     ):
         """Canonical copy only. Opening the committed child uses ordinary resume."""
         settlement = await self._admit_session_open()
         try:
             repository = await self._ensure_resources()
             deadline = self._canonical_deadline()
-            worker = asyncio.create_task(asyncio.to_thread(
-                repository.fork_conversation, source_session_id=source_session_id,
-                anchor_entry_id=anchor_entry_id, child_session_id=child_session_id,
-                memory_domain_id=memory_domain_id,
-                deadline_monotonic=deadline,
-            ))
-            _, cancelled, _ = await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
+            worker = asyncio.create_task(
+                asyncio.to_thread(
+                    repository.fork_conversation,
+                    source_session_id=source_session_id,
+                    anchor_entry_id=anchor_entry_id,
+                    child_session_id=child_session_id,
+                    memory_domain_id=memory_domain_id,
+                    deadline_monotonic=deadline,
+                )
+            )
+            _, cancelled, _ = await _join_task_beyond_logical_deadline(
+                worker, deadline_monotonic=deadline
+            )
             if cancelled is not None:
                 raise cancelled
             return worker.result()
@@ -5127,7 +6833,9 @@ class KernelHostCore:
         workspace = resolve_workspace(workspace_input)
         canonical_root = workspace.workspace_root.resolve(strict=False)
         async with self._lock:
-            capability_baseline = self._workspace_capability_revisions.setdefault(canonical_root, 0)
+            capability_baseline = self._workspace_capability_revisions.setdefault(
+                canonical_root, 0
+            )
         deadline = self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
         user_home_resolution = resolve_user_home()
         pulsara_home_resolution = resolve_pulsara_home(
@@ -5246,14 +6954,21 @@ class KernelHostCore:
             await io_owner.aclose(deadline_monotonic=deadline)
             raise
 
-    async def _register_prepared_session(self, session: KernelHostSession, capability_baseline: int) -> None:
+    async def _register_prepared_session(
+        self, session: KernelHostSession, capability_baseline: int
+    ) -> None:
         """Join source capture with publication without missing an in-flight edit."""
         root = session.workspace.workspace_root.resolve(strict=False)
         async with self._lock:
             if self._closing:
-                raise KernelHostCoreClosing("Kernel Host shutdown won before session registration")
+                raise KernelHostCoreClosing(
+                    "Kernel Host shutdown won before session registration"
+                )
             self._sessions[session.host_session_id] = session
-            self._extension_routes[session.session_id] = (session.host_session_id, session.extensions)
+            self._extension_routes[session.session_id] = (
+                session.host_session_id,
+                session.extensions,
+            )
             changed = self._workspace_capability_revisions[root] > capability_baseline
         if changed:
             await session.request_capability_refresh()
@@ -5345,13 +7060,25 @@ class KernelHostCore:
         return result
 
     async def mark_capability_change(self, workspace_root: Path | None = None) -> int:
-        canonical_root = workspace_root.resolve(strict=False) if workspace_root is not None else None
+        canonical_root = (
+            workspace_root.resolve(strict=False) if workspace_root is not None else None
+        )
         async with self._lock:
-            roots = {canonical_root} if canonical_root is not None else set(self._workspace_capability_revisions)
+            roots = (
+                {canonical_root}
+                if canonical_root is not None
+                else set(self._workspace_capability_revisions)
+            )
             for root in roots:
-                self._workspace_capability_revisions[root] = self._workspace_capability_revisions.get(root, 0) + 1
-            sessions = tuple(session for session in self._sessions.values()
-                if canonical_root is None or session.workspace.workspace_root.resolve() == canonical_root)
+                self._workspace_capability_revisions[root] = (
+                    self._workspace_capability_revisions.get(root, 0) + 1
+                )
+            sessions = tuple(
+                session
+                for session in self._sessions.values()
+                if canonical_root is None
+                or session.workspace.workspace_root.resolve() == canonical_root
+            )
         marked = 0
         for session in sessions:
             try:
@@ -5432,6 +7159,7 @@ class KernelHostCore:
         maximum_items: int,
         after_accepted_at: datetime | None = None,
         after_task_id: str | None = None,
+        batch_id: str | None = None,
     ) -> tuple[
         tuple[Mapping[str, object], ...],
         tuple[Mapping[str, object], ...],
@@ -5450,6 +7178,7 @@ class KernelHostCore:
             maximum_items=maximum_items,
             after_accepted_at=after_accepted_at,
             after_task_id=after_task_id,
+            batch_id=batch_id,
             include_lookahead=True,
             deadline_monotonic=deadline,
         )
@@ -5465,6 +7194,53 @@ class KernelHostCore:
                 )
             )
         return rows, tuple(dependencies)
+
+    async def read_subagent_task_group_page(
+        self,
+        *,
+        session_id: str,
+        maximum_items: int,
+        after_first_accepted_at: datetime | None = None,
+        after_batch_id: str | None = None,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Cold-read real batch aggregates without activating a Host."""
+
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not 1 <= maximum_items <= 50:
+            raise ValueError("subagent group page bound is invalid")
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.list_subagent_task_groups,
+            session_id=session_id,
+            maximum_items=maximum_items,
+            after_first_accepted_at=after_first_accepted_at,
+            after_batch_id=after_batch_id,
+            include_lookahead=True,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def read_subagent_task_activity_page(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        maximum_items: int,
+        after_entry_sequence: int = 0,
+    ):
+        """Cold-read exact canonical activity identities for one task."""
+
+        if not session_id or not task_id:
+            raise ValueError("session and task identity are required")
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.list_subagent_task_activities,
+            session_id=session_id,
+            task_id=task_id,
+            maximum_items=maximum_items,
+            after_entry_sequence=after_entry_sequence,
+            deadline_monotonic=self._canonical_deadline(),
+        )
 
     async def close_session(
         self, host_session_id: str, *, close_conversation: bool

@@ -74,7 +74,7 @@ from pulsara_agent.primitives.tool_result_projection import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v11-async-subagent-completions"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v12-provider-schema-subtraction"
 )
 
 

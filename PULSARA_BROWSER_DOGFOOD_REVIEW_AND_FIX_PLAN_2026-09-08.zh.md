@@ -1,10 +1,10 @@
 # Pulsara 浏览器 dogfood 复盘与后续修复方案
 
-日期：2026-09-08。状态：**PROPOSED，尚未实施**。
+日期：2026-09-08。状态：**实施中；PR02 已 ACTIVATED；PR03 已完成两轮 reviewer kernel 时序修正及 kernel 全量重验，待按修订合同重新完成前端、wheel 与真实 provider/browser activation；其他批次按各自规格推进。**
 
 依据：完整阅读 `PULSARA_REAL_BROWSER_DOGFOOD_BUG_REPORT_2026-09-08.zh.md`，以当前工作树生产代码为主要事实来源。Git 基线为 `7e2ec332`。原报告保留，不把本次静态发现倒填成此前真实浏览器已复现的问题。
 
-本次只新增此文档，未修改产品实现、数据库、生产配置或 active specification，也未进行新的真实 provider 调用。
+2026-09-08 初始复盘只新增了本文档，当时未修改产品实现、数据库、生产配置或 active specification，也未进行新的真实 provider 调用；后续 PR activation 状态与证据以本页索引及对应实施规格为准。
 
 路径约定：正文中简写的 `conversation_kernel/...`、`terminal_protocol/...`、`tools/...`、`capability/...`、`terminal_process/...` 均位于 `src/pulsara_agent/`；`frontend/...` 和 `tests/...` 从仓库根目录起算。行号对应本次审阅工作树，用于定位，不是内容身份凭证。
 
@@ -16,14 +16,19 @@
 | --- | --- | --- | --- |
 | PR01 | [原文保真 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR01_SOURCE_TEXT_FIDELITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F07；删除原文全局中文化，保留 typed UI 标签 | 实现已提交于 2212804e；验收待补，未 ACTIVATED |
 | PR02 | [工具结果、输入队列与反馈 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR02_TOOL_RESULTS_QUEUE_AND_FEEDBACK_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F01/F02/F03/F05/M03；结果详情、exact live 关联、提交身份与队列、取消反馈、文件工具说明 | ACTIVATED — 2026-09-10 第二轮审查闭环（工作树，未提交） |
+| PR03 | [精确运行控制、后台命令与任务侧栏 Hard Cut 实施规格](PULSARA_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md) | F06/M01；exact STOP、子任务取消、后台查看/终止、控制反馈事件、任务 tab 替换/后台终端新增、原始结果艺术风格 | IMPLEMENTED，REACTIVATION PENDING — 两轮 reviewer 指出的 kernel 正常结束/watchdog/seal、compaction 观察、closing 乱序证据与终态竞态已修，kernel 全量 `1734 passed`；修订后的前端、wheel 与真实 provider/browser 门槛尚待重验（工作树，未提交） |
 
-2026-09-10 索引更新：PR01 的实现已提交，但不因此宣称其 activation 完成；其规格仍待补齐验收记录。PR02 已按用户要求把 F01/F02/F03/F05/M03 作为一个 hard cut 完成自动化、隔离 wheel、真实 provider 与浏览器验收；两轮审查指出的大 blob queue 消费/终态竞态、prompt delivery 状态机、late live binding、跨会话异步 owner、迟到 artifact 页、浏览器实际 digest/fatal UTF-8、builtin-only 文件解释、queue 权限/steer target 和 M03 schema 字段说明均已先补红灯再闭环。`edit_file` 的最终产品语义是直接显示真实 unified diff，不提供独立“复制差异”按钮；完整 diff 通过“复制结果原文”取得。用户接受沿用上一轮真实 provider 行为证据；最终安装包另行复验既有 canonical 会话及受影响浏览器 UI。PR02 继续在未提交工作树中保持 ACTIVATED。F06 的 exact-target stop 及 F04/M01/M02/M04 等其他问题仍保留原状态，尚未创建其实施规格。本索引不会因 PR02 激活而宣称 Batch A 全部完成；下文原始调查与旧行号保留为历史诊断依据，实施以对应 PR 规格和当前代码为准。
+2026-09-11 索引更新：PR01 的实现已提交，但不因此宣称其 activation 完成；其规格仍待补齐验收记录。PR02 已按用户要求把 F01/F02/F03/F05/M03 作为一个 hard cut 完成自动化、隔离 wheel、真实 provider 与浏览器验收；两轮审查指出的大 blob queue 消费/终态竞态、prompt delivery 状态机、late live binding、跨会话异步 owner、迟到 artifact 页、浏览器实际 digest/fatal UTF-8、builtin-only 文件解释、queue 权限/steer target 和 M03 schema 字段说明均已先补红灯再闭环。`edit_file` 的最终产品语义是直接显示真实 unified diff，不提供独立“复制差异”按钮；完整 diff 通过“复制结果原文”取得。PR02 继续在未提交工作树中保持 ACTIVATED。PR03 原 activation 证据位于 `output/playwright/pr03-dogfood/`；reviewer 后续确认正常 ROOT 结束协调、未知提交确认、请求/transport 乱序、Host closing 接纳、子任务取消终态与进程终止 disposition 六处 kernel 时序缺口，现已修订唯一合同并完成实现，旧证据仅作历史，修订后的第 20 节重验完成前不标 ACTIVATED。F04/M02/M04 仍保留原状态。本索引不会因 PR02 激活而宣称其他批次全部完成；下文原始调查与旧行号保留为历史诊断依据，实施以对应 PR 规格和当前代码为准。
 
-### 下一轮控制语义讨论
+### PR03 控制语义与实施范围
 
-2026-09-10 新增：[用户停止、子任务取消与后台命令控制：最新版产品契约](PULSARA_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md)。基线为已提交的 `b9adc8b8`。该文整理 F06/M01 的最新讨论：前端不单独暴露 monitor，按后台 process 展示；人工终止组合取消关联监视与终止进程；活动 ROOT 获得控制反馈，idle 不因此新增唤醒。本文第 6 节中更早的前端动作/通知建议若与新文冲突，以新文为准。
+2026-09-11：原[用户停止与后台命令产品契约](PULSARA_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md)已在原路径升级为 PR03 唯一实施规格，起始核对基线 `f6f52f5c`。接口、CLI、有限 process-local attempt 的提交期限/退役、后台读取、真实反馈类别/事务/provider 投影、任务完整读取与结果继续入口均已实现。两轮 reviewer kernel 时序复核后的修订也已落地：第二轮补齐 watchdog 全分支截止、ROOT completion seal/settle、预装 compaction successor 纳入观察和 closing 早到证据合并；kernel 全量 `1734 passed, 19 warnings`。新增验收尚未完成真实 provider/browser 与 isolated wheel 重验，因此 F06/M01 当前为 IMPLEMENTED、REACTIVATION PENDING；旧证据见 `output/playwright/pr03-dogfood/activation-evidence.md`。
 
-新文不是 ACTIVATED 实施规格；反馈载体、接纳边界等仍须按其第 14 节闭合。没有据此修改 F06/M01 的实现状态，F04/M02/M04 仍在原范围外。
+Demo 只允许参考侧栏“任务”（完整替换，含组图/节点详情）、“后台终端”（新增 tab）和 create_agent_tasks 原始结果区的艺术风格；能力、root 主对话/创建摘要跳转、输入框、左栏及其他 Demo 区域一律不参考。生产能力和主对话结构保留。
+
+本 PR 授权**一个** committed 事件 `UserControlFeedbackAccepted`，配套一个 USER_CONTROL_FEEDBACK EntryKind 和一个 canonical input origin；复用原 ENTRY subject/HOST_WRITER/内容与事务，不新增表、关系、subject/guard、durable job、live event、投递队列或 fingerprint。精确增量及必要协议枚举见 PR03 第 14/18 节；不是将原减法约束整体放宽。
+
+下文第 6 节的早期四动作/独立 monitor UI 建议、Batch B 中 M01 的旧归属，以 PR03 新规格取代。第 10.3 节的类别约束按 PR03 的精确例外执行；PR01/PR02 不因此扩大范围或重写旧验收。F04/M02/M04 仍在 PR03 范围外。
 
 ## 1. 我的总体判断
 
@@ -44,9 +49,9 @@
 | F03 | 排队正文不投影；按正文消除 optimistic 消息 | BUG-02 主因已确认；重复正文问题为额外代码发现 | P2，首批 |
 | F04 | 历史规划没有正文和对应决策视图 | BUG-03；底层正文仍在，缺历史投影和入口 | P2，第二批 |
 | F05 | 取消规划 toast 承诺继续 | BUG-04；确定文案缺陷 | P3，可随首批修复 |
-| F06 | 停止请求未绑定点击时的 turn | 代码级并发目标缺口；尚无浏览器延迟竞态复现 | P2，控制链首批 |
+| F06 | 停止请求未绑定点击时的 turn | PR03 已以 exact click-time target hard cut 闭合；后续 kernel closing/反馈结束竞态已修，待修订后 activation 重验 | IMPLEMENTED，REACTIVATION PENDING |
 | F07 | 正则中文化改写模型代码和方案正文 | 新增代码发现，实际函数运行已复现；复制也使用改写后的正文 | P1，首批优先 |
-| M01 | 停止推理、停止进程、取消监视、停止自动续轮被混同 | 真实行为已确认；具体产品选择需明确 | 与 F06 一起定稿 |
+| M01 | 停止推理、停止进程、取消监视、停止自动续轮被混同 | PR03 已冻结分离语义、组合控制和真实反馈；正常结束 coordination/终态竞态已修，待修订后 activation 重验 | IMPLEMENTED，REACTIVATION PENDING |
 | M02 | 切会话/重连会终止普通工具确认 | 当前有意 fail-closed；缺预告、原因展示和恢复指引 | 与 F04 并行 |
 | M03 | `N\|` 前缀误写、replace_file 与 seen guard 边界 | 前者是模型易用性风险；后者现有例外需说清 | 小范围 descriptor 修复 |
 | M04 | “已见”实际是 workspace 内进程级 observation | 代码事实；不等于每个模型都看过，也不是权限漏洞 | 明确承诺，暂不扩大实现 |
@@ -338,7 +343,7 @@ F01/F02/F03/F05/F06/F07 属于首批修复；按上方实施文档索引拆分 P
 
 ### Batch B：历史审批与生命周期反馈
 
-完成 F04、M02 和 M01 的分离语义展示。复用既有 plan 正文读取、canonical relation 和 exact owner gate；补历史查询只读投影，不把 history 塞进 active interaction。
+本批继续处理 F04、M02；M01 已与 F06 一起归入 PR03，不在本批重复实施。复用既有 plan 正文读取、canonical relation 和 exact owner gate；补历史查询只读投影，不把 history 塞进 active interaction。
 
 删除：历史卡片只剩“等待确认”的唯一展示、因 controller detach 而失败却让用户误以为主动拒绝的唯一反馈。
 
@@ -391,7 +396,7 @@ npm test -- lib/runtime-adapter.test.ts app/pulsara-app.test.tsx
 3. 任何迟到的停止 A 都不能误停 B；不承诺取消已发生效果。
 4. 历史 draft1/draft2 与各自决策对应，全文读取权限不扩大，fork 不伪造审批权威。
 5. 取消规划、controller detach、后台继续运行分别给出准确反馈。
-6. 无新增 durable event/job/relation/subject/guard 或 fingerprint；无兼容旧路径；provider prefix 规则不变。
+6. 默认不新增 durable event/job/relation/subject/guard 或 fingerprint；PR03 唯一例外是其第 18.1 节明确列出的 UserControlFeedbackAccepted 事件及配套 EntryKind/input origin，用于记录真实来源，不是投递 receipt。表、关系、subject/guard、durable job、live event 与 fingerprint 仍零增量，协议的精确扩展按 PR03 第 14 节同步。PR01/PR02 原减法合同不变；所有 PR 均无兼容旧路径，provider prefix 规则不变。
 7. 新失败场景先有能失败的断言，再修成绿；无弱化断言、skip/xfail 或改写原报告证据。
 8. 原文内容不被术语中文化改写；复制代码可用，审批时显示的内容与被批准的 draft 一致。
 

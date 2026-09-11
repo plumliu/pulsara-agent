@@ -1051,6 +1051,35 @@ class DirectKernelToolPort:
     def terminal_monitor_coordinator(self) -> TerminalMonitorCoordinator:
         return self._terminal_monitor
 
+    def list_background_terminal_processes(self):
+        return self._terminal.list_background_processes(
+            owner_host_session_id=self._host_owner_id
+        )
+
+    def read_background_terminal_log(
+        self, process_id: str, *, maximum_chars: int, since_cursor: str | None = None
+    ):
+        return self._terminal.log_process(
+            process_id,
+            max_output_chars=maximum_chars,
+            owner_host_session_id=self._host_owner_id,
+            since_cursor=since_cursor,
+        )
+
+    def terminate_background_terminal_process(
+        self,
+        process_id: str,
+        *,
+        maximum_chars: int = 32_000,
+        deadline_monotonic: float | None = None,
+    ):
+        del deadline_monotonic
+        return self._terminal.terminate_process_if_running(
+            process_id,
+            max_output_chars=maximum_chars,
+            owner_host_session_id=self._host_owner_id,
+        )
+
     @property
     def todo_owner(self) -> TodoRunStateOwner:
         return self._todo_owner

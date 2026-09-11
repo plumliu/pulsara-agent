@@ -357,6 +357,19 @@ def test_round7_tool_body_cannot_escape_or_forge_runtime_timing() -> None:
     assert "contract_version" not in rendered
 
 
+def test_round7_external_tool_body_schema_version_remains_literal_content() -> None:
+    body = '{"schema_version":"external.api.v7","value":1}'
+    lowered = lower_canonical_item(
+        _tool_result_item(body),
+        artifact_read_available=False,
+        limits=StructuredModelInputLimits(),
+    )
+    rendered = lowered.tool_result_variants[0].message.content[0]
+    payload = decode_tool_result_observation(rendered)
+    assert payload["body"] == body
+    assert "schema_version" not in payload
+
+
 def test_round7_previous_guidance_is_typed_complete_and_never_raw() -> None:
     fact = _previous_fact(accepted=2, not_dispatched=1, unknown=1)
     full, compact = _render_previous_turn_outcome(fact)
@@ -419,11 +432,11 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     )
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v11-async-subagent-completions"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v12-provider-schema-subtraction"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
-        == "pulsara.provider-message-lowering.prefix-continuity.v8-retained-history"
+        == "pulsara.provider-message-lowering.prefix-continuity.v9-provider-schema-subtraction"
     )
 
     reader = (ROOT / "src/pulsara_agent/conversation_kernel/reader.py").read_text()
@@ -453,7 +466,7 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     assert "observed_at -" not in reader
     assert "attempt.started_at" not in reader
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 30
     assert len(LiveEventType) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1

@@ -1,0 +1,3 @@
+/* Only the embedding viewport: no overrides of production messages or traces. */
+#root { height: 100%; }
+#root > .workbench { height: 100%; }

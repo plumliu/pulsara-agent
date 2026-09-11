@@ -1,4 +1,7 @@
-@media (max-width: 1220px) {
+/* The inline inspector still fits at 1154px (62 + 252 + 480 + 360).
+   Only switch to the modal drawer once the workbench can no longer keep its
+   documented minimum width; otherwise the drawer masks the composer. */
+@media (max-width: 1153px) {
   .pulsara-shell.is-workbench, .pulsara-shell.is-workbench.has-inspector { grid-template-columns: 58px 228px minmax(460px,1fr); }
   .inspector-panel { position: fixed; top: 0; right: 0; bottom: 0; width: 360px; border-left: 1px solid var(--line-strong); background: var(--paper-solid); box-shadow: var(--shadow-lg); transform: translateX(100%); transition: transform .18s ease,opacity .18s ease; }
   .inspector-panel.is-open { transform: translateX(0); }

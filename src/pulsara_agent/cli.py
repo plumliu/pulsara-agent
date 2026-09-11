@@ -11,6 +11,7 @@ from pathlib import Path
 import signal
 import sys
 from time import monotonic
+from uuid import uuid4
 from pulsara_agent.plugins.contracts import SuccessfulPluginInstallOutcome
 
 from pulsara_agent import __version__
@@ -38,6 +39,7 @@ from pulsara_agent.capability.pulsara_home import (
     resolve_user_home,
 )
 from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.conversation_kernel.user_control import ControlQueryStatus
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     DEFAULT_KERNEL_WATCHDOG_POLICY,
 )
@@ -472,11 +474,44 @@ async def _kernel_host_repl(args) -> None:
                 print(json.dumps([item.to_dict() for item in summaries], indent=2))
                 continue
             if command == ":stop":
-                print(
-                    "Stopped."
-                    if await session.stop_current_turn()
-                    else "No active turn."
+                target_turn_id = session.active_root_turn_id()
+                if target_turn_id is None:
+                    print("No active turn.")
+                    continue
+                command_id = (
+                    f"command:control:{session.control_admission_deadline_ms()}:"
+                    f"{uuid4().hex}"
                 )
+                outcome = await session.request_stop_turn(
+                    command_id=command_id,
+                    expected_session_id=session.session_id,
+                    expected_host_session_id=session.host_session_id,
+                    target_turn_id=target_turn_id,
+                )
+                request = outcome.user_control
+                if request is None:
+                    print(outcome.public_message)
+                    continue
+                from pulsara_agent.conversation_kernel.user_control import (
+                    UserControlRequest,
+                )
+
+                expected = UserControlRequest(
+                    request.operation,
+                    command_id,
+                    request.session_id,
+                    request.host_session_id,
+                    request.target,
+                )
+                while outcome.status == "PENDING":
+                    await asyncio.sleep(0.05)
+                    queried = await session.query_control_command(expected)
+                    if queried.outcome is None:
+                        print(_control_query_unavailable_message(queried.status))
+                        break
+                    outcome = queried.outcome
+                else:
+                    print(outcome.public_message)
                 continue
             if command == ":close":
                 await core.close_session(
@@ -511,6 +546,14 @@ async def _kernel_host_repl(args) -> None:
             _print_agent_run_result(await session.run_turn(prompt))
     finally:
         await core.shutdown()
+
+
+def _control_query_unavailable_message(status: ControlQueryStatus) -> str:
+    if status is ControlQueryStatus.RESULT_UNAVAILABLE:
+        return "The original control result is no longer available."
+    if status is ControlQueryStatus.OWNER_UNAVAILABLE:
+        return "The original Host owner is unavailable."
+    raise ValueError("a FOUND control query must carry its outcome")
 
 
 class _SkillCliUsageError(ValueError):

@@ -103,7 +103,7 @@ def test_round5_architecture_removes_turn_budget_and_preserves_oracles() -> None
     assert "maximum_model_calls_per_turn" not in foreground_source
     assert "maximum_tool_calls_per_turn" not in foreground_source
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1

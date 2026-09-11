@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from time import monotonic
 from typing import AsyncIterator
+from uuid import uuid4
 
 from psycopg.rows import dict_row
 import pytest
@@ -771,7 +772,23 @@ def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successo
         )
 
         if operation == "stop":
-            assert await asyncio.wait_for(session.stop_current_turn(), timeout=5)
+            command_id = (
+                f"command:control:{session.control_admission_deadline_ms()}:"
+                f"{uuid4()}"
+            )
+            accepted = await asyncio.wait_for(
+                session.request_stop_turn(
+                    command_id=command_id,
+                    expected_session_id=session.session_id,
+                    expected_host_session_id=session.host_session_id,
+                    target_turn_id=pending.origin_turn_id,
+                ),
+                timeout=5,
+            )
+            assert accepted.status == "PENDING"
+            attempt = session._user_control_attempts[command_id]  # noqa: SLF001
+            assert attempt.task is not None
+            await asyncio.wait_for(attempt.task, timeout=5)
         else:
             await asyncio.wait_for(
                 core.close_session(

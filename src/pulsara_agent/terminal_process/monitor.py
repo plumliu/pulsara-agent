@@ -71,6 +71,20 @@ class TerminalMonitorRejectionReason(StrEnum):
     PROCESS_ALREADY_TERMINAL = "PROCESS_ALREADY_TERMINAL"
 
 
+class TerminalMonitorCancelOutcome(StrEnum):
+    CANCELLED = "CANCELLED"
+    ALREADY_CLOSED = "ALREADY_CLOSED"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalMonitorCancelResult:
+    monitor_id: str
+    outcome: TerminalMonitorCancelOutcome
+    in_flight_observation_ids: tuple[str, ...]
+    detail: str | None = None
+
+
 class TerminalMonitorRejected(RuntimeError):
     """A normal closed product rejection, not a system failure."""
 
@@ -429,6 +443,48 @@ class TerminalMonitorCoordinator:
                 return "already_terminal"
             self._close_locked(registration, TerminalMonitorCloseReason.CANCELLED)
             return "cancelled"
+
+    def cancel_for_process(
+        self, process_id: str
+    ) -> TerminalMonitorCancelResult | None:
+        """Close the exact optional live monitor associated with one process."""
+
+        with self._lock:
+            registration = next(
+                (
+                    item
+                    for item in self._registrations.values()
+                    if item.process_id == process_id
+                    and item.state is not TerminalMonitorState.CLOSED
+                ),
+                None,
+            )
+            if registration is None:
+                return None
+            in_flight_ids: tuple[str, ...] = ()
+            if registration.in_flight is not None:
+                target = registration.in_flight.target
+                in_flight_ids = (
+                    (
+                        target.entry_id
+                        if isinstance(target, ExistingTurnInstallation)
+                        else target.initial_entry_id
+                    ),
+                )
+            try:
+                self._close_locked(registration, TerminalMonitorCloseReason.CANCELLED)
+            except Exception as exc:  # keep the process-control half independent
+                return TerminalMonitorCancelResult(
+                    registration.monitor_id,
+                    TerminalMonitorCancelOutcome.FAILED,
+                    in_flight_ids,
+                    str(exc),
+                )
+            return TerminalMonitorCancelResult(
+                registration.monitor_id,
+                TerminalMonitorCancelOutcome.CANCELLED,
+                in_flight_ids,
+            )
 
     def process_completed(
         self, process_id: str, *, status: str, exit_code: int | None
@@ -919,6 +975,8 @@ __all__ = [
     "PreparedTerminalMonitorRegistration",
     "TerminalDeliveryCoverage",
     "TerminalMonitorCoordinator",
+    "TerminalMonitorCancelOutcome",
+    "TerminalMonitorCancelResult",
     "TerminalMonitorPolicy",
     "TerminalMonitorRejected",
     "TerminalMonitorRejectionReason",

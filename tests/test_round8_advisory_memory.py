@@ -414,7 +414,7 @@ def test_round8_closed_taxonomy_tokenizer_and_process_local_architecture() -> No
         "FACT",
         "DECISION",
     )
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1

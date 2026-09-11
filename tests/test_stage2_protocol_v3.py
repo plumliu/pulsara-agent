@@ -7,7 +7,18 @@ import pytest
 
 from pulsara_agent.conversation_kernel.host import (
     KernelCommandOutcome,
+    KernelControlQueryResult,
     KernelHostSession,
+)
+from pulsara_agent.conversation_kernel.user_control import (
+    ControlQueryStatus,
+    ProcessControlResult,
+    UserControlExecution,
+    UserControlOperation,
+    UserControlOutcome,
+    UserControlRequest,
+    UserControlTarget,
+    UserControlTargetKind,
 )
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
@@ -42,10 +53,20 @@ from pulsara_agent.terminal_protocol.v3_gateway import (
     TerminalKernelProtocolServer,
     _Connection,
 )
+from pulsara_agent.terminal_process.models import (
+    TerminalProcessInfo,
+    TerminalProcessLog,
+    TerminalProcessOrigin,
+)
+from pulsara_agent.terminal_process.output import (
+    TerminalOutputReadDisposition,
+    TerminalOutputSourceCoverage,
+)
 
 
 class _CommandHost:
     session_id = "session:test"
+    host_session_id = "host:test"
 
     def __init__(self) -> None:
         self.submitted: list[tuple[str, str]] = []
@@ -53,6 +74,11 @@ class _CommandHost:
         self.resolved: list[dict[str, object]] = []
         self.accepted_subagent_completions: list[dict[str, object]] = []
         self.accepted_job_results: list[dict[str, object]] = []
+        self.stop_requests: list[dict[str, str]] = []
+        self.cancel_requests: list[dict[str, str]] = []
+        self.terminate_requests: list[dict[str, str]] = []
+        self.control_queries: list[UserControlRequest] = []
+        self.background_reads: list[dict[str, object]] = []
 
     async def submit_prompt(
         self, *, command_id: str, text: str
@@ -62,8 +88,135 @@ class _CommandHost:
             command_id, "PENDING", "queue:item", "PROMPT_QUEUED", "Queued."
         )
 
-    async def stop_current_turn(self) -> bool:
-        return False
+    def _control_outcome(
+        self,
+        *,
+        command_id: str,
+        operation: UserControlOperation,
+        target_kind: UserControlTargetKind,
+        target_id: str,
+    ) -> KernelCommandOutcome:
+        return KernelCommandOutcome(
+            command_id,
+            "PENDING",
+            target_id,
+            "CONTROL_ACCEPTED",
+            "Control accepted.",
+            user_control=UserControlOutcome(
+                operation=operation,
+                session_id=self.session_id,
+                host_session_id=self.host_session_id,
+                target=UserControlTarget(target_kind, target_id),
+                accepted=True,
+                execution=UserControlExecution.RUNNING,
+            ),
+        )
+
+    async def request_stop_turn(self, **kwargs) -> KernelCommandOutcome:
+        self.stop_requests.append(dict(kwargs))
+        return self._control_outcome(
+            command_id=str(kwargs["command_id"]),
+            operation=UserControlOperation.STOP_ACTIVE_TURN,
+            target_kind=UserControlTargetKind.ROOT_TURN,
+            target_id=str(kwargs["target_turn_id"]),
+        )
+
+    async def request_cancel_subagent(self, **kwargs) -> KernelCommandOutcome:
+        self.cancel_requests.append(dict(kwargs))
+        return self._control_outcome(
+            command_id=str(kwargs["command_id"]),
+            operation=UserControlOperation.CANCEL_SUBAGENT_TASK,
+            target_kind=UserControlTargetKind.SUBAGENT_TASK,
+            target_id=str(kwargs["task_id"]),
+        )
+
+    async def request_terminate_background_process(
+        self, **kwargs
+    ) -> KernelCommandOutcome:
+        self.terminate_requests.append(dict(kwargs))
+        return self._control_outcome(
+            command_id=str(kwargs["command_id"]),
+            operation=UserControlOperation.TERMINATE_BACKGROUND_PROCESS,
+            target_kind=UserControlTargetKind.BACKGROUND_PROCESS,
+            target_id=str(kwargs["process_id"]),
+        )
+
+    async def query_control_command(
+        self, request: UserControlRequest
+    ) -> KernelControlQueryResult:
+        self.control_queries.append(request)
+        return KernelControlQueryResult(
+            ControlQueryStatus.FOUND,
+            KernelCommandOutcome(
+                request.command_id,
+                "SUCCEEDED",
+                request.target.target_id,
+                "BACKGROUND_CONTROL_COMPLETED",
+                "Control completed.",
+                user_control=UserControlOutcome(
+                    operation=request.operation,
+                    session_id=request.session_id,
+                    host_session_id=request.host_session_id,
+                    target=request.target,
+                    accepted=True,
+                    execution=UserControlExecution.FINISHED,
+                    process=ProcessControlResult(
+                        disposition="TERMINATION_COMPLETED",
+                        status="killed",
+                        exit_code=-15,
+                        physical_state="PHYSICALLY_JOINED",
+                        group_alive=False,
+                    ),
+                ),
+            ),
+        )
+
+    def list_background_processes(self, **kwargs) -> tuple[TerminalProcessInfo, ...]:
+        self.background_reads.append({"kind": "list", **kwargs})
+        def process(process_id: str, started_at: float) -> TerminalProcessInfo:
+            return TerminalProcessInfo(
+                process_id=process_id,
+                terminal_session_id="terminal-session:1",
+                command="sleep 60",
+                cwd="/tmp",
+                backend_type="local",
+                io_mode="pipe",
+                status="running",
+                exit_code=None,
+                timed_out=False,
+                stdin_closed=False,
+                started_at_monotonic=started_at,
+                ended_at_monotonic=None,
+                duration_seconds=1.0,
+                owner_host_session_id=self.host_session_id,
+                origin=TerminalProcessOrigin("turn:root", "ROOT"),
+                stream_id="stream:1",
+                output_revision=2,
+                output_cursor="cursor:2",
+                retained_from_cursor="cursor:0",
+                background_adopted=True,
+            )
+
+        return (
+            process("process:2", 20.0),
+            process("process:1", 10.0),
+        )
+
+    def read_background_process_log(self, **kwargs) -> TerminalProcessLog:
+        self.background_reads.append({"kind": "log", **kwargs})
+        process = self.list_background_processes(
+            expected_session_id=kwargs["expected_session_id"],
+            expected_host_session_id=kwargs["expected_host_session_id"],
+        )[1]
+        return TerminalProcessLog(
+            process=process,
+            output="exact output\n",
+            truncated=False,
+            output_disposition=TerminalOutputReadDisposition.EXACT_DELTA,
+            output_cursor="cursor:2",
+            retained_from_cursor="cursor:0",
+            source_coverage=TerminalOutputSourceCoverage.COMPLETE,
+        )
 
     async def steer_active_turn(
         self, *, command_id: str, text: str, target_turn_id: str
@@ -255,6 +408,187 @@ def test_stage2_observer_cannot_mutate_but_can_detach() -> None:
         )
     )
     assert detached.command_outcome.status == wire.SUCCEEDED
+
+
+@pytest.mark.parametrize(
+    ("command_kind", "target_field", "target_id", "record_name"),
+    (
+        (wire.STOP_ACTIVE_TURN, "target_turn_id", "turn:A", "stop_requests"),
+        (
+            wire.CANCEL_SUBAGENT_TASK,
+            "subagent_task_id",
+            "task:A",
+            "cancel_requests",
+        ),
+        (
+            wire.TERMINATE_BACKGROUND_PROCESS,
+            "target_process_id",
+            "process:A",
+            "terminate_requests",
+        ),
+    ),
+)
+def test_pr03_controller_commands_preserve_exact_owner_and_target(
+    command_kind: int,
+    target_field: str,
+    target_id: str,
+    record_name: str,
+) -> None:
+    server = _server()
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    request = wire.CommandRequest(
+        request_id=f"request:{target_id}",
+        command_id="command:control:9999999999999:11111111-1111-4111-8111-111111111111",
+        command_kind=command_kind,
+        expected_session_id="session:test",
+        expected_host_session_id="host:test",
+        **{target_field: target_id},
+    )
+
+    response = asyncio.run(server._command(controller, request))
+
+    assert response.command_outcome.status == wire.PENDING
+    assert response.command_outcome.user_control.target.target_id == target_id
+    calls = getattr(controller.host_session, record_name)
+    assert calls == [
+        {
+            "command_id": request.command_id,
+            "expected_session_id": "session:test",
+            "expected_host_session_id": "host:test",
+            {
+                "target_turn_id": "target_turn_id",
+                "subagent_task_id": "task_id",
+                "target_process_id": "process_id",
+            }[target_field]: target_id,
+        }
+    ]
+
+
+def test_pr03_control_rejects_a_missing_exact_target_without_calling_host() -> None:
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    response = asyncio.run(
+        _server()._command(
+            controller,
+            wire.CommandRequest(
+                request_id="request:stop-missing-target",
+                command_id=(
+                    "command:control:9999999999999:"
+                    "22222222-2222-4222-8222-222222222222"
+                ),
+                command_kind=wire.STOP_ACTIVE_TURN,
+                expected_session_id="session:test",
+                expected_host_session_id="host:test",
+            ),
+        )
+    )
+
+    assert response.error.stable_code == "STOP_REQUEST_INVALID"
+    assert controller.host_session.stop_requests == []
+
+
+def test_pr03_control_query_requires_controller_and_exact_expectation() -> None:
+    request = wire.QueryCommandRequest(
+        request_id="request:query-control",
+        command_id="command:control:9999999999999:33333333-3333-4333-8333-333333333333",
+        expected_control=wire.ExpectedUserControl(
+            operation=wire.USER_CONTROL_TERMINATE_BACKGROUND_PROCESS,
+            session_id="session:test",
+            host_session_id="host:test",
+            target=wire.UserControlTarget(
+                kind=wire.USER_CONTROL_BACKGROUND_PROCESS,
+                target_id="process:1",
+            ),
+        ),
+    )
+    observer = _state(role=wire.ATTACHMENT_ROLE_OBSERVER)
+    denied = asyncio.run(_server()._query_command(observer, request))
+    assert denied.error.stable_code == "CONTROLLER_REQUIRED"
+    assert observer.host_session.control_queries == []
+
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    response = asyncio.run(_server()._query_command(controller, request))
+    assert response.query_command.control_query_status == wire.CONTROL_QUERY_FOUND
+    assert response.query_command.outcome.status == wire.SUCCEEDED
+    assert response.query_command.outcome.user_control.process.group_alive is False
+    assert controller.host_session.control_queries == [
+        UserControlRequest(
+            UserControlOperation.TERMINATE_BACKGROUND_PROCESS,
+            request.command_id,
+            "session:test",
+            "host:test",
+            UserControlTarget(
+                UserControlTargetKind.BACKGROUND_PROCESS,
+                "process:1",
+            ),
+        )
+    ]
+
+
+def test_pr03_observer_can_page_background_processes_and_read_exact_log() -> None:
+    observer = _state(role=wire.ATTACHMENT_ROLE_OBSERVER)
+    server = _server()
+    first = asyncio.run(
+        server._list_background_processes(
+            observer,
+            wire.ListBackgroundProcessesRequest(
+                request_id="request:background-first",
+                expected_session_id="session:test",
+                expected_host_session_id="host:test",
+                maximum_items=1,
+            ),
+        )
+    )
+    assert [item.process_id for item in first.background_processes.processes] == [
+        "process:1"
+    ]
+    assert first.background_processes.next_cursor
+
+    second = asyncio.run(
+        server._list_background_processes(
+            observer,
+            wire.ListBackgroundProcessesRequest(
+                request_id="request:background-second",
+                expected_session_id="session:test",
+                expected_host_session_id="host:test",
+                cursor=first.background_processes.next_cursor,
+                maximum_items=1,
+            ),
+        )
+    )
+    assert [item.process_id for item in second.background_processes.processes] == [
+        "process:2"
+    ]
+    assert not second.background_processes.next_cursor
+
+    log = asyncio.run(
+        server._read_background_process_log(
+            observer,
+            wire.ReadBackgroundProcessLogRequest(
+                request_id="request:background-log",
+                expected_session_id="session:test",
+                expected_host_session_id="host:test",
+                process_id="process:1",
+                output_cursor="cursor:1",
+                max_output_chars=512,
+            ),
+        )
+    )
+    assert log.background_process_log.process.process_id == "process:1"
+    assert log.background_process_log.output == "exact output\n"
+    assert log.background_process_log.output_cursor == "cursor:2"
+
+    wrong_owner = asyncio.run(
+        server._list_background_processes(
+            observer,
+            wire.ListBackgroundProcessesRequest(
+                request_id="request:wrong-owner",
+                expected_session_id="session:test",
+                expected_host_session_id="host:other",
+                maximum_items=1,
+            ),
+        )
+    )
+    assert wrong_owner.error.stable_code == "BACKGROUND_OWNER_MISMATCH"
 
 
 def test_stage2_controller_prompt_bounds_are_authoritative() -> None:
@@ -560,7 +894,7 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
     live = {
         item.name for item in wire.LiveEventType.DESCRIPTOR.values if item.number != 0
     }
-    assert len(committed) == 29
+    assert len(committed) == 30
     assert len(live) == 24
     assert set(COMMITTED_PROJECTION_BRANCH_BY_TYPE) == {
         item.value for item in CommittedEventType
@@ -576,6 +910,7 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
         "ToolResultAccepted",
         "UserSteerAccepted",
         "TerminalObservationAccepted",
+        "UserControlFeedbackAccepted",
         "InterAgentMessageAccepted",
         "PlanContinuationAccepted",
     }

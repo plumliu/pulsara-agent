@@ -1033,6 +1033,7 @@ class FrozenRetainedHistoricalRequest:
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
                 CanonicalInputOriginKind.HUMAN_STEER,
                 CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
+                CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
             },
             FrozenProviderInputItemKind.PLAN_CONTINUATION: {
                 CanonicalInputOriginKind.PLAN_CONTINUATION

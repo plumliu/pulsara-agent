@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from dataclasses import dataclass
 from hashlib import sha256
 import hmac
+import json
 import os
 from pathlib import Path
 import secrets
@@ -18,6 +21,13 @@ from google.protobuf.message import DecodeError, Message
 
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.host import KernelHostSession
+from pulsara_agent.conversation_kernel.user_control import (
+    ControlQueryStatus,
+    UserControlOperation,
+    UserControlRequest,
+    UserControlTarget,
+    UserControlTargetKind,
+)
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     ARTIFACT_READ_HARD_CHARS,
     PostgresToolArtifactReadPort,
@@ -79,12 +89,13 @@ from pulsara_agent.primitives.plan_workflow import (
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
+from pulsara_agent.terminal_process.models import TerminalProcessInfo
 
 
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:63a5c3a0833b5fa25ba814c48e7d0cb05fd69dac00e530c71e8e4b10bd841aea"
+    "sha256:3d99107960644df65e913fe66150d25b72ffe384aa0136bff114ea0714cc9bce"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -263,6 +274,10 @@ class TerminalKernelProtocolServer:
             return await self._read_content(state, request)
         if kind == "read_tool_artifact":
             return await self._read_tool_artifact(state, request)
+        if kind == "list_background_processes":
+            return await self._list_background_processes(state, request)
+        if kind == "read_background_process_log":
+            return await self._read_background_process_log(state, request)
         if kind == "heartbeat":
             return wire.ServerFrame(
                 heartbeat=wire.HeartbeatResponse(
@@ -428,6 +443,11 @@ class TerminalKernelProtocolServer:
                     snapshot,
                     state.host_session.current_todo_snapshots(),
                     state.host_session.current_compaction_projection(),
+                    host_session_id=state.host_session.host_session_id,
+                    active_root_turn_id=state.host_session.active_root_turn_id(),
+                    control_admission_deadline_ms=(
+                        state.host_session.control_admission_deadline_ms()
+                    ),
                 ),
             )
         )
@@ -587,7 +607,10 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "COMMAND_ID_INVALID")
         if request.client_submission_id not in ("", request.command_id):
             return _error(request.request_id, "COMMAND_SUBMISSION_ID_MISMATCH")
-        if request.command_kind != wire.ACCEPT_SUBAGENT_COMPLETION and (
+        if request.command_kind not in (
+            wire.ACCEPT_SUBAGENT_COMPLETION,
+            wire.CANCEL_SUBAGENT_TASK,
+        ) and (
             request.subagent_task_id
         ):
             return _error(request.request_id, "COMMAND_SOURCE_UNION_INVALID")
@@ -617,6 +640,30 @@ class TerminalKernelProtocolServer:
             request.target_plan_workflow_id or request.expected_plan_workflow_revision
         ):
             return _error(request.request_id, "PLAN_COMMAND_FIELDS_NOT_ALLOWED")
+        control_command = request.command_kind in (
+            wire.STOP_ACTIVE_TURN,
+            wire.CANCEL_SUBAGENT_TASK,
+            wire.TERMINATE_BACKGROUND_PROCESS,
+        )
+        if control_command:
+            if (
+                not request.expected_session_id
+                or not request.expected_host_session_id
+                or request.client_submission_id
+                or request.requested_permission_mode
+                != wire.PERMISSION_MODE_UNSPECIFIED
+                or request.target_plan_workflow_id
+                or request.expected_plan_workflow_revision
+                or request.force
+                or request.text
+            ):
+                return _error(request.request_id, "CONTROL_REQUEST_INVALID")
+        elif (
+            request.expected_session_id
+            or request.expected_host_session_id
+            or request.target_process_id
+        ):
+            return _error(request.request_id, "CONTROL_FIELDS_NOT_ALLOWED")
         if request.command_kind == wire.SUBMIT_PROMPT:
             if not _valid_prompt(request.text) or request.target_turn_id:
                 return _error(request.request_id, "PROMPT_INVALID")
@@ -636,17 +683,43 @@ class TerminalKernelProtocolServer:
                 target_turn_id=request.target_turn_id,
             )
         elif request.command_kind == wire.STOP_ACTIVE_TURN:
-            if request.text or request.target_turn_id:
+            if (
+                not request.target_turn_id
+                or request.subagent_task_id
+                or request.target_process_id
+            ):
                 return _error(request.request_id, "STOP_REQUEST_INVALID")
-            stopped = await state.host_session.stop_current_turn()
-            from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
-
-            outcome = KernelCommandOutcome(
-                request.command_id,
-                "SUCCEEDED" if stopped else "REJECTED",
-                "",
-                "TURN_STOP_REQUESTED" if stopped else "NO_ACTIVE_TURN",
-                "The active turn was stopped." if stopped else "No active turn exists.",
+            outcome = await state.host_session.request_stop_turn(
+                command_id=request.command_id,
+                expected_session_id=request.expected_session_id,
+                expected_host_session_id=request.expected_host_session_id,
+                target_turn_id=request.target_turn_id,
+            )
+        elif request.command_kind == wire.CANCEL_SUBAGENT_TASK:
+            if (
+                request.target_turn_id
+                or not request.subagent_task_id
+                or request.target_process_id
+            ):
+                return _error(request.request_id, "SUBAGENT_CANCEL_REQUEST_INVALID")
+            outcome = await state.host_session.request_cancel_subagent(
+                command_id=request.command_id,
+                expected_session_id=request.expected_session_id,
+                expected_host_session_id=request.expected_host_session_id,
+                task_id=request.subagent_task_id,
+            )
+        elif request.command_kind == wire.TERMINATE_BACKGROUND_PROCESS:
+            if (
+                request.target_turn_id
+                or request.subagent_task_id
+                or not request.target_process_id
+            ):
+                return _error(request.request_id, "PROCESS_CONTROL_REQUEST_INVALID")
+            outcome = await state.host_session.request_terminate_background_process(
+                command_id=request.command_id,
+                expected_session_id=request.expected_session_id,
+                expected_host_session_id=request.expected_host_session_id,
+                process_id=request.target_process_id,
             )
         elif request.command_kind == wire.ACCEPT_SUBAGENT_COMPLETION:
             new_root = not request.target_turn_id
@@ -974,6 +1047,35 @@ class TerminalKernelProtocolServer:
     ) -> wire.ServerFrame:
         if not _valid_command_id(request.command_id):
             return _error(request.request_id, "COMMAND_ID_INVALID")
+        if request.HasField("expected_control"):
+            if state.granted_role != wire.ATTACHMENT_ROLE_CONTROLLER:
+                return _error(request.request_id, "CONTROLLER_REQUIRED")
+            expected = _control_request_from_wire(
+                request.command_id, request.expected_control
+            )
+            if expected is None:
+                return _error(request.request_id, "CONTROL_QUERY_INVALID")
+            control = await state.host_session.query_control_command(expected)
+            response = wire.QueryCommandResponse(
+                request_id=request.request_id,
+                found=control.status is ControlQueryStatus.FOUND,
+                control_query_status={
+                    ControlQueryStatus.FOUND: wire.CONTROL_QUERY_FOUND,
+                    ControlQueryStatus.RESULT_UNAVAILABLE: (
+                        wire.CONTROL_QUERY_RESULT_UNAVAILABLE
+                    ),
+                    ControlQueryStatus.OWNER_UNAVAILABLE: (
+                        wire.CONTROL_QUERY_OWNER_UNAVAILABLE
+                    ),
+                }[control.status],
+            )
+            if control.outcome is not None:
+                response.outcome.CopyFrom(
+                    _outcome_to_wire(request.request_id, control.outcome)
+                )
+            return wire.ServerFrame(query_command=response)
+        if request.command_id.startswith("command:control:"):
+            return _error(request.request_id, "CONTROL_QUERY_EXPECTATION_REQUIRED")
         outcome = await state.host_session.query_command(request.command_id)
         response = wire.QueryCommandResponse(
             request_id=request.request_id, found=outcome is not None
@@ -1132,6 +1234,108 @@ class TerminalKernelProtocolServer:
                 total_chars=page.total_chars,
                 has_more=page.has_more,
                 next_offset_chars=page.next_offset_chars or 0,
+            )
+        )
+
+    async def _list_background_processes(
+        self, state: _Connection, request: wire.ListBackgroundProcessesRequest
+    ) -> wire.ServerFrame:
+        if (
+            request.expected_session_id != state.host_session.session_id
+            or request.expected_host_session_id
+            != state.host_session.host_session_id
+            or not 1 <= request.maximum_items <= 50
+        ):
+            return _error(request.request_id, "BACKGROUND_OWNER_MISMATCH")
+        try:
+            after = (
+                _decode_background_cursor(
+                    request.cursor,
+                    session_id=request.expected_session_id,
+                    host_session_id=request.expected_host_session_id,
+                )
+                if request.cursor
+                else None
+            )
+        except ValueError:
+            return _error(request.request_id, "BACKGROUND_CURSOR_INVALID")
+        processes = await asyncio.to_thread(
+            state.host_session.list_background_processes,
+            expected_session_id=request.expected_session_id,
+            expected_host_session_id=request.expected_host_session_id,
+        )
+        ordered = tuple(
+            sorted(processes, key=lambda item: (item.started_at_monotonic, item.process_id))
+        )
+        if after is not None:
+            ordered = tuple(
+                item
+                for item in ordered
+                if (item.started_at_monotonic, item.process_id) > after
+            )
+        page = ordered[: request.maximum_items]
+        has_more = len(ordered) > len(page)
+        next_cursor = (
+            _encode_background_cursor(
+                session_id=request.expected_session_id,
+                host_session_id=request.expected_host_session_id,
+                started_at=page[-1].started_at_monotonic,
+                process_id=page[-1].process_id,
+            )
+            if page and has_more
+            else ""
+        )
+        return wire.ServerFrame(
+            background_processes=wire.BackgroundProcessPage(
+                request_id=request.request_id,
+                session_id=state.host_session.session_id,
+                host_session_id=state.host_session.host_session_id,
+                processes=tuple(_background_process_to_wire(item) for item in page),
+                next_cursor=next_cursor,
+            )
+        )
+
+    async def _read_background_process_log(
+        self, state: _Connection, request: wire.ReadBackgroundProcessLogRequest
+    ) -> wire.ServerFrame:
+        if (
+            request.expected_session_id != state.host_session.session_id
+            or request.expected_host_session_id
+            != state.host_session.host_session_id
+        ):
+            return _error(request.request_id, "BACKGROUND_OWNER_MISMATCH")
+        if (
+            not request.process_id
+            or not 512 <= request.max_output_chars <= 32_000
+        ):
+            return _error(request.request_id, "BACKGROUND_LOG_RANGE_INVALID")
+        try:
+            result = await asyncio.to_thread(
+                state.host_session.read_background_process_log,
+                expected_session_id=request.expected_session_id,
+                expected_host_session_id=request.expected_host_session_id,
+                process_id=request.process_id,
+                maximum_chars=request.max_output_chars,
+                since_cursor=request.output_cursor or None,
+            )
+        except KeyError:
+            return _error(request.request_id, "BACKGROUND_PROCESS_UNAVAILABLE")
+        except ValueError:
+            return _error(request.request_id, "BACKGROUND_CURSOR_INVALID")
+        return wire.ServerFrame(
+            background_process_log=wire.BackgroundProcessLog(
+                request_id=request.request_id,
+                session_id=state.host_session.session_id,
+                host_session_id=state.host_session.host_session_id,
+                process=_background_process_to_wire(result.process),
+                output=result.output,
+                truncated=result.truncated,
+                output_disposition=result.output_disposition.value,
+                output_cursor=result.output_cursor,
+                retained_from_cursor=result.retained_from_cursor,
+                gap_before_output=result.gap_before_output,
+                truncated_by_response_bound=result.truncated_by_response_bound,
+                source_coverage=result.source_coverage.value,
             )
         )
 
@@ -1485,6 +1689,10 @@ def _live_control_snapshot_to_wire(
         None,
         None,
     ),
+    *,
+    host_session_id: str = "",
+    active_root_turn_id: str | None = None,
+    control_admission_deadline_ms: int = 0,
 ) -> wire.SessionLiveControlSnapshot:
     in_progress, trigger, phase, scope = compaction_projection
     result = wire.SessionLiveControlSnapshot(
@@ -1521,6 +1729,9 @@ def _live_control_snapshot_to_wire(
         compaction_phase=phase or "",
         compaction_target_scope=scope or "",
         input_admission_deferred=in_progress,
+        host_session_id=host_session_id,
+        active_root_turn_id=active_root_turn_id or "",
+        control_admission_deadline_ms=control_admission_deadline_ms,
     )
     if snapshot.current_interaction is not None:
         result.current_interaction.CopyFrom(
@@ -1560,6 +1771,7 @@ def _outcome_to_wire(request_id: str, outcome: object) -> wire.CommandOutcome:
         "SUCCEEDED": wire.SUCCEEDED,
         "REJECTED": wire.REJECTED,
         "PENDING": wire.PENDING,
+        "FAILED": wire.FAILED,
     }[outcome.status]
     result = wire.CommandOutcome(
         request_id=request_id,
@@ -1591,7 +1803,227 @@ def _outcome_to_wire(request_id: str, outcome: object) -> wire.CommandOutcome:
             consumed_entry_id=outcome.prompt_delivery.consumed_entry_id or "",
             delivery_mode=outcome.prompt_delivery.delivery_mode,
         ))
+    if outcome.user_control is not None:
+        result.user_control.CopyFrom(_user_control_outcome_to_wire(outcome.user_control))
     return result
+
+
+def _control_request_from_wire(
+    command_id: str, expected: wire.ExpectedUserControl
+) -> UserControlRequest | None:
+    operation = {
+        wire.USER_CONTROL_STOP_ACTIVE_TURN: UserControlOperation.STOP_ACTIVE_TURN,
+        wire.USER_CONTROL_CANCEL_SUBAGENT_TASK: (
+            UserControlOperation.CANCEL_SUBAGENT_TASK
+        ),
+        wire.USER_CONTROL_TERMINATE_BACKGROUND_PROCESS: (
+            UserControlOperation.TERMINATE_BACKGROUND_PROCESS
+        ),
+    }.get(expected.operation)
+    kind = {
+        wire.USER_CONTROL_ROOT_TURN: UserControlTargetKind.ROOT_TURN,
+        wire.USER_CONTROL_SUBAGENT_TASK: UserControlTargetKind.SUBAGENT_TASK,
+        wire.USER_CONTROL_BACKGROUND_PROCESS: UserControlTargetKind.BACKGROUND_PROCESS,
+    }.get(expected.target.kind)
+    expected_kind = {
+        UserControlOperation.STOP_ACTIVE_TURN: UserControlTargetKind.ROOT_TURN,
+        UserControlOperation.CANCEL_SUBAGENT_TASK: UserControlTargetKind.SUBAGENT_TASK,
+        UserControlOperation.TERMINATE_BACKGROUND_PROCESS: (
+            UserControlTargetKind.BACKGROUND_PROCESS
+        ),
+    }.get(operation)
+    if (
+        operation is None
+        or kind is None
+        or kind is not expected_kind
+        or not expected.session_id
+        or not expected.host_session_id
+        or not expected.target.target_id
+    ):
+        return None
+    return UserControlRequest(
+        operation,
+        command_id,
+        expected.session_id,
+        expected.host_session_id,
+        UserControlTarget(kind, expected.target.target_id),
+    )
+
+
+def _user_control_outcome_to_wire(value: object) -> wire.UserControlOutcome:
+    result = wire.UserControlOutcome(
+        operation={
+            "STOP_ACTIVE_TURN": wire.USER_CONTROL_STOP_ACTIVE_TURN,
+            "CANCEL_SUBAGENT_TASK": wire.USER_CONTROL_CANCEL_SUBAGENT_TASK,
+            "TERMINATE_BACKGROUND_PROCESS": (
+                wire.USER_CONTROL_TERMINATE_BACKGROUND_PROCESS
+            ),
+        }[value.operation.value],
+        session_id=value.session_id,
+        host_session_id=value.host_session_id,
+        target=wire.UserControlTarget(
+            kind={
+                "ROOT_TURN": wire.USER_CONTROL_ROOT_TURN,
+                "SUBAGENT_TASK": wire.USER_CONTROL_SUBAGENT_TASK,
+                "BACKGROUND_PROCESS": wire.USER_CONTROL_BACKGROUND_PROCESS,
+            }[value.target.kind.value],
+            target_id=value.target.target_id,
+        ),
+        accepted=value.accepted,
+        execution={
+            "NOT_STARTED": wire.USER_CONTROL_NOT_STARTED,
+            "RUNNING": wire.USER_CONTROL_RUNNING,
+            "FINISHED": wire.USER_CONTROL_FINISHED,
+        }[value.execution.value],
+    )
+    if value.root is not None:
+        result.root.CopyFrom(
+            wire.RootControlResult(
+                status=value.root.status or "", reason=value.root.reason or ""
+            )
+        )
+    if value.subagent is not None:
+        result.subagent.CopyFrom(
+            wire.SubagentControlResult(
+                disposition=value.subagent.disposition,
+                status=value.subagent.status or "",
+                reason=value.subagent.reason or "",
+            )
+        )
+    if value.process is not None:
+        process = wire.ProcessControlResult(
+            disposition=value.process.disposition,
+            status=value.process.status,
+            physical_state=value.process.physical_state,
+        )
+        if value.process.exit_code is not None:
+            process.exit_code = value.process.exit_code
+        if value.process.group_alive is not None:
+            process.group_alive = value.process.group_alive
+        result.process.CopyFrom(process)
+    if value.monitor is not None:
+        result.monitor.CopyFrom(
+            wire.MonitorControlResult(
+                monitor_id=value.monitor.monitor_id,
+                outcome=value.monitor.outcome,
+                in_flight_observation_ids=value.monitor.in_flight_observation_ids,
+                detail=value.monitor.detail or "",
+            )
+        )
+    if value.feedback is not None:
+        feedback = wire.UserControlFeedbackState(
+            canonical_status=value.feedback.canonical_status.value,
+            inclusion_status=value.feedback.inclusion_status.value,
+            owner_availability=value.feedback.owner_availability.value,
+            reason=value.feedback.reason or "",
+            target_root_turn_id=value.feedback.target_root_turn_id or "",
+            entry_id=value.feedback.entry_id or "",
+            context_binding_revision_id=(
+                value.feedback.context_binding_revision_id or ""
+            ),
+            transport_invocation_attempted=(
+                value.feedback.transport.invocation_attempted
+            ),
+            transport_detail=value.feedback.transport.detail or "",
+        )
+        if value.feedback.model_call_index is not None:
+            feedback.model_call_index = value.feedback.model_call_index
+        if value.feedback.transport.invocation_succeeded is not None:
+            feedback.transport_invocation_succeeded = (
+                value.feedback.transport.invocation_succeeded
+            )
+        result.feedback.CopyFrom(feedback)
+    return result
+
+
+def _background_process_to_wire(value: TerminalProcessInfo) -> wire.BackgroundProcessItem:
+    item = wire.BackgroundProcessItem(
+        process_id=value.process_id,
+        command=value.command,
+        cwd=value.cwd,
+        status=value.status,
+        physical_state=value.physical_state,
+        io_mode=value.io_mode,
+        stream_id=value.stream_id,
+        output_revision=value.output_revision,
+        output_cursor=value.output_cursor,
+        retained_from_cursor=value.retained_from_cursor,
+        started_at_monotonic=value.started_at_monotonic,
+        duration_seconds=value.duration_seconds,
+        timed_out=value.timed_out,
+        stdin_closed=value.stdin_closed,
+        origin=wire.BackgroundProcessOrigin(
+            turn_id=value.origin.turn_id,
+            scope_kind=value.origin.conversation_scope_kind,
+            subagent_task_id=value.origin.scope_subagent_task_id or "",
+        ),
+    )
+    if value.exit_code is not None:
+        item.exit_code = value.exit_code
+    if value.ended_at_monotonic is not None:
+        item.ended_at_monotonic = value.ended_at_monotonic
+    return item
+
+
+def _encode_background_cursor(
+    *,
+    session_id: str,
+    host_session_id: str,
+    started_at: float,
+    process_id: str,
+) -> str:
+    body = json.dumps(
+        {
+            "v": 1,
+            "kind": "background-processes",
+            "session_id": session_id,
+            "host_session_id": host_session_id,
+            "started_at": started_at,
+            "process_id": process_id,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(body).decode("ascii").rstrip("=")
+
+
+def _decode_background_cursor(
+    value: str, *, session_id: str, host_session_id: str
+) -> tuple[float, str]:
+    try:
+        padded = value + "=" * (-len(value) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        if (
+            not isinstance(decoded, dict)
+            or set(decoded)
+            != {
+                "v",
+                "kind",
+                "session_id",
+                "host_session_id",
+                "started_at",
+                "process_id",
+            }
+            or decoded["v"] != 1
+            or decoded["kind"] != "background-processes"
+            or decoded["session_id"] != session_id
+            or decoded["host_session_id"] != host_session_id
+            or not isinstance(decoded["started_at"], (int, float))
+            or isinstance(decoded["started_at"], bool)
+            or not isinstance(decoded["process_id"], str)
+            or not decoded["process_id"]
+        ):
+            raise ValueError
+        return float(decoded["started_at"]), decoded["process_id"]
+    except (
+        ValueError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        binascii.Error,
+    ) as exc:
+        raise ValueError("background cursor is invalid") from exc
 
 
 def _error(request_id: str, code: str) -> wire.ServerFrame:

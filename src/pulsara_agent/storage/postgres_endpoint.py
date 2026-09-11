@@ -36,6 +36,7 @@ _FORBIDDEN_CONNINFO_KEYS = frozenset(
 _FORBIDDEN_LIBPQ_ENVIRONMENT = frozenset(
     {"PGSERVICE", "PGSERVICEFILE", "PGOPTIONS", "PGTARGETSESSIONATTRS"}
 )
+_POSTGRES_TIMEOUT_MAX_MILLISECONDS = (1 << 31) - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,17 +217,27 @@ def apply_connection_deadline(
     connection: Connection, deadline_monotonic: float
 ) -> None:
     milliseconds = max(1, int(_remaining(deadline_monotonic) * 1000))
+    # PostgreSQL stores statement_timeout and lock_timeout as signed 32-bit
+    # millisecond values.  Zero is its explicit unbounded representation.  A
+    # farther-away caller deadline must therefore disable the server GUC
+    # instead of overflowing it or silently shortening the logical deadline
+    # to PostgreSQL's roughly 24-day representable ceiling.
+    timeout_setting = (
+        "0"
+        if milliseconds > _POSTGRES_TIMEOUT_MAX_MILLISECONDS
+        else f"{milliseconds}ms"
+    )
     restore_transactional_mode = not connection.autocommit
     if restore_transactional_mode:
         connection.autocommit = True
     try:
         connection.execute(
             "SELECT pg_catalog.set_config('statement_timeout', %s, false)",
-            (f"{milliseconds}ms",),
+            (timeout_setting,),
         )
         connection.execute(
             "SELECT pg_catalog.set_config('lock_timeout', %s, false)",
-            (f"{milliseconds}ms",),
+            (timeout_setting,),
         )
     finally:
         if restore_transactional_mode and not connection.closed:

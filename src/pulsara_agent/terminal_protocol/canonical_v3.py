@@ -107,6 +107,7 @@ _ENTRY_TYPES = frozenset(
         CommittedEventType.TOOL_RESULT_ACCEPTED.value,
         CommittedEventType.USER_STEER_ACCEPTED.value,
         CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
+        CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED.value,
         CommittedEventType.PLAN_CONTINUATION_ACCEPTED.value,
         CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED.value,
     }
@@ -131,9 +132,9 @@ COMMITTED_PROJECTION_BRANCH_BY_TYPE: Mapping[str, str] = MappingProxyType(
     }
 )
 
-if len(_COMMITTED_ENUM) != 29 or len(COMMITTED_EVENT_DESCRIPTORS) != 29:
+if len(_COMMITTED_ENUM) != 30 or len(COMMITTED_EVENT_DESCRIPTORS) != 30:
     raise RuntimeError(
-        "Protocol v3 committed projection map must contain exact 29 types"
+        "Protocol v3 committed projection map must contain exact 30 types"
     )
 
 
@@ -286,6 +287,41 @@ class CanonicalProtocolReader:
                     entry_sequence=entries[0].entry_sequence,
                 )
             return entries, cursor, has_more
+
+    def subagent_activity_page(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        after_entry_sequence: int,
+        maximum_entries: int,
+        deadline_monotonic: float,
+    ) -> tuple[tuple[wire.CanonicalEntry, ...], bool]:
+        """Read exact canonical activity metadata for one durable subagent task."""
+
+        _bounded(maximum_entries, MAXIMUM_SNAPSHOT_ENTRIES, "task activity entries")
+        if not task_id or after_entry_sequence < 0:
+            raise ValueError("task activity cursor is invalid")
+        with self._connection(deadline_monotonic) as connection:
+            task = connection.execute(
+                "SELECT id FROM pulsara_v3.subagent_tasks WHERE session_id = %s AND id = %s",
+                (session_id, task_id),
+            ).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            rows = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE session_id = %s
+                     AND conversation_scope_kind = 'SUBAGENT_TASK'
+                     AND scope_subagent_task_id = %s
+                     AND entry_sequence > %s
+                   ORDER BY entry_sequence, id LIMIT %s""",
+                (session_id, task_id, after_entry_sequence, maximum_entries + 1),
+            ).fetchall()
+            return (
+                tuple(self._entry(connection, row) for row in rows[:maximum_entries]),
+                len(rows) > maximum_entries,
+            )
 
     @staticmethod
     def _snapshot_value(

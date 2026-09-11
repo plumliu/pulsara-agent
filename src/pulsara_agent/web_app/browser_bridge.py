@@ -275,6 +275,8 @@ class LocalBrowserBridge:
                 "CANCEL_PLAN",
                 "FORCE_EXIT_PLAN",
                 "COMPACT_CONTEXT",
+                "CANCEL_SUBAGENT_TASK",
+                "TERMINATE_BACKGROUND_PROCESS",
             },
         )
         permission_name = str(
@@ -293,7 +295,19 @@ class LocalBrowserBridge:
         request = wire.CommandRequest(
             command_id=command_id,
             command_kind=kind,
-            client_submission_id=str(body.get("client_submission_id", command_id)),
+            client_submission_id=str(
+                body.get(
+                    "client_submission_id",
+                    ""
+                    if kind_name
+                    in {
+                        "STOP_ACTIVE_TURN",
+                        "CANCEL_SUBAGENT_TASK",
+                        "TERMINATE_BACKGROUND_PROCESS",
+                    }
+                    else command_id,
+                )
+            ),
             text=str(body.get("text", "")),
             target_turn_id=str(body.get("target_turn_id", "")),
             subagent_task_id=str(body.get("subagent_task_id", "")),
@@ -304,6 +318,11 @@ class LocalBrowserBridge:
                 "expected_plan_workflow_revision",
             ),
             force=bool(body.get("force", False)),
+            expected_session_id=str(body.get("expected_session_id", "")),
+            expected_host_session_id=str(
+                body.get("expected_host_session_id", "")
+            ),
+            target_process_id=str(body.get("target_process_id", "")),
         )
         return protobuf_json(await connection.controller.request("command", request))
 
@@ -314,6 +333,37 @@ class LocalBrowserBridge:
         request = wire.QueryCommandRequest(
             command_id=_required_string(body, "command_id")
         )
+        expected = body.get("expected_control")
+        if expected is not None:
+            if not isinstance(expected, dict):
+                raise ValueError("expected_control must be an object")
+            operation = _enum_value(
+                _required_string(expected, "operation"),
+                allowed={
+                    "USER_CONTROL_STOP_ACTIVE_TURN",
+                    "USER_CONTROL_CANCEL_SUBAGENT_TASK",
+                    "USER_CONTROL_TERMINATE_BACKGROUND_PROCESS",
+                },
+            )
+            kind = _enum_value(
+                _required_string(expected, "target_kind"),
+                allowed={
+                    "USER_CONTROL_ROOT_TURN",
+                    "USER_CONTROL_SUBAGENT_TASK",
+                    "USER_CONTROL_BACKGROUND_PROCESS",
+                },
+            )
+            request.expected_control.CopyFrom(
+                wire.ExpectedUserControl(
+                    operation=operation,
+                    session_id=_required_string(expected, "session_id"),
+                    host_session_id=_required_string(expected, "host_session_id"),
+                    target=wire.UserControlTarget(
+                        kind=kind,
+                        target_id=_required_string(expected, "target_id"),
+                    ),
+                )
+            )
         return protobuf_json(
             await connection.controller.request("query_command", request)
         )
@@ -362,6 +412,51 @@ class LocalBrowserBridge:
         )
         return protobuf_json(
             await connection.controller.request("read_tool_artifact", request)
+        )
+
+    async def list_background_processes(
+        self, connection_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        connection = await self._connection(connection_id)
+        request = wire.ListBackgroundProcessesRequest(
+            expected_session_id=_required_string(body, "expected_session_id"),
+            expected_host_session_id=_required_string(
+                body, "expected_host_session_id"
+            ),
+            cursor=str(body.get("cursor", "")),
+            maximum_items=_bounded_uint(
+                body.get("maximum_items", 50),
+                "maximum_items",
+                minimum=1,
+                maximum=50,
+            ),
+        )
+        return protobuf_json(
+            await connection.controller.request("list_background_processes", request)
+        )
+
+    async def read_background_process_log(
+        self, connection_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        connection = await self._connection(connection_id)
+        request = wire.ReadBackgroundProcessLogRequest(
+            expected_session_id=_required_string(body, "expected_session_id"),
+            expected_host_session_id=_required_string(
+                body, "expected_host_session_id"
+            ),
+            process_id=_required_string(body, "process_id"),
+            output_cursor=str(body.get("output_cursor", "")),
+            max_output_chars=_bounded_uint(
+                body.get("max_output_chars", 32_000),
+                "max_output_chars",
+                minimum=512,
+                maximum=32_000,
+            ),
+        )
+        return protobuf_json(
+            await connection.controller.request(
+                "read_background_process_log", request
+            )
         )
 
     async def resolve_interaction(

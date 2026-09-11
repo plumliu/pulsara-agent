@@ -183,8 +183,19 @@ async def _run(settings: PulsaraSettings, workspace: Path) -> dict[str, object]:
         read_result_id, terminal_attempt_id = await _wait_for_terminal_attempt(
             session
         )
-        stop_accepted = await session.stop_current_turn()
-        if not stop_accepted:
+        target_turn_id = session.active_root_turn_id()
+        if target_turn_id is None:
+            raise RuntimeError("controlled ROOT turn identity was unavailable")
+        stop = await session.request_stop_turn(
+            command_id=(
+                f"command:control:{session.control_admission_deadline_ms()}:"
+                f"{uuid4()}"
+            ),
+            expected_session_id=session.session_id,
+            expected_host_session_id=session.host_session_id,
+            target_turn_id=target_turn_id,
+        )
+        if stop.status not in {"PENDING", "SUCCEEDED"}:
             raise RuntimeError("controlled user stop was not accepted")
         await asyncio.gather(first_task, return_exceptions=True)
 

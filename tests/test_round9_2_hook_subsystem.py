@@ -378,7 +378,7 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
     assert external_permission_mode("read-only", active_plan_workflow=True) == "plan"
     assert external_permission_mode("bypass-permissions") == "bypassPermissions"
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1

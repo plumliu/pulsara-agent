@@ -664,7 +664,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
 
 
 def test_todo_refinement_preserves_the_closed_durability_oracle() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LiveEventType) == 24
     assert tuple(item for item in LiveEventType if "TODO" in item.name) == (
         LiveEventType.TODO_SNAPSHOT_UPDATED,

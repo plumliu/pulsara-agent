@@ -47,6 +47,9 @@ class _Sessions:
         return {"candidates": []}
 
     def __init__(self) -> None:
+        self.task_page_calls: list[tuple[str, int, str | None, str | None]] = []
+        self.task_group_calls: list[tuple[str, int, str | None]] = []
+        self.task_activity_calls: list[tuple[str, str, int, str | None]] = []
         self.reconnect_calls: list[tuple[str, str]] = []
         self.install_calls: list[tuple[str, str]] = []
         self.project_skill_toggle_calls: list[tuple[str, str, bool]] = []
@@ -82,16 +85,51 @@ class _Sessions:
         *,
         maximum_items: int,
         cursor: str | None,
+        batch_id: str | None,
     ) -> dict[str, object]:
         assert session_id == "session-1"
         assert maximum_items == 17
         assert cursor == "next-page"
+        self.task_page_calls.append((session_id, maximum_items, cursor, batch_id))
         return {
             "session_id": session_id,
             "tasks": [{"id": "task-1", "status": "COMPLETED"}],
             "total_count": 1,
             "page_count": 1,
             "remaining_count": 0,
+            "next_cursor": None,
+        }
+
+    async def list_session_task_groups(
+        self,
+        session_id: str,
+        *,
+        maximum_items: int,
+        cursor: str | None,
+    ) -> dict[str, object]:
+        self.task_group_calls.append((session_id, maximum_items, cursor))
+        return {
+            "session_id": session_id,
+            "groups": [{"group_id": "batch:1", "task_count": 1}],
+            "next_cursor": None,
+        }
+
+    async def list_session_task_activities(
+        self,
+        session_id: str,
+        task_id: str,
+        *,
+        maximum_items: int,
+        cursor: str | None,
+    ) -> dict[str, object]:
+        self.task_activity_calls.append(
+            (session_id, task_id, maximum_items, cursor)
+        )
+        return {
+            "session_id": session_id,
+            "task_id": task_id,
+            "objective": "inspect exact activity",
+            "activities": [{"entry_id": "entry:1", "kind": "ASSISTANT_MESSAGE"}],
             "next_cursor": None,
         }
 
@@ -256,6 +294,7 @@ def _user_capabilities(active_session_id: str | None) -> dict[str, object]:
 class _Bridge:
     def __init__(self) -> None:
         self.connect_calls: list[tuple[str, str, bool]] = []
+        self.operation_calls: list[tuple[str, str, dict[str, object]]] = []
 
     async def connect(
         self,
@@ -271,6 +310,34 @@ class _Bridge:
             "session_id": session_id,
             "role": "controller",
         }
+
+    async def command(
+        self, connection_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        self.operation_calls.append(("command", connection_id, body))
+        return {"command_outcome": {"status": "PENDING"}}
+
+    async def query_command(
+        self, connection_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        self.operation_calls.append(("query-command", connection_id, body))
+        return {"query_command": {"control_query_status": "CONTROL_QUERY_FOUND"}}
+
+    async def list_background_processes(
+        self, connection_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        self.operation_calls.append(
+            ("list-background-processes", connection_id, body)
+        )
+        return {"background_processes": {"processes": []}}
+
+    async def read_background_process_log(
+        self, connection_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        self.operation_calls.append(
+            ("read-background-process-log", connection_id, body)
+        )
+        return {"background_process_log": {"output": "exact output"}}
 
 
 def test_zero_config_settings_and_database_surface_stays_usable(
@@ -645,6 +712,46 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 assert payload["tasks"] == [{"id": "task-1", "status": "COMPLETED"}]
 
             async with client.get(
+                f"{server.origin}/api/sessions/session-1/tasks",
+                params={
+                    "limit": "17",
+                    "cursor": "next-page",
+                    "batch_id": "batch:1",
+                },
+            ) as response:
+                assert response.status == 200
+            assert sessions.task_page_calls[-1] == (
+                "session-1",
+                17,
+                "next-page",
+                "batch:1",
+            )
+
+            async with client.get(
+                f"{server.origin}/api/sessions/session-1/task-groups",
+                params={"limit": "9", "cursor": "group:next"},
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["groups"] == [
+                    {"group_id": "batch:1", "task_count": 1}
+                ]
+            assert sessions.task_group_calls == [
+                ("session-1", 9, "group:next")
+            ]
+
+            async with client.get(
+                f"{server.origin}/api/sessions/session-1/tasks/task-1/activities",
+                params={"limit": "11", "cursor": "activity:next"},
+            ) as response:
+                assert response.status == 200
+                activity_page = await response.json()
+                assert activity_page["objective"] == "inspect exact activity"
+                assert activity_page["activities"][0]["entry_id"] == "entry:1"
+            assert sessions.task_activity_calls == [
+                ("session-1", "task-1", 11, "activity:next")
+            ]
+
+            async with client.get(
                 f"{server.origin}/api/sessions/session-1/capabilities"
             ) as response:
                 assert response.status == 200
@@ -809,6 +916,77 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                         True,
                     )
                 ]
+
+            control = {
+                "command_id": (
+                    "command:control:9999999999999:"
+                    "55555555-5555-4555-8555-555555555555"
+                ),
+                "command_kind": "TERMINATE_BACKGROUND_PROCESS",
+                "expected_session_id": "session-1",
+                "expected_host_session_id": "host:session-1",
+                "target_process_id": "process:exact",
+            }
+            async with client.post(
+                f"{server.origin}/api/connections/connection-1/command",
+                json=control,
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["command_outcome"]["status"] == (
+                    "PENDING"
+                )
+
+            async with client.post(
+                f"{server.origin}/api/connections/connection-1/list-background-processes",
+                json={
+                    "expected_session_id": "session-1",
+                    "expected_host_session_id": "host:session-1",
+                    "maximum_items": 13,
+                },
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 200
+
+            async with client.post(
+                f"{server.origin}/api/connections/connection-1/read-background-process-log",
+                json={
+                    "expected_session_id": "session-1",
+                    "expected_host_session_id": "host:session-1",
+                    "process_id": "process:exact",
+                    "output_cursor": "output:2",
+                    "max_output_chars": 4096,
+                },
+                headers={"Origin": server.origin, "Sec-Fetch-Site": "same-origin"},
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["background_process_log"][
+                    "output"
+                ] == "exact output"
+
+            assert bridge.operation_calls == [
+                ("command", "connection-1", control),
+                (
+                    "list-background-processes",
+                    "connection-1",
+                    {
+                        "expected_session_id": "session-1",
+                        "expected_host_session_id": "host:session-1",
+                        "maximum_items": 13,
+                    },
+                ),
+                (
+                    "read-background-process-log",
+                    "connection-1",
+                    {
+                        "expected_session_id": "session-1",
+                        "expected_host_session_id": "host:session-1",
+                        "process_id": "process:exact",
+                        "output_cursor": "output:2",
+                        "max_output_chars": 4096,
+                    },
+                ),
+            ]
     finally:
         await server.aclose()
 

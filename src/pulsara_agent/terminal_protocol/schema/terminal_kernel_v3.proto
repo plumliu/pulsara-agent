@@ -61,6 +61,7 @@ enum CommittedEventType {
   PLAN_DRAFT_DECISION_ACCEPTED = 32;
   PLAN_WORKFLOW_EXITED = 33;
   PLAN_CONTINUATION_ACCEPTED = 34;
+  USER_CONTROL_FEEDBACK_ACCEPTED = 35;
 }
 
 enum LiveEventType {
@@ -107,6 +108,7 @@ enum EntryKind {
   TERMINAL_OBSERVATION = 6;
   PLAN_CONTINUATION = 7;
   INTER_AGENT_MESSAGE = 8;
+  USER_CONTROL_FEEDBACK = 9;
 }
 
 enum PermissionMode {
@@ -637,6 +639,9 @@ message SessionLiveControlSnapshot {
   string compaction_phase = 8;
   string compaction_target_scope = 9;
   bool input_admission_deferred = 10;
+  string host_session_id = 11;
+  string active_root_turn_id = 12;
+  uint64 control_admission_deadline_ms = 13;
 }
 
 enum LiveControlEventKind {
@@ -720,6 +725,8 @@ enum CommandKind {
   CANCEL_PLAN = 9;
   FORCE_EXIT_PLAN = 10;
   COMPACT_CONTEXT = 11;
+  CANCEL_SUBAGENT_TASK = 12;
+  TERMINATE_BACKGROUND_PROCESS = 13;
 }
 
 message CommandRequest {
@@ -737,6 +744,9 @@ message CommandRequest {
   string target_plan_workflow_id = 12;
   uint64 expected_plan_workflow_revision = 13;
   bool force = 14;
+  string expected_session_id = 15;
+  string expected_host_session_id = 16;
+  string target_process_id = 17;
 }
 
 enum CommandStatus {
@@ -744,6 +754,94 @@ enum CommandStatus {
   SUCCEEDED = 1;
   REJECTED = 2;
   PENDING = 3;
+  FAILED = 4;
+}
+
+enum UserControlOperation {
+  USER_CONTROL_OPERATION_UNSPECIFIED = 0;
+  USER_CONTROL_STOP_ACTIVE_TURN = 1;
+  USER_CONTROL_CANCEL_SUBAGENT_TASK = 2;
+  USER_CONTROL_TERMINATE_BACKGROUND_PROCESS = 3;
+}
+
+enum UserControlTargetKind {
+  USER_CONTROL_TARGET_KIND_UNSPECIFIED = 0;
+  USER_CONTROL_ROOT_TURN = 1;
+  USER_CONTROL_SUBAGENT_TASK = 2;
+  USER_CONTROL_BACKGROUND_PROCESS = 3;
+}
+
+enum UserControlExecution {
+  USER_CONTROL_EXECUTION_UNSPECIFIED = 0;
+  USER_CONTROL_NOT_STARTED = 1;
+  USER_CONTROL_RUNNING = 2;
+  USER_CONTROL_FINISHED = 3;
+}
+
+message UserControlTarget {
+  UserControlTargetKind kind = 1;
+  string target_id = 2;
+}
+
+message RootControlResult {
+  string status = 1;
+  string reason = 2;
+}
+
+message SubagentControlResult {
+  string disposition = 1;
+  string status = 2;
+  string reason = 3;
+}
+
+message ProcessControlResult {
+  string disposition = 1;
+  string status = 2;
+  optional sint32 exit_code = 3;
+  string physical_state = 4;
+  optional bool group_alive = 5;
+}
+
+message MonitorControlResult {
+  string monitor_id = 1;
+  string outcome = 2;
+  repeated string in_flight_observation_ids = 3;
+  string detail = 4;
+}
+
+message UserControlFeedbackState {
+  string canonical_status = 1;
+  string inclusion_status = 2;
+  string owner_availability = 3;
+  string reason = 4;
+  string target_root_turn_id = 5;
+  string entry_id = 6;
+  string context_binding_revision_id = 7;
+  optional uint64 model_call_index = 8;
+  bool transport_invocation_attempted = 9;
+  optional bool transport_invocation_succeeded = 10;
+  string transport_detail = 11;
+}
+
+message UserControlOutcome {
+  UserControlOperation operation = 1;
+  string session_id = 2;
+  string host_session_id = 3;
+  UserControlTarget target = 4;
+  bool accepted = 5;
+  UserControlExecution execution = 6;
+  RootControlResult root = 7;
+  SubagentControlResult subagent = 8;
+  ProcessControlResult process = 9;
+  MonitorControlResult monitor = 10;
+  UserControlFeedbackState feedback = 11;
+}
+
+message ExpectedUserControl {
+  UserControlOperation operation = 1;
+  string session_id = 2;
+  string host_session_id = 3;
+  UserControlTarget target = 4;
 }
 
 message CommandOutcome {
@@ -760,6 +858,7 @@ message CommandOutcome {
   PlanDraftDecision plan_draft_decision = 11;
   string plan_continuation_turn_id = 12;
   PromptDelivery prompt_delivery = 13;
+  UserControlOutcome user_control = 14;
 }
 
 message PromptDelivery {
@@ -774,12 +873,21 @@ message QueryCommandRequest {
   string attachment_id = 2;
   uint64 attachment_generation = 3;
   string command_id = 4;
+  ExpectedUserControl expected_control = 5;
+}
+
+enum ControlQueryStatus {
+  CONTROL_QUERY_STATUS_UNSPECIFIED = 0;
+  CONTROL_QUERY_FOUND = 1;
+  CONTROL_QUERY_RESULT_UNAVAILABLE = 2;
+  CONTROL_QUERY_OWNER_UNAVAILABLE = 3;
 }
 
 message QueryCommandResponse {
   string request_id = 1;
   bool found = 2;
   CommandOutcome outcome = 3;
+  ControlQueryStatus control_query_status = 4;
 }
 
 enum InteractionResolutionDecision {
@@ -933,6 +1041,76 @@ message ToolArtifactTextChunk {
   uint64 next_offset_chars = 13;
 }
 
+message ListBackgroundProcessesRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string expected_session_id = 4;
+  string expected_host_session_id = 5;
+  string cursor = 6;
+  uint32 maximum_items = 7;
+}
+
+message BackgroundProcessOrigin {
+  string turn_id = 1;
+  string scope_kind = 2;
+  string subagent_task_id = 3;
+}
+
+message BackgroundProcessItem {
+  string process_id = 1;
+  string command = 2;
+  string cwd = 3;
+  string status = 4;
+  optional sint32 exit_code = 5;
+  string physical_state = 6;
+  string io_mode = 7;
+  string stream_id = 8;
+  uint64 output_revision = 9;
+  string output_cursor = 10;
+  string retained_from_cursor = 11;
+  double started_at_monotonic = 12;
+  optional double ended_at_monotonic = 13;
+  double duration_seconds = 14;
+  bool timed_out = 15;
+  bool stdin_closed = 16;
+  BackgroundProcessOrigin origin = 17;
+}
+
+message BackgroundProcessPage {
+  string request_id = 1;
+  string session_id = 2;
+  string host_session_id = 3;
+  repeated BackgroundProcessItem processes = 4;
+  string next_cursor = 5;
+}
+
+message ReadBackgroundProcessLogRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string expected_session_id = 4;
+  string expected_host_session_id = 5;
+  string process_id = 6;
+  string output_cursor = 7;
+  uint32 max_output_chars = 8;
+}
+
+message BackgroundProcessLog {
+  string request_id = 1;
+  string session_id = 2;
+  string host_session_id = 3;
+  BackgroundProcessItem process = 4;
+  string output = 5;
+  bool truncated = 6;
+  string output_disposition = 7;
+  string output_cursor = 8;
+  string retained_from_cursor = 9;
+  bool gap_before_output = 10;
+  bool truncated_by_response_bound = 11;
+  string source_coverage = 12;
+}
+
 message CanonicalContentChunk {
   string request_id = 1;
   string digest = 2;
@@ -969,6 +1147,8 @@ message ClientFrame {
     ReadPlanQuestionContentRequest read_plan_question = 12;
     ReadPlanDraftTextChunkRequest read_plan_draft = 13;
     ReadToolArtifactRequest read_tool_artifact = 14;
+    ListBackgroundProcessesRequest list_background_processes = 15;
+    ReadBackgroundProcessLogRequest read_background_process_log = 16;
   }
 }
 
@@ -994,5 +1174,7 @@ message ServerFrame {
     PlanQuestionContent plan_question = 12;
     PlanDraftTextChunk plan_draft = 13;
     ToolArtifactTextChunk tool_artifact = 14;
+    BackgroundProcessPage background_processes = 15;
+    BackgroundProcessLog background_process_log = 16;
   }
 }

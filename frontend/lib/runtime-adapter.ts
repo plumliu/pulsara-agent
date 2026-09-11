@@ -25,6 +25,7 @@ import type {
   SkillCapability,
   SkillImportInput,
   SkillImportCandidate,
+  SubagentActivity,
   SubagentRun,
   TodoRun,
   ToolTrace,
@@ -175,6 +176,8 @@ export interface RuntimeProjection {
   promptTransitions: LocalPromptSubmission[];
   planMode: boolean;
   activeTurnId?: string;
+  hostSessionId?: string;
+  controlAdmissionDeadlineMs?: number;
   control: ProtocolCanonicalControl;
   liveControl: ProtocolLiveControlSnapshot;
   agentTasks: AgentTask[];
@@ -206,6 +209,108 @@ export interface ToolArtifactPage {
   totalChars: number;
   hasMore: boolean;
   nextOffsetChars?: number;
+}
+
+export interface BackgroundProcess {
+  processId: string;
+  command: string;
+  cwd: string;
+  status: string;
+  exitCode?: number;
+  physicalState: string;
+  ioMode: string;
+  streamId: string;
+  outputCursor: string;
+  retainedFromCursor: string;
+  durationSeconds: number;
+  timedOut: boolean;
+  originTurnId: string;
+  originSubagentTaskId?: string;
+}
+
+export interface BackgroundProcessPage {
+  processes: BackgroundProcess[];
+  nextCursor?: string;
+}
+
+export interface BackgroundProcessLog {
+  process: BackgroundProcess;
+  output: string;
+  outputCursor: string;
+  retainedFromCursor: string;
+  gapBeforeOutput: boolean;
+  truncatedByResponseBound: boolean;
+  sourceCoverage: string;
+}
+
+export interface UserControlCommandRef {
+  commandId: string;
+  operation: 'STOP_ACTIVE_TURN' | 'CANCEL_SUBAGENT_TASK' | 'TERMINATE_BACKGROUND_PROCESS';
+  sessionId: string;
+  hostSessionId: string;
+  targetKind: 'ROOT_TURN' | 'SUBAGENT_TASK' | 'BACKGROUND_PROCESS';
+  targetId: string;
+}
+
+export function createUserControlCommandRef(
+  projection: Pick<RuntimeProjection, 'hostSessionId' | 'controlAdmissionDeadlineMs'>,
+  sessionId: string,
+  operation: UserControlCommandRef['operation'],
+  targetKind: UserControlCommandRef['targetKind'],
+  targetId: string,
+): UserControlCommandRef {
+  const hostSessionId = projection.hostSessionId ?? '';
+  const deadline = projection.controlAdmissionDeadlineMs ?? 0;
+  if (!sessionId || !hostSessionId || !targetId || deadline < 1) {
+    throw new RuntimeApiError(
+      'CONTROL_TARGET_UNAVAILABLE',
+      '当前控制身份尚未确认，请刷新后重试。',
+      true,
+    );
+  }
+  return {
+    commandId: `command:control:${deadline}:${crypto.randomUUID()}`,
+    operation,
+    sessionId,
+    hostSessionId,
+    targetKind,
+    targetId,
+  };
+}
+
+export interface UserControlReceipt {
+  accepted: boolean;
+  execution: 'NOT_STARTED' | 'RUNNING' | 'FINISHED';
+  process?: {
+    disposition: string;
+    status: string;
+    exitCode?: number;
+    physicalState: string;
+    groupAlive?: boolean;
+  };
+  monitor?: {
+    monitorId: string;
+    outcome: string;
+    detail?: string;
+  };
+  feedback?: {
+    canonicalStatus: string;
+    inclusionStatus: string;
+    ownerAvailability: string;
+    reason?: string;
+    targetRootTurnId?: string;
+    entryId?: string;
+    contextBindingRevisionId?: string;
+    modelCallIndex?: number;
+    transportInvocationAttempted: boolean;
+    transportInvocationSucceeded?: boolean;
+    transportDetail?: string;
+  };
+}
+
+export interface UserControlQueryResult {
+  status: 'FOUND' | 'RESULT_UNAVAILABLE' | 'OWNER_UNAVAILABLE';
+  receipt?: CommandReceipt;
 }
 
 export interface LocalPromptSubmission {
@@ -314,7 +419,9 @@ export interface RuntimeAdapter {
   forkConversation(sessionId: string, anchorEntryId: string, childSessionId: string): Promise<ForkOutcome>;
   readSession(sessionId: string): Promise<SessionSummary | null>;
   listSessions(): Promise<SessionSummary[]>;
-  listSessionTasks(sessionId: string, cursor?: string): Promise<AgentTaskPage>;
+  listSessionTaskGroups(sessionId: string, cursor?: string): Promise<AgentTaskGroupPage>;
+  listSessionTasks(sessionId: string, cursor?: string, batchId?: string): Promise<AgentTaskPage>;
+  listSessionTaskActivities(sessionId: string, taskId: string, cursor?: string): Promise<AgentTaskActivityPage>;
   inspectCapabilities(sessionId: string): Promise<CapabilitySnapshot>;
   reconnectMcpServer(sessionId: string, serverId: string): Promise<CapabilitySnapshot>;
   installSkill(
@@ -407,6 +514,213 @@ export interface AgentTaskPage {
   nextCursor?: string;
 }
 
+export interface AgentTaskGroup {
+  id: string;
+  parentTurnId: string;
+  firstAcceptedAt: string;
+  taskCount: number;
+  statusCounts: Record<'pending' | 'active' | 'waiting' | 'completed' | 'cancelled' | 'failed' | 'interrupted' | 'blocked', number>;
+  singleTaskLabel?: string;
+}
+
+export interface AgentTaskGroupPage {
+  groups: AgentTaskGroup[];
+  totalCount: number;
+  remainingCount: number;
+  nextCursor?: string;
+}
+
+export interface AgentTaskActivityRecord {
+  entryId: string;
+  turnId: string;
+  entrySequence: number;
+  entryKind: string;
+  acceptedAt: string;
+  objective: string;
+  body?: string;
+  contentKind: 'INLINE' | 'CANONICAL_BLOB';
+  contentDigest: string;
+  contentSize: number;
+  blocks: Array<{ blockId: string; ordinal: number; kind: string; toolCallId?: string; toolName?: string }>;
+  toolResults: Array<{ attemptId?: string; assistantEntryId: string; toolCallId: string; resultEntryId: string; resultState: string }>;
+}
+
+export interface AgentTaskActivityPage {
+  activities: AgentTaskActivityRecord[];
+  nextCursor?: string;
+}
+
+/**
+ * Lower the task inspector's canonical entry rows into the same message model
+ * used by the root transcript. Canonical assistant envelopes are storage
+ * records, not user-facing prose; tool results stay attached to their exact
+ * assistant entry and tool call instead of becoming standalone JSON messages.
+ */
+export function projectAgentTaskConversation(
+  records: readonly AgentTaskActivityRecord[],
+  projectedActivities: readonly SubagentActivity[] = [],
+): Message[] {
+  const messages: Message[] = [];
+  const projectedById = new Map(projectedActivities.map((activity) => [activity.id, activity]));
+  const representedProjectedIds = new Set<string>();
+  const ordered = [...records].sort((left, right) => (
+    left.entrySequence - right.entrySequence || left.entryId.localeCompare(right.entryId)
+  ));
+
+  for (const record of ordered) {
+    const body = record.body ?? '';
+    if (record.entryKind === 'USER_MESSAGE' || record.entryKind === 'INTER_AGENT_MESSAGE') {
+      messages.push({
+        id: record.entryId,
+        turnId: record.turnId,
+        entrySequence: record.entrySequence,
+        role: 'user',
+        userKind: record.entryKind === 'INTER_AGENT_MESSAGE' ? 'steer' : 'prompt',
+        time: formatTime(record.acceptedAt),
+        body,
+      });
+      representedProjectedIds.add(record.entryId);
+      continue;
+    }
+
+    if (record.entryKind === 'ASSISTANT_MESSAGE' || record.entryKind === 'ASSISTANT_TOOL_REQUEST') {
+      const projected = projectedById.get(record.entryId);
+      if (projected) representedProjectedIds.add(record.entryId);
+      const traces = projected?.traces?.map((trace) => ({
+        ...trace,
+        artifact: trace.artifact ? { ...trace.artifact } : undefined,
+      })) ?? record.blocks
+        .filter((block) => block.kind === 'TOOL_CALL')
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .map((block): ToolTrace => {
+          const name = block.toolName || 'Tool';
+          const result = record.toolResults.find((candidate) => (
+            candidate.assistantEntryId === record.entryId
+            && candidate.toolCallId === block.toolCallId
+          ));
+          const status = toolResultStatus(result?.resultState);
+          return {
+            id: block.toolCallId || block.blockId,
+            kind: toolKind(name),
+            toolName: name,
+            title: toolDisplayName(name),
+            subtitle: status === 'running' ? '等待结果' : status === 'completed' ? '已完成' : toolFailureLabel(result?.resultState),
+            status,
+            resultEntryId: result?.resultEntryId,
+            resultState: result?.resultState,
+            meta: status === 'completed' ? '操作完成' : status === 'cancelled' ? '操作已取消' : status === 'failed' ? '操作未完成' : undefined,
+          };
+        });
+      messages.push({
+        id: record.entryId,
+        turnId: record.turnId,
+        entrySequence: record.entrySequence,
+        role: 'assistant',
+        assistantKind: record.entryKind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
+        time: formatTime(record.acceptedAt),
+        body: projected?.body ?? taskAssistantBody(record.entryKind, body),
+        reasoning: projected?.reasoning?.map((block) => ({ ...block })),
+        traces: traces.length ? traces : undefined,
+        status: projected?.status === 'running' ? 'running' : 'completed',
+      });
+      continue;
+    }
+
+    if (record.entryKind === 'TOOL_RESULT') {
+      const resultRef = record.toolResults.find((candidate) => candidate.resultEntryId === record.entryId);
+      const target = resultRef
+        ? messages.find((message) => message.id === resultRef.assistantEntryId)
+        : undefined;
+      const trace = target?.traces?.find((candidate) => candidate.id === resultRef?.toolCallId);
+      if (trace) {
+        trace.status = toolResultStatus(resultRef?.resultState);
+        trace.subtitle = trace.status === 'completed' ? '已完成' : toolFailureLabel(resultRef?.resultState);
+        trace.resultText = body;
+        trace.resultEntryId = record.entryId;
+        trace.resultState = resultRef?.resultState;
+        trace.resultSummary = summarizeToolResult(trace.toolName, body);
+        trace.meta = trace.status === 'completed' ? '操作完成' : trace.status === 'cancelled' ? '操作已取消' : '操作未完成';
+      } else {
+        messages.push({
+          id: record.entryId,
+          turnId: record.turnId,
+          entrySequence: record.entrySequence,
+          role: 'assistant',
+          assistantKind: 'tool-request',
+          time: formatTime(record.acceptedAt),
+          body: '',
+          status: 'completed',
+          traces: [{
+            id: resultRef?.toolCallId || record.entryId,
+            kind: 'artifact',
+            title: '操作结果',
+            subtitle: '已记录',
+            status: toolResultStatus(resultRef?.resultState),
+            resultText: body,
+            resultEntryId: record.entryId,
+            resultState: resultRef?.resultState,
+            resultSummary: summarizeToolResult(undefined, body),
+            associationPending: true,
+          }],
+        });
+      }
+      representedProjectedIds.add(record.entryId);
+      continue;
+    }
+
+    if (record.entryKind === 'TERMINAL_OBSERVATION') {
+      const target = [...messages].reverse().find((message) => message.role === 'assistant');
+      const trace: ToolTrace = {
+        id: record.entryId,
+        kind: 'terminal',
+        title: '命令进展',
+        subtitle: '已记录',
+        status: 'completed',
+        resultText: body,
+      };
+      if (target) target.traces = [...(target.traces ?? []), trace];
+      else messages.push({
+        id: record.entryId,
+        turnId: record.turnId,
+        entrySequence: record.entrySequence,
+        role: 'assistant',
+        assistantKind: 'tool-request',
+        time: formatTime(record.acceptedAt),
+        body: '',
+        traces: [trace],
+        status: 'completed',
+      });
+      representedProjectedIds.add(record.entryId);
+    }
+  }
+
+  for (const activity of projectedActivities) {
+    if (representedProjectedIds.has(activity.id) || messages.some((message) => message.id === activity.id)) continue;
+    messages.push({
+      id: activity.id,
+      role: 'assistant',
+      assistantKind: activity.status === 'running' ? 'live' : 'terminal',
+      time: activity.time,
+      body: activity.body,
+      reasoning: activity.reasoning?.map((block) => ({ ...block })),
+      traces: activity.traces?.map((trace) => ({ ...trace })),
+      status: activity.status === 'running' ? 'running' : 'completed',
+    });
+  }
+  return messages;
+}
+
+function taskAssistantBody(entryKind: string, body: string): string {
+  if (entryKind === 'ASSISTANT_TOOL_REQUEST' || !body) return '';
+  try {
+    const value = JSON.parse(body) as { blocks?: unknown; draft_identity?: unknown };
+    if (Array.isArray(value.blocks) && typeof value.draft_identity === 'string') return '';
+  } catch {
+    // Natural-language assistant content is not expected to be JSON.
+  }
+  return body;
+}
+
 export interface RuntimeConnection {
   readonly sessionId: string;
   readonly role: 'observer' | 'controller';
@@ -416,7 +730,13 @@ export interface RuntimeConnection {
   observe(signal?: AbortSignal): Promise<RuntimeProjection>;
   submitPrompt(commandId: string, text: string, permission: PermissionMode): Promise<CommandReceipt>;
   steerActiveTurn(commandId: string, text: string, targetTurnId: string): Promise<CommandReceipt>;
-  stopActiveTurn(): Promise<CommandReceipt>;
+  stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt>;
+  cancelSubagentTask(reference: UserControlCommandRef): Promise<CommandReceipt>;
+  terminateBackgroundProcess(reference: UserControlCommandRef): Promise<CommandReceipt>;
+  queryControlCommand(reference: UserControlCommandRef): Promise<UserControlQueryResult>;
+  listBackgroundProcesses(cursor?: string): Promise<BackgroundProcessPage>;
+  readBackgroundProcessLog(processId: string, outputCursor?: string): Promise<BackgroundProcessLog>;
+  readCanonicalEntryContent(entryId: string, digest: string, size: number): Promise<string>;
   compactContext(targetTurnId?: string): Promise<CommandReceipt>;
   acceptSubagentCompletion(taskId: string, permission: PermissionMode): Promise<CommandReceipt>;
   enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt>;
@@ -432,7 +752,7 @@ export interface RuntimeConnection {
 
 export interface CommandReceipt {
   commandId: string;
-  status: 'succeeded' | 'rejected' | 'pending';
+  status: 'succeeded' | 'rejected' | 'pending' | 'failed';
   targetId?: string;
   publicCode?: string;
   publicMessage?: string;
@@ -444,12 +764,15 @@ export interface CommandReceipt {
   };
   planDraftDecision?: 'approve' | 'revise' | 'cancel';
   planContinuationTurnId?: string;
+  userControl?: UserControlReceipt;
 }
 
 export type RuntimeCommandKind =
   | 'SUBMIT_PROMPT'
   | 'STEER_ACTIVE_TURN'
   | 'STOP_ACTIVE_TURN'
+  | 'CANCEL_SUBAGENT_TASK'
+  | 'TERMINATE_BACKGROUND_PROCESS'
   | 'COMPACT_CONTEXT'
   | 'ACCEPT_SUBAGENT_COMPLETION'
   | 'ENTER_PLAN';
@@ -661,6 +984,9 @@ export interface ProtocolLiveControlSnapshot {
   current_todos?: ProtocolTodoRunSnapshot[];
   compaction_in_progress?: boolean;
   input_admission_deferred?: boolean;
+  host_session_id?: string;
+  active_root_turn_id?: string;
+  control_admission_deadline_ms?: string | number;
 }
 
 interface ProtocolTodoRunSnapshot {
@@ -781,6 +1107,27 @@ interface ProtocolCommandOutcome {
   };
   plan_draft_decision?: string;
   plan_continuation_turn_id?: string;
+  user_control?: Record<string, unknown>;
+}
+
+interface ProtocolBackgroundProcess {
+  process_id: string;
+  command?: string;
+  cwd?: string;
+  status?: string;
+  exit_code?: string | number;
+  physical_state?: string;
+  io_mode?: string;
+  stream_id?: string;
+  output_cursor?: string;
+  retained_from_cursor?: string;
+  duration_seconds?: number;
+  timed_out?: boolean;
+  origin?: {
+    turn_id?: string;
+    scope_kind?: string;
+    subagent_task_id?: string;
+  };
 }
 
 export function selectPromptCommand(isTurnActive: boolean, steer: boolean): RuntimeCommandKind {
@@ -934,9 +1281,50 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return payload.sessions.map(projectSessionSummary);
   }
 
-  async listSessionTasks(sessionId: string, cursor?: string): Promise<AgentTaskPage> {
+  async listSessionTaskGroups(sessionId: string, cursor?: string): Promise<AgentTaskGroupPage> {
     const query = new URLSearchParams({ limit: '50' });
     if (cursor) query.set('cursor', cursor);
+    const payload = await apiRequest<{
+      groups?: Array<{
+        group_id: string;
+        parent_turn_id: string;
+        first_accepted_at: string;
+        task_count: string | number;
+        status_counts?: Record<string, string | number>;
+        single_task_label?: string | null;
+      }>;
+      total_count?: string | number;
+      remaining_count?: string | number;
+      next_cursor?: string | null;
+    }>(`/api/sessions/${encodeURIComponent(sessionId)}/task-groups?${query.toString()}`);
+    return {
+      groups: (payload.groups ?? []).map((group) => ({
+        id: group.group_id,
+        parentTurnId: group.parent_turn_id,
+        firstAcceptedAt: group.first_accepted_at,
+        taskCount: numeric(group.task_count),
+        statusCounts: {
+          pending: numeric(group.status_counts?.pending),
+          active: numeric(group.status_counts?.active),
+          waiting: numeric(group.status_counts?.waiting),
+          completed: numeric(group.status_counts?.completed),
+          cancelled: numeric(group.status_counts?.cancelled),
+          failed: numeric(group.status_counts?.failed),
+          interrupted: numeric(group.status_counts?.interrupted),
+          blocked: numeric(group.status_counts?.blocked),
+        },
+        singleTaskLabel: group.single_task_label || undefined,
+      })),
+      totalCount: numeric(payload.total_count),
+      remainingCount: numeric(payload.remaining_count),
+      nextCursor: payload.next_cursor || undefined,
+    };
+  }
+
+  async listSessionTasks(sessionId: string, cursor?: string, batchId?: string): Promise<AgentTaskPage> {
+    const query = new URLSearchParams({ limit: '50' });
+    if (cursor) query.set('cursor', cursor);
+    if (batchId) query.set('batch_id', batchId);
     const payload = await apiRequest<ProtocolTaskInventoryPage>(
       `/api/sessions/${encodeURIComponent(sessionId)}/tasks?${query.toString()}`,
     );
@@ -944,6 +1332,56 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       tasks: (payload.tasks ?? []).map(projectTaskInventoryRecord),
       totalCount: numeric(payload.total_count),
       remainingCount: numeric(payload.remaining_count),
+      nextCursor: payload.next_cursor || undefined,
+    };
+  }
+
+  async listSessionTaskActivities(sessionId: string, taskId: string, cursor?: string): Promise<AgentTaskActivityPage> {
+    const query = new URLSearchParams({ limit: '50' });
+    if (cursor) query.set('cursor', cursor);
+    const payload = await apiRequest<{
+      activities?: Array<{
+        entry_id: string;
+        turn_id: string;
+        entry_sequence: string | number;
+        entry_kind: string;
+        accepted_at: string;
+        objective: string;
+        content: { kind: 'INLINE' | 'CANONICAL_BLOB'; inline_content?: string; digest: string; size: string | number };
+        blocks?: Array<{ block_id: string; ordinal: string | number; kind: string; tool_call_id?: string | null; tool_name?: string | null }>;
+        tool_results?: Array<{ attempt_id?: string | null; assistant_entry_id: string; tool_call_id: string; result_entry_id: string; result_state: string }>;
+      }>;
+      next_cursor?: string | null;
+    }>(`/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/activities?${query.toString()}`);
+    return {
+      activities: (payload.activities ?? []).map((activity) => ({
+        entryId: activity.entry_id,
+        turnId: activity.turn_id,
+        entrySequence: numeric(activity.entry_sequence),
+        entryKind: activity.entry_kind,
+        acceptedAt: activity.accepted_at,
+        objective: activity.objective,
+        body: activity.content.inline_content
+          ? decodeBase64(activity.content.inline_content)
+          : undefined,
+        contentKind: activity.content.kind,
+        contentDigest: activity.content.digest,
+        contentSize: numeric(activity.content.size),
+        blocks: (activity.blocks ?? []).map((block) => ({
+          blockId: block.block_id,
+          ordinal: numeric(block.ordinal),
+          kind: block.kind,
+          toolCallId: block.tool_call_id || undefined,
+          toolName: block.tool_name || undefined,
+        })),
+        toolResults: (activity.tool_results ?? []).map((result) => ({
+          attemptId: result.attempt_id || undefined,
+          assistantEntryId: result.assistant_entry_id,
+          toolCallId: result.tool_call_id,
+          resultEntryId: result.result_entry_id,
+          resultState: result.result_state,
+        })),
+      })),
       nextCursor: payload.next_cursor || undefined,
     };
   }
@@ -1410,8 +1848,168 @@ class LocalRuntimeConnection implements RuntimeConnection {
     return this.command('STEER_ACTIVE_TURN', { text, target_turn_id: targetTurnId }, commandId);
   }
 
-  stopActiveTurn(): Promise<CommandReceipt> {
-    return this.command('STOP_ACTIVE_TURN');
+  stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt> {
+    this.assertControlReference(reference, 'STOP_ACTIVE_TURN', 'ROOT_TURN');
+    return this.command('STOP_ACTIVE_TURN', {
+      client_submission_id: '',
+      expected_session_id: reference.sessionId,
+      expected_host_session_id: reference.hostSessionId,
+      target_turn_id: reference.targetId,
+    }, reference.commandId);
+  }
+
+  cancelSubagentTask(reference: UserControlCommandRef): Promise<CommandReceipt> {
+    this.assertControlReference(reference, 'CANCEL_SUBAGENT_TASK', 'SUBAGENT_TASK');
+    return this.controlCommand(reference, 'subagent_task_id');
+  }
+
+  terminateBackgroundProcess(reference: UserControlCommandRef): Promise<CommandReceipt> {
+    this.assertControlReference(reference, 'TERMINATE_BACKGROUND_PROCESS', 'BACKGROUND_PROCESS');
+    return this.controlCommand(reference, 'target_process_id');
+  }
+
+  async queryControlCommand(
+    reference: UserControlCommandRef,
+  ): Promise<UserControlQueryResult> {
+    const operation = `USER_CONTROL_${reference.operation}`;
+    const targetKind = `USER_CONTROL_${reference.targetKind}`;
+    const frame = await this.post<{
+      query_command?: {
+        found?: boolean;
+        control_query_status?: string;
+        outcome?: ProtocolCommandOutcome;
+      };
+      error?: ProtocolError;
+    }>('query-command', {
+      command_id: reference.commandId,
+      expected_control: {
+        operation,
+        session_id: reference.sessionId,
+        host_session_id: reference.hostSessionId,
+        target_kind: targetKind,
+        target_id: reference.targetId,
+      },
+    });
+    assertProtocolFrame(frame);
+    const query = frame.query_command;
+    if (!query) throw new RuntimeApiError(
+      'CONTROL_QUERY_INVALID', '控制查询没有返回可识别的结果。', false,
+    );
+    if (query.control_query_status === 'CONTROL_QUERY_FOUND') {
+      if (!query.found || !query.outcome) throw new RuntimeApiError(
+        'CONTROL_QUERY_INVALID', '控制查询缺少已确认的操作结果。', false,
+      );
+      return { status: 'FOUND', receipt: projectCommand(query.outcome) };
+    }
+    if (query.control_query_status === 'CONTROL_QUERY_RESULT_UNAVAILABLE') {
+      return { status: 'RESULT_UNAVAILABLE' };
+    }
+    if (query.control_query_status === 'CONTROL_QUERY_OWNER_UNAVAILABLE') {
+      return { status: 'OWNER_UNAVAILABLE' };
+    }
+    throw new RuntimeApiError(
+      'CONTROL_QUERY_INVALID', '控制查询返回了未知状态。', false,
+    );
+  }
+
+  async listBackgroundProcesses(cursor?: string): Promise<BackgroundProcessPage> {
+    const hostSessionId = this.liveControl.host_session_id ?? '';
+    if (!hostSessionId) throw new RuntimeApiError(
+      'BACKGROUND_OWNER_UNAVAILABLE', '后台命令 owner 尚未确认。', true,
+    );
+    const frame = await this.post<{
+      background_processes?: {
+        session_id?: string;
+        host_session_id?: string;
+        processes?: ProtocolBackgroundProcess[];
+        next_cursor?: string;
+      };
+      error?: ProtocolError;
+    }>('list-background-processes', {
+      expected_session_id: this.sessionId,
+      expected_host_session_id: hostSessionId,
+      cursor: cursor ?? '',
+      maximum_items: 50,
+    });
+    assertProtocolFrame(frame);
+    const page = frame.background_processes;
+    if (
+      !page
+      || page.session_id !== this.sessionId
+      || page.host_session_id !== hostSessionId
+    ) throw new RuntimeApiError(
+      'BACKGROUND_OWNER_MISMATCH', '后台命令列表来自另一个会话。', true,
+    );
+    return {
+      processes: (page.processes ?? []).map(projectBackgroundProcess),
+      nextCursor: page.next_cursor || undefined,
+    };
+  }
+
+  async readBackgroundProcessLog(
+    processId: string,
+    outputCursor?: string,
+  ): Promise<BackgroundProcessLog> {
+    const hostSessionId = this.liveControl.host_session_id ?? '';
+    const frame = await this.post<{
+      background_process_log?: {
+        session_id?: string;
+        host_session_id?: string;
+        process?: ProtocolBackgroundProcess;
+        output?: string;
+        output_cursor?: string;
+        retained_from_cursor?: string;
+        gap_before_output?: boolean;
+        truncated_by_response_bound?: boolean;
+        source_coverage?: string;
+      };
+      error?: ProtocolError;
+    }>('read-background-process-log', {
+      expected_session_id: this.sessionId,
+      expected_host_session_id: hostSessionId,
+      process_id: processId,
+      output_cursor: outputCursor ?? '',
+      max_output_chars: 32_000,
+    });
+    assertProtocolFrame(frame);
+    const value = frame.background_process_log;
+    if (
+      !value?.process
+      || value.process.process_id !== processId
+      || value.session_id !== this.sessionId
+      || value.host_session_id !== hostSessionId
+    ) throw new RuntimeApiError(
+      'BACKGROUND_LOG_MISMATCH', '后台命令输出来自另一个目标。', true,
+    );
+    return {
+      process: projectBackgroundProcess(value.process),
+      output: value.output ?? '',
+      outputCursor: value.output_cursor ?? '',
+      retainedFromCursor: value.retained_from_cursor ?? '',
+      gapBeforeOutput: Boolean(value.gap_before_output),
+      truncatedByResponseBound: Boolean(value.truncated_by_response_bound),
+      sourceCoverage: value.source_coverage ?? '',
+    };
+  }
+
+  async readCanonicalEntryContent(
+    entryId: string,
+    digest: string,
+    size: number,
+  ): Promise<string> {
+    if (!entryId || !digest.startsWith('sha256:') || size < 0) {
+      throw new RuntimeApiError(
+        'CONTENT_REFERENCE_INVALID', '这条任务活动缺少精确内容身份。', false,
+      );
+    }
+    const reference: ProtocolContent = { digest, size };
+    await this.hydrateContentReference(
+      reference,
+      { entry_id: entryId },
+      '这条任务活动暂时无法完整读取。',
+    );
+    if (reference.inline_content === undefined) return '';
+    return decodeContent(reference);
   }
 
   compactContext(targetTurnId?: string): Promise<CommandReceipt> {
@@ -1700,6 +2298,39 @@ class LocalRuntimeConnection implements RuntimeConnection {
     return projectCommand(frame.command_outcome);
   }
 
+  private controlCommand(
+    reference: UserControlCommandRef,
+    targetField: 'subagent_task_id' | 'target_process_id',
+  ): Promise<CommandReceipt> {
+    return this.command(reference.operation, {
+      client_submission_id: '',
+      expected_session_id: reference.sessionId,
+      expected_host_session_id: reference.hostSessionId,
+      [targetField]: reference.targetId,
+    }, reference.commandId);
+  }
+
+  private assertControlReference(
+    reference: UserControlCommandRef,
+    operation: UserControlCommandRef['operation'],
+    targetKind: UserControlCommandRef['targetKind'],
+  ): void {
+    if (
+      reference.operation !== operation
+      || reference.targetKind !== targetKind
+      || reference.sessionId !== this.sessionId
+      || reference.hostSessionId !== (this.liveControl.host_session_id ?? '')
+      || !reference.targetId
+      || !reference.commandId.startsWith('command:control:')
+    ) {
+      throw new RuntimeApiError(
+        'CONTROL_REFERENCE_INVALID',
+        '控制操作的 owner 或目标身份不一致。',
+        false,
+      );
+    }
+  }
+
   private async post<T>(
     operation: string,
     body: Record<string, unknown>,
@@ -1811,6 +2442,13 @@ class LocalRuntimeConnection implements RuntimeConnection {
     NonNullable<ProtocolCanonicalControl['prompt_queue']>[number] | undefined
   > {
     for (const item of this.control.prompt_queue ?? []) {
+      if (!item.queue_item_id) {
+        throw new RuntimeApiError(
+          'CONTENT_REFERENCE_MISSING',
+          '等待处理的输入缺少精确身份。',
+          true,
+        );
+      }
       try {
         await this.hydrateContentReference(
           item.content,
@@ -2306,7 +2944,11 @@ class LocalRuntimeConnection implements RuntimeConnection {
         this.control.active_plan_workflow
         && Object.keys(this.control.active_plan_workflow).length,
       ),
-      activeTurnId: activeTurn?.turn_id,
+      activeTurnId: this.liveControl.active_root_turn_id || activeTurn?.turn_id,
+      hostSessionId: this.liveControl.host_session_id || undefined,
+      controlAdmissionDeadlineMs: numeric(
+        this.liveControl.control_admission_deadline_ms,
+      ) || undefined,
       control: this.control,
       liveControl: this.liveControl,
       agentTasks,
@@ -3677,8 +4319,19 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
     ? 'succeeded'
     : value.status === 'PENDING'
       ? 'pending'
-      : 'rejected';
+      : value.status === 'FAILED'
+        ? 'failed'
+        : 'rejected';
   const prompt = value.prompt_delivery;
+  const control = asRecord(value.user_control);
+  const process = asRecord(control.process);
+  const monitor = asRecord(control.monitor);
+  const feedback = asRecord(control.feedback);
+  const hasControl = Object.keys(control).length > 0;
+  const hasProcess = Object.keys(process).length > 0;
+  const hasMonitor = Object.keys(monitor).length > 0;
+  const hasFeedback = Object.keys(feedback).length > 0;
+  const execution = String(control.execution ?? '').replace(/^USER_CONTROL_/u, '');
   return {
     commandId: value.command_id,
     status,
@@ -3699,6 +4352,62 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
       PLAN_DRAFT_CANCEL: 'cancel',
     } as const)[value.plan_draft_decision as 'PLAN_DRAFT_APPROVE' | 'PLAN_DRAFT_REVISE' | 'PLAN_DRAFT_CANCEL'] ?? undefined,
     planContinuationTurnId: value.plan_continuation_turn_id || undefined,
+    userControl: hasControl ? {
+      accepted: Boolean(control.accepted),
+      execution: (
+        ['NOT_STARTED', 'RUNNING', 'FINISHED'].includes(execution)
+          ? execution
+          : 'NOT_STARTED'
+      ) as 'NOT_STARTED' | 'RUNNING' | 'FINISHED',
+      process: hasProcess ? {
+        disposition: String(process.disposition ?? ''),
+        status: String(process.status ?? ''),
+        exitCode: process.exit_code === undefined ? undefined : numeric(process.exit_code),
+        physicalState: String(process.physical_state ?? ''),
+        groupAlive: process.group_alive === undefined ? undefined : Boolean(process.group_alive),
+      } : undefined,
+      monitor: hasMonitor ? {
+        monitorId: String(monitor.monitor_id ?? ''),
+        outcome: String(monitor.outcome ?? ''),
+        detail: String(monitor.detail ?? '') || undefined,
+      } : undefined,
+      feedback: hasFeedback ? {
+        canonicalStatus: String(feedback.canonical_status ?? ''),
+        inclusionStatus: String(feedback.inclusion_status ?? ''),
+        ownerAvailability: String(feedback.owner_availability ?? ''),
+        reason: String(feedback.reason ?? '') || undefined,
+        targetRootTurnId: String(feedback.target_root_turn_id ?? '') || undefined,
+        entryId: String(feedback.entry_id ?? '') || undefined,
+        contextBindingRevisionId: String(feedback.context_binding_revision_id ?? '') || undefined,
+        modelCallIndex: feedback.model_call_index === undefined
+          ? undefined
+          : numeric(feedback.model_call_index),
+        transportInvocationAttempted: Boolean(feedback.transport_invocation_attempted),
+        transportInvocationSucceeded: feedback.transport_invocation_succeeded === undefined
+          ? undefined
+          : Boolean(feedback.transport_invocation_succeeded),
+        transportDetail: String(feedback.transport_detail ?? '') || undefined,
+      } : undefined,
+    } : undefined,
+  };
+}
+
+function projectBackgroundProcess(value: ProtocolBackgroundProcess): BackgroundProcess {
+  return {
+    processId: value.process_id,
+    command: value.command ?? '',
+    cwd: value.cwd ?? '',
+    status: value.status ?? 'unknown',
+    exitCode: value.exit_code === undefined ? undefined : numeric(value.exit_code),
+    physicalState: value.physical_state ?? 'unknown',
+    ioMode: value.io_mode ?? '',
+    streamId: value.stream_id ?? '',
+    outputCursor: value.output_cursor ?? '',
+    retainedFromCursor: value.retained_from_cursor ?? '',
+    durationSeconds: value.duration_seconds ?? 0,
+    timedOut: Boolean(value.timed_out),
+    originTurnId: value.origin?.turn_id ?? '',
+    originSubagentTaskId: value.origin?.subagent_task_id || undefined,
   };
 }
 
@@ -3726,7 +4435,9 @@ async function verifyContentIntegrity(
   publicMessage: string,
 ): Promise<void> {
   try {
-    const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+    const digest = await globalThis.crypto.subtle.digest(
+      'SHA-256', Uint8Array.from(bytes).buffer,
+    );
     const actualDigest = `sha256:${[...new Uint8Array(digest)]
       .map((value) => value.toString(16).padStart(2, '0'))
       .join('')}`;

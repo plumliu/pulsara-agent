@@ -216,6 +216,18 @@ def test_empty_install_second_migrate_and_binding_v2_checkout() -> None:
             assert repository.connection_provider is provider
 
 
+def test_runtime_connection_accepts_far_future_deadline_without_guc_overflow() -> None:
+    with _migrated_database() as database:
+        factory = PostgresRuntimeConnectionFactory(database.runtime_dsn)
+        with factory.connect(
+            deadline_monotonic=monotonic() + 1_000_000_000.0,
+            autocommit=True,
+        ) as connection:
+            assert connection.execute("SHOW statement_timeout").fetchone() == ("0",)
+            assert connection.execute("SHOW lock_timeout").fetchone() == ("0",)
+            assert connection.execute("SELECT 1").fetchone() == (1,)
+
+
 def test_old_ledger_and_unmanaged_object_require_reset_without_advancing_ddl() -> None:
     with _empty_database() as database:
         with psycopg.connect(database.admin_dsn) as connection:

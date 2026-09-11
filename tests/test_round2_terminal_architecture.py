@@ -108,7 +108,7 @@ def _schema_descriptions(value: object) -> tuple[str, ...]:
 def test_round2_closed_oracles_and_no_durable_terminal_authority(
     tmp_path: Path,
 ) -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
@@ -268,6 +268,9 @@ def test_round2_three_terminal_prompts_teach_the_closed_lifecycle_roles() -> Non
     assert "since_cursor may be copied" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "do not send another update later" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "Avoid repeated polling" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "stopped by the user outside a tool call" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "empty terminal_monitor list does not prove" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "not authorization to restart" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "environment closes or is replaced" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "wait once" not in TERMINAL_PROCESS_TOOL_DESCRIPTION
 
@@ -277,6 +280,8 @@ def test_round2_three_terminal_prompts_teach_the_closed_lifecycle_roles() -> Non
     assert "only a completion update" in TERMINAL_MONITOR_TOOL_DESCRIPTION
     assert "may cause the agent to run again" in TERMINAL_MONITOR_TOOL_DESCRIPTION
     assert "do not poll merely to wait" in TERMINAL_MONITOR_TOOL_DESCRIPTION
+    assert "continue other independent work" in TERMINAL_MONITOR_TOOL_DESCRIPTION
+    assert "empty monitor list does not prove" in TERMINAL_MONITOR_TOOL_DESCRIPTION
     assert "does not stop the command" in TERMINAL_MONITOR_TOOL_DESCRIPTION
     assert "environment closes or is replaced" in TERMINAL_MONITOR_TOOL_DESCRIPTION
 

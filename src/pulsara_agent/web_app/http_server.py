@@ -485,6 +485,14 @@ class LocalHttpServer:
             "/api/sessions/{session_id}/tasks", self._list_session_tasks
         )
         self._app.router.add_get(
+            "/api/sessions/{session_id}/task-groups",
+            self._list_session_task_groups,
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/tasks/{task_id}/activities",
+            self._list_session_task_activities,
+        )
+        self._app.router.add_get(
             "/api/sessions/{session_id}/capabilities",
             self._inspect_session_capabilities,
         )
@@ -550,6 +558,8 @@ class LocalHttpServer:
             "read-plan-draft",
             "read-content",
             "read-tool-artifact",
+            "list-background-processes",
+            "read-background-process-log",
         ):
             self._app.router.add_post(
                 f"/api/connections/{{connection_id}}/{operation}",
@@ -1158,11 +1168,53 @@ class LocalHttpServer:
                 request.match_info["session_id"],
                 maximum_items=maximum_items,
                 cursor=request.query.get("cursor"),
+                batch_id=request.query.get("batch_id"),
             )
         except ValueError as exc:
             raise HttpPublicError(
                 "TASK_PAGE_INVALID",
                 "任务列表的分页参数不正确。",
+                status=400,
+            ) from exc
+        return web.json_response(payload)
+
+    async def _list_session_task_groups(self, request: web.Request) -> web.Response:
+        raw_limit = request.query.get("limit", "50")
+        try:
+            maximum_items = int(raw_limit)
+            payload = await self.sessions.list_session_task_groups(
+                request.match_info["session_id"],
+                maximum_items=maximum_items,
+                cursor=request.query.get("cursor"),
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            if detail.startswith("TASK_BATCH_DATA_INCOMPLETE:"):
+                raise HttpPublicError(
+                    "TASK_BATCH_DATA_INCOMPLETE",
+                    f"任务缺少批次身份：{detail.partition(':')[2]}",
+                    status=409,
+                ) from exc
+            raise HttpPublicError(
+                "TASK_GROUP_PAGE_INVALID",
+                "任务组的分页参数不正确。",
+                status=400,
+            ) from exc
+        return web.json_response(payload)
+
+    async def _list_session_task_activities(self, request: web.Request) -> web.Response:
+        raw_limit = request.query.get("limit", "50")
+        try:
+            payload = await self.sessions.list_session_task_activities(
+                request.match_info["session_id"],
+                request.match_info["task_id"],
+                maximum_items=int(raw_limit),
+                cursor=request.query.get("cursor"),
+            )
+        except ValueError as exc:
+            raise HttpPublicError(
+                "TASK_ACTIVITY_PAGE_INVALID",
+                "任务活动的分页参数不正确。",
                 status=400,
             ) from exc
         return web.json_response(payload)
@@ -1749,6 +1801,12 @@ class LocalHttpServer:
                 "read-content": lambda: self.bridge.read_content(connection_id, body),
                 "read-tool-artifact": lambda: self.bridge.read_tool_artifact(
                     connection_id, body
+                ),
+                "list-background-processes": lambda: (
+                    self.bridge.list_background_processes(connection_id, body)
+                ),
+                "read-background-process-log": lambda: (
+                    self.bridge.read_background_process_log(connection_id, body)
                 ),
             }
             return web.json_response(await methods[operation]())

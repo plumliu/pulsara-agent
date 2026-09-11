@@ -1542,13 +1542,19 @@ def _large_native_replay_script(
     raise AssertionError(f"unsupported test API: {api}")
 
 
-def test_capability_adoption_runs_before_each_unprepared_dispatch(stage2_migrated_postgres_database):
+def test_capability_adoption_runs_before_each_unprepared_dispatch(
+    stage2_migrated_postgres_database,
+):
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
     lease = _acquire_bound_host_writer(
-        repository, session_id=session_id, workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"), lease_seconds=30, deadline_monotonic=monotonic() + 30,
+        repository,
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
     )
     tool = _AssertingTool(provider, session_id)
     observations = []
@@ -1560,9 +1566,12 @@ def test_capability_adoption_runs_before_each_unprepared_dispatch(stage2_migrate
     model = _ScriptedModel([_tool_stream(), _text_stream("after update")])
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository, writer_lease=lease, model=model,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
         tools=StructuredToolPort(tool, tool_names=("terminal",)),
-        live_bus=LiveAgentEventBus(), context_source_collector=StaticContextSourceCollector(),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
         before_provider_preparation=adopt,
     )
     result = asyncio.run(runner.run_turn("call a tool and continue"))
@@ -1571,6 +1580,56 @@ def test_capability_adoption_runs_before_each_unprepared_dispatch(stage2_migrate
     assert len(observations) == 2
     assert observations[0] == ()
     assert len(observations[1]) == 1
+
+
+def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    barriers: list[str] = []
+    fences: list[str] = []
+    settlements: list[tuple[str, bool]] = []
+
+    async def barrier(turn_id: str) -> None:
+        barriers.append(turn_id)
+
+    async def fence(turn_id: str) -> bool:
+        fences.append(turn_id)
+        return len(fences) == 1
+
+    async def settle_fence(turn_id: str, *, turn_completed: bool) -> None:
+        settlements.append((turn_id, turn_completed))
+
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=_ScriptedModel(
+            [_text_stream("first answer"), _text_stream("feedback-aware answer")]
+        ),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        root_control_preparation_barrier=barrier,
+        root_control_completion_fence=fence,
+        root_control_completion_settlement=settle_fence,
+    )
+    result = asyncio.run(runner.run_turn("question"))
+    assert result.final_text == "feedback-aware answer"
+    assert result.model_call_count == 2
+    assert len(barriers) == 2
+    assert fences == [result.turn_id, result.turn_id]
+    assert settlements == [(result.turn_id, False), (result.turn_id, True)]
 
 
 def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
@@ -1809,9 +1868,7 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
                         terminal_kind=(
                             ProviderNormalizedTerminalKind.OUTPUT_INCOMPLETE
                         ),
-                        usage=TransportUsageReport(
-                            usage_status="missing", usage=None
-                        ),
+                        usage=TransportUsageReport(usage_status="missing", usage=None),
                         incomplete_reason=(
                             ProviderOutputIncompleteReason.UNKNOWN_PROVIDER_INCOMPLETE
                         ),
@@ -1827,12 +1884,8 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
             [
                 [
                     ProviderStreamTerminal(
-                        terminal_kind=(
-                            ProviderNormalizedTerminalKind.PROVIDER_ERROR
-                        ),
-                        usage=TransportUsageReport(
-                            usage_status="missing", usage=None
-                        ),
+                        terminal_kind=(ProviderNormalizedTerminalKind.PROVIDER_ERROR),
+                        usage=TransportUsageReport(usage_status="missing", usage=None),
                         error=sanitize_provider_failure(
                             message="source provider quota exhausted",
                             code_hint="429",
@@ -1849,12 +1902,8 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
             [
                 [
                     ProviderStreamTerminal(
-                        terminal_kind=(
-                            ProviderNormalizedTerminalKind.PROVIDER_ERROR
-                        ),
-                        usage=TransportUsageReport(
-                            usage_status="missing", usage=None
-                        ),
+                        terminal_kind=(ProviderNormalizedTerminalKind.PROVIDER_ERROR),
+                        usage=TransportUsageReport(usage_status="missing", usage=None),
                         error=sanitize_provider_failure(
                             message="source provider quota exhausted",
                             code_hint="429",
@@ -2091,8 +2140,7 @@ def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
     )
     assert model.summary_transport.calls == []
     assert [
-        request.prepared_call.call.binding.connection_id
-        for request in model.requests
+        request.prepared_call.call.binding.connection_id for request in model.requests
     ] == [
         ModelConnectionId("model-connection:" + "0" * 32),
         ModelConnectionId("model-connection:" + "2" * 32),
@@ -3215,6 +3263,7 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
             minimum_reclaim_tokens=1,
         )
     )
+    installed_provider_inputs: list[object] = []
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
@@ -3225,6 +3274,7 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
         workspace_id=workspace_id,
+        provider_input_installed_observer=installed_provider_inputs.append,
     )
     captured_successors: list[object] = []
     second_waiters: list[asyncio.Future[object]] = []
@@ -3279,6 +3329,7 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
     assert deferred_outcome.public_code == "HOST_CLOSING"
     assert len(model.summary_transport.contexts) == 1
     assert len(model.requests) == 2
+    assert installed_provider_inputs == model.requests
     assert len(captured_successors) == 1
     captured = captured_successors[0]
     assert not captured.owns_execution_authority
@@ -4514,11 +4565,15 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
 
 
 def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
-    stage2_migrated_postgres_database, tmp_path,
+    stage2_migrated_postgres_database,
+    tmp_path,
 ) -> None:
     from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
     from pulsara_agent.conversation_kernel.io import KernelSessionIO
-    from pulsara_agent.memory.scope import MemoryDomainContext, freeze_memory_read_context_binding
+    from pulsara_agent.memory.scope import (
+        MemoryDomainContext,
+        freeze_memory_read_context_binding,
+    )
     from pulsara_agent.retrieval.config import EmbeddingBackendConfig
     from pulsara_agent.settings import LocalSettingsStore
     from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
@@ -4527,38 +4582,58 @@ def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
     repository = ConversationKernelRepository(provider)
     session_id, workspace_id = _name("session"), _name("workspace")
     lease = _acquire_bound_host_writer(
-        repository, session_id=session_id, workspace_id=workspace_id,
-        writer_owner_id=_name("host"), lease_seconds=30,
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
     io = KernelSessionIO()
     memory = KernelMemoryToolPort(
-        repository=repository, session_id=session_id,
+        repository=repository,
+        session_id=session_id,
         read_binding=freeze_memory_read_context_binding(
-            domain=MemoryDomainContext("test", "transient"), host_workspace_id=workspace_id,
+            domain=MemoryDomainContext("test", "transient"),
+            host_workspace_id=workspace_id,
         ),
-        embedding_config=EmbeddingBackendConfig(), io_owner=io,
+        embedding_config=EmbeddingBackendConfig(),
+        io_owner=io,
         settings=LocalSettingsStore(tmp_path / "settings.yaml"),
     )
 
     class MemoryDelegate(_AssertingTool):
         async def invoke(self, *, tool_name, arguments, invocation_context, **kwargs):
             return await memory.invoke(
-                tool_name=tool_name, arguments=arguments, invocation_context=invocation_context,
+                tool_name=tool_name,
+                arguments=arguments,
+                invocation_context=invocation_context,
             )
 
-    model = _ScriptedModel([
-        _named_tool_stream(tool_name="remember", tool_call_id="call:bad-citation", arguments={
-            "statement": "Test memory", "context_target": "GLOBAL", "kind_hint": "FACT",
-            "cited_tool_result_handles": ["tool:not-visible"],
-        }),
-        _text_stream("记忆引用无效，本次未保存。"),
-        _text_stream("下一轮仍可以正常回复。"),
-    ])
+    model = _ScriptedModel(
+        [
+            _named_tool_stream(
+                tool_name="remember",
+                tool_call_id="call:bad-citation",
+                arguments={
+                    "statement": "Test memory",
+                    "context_target": "GLOBAL",
+                    "kind_hint": "FACT",
+                    "cited_tool_result_handles": ["tool:not-visible"],
+                },
+            ),
+            _text_stream("记忆引用无效，本次未保存。"),
+            _text_stream("下一轮仍可以正常回复。"),
+        ]
+    )
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository, writer_lease=lease, model=model,
-        tools=StructuredToolPort(MemoryDelegate(provider, session_id), tool_names=("remember",)),
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(
+            MemoryDelegate(provider, session_id), tool_names=("remember",)
+        ),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
@@ -4576,22 +4651,40 @@ def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
     asyncio.run(exercise())
     assert len(model.requests) == 3
     snapshot = CanonicalProtocolReader(provider).snapshot(
-        session_id=session_id, maximum_entries=10, maximum_control_items=20,
+        session_id=session_id,
+        maximum_entries=10,
+        maximum_control_items=20,
         deadline_monotonic=monotonic() + 10,
     )
     assert snapshot.control.latest_root_turn.status == "COMPLETED"
     assert not snapshot.control.active_turns
-    result_entries = [entry for entry in snapshot.entries if entry.HasField("tool_result")]
+    result_entries = [
+        entry for entry in snapshot.entries if entry.HasField("tool_result")
+    ]
     assert len(result_entries) == 1
     assert result_entries[0].tool_result.result_state == "APPLICATION_ERROR"
     assert result_entries[0].tool_result.tool_call_id == "call:bad-citation"
     assert result_entries[0].tool_result.assistant_entry_id in {
         entry.entry_id for entry in snapshot.entries if entry.blocks
     }
-    with provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 10) as c:
-        assert c.execute("SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s", (session_id,)).fetchall() == [("APPLICATION_ERROR",)]
-        assert c.execute("SELECT status FROM pulsara_v3.turns WHERE session_id=%s ORDER BY accepted_at", (session_id,)).fetchall() == [("COMPLETED",), ("COMPLETED",)]
-        assert c.execute("SELECT count(*) FROM pulsara_v3.memory_candidates WHERE origin_session_id=%s", (session_id,)).fetchone()[0] == 0
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 10
+    ) as c:
+        assert c.execute(
+            "SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s",
+            (session_id,),
+        ).fetchall() == [("APPLICATION_ERROR",)]
+        assert c.execute(
+            "SELECT status FROM pulsara_v3.turns WHERE session_id=%s ORDER BY accepted_at",
+            (session_id,),
+        ).fetchall() == [("COMPLETED",), ("COMPLETED",)]
+        assert (
+            c.execute(
+                "SELECT count(*) FROM pulsara_v3.memory_candidates WHERE origin_session_id=%s",
+                (session_id,),
+            ).fetchone()[0]
+            == 0
+        )
 
 
 def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
@@ -5766,19 +5859,28 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
     )
 
 
-@pytest.mark.parametrize("permission, response, expected_actor", [
-    ("bypass-permissions", "SUBMIT", "runtime"),
-    ("accept-edits", "SUBMIT", "runtime"),
-    ("ask-permissions", "SUBMIT", "human"),
-    ("read-only", "SUBMIT", "human"),
-    ("read-only", "CANCEL", None),
-    ("read-only", "NO_CONTROLLER", None),
-])
+@pytest.mark.parametrize(
+    "permission, response, expected_actor",
+    [
+        ("bypass-permissions", "SUBMIT", "runtime"),
+        ("accept-edits", "SUBMIT", "runtime"),
+        ("ask-permissions", "SUBMIT", "human"),
+        ("read-only", "SUBMIT", "human"),
+        ("read-only", "CANCEL", None),
+        ("read-only", "NO_CONTROLLER", None),
+    ],
+)
 def test_manage_capability_settles_through_real_attempt_and_model_followup(
-    stage2_migrated_postgres_database, tmp_path, permission, response, expected_actor,
+    stage2_migrated_postgres_database,
+    tmp_path,
+    permission,
+    response,
+    expected_actor,
 ):
     from tests.test_capability_management_preparation import preparation
-    from pulsara_agent.capability.management_form import AcceptedCapabilityFormSubmission
+    from pulsara_agent.capability.management_form import (
+        AcceptedCapabilityFormSubmission,
+    )
     from pulsara_agent.conversation_kernel.interaction import ToolInteractionResolution
     from pulsara_agent.capability.mcp_management import LocalMcpTarget
     from pulsara_agent.primitives.permission import PermissionMode
@@ -5786,14 +5888,37 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id, workspace_id = _name("session"), _name("workspace")
-    lease = _acquire_bound_host_writer(repository, session_id=session_id, workspace_id=workspace_id,
-        writer_owner_id=_name("host"), lease_seconds=30, deadline_monotonic=monotonic() + 30)
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
     service = preparation(tmp_path)
     target = LocalMcpTarget("fixture", service.workspace_root)
-    args = {"action": "ADD_LOCAL_MCP", "scope": "WORKSPACE", "server_id": "fixture",
-        "config": {"transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"}}}
-    model = _ScriptedModel([_named_tool_stream(tool_name="manage_capability", tool_call_id="call:manage", arguments=args),
-                            _text_stream("management settled; continuing normally")])
+    args = {
+        "action": "ADD_LOCAL_MCP",
+        "scope": "WORKSPACE",
+        "server_id": "fixture",
+        "config": {
+            "transport": {
+                "type": "streamable_http",
+                "endpoint": "https://example.org/mcp",
+            }
+        },
+    }
+    model = _ScriptedModel(
+        [
+            _named_tool_stream(
+                tool_name="manage_capability",
+                tool_call_id="call:manage",
+                arguments=args,
+            ),
+            _text_stream("management settled; continuing normally"),
+        ]
+    )
     forms, adoptions = [], []
 
     class Interaction:
@@ -5801,12 +5926,20 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
             forms.append(kwargs["form"])
             assert service.mcp.inspect(target) is None
             if response == "NO_CONTROLLER":
-                return ToolInteractionResolution("DENY", "interaction:no-controller", "no controller")
+                return ToolInteractionResolution(
+                    "DENY", "interaction:no-controller", "no controller"
+                )
             if response == "CANCEL":
-                return ToolInteractionResolution("CANCEL", "interaction:cancel", "cancelled")
+                return ToolInteractionResolution(
+                    "CANCEL", "interaction:cancel", "cancelled"
+                )
             values = await kwargs["form"].prepare_submission({})
-            return ToolInteractionResolution("SUBMIT", "interaction:user-fixture", "submitted",
-                capability_submission=AcceptedCapabilityFormSubmission(values))
+            return ToolInteractionResolution(
+                "SUBMIT",
+                "interaction:user-fixture",
+                "submitted",
+                capability_submission=AcceptedCapabilityFormSubmission(values),
+            )
 
     class Adoption:
         async def adopt_capability_management_change(self, *, workspace_root):
@@ -5816,29 +5949,59 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
             return "RELOADED"
 
     live_bus = LiveAgentEventBus()
-    tools = DirectKernelToolPort(workspace_root=service.workspace_root, host_owner_id="host:manage",
-        session_id=session_id, live_bus=live_bus, authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+    tools = DirectKernelToolPort(
+        workspace_root=service.workspace_root,
+        host_owner_id="host:manage",
+        session_id=session_id,
+        live_bus=live_bus,
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+    )
     tools.bind_capability_management(service)
-    seal_test_direct_tool_port(tools, interaction=Interaction(), capability_reload=Adoption())
-    runner = ConversationKernelRunner(model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository, writer_lease=lease, model=model, tools=tools, live_bus=live_bus,
-        context_source_collector=StaticContextSourceCollector())
+    seal_test_direct_tool_port(
+        tools, interaction=Interaction(), capability_reload=Adoption()
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=tools,
+        live_bus=live_bus,
+        context_source_collector=StaticContextSourceCollector(),
+    )
 
     async def run():
         try:
-            return await runner.run_turn("configure this MCP", requested_permission_mode=PermissionMode(permission))
+            return await runner.run_turn(
+                "configure this MCP",
+                requested_permission_mode=PermissionMode(permission),
+            )
         finally:
             await tools.aclose(timeout_seconds=2)
             await service.mcp.aclose()
+
     result = asyncio.run(run())
     assert result.final_text == "management settled; continuing normally"
-    assert len(forms) == (0 if permission in {"bypass-permissions", "accept-edits"} else 1)
+    assert len(forms) == (
+        0 if permission in {"bypass-permissions", "accept-edits"} else 1
+    )
     assert len(adoptions) == (0 if expected_actor is None else 1)
-    rows = repository.rehydrate_session(session_id=session_id, deadline_monotonic=monotonic() + 30)
+    rows = repository.rehydrate_session(
+        session_id=session_id, deadline_monotonic=monotonic() + 30
+    )
     assert sum(row["entry_kind"] == "TOOL_RESULT" for row in rows) == 1
-    with provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30) as connection:
-        attempts = connection.execute("SELECT actor_kind, authorization_kind FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s", (session_id,)).fetchall()
-    assert attempts == ([] if expected_actor is None else [(expected_actor, "human" if expected_actor == "human" else "machine")])
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30
+    ) as connection:
+        attempts = connection.execute(
+            "SELECT actor_kind, authorization_kind FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s",
+            (session_id,),
+        ).fetchall()
+    assert attempts == (
+        []
+        if expected_actor is None
+        else [(expected_actor, "human" if expected_actor == "human" else "machine")]
+    )
 
 
 def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(

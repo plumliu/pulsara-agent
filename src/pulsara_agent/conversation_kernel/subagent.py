@@ -19,6 +19,7 @@ import math
 from pathlib import Path
 import re
 import secrets
+from enum import StrEnum
 from time import monotonic
 from typing import Callable, Mapping
 
@@ -242,6 +243,20 @@ class _SubagentListCursor:
 class _BatchAdmissionAttempt:
     candidate: PreparedSubagentTaskBatchAdmission
     task: asyncio.Task[KernelToolResult]
+
+
+class SubagentCancelDisposition(StrEnum):
+    CANCELLED = "CANCELLED"
+    ALREADY_TERMINAL = "ALREADY_TERMINAL"
+    TARGET_UNAVAILABLE = "TARGET_UNAVAILABLE"
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentCancelResult:
+    disposition: SubagentCancelDisposition
+    task_id: str
+    status: str | None
+    reason: str | None
 
 
 class KernelSubagentManager:
@@ -2234,6 +2249,22 @@ class KernelSubagentManager:
         task_id = str(arguments.get("task_id") or "")
         if not task_id:
             return _result("INVALID_ARGUMENTS", {"error": "task_id is required"})
+        result = await self.cancel_task(task_id)
+        if result.disposition is SubagentCancelDisposition.TARGET_UNAVAILABLE:
+            return _result("APPLICATION_ERROR", {"error": "subagent is unknown"})
+        return _result(
+            "SUCCESS",
+            {
+                "task_id": result.task_id,
+                "status": (result.status or "unknown").lower(),
+            },
+        )
+
+    async def cancel_task(self, task_id: str) -> SubagentCancelResult:
+        """Cancel one exact task while preserving its canonical settlement path."""
+
+        if not task_id:
+            raise ValueError("task_id is required")
         async with self._lock:
             live = self._tasks.get(task_id)
             permit = self._launch_permits.get(task_id)
@@ -2255,29 +2286,72 @@ class KernelSubagentManager:
                 deadline_monotonic=self._canonical_deadline(),
             )
             if durable is None:
-                return _result("APPLICATION_ERROR", {"error": "subagent is unknown"})
+                return SubagentCancelResult(
+                    SubagentCancelDisposition.TARGET_UNAVAILABLE,
+                    task_id,
+                    None,
+                    "TARGET_UNAVAILABLE",
+                )
             status = str(durable["status"])
             if SubagentTaskStatus(status).terminal:
-                return _task_status_acknowledgement(durable)
-            await self._settle_task_terminal_exact(
-                task_id,
-                SubagentTaskStatus.CANCELLED,
-                "USER_CANCELLED",
-                require_absent_turn=True,
-            )
-            await self._settle_dependency_frontier(task_id)
+                return SubagentCancelResult(
+                    SubagentCancelDisposition.ALREADY_TERMINAL,
+                    task_id,
+                    status,
+                    str(durable.get("terminal_reason") or "") or None,
+                )
+            settlement_conflict: ConversationKernelConflict | None = None
+            try:
+                await self._settle_task_terminal_exact(
+                    task_id,
+                    SubagentTaskStatus.CANCELLED,
+                    "USER_CANCELLED",
+                    require_absent_turn=True,
+                )
+            except ConversationKernelConflict as exc:
+                # A natural terminal winner can commit after the preflight
+                # read.  Re-read the canonical owner before deciding whether
+                # this was a failed control or an already-terminal no-op.
+                settlement_conflict = exc
             durable = await self._io.run(
                 self._repository.query_subagent_task,
                 session_id=self._guard.session_id,
                 task_id=task_id,
                 deadline_monotonic=self._canonical_deadline(),
             )
-            assert durable is not None
-            return _task_status_acknowledgement(durable)
+            if durable is None:
+                if settlement_conflict is not None:
+                    raise settlement_conflict
+                raise ConversationKernelConflict(
+                    "subagent cancellation target disappeared during settlement"
+                )
+            status = str(durable["status"])
+            if not SubagentTaskStatus(status).terminal:
+                if settlement_conflict is not None:
+                    raise settlement_conflict
+                raise ConversationKernelConflict(
+                    "subagent cancellation did not reach a terminal state"
+                )
+            cancelled = status == SubagentTaskStatus.CANCELLED.value
+            if cancelled:
+                await self._settle_dependency_frontier(task_id)
+            return SubagentCancelResult(
+                SubagentCancelDisposition.CANCELLED
+                if cancelled
+                else SubagentCancelDisposition.ALREADY_TERMINAL,
+                task_id,
+                status,
+                str(
+                    durable.get("terminal_reason")
+                    or ("USER_CANCELLED" if cancelled else "")
+                )
+                or None,
+            )
+        cancel_live_task = False
         if not live.task.done():
             async with self._lock:
                 current = self._tasks.get(task_id)
-                if current is not None:
+                if current is live and not current.task.done():
                     cause = current.cancellation_intent.install_cause(
                         ForegroundCancellationCause.USER_REQUEST
                     )
@@ -2286,6 +2360,8 @@ class KernelSubagentManager:
                         if cause is ForegroundCancellationCause.USER_REQUEST
                         else "HOST_CLOSING"
                     )
+                    cancel_live_task = True
+        if cancel_live_task:
             live.task.cancel()
             await asyncio.gather(live.task, return_exceptions=True)
         if live.status == "ACTIVE":
@@ -2296,7 +2372,76 @@ class KernelSubagentManager:
                 turn_reason="USER_STOPPED",
                 schedule_after=True,
             )
-        return _result("SUCCESS", {"status": live.status.lower(), "task_id": task_id})
+        durable = await self._io.run(
+            self._repository.query_subagent_task,
+            session_id=self._guard.session_id,
+            task_id=task_id,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        status = live.status if durable is None else str(durable["status"])
+        reason = (
+            live.cancellation_reason
+            if durable is None and status == "CANCELLED"
+            else None
+            if durable is None
+            else str(durable.get("terminal_reason") or "") or None
+        )
+        disposition = (
+            SubagentCancelDisposition.CANCELLED
+            if status == "CANCELLED"
+            else SubagentCancelDisposition.ALREADY_TERMINAL
+        )
+        return SubagentCancelResult(disposition, task_id, status, reason)
+
+    async def preflight_cancel_task(
+        self, task_id: str
+    ) -> SubagentCancelResult | None:
+        """Validate one exact target before a user-control attempt is accepted.
+
+        ``None`` means the task is currently cancellable.  The later
+        ``cancel_task`` call remains the authoritative cancellation owner and
+        revalidates every state; this read only prevents a missing or already
+        terminal target from being advertised as accepted work.
+        """
+
+        if not task_id:
+            raise ValueError("task_id is required")
+        async with self._lock:
+            live = self._tasks.get(task_id)
+            permit = self._launch_permits.get(task_id)
+            if live is not None:
+                if live.status == "ACTIVE" and not live.task.done():
+                    return None
+                return SubagentCancelResult(
+                    SubagentCancelDisposition.ALREADY_TERMINAL,
+                    task_id,
+                    live.status,
+                    live.cancellation_reason,
+                )
+            if permit is not None:
+                return None
+        durable = await self._io.run(
+            self._repository.query_subagent_task,
+            session_id=self._guard.session_id,
+            task_id=task_id,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        if durable is None:
+            return SubagentCancelResult(
+                SubagentCancelDisposition.TARGET_UNAVAILABLE,
+                task_id,
+                None,
+                "TARGET_UNAVAILABLE",
+            )
+        status = str(durable["status"])
+        if SubagentTaskStatus(status).terminal:
+            return SubagentCancelResult(
+                SubagentCancelDisposition.ALREADY_TERMINAL,
+                task_id,
+                status,
+                str(durable.get("terminal_reason") or "") or None,
+            )
+        return None
 
     async def _send_message(
         self,

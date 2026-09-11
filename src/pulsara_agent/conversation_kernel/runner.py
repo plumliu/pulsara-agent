@@ -172,6 +172,9 @@ from pulsara_agent.conversation_kernel.safe_point import (
     ProviderSafePointCoordinator,
 )
 from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
+from pulsara_agent.ports.user_control_feedback import (
+    UserControlFeedbackInstallationAttempt,
+)
 from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 from pulsara_agent.model_input.compiler import (
     StructuredModelInputCompiler,
@@ -342,6 +345,10 @@ class ChildCompactionContinuationBlocked(RuntimeError):
     pass
 
 
+class RootControlCompletionSettlementPort(Protocol):
+    async def __call__(self, turn_id: str, *, turn_completed: bool) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _RootSessionStartCompactPort(SessionStartCompactPort):
     dispatcher: KernelHookDispatcher | None = dataclass_field(repr=False, compare=False)
@@ -432,6 +439,13 @@ class ConversationKernelRunner:
         input_reader: CanonicalProviderInputReader | None = None,
         safe_point: ProviderSafePointCoordinator | None = None,
         before_provider_preparation: Callable[[], Awaitable[bool]] | None = None,
+        root_control_preparation_barrier: (
+            Callable[[str], Awaitable[None]] | None
+        ) = None,
+        root_control_completion_fence: (Callable[[str], Awaitable[bool]] | None) = None,
+        root_control_completion_settlement: (
+            RootControlCompletionSettlementPort | None
+        ) = None,
         content_publisher: CanonicalContentPublisher | None = None,
         io_owner: KernelSessionIO | None = None,
         context_source_collector: ContextSourceCollectorPort,
@@ -459,6 +473,12 @@ class ConversationKernelRunner:
         hook_scope: HookDispatchScopeRef | None = None,
         session_start_source: str = "startup",
         presentation_notice_sink: Callable[[str], None] | None = None,
+        provider_input_installed_observer: (
+            Callable[[KernelModelExecutionRequest], None] | None
+        ) = None,
+        provider_input_failure_observer: (
+            Callable[[str, str], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         if maximum_output_tokens_per_call < 1 or (
             maximum_input_tokens_per_call is not None
@@ -476,6 +496,9 @@ class ConversationKernelRunner:
         )
         blob_store = PostgresCanonicalBlobStore(repository.connection_provider)
         self._before_provider_preparation = before_provider_preparation
+        self._root_control_preparation_barrier = root_control_preparation_barrier
+        self._root_control_completion_fence = root_control_completion_fence
+        self._root_control_completion_settlement = root_control_completion_settlement
         self._safe_point = safe_point or ProviderSafePointCoordinator(
             repository=repository,
             guard=writer_lease.guard,
@@ -548,6 +571,8 @@ class ConversationKernelRunner:
         self._hook_context_owner = hook_context_owner
         self._hook_scope = hook_scope
         self._presentation_notice_sink = presentation_notice_sink
+        self._provider_input_installed_observer = provider_input_installed_observer
+        self._provider_input_failure_observer = provider_input_failure_observer
         self._session_start_boundary = _SessionStartColdBoundaryOwner(
             session_start_source
         )
@@ -866,6 +891,7 @@ class ConversationKernelRunner:
         successor_dispatch: PreparedProviderDispatch | None = None
         completed_tool_batch = False
         stop_continuation_used = False
+        input_selection_in_progress = False
         root_completion_phase_opened = False
         if (
             intent.scope_kind is ModelInputScopeKind.ROOT
@@ -875,7 +901,16 @@ class ConversationKernelRunner:
             root_completion_phase_opened = True
         try:
             while True:
-                if successor_dispatch is None and self._before_provider_preparation is not None:
+                if (
+                    successor_dispatch is None
+                    and intent.scope_kind is ModelInputScopeKind.ROOT
+                    and self._root_control_preparation_barrier is not None
+                ):
+                    await self._root_control_preparation_barrier(turn_id)
+                if (
+                    successor_dispatch is None
+                    and self._before_provider_preparation is not None
+                ):
                     # No input/surface handle exists here. A transferred compaction
                     # successor must be consumed untouched; edits wait for its next
                     # ordinary preparation boundary instead of replanning it.
@@ -925,6 +960,7 @@ class ConversationKernelRunner:
                     completed_tool_batch = False
                     continue
                 model_call_count += 1
+                input_selection_in_progress = True
                 planning_deadline = self._planning_deadline()
                 dispatch = successor_dispatch
                 successor_dispatch = None
@@ -1271,7 +1307,10 @@ class ConversationKernelRunner:
                             )
                         finally:
                             dispatch.retire_hook_context_reservation()
+                    if self._provider_input_installed_observer is not None:
+                        self._provider_input_installed_observer(provider_open.request)
                     request = provider_open.request
+                    input_selection_in_progress = False
                     execution = provider_open.execution
                     permit = provider_open.permit
                     entry_id = _id("entry")
@@ -1380,18 +1419,26 @@ class ConversationKernelRunner:
                         else completion_prepared.result
                     )
                     root_answer_fenced = False
+                    control_answer_fenced = False
+                    pending_control_feedback = False
                     if (
                         complete_turn
                         and identity.conversation_scope_kind is ModelInputScopeKind.ROOT
-                        and self._subagent_runtime is not None
                     ):
-                        pending_completion = (
-                            await self._subagent_runtime.seal_root_completion_delivery(
+                        pending_completion = False
+                        if self._subagent_runtime is not None:
+                            pending_completion = await self._subagent_runtime.seal_root_completion_delivery(
                                 turn_id
                             )
+                            root_answer_fenced = True
+                        if self._root_control_completion_fence is not None:
+                            pending_control_feedback = (
+                                await self._root_control_completion_fence(turn_id)
+                            )
+                            control_answer_fenced = True
+                        complete_turn = not (
+                            pending_completion or pending_control_feedback
                         )
-                        root_answer_fenced = True
-                        complete_turn = not pending_completion
                     settlement = PreparedAssistantMessageSettlement(
                         guard=self._writer_lease.guard,
                         cut=request.cut,
@@ -1414,6 +1461,13 @@ class ConversationKernelRunner:
                     try:
                         accepted = await self._assistant_settlements.settle(settlement)
                     except BaseException:
+                        if (
+                            control_answer_fenced
+                            and self._root_control_completion_settlement is not None
+                        ):
+                            await self._root_control_completion_settlement(
+                                turn_id, turn_completed=False
+                            )
                         if root_answer_fenced and self._subagent_runtime is not None:
                             await (
                                 self._subagent_runtime.settle_root_completion_delivery(
@@ -1425,6 +1479,13 @@ class ConversationKernelRunner:
                                 completion_prepared.permit, committed=False
                             )
                         raise
+                    if (
+                        control_answer_fenced
+                        and self._root_control_completion_settlement is not None
+                    ):
+                        await self._root_control_completion_settlement(
+                            turn_id, turn_completed=accepted.turn_completed
+                        )
                     if root_answer_fenced and self._subagent_runtime is not None:
                         await self._subagent_runtime.settle_root_completion_delivery(
                             turn_id, turn_completed=accepted.turn_completed
@@ -1572,6 +1633,17 @@ class ConversationKernelRunner:
             if active_surface_borrow is not None:
                 active_surface_borrow.close()
                 active_surface_borrow = None
+            if (
+                input_selection_in_progress
+                and intent.scope_kind is ModelInputScopeKind.ROOT
+                and self._provider_input_failure_observer is not None
+            ):
+                await self._provider_input_failure_observer(
+                    turn_id,
+                    "INPUT_COMPILE_FAILED"
+                    if isinstance(error, StructuredModelInputCompileError)
+                    else "INPUT_ADMISSION_FAILED",
+                )
             if self._extensions is not None:
                 if isinstance(error, StructuredModelInputCompileError):
                     self._offer_operational_best_effort(
@@ -1743,6 +1815,30 @@ class ConversationKernelRunner:
             target=target,
             workspace_id=workspace_id,
             actor_id=actor_id,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    async def install_user_control_feedback(
+        self,
+        *,
+        attempt: UserControlFeedbackInstallationAttempt,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry:
+        return await self._io.run(
+            self._safe_point.install_user_control_feedback,
+            attempt=attempt,
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    async def confirm_user_control_feedback(
+        self,
+        *,
+        attempt: UserControlFeedbackInstallationAttempt,
+        deadline_monotonic: float,
+    ) -> AcceptedEntry | None:
+        return await self._io.run(
+            self._safe_point.confirm_user_control_feedback,
+            attempt=attempt,
             deadline_monotonic=deadline_monotonic,
         )
 
