@@ -232,6 +232,7 @@ message PromptQueueControl {
   CanonicalContentReference content = 6;
   RunPermissionProjection permission = 7;
   string command_id = 8;
+  string accepted_at_utc = 9;
 }
 
 message PlanWorkflowControl {
@@ -718,7 +719,7 @@ enum CommandKind {
   STOP_ACTIVE_TURN = 2;
   DETACH = 3;
   CLOSE_SESSION = 4;
-  STEER_ACTIVE_TURN = 5;
+  reserved 5;
   ACCEPT_SUBAGENT_COMPLETION = 6;
   reserved 7;
   ENTER_PLAN = 8;
@@ -727,6 +728,8 @@ enum CommandKind {
   COMPACT_CONTEXT = 11;
   CANCEL_SUBAGENT_TASK = 12;
   TERMINATE_BACKGROUND_PROCESS = 13;
+  CANCEL_QUEUED_PROMPT = 14;
+  STEER_QUEUED_PROMPT = 15;
 }
 
 message CommandRequest {
@@ -747,6 +750,7 @@ message CommandRequest {
   string expected_session_id = 15;
   string expected_host_session_id = 16;
   string target_process_id = 17;
+  string target_queue_item_id = 18;
 }
 
 enum CommandStatus {

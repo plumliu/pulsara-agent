@@ -26,6 +26,8 @@ import {
   MessageSquarePlus,
   PanelRight,
   Play,
+  Pencil,
+  Trash2,
   RotateCcw,
   Send,
   ShieldCheck,
@@ -48,6 +50,7 @@ import type {
   RuntimeInteractionResolution,
   RuntimeInteractionSummary,
   QueuedPrompt,
+  QueuedPromptAction,
   LocalPromptSubmission,
   ToolArtifactPage,
 } from '../lib/runtime-adapter';
@@ -72,6 +75,9 @@ interface WorkbenchViewProps {
   queuedCount: number;
   queuedPrompts: QueuedPrompt[];
   localSubmissions: LocalPromptSubmission[];
+  queueActions: QueuedPromptAction[];
+  onQueueAction: (item: QueuedPrompt, kind: QueuedPromptAction['kind']) => Promise<void>;
+  onQueueActionHandled: (commandId: string) => void;
   runtimeStatus: RuntimeStatus;
   runtimeError?: string;
   modelConfigurations: ModelConfigurationSummary[];
@@ -93,7 +99,6 @@ interface WorkbenchViewProps {
   onModelCallBindingChange: (binding: ModelCallBindingPayload) => Promise<void>;
   onSend: (
     text: string,
-    steer: boolean,
     permission: PermissionMode,
     requestPlan: boolean,
   ) => Promise<boolean>;
@@ -1297,6 +1302,9 @@ export function WorkbenchView({
   queuedCount,
   queuedPrompts,
   localSubmissions,
+  queueActions,
+  onQueueAction,
+  onQueueActionHandled,
   runtimeStatus,
   runtimeError,
   modelConfigurations,
@@ -1357,6 +1365,120 @@ export function WorkbenchView({
   const optionsTriggerRef = useRef<HTMLButtonElement>(null);
   const budgetInputRef = useRef<HTMLInputElement>(null);
   const composerComposingRef = useRef(false);
+  const handledQueueActions = useRef(new Set<string>());
+  const queueClicks = useRef(new Set<string>());
+  const activeQueueActions = queueActions.filter(item => item.sessionId === session.id);
+  const pendingEditRestoration = activeQueueActions.find(item => item.kind === 'edit' && item.status === 'accepted' && !item.handled);
+  // If another draft exists despite the reservation, keep both texts and let
+  // the user finish/clear that draft. The accepted edit restores once empty.
+  const editRestoreConflict = pendingEditRestoration && draft.length > 0;
+  const editingQueue = activeQueueActions.some(item => item.kind === 'edit' && (
+    ['submitting', 'unknown'].includes(item.status)
+    || (item.status === 'accepted' && !item.handled && !draft.length)
+  ));
+  const visibleQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
+    && !activeQueueActions.some(action => action.status === 'accepted' && action.source.queueItemId === item.queueItemId));
+  const pendingSteers = queuedPrompts.filter(item => item.deliveryMode === 'steer'
+    && !messages.some(message => message.userKind === 'steer'
+      && message.inputSource?.commandId === item.commandId && message.inputSource.queueItemId === item.queueItemId));
+  for (const action of activeQueueActions) {
+    const delivery = action.receipt?.promptDelivery;
+    if (action.kind !== 'send' || action.status !== 'accepted' || !delivery
+      || !['PENDING', 'CONSUMED'].includes(delivery.queueStatus)) continue;
+    const consumed = messages.some(message => message.userKind === 'steer'
+      && message.inputSource?.commandId === action.commandId
+      && message.inputSource.queueItemId === delivery.queueItemId);
+    if (consumed || pendingSteers.some(item => item.commandId === action.commandId && item.queueItemId === delivery.queueItemId)) continue;
+    pendingSteers.push({ ...action.source, queueItemId: delivery.queueItemId,
+      commandId: action.commandId, deliveryMode: 'steer', targetTurnId: action.targetTurnId,
+      submittedAt: action.submittedAt });
+  }
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+    for (const action of queueActions) {
+      if (action.sessionId !== session.id || action.kind === 'send' || action.status !== 'accepted'
+        || action.handled || handledQueueActions.current.has(action.commandId)) continue;
+      if (action.kind === 'edit') {
+        // Editing reserves the empty composer until the exact cancellation is
+        // known. Never overwrite a draft, including one restored by another action.
+        if (draft) continue;
+        setDraft(action.source.body);
+        if (action.source.requestedPermission) onPermissionChange(action.source.requestedPermission);
+        setRequestPlan(false);
+      }
+      handledQueueActions.current.add(action.commandId);
+      onQueueActionHandled(action.commandId);
+      requestAnimationFrame(() => {
+        const next = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
+          && item.sequence > action.source.sequence && visibleQueue.some(visible => visible.queueItemId === item.queueItemId))[0];
+        const button = action.kind === 'delete' && next
+          ? [...(composerWrapRef.current?.querySelectorAll<HTMLButtonElement>('button[data-delete-queue]') ?? [])]
+            .find(item => item.dataset.deleteQueue === next.queueItemId)
+          : undefined;
+        if (button) button.focus();
+        else {
+          const input = composerInputRef.current;
+          input?.focus();
+          if (action.kind === 'edit') input?.setSelectionRange(input.value.length, input.value.length);
+        }
+      });
+    }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [draft, onPermissionChange, onQueueActionHandled, queueActions, queuedPrompts, session.id, setDraft, setRequestPlan, visibleQueue]);
+
+  const queueAction = async (item: QueuedPrompt, kind: QueuedPromptAction['kind']) => {
+    if (!canControl || isObserver || editingQueue || queueClicks.current.has('composer-edit') || queueClicks.current.has(item.queueItemId)) return;
+    if (kind === 'edit' && (draft.length > 0 || submitting)) {
+      onNotify('请先处理当前草稿', '当前草稿和排队输入都会保留。');
+      return;
+    }
+    if (kind === 'edit') queueClicks.current.add('composer-edit');
+    queueClicks.current.add(item.queueItemId);
+    try { await onQueueAction(item, kind); }
+    finally { queueClicks.current.delete(item.queueItemId); if (kind === 'edit') queueClicks.current.delete('composer-edit'); }
+  };
+  const composerQueue = (visibleQueue.length > 0 || localSubmissions.length > 0 || editRestoreConflict) && (
+    <section className="composer-queue" aria-label="等待处理的输入">
+      {editRestoreConflict && <article data-command-id={pendingEditRestoration.commandId} className="is-local">
+        <Pencil size={13} aria-hidden="true" />
+        <p title={pendingEditRestoration.source.body}>{pendingEditRestoration.source.body}</p>
+        <small role="status">已取消排队，原文等待恢复；请先处理当前草稿。</small>
+      </article>}
+      {visibleQueue.map(item => {
+        const action = activeQueueActions.find(action => action.source.queueItemId === item.queueItemId
+          && ['submitting', 'unknown'].includes(action.status));
+        const busy = Boolean(action);
+        return <article key={item.queueItemId} data-queue-item-id={item.queueItemId} aria-busy={busy}>
+          <CornerDownRight size={13} aria-hidden="true" />
+          <p title={item.body}>{item.body}</p>
+          {!isObserver && <div className="composer-queue__actions">
+            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={busy || editingQueue || !canControl || !isRunning}
+              onClick={() => void queueAction(item, 'send')}><CornerDownRight size={13} />发送</button>
+            <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={busy || editingQueue || !canControl}
+              onClick={() => void queueAction(item, 'edit')}><Pencil size={13} />编辑</button>
+            <button type="button" aria-label="删除" title="取消这条排队输入" disabled={busy || editingQueue || !canControl}
+              data-delete-queue={item.queueItemId} onClick={() => void queueAction(item, 'delete')}><Trash2 size={13} />删除</button>
+          </div>}
+          {action?.status === 'unknown' && <small role="status">正在核对操作状态</small>}
+        </article>;
+      })}
+      {localSubmissions.filter(item => item.outcomeCode !== 'USER_REDIRECTED_TO_STEER').map(item => (
+        <article key={item.commandId} data-command-id={item.commandId} className="is-local">
+          <LoaderCircle size={13} aria-hidden="true" />
+          <p title={item.body}>{item.bodyUnavailable ? '正文未能在队列终止前完成读取。' : item.body}</p>
+          <small>{item.status === 'sending' ? '正在加入' : item.status === 'cancelled' ? '队列已取消'
+            : item.status === 'rejected' ? '队列已拒绝' : item.status === 'consumed' ? item.outcomeCode === 'TURN_INTERRUPTED' ? '已接收 · 执行已中断' : '输入已接收'
+              : item.status === 'unknown' ? '提交状态未知' : '正在核对投递状态'}</small>
+          <div className="composer-queue__detail">
+            {item.targetTurnId && <span>目标轮次：{item.targetTurnId}</span>}
+            <span>适用权限：{item.permission ? permissionLabels[item.permission] : item.deliveryMode === 'steer' ? '继承当前轮次' : '未知'}</span>
+            {item.detail && <span>{item.detail}</span>}
+          </div>
+        </article>
+      ))}
+    </section>
+  );
   const wordCount = draft.trim().length;
   const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
   const modelBindingMissing = Boolean(modelCallBinding && !selectedModel);
@@ -1423,6 +1545,7 @@ export function WorkbenchView({
   }, [focusMemoryEntry, session.id, messages]);
 
   const insertSkill = useCallback((name: string) => {
+    if (editingQueue || queueClicks.current.has('composer-edit')) return;
     const marker = `$${name}`;
     setDraft((current) => {
       const alreadySelected = new RegExp(`(^|\\s)\\$${name}(?=\\s|$)`).test(current);
@@ -1432,7 +1555,7 @@ export function WorkbenchView({
     setSkillOpen(false);
     setOptionsOpen(false);
     window.requestAnimationFrame(() => composerInputRef.current?.focus());
-  }, [setDraft]);
+  }, [editingQueue, setDraft]);
 
   const updateJumpPosition = useCallback(() => {
     const workbench = workbenchRef.current;
@@ -1471,13 +1594,13 @@ export function WorkbenchView({
 
   const composerHint = useMemo(() => {
     if (!isRunning) return 'Enter 发送 · Shift Enter 换行';
-    return 'Enter 排队下一轮 · ⌘ Enter 引导当前任务';
+    return 'Enter 排队下一轮 · Shift Enter 换行';
   }, [isRunning]);
 
-  const submit = async (steer: boolean) => {
-    const value = draft.trim();
-    if (!value || submitting) return;
-    if (!steer && !modelReady) {
+  const submit = async () => {
+    const value = draft;
+    if (!value.trim() || submitting || editingQueue) return;
+    if (!modelReady) {
       onNotify(
         modelBindingMissing ? '原模型配置已删除' : '请先选择模型配置',
         modelBindingMissing
@@ -1490,13 +1613,12 @@ export function WorkbenchView({
     setSubmitting(true);
     const accepted = await onSend(
       value,
-      steer,
       permission,
-      !steer && requestPlan && !isRunning && !activePlanMode,
+      requestPlan && !isRunning && !activePlanMode,
     );
     setSubmitting(false);
     if (!accepted) return;
-    setDraft((current) => current.trim() === value ? '' : current);
+    setDraft((current) => current === value ? '' : current);
     setRequestPlan(false);
     onPermissionChange('bypass-permissions');
   };
@@ -1702,55 +1824,14 @@ export function WorkbenchView({
           {contextCompactionIndex === messages.length && contextCompaction && (
             <ContextCompactionDivider />
           )}
-          {(queuedPrompts.length > 0 || localSubmissions.length > 0) && (
-            <section className="prompt-queue" aria-label="等待处理的输入">
-              <header><MessageSquarePlus size={13} /><strong>等待处理的输入</strong></header>
-              {queuedPrompts.map((item) => (
-                <article key={item.queueItemId} data-queue-item-id={item.queueItemId}>
-                  <div className="prompt-queue__meta">
-                    <span>{item.deliveryMode === 'steer' ? '补充当前任务' : '下一轮任务'}</span>
-                    {item.deliveryMode === 'steer' && (
-                      <span>目标轮次：{item.targetTurnId ?? '未知'}</span>
-                    )}
-                    <span>适用权限：{item.permission ? permissionLabels[item.permission] : '未知'}</span>
-                  </div>
-                  <pre>{item.body}</pre>
-                </article>
-              ))}
-              {localSubmissions.map((item) => (
-                <article key={item.commandId} data-command-id={item.commandId} className="is-local">
-                  <div className="prompt-queue__meta">
-                    <span>{item.status === 'sending'
-                      ? '正在发送'
-                      : item.status === 'queued'
-                        ? '已进入队列'
-                        : item.status === 'synchronizing'
-                          ? '正在核对投递状态'
-                          : item.status === 'consumed'
-                            ? item.outcomeCode === 'TURN_INTERRUPTED'
-                              ? '已接收 · 执行已中断'
-                              : '输入已接收'
-                            : item.status === 'cancelled'
-                              ? '队列已取消'
-                              : item.status === 'rejected'
-                                ? '队列已拒绝'
-                                : '提交状态未知'}</span>
-                    <span>投递类型：{item.deliveryMode === 'steer' ? '补充当前任务' : '下一轮任务'}</span>
-                    {item.deliveryMode === 'steer' && (
-                      <span>目标轮次：{item.targetTurnId ?? '未知'}</span>
-                    )}
-                    <span>适用权限：{item.permission
-                      ? permissionLabels[item.permission]
-                      : item.deliveryMode === 'steer' ? '继承当前轮次' : '未知'}</span>
-                  </div>
-                  {item.bodyUnavailable
-                    ? <p className="prompt-queue__detail">正文未能在队列终止前完成读取。</p>
-                    : <pre>{item.body}</pre>}
-                  {item.detail && <p className="prompt-queue__detail">{item.detail}</p>}
-                </article>
-              ))}
-            </section>
-          )}
+          {pendingSteers.map(item => (
+            <div key={item.queueItemId} data-queue-item-id={item.queueItemId} data-action-command-id={item.commandId}
+              aria-description="引导已提交，等待当前任务接收">
+              <UserMessage message={{ id: item.queueItemId, turnId: item.targetTurnId,
+                role: 'user', userKind: 'steer', body: item.body, status: 'completed',
+                time: item.submittedAt ? new Date(item.submittedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '' }} />
+            </div>
+          ))}
           {canControl && interaction && (
             <InteractionCard
               key={`${interaction.id}:${'workflowRevision' in interaction ? interaction.workflowRevision : 'live'}`}
@@ -1791,11 +1872,7 @@ export function WorkbenchView({
           <p className="composer-note">当前没有活动会话</p>
         </div>
       ) : !isObserver ? <div className="composer-wrap" ref={composerWrapRef}>
-        {queuedCount > 0 && (
-          <div className="queued-input">
-            <MessageSquarePlus size={12} /><span>{queuedCount} 条输入正在等待处理</span>
-          </div>
-        )}
+        {composerQueue}
         <div className="composer-frame">
           <TodoDock
             key={todo?.id ?? 'no-todo'}
@@ -1809,7 +1886,9 @@ export function WorkbenchView({
             <textarea
               ref={composerInputRef}
               value={draft}
-              onChange={(event) => setDraft(event.target.value)}
+              onChange={(event) => {
+                if (!editingQueue && !queueClicks.current.has('composer-edit')) setDraft(event.target.value);
+              }}
               onCompositionStart={() => {
                 composerComposingRef.current = true;
               }}
@@ -1828,12 +1907,12 @@ export function WorkbenchView({
                     || nativeEvent.keyCode === 229
                   ) return;
                   event.preventDefault();
-                  void submit(event.metaKey || event.ctrlKey);
+                  void submit();
                 }
               }}
               rows={1}
-              disabled={runtimeStatus !== 'online' || !session.id}
-              placeholder={isRunning ? '补充指令，或引导当前运行…' : '让 Pulsara 处理复杂工作…'}
+              disabled={runtimeStatus !== 'online' || !session.id || editingQueue}
+              placeholder={isRunning ? '输入下一轮任务…' : '让 Pulsara 处理复杂工作…'}
               aria-label="发送给 Pulsara"
             />
             {wordCount > 0 && <span className="draft-count">{wordCount}</span>}
@@ -1885,7 +1964,7 @@ export function WorkbenchView({
                     }}
                     aria-expanded={skillOpen}
                     aria-label="选择技能"
-                    disabled={submitting}
+                    disabled={submitting || editingQueue}
                   ><BookOpenText size={12} /> 技能 <ChevronDown size={10} /></button>
                   {skillOpen && (
                     <div className="menu-popover skill-menu skill-menu--composer">
@@ -1894,7 +1973,7 @@ export function WorkbenchView({
                         {skills.map((skill) => {
                           const selected = skill.configured || new RegExp(`(^|\\s)\\$${skill.name}(?=\\s|$)`).test(draft);
                           return (
-                            <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured}>
+                            <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured || editingQueue}>
                               <span><strong>${skill.name}</strong><small>{skill.description}</small></span>
                               {selected && <Check size={13} />}
                             </button>
@@ -1940,7 +2019,7 @@ export function WorkbenchView({
                   title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，子任务、排队输入和后台命令不会自动取消。"
                 ><CircleStop size={15} /></button>
               ) : (
-                <button className="send-button" onClick={() => void submit(false)} disabled={!draft.trim() || submitting || runtimeStatus !== 'online' || !session.id || !modelReady} aria-label={isRunning ? '排队发送' : '发送'}>
+                <button className="send-button" onClick={() => void submit()} disabled={!draft.trim() || submitting || runtimeStatus !== 'online' || !session.id || !modelReady} aria-label={isRunning ? '排队发送' : '发送'}>
                   {isRunning ? <Play size={14} fill="currentColor" /> : <Send size={14} />}
                 </button>
               )}
@@ -1950,7 +2029,8 @@ export function WorkbenchView({
         </div>
         <p className={`composer-note${!modelReady ? ' composer-note--attention' : ''}`}>{!modelReady ? (modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置') : composerHint} · 规划与权限只作用于本轮</p>
       </div> : (
-        <div className="observer-wrap">
+        <div className="observer-wrap composer-wrap">
+          {composerQueue}
           <div className="observer-dock">
             <span className="observer-dock__icon"><Eye size={15} /></span>
             <span><strong>这个会话正在另一个窗口中操作</strong><small>这里仍会实时显示对话、思考和任务进展。</small></span>

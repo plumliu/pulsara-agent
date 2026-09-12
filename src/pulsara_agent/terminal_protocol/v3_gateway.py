@@ -95,7 +95,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:0087781bdf6d33e5695c43054f7e9cf3654bc5dfe0c2c0572c553b21425bb51f"
+    "sha256:538c470374cd2f38c1293b2d3605ac6cb97e250ff0ca99726d4f4bdeb6bdfa1c"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -620,6 +620,15 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "CONTROLLER_REQUIRED")
         if request.force and request.command_kind != wire.COMPACT_CONTEXT:
             return _error(request.request_id, "COMMAND_FORCE_FIELD_NOT_ALLOWED")
+        queue_action = request.command_kind in (
+            wire.CANCEL_QUEUED_PROMPT, wire.STEER_QUEUED_PROMPT,
+        )
+        if queue_action:
+            if (not request.target_queue_item_id or request.text
+                or bool(request.target_turn_id) != (request.command_kind == wire.STEER_QUEUED_PROMPT)):
+                return _error(request.request_id, "QUEUE_ACTION_INVALID")
+        elif request.target_queue_item_id:
+            return _error(request.request_id, "QUEUE_TARGET_FIELD_NOT_ALLOWED")
         requested_permission = _permission_from_wire(request.requested_permission_mode)
         permission_command = request.command_kind in (
             wire.SUBMIT_PROMPT,
@@ -674,12 +683,15 @@ class TerminalKernelProtocolServer:
                 text=request.text,
                 requested_permission_mode=requested_permission,
             )
-        elif request.command_kind == wire.STEER_ACTIVE_TURN:
-            if not _valid_prompt(request.text) or not request.target_turn_id:
-                return _error(request.request_id, "STEER_INVALID")
-            outcome = await state.host_session.steer_active_turn(
+        elif request.command_kind == wire.CANCEL_QUEUED_PROMPT:
+            outcome = await state.host_session.cancel_queued_prompt(
                 command_id=request.command_id,
-                text=request.text,
+                source_queue_item_id=request.target_queue_item_id,
+            )
+        elif request.command_kind == wire.STEER_QUEUED_PROMPT:
+            outcome = await state.host_session.steer_queued_prompt(
+                command_id=request.command_id,
+                source_queue_item_id=request.target_queue_item_id,
                 target_turn_id=request.target_turn_id,
             )
         elif request.command_kind == wire.STOP_ACTIVE_TURN:

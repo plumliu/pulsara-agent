@@ -1,10 +1,10 @@
 # Pulsara 子任务等待、完成交付与可见性：产品与内核修订方案
 
-> 状态：**ACTIVATED — 2026-09-11；Phase A–D 与第 15 节验收已完成**
+> 状态：**IMPLEMENTED, REACTIVATION PENDING — 2026-09-12 修正任务清单合并时的 ROOT 来源关系投影；原 activation 保留于第 16 节，修订后验证见第 17 节**
 >
 > 日期：2026-09-11
 >
-> 本文整理两份用户截图、Luna max 对本地 Codex 的只读调研、后续独立源码审查和产品讨论，并在同一文档中冻结、实施和验收 subagent wait/completion hard cut。第 16 节是本次 activation 记录。
+> 本文整理两份用户截图、Luna max 对本地 Codex 的只读调研、后续独立源码审查和产品讨论，并在同一文档中冻结、实施和验收 subagent wait/completion hard cut。第 16 节是原 activation 记录，不代替第 17 节修订后的验收。
 >
 > 2026-09-11 已完成生产代码、clean-v0 schema/协议、前端、测试、真实 provider/browser 与 isolated wheel 的同次 hard cut；没有保留旧字段、旧 outcome 或兼容路径。
 
@@ -477,6 +477,8 @@ PR03 的人工后台命令终止反馈在 idle 时 UI-only，不创建反馈 ent
 3. “上一 ROOT”必须由同一 session 既有 canonical ROOT admission/initial-entry 顺序确认；排除 child turn，不以最近一条可见消息、时间戳或 task 排序代替。沿用已有 canonical 顺序，不新增持久 ROOT ordinal。
 4. 翻页、历史回看和新 ROOT 开始不能改变已有 entry 的来源关系。缺少 source/target 顺序事实时使用不带“上一轮／此前”的中性文案，按既有精确查询补齐，不推测。
 
+唯一实现路径：runtime adapter 从完整 canonical entries 提取 ROOT 顺序，将其作为只读、可丢弃的 `canonicalRootTurnIds` 随当前 projection 传递。`mergeRuntimeTaskInventory` 继续使用同一份顺序，不再从 `Message[]` 重建。由 terminal observation 发起、尚无 assistant message 就结束的 ROOT 也必须参与顺序；视觉投影将其 trace 并到其他消息，不会删除这一 canonical 事实。顺序缺失时清除旧的 previous/earlier 推断并显示中性文案；source/target 身份相同仍可直接证明 current。不新增协议字段、数据库 ordinal、receipt、fingerprint 或第二真源。
+
 失败、取消、中断和依赖失败使用真实终态及有用说明，不一律写“已完成”。成功/失败都可以有待接纳的终态说明。
 
 删除“主任务会结合这项工作的结果继续处理”“已经用于当前处理”等超过证据的固定文案；不清洗或改写模型、用户、工具的来源正文。
@@ -699,7 +701,7 @@ npm run build:local
 
 ## 15. 完成标准与冻结决定
 
-只有实施阶段全部满足下列条件，才能把本方案标为 ACTIVATED，并同步相关 active specs。本次验收结果如下：
+只有实施阶段全部满足下列条件，才能把本方案标为 ACTIVATED，并同步相关 active specs。下列状态包含第 17 节审查后修订，未重验的安装产物／真实浏览器门槛不沿用原勾选：
 
 - [x] first/all 与无 targets 等待按 §6 单一路径实现，无隐藏 fail-fast；五种 exact outcome 和输入身份矩阵通过，旧 input_available 无兼容路径。
 - [x] W06 的 terminal→inbox 窗口已确定性验证并由唯一 turn-bound manager readiness 闭合；wait 成功不依赖未来 offer；W23/W24 的 seal/owner/已接纳检查通过。
@@ -709,8 +711,8 @@ npm run build:local
 - [x] completion_accepted / completionAccepted 已贯穿所有生产 DTO/schema/模型结果/类型/读写与入口状态，旧字段无别名、双读或 fallback；生成产物一致。
 - [x] 现有继续入口、权限、F03 队列身份、STOP/effect settlement、PR03 相邻语义保持。
 - [x] Host 丢失无伪造排队、无 replay 或 child 重跑；不新增持久调度机制或 fingerprint。
-- [x] focused、完整回归、continuity、架构 subtraction、协议／静态构建全部完成；失败如实处理。
-- [x] 真实 provider/browser 与最终安装产物验收完成，不复用旧截图冒充本次成功。
+- [ ] 修订后 focused、完整回归、continuity、架构 subtraction、协议／静态构建全部完成；本轮自动化范围见第 17 节。
+- [ ] 修订后的真实 provider/browser 与最终安装产物验收完成，不复用旧截图冒充本次成功。
 - [x] 新旧规格及 descriptor 同步，旧路径删除；修改范围、剩余风险、验证命令和 Git 状态有最终记录。
 
 本次审阅已冻结：§6.5 五种 outcome 和正文形状；§7.2 `ensure_root_completion_ready` 的唯一 owner、输入、队列接管与不可用结论；§10.2 的来源关系判定；§10.4 不做 subagent inclusion 展示；§10.5 字段 hard cut。实施者不得改成“到时候看情况”的可选路径。
@@ -772,3 +774,13 @@ Phase A 已按冻结范围完成精确复现，并核对了现有只读事实、
 主时间线按 exact `turnId` 识别一次 assistant loop：同一轮的思考、工具、用户 steer、子任务完成提示和最终回复只在首个 assistant 片段显示一次图标与精确名称 `Pulsara`；下一轮仍重新显示。没有 `turnId` 的临时投影保留基于相邻 assistant 内容的窄 fallback，steer 或子任务提示不会凭空制造新的 assistant 身份。
 
 该调整不改变 canonical rows、消息顺序、provider 输入或子任务接纳语义，只压缩重复的视觉身份。组件测试先复现同一 `turnId` 跨 steer／completion 出现两个身份头的旧行为，再固定为每轮一个。前端全量 `200 passed`，ESLint、TypeScript 和 local build 通过；追加将 steer 标题收紧为单独的“引导”后重新构建，最终 bundle 为 `index-BgRJrTCE.js` 与 `index-C5kA0N-N.css`。真实浏览器在长会话 `b29ba118` 中测得 11 个 assistant 片段、2 个用户轮次、2 个 `Pulsara` 身份头，证据见 `output/playwright/subagent-wait-refinement/single-pulsara-heading-per-loop.png`。
+
+## 17. ROOT 来源顺序审查修正（2026-09-12）
+
+对 commit `4884daa6` 及当前 dirty 工作树复核时，发现 `project()` 已使用 canonical entries 判定来源，但随后 `mergeRuntimeTaskInventory()` 又从展示消息重建顺序。一个由 terminal observation 发起、没有 assistant message 就结束的中间 ROOT，其 trace 可能并入前一条消息；据此重算会把真实的“此前”误写为“上一轮”。这是展示层丢失身份后的错误重算，不是 canonical completion 投递时序变化。
+
+先以真实 adapter snapshot 复现 A→B→C：A 创建 reader，B 只有 terminal observation，C 接纳 A 的结果。修复后 canonical ROOT 顺序作为当前 projection 的只读事实传入清单合并，重复 merge 均保留 `earlier`。同一测试验证 B 不需要独立可见消息；相邻测试覆盖 current/previous/earlier、缺失顺序时清除旧推断并降级中性文案。
+
+删除 `orderedRootTurnIdsFromMessages`，没有保留 fallback；不增加后端／协议字段、数据库 ordinal、哈希或独立查询 owner。任务分页合并仍复用原 machinery。
+
+与 PR04 联合验证：三文件 focused **154 passed**、前端完整回归 **221 passed**、ESLint、TypeScript、协议生成检查、`build:local` 和 `git diff --check` 通过。最终生成入口为 `index-DkOQlHP2.js` / `index-Cryz142G.css`；命令见 [PR04 第 23 节](PULSARA_BROWSER_DOGFOOD_PR04_PROMPT_QUEUE_STEER_COMPOSER_HARD_CUT_IMPLEMENTATION_SPEC.zh.md#23-审查后修正2026-09-12)。本轮只修前端投影／交互和对应测试，不重复 kernel pytest；没有重跑真实 provider/browser 或 isolated wheel，因此本规格保持 IMPLEMENTED、REACTIVATION PENDING。原第 16 节证据不覆盖本轮安装产物，无 stage/commit。

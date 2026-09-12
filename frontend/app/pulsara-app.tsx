@@ -24,6 +24,8 @@ import {
   type RuntimeInteractionSummary,
   type RuntimeProjection,
   type LocalPromptSubmission,
+  type QueuedPrompt,
+  type QueuedPromptAction,
   type CommandReceipt,
 } from '../lib/runtime-adapter';
 import type {
@@ -187,6 +189,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('starting');
   const [runtimeError, setRuntimeError] = useState<string>();
   const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
+  const [queueActions, setQueueActions] = useState<QueuedPromptAction[]>([]);
+  const queueActionsInFlight = useRef(new Set<string>());
   const [inspectorOpen, setInspectorOpen] = useState(readInitialInspectorVisibility);
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -241,6 +245,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
     if (queueStatus === 'CONSUMED') {
       notify('输入已接受', productMessage(receipt.publicMessage, '输入已写入会话。'), 'success');
+      return;
+    }
+    if (receipt.publicCode === 'USER_REDIRECTED_TO_STEER') {
+      notify('已改为引导', '这条输入已改为当前任务的引导。', 'success');
       return;
     }
     if (queueStatus === 'CANCELLED') {
@@ -958,9 +966,156 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     );
   };
 
+  const settleQueueAction = useCallback((action: QueuedPromptAction, receipt: CommandReceipt, owner: RuntimeConnection) => {
+    if (!ownsConnection(owner) || owner.sessionId !== action.sessionId) return;
+    const delivery = receipt.promptDelivery;
+    const accepted = action.kind === 'send'
+      ? Boolean(delivery && delivery.deliveryMode === 'steer' && ['PENDING', 'CONSUMED'].includes(delivery.queueStatus))
+      : receipt.status === 'succeeded' && receipt.publicCode === 'PROMPT_CANCELLED'
+        && delivery?.queueItemId === action.source.queueItemId;
+    if (receipt.commandId !== action.commandId) throw new Error('队列操作返回了不一致的身份。');
+    setQueueActions(current => current.map(item => item.commandId === action.commandId && item.sessionId === action.sessionId
+      ? { ...item, connectionGeneration: owner.generation, status: accepted ? 'accepted' : 'rejected', receipt }
+      : item));
+    if (accepted) setLocalSubmissions(current => current.map(item => (
+      item.sessionId === action.sessionId && item.commandId === action.source.commandId
+        && item.queueItemId === action.source.queueItemId
+        ? { ...item, handledByQueueAction: true }
+        : item
+    )));
+    queueActionsInFlight.current.delete(`${action.sessionId}:${action.source.queueItemId}`);
+    if (!accepted) notify('操作未完成', productMessage(receipt.publicMessage, receipt.publicCode ?? '请刷新后查看这条输入的状态。'), 'warning');
+  }, [notify, ownsConnection]);
+
+  const actOnQueuedPrompt = async (source: QueuedPrompt, kind: QueuedPromptAction['kind']) => {
+    const active = connectionRef.current;
+    if (!active || active.role !== 'controller' || !ownsConnection(active)) return;
+    // CURRENT_CONTROL advances across FIFO ROOTs; the connection's initial
+    // live-control snapshot can still name the ROOT present at reload.
+    const targetTurnId = active.current().control.active_turns?.find(
+      turn => turn.scope_kind === 'ROOT' && turn.status === 'RUNNING',
+    )?.turn_id;
+    if (kind === 'send' && !targetTurnId) {
+      notify('当前任务已结束', '这条输入会按队列顺序自动处理。', 'warning');
+      return;
+    }
+    const key = `${active.sessionId}:${source.queueItemId}`;
+    if (queueActionsInFlight.current.has(key)) return;
+    queueActionsInFlight.current.add(key);
+    const action: QueuedPromptAction = {
+      sessionId: active.sessionId, connectionGeneration: active.generation,
+      commandId: `command:web:${crypto.randomUUID()}`, source, kind,
+      targetTurnId: kind === 'send' ? targetTurnId : undefined,
+      submittedAt: new Date().toISOString(), status: 'submitting',
+    };
+    setQueueActions(current => [...current.filter(item => !(item.sessionId === action.sessionId && item.source.queueItemId === source.queueItemId)), action]);
+    try {
+      const receipt = kind === 'send'
+        ? await active.steerQueuedPrompt(action.commandId, source.queueItemId, targetTurnId!)
+        : await active.cancelQueuedPrompt(action.commandId, source.queueItemId);
+      if (!ownsConnection(active)) return;
+      settleQueueAction(action, receipt, active);
+    } catch (error) {
+      if (!ownsConnection(active)) return;
+      const recovered = await recoverConnectionAfterOperation(error, active);
+      if (!recovered || !ownsConnection(recovered)) return;
+      // The reconciliation effect owns queries, including recovery on a new
+      // connection. Do not race a second query against it after reconnect.
+      setQueueActions(current => current.map(item => item.commandId === action.commandId
+        ? { ...item, status: 'unknown', connectionGeneration: recovered.generation,
+          lastCheckedEventSequence: undefined, lastCheckedConnectionGeneration: undefined }
+        : item));
+      notify('正在核对操作状态', '将查询这次操作的原始身份，不会自动重发。', 'warning');
+    }
+  };
+
+  useEffect(() => {
+    if (!connection || !ownsConnection(connection)) return;
+    setQueueActions(current => current.flatMap(item => {
+      if (item.sessionId !== connection.sessionId) return [item];
+      if (item.status === 'submitting' && item.connectionGeneration !== connection.generation) return [{
+        ...item, status: 'unknown' as const, connectionGeneration: connection.generation,
+        lastCheckedEventSequence: undefined, lastCheckedConnectionGeneration: undefined,
+      }];
+      if (item.status === 'accepted' && item.connectionGeneration !== connection.generation) {
+        // An accepted edit's original text is still needed until the composer
+        // restores it. Reconnecting only discards disposable steer previews.
+        if (item.kind === 'edit' && !item.handled) return [{ ...item, connectionGeneration: connection.generation }];
+        return [];
+      }
+      const delivery = item.receipt?.promptDelivery;
+      if (item.kind === 'send' && delivery) {
+        if (projection.messages.some(message => message.userKind === 'steer'
+          && message.inputSource?.commandId === item.commandId
+          && message.inputSource.queueItemId === delivery.queueItemId)) return [];
+      }
+      if (item.kind !== 'send' && item.status === 'accepted' && item.handled
+        && !projection.queuedPrompts.some(prompt => prompt.queueItemId === item.source.queueItemId)) return [];
+      return [item];
+    }));
+  }, [connection, ownsConnection, projection]);
+
+  useEffect(() => {
+    if (!connection || !ownsConnection(connection)) return;
+    const queryKey = (item: QueuedPromptAction) => `queue-action:${item.sessionId}:${connection.generation}:${item.commandId}`;
+    const candidate = queueActions.find(item => item.sessionId === connection.sessionId && (
+      item.status === 'unknown' || (item.kind === 'send' && item.status === 'accepted'
+        && !projection.queuedPrompts.some(prompt => prompt.commandId === item.commandId
+          && prompt.queueItemId === item.receipt?.promptDelivery?.queueItemId)
+        && !projection.messages.some(message => message.userKind === 'steer'
+          && message.inputSource?.commandId === item.commandId
+          && message.inputSource.queueItemId === item.receipt?.promptDelivery?.queueItemId))
+    ) && !promptReconciliationInFlight.current.has(queryKey(item))
+      && (item.lastCheckedEventSequence !== projection.eventSequence || item.lastCheckedConnectionGeneration !== connection.generation));
+    if (!candidate) return;
+    const key = queryKey(candidate);
+    promptReconciliationInFlight.current.add(key);
+    setQueueActions(current => current.map(item => item === candidate ? {
+      ...item, lastCheckedEventSequence: projection.eventSequence, lastCheckedConnectionGeneration: connection.generation,
+    } : item));
+    void (async () => {
+      try {
+        const receipt = await connection.queryCommand(candidate.commandId);
+        if (!ownsConnection(connection)) return;
+        if (receipt) {
+          settleQueueAction(candidate, receipt, connection);
+          return;
+        }
+        // Rejections happen before the action command is inserted. A missing
+        // command alone is not proof, but a consumed exact NEW_TURN source can
+        // never subsequently be cancelled/redirected by this action's CAS.
+        const sourceConsumed = connection.current().messages.some(message => (
+          message.userKind === 'prompt'
+          && message.inputSource?.commandId === candidate.source.commandId
+          && message.inputSource.queueItemId === candidate.source.queueItemId
+          && message.inputSource.deliveryMode === 'new-turn'
+        ));
+        const sourceReceipt = sourceConsumed ? undefined : await connection.queryCommand(candidate.source.commandId);
+        if (!ownsConnection(connection)) return;
+        const delivery = sourceReceipt?.promptDelivery;
+        if (!sourceConsumed && !(sourceReceipt?.commandId === candidate.source.commandId
+          && delivery?.queueItemId === candidate.source.queueItemId
+          && delivery.deliveryMode === 'new-turn' && delivery.queueStatus === 'CONSUMED')) return;
+        setQueueActions(current => current.map(item => item.commandId === candidate.commandId && item.sessionId === candidate.sessionId
+          ? { ...item, status: 'rejected', connectionGeneration: connection.generation }
+          : item));
+        queueActionsInFlight.current.delete(`${candidate.sessionId}:${candidate.source.queueItemId}`);
+        notify('操作未完成', '这条输入已开始处理，无法再编辑、删除或改为引导。', 'warning');
+      } catch {
+        // Keep unknown facts unknown; only query again on a new cut/connection.
+      } finally {
+        promptReconciliationInFlight.current.delete(key);
+        if (ownsConnection(connection)) {
+          // A newer cut may have arrived while this exact query was in flight.
+          // Reconsider it without concurrent queries or mutating resubmission.
+          setQueueActions(current => [...current]);
+        }
+      }
+    })();
+  }, [connection, notify, ownsConnection, projection, queueActions, settleQueueAction]);
+
   const sendPrompt = async (
     text: string,
-    steer: boolean,
     permission: PermissionMode,
     requestPlan: boolean,
   ): Promise<boolean> => {
@@ -974,7 +1129,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       return false;
     }
     const commandId = `command:web:${crypto.randomUUID()}`;
-    const deliveryMode = projection.isRunning && steer ? 'steer' as const : 'new-turn' as const;
+    const deliveryMode = 'new-turn' as const;
     try {
       if (requestPlan && projection.isRunning) {
         notify('当前运行结束后才能先规划', '先规划只作用于一条尚未开始的新输入。', 'warning');
@@ -994,32 +1149,18 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         commandId,
         body: text,
         deliveryMode,
-        targetTurnId: deliveryMode === 'steer' ? projection.activeTurnId : undefined,
-        permission: deliveryMode === 'new-turn' ? permission : undefined,
+        permission,
         status: 'sending',
       }]);
-      const receipt = projection.isRunning && steer
-        ? projection.activeTurnId
-          ? await active.steerActiveTurn(commandId, text, projection.activeTurnId)
-          : undefined
-        : await active.submitPrompt(commandId, text, permission);
+      const receipt = await active.submitPrompt(commandId, text, permission);
       if (!ownsConnection(active)) return false;
-      if (!receipt) {
-        setLocalSubmissions((current) => current.filter((item) => item.commandId !== commandId));
-        notify('暂时无法引导当前任务', '当前没有可以接收补充指令的任务。', 'warning');
-        return false;
-      }
       setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
         ? submissionFromReceipt(item, receipt)
         : item));
       notifyPromptReceipt(
         receipt,
-        requestPlan ? '本轮将先制定计划' : projection.isRunning && !steer ? '输入将在下一轮处理' : steer ? '补充指令已接受' : '输入已接受',
-        projection.isRunning && !steer
-          ? '会在当前轮完成后自动开始。'
-          : steer
-            ? '当前任务会在安全位置接收这条补充指令。'
-            : '已送达本地服务。',
+        requestPlan ? '本轮将先制定计划' : projection.isRunning ? '输入将在下一轮处理' : '输入已接受',
+        projection.isRunning ? '会在当前轮完成后自动开始。' : '已送达本地服务。',
       );
       return promptWasAccepted(receipt);
     } catch (error) {
@@ -1668,8 +1809,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           inspectorOpen={inspectorOpen}
           queuedCount={projection.queuedCount}
           queuedPrompts={projection.queuedPrompts}
+          queueActions={queueActions.filter(item => item.sessionId === activeSession.id && item.connectionGeneration === connection?.generation)}
+          onQueueAction={actOnQueuedPrompt}
+          onQueueActionHandled={(commandId) => setQueueActions(current => current.map(item => item.commandId === commandId ? { ...item, handled: true } : item))}
           localSubmissions={localSubmissions.filter((item) => (
             item.sessionId === activeSession.id
+            && !item.handledByQueueAction
+            && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
+            && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
             && !projection.queuedPrompts.some((queued) => queued.commandId === item.commandId)
             && !projection.messages.some((message) => message.inputSource?.commandId === item.commandId)
           ))}

@@ -1,6 +1,8 @@
 # Pulsara 浏览器 PR04：输入队列、即时引导与 Composer Hard Cut 实施规格
 
-状态：**READY FOR IMPLEMENTATION — 产品决定已冻结，尚未实施，禁止标记 ACTIVATED**。
+状态：**IMPLEMENTED, REACTIVATION PENDING — 2026-09-12 审查后修正了 action 查询、编辑草稿保留与未观察到 PENDING 的 steer 终态收敛；修订后验收见第 23 节（工作树，未提交）**。
+
+原 activation 证据：[PR04 activation evidence](output/playwright/pr04-dogfood/activation-evidence.md)。它不证明第 23 节修订后的最终安装产物和真实浏览器已重新验收。
 
 日期：2026-09-12。
 
@@ -34,6 +36,7 @@
 - “删除”不弹二次确认；只有服务端 CAS 成功后才从页面消失。
 - “编辑”只有在 composer 当前无草稿时执行。已有草稿时保留两份内容、拒绝本次操作并提示先处理当前草稿；不得覆盖、拼接或静默丢弃任一文本。
 - 编辑成功后恢复该输入的原始正文和已冻结的请求权限到 composer，并聚焦输入框；不恢复已经失效的模型快照或规划 workflow。
+- 编辑在途／结果未知时保留空 composer，禁用所有草稿写入入口，包括已经打开的技能菜单，而不仅是 textarea。若恢复连接时已有另一份草稿，保留原输入的待回填正文并允许用户处理现有草稿；清空／提交后再恢复，不覆盖也不永久锁定输入框。未回填的 accepted edit 不因 connection generation 变化而丢弃。
 
 ### 2.2 loop 结束后的队列
 
@@ -111,7 +114,7 @@ Pulsara **不照搬** Codex 的窄竞态：Codex 存在 steer 返回 accepted、
 - PR03 的 Host closing、control owner、STOP、effect settlement 与 provider-prefix continuity 继续有效。
 - F07 原文保真适用于队列正文、乐观引导、编辑回填、canonical steer 与复制；任何路径不得翻译或重写正文。
 
-本文未实施前，生产代码仍以当前 PR02/Subagent-R1 行为为真；仅创建本规格不得把索引或 UI 标成 ACTIVATED。
+上述为实施前的 PR02/Subagent-R1 起点。PR04 已完成单一路径 hard cut；第 22 节保留原 activation，第 23 节记录审查后的修正和当前验证边界。
 
 ## 5. 唯一权威与职责
 
@@ -264,6 +267,12 @@ payload 只用于可核验诊断，不成为执行 authority。执行与查询�
 
 网络错误不等于拒绝。前端在可用的新 connection owner 上按原 action command 查询；查询前后都校验 session＋connection generation，绝不自动重发 cancel/steer action。
 
+查询为空也不等于拒绝：source 状态校验可能在 action command 插入前拒绝，丢失该 ACK 后没有 action row 可查。此时只允许使用同 session 的 exact source command＋queue item＋NEW_TURN 身份补充只读判断：
+
+- canonical consumed entry，或原 submission command 查询的 `CONSUMED + NEW_TURN`，证明 source 已被 FIFO 消费，该 action 不可能再成功取消或改投。前端据此结束未知展示并解锁 composer，不回填已经消费的正文，不伪造 action receipt。
+- source 不可见、query 为空、同文不同身份、仅看见 CANCELLED 都不足以得出上述结论，继续保留未知，不自动重发操作。
+- 原 action 查询由单一 reconciliation effect 持有；同一 session/connection/action 不并发查询。查询期间若到达更新 cut，完成后重新检查最新 cut；不依赖模型继续输出才能收敛。
+
 ## 10. wait_agent 与 steer
 
 改投得到的 replacement 是普通 exact pending steer，必须复用 Subagent-R1 已激活的行为：
@@ -297,6 +306,8 @@ terminal local transition 仍按 PR02 typed 状态展示，但不得把已成功
 - action 明确 rejected/failed；
 - owner/session 变化，随后由新 snapshot 重建 pending steer；
 - replacement canonical terminal 且没有 consumed entry。
+
+accepted steer 在当前快照中既无 exact pending replacement，也无 exact consumed entry 时，按原 action command 查询最终结果；不以“浏览器曾观察到 replacement PENDING”为前置条件。接纳后立即 STOP／失败的路径也必须移除被拒绝的乐观卡，不能永久停留在“引导”。
 
 pending steer 在 reload/第二窗口中仍由 canonical `prompt_queue` 投影为蓝色“引导”，而不是退回 composer 的 NEW_TURN 列表。observer 可以看见，但没有操作按钮。
 
@@ -371,6 +382,7 @@ continuity 测试必须逐字验证 SYSTEM/tools 不变、旧 messages 不改写
 6. 任何 cancel→steer 或 steer→cancel 的前端双请求实现；
 7. 按正文消除乐观 steer 的路径；
 8. 若搜索证明无正式调用方，删除旧 `STEER_ACTIVE_TURN` 协议/adapter/browser command；否则记录保留调用方并仅删除浏览器 composer 入口。
+9. 删除 queue action 对 `observedPending` 的依赖，以及 reconnect 分支内与 reconciliation effect 重复查询 action 的路径。PR02 普通 submission 的独立状态机不在本项删除范围内。
 
 不保留 feature flag、兼容 UI、旧按钮隐藏样式或双提交 fallback。
 
@@ -398,6 +410,9 @@ continuity 测试必须逐字验证 SYSTEM/tools 不变、旧 messages 不改写
 - delete 成功移除；失败保持。
 - observer/reload/跨 session late ACK 不获得操作或串状态。
 - 多条同文、乱序 action、loop 在点击时结束。
+- 拒绝 ACK 丢失且 action query 为空：exact source 被 FIFO 消费后解锁；同文其他 source 不解锁；consumed entry 不在可见历史时查询原 submission。
+- 编辑期间已打开的技能菜单不能写入草稿；意外存在另一份草稿时两份正文保留且 composer 可继续操作。
+- replacement 未被任何 PENDING snapshot 观察到就拒绝，仍按原 action 查询移除乐观卡；查询期间的新 cut 不丢失，也不启动并发查询。
 
 ## 17. Phase B：Kernel 与协议
 
@@ -461,20 +476,20 @@ continuity 测试必须逐字验证 SYSTEM/tools 不变、旧 messages 不改写
 
 只有全部满足才标记 ACTIVATED：
 
-- [ ] 运行中 composer 输入只进入 canonical NEW_TURN queue；旧直达 steer UX 已删除。
-- [ ] composer queue 展示 exact 正文和顺序，每项只有带 icon 的发送/编辑/删除。
-- [ ] edit/delete 使用 kernel exact CAS；无浏览器假删除、无草稿覆盖。
-- [ ] send 使用单事务 source→replacement steer 改投；不存在前端 cancel＋send 双请求。
-- [ ] 改投与 ROOT settlement 有唯一赢家；accepted steer 必有同 turn successor handling，失败时 source 不丢失。
-- [ ] wait_agent 被 replacement steer 精确唤醒，NEW_TURN 仍不打断。
-- [ ] accepted 后立即显示单张蓝色“引导”；canonical exact 接替，无“模型已读”伪承诺。
-- [ ] 未操作队列在 loop 结束后由现有 FIFO owner 逐条进入新 ROOT；浏览器不重发。
-- [ ] 权限、Hook、plan handoff、STOP/cancellation/effect settlement 与 observer owner 保持。
-- [ ] SYSTEM/tools byte-identical、messages suffix-only、compaction continuity 通过。
-- [ ] 无新表、receipt、scheduler、durable delivery queue、event kind、subject slot 或 fingerprint。
-- [ ] focused/full regression、protocol generation、lint/typecheck/build、isolated wheel/launcher 全部通过。
-- [ ] 真实 provider/browser 覆盖 final-message/steer race、编辑、删除、自动 FIFO、reload/observer 和窄屏。
-- [ ] 规格、索引、证据与最终 bundle 同步；Git 状态如实记录，未自动 stage/commit。
+- [x] 运行中 composer 输入只进入 canonical NEW_TURN queue；旧直达 steer UX 已删除。
+- [x] composer queue 展示 exact 正文和顺序，每项只有带 icon 的发送/编辑/删除。
+- [x] edit/delete 使用 kernel exact CAS；无浏览器假删除、无草稿覆盖。
+- [x] send 使用单事务 source→replacement steer 改投；不存在前端 cancel＋send 双请求。
+- [x] 改投与 ROOT settlement 有唯一赢家；accepted steer 必有同 turn successor handling，失败时 source 不丢失。
+- [x] wait_agent 被 replacement steer 精确唤醒，NEW_TURN 仍不打断。
+- [x] accepted 后立即显示单张蓝色“引导”；canonical exact 接替，无“模型已读”伪承诺。
+- [x] 未操作队列在 loop 结束后由现有 FIFO owner 逐条进入新 ROOT；浏览器不重发。
+- [x] 权限、Hook、plan handoff、STOP/cancellation/effect settlement 与 observer owner 保持。
+- [x] SYSTEM/tools byte-identical、messages suffix-only、compaction continuity 通过。
+- [x] 无新表、receipt、scheduler、durable delivery queue、event kind、subject slot 或 fingerprint。
+- [ ] 修订后的 focused/full regression、protocol generation、lint/typecheck/build、isolated wheel/launcher 全部通过；原验收不能代替修订后安装产物验收。
+- [ ] 修订后的真实 provider/browser 覆盖 final-message/steer race、编辑、删除、自动 FIFO、reload/observer 和窄屏。
+- [x] 规格、索引、证据与最终 bundle 同步；Git 状态如实记录，未自动 stage/commit。
 
 ## 21. 剩余边界
 
@@ -485,3 +500,42 @@ continuity 测试必须逐字验证 SYSTEM/tools 不变、旧 messages 不改写
 - pending/optimistic UI 在进程崩溃后可丢失；canonical queue/action/entry 仍可通过 reload 重建，不为视觉连续性新增 durable receipt。
 
 最终产品不变量是：**用户可以先排队、再选择任意普通待处理输入引导当前任务；界面立即确认用户动作，kernel 精确保证消息只进入当前 turn 或未来 FIFO 其中之一，绝不丢失、重复或伪称模型已读。**
+
+
+## 22. 原实施与 activation 记录（2026-09-12；第 23 节修订之前）
+
+Phase A 先保留双请求丢失/重复的确定性复现和新 queue/composer 红灯；Phase B–C 实现单事务 exact queue action、严格协议字段、composer queue 和即时蓝色引导，并删除旧浏览器直达 steer。非浏览器调用方搜索未发现正式 V3 direct-steer caller，故删除该协议 command 并 reserve 旧编号；内部 Host steer / queue delivery mode 继续由既有 kernel owner 使用，不构成协议兼容分支。
+
+浏览器验收另复现了 reload 初始 live-control ROOT 指针在后续 ROOT 残留的问题，先补 exact 失败断言，再使 queue action 唯一从 CURRENT_CONTROL 的 RUNNING ROOT 冻结目标；不 fallback 到旧 live 指针，不改变 Host closing/权限/取消/effect settlement 语义。
+
+最终 Python full **1758 passed**、explicit focused **293 passed**、前端 full **214 passed**；protocol generation、ruff、lint、TypeScript、build 和 diff check 全过。最终 wheel 从非源码 cwd 启动，import/static 均来自临时 venv；最终 bundle 为 `index-9FLB7y9d.js` / `index-Cryz142G.css`。
+
+保存配置驱动的 OpenRouter `openai/gpt-5.6-luna` dogfood 共 **41 次真实 provider 调用**（独立 probe 14、浏览器 27）。覆盖 wait exact wake 与 child continuation、四项 FIFO、edit/delete、final-visible 同 turn successor、completion-first source 保留后自动 FIFO、同文、大 blob、lost ACK 原 command query、reload/observer、390×844 与桌面布局。SYSTEM/tools exact 与 messages suffix continuity 在自动化和真实输入中均验证；无新增未授权 durability/receipt/fingerprint/scheduler。
+
+完整命令、red/green 日志、可见截图、实际 command/source/replacement/turn/entry ID、调用计数、原始 wire/canonical 证据、边界与 Git 状态见 [activation evidence](output/playwright/pr04-dogfood/activation-evidence.md) 和 [verified evidence](output/playwright/pr04-dogfood/verified-evidence.json)。没有 stage/commit；本次 activation 不改变 PR01/PR03 或其他批次的独立状态。
+
+## 23. 审查后修正（2026-09-12）
+
+本轮直接在既有 dirty 工作树实施三个 PR04 finding，并联修 Subagent-R1 的来源关系投影。没有覆盖、清理或代为提交既有改动。
+
+- **原操作无 durable row 的未知结果**：先查询原 action，缺少 receipt 时用 exact source 的已消费事实结束不可能再成功的操作。原文已用于新 ROOT 时不恢复到草稿；未知事实保持未知。补充了来源 entry 不在可见历史、只能查询原 submission 的路径。
+- **编辑占用草稿**：textarea、技能触发器和已打开菜单统一服从编辑保留状态。意外存在其他草稿时展示待恢复原文，允许处理草稿后恢复；重连不删除尚未回填的 accepted edit。
+- **快速拒绝的 steer**：删除 action 的 `observedPending` 门槛；replacement 没有进入任一 PENDING snapshot 也查询真实终态并撤去乐观卡。删除重连分支内的第二查询者，同一 action 查询串行；查询期间的新 cut 在结束后继续检查。
+
+三个原始 PR04 回归加 Subagent-R1 回归先确认失败，再修复生产路径；另补草稿冲突、不可见 consumed source 和查询中到达新 cut 的测试。没有降低原断言或增加 skip/xfail。一个旧来源文案 fixture 补齐 canonical ROOT 顺序和 task parent 身份；query fixture 按实际 command 区分 source cancellation 和 replacement rejection。
+
+本轮验证命令与结果（frontend 命令 cwd 为 `frontend/`；协议命令 cwd 为仓库根目录）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm test -- app/pulsara-app.test.tsx lib/runtime-adapter.test.ts components/workbench-view.test.tsx` | 154 passed |
+| `npm test` | 221 passed，15 个文件 |
+| `npm run lint` | 通过 |
+| `./node_modules/.bin/tsc --noEmit --incremental false` | 通过 |
+| `npm run build:local` | 通过；入口 `index-DkOQlHP2.js` / `index-Cryz142G.css` |
+| `uv run python tools/generate_terminal_protocol_contract.py --check` | 通过 |
+| `git diff --check` | 通过 |
+
+构建仍有既有的 500 kB chunk 提示；Vitest 启动仍有 Node `--localstorage-file` 提示。旧生成的 JS/map 已由标准 build 替换，CSS 内容未变。
+
+本轮不修改 kernel、协议、schema、权限、effect settlement、provider prefix、保存配置或数据库，不新增持久状态、receipt 或 fingerprint。Python full、continuity、isolated wheel/launcher 和真实 provider/browser 未重新执行；第 22 节证据保留为历史，不计为修订后 activation。当前无 stage/commit，需完成第 20 节未勾选门槛后才能重新 ACTIVATED。

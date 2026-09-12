@@ -1,12 +1,139 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ToolArtifactPage } from '../lib/runtime-adapter';
+import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../lib/runtime-adapter';
 import { WorkbenchView } from './workbench-view';
 
 afterEach(() => {
   vi.unstubAllGlobals();
   cleanup();
+});
+
+describe('PR04 composer queue hard cut', () => {
+  const item: QueuedPrompt = {
+    queueItemId: 'source', commandId: 'submission', sequence: 1, status: 'pending',
+    deliveryMode: 'new-turn', body: '  original\n原文  ', permission: 'read-only',
+    requestedPermission: 'ask-permissions',
+  };
+  const acceptedAction = (kind: QueuedPromptAction['kind']): QueuedPromptAction => ({
+    sessionId: 'session-one', connectionGeneration: 1, commandId: 'action', kind,
+    source: item, targetTurnId: kind === 'send' ? 'turn-one' : undefined,
+    submittedAt: '2026-09-12T05:00:00Z', status: 'accepted', receipt: {
+      commandId: 'action', status: kind === 'send' ? 'pending' : 'succeeded',
+      promptDelivery: { queueItemId: kind === 'send' ? 'replacement' : 'source',
+        queueStatus: kind === 'send' ? 'PENDING' : 'CANCELLED', deliveryMode: kind === 'send' ? 'steer' : 'new-turn' },
+    },
+  });
+
+  it('keeps the source busy until accepted then shows one exact steer, replaced by its canonical entry', () => {
+    const action = acceptedAction('send');
+    const view = render(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [{ ...action, status: 'submitting' }] })} />);
+    expect(screen.queryByRole('article', { name: '引导' })).toBeNull();
+    const queue = screen.getByRole('region', { name: '等待处理的输入' });
+    expect(within(queue).getAllByRole('button').every(button => (button as HTMLButtonElement).disabled)).toBe(true);
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [action] })} />);
+    expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
+    expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
+    expect(view.container.querySelector('.user-steer p')?.textContent).toBe(item.body);
+    expect(screen.queryByText(/模型已收到|模型已读/)).toBeNull();
+    view.rerender(<WorkbenchView {...props({ queueActions: [action], messages: [{
+      id: 'entry', turnId: 'turn-one', role: 'user', userKind: 'steer', body: item.body,
+      time: '13:00', status: 'completed', inputSource: { commandId: 'action', queueItemId: 'replacement', deliveryMode: 'steer' },
+    }] })} />);
+    expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
+    expect(view.container.querySelector('[data-action-command-id]')).toBeNull();
+  });
+
+  it('does not deduplicate another command with identical text', () => {
+    render(<WorkbenchView {...props({ queueActions: [acceptedAction('send')], messages: [{
+      id: 'other-entry', turnId: 'turn-one', role: 'user', userKind: 'steer', body: item.body,
+      time: '12:59', status: 'completed', inputSource: { commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'steer' },
+    }] })} />);
+    expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(2);
+  });
+
+  it('refuses edit with any draft and preserves both texts without sending cancellation', () => {
+    const onQueueAction = vi.fn(async () => undefined);
+    render(<WorkbenchView {...props({ queuedPrompts: [item], onQueueAction })} />);
+    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), { target: { value: 'existing draft' } });
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+    expect(onQueueAction).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement).value).toBe('existing draft');
+    expect(screen.getByRole('region', { name: '等待处理的输入' }).querySelector('p')?.textContent).toBe(item.body);
+  });
+
+  it('restores the complete original and requested permission only after exact edit cancellation', async () => {
+    const onPermissionChange = vi.fn();
+    const action = acceptedAction('edit');
+    const onQueueActionHandled = () => view.rerender(<WorkbenchView {...props({ queueActions: [{ ...action, handled: true }], onPermissionChange, onQueueActionHandled })} />);
+    const view = render(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [{ ...action, status: 'submitting' }], onPermissionChange })} />);
+    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+    expect(input.value).toBe('');
+    expect(input.disabled).toBe(true);
+    view.rerender(<WorkbenchView {...props({ queueActions: [action], onPermissionChange, onQueueActionHandled })} />);
+    await waitFor(() => expect(input.value).toBe(item.body));
+    expect(onPermissionChange).toHaveBeenCalledWith('ask-permissions');
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(input.selectionStart).toBe(item.body.length);
+    expect(input.selectionEnd).toBe(item.body.length);
+  });
+
+  it('keeps a rejected delete in place and moves successful delete focus to the next row', async () => {
+    const next = { ...item, queueItemId: 'next', commandId: 'next-command', sequence: 2 };
+    const action = acceptedAction('delete');
+    const view = render(<WorkbenchView {...props({ queuedPrompts: [item, next], queueActions: [{ ...action, status: 'rejected' }] })} />);
+    expect(view.container.querySelectorAll('.composer-queue article')).toHaveLength(2);
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [item, next], queueActions: [action] })} />);
+    expect(view.container.querySelectorAll('.composer-queue article')).toHaveLength(1);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '删除' })));
+  });
+
+  it('does not reuse a pending edit from another session', () => {
+    render(<WorkbenchView {...props({ queueActions: [{ ...acceptedAction('edit'), sessionId: 'another-session' }] })} />);
+    expect((screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('keeps an unexpected draft editable while retaining an accepted edit for later restoration', async () => {
+    const view = render(<WorkbenchView {...props()} />);
+    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: 'another draft' } });
+    // A restored connection can reveal an accepted edit after a local draft exists.
+    const action = acceptedAction('edit');
+    const onQueueActionHandled = vi.fn();
+    view.rerender(<WorkbenchView {...props({ queueActions: [action], onQueueActionHandled })} />);
+    expect(input.disabled).toBe(false);
+    expect(input.value).toBe('another draft');
+    expect(screen.getByRole('region', { name: '等待处理的输入' }).querySelector('p')?.textContent).toBe(item.body);
+    expect(screen.getByRole('status').textContent).toContain('请先处理当前草稿');
+    expect(onQueueActionHandled).not.toHaveBeenCalled();
+    fireEvent.change(input, { target: { value: '' } });
+    await waitFor(() => expect(input.value).toBe(item.body));
+    expect(onQueueActionHandled).toHaveBeenCalledWith(action.commandId);
+  });
+  it.each([{}, { metaKey: true }, { ctrlKey: true }])('always queues Enter, including modifiers %j', async (modifiers) => {
+    const onSend = vi.fn(async () => true);
+    render(<WorkbenchView {...props({ onSend })} />);
+    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), { target: { value: '  exact\ninput  ' } });
+    fireEvent.keyDown(screen.getByLabelText('发送给 Pulsara'), { key: 'Enter', ...modifiers });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('  exact\ninput  ', 'read-only', false));
+    expect(screen.queryByText(/⌘ Enter/)).toBeNull();
+  });
+
+  it('places exact duplicate inputs in composer with three accessible flat actions', () => {
+    const queuedPrompts = ['one', 'two'].map((id, index) => ({
+      queueItemId: id, commandId: `command-${id}`, sequence: index + 1,
+      status: 'pending' as const, deliveryMode: 'new-turn' as const,
+      body: 'same\n原文', permission: 'read-only' as const,
+    }));
+    const view = render(<WorkbenchView {...props({ queuedPrompts, queuedCount: 2 })} />);
+    const queue = screen.getByRole('region', { name: '等待处理的输入' });
+    expect(queue.closest('.composer-wrap')).toBeTruthy();
+    expect(view.container.querySelector('.thread-scroll .prompt-queue')).toBeNull();
+    expect(within(queue).getAllByRole('button', { name: '发送' })).toHaveLength(2);
+    expect(within(queue).getAllByRole('button', { name: '编辑' })).toHaveLength(2);
+    expect(within(queue).getAllByRole('button', { name: '删除' })).toHaveLength(2);
+    expect(queue.querySelectorAll('button svg')).toHaveLength(6);
+  });
 });
 
 const model = {
@@ -39,6 +166,9 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     queuedCount: 0,
     queuedPrompts: [],
     localSubmissions: [],
+    queueActions: [],
+    onQueueAction: vi.fn(async () => undefined),
+    onQueueActionHandled: vi.fn(),
     runtimeStatus: 'online',
     modelConfigurations: [model],
     modelCallBinding: { connection_id: model.id, reasoning: null },

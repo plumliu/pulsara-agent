@@ -4,7 +4,6 @@ import {
   createUserControlCommandRef,
   LocalHttpRuntimeAdapter,
   mergeRuntimeTaskInventory,
-  selectPromptCommand,
   type RuntimeProjection,
 } from './runtime-adapter';
 import type { AgentTask } from './pulsara-types';
@@ -281,7 +280,35 @@ it('preserves pending safe-point adoption from a user capability mutation', asyn
   });
 });
 
-describe('selectPromptCommand', () => {
+describe('exact prompt projection', () => {
+  it('preserves canonical ROOT order through inventory merges when an observation-only ROOT has no message', async () => {
+    const entry = (id: string, turn: string, sequence: number, kind: string) => ({
+      entry_id: id, turn_id: turn, entry_sequence: String(sequence), entry_kind: kind,
+      scope_kind: 'ROOT', content: inlineContent('text'),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', event_sequence_cut: '8', entries: [
+        entry('prompt-a', 'A', 1, 'USER_MESSAGE'),
+        entry('answer-a', 'A', 2, 'ASSISTANT_MESSAGE'),
+        // B was started by a monitor, then interrupted before assistant output.
+        entry('monitor-b', 'B', 3, 'TERMINAL_OBSERVATION'),
+        entry('prompt-c', 'C', 4, 'USER_MESSAGE'),
+        { ...entry('completion', 'C', 5, 'INTER_AGENT_MESSAGE'), source_subagent_task_id: 'reader' },
+      ], control: { subagent_tasks: [{ task_id: 'reader', parent_turn_id: 'A', label: 'reader',
+        status: 'COMPLETED', completion_accepted: true }] } } },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200 })));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const projection = connection.current();
+    expect(projection.messages.find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
+    const merged = mergeRuntimeTaskInventory(projection, projection.agentTasks);
+    expect(merged.messages.find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
+    expect(mergeRuntimeTaskInventory(merged, merged.agentTasks).messages
+      .find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
+  });
+
   it('joins tool results exactly across interrupted history, reordered results, and paging', async () => {
     const content = (text: string) => ({ kind: 'INLINE', inline_content: btoa(text) });
     const request = (id: string, sequence: number, call: string) => ({
@@ -315,18 +342,6 @@ describe('selectPromptCommand', () => {
     expect(messages.find(m => m.id === 'b')?.traces?.[0]).toMatchObject({ status: 'failed' });
     expect(messages.find(m => m.id === 'b')?.traces).toHaveLength(1);
     expect(messages.find(m => m.id === 'detached')?.traces?.[0]).toMatchObject({ status: 'failed' });
-  });
-
-  it('submits a normal prompt when there is no active turn', () => {
-    expect(selectPromptCommand(false, false)).toBe('SUBMIT_PROMPT');
-  });
-
-  it('queues a new prompt instead of rewriting an active turn', () => {
-    expect(selectPromptCommand(true, false)).toBe('SUBMIT_PROMPT');
-  });
-
-  it('uses the explicit steer command for an active turn', () => {
-    expect(selectPromptCommand(true, true)).toBe('STEER_ACTIVE_TURN');
   });
 
   it('keeps an in-flight user steer distinct from an ordinary user turn', async () => {
@@ -1779,6 +1794,7 @@ describe('session task inventory', () => {
       completionAccepted: true, dependencyIds: [], color: 'blue' as const,
     };
     const projection: RuntimeProjection = {
+      canonicalRootTurnIds: ['turn-1', 'turn-2', 'turn-3'],
       messages: [
         { id: 'root-1', turnId: 'turn-1', entrySequence: 1, role: 'user', time: '1', body: '一' },
         { id: 'root-2', turnId: 'turn-2', entrySequence: 2, role: 'user', time: '2', body: '二' },
@@ -1805,6 +1821,9 @@ describe('session task inventory', () => {
       { label: '上一任务', relation: 'previous' },
       { label: '当前任务', relation: 'current' },
     ]);
+    const withoutOrder = mergeRuntimeTaskInventory({ ...merged, canonicalRootTurnIds: undefined }, merged.agentTasks);
+    expect(withoutOrder.messages.slice(-3).map(message => message.sourceSubagentRelation))
+      .toEqual([undefined, undefined, 'current']);
   });
 });
 

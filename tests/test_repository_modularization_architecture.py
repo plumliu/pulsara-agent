@@ -159,6 +159,8 @@ _PR03_ADDED_METHODS = {
     "list_subagent_task_activities",
     "list_subagent_task_groups",
 }
+# PR04 §6: source CAS plus replacement INSERT shares the existing writer transaction.
+_PR04_ADDED_METHODS = {"apply_queued_prompt_action"}
 _PR03_CHANGED_METHODS = {
     "interrupt_turn",
 }
@@ -831,6 +833,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _SUBAGENT_WAIT_REFINEMENT_ADDED_METHODS
                 | _MODEL_UNIVERSE_ADDED_METHODS
                 | _PR03_ADDED_METHODS
+                | _PR04_ADDED_METHODS
                 | {
                     "_management_connection",
                     "fork_conversation",
@@ -956,6 +959,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _SUBAGENT_WAIT_REFINEMENT_ADDED_METHODS
             | _MODEL_UNIVERSE_ADDED_METHODS
             | _PR03_ADDED_METHODS
+            | _PR04_ADDED_METHODS
             | {
                 "_management_connection",
                 "fork_conversation",
@@ -1047,6 +1051,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND9_2_CHANGED_METHODS
         | _MODEL_UNIVERSE_ADDED_METHODS
         | _PR03_ADDED_METHODS
+        | _PR04_ADDED_METHODS
         | _PR03_CHANGED_METHODS
         | _MODEL_UNIVERSE_CHANGED_METHODS
         | _MODEL_UNIVERSE_REMOVED_METHODS

@@ -82,6 +82,10 @@ from pulsara_agent.conversation_kernel.contracts import (
     canonical_digest,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.queued_prompt_actions import (
+    QueuedPromptAction,
+    QueuedPromptActionRejected,
+)
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     DEFAULT_KERNEL_WATCHDOG_POLICY,
     KernelExecutionDeadlineFactory,
@@ -2716,6 +2720,84 @@ class KernelHostSession:
                 delivery_mode=delivery_mode.value,
             ),
         )
+
+    async def cancel_queued_prompt(
+        self, *, command_id: str, source_queue_item_id: str
+    ) -> KernelCommandOutcome:
+        return await self._apply_queued_prompt_action(QueuedPromptAction(
+            self.session_id, command_id, source_queue_item_id,
+        ))
+
+    async def steer_queued_prompt(
+        self, *, command_id: str, source_queue_item_id: str, target_turn_id: str
+    ) -> KernelCommandOutcome:
+        return await self._apply_queued_prompt_action(QueuedPromptAction(
+            self.session_id, command_id, source_queue_item_id, target_turn_id,
+        ))
+
+    async def _apply_queued_prompt_action(
+        self, candidate: QueuedPromptAction
+    ) -> KernelCommandOutcome:
+        # Reserve only process-local admission here; no database IO under the
+        # Host lock. The existing canonical writer resolves target/source/fence.
+        async with self._lock:
+            self._require_open()
+            if self._plan_exit_fence:
+                return KernelCommandOutcome(
+                    candidate.command_id, "REJECTED", "", "PLAN_TRANSITION_BUSY",
+                    "A Plan force-exit transition is in progress.",
+                )
+            try:
+                reservation = self._reserve_compaction_write_locked(
+                    scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None,
+                )
+            except RuntimeError:
+                return KernelCommandOutcome(
+                    candidate.command_id, "REJECTED", "", "COMPACTION_IN_PROGRESS",
+                    "Context compaction is in progress for the ROOT scope.",
+                )
+        try:
+            try:
+                await self._io.run(
+                    self.repository.apply_queued_prompt_action, self._lease.guard,
+                    candidate=candidate, occurred_at=datetime.now().astimezone(),
+                    actor_id=self.host_session_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except QueuedPromptActionRejected as error:
+                return KernelCommandOutcome(
+                    candidate.command_id, "REJECTED", "", error.code,
+                    {
+                        "COMMAND_CONFLICT": "该操作身份已经用于另一项操作。",
+                        "PROMPT_NOT_PENDING": "这条输入已不在等待队列中。",
+                        "PROMPT_ALREADY_CONSUMED": "这条输入已开始处理。",
+                        "STEER_TARGET_CLOSED": "当前任务已结束；输入仍按队列顺序处理。",
+                        "PROMPT_HAS_PLAN_HANDOFF": "这条输入关联规划交接，暂时不能改为引导。",
+                    }[error.code],
+                )
+            except Exception:
+                # Confirm the original action only. Never reissue a mutation
+                # after an unknown ACK, or infer a winner from source text.
+                row = await self._query_command_row(candidate.command_id)
+                if row is None:
+                    raise
+                if (row["command_kind"] != candidate.command_kind
+                    or row["semantic_digest"] != candidate.semantic_digest
+                    or row["target_queue_item_id"] != candidate.target_queue_item_id):
+                    raise ConversationKernelConflict("queue action confirmation conflicts")
+            self._hook_context.retire_prompt_candidate(
+                scope=self._hook_root_scope,
+                prompt_candidate_id=candidate.source_queue_item_id,
+            )
+            self._queue_wake.set()
+            if candidate.target_turn_id is not None:
+                await self._subagents.notify_root_input_activity()
+            outcome = await self.query_command(candidate.command_id)
+            if outcome is None:
+                raise ConversationKernelConflict("queue action has no canonical winner")
+            return outcome
+        finally:
+            await self._release_compaction_write_reservation(reservation)
 
     async def steer_active_turn(
         self, *, command_id: str, text: str, target_turn_id: str
@@ -5564,12 +5646,17 @@ class KernelHostSession:
             )
             target = str(row.get("consumed_turn_id") or row["target_queue_item_id"])
             status = str(row.get("consumed_turn_status") or "")
+            if command_kind == "CANCEL_PROMPT" and queue_status == "CANCELLED":
+                return KernelCommandOutcome(
+                    command_id, "SUCCEEDED", target, "PROMPT_CANCELLED",
+                    "排队输入已取消。", prompt_delivery=prompt_delivery,
+                )
             if queue_status == "PENDING":
                 return KernelCommandOutcome(
                     command_id,
                     "PENDING",
                     target,
-                    "PROMPT_QUEUED",
+                    "PROMPT_STEER_QUEUED" if command_kind == "STEER_QUEUED_PROMPT" else "PROMPT_QUEUED",
                     "Prompt is queued.",
                     prompt_delivery=prompt_delivery,
                 )
@@ -5579,7 +5666,7 @@ class KernelHostSession:
                     "REJECTED",
                     target,
                     str(row.get("queue_terminal_reason") or queue_status),
-                    "The queued prompt was not delivered.",
+                    "已改为引导。" if row.get("queue_terminal_reason") == "USER_REDIRECTED_TO_STEER" else "The queued prompt was not delivered.",
                     prompt_delivery=prompt_delivery,
                 )
             if queue_status == "CONSUMED" and not status:

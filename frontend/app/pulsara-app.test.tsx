@@ -313,7 +313,13 @@ class FakeConnection implements RuntimeConnection {
     return { commandId, status: 'succeeded', publicMessage: '任务已经开始。' };
   });
 
-  async steerActiveTurn(commandId: string): Promise<CommandReceipt> {
+  async cancelQueuedPrompt(commandId: string, queueItemId: string): Promise<CommandReceipt> {
+    return { commandId, status: 'succeeded', publicCode: 'PROMPT_CANCELLED', promptDelivery: {
+      queueItemId, queueStatus: 'CANCELLED', deliveryMode: 'new-turn',
+    } };
+  }
+
+  async steerQueuedPrompt(commandId: string): Promise<CommandReceipt> {
     return { commandId, status: 'succeeded' };
   }
 
@@ -393,7 +399,7 @@ class FakeConnection implements RuntimeConnection {
     };
   });
 
-  queryCommand = vi.fn(async (): Promise<CommandReceipt | undefined> => {
+  queryCommand = vi.fn<RuntimeConnection['queryCommand']>(async () => {
     if (this.closed) {
       throw new RuntimeApiError('CONNECTION_CLOSED', '本地连接已经关闭。', true);
     }
@@ -2046,8 +2052,11 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''),
+      canonicalRootTurnIds: ['turn-source', 'turn-target'],
+      agentTasks: [{ id: 'task-internal', parentId: 'turn-source', label: 'reader', role: '研究',
+        objective: '读取结果', dependencyIds: [], status: 'completed', color: 'blue', completionAccepted: true }],
       messages: [{
-        id: 'accepted-result', role: 'user', userKind: 'subagent-completion', time: '18:14',
+        id: 'accepted-result', turnId: 'turn-target', role: 'user', userKind: 'subagent-completion', time: '18:14',
         body: '{"status":"accepted","task_id":"internal"}',
         sourceSubagentTaskId: 'task-internal',
         sourceSubagentLabel: 'reader',
@@ -2871,13 +2880,15 @@ describe('PulsaraApp', () => {
     const { container } = render(<PulsaraApp adapter={adapter} />);
 
     const queue = await screen.findByRole('region', { name: '等待处理的输入' });
-    expect([...queue.querySelectorAll('pre')].map((item) => item.textContent))
-      .toEqual(['相同\n正文', '相同\n正文']);
+    expect([...queue.querySelectorAll('p')].map((item) => item.textContent))
+      .toEqual(['相同\n正文']);
+    const steer = screen.getByRole('article', { name: '引导' });
+    expect(within(steer).getByText('相同 正文')).toBeTruthy();
+    expect(steer.closest('[data-queue-item-id]')?.getAttribute('data-queue-item-id')).toBe('queue-1');
     expect([...queue.querySelectorAll('article')].map((item) => item.dataset.queueItemId))
-      .toEqual(['queue-1', 'queue-2']);
-    expect(within(queue).getByText('目标轮次：turn-1')).toBeTruthy();
-    expect(within(queue).getByText('适用权限：只读')).toBeTruthy();
-    expect(within(queue).getByText('适用权限：未知')).toBeTruthy();
+      .toEqual(['queue-2']);
+    expect(queue.closest('.composer-wrap')).toBeTruthy();
+    expect(within(queue).queryByRole('button')).toBeNull();
     expect(container.querySelectorAll('.user-turn')).toHaveLength(0);
   });
 
@@ -3012,7 +3023,7 @@ describe('PulsaraApp', () => {
         deliveryMode: 'new-turn', body: '随后被取消的输入', permission: 'accept-edits',
       }],
     });
-    expect(await screen.findByText('适用权限：接受编辑')).toBeTruthy();
+    await waitFor(() => expect(document.querySelector('[data-queue-item-id="queue-terminal"] p')?.textContent).toBe('随后被取消的输入'));
 
     active.emit({
       ...projection(''), messages: [], isRunning: true, eventSequence: 3,
@@ -3256,5 +3267,236 @@ describe('PulsaraApp', () => {
     expect(within(dialog).queryByText('结果尚未加入主对话。')).toBeNull();
     expect(within(dialog).queryByRole('button', { name: '用这份结果继续' })).toBeNull();
     expect(within(dialog).queryByText(/不会重新运行子任务/)).toBeNull();
+  });
+});
+
+describe('PR04 atomic queue action ownership', () => {
+  const source = {
+    queueItemId: 'queue-source', commandId: 'source-command', sequence: 1, status: 'pending' as const,
+    deliveryMode: 'new-turn' as const, body: '  keep\n原文  ', permission: 'read-only' as const,
+    requestedPermission: 'ask-permissions' as const,
+  };
+  async function setup() {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = { ...projection(''), messages: [], queuedCount: 1, queuedPrompts: [source],
+      control: { active_turns: [{ turn_id: 'turn-1', scope_kind: 'ROOT', status: 'RUNNING' }] } };
+    const view = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('region', { name: '等待处理的输入' });
+    return { adapter, active: adapter.lastConnection!, ...view };
+  }
+  const accepted = (commandId: string): CommandReceipt => ({
+    commandId, status: 'pending', publicCode: 'PROMPT_STEER_QUEUED', promptDelivery: {
+      queueItemId: 'replacement', queueStatus: 'PENDING', deliveryMode: 'steer',
+    },
+  });
+
+  it('sends one text-free action, waits for ACK, then exactly replaces the optimistic card', async () => {
+    const { active, container } = await setup();
+    const pending = deferred<CommandReceipt>();
+    const steer = vi.spyOn(active, 'steerQueuedPrompt').mockReturnValue(pending.promise);
+    const cancel = vi.spyOn(active, 'cancelQueuedPrompt');
+    const send = within(screen.getByRole('region', { name: '等待处理的输入' })).getByRole('button', { name: '发送' });
+    fireEvent.click(send);
+    fireEvent.click(send);
+    expect(steer).toHaveBeenCalledTimes(1);
+    const commandId = steer.mock.calls[0][0];
+    expect(steer).toHaveBeenCalledWith(commandId, source.queueItemId, 'turn-1');
+    expect(cancel).not.toHaveBeenCalled();
+    expect(active.submitPrompt).not.toHaveBeenCalled();
+    expect(screen.queryByRole('article', { name: '引导' })).toBeNull();
+    pending.resolve(accepted(commandId));
+    await screen.findByRole('article', { name: '引导' });
+    expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
+    expect(container.querySelector('.user-steer p')?.textContent).toBe(source.body);
+    active.emit({ ...projection(''), queuedCount: 0, queuedPrompts: [], eventSequence: 3,
+      messages: [{ id: 'canonical-steer', role: 'user', userKind: 'steer', turnId: 'turn-1',
+        time: 'now', body: source.body, status: 'completed',
+        inputSource: { commandId, queueItemId: 'replacement', deliveryMode: 'steer' } }],
+    });
+    await waitFor(() => expect(container.querySelector('[data-action-command-id]')).toBeNull());
+    expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
+  });
+
+  it('recovers a lost action ACK by querying its original command on the new connection', async () => {
+    const { active, adapter } = await setup();
+    const steer = vi.spyOn(active, 'steerQueuedPrompt').mockImplementation(async commandId => {
+      adapter.queryCommandResult = accepted(commandId);
+      throw new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', 'ACK lost', true);
+    });
+    fireEvent.click(within(screen.getByRole('region', { name: '等待处理的输入' })).getByRole('button', { name: '发送' }));
+    await screen.findByRole('article', { name: '引导' });
+    expect(adapter.connectCalls).toHaveLength(2);
+    expect(steer).toHaveBeenCalledTimes(1);
+    expect(adapter.lastConnection!.queryCommand).toHaveBeenCalledWith(steer.mock.calls[0][0]);
+    expect(adapter.lastConnection!.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('freezes the current canonical ROOT after reload instead of a stale live snapshot ROOT', async () => {
+    const { active } = await setup();
+    const steer = vi.spyOn(active, 'steerQueuedPrompt').mockImplementation(async commandId => accepted(commandId));
+    active.emit({ ...active.current(), activeTurnId: 'turn-old-snapshot',
+      control: { active_turns: [{ turn_id: 'turn-successor', scope_kind: 'ROOT', status: 'RUNNING' }] },
+      eventSequence: 9,
+    });
+    fireEvent.click(within(screen.getByRole('region', { name: '等待处理的输入' })).getByRole('button', { name: '发送' }));
+    expect(steer).toHaveBeenCalledWith(expect.any(String), source.queueItemId, 'turn-successor');
+    await screen.findByRole('article', { name: '引导' });
+  });
+
+  it('does not send to the reloaded ROOT when canonical control has no RUNNING ROOT', async () => {
+    const { active } = await setup();
+    const steer = vi.spyOn(active, 'steerQueuedPrompt');
+    active.emit({ ...active.current(), activeTurnId: 'turn-old-snapshot', control: {}, eventSequence: 10 });
+    fireEvent.click(within(screen.getByRole('region', { name: '等待处理的输入' })).getByRole('button', { name: '发送' }));
+    expect(steer).not.toHaveBeenCalled();
+    expect(screen.getByText('这条输入会按队列顺序自动处理。')).toBeTruthy();
+    expect(screen.getByRole('region', { name: '等待处理的输入' })).toBeTruthy();
+  });
+
+  it('keeps the exact source after the completion fence rejects the action', async () => {
+    const { active, container } = await setup();
+    vi.spyOn(active, 'steerQueuedPrompt').mockImplementation(async commandId => ({
+      commandId, status: 'rejected', publicCode: 'STEER_TARGET_CLOSED', publicMessage: '当前任务已结束；输入仍按队列顺序处理。',
+    }));
+    fireEvent.click(within(screen.getByRole('region', { name: '等待处理的输入' })).getByRole('button', { name: '发送' }));
+    await screen.findByText('当前任务已结束；输入仍按队列顺序处理。');
+    expect(container.querySelector('[data-queue-item-id="queue-source"] p')?.textContent).toBe(source.body);
+    expect(screen.queryByRole('article', { name: '引导' })).toBeNull();
+    expect(active.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('edits only after cancellation ACK and restores the requested permission', async () => {
+    const { active } = await setup();
+    const cancellation = deferred<CommandReceipt>();
+    const cancel = vi.spyOn(active, 'cancelQueuedPrompt').mockReturnValue(cancellation.promise);
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+    expect(input.value).toBe('');
+    expect(screen.getByRole('region', { name: '等待处理的输入' })).toBeTruthy();
+    cancellation.resolve({ commandId: cancel.mock.calls[0][0], status: 'succeeded', publicCode: 'PROMPT_CANCELLED',
+      promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CANCELLED', deliveryMode: 'new-turn' } });
+    await waitFor(() => expect(input.value).toBe(source.body));
+    expect(screen.getByRole('button', { name: /每次询问/ })).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(active.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('releases an unknown edit when its exact source has been canonically consumed', async () => {
+    const { active, adapter } = await setup();
+    const cancel = vi.spyOn(active, 'cancelQueuedPrompt').mockImplementation(async () => {
+      // FIFO won; the rejection was not persisted as an action command.
+      throw new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', 'rejection ACK lost', true);
+    });
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+    await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
+    const next = adapter.lastConnection!;
+    await waitFor(() => expect(next.queryCommand).toHaveBeenCalledWith(cancel.mock.calls[0][0]));
+    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+    expect(input.disabled).toBe(true);
+    // Identical text from a different submission is not evidence about source.
+    next.emit({ ...next.current(), eventSequence: 10, messages: [{
+      id: 'other', role: 'user', userKind: 'prompt', time: 'now', body: source.body,
+      inputSource: { commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'new-turn' },
+    }] });
+    await waitFor(() => expect(next.queryCommand.mock.calls.length).toBeGreaterThan(1));
+    expect(input.disabled).toBe(true);
+    next.emit({ ...next.current(), eventSequence: 20, queuedPrompts: [], queuedCount: 0, messages: [{
+      id: 'consumed-source', turnId: 'turn-next', entrySequence: 20,
+      role: 'user', userKind: 'prompt', time: 'now', body: source.body,
+      inputSource: { commandId: source.commandId, queueItemId: source.queueItemId, deliveryMode: 'new-turn' },
+    }] });
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(input.value).toBe('');
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(next.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reserves skill insertion as well as typing while an edit is in flight', async () => {
+    const { active } = await setup();
+    const pending = deferred<CommandReceipt>();
+    const cancel = vi.spyOn(active, 'cancelQueuedPrompt').mockReturnValue(pending.promise);
+    fireEvent.click(screen.getByRole('button', { name: '本轮选项' }));
+    fireEvent.click(await screen.findByRole('button', { name: '选择技能' }));
+    const skill = screen.getByRole('button', { name: /\$pdf/ });
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+    // Even an already-open menu must not bypass the composer reservation.
+    fireEvent.click(skill);
+    pending.resolve({ commandId: cancel.mock.calls[0][0], status: 'succeeded', publicCode: 'PROMPT_CANCELLED',
+      promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CANCELLED', deliveryMode: 'new-turn' } });
+    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(input.value).toBe(source.body);
+  });
+
+  it('queries a rejected steer even if no pending snapshot ever contained the replacement', async () => {
+    const { active } = await setup();
+    const steer = vi.spyOn(active, 'steerQueuedPrompt').mockImplementation(async commandId => accepted(commandId));
+    const query = vi.spyOn(active, 'queryCommand').mockImplementation(async commandId => accepted(commandId));
+    fireEvent.click(within(screen.getByRole('region', { name: '等待处理的输入' })).getByRole('button', { name: '发送' }));
+    await screen.findByRole('article', { name: '引导' });
+    const commandId = steer.mock.calls[0][0];
+    query.mockImplementation(async id => id === source.commandId ? {
+      commandId: id, status: 'succeeded', publicCode: 'PROMPT_CANCELLED',
+      promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CANCELLED', deliveryMode: 'new-turn' },
+    } : ({ commandId: id, status: 'rejected', publicCode: 'STEER_TARGET_TERMINAL',
+      publicMessage: '目标任务已中断，引导未被接纳。',
+      promptDelivery: { queueItemId: 'replacement', queueStatus: 'REJECTED', deliveryMode: 'steer' } }));
+    active.emit({ ...active.current(), isRunning: false, control: { active_turns: [] },
+      eventSequence: 10, messages: [], queuedPrompts: [], queuedCount: 0 });
+    await waitFor(() => expect(screen.queryByRole('article', { name: '引导' })).toBeNull());
+    expect(query).toHaveBeenCalledWith(commandId);
+    expect(steer).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('目标任务已中断，引导未被接纳。')).toBeTruthy();
+  });
+
+  it('queries the exact consumed source when it is absent from visible history', async () => {
+    const { active, adapter } = await setup();
+    const cancel = vi.spyOn(active, 'cancelQueuedPrompt').mockRejectedValue(
+      new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', 'rejection ACK lost', true),
+    );
+    fireEvent.click(screen.getByRole('button', { name: '编辑' }));
+    await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
+    const next = adapter.lastConnection!;
+    await waitFor(() => expect(next.queryCommand).toHaveBeenCalledWith(cancel.mock.calls[0][0]));
+    next.queryCommand.mockImplementation(async id => id === source.commandId ? {
+      commandId: id, status: 'succeeded', publicCode: 'PROMPT_CONSUMED',
+      promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CONSUMED', deliveryMode: 'new-turn' },
+    } : undefined);
+    next.emit({ ...next.current(), eventSequence: 20, messages: [], queuedPrompts: [], queuedCount: 0 });
+    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(next.queryCommand).toHaveBeenCalledWith(source.commandId);
+    expect(input.value).toBe('');
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(next.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('rechecks a newer cut after the original action query finishes without issuing concurrent queries', async () => {
+    const { active } = await setup();
+    const pendingQuery = deferred<CommandReceipt>();
+    const steer = vi.spyOn(active, 'steerQueuedPrompt').mockImplementation(async id => accepted(id));
+    const query = vi.spyOn(active, 'queryCommand').mockReturnValue(pendingQuery.promise);
+    fireEvent.click(within(screen.getByRole('region', { name: '等待处理的输入' })).getByRole('button', { name: '发送' }));
+    await screen.findByRole('article', { name: '引导' });
+    const commandId = steer.mock.calls[0][0];
+    await waitFor(() => expect(query).toHaveBeenCalledWith(commandId));
+    query.mockImplementation(async id => id === source.commandId ? {
+      commandId: id, status: 'succeeded', publicCode: 'PROMPT_CANCELLED',
+      promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CANCELLED', deliveryMode: 'new-turn' },
+    } : {
+      commandId: id, status: 'rejected', publicCode: 'STEER_TARGET_TERMINAL',
+      publicMessage: '目标任务已中断，引导未被接纳。',
+      promptDelivery: { queueItemId: 'replacement', queueStatus: 'REJECTED', deliveryMode: 'steer' },
+    });
+    active.emit({ ...active.current(), isRunning: false, control: { active_turns: [] },
+      eventSequence: 10, messages: [], queuedPrompts: [], queuedCount: 0 });
+    await waitFor(() => expect(query).toHaveBeenCalledWith(source.commandId));
+    expect(query.mock.calls.filter(([id]) => id === commandId)).toHaveLength(1);
+    expect(screen.getByRole('article', { name: '引导' })).toBeTruthy();
+    pendingQuery.resolve(accepted(commandId));
+    await waitFor(() => expect(screen.queryByRole('article', { name: '引导' })).toBeNull());
+    expect(query.mock.calls.filter(([id]) => id === commandId)).toHaveLength(2);
+    expect(screen.getByText('目标任务已中断，引导未被接纳。')).toBeTruthy();
+    expect(steer).toHaveBeenCalledTimes(1);
   });
 });

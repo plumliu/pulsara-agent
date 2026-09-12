@@ -166,6 +166,8 @@ export interface LocalSettingsReadModel {
 }
 
 export interface RuntimeProjection {
+  /** Canonical ROOT admission order, before lossy transcript presentation. */
+  canonicalRootTurnIds?: readonly string[];
   messages: Message[];
   presentationNotices?: string[];
   contextCompaction?: ContextCompactionBoundary;
@@ -199,6 +201,23 @@ export interface QueuedPrompt {
   targetTurnId?: string;
   body: string;
   permission?: PermissionMode;
+  submittedAt?: string;
+  requestedPermission?: PermissionMode;
+}
+
+export interface QueuedPromptAction {
+  sessionId: string;
+  connectionGeneration: number;
+  commandId: string;
+  kind: 'send' | 'edit' | 'delete';
+  source: QueuedPrompt;
+  targetTurnId?: string;
+  submittedAt: string;
+  status: 'submitting' | 'unknown' | 'accepted' | 'rejected';
+  receipt?: CommandReceipt;
+  handled?: boolean;
+  lastCheckedEventSequence?: number;
+  lastCheckedConnectionGeneration?: number;
 }
 
 export interface ToolArtifactPage {
@@ -319,6 +338,7 @@ export interface LocalPromptSubmission {
   commandId: string;
   body: string;
   bodyUnavailable?: boolean;
+  handledByQueueAction?: boolean;
   deliveryMode: 'new-turn' | 'steer';
   targetTurnId?: string;
   permission?: PermissionMode;
@@ -729,7 +749,8 @@ export interface RuntimeConnection {
   snapshot(): Promise<RuntimeProjection>;
   observe(signal?: AbortSignal): Promise<RuntimeProjection>;
   submitPrompt(commandId: string, text: string, permission: PermissionMode): Promise<CommandReceipt>;
-  steerActiveTurn(commandId: string, text: string, targetTurnId: string): Promise<CommandReceipt>;
+  cancelQueuedPrompt(commandId: string, queueItemId: string): Promise<CommandReceipt>;
+  steerQueuedPrompt(commandId: string, queueItemId: string, targetTurnId: string): Promise<CommandReceipt>;
   stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt>;
   cancelSubagentTask(reference: UserControlCommandRef): Promise<CommandReceipt>;
   terminateBackgroundProcess(reference: UserControlCommandRef): Promise<CommandReceipt>;
@@ -769,7 +790,8 @@ export interface CommandReceipt {
 
 export type RuntimeCommandKind =
   | 'SUBMIT_PROMPT'
-  | 'STEER_ACTIVE_TURN'
+  | 'CANCEL_QUEUED_PROMPT'
+  | 'STEER_QUEUED_PROMPT'
   | 'STOP_ACTIVE_TURN'
   | 'CANCEL_SUBAGENT_TASK'
   | 'TERMINATE_BACKGROUND_PROCESS'
@@ -927,7 +949,7 @@ export interface ProtocolCanonicalControl {
   active_turns?: ProtocolActiveTurn[];
   prompt_queue?: Array<{
     queue_item_id?: string; command_id?: string; queue_sequence?: string | number;
-    status?: string; delivery_mode?: string; target_turn_id?: string;
+    status?: string; delivery_mode?: string; target_turn_id?: string; accepted_at_utc?: string;
     content?: ProtocolContent; permission?: { requested_mode?: string; effective_mode?: string };
   }>;
   prompt_queue_total_count?: string | number;
@@ -1128,11 +1150,6 @@ interface ProtocolBackgroundProcess {
     scope_kind?: string;
     subagent_task_id?: string;
   };
-}
-
-export function selectPromptCommand(isTurnActive: boolean, steer: boolean): RuntimeCommandKind {
-  if (isTurnActive && steer) return 'STEER_ACTIVE_TURN';
-  return 'SUBMIT_PROMPT';
 }
 
 const browserInstanceStorageKey = 'pulsara-browser-instance-id-v1';
@@ -1844,8 +1861,12 @@ class LocalRuntimeConnection implements RuntimeConnection {
     return this.command('SUBMIT_PROMPT', { text, requested_permission_mode: protocolPermissionModes[permission] }, commandId);
   }
 
-  steerActiveTurn(commandId: string, text: string, targetTurnId: string): Promise<CommandReceipt> {
-    return this.command('STEER_ACTIVE_TURN', { text, target_turn_id: targetTurnId }, commandId);
+  cancelQueuedPrompt(commandId: string, queueItemId: string): Promise<CommandReceipt> {
+    return this.command('CANCEL_QUEUED_PROMPT', { target_queue_item_id: queueItemId }, commandId);
+  }
+
+  steerQueuedPrompt(commandId: string, queueItemId: string, targetTurnId: string): Promise<CommandReceipt> {
+    return this.command('STEER_QUEUED_PROMPT', { target_queue_item_id: queueItemId, target_turn_id: targetTurnId }, commandId);
   }
 
   stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt> {
@@ -2900,10 +2921,11 @@ class LocalRuntimeConnection implements RuntimeConnection {
       canonical,
       activeTurnIds,
     );
+    const canonicalRootTurnIds = orderedRootTurnIdsFromEntries(canonical);
     annotateSubagentCompletionSources(
       messages,
       agentTasks,
-      orderedRootTurnIdsFromEntries(canonical),
+      canonicalRootTurnIds,
     );
     for (const draft of visibleDrafts) {
       if (draft.scopeKind === 'SUBAGENT_TASK' || draft.taskId) continue;
@@ -2938,6 +2960,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     const interaction = projectInteraction(this.liveControl, this.control);
     return {
       messages,
+      canonicalRootTurnIds,
       presentationNotices: this.presentationNotices,
       contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base,
@@ -3943,6 +3966,8 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
       targetTurnId: item.target_turn_id || undefined,
       body: decodeContent(item.content),
       permission: protocolPermission(item.permission?.effective_mode),
+      submittedAt: item.accepted_at_utc || undefined,
+      requestedPermission: protocolPermission(item.permission?.requested_mode),
     }));
 }
 
@@ -4292,33 +4317,16 @@ function orderedRootTurnIdsFromEntries(entries: ProtocolEntry[]): string[] {
   return ordered;
 }
 
-function orderedRootTurnIdsFromMessages(messages: Message[]): string[] {
-  const canonical = messages
-    .map((message, index) => ({ message, index }))
-    .filter(({ message }) => message.turnId && message.entrySequence !== undefined)
-    .sort((left, right) => (
-      (left.message.entrySequence ?? 0) - (right.message.entrySequence ?? 0)
-      || left.index - right.index
-    ));
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  for (const { message } of canonical) {
-    if (!message.turnId || seen.has(message.turnId)) continue;
-    seen.add(message.turnId);
-    ordered.push(message.turnId);
-  }
-  return ordered;
-}
-
 function annotateSubagentCompletionSources(
   messages: Message[],
   tasks: AgentTask[],
-  rootTurnIds: string[],
+  rootTurnIds: readonly string[],
 ): void {
   const taskById = new Map(tasks.map((task) => [task.id, task]));
   const turnIndex = new Map(rootTurnIds.map((turnId, index) => [turnId, index]));
   for (const message of messages) {
     if (message.userKind !== 'subagent-completion' || !message.sourceSubagentTaskId) continue;
+    message.sourceSubagentRelation = undefined;
     const source = taskById.get(message.sourceSubagentTaskId);
     if (!source) continue;
     message.sourceSubagentLabel = source.label;
@@ -4371,7 +4379,7 @@ export function mergeRuntimeTaskInventory(
   annotateSubagentCompletionSources(
     messages,
     merged,
-    orderedRootTurnIdsFromMessages(messages),
+    projection.canonicalRootTurnIds ?? [],
   );
   const runById = new Map<string, SubagentRun>();
   for (const message of messages) {

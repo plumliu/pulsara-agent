@@ -250,10 +250,11 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
             ), relation
 
 
-def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
+def _exercise_host_steer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage2_migrated_postgres_database,
+    redirect_queued: bool,
 ) -> None:
     import pulsara_agent.conversation_kernel.host as kernel_host
 
@@ -282,17 +283,33 @@ def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
         )
         await asyncio.wait_for(model.started.wait(), timeout=2)
         assert session._active_turn_id is not None  # noqa: SLF001
-        outcome = await session.steer_active_turn(
-            command_id="command:steer",
-            text="new direction",
-            target_turn_id=session._active_turn_id,  # noqa: SLF001
-        )
+        if redirect_queued:
+            queued = await session.submit_prompt(
+                command_id="command:queued-source", text="new direction",
+            )
+            assert queued.prompt_delivery is not None
+            outcome = await session.steer_queued_prompt(
+                command_id="command:steer",
+                source_queue_item_id=queued.prompt_delivery.queue_item_id,
+                target_turn_id=session._active_turn_id,
+            )
+            assert outcome.public_code == "PROMPT_STEER_QUEUED"
+        else:
+            outcome = await session.steer_active_turn(
+                command_id="command:steer",
+                text="new direction",
+                target_turn_id=session._active_turn_id,  # noqa: SLF001
+            )
         assert outcome.status == "PENDING"
         model.release.set()
         result = await asyncio.wait_for(running, timeout=5)
         assert result.final_text == "AFTER_STEER"
         assert len(model.requests) == 2
         second = model.requests[1]
+        first_input = model.requests[0].compiled_input
+        assert second.compiled_input.system_prompt == first_input.system_prompt
+        assert second.compiled_input.tools == first_input.tools
+        assert second.compiled_input.messages[:len(first_input.messages)] == first_input.messages
         assert any(
             item.role is MessageRole.USER and item.content == ("new direction",)
             for item in second.compiled_input.messages  # type: ignore[attr-defined]
@@ -308,6 +325,7 @@ def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
             "USER_STEER",
             "ASSISTANT_MESSAGE",
         ]
+        assert {row["turn_id"] for row in rows} == {result.turn_id}
         await core.close_session(
             session.host_session_id,
             close_conversation=True,
@@ -315,3 +333,11 @@ def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(
         await core.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_stage2_host_consumes_exact_active_turn_steer_at_provider_safe_point(tmp_path, monkeypatch, stage2_migrated_postgres_database):
+    _exercise_host_steer(tmp_path, monkeypatch, stage2_migrated_postgres_database, False)
+
+
+def test_pr04_host_redirect_consumes_same_turn_steer_with_prefix_continuity(tmp_path, monkeypatch, stage2_migrated_postgres_database):
+    _exercise_host_steer(tmp_path, monkeypatch, stage2_migrated_postgres_database, True)

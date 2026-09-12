@@ -218,10 +218,10 @@ class _CommandHost:
             source_coverage=TerminalOutputSourceCoverage.COMPLETE,
         )
 
-    async def steer_active_turn(
-        self, *, command_id: str, text: str, target_turn_id: str
+    async def steer_queued_prompt(
+        self, *, command_id: str, source_queue_item_id: str, target_turn_id: str
     ) -> KernelCommandOutcome:
-        self.steered.append((command_id, text, target_turn_id))
+        self.steered.append((command_id, source_queue_item_id, target_turn_id))
         return KernelCommandOutcome(
             command_id,
             "PENDING",
@@ -229,6 +229,13 @@ class _CommandHost:
             "PROMPT_QUEUED",
             "Steer queued.",
         )
+
+    async def cancel_queued_prompt(
+        self, *, command_id: str, source_queue_item_id: str
+    ) -> KernelCommandOutcome:
+        self.steered.append((command_id, source_queue_item_id, ""))
+        return KernelCommandOutcome(command_id, "SUCCEEDED", source_queue_item_id,
+                                    "PROMPT_CANCELLED", "Cancelled.")
 
     async def query_command(self, command_id: str) -> None:
         del command_id
@@ -621,15 +628,15 @@ def test_stage2_controller_can_send_an_exact_active_turn_steer() -> None:
                 request_id="request:steer",
                 command_id="command:steer",
                 client_submission_id="command:steer",
-                command_kind=wire.STEER_ACTIVE_TURN,
-                text="new direction",
+                command_kind=wire.STEER_QUEUED_PROMPT,
+                target_queue_item_id="queue:source",
                 target_turn_id="turn:active",
             ),
         )
     )
     assert result.command_outcome.status == wire.PENDING
     assert controller.host_session.steered == [
-        ("command:steer", "new direction", "turn:active")
+        ("command:steer", "queue:source", "turn:active")
     ]
 
 
@@ -934,3 +941,28 @@ def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
         "LIVE_GAP",
         "LIVE_CONTROL_GAP",
     }
+
+
+def test_pr04_cancel_queue_command_and_closed_field_matrix():
+    server = _server()
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    observer = _state(role=wire.ATTACHMENT_ROLE_OBSERVER)
+    valid = dict(command_id='command:cancel', command_kind=wire.CANCEL_QUEUED_PROMPT,
+                 target_queue_item_id='queue:source')
+    accepted = asyncio.run(server._command(controller, wire.CommandRequest(**valid)))
+    assert accepted.command_outcome.status == wire.SUCCEEDED
+    assert accepted.command_outcome.public_code == 'PROMPT_CANCELLED'
+    assert asyncio.run(server._command(observer, wire.CommandRequest(**valid))).error.stable_code == 'CONTROLLER_REQUIRED'
+    for changed, code in [
+        ({'text': 'must not resend body'}, 'QUEUE_ACTION_INVALID'),
+        ({'target_turn_id': 'turn:wrong'}, 'QUEUE_ACTION_INVALID'),
+        ({'target_queue_item_id': ''}, 'QUEUE_ACTION_INVALID'),
+        ({'requested_permission_mode': wire.PERMISSION_MODE_READ_ONLY}, 'PERMISSION_FIELD_NOT_ALLOWED'),
+        ({'command_kind': wire.SUBMIT_PROMPT, 'text': 'hello'}, 'QUEUE_TARGET_FIELD_NOT_ALLOWED'),
+        ({'command_kind': wire.STEER_QUEUED_PROMPT}, 'QUEUE_ACTION_INVALID'),
+        ({'expected_session_id': 'another-session'}, 'CONTROL_FIELDS_NOT_ALLOWED'),
+    ]:
+        result = asyncio.run(server._command(controller, wire.CommandRequest(**(valid | changed))))
+        assert result.error.stable_code == code
+    assert controller.host_session.steered == [('command:cancel', 'queue:source', '')]
+    assert 'STEER_ACTIVE_TURN' not in wire.CommandKind.keys()

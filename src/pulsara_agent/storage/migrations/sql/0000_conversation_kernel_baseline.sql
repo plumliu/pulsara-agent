@@ -299,7 +299,7 @@ CREATE TABLE pulsara_v3.session_commands (
     session_id text NOT NULL,
     command_id text NOT NULL,
     command_kind text NOT NULL CHECK (command_kind IN (
-        'SUBMIT_PROMPT', 'STEER', 'QUEUE_PROMPT', 'CANCEL_PROMPT',
+        'SUBMIT_PROMPT', 'STEER', 'QUEUE_PROMPT', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT',
         'RESOLVE_INTERACTION', 'ACCEPT_SUBAGENT_COMPLETION',
         'ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN',
         'RESOLVE_PLAN_INTERACTION', 'COMPACT_CONTEXT'
@@ -335,7 +335,7 @@ CREATE TABLE pulsara_v3.session_commands (
     CHECK (
         (command_kind = 'SUBMIT_PROMPT' AND target_kind = 'TURN') OR
         (command_kind = 'STEER' AND target_kind = 'ENTRY') OR
-        (command_kind IN ('QUEUE_PROMPT', 'CANCEL_PROMPT') AND target_kind = 'QUEUE_ITEM') OR
+        (command_kind IN ('QUEUE_PROMPT', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT') AND target_kind = 'QUEUE_ITEM') OR
         (command_kind = 'RESOLVE_INTERACTION' AND target_kind = 'INTERACTION_DECISION') OR
         (command_kind = 'ACCEPT_SUBAGENT_COMPLETION' AND target_kind = 'ENTRY') OR
         (command_kind IN ('ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN')

@@ -971,6 +971,7 @@ class CanonicalProtocolReader:
                 target_turn_id=str(row["target_turn_id"] or ""),
                 content=_content_reference(row),
                 command_id=str(row["command_id"]),
+                accepted_at_utc=_utc(row["accepted_at"]),
             )
             if row["permission_snapshot_id"] is not None:
                 target.permission.CopyFrom(_permission_projection(row))

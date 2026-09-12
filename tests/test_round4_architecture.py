@@ -133,7 +133,7 @@ def test_round4_every_turn_creator_installs_frozen_permission_columns() -> None:
     queue_inserts = tuple(
         match.group(1)
         for match in re.finditer(
-            r"INSERT INTO pulsara_v3\.prompt_queue_items\s*\((.*?)\)\s*VALUES",
+            r"INSERT INTO pulsara_v3\.prompt_queue_items\s*\(([^()]*)\)\s*VALUES",
             source,
             flags=re.DOTALL,
         )
@@ -145,6 +145,21 @@ def test_round4_every_turn_creator_installs_frozen_permission_columns() -> None:
         "effective_permission_mode",
         "permission_snapshot_fingerprint",
     } <= {item.strip() for item in queue_inserts[0].split(",")}
+
+    # PR04 §6.2 adds one INSERT ... SELECT for exact redirected steers. Its
+    # omitted permission/binding/handoff fields must be NULL; it may only copy
+    # the canonical content descriptor and freeze the current ROOT target.
+    copies = tuple(re.finditer(
+        r"INSERT INTO pulsara_v3\.prompt_queue_items\s*\(([^()]*)\)\s*SELECT",
+        source, flags=re.DOTALL,
+    ))
+    assert len(copies) == 1
+    assert {column.strip() for column in copies[0].group(1).split(',')} == {
+        'id', 'session_id', 'workspace_id', 'queue_sequence', 'command_id',
+        'client_submission_id', 'delivery_mode', 'target_turn_id', 'status',
+        'inline_content', 'blob_id', 'content_digest', 'content_size',
+        'content_media_type', 'content_codec',
+    }
 
 
 def test_round4_compiler_has_no_repository_or_runtime_authority() -> None:
