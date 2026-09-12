@@ -615,6 +615,7 @@ message LiveInteractionView {
   string public_prompt = 3;
   repeated string public_options = 4;
   string expires_at_utc = 5;
+  bool decision_in_progress = 6;
 }
 
 message LiveTodoRunSnapshot {

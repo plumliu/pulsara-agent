@@ -166,10 +166,11 @@
 .interaction-card { margin: 24px 0 8px 40px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--blue) 26%, var(--line)); border-radius: 15px; background: color-mix(in srgb, var(--paper-solid) 94%, var(--blue-soft)); box-shadow: var(--shadow-md); animation: pop-in .18s ease-out; }
 .interaction-card--tool-confirmation { border-color: color-mix(in srgb, var(--amber) 34%, var(--line)); background: color-mix(in srgb, var(--paper-solid) 94%, var(--amber-soft)); }
 .interaction-card__header { display: flex; align-items: center; gap: 10px; padding: 13px 14px; border-bottom: 1px solid var(--line); }
-.interaction-card__icon { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 9px; background: var(--blue-soft); color: var(--blue); }
+.interaction-card__icon { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; border-radius: 9px; background: var(--blue-soft); color: var(--blue); }
+.interaction-card__icon > svg { display: block; }
 .interaction-card--tool-confirmation .interaction-card__icon { background: var(--amber-soft); color: var(--amber); }
 .interaction-card__header div { min-width: 0; }
-.interaction-card__header span, .interaction-card__header small { display: block; }
+.interaction-card__header div > span, .interaction-card__header small { display: block; }
 .interaction-card__header div > span { font-family: var(--serif); font-size: var(--type-title-small); font-weight: 650; }
 .interaction-card__header small { margin-top: 2px; color: var(--muted); font-size: var(--type-label); }
 .interaction-loading { display: flex; align-items: center; gap: 7px; padding: 17px 15px; color: var(--muted); font-size: var(--type-small); }
@@ -181,6 +182,16 @@
 .interaction-actions button, .interaction-text-answer > button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 31px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); font-size: var(--type-label); font-weight: 650; }
 .interaction-actions button:hover, .interaction-text-answer > button:hover { border-color: var(--line-strong); color: var(--ink); }
 .interaction-actions button.is-primary, .interaction-text-answer > button.is-primary { border-color: var(--ink); background: var(--ink); color: var(--paper-solid); }
+.interaction-card--tool-confirmation .interaction-card__header { padding: 16px 20px; border-bottom-color: color-mix(in srgb, var(--line) 65%, transparent); }
+.interaction-card--tool-confirmation .interaction-question { padding: 18px 20px 16px; font-weight: 500; }
+.tool-confirmation-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px 18px; }
+.tool-confirmation-status { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-family: var(--sans); font-size: var(--type-label); line-height: 1.5; }
+.tool-confirmation-status > svg { flex-shrink: 0; }
+.tool-confirmation-status small { display: block; margin-top: 2px; color: var(--faint); font-size: var(--type-micro); font-variant-numeric: tabular-nums; }
+.tool-confirmation-status .is-spinning { animation: spin .9s linear infinite; }
+.tool-confirmation-footer .interaction-actions { margin-left: auto; padding: 0; gap: 8px; }
+.tool-confirmation-footer .interaction-actions button { min-height: 36px; padding: 0 13px; }
+.tool-confirmation-footer .interaction-actions button:disabled { cursor: default; opacity: .55; }
 .plan-options { display: grid; gap: 7px; padding: 0 14px 11px; }
 .plan-options > button { padding: 10px 11px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--paper-raised) 86%, transparent); text-align: left; }
 .plan-options > button:hover { border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); background: var(--paper-raised); }

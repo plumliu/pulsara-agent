@@ -541,7 +541,7 @@ async def _run(
                     ),
                 )
                 controller_id = "model-switch-handover-dogfood-controller"
-                if not session.attach_controller(controller_id):
+                if not await session.attach_controller(controller_id):
                     raise RuntimeError("could not attach the dogfood controller")
                 switch_results: list[object] = []
                 execute_switch = session._runner.compaction.execute_model_switch_active  # noqa: SLF001

@@ -5715,9 +5715,9 @@ class KernelHostSession:
             ),
         )
 
-    def attach_controller(self, attachment_id: str) -> bool:
+    async def attach_controller(self, attachment_id: str) -> bool:
         self._require_open()
-        return self._interactions.attach_controller(attachment_id)
+        return await self._interactions.attach_controller(attachment_id)
 
     def has_controller_attachment(self, attachment_id: str) -> bool:
         """Validate the process-local Plan-content capability holder."""

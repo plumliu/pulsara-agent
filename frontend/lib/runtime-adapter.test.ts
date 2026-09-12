@@ -1210,8 +1210,10 @@ describe('exact prompt projection', () => {
     });
     expect(create?.subagentRuns?.find((run) => run.id === 'task-orphan')).toBeUndefined();
     expect(orphanTool?.traces?.[0]).toMatchObject({
-      status: 'cancelled', subtitle: '已结束', meta: '操作未完成',
+      status: 'cancelled', subtitle: '已结束', meta: '结果待核实',
+      resultSummary: '原运行已结束，操作结果尚未记录；需要核实实际状态。',
     });
+    expect(orphanTool?.traces?.[0].resultText).toBeUndefined();
     expect(orphanTool?.subagentRuns).toBeUndefined();
     expect(create?.subagentRuns?.[0]).toMatchObject({
       id: 'task-1', label: '读取标题', status: 'completed', objective: 'Read README.md.',
@@ -2342,4 +2344,66 @@ describe('source text fidelity hard cut', () => {
     expect(messages.find((message) => message.id === 'mcp-request')?.traces?.[0].resultSummary)
       .toBeUndefined();
   });
+});
+
+it('PR05 projects the original deadline/busy view and sends only the app command', async () => {
+  const deadline = '2099-01-01T00:00:00+00:00';
+  const responses = [connectPayload([], {}, [], {
+    owner_epoch: '7', live_revision: '12', current_interaction: {
+      interaction_id: 'interaction:original', interaction_kind: 'TOOL_CONFIRMATION',
+      public_prompt: 'Allow terminal?', public_options: ['ALLOW', 'DENY'],
+      expires_at_utc: deadline, decision_in_progress: true,
+    },
+  }), { command_outcome: { command_id: 'command:original', status: 'SUCCEEDED', public_code: 'INTERACTION_ALLOW' } }];
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 }));
+  vi.stubGlobal('fetch', fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const interaction = connection.current().interaction!;
+  expect(interaction).toEqual({ id: 'interaction:original', kind: 'tool-confirmation',
+    prompt: 'Allow terminal?', options: ['ALLOW', 'DENY'], expiresAtUtc: deadline, decisionInProgress: true });
+  await connection.resolveInteraction(interaction, { kind: 'tool', decision: 'allow', commandId: 'command:original' });
+  const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
+  expect(body.command_id).toBe('command:original');
+  expect(body.interaction_id).toBe('interaction:original');
+  expect(body.expected_live_revision).toBe(12);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it('PR05 preserves explicit confirmed non-acceptance from the protocol', async () => {
+  const responses = [connectPayload([], {}, [], {
+    owner_epoch: '7', live_revision: '12', current_interaction: {
+      interaction_id: 'interaction:original', interaction_kind: 'TOOL_CONFIRMATION',
+      public_prompt: 'Allow terminal?', public_options: ['ALLOW', 'DENY'],
+      expires_at_utc: '2099-01-01T00:00:00Z', decision_in_progress: false,
+    },
+  }), {error: {stable_code: 'INTERACTION_NOT_ACCEPTED', public_message: 'confirmed not accepted'}}];
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), {status: 200}));
+  vi.stubGlobal('fetch', fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  await expect(connection.resolveInteraction(connection.current().interaction!, {
+    kind: 'tool', decision: 'allow', commandId: 'command:original',
+  })).rejects.toMatchObject({code: 'INTERACTION_NOT_ACCEPTED', retryable: false});
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it.each([undefined, 'interaction:expired', 'unrecognized-reason'])('PR05 removes the old slot and explains only the observed close reason: %s', async (reason) => {
+  const responses = [connectPayload([], {}, [], {
+    current_interaction: {
+      interaction_id: 'interaction:original', interaction_kind: 'TOOL_CONFIRMATION',
+      public_prompt: 'Allow terminal?', expires_at_utc: '2000-01-01T00:00:00Z',
+    },
+  }), { observation: {
+    live: reason ? [{ event_type: 'INTERACTION_CLOSED', payload: {
+      interaction_closed: { interaction_id: 'interaction:original', reason },
+    } }] : [],
+    live_control: [{ kind: 'LIVE_INTERACTION_CLOSED' }],
+  } }, { observation: {} }];
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().interaction?.id).toBe('interaction:original');
+  const closed = await connection.observe();
+  expect(closed.interaction).toBeUndefined();
+  expect(closed.presentationNotices).toEqual([reason === 'interaction:expired'
+    ? '确认已过期，本次操作未获授权。' : '这项确认已结束；原因暂不可确认。']);
+  expect((await connection.observe()).presentationNotices).toEqual([]);
 });

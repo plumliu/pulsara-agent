@@ -96,7 +96,7 @@ def test_form_requires_controller_without_attempt():
 def test_form_secret_transfers_once_without_live_or_canonical_publication():
     async def run():
         coordinator, live, permission = setup()
-        coordinator.attach_controller("browser:1")
+        await coordinator.attach_controller("browser:1")
         binding = McpCredentialBinding(
             McpCredentialOwner("local", "user", "test"), "bearer"
         )
@@ -140,7 +140,7 @@ def test_form_secret_transfers_once_without_live_or_canonical_publication():
 def test_boolean_confirmation_cannot_settle_capability_form(decision):
     async def run():
         coordinator, live, permission = setup()
-        coordinator.attach_controller("browser:1")
+        await coordinator.attach_controller("browser:1")
 
         async def prepare(_):
             pytest.fail("boolean decision must not parse the form")
@@ -176,7 +176,7 @@ def test_boolean_confirmation_cannot_settle_capability_form(decision):
 def test_form_rejects_foreign_or_stale_controller(wrong_field, wrong_value):
     async def run():
         coordinator, live, permission = setup()
-        coordinator.attach_controller("browser:1")
+        await coordinator.attach_controller("browser:1")
 
         async def prepare(_):
             pytest.fail("stale controller must not submit")
@@ -200,7 +200,7 @@ def test_form_rejects_foreign_or_stale_controller(wrong_field, wrong_value):
 def test_invalid_submission_keeps_same_form_for_correction():
     async def run():
         coordinator, live, permission = setup()
-        coordinator.attach_controller("browser:1")
+        await coordinator.attach_controller("browser:1")
 
         async def prepare(value):
             if not value.get("ready"):
@@ -231,7 +231,7 @@ def test_invalid_submission_keeps_same_form_for_correction():
 def test_form_validation_race_cannot_accept_after_owner_loss(interruption):
     async def run():
         coordinator, live, permission = setup()
-        coordinator.attach_controller("browser:1")
+        await coordinator.attach_controller("browser:1")
         entered, release = asyncio.Event(), asyncio.Event()
 
         async def prepare(_):
@@ -260,9 +260,15 @@ def test_form_validation_race_cannot_accept_after_owner_loss(interruption):
                 else coordinator.controller_detached("browser:1")
             )
             await asyncio.sleep(0)
-            assert not ending.done()
+            if interruption == "close":
+                assert not ending.done()
+            else:
+                assert ending.done()
+                assert not coordinator.is_current_controller("browser:1")
+                assert coordinator._pending.capability_cancelled
+                assert not submission.done()
             if interruption == "detach_reattach":
-                assert coordinator.attach_controller("browser:1")
+                assert await coordinator.attach_controller("browser:1")
         release.set()
         await submission
         if ending is not None:
@@ -278,7 +284,7 @@ def test_form_validation_race_cannot_accept_after_owner_loss(interruption):
 def test_capability_and_boolean_confirmation_share_one_fifo_slot():
     async def run():
         coordinator, live, permission = setup()
-        coordinator.attach_controller("browser:1")
+        await coordinator.attach_controller("browser:1")
 
         async def prepare(_):
             return CapabilityFormValues(freeze_json({}))
@@ -316,7 +322,7 @@ def test_browser_form_uses_current_host_without_secret_protocol_frames():
 
     async def run():
         coordinator, live, permission = setup()
-        coordinator.attach_controller("browser:1")
+        await coordinator.attach_controller("browser:1")
 
         async def prepare(value):
             if value.get("key"):

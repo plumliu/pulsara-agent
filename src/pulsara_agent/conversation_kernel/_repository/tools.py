@@ -923,7 +923,6 @@ class _ToolOperations:
 
         allow = decision == "ALLOW"
         deny = decision == "DENY"
-        result_entry_sequence: int | None = None
         if not (allow or deny):
             raise ValueError("tool interaction decision must be ALLOW or DENY")
         if allow != (
@@ -953,65 +952,24 @@ class _ToolOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            existing = connection.execute(
-                """
-                SELECT c.semantic_digest, c.target_interaction_decision_id,
-                       d.decision, d.subject_tool_call_entry_id,
-                       d.subject_tool_call_id,
-                       d.permission_snapshot_fingerprint,
-                       a.id AS attempt_id, r.id AS result_id,
-                       r.result_entry_id, r.observed_at AS result_observed_at,
-                       result_entry.entry_sequence AS result_entry_sequence
-                FROM pulsara_v3.session_commands AS c
-                JOIN pulsara_v3.interaction_decisions AS d
-                  ON d.session_id = c.session_id
-                 AND d.id = c.target_interaction_decision_id
-                LEFT JOIN pulsara_v3.tool_execution_attempts AS a
-                  ON a.session_id = d.session_id
-                 AND a.assistant_entry_id = d.subject_tool_call_entry_id
-                 AND a.tool_call_id = d.subject_tool_call_id
-                LEFT JOIN pulsara_v3.tool_results AS r
-                  ON r.session_id = d.session_id
-                 AND r.tool_call_entry_id = d.subject_tool_call_entry_id
-                 AND r.tool_call_id = d.subject_tool_call_id
-                LEFT JOIN pulsara_v3.transcript_entries AS result_entry
-                  ON result_entry.entry_owner_kind = 'EXECUTED_TURN' AND result_entry.session_id = r.session_id
-                 AND result_entry.id = r.result_entry_id
-                WHERE c.session_id = %s AND c.command_id = %s
-                  AND c.command_kind = 'RESOLVE_INTERACTION'
-                """,
-                (guard.session_id, command_id),
-            ).fetchone()
+            existing = self._read_tool_interaction_decision(
+                connection, guard,
+                command_id=command_id,
+                decision_id=decision_id,
+                assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+                decision=decision,
+                attempt_id=attempt_id,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+                denial_content=denial_content,
+                redacted_subject=redacted_subject,
+                actor_id=actor_id,
+                occurred_at=occurred_at,
+                permission_snapshot_fingerprint=permission_snapshot_fingerprint,
+            )
             if existing is not None:
-                if (
-                    existing["semantic_digest"] != semantic_digest
-                    or existing["target_interaction_decision_id"] != decision_id
-                    or existing["decision"] != decision
-                    or existing["subject_tool_call_entry_id"] != assistant_entry_id
-                    or existing["subject_tool_call_id"] != tool_call_id
-                    or existing["attempt_id"] != attempt_id
-                    or existing["result_entry_id"] != result_entry_id
-                ):
-                    raise ConversationKernelConflict(
-                        "interaction command identity conflict"
-                    )
-                return AcceptedInteractionDecision(
-                    decision_id,
-                    command_id,
-                    decision,
-                    assistant_entry_id,
-                    tool_call_id,
-                    attempt_id,
-                    result_entry_id,
-                    str(existing["permission_snapshot_fingerprint"]),
-                    None if existing["result_id"] is None else str(existing["result_id"]),
-                    (
-                        None
-                        if existing["result_entry_sequence"] is None
-                        else int(existing["result_entry_sequence"])
-                    ),
-                    existing["result_observed_at"],
-                )
+                return existing
             subject = connection.execute(
                 """
                 SELECT e.turn_id, e.workspace_id, e.conversation_scope_kind,
@@ -1211,16 +1169,166 @@ class _ToolOperations:
                 workspace_id=str(subject["workspace_id"]),
                 drafts=tuple(drafts),
             )
+            accepted = self._read_tool_interaction_decision(
+                connection, guard,
+                command_id=command_id,
+                decision_id=decision_id,
+                assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+                decision=decision,
+                attempt_id=attempt_id,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+                denial_content=denial_content,
+                redacted_subject=redacted_subject,
+                actor_id=actor_id,
+                occurred_at=occurred_at,
+                permission_snapshot_fingerprint=permission_snapshot_fingerprint,
+            )
+            assert accepted is not None
+        return accepted
+
+
+    def confirm_tool_interaction_decision(
+        self, guard: HostWriterGuard, *,
+        command_id: str,
+        decision_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
+        decision: str,
+        attempt_id: str | None,
+        result_id: str | None,
+        result_entry_id: str | None,
+        denial_content: CanonicalContent | None,
+        redacted_subject: str,
+        actor_id: str,
+        occurred_at: datetime,
+        permission_snapshot_fingerprint: str,
+        deadline_monotonic: float,
+    ) -> AcceptedInteractionDecision | None:
+        """Read the exact original decision after its physical writer exited.
+
+        REPEATABLE READ prevents mixing a command with a later/different
+        relationship snapshot. This lane is explicitly read-only.
+        """
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row, deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+            self._require_writer(connection, guard, lock=False)
+            return self._read_tool_interaction_decision(
+                connection, guard,
+                command_id=command_id,
+                decision_id=decision_id,
+                assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+                decision=decision,
+                attempt_id=attempt_id,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+                denial_content=denial_content,
+                redacted_subject=redacted_subject,
+                actor_id=actor_id,
+                occurred_at=occurred_at,
+                permission_snapshot_fingerprint=permission_snapshot_fingerprint,
+            )
+
+    def _read_tool_interaction_decision(
+        self, connection: Connection, guard: HostWriterGuard, *,
+        command_id: str,
+        decision_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
+        decision: str,
+        attempt_id: str | None,
+        result_id: str | None,
+        result_entry_id: str | None,
+        denial_content: CanonicalContent | None,
+        redacted_subject: str,
+        actor_id: str,
+        occurred_at: datetime,
+        permission_snapshot_fingerprint: str,
+    ) -> AcceptedInteractionDecision | None:
+        command = connection.execute(
+            "SELECT * FROM pulsara_v3.session_commands WHERE session_id = %s AND command_id = %s",
+            (guard.session_id, command_id),
+        ).fetchone()
+        saved = connection.execute(
+            """SELECT * FROM pulsara_v3.interaction_decisions
+               WHERE session_id = %s AND (id = %s OR command_id = %s)""",
+            (guard.session_id, decision_id, command_id),
+        ).fetchone()
+        attempt = connection.execute(
+            """SELECT * FROM pulsara_v3.tool_execution_attempts
+               WHERE session_id = %s AND ((assistant_entry_id = %s AND tool_call_id = %s) OR id = %s)""",
+            (guard.session_id, assistant_entry_id, tool_call_id, attempt_id),
+        ).fetchone()
+        result = connection.execute(
+            """SELECT * FROM pulsara_v3.tool_results WHERE session_id = %s
+               AND ((tool_call_entry_id = %s AND tool_call_id = %s) OR id = %s)""",
+            (guard.session_id, assistant_entry_id, tool_call_id, result_id),
+        ).fetchone()
+        entry = None
+        if decision == "DENY":
+            entry = connection.execute(
+                """SELECT * FROM pulsara_v3.transcript_entries
+                   WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
+                (guard.session_id, result_entry_id),
+            ).fetchone()
+        if all(value is None for value in (command, saved, attempt, result, entry)):
+            return None
+        if command is None or saved is None:
+            raise ConversationKernelConflict("interaction decision is only partially installed")
+        semantic_digest = canonical_digest("pulsara:resolve-tool-interaction:v1", {
+            "assistant_entry_id": assistant_entry_id, "tool_call_id": tool_call_id, "decision": decision,
+        })
+        if (
+            command["command_kind"] != "RESOLVE_INTERACTION"
+            or command["request_schema_version"] != "resolve_tool_interaction.v1"
+            or command["target_kind"] != "INTERACTION_DECISION"
+            or command["semantic_digest"] != semantic_digest
+            or command["target_interaction_decision_id"] != decision_id
+            or saved["id"] != decision_id or saved["command_id"] != command_id
+            or saved["subject_kind"] != "TOOL_CALL"
+            or saved["subject_tool_call_entry_id"] != assistant_entry_id
+            or saved["subject_tool_call_id"] != tool_call_id
+            or saved["decision"] != decision
+            or saved["actor_kind"] != "human" or saved["actor_id"] != actor_id
+            or saved["redacted_subject"] != redacted_subject
+            or saved["permission_snapshot_fingerprint"] != permission_snapshot_fingerprint
+        ):
+            raise ConversationKernelConflict("interaction command identity conflict")
+        if decision == "ALLOW":
+            # A later legitimate ToolResult does not change the original ALLOW
+            # union. Only its original exact attempt is returned here.
+            if (attempt is None or attempt["id"] != attempt_id
+                or attempt["assistant_entry_id"] != assistant_entry_id
+                or attempt["tool_call_id"] != tool_call_id
+                or attempt["authorization_kind"] != "human"
+                or attempt["authorization_reference"] != f"interaction-decision:{decision_id}"
+                or attempt["permission_snapshot_fingerprint"] != permission_snapshot_fingerprint
+                or result_id is not None or result_entry_id is not None or denial_content is not None):
+                raise ConversationKernelConflict("interaction ALLOW attempt is incomplete or conflicting")
+        elif decision == "DENY":
+            if (attempt is not None or attempt_id is not None or result is None or entry is None
+                or result["id"] != result_id or result["result_entry_id"] != result_entry_id
+                or result["tool_call_entry_id"] != assistant_entry_id
+                or result["tool_call_id"] != tool_call_id
+                or result["attempt_id"] is not None
+                or result["result_origin_kind"] != "POLICY_NO_ATTEMPT"
+                or result["result_state"] != "PERMISSION_DENIED"
+                or result["permission_snapshot_fingerprint"] != permission_snapshot_fingerprint
+                or entry["entry_kind"] != EntryKind.TOOL_RESULT.value
+                or self._content_from_row(entry) != denial_content):
+                raise ConversationKernelConflict("interaction DENY result is incomplete or conflicting")
+        else:
+            raise ConversationKernelConflict("interaction decision union is invalid")
         return AcceptedInteractionDecision(
-            decision_id,
-            command_id,
-            decision,
-            assistant_entry_id,
-            tool_call_id,
-            attempt_id,
-            result_entry_id,
-            permission_snapshot_fingerprint,
-            result_id,
-            result_entry_sequence,
-            occurred_at if deny else None,
+            decision_id, command_id, decision, assistant_entry_id, tool_call_id,
+            attempt_id, result_entry_id, permission_snapshot_fingerprint,
+            None if decision == "ALLOW" or result is None else str(result["id"]),
+            None if entry is None else int(entry["entry_sequence"]),
+            None if decision == "ALLOW" or result is None else result["observed_at"],
         )

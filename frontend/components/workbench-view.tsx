@@ -13,6 +13,7 @@ import {
   ChevronRight,
   ChevronUp,
   CircleStop,
+  Clock3,
   Copy,
   CornerDownRight,
   FileDiff,
@@ -83,6 +84,7 @@ interface WorkbenchViewProps {
   modelConfigurations: ModelConfigurationSummary[];
   modelCallBinding?: ModelCallBindingPayload | null;
   interaction?: RuntimeInteractionSummary;
+  toolDecisionPending?: boolean;
   canControl: boolean;
   isObserver: boolean;
   permission: PermissionMode;
@@ -1125,11 +1127,13 @@ function permissionPrompt(prompt: string): string {
 
 function InteractionCard({
   interaction,
+  toolDecisionPending,
   onRead,
   onResolve,
   onNotify,
 }: {
   interaction: RuntimeInteractionSummary;
+  toolDecisionPending: boolean;
   onRead: WorkbenchViewProps['onReadInteraction'];
   onResolve: WorkbenchViewProps['onResolveInteraction'];
   onNotify: MarkdownNotify;
@@ -1142,6 +1146,18 @@ function InteractionCard({
   const [feedback, setFeedback] = useState('');
   const interactionId = interaction.id;
   const interactionKind = interaction.kind;
+  const [now, setNow] = useState(Date.now);
+  const expiresAtUtc = interaction.kind === 'tool-confirmation' ? interaction.expiresAtUtc : '';
+  const decisionInProgress = interaction.kind === 'tool-confirmation' && interaction.decisionInProgress;
+  const expired = Boolean(expiresAtUtc) && Date.parse(expiresAtUtc) <= now;
+  useEffect(() => {
+    if (!expiresAtUtc) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [expiresAtUtc]);
+  const toolBusy = busy || decisionInProgress || toolDecisionPending;
+  const toolDisabled = toolBusy || expired || !expiresAtUtc;
+  const secondsLeft = Math.max(0, Math.ceil((Date.parse(expiresAtUtc) - now) / 1000));
   const prompt = 'prompt' in interaction ? interaction.prompt : '';
   const optionsKey = 'options' in interaction ? interaction.options.join('\u0000') : '';
   const workflowId = 'workflowId' in interaction ? interaction.workflowId : '';
@@ -1152,7 +1168,9 @@ function InteractionCard({
     const requested: RuntimeInteractionSummary = interactionKind === 'tool-confirmation' || interactionKind === 'capability-form'
       ? {
         id: interactionId,
-        kind: interactionKind,
+        ...(interactionKind === 'tool-confirmation'
+          ? { kind: 'tool-confirmation' as const, expiresAtUtc, decisionInProgress }
+          : { kind: 'capability-form' as const }),
         prompt,
         options: optionsKey ? optionsKey.split('\u0000') : [],
       }
@@ -1166,10 +1184,10 @@ function InteractionCard({
       },
     );
     return () => { current = false; };
-  }, [interactionId, interactionKind, onRead, optionsKey, prompt, workflowId, workflowRevision]);
+  }, [interactionId, interactionKind, onRead, optionsKey, prompt, workflowId, workflowRevision, expiresAtUtc, decisionInProgress]);
 
   const resolve = async (resolution: RuntimeInteractionResolution) => {
-    if (busy) return;
+    if (busy || (resolution.kind === 'tool' && toolDisabled)) return;
     setBusy(true);
     const accepted = await onResolve(interaction, resolution);
     if (!accepted) setBusy(false);
@@ -1178,7 +1196,7 @@ function InteractionCard({
   return (
     <section className={`interaction-card interaction-card--${interaction.kind}`} aria-live="polite">
       <header className="interaction-card__header">
-        <span className="interaction-card__icon">
+        <span className="interaction-card__icon" aria-hidden="true">
           {interaction.kind === 'tool-confirmation' ? <ShieldCheck size={15} /> : <FileText size={15} />}
         </span>
         <div>
@@ -1194,11 +1212,20 @@ function InteractionCard({
       {content?.kind === 'tool-confirmation' && (
         <>
           <p className="interaction-question">{permissionPrompt(content.prompt)}</p>
-          <div className="interaction-actions">
-            <button disabled={busy} onClick={() => void resolve({ kind: 'tool', decision: 'deny' })}>拒绝</button>
-            <button className="is-primary" disabled={busy} onClick={() => void resolve({ kind: 'tool', decision: 'allow' })}>
-              {busy ? <LoaderCircle size={13} /> : <Check size={13} />} 允许本次操作
-            </button>
+          <div className="tool-confirmation-footer">
+            <div className="tool-confirmation-status">
+              {toolBusy ? <LoaderCircle size={15} className="is-spinning" /> : <Clock3 size={15} />}
+              <div>
+                <span>{toolBusy ? '正在处理确认' : expired ? '已到截止时间' : <span aria-live="off">剩余 {Math.floor(secondsLeft / 60)} 分 {secondsLeft % 60} 秒</span>}</span>
+                <small>{toolBusy ? '决定结果确认后将继续更新' : expired ? '正在等待后台确认状态' : <time dateTime={expiresAtUtc} aria-live="off">截至 {new Date(expiresAtUtc).toLocaleTimeString('zh-CN')}</time>}</small>
+              </div>
+            </div>
+            <div className="interaction-actions">
+              <button disabled={toolDisabled} onClick={() => void resolve({ kind: 'tool', decision: 'deny' })}>拒绝</button>
+              <button className="is-primary" disabled={toolDisabled} onClick={() => void resolve({ kind: 'tool', decision: 'allow' })}>
+                {toolBusy ? <LoaderCircle size={13} /> : <Check size={13} />} 允许本次操作
+              </button>
+            </div>
           </div>
         </>
       )}
@@ -1310,6 +1337,7 @@ export function WorkbenchView({
   modelConfigurations,
   modelCallBinding,
   interaction,
+  toolDecisionPending = false,
   canControl,
   isObserver,
   permission,
@@ -1836,6 +1864,7 @@ export function WorkbenchView({
             <InteractionCard
               key={`${interaction.id}:${'workflowRevision' in interaction ? interaction.workflowRevision : 'live'}`}
               interaction={interaction}
+              toolDecisionPending={toolDecisionPending}
               onRead={onReadInteraction}
               onResolve={onResolveInteraction}
               onNotify={onNotify}

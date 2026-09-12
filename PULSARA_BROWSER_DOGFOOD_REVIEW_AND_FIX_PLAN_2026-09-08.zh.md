@@ -1,6 +1,6 @@
 # Pulsara 浏览器 dogfood 复盘与后续修复方案
 
-日期：2026-09-08。状态：**实施中；PR02 已 ACTIVATED；PR04 与子任务等待/完成语义修订在 2026-09-12 审查后已完成四项前端修正及自动化，保持 IMPLEMENTED、REACTIVATION PENDING；PR03 已完成两轮 reviewer kernel 时序修正及 kernel 全量重验，待按修订合同重新完成前端、wheel 与真实 provider/browser activation；其他批次按各自规格推进。**
+日期：2026-09-08。状态：**实施中；PR05 已完成 reviewer 三项修正与第 20 节重新验收，ACTIVATED（2026-09-12，未提交）；PR02 已 ACTIVATED；PR04 与子任务等待/完成语义修订在 2026-09-12 审查后已完成四项前端修正及自动化，保持 IMPLEMENTED、REACTIVATION PENDING；PR03 已完成两轮 reviewer kernel 时序修正及 kernel 全量重验，待按修订合同重新完成前端、wheel 与真实 provider/browser activation；其他批次按各自规格推进。**
 
 依据：完整阅读 `PULSARA_REAL_BROWSER_DOGFOOD_BUG_REPORT_2026-09-08.zh.md`，以当前工作树生产代码为主要事实来源。Git 基线为 `7e2ec332`。原报告保留，不把本次静态发现倒填成此前真实浏览器已复现的问题。
 
@@ -16,9 +16,10 @@
 | --- | --- | --- | --- |
 | PR01 | [原文保真 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR01_SOURCE_TEXT_FIDELITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F07；删除原文全局中文化，保留 typed UI 标签 | 实现已提交于 2212804e；验收待补，未 ACTIVATED |
 | PR02 | [工具结果、输入队列与反馈 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR02_TOOL_RESULTS_QUEUE_AND_FEEDBACK_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | F01/F02/F03/F05/M03；结果详情、exact live 关联、提交身份与队列、取消反馈、文件工具说明 | ACTIVATED — 2026-09-10 第二轮审查闭环（工作树，未提交） |
-| PR03 | [精确运行控制、后台命令与任务侧栏 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR03_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh) | F06/M01；exact STOP、子任务取消、后台查看/终止、控制反馈事件、任务 tab 替换/后台终端新增、原始结果艺术风格 | IMPLEMENTED，REACTIVATION PENDING — 两轮 reviewer 指出的 kernel 正常结束/watchdog/seal、compaction 观察、closing 乱序证据与终态竞态已修，kernel 全量 `1734 passed`；修订后的前端、wheel 与真实 provider/browser 门槛尚待重验（工作树，未提交） |
-| PR04 | [输入队列、即时引导与 Composer Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR04_PROMPT_QUEUE_STEER_COMPOSER_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | 运行中输入统一排队、exact 队列项发送/编辑/删除、同 turn successor round、服务端接纳后的即时“引导”展示 | IMPLEMENTED，REACTIVATION PENDING — 2026-09-12；未知 action、编辑草稿保留、快速拒绝 steer 已修；前端 221，修订后的 wheel/provider/browser 未重验（工作树，未提交） |
-| Subagent-R1 | [子任务等待与完成语义修订](PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md) | strict first/all、exact 输入中断、turn-bound readiness、`completion_accepted` hard cut、当前/上一/此前 ROOT 提示 | IMPLEMENTED，REACTIVATION PENDING — 2026-09-12；修正清单合并丢失中间 ROOT 的来源关系，前端 221；原 activation 保留为历史，修订后安装产物与浏览器未重验 |
+| PR03 | [精确运行控制、后台命令与任务侧栏 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR03_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md) | F06/M01；exact STOP、子任务取消、后台查看/终止、控制反馈事件、任务 tab 替换/后台终端新增、原始结果艺术风格 | IMPLEMENTED，REACTIVATION PENDING — 两轮 reviewer 指出的 kernel 正常结束/watchdog/seal、compaction 观察、closing 乱序证据与终态竞态已修，kernel 全量 `1734 passed`；修订后的前端、wheel 与真实 provider/browser 门槛尚待重验（原验收记录） |
+| PR04 | [输入队列、即时引导与 Composer Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR04_PROMPT_QUEUE_STEER_COMPOSER_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | 运行中输入统一排队、exact 队列项发送/编辑/删除、同 turn successor round、服务端接纳后的即时“引导”展示 | IMPLEMENTED，REACTIVATION PENDING — 2026-09-12；已提交于 `0828161f`，前端 221；修订后的 wheel/provider/browser 未重验 |
+| PR05 | [同 Host 工具确认保留与重连 Hard Cut 实施规格](PULSARA_BROWSER_DOGFOOD_PR05_SAME_HOST_TOOL_CONFIRMATION_RETENTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) | M02 新语义；普通确认跨切会话／重连保留、无 controller 入队、exact 决策、期限与失效、关闭／崩溃边界；不做跨重启审批恢复 | ACTIVATED — 2026-09-12；三项 reviewer 修正完成，Python 1798／前端 236、真实事务／协议／wheel／provider/browser 重新验收通过，未提交 |
+| Subagent-R1 | [子任务等待与完成语义修订](PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md) | strict first/all、exact 输入中断、turn-bound readiness、`completion_accepted` hard cut、当前/上一/此前 ROOT 提示 | IMPLEMENTED，REACTIVATION PENDING — 来源关系修正已随 `0828161f` 提交，前端 221；原 activation 保留为历史，修订后安装产物与浏览器未重验 |
 
 2026-09-11 索引更新：PR01 的实现已提交，但不因此宣称其 activation 完成；其规格仍待补齐验收记录。PR02 已按用户要求把 F01/F02/F03/F05/M03 作为一个 hard cut 完成自动化、隔离 wheel、真实 provider 与浏览器验收；两轮审查指出的大 blob queue 消费/终态竞态、prompt delivery 状态机、late live binding、跨会话异步 owner、迟到 artifact 页、浏览器实际 digest/fatal UTF-8、builtin-only 文件解释、queue 权限/steer target 和 M03 schema 字段说明均已先补红灯再闭环。`edit_file` 的最终产品语义是直接显示真实 unified diff，不提供独立“复制差异”按钮；完整 diff 通过“复制结果原文”取得。PR02 继续在未提交工作树中保持 ACTIVATED。PR03 原 activation 证据位于 `output/playwright/pr03-dogfood/`；reviewer 后续确认正常 ROOT 结束协调、未知提交确认、请求/transport 乱序、Host closing 接纳、子任务取消终态与进程终止 disposition 六处 kernel 时序缺口，现已修订唯一合同并完成实现，旧证据仅作历史，修订后的第 20 节重验完成前不标 ACTIVATED。F04/M02/M04 仍保留原状态。本索引不会因 PR02 激活而宣称其他批次全部完成；下文原始调查与旧行号保留为历史诊断依据，实施以对应 PR 规格和当前代码为准。
 
@@ -30,7 +31,7 @@
 
 ### PR03 控制语义与实施范围
 
-2026-09-11：原[用户停止与后台命令产品契约](PULSARA_BROWSER_DOGFOOD_PR03_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh)已在原路径升级为 PR03 唯一实施规格，起始核对基线 `f6f52f5c`。接口、CLI、有限 process-local attempt 的提交期限/退役、后台读取、真实反馈类别/事务/provider 投影、任务完整读取与结果继续入口均已实现。两轮 reviewer kernel 时序复核后的修订也已落地：第二轮补齐 watchdog 全分支截止、ROOT completion seal/settle、预装 compaction successor 纳入观察和 closing 早到证据合并；kernel 全量 `1734 passed, 19 warnings`。新增验收尚未完成真实 provider/browser 与 isolated wheel 重验，因此 F06/M01 当前为 IMPLEMENTED、REACTIVATION PENDING；旧证据见 `output/playwright/pr03-dogfood/activation-evidence.md`。
+2026-09-11：原[用户停止与后台命令产品契约](PULSARA_BROWSER_DOGFOOD_PR03_KERNEL_USER_STOP_AND_BACKGROUND_COMMAND_PRODUCT_CONTRACT.zh.md)已在原路径升级为 PR03 唯一实施规格，起始核对基线 `f6f52f5c`。接口、CLI、有限 process-local attempt 的提交期限/退役、后台读取、真实反馈类别/事务/provider 投影、任务完整读取与结果继续入口均已实现。两轮 reviewer kernel 时序复核后的修订也已落地：第二轮补齐 watchdog 全分支截止、ROOT completion seal/settle、预装 compaction successor 纳入观察和 closing 早到证据合并；kernel 全量 `1734 passed, 19 warnings`。新增验收尚未完成真实 provider/browser 与 isolated wheel 重验，因此 F06/M01 当前为 IMPLEMENTED、REACTIVATION PENDING；旧证据见 `output/playwright/pr03-dogfood/activation-evidence.md`。
 
 Demo 只允许参考侧栏“任务”（完整替换，含组图/节点详情）、“后台终端”（新增 tab）和 create_agent_tasks 原始结果区的艺术风格；能力、root 主对话/创建摘要跳转、输入框、左栏及其他 Demo 区域一律不参考。生产能力和主对话结构保留。
 
@@ -39,6 +40,8 @@ Demo 只允许参考侧栏“任务”（完整替换，含组图/节点详情�
 下文第 6 节的早期四动作/独立 monitor UI 建议、Batch B 中 M01 的旧归属，以 PR03 新规格取代。第 10.3 节的类别约束按 PR03 的精确例外执行；PR01/PR02 不因此扩大范围或重写旧验收。F04/M02/M04 仍在 PR03 范围外。
 
 ## 1. 我的总体判断
+
+2026-09-12 后续产品决定：M02 不再只补“离开会拒绝”的提示，而是由 PR05 实施“普通工具确认属于存活 Host，切走后保留、回来可继续批准”。无 controller 时后来产生的确认也可等待；保留 10 分钟原期限，STOP／失效／关闭仍终止，crash 后不恢复旧确认。能力配置表单和 plan 的既有独立生命周期不扩大。F04 的完整历史方案浏览暂缓，不作为 PR05 前置条件；审批时原文准确、结束后无可误操作的旧按钮仍是产品边界。下文早期提案与此冲突处以 PR05 为准，不将规格编写声称为已实施。
 
 当前问题不是“核心执行器普遍不可靠”，而是**执行事实与用户能够看见、能够控制的事实之间存在断层**。这个断层不能当作单纯的界面润色：用户看不到 diff、待执行输入或批准过的方案，就很难判断下一次授权是否合适。
 
@@ -55,12 +58,12 @@ Demo 只允许参考侧栏“任务”（完整替换，含组图/节点详情�
 | F01 | 完整工具结果被摘要替代 | BUG-01；浏览器、canonical、当前代码一致 | P2，首批 |
 | F02 | live tool-result draft 未准确关联调用 | 代码确认，内存运行诊断复现；是 BUG-01 外另一个底层原因，不是原浏览器证据的完整替代解释 | P2，首批 |
 | F03 | 排队正文不投影；按正文消除 optimistic 消息 | BUG-02 主因已确认；重复正文问题为额外代码发现 | P2，首批 |
-| F04 | 历史规划没有正文和对应决策视图 | BUG-03；底层正文仍在，缺历史投影和入口 | P2，第二批 |
+| F04 | 历史规划正文和决策回看 | 原历史投影缺口仍在；完整版本浏览暂缓，不纳入 PR05；当前审批准确和结束状态不误导仍需保持 | 产品功能暂缓，非 PR05 前置 |
 | F05 | 取消规划 toast 承诺继续 | BUG-04；确定文案缺陷 | P3，可随首批修复 |
 | F06 | 停止请求未绑定点击时的 turn | PR03 已以 exact click-time target hard cut 闭合；后续 kernel closing/反馈结束竞态已修，待修订后 activation 重验 | IMPLEMENTED，REACTIVATION PENDING |
 | F07 | 正则中文化改写模型代码和方案正文 | 新增代码发现，实际函数运行已复现；复制也使用改写后的正文 | P1，首批优先 |
 | M01 | 停止推理、停止进程、取消监视、停止自动续轮被混同 | PR03 已冻结分离语义、组合控制和真实反馈；正常结束 coordination/终态竞态已修，待修订后 activation 重验 | IMPLEMENTED，REACTIVATION PENDING |
-| M02 | 切会话/重连会终止普通工具确认 | 当前有意 fail-closed；缺预告、原因展示和恢复指引 | 与 F04 并行 |
+| M02 | 切会话/重连会终止普通工具确认 | PR05 hard cut 已完成：同 Host 保留普通确认，无 controller 可入队，精确撤权与原决定只读核实；表单和 plan 独立 | PR05 ACTIVATED（2026-09-12 重新验收） |
 | M03 | `N\|` 前缀误写、replace_file 与 seen guard 边界 | 前者是模型易用性风险；后者现有例外需说清 | 小范围 descriptor 修复 |
 | M04 | “已见”实际是 workspace 内进程级 observation | 代码事实；不等于每个模型都看过，也不是权限漏洞 | 明确承诺，暂不扩大实现 |
 
@@ -280,26 +283,29 @@ Host 的 stop_current_turn 没有杀进程或取消所有 monitor。terminal mon
 
 如果产品最终想要“停止后直到下一次人工输入都不再自动回复”，这是另一项暂停自动接纳的产品契约，不是修一行 toast：要同时规定 terminal/subagent completion、已冻结安装、已提交 observation、队列优先级、恢复条件和进程重启后的弱保证。届时优先复用 process-local owner，不建立持久暂停任务系统。本方案不把这项扩大后的语义默认为已获批准。
 
-## 7. M02：确认随 controller detach 结束，应显式告知而非改成 durable
+## 7. M02：同 Host 保留普通确认，离开不等于拒绝
 
-### 7.1 当前行为是有意的安全收敛
+### 7.1 实施前代码事实
 
 `pulsara-app.tsx:325` 切会话/重连时先 close 旧连接；`runtime-adapter.ts:1523` 删除 attachment。`conversation_kernel/interaction.py:552` 在 controller_detached 时调用 `_abort_all`，普通工具确认最终 DENY，原文说明 controller detached。
 
-这与 E02 的文件未创建一致。它与可跨进程恢复的 canonical plan draft 不是同一种对象，不应为了“切回来还能点允许”把普通确认升级为 durable approval。
+这与 E02 的文件未创建一致。待确认对象和 future 实际已经由 Host 内存 owner 持有，并不是浏览器状态；只是 detach 策略主动结束它。因而可以修改连接缺席的策略，而不将普通确认升级为 durable approval。
 
 此外，代码专门处理 resolving 与已获 durable winner 的竞争。不能粗暴清除 future/重置 pending，把已经决策的 winner 当成没有发生。
 
-### 7.2 推荐近期方案
+### 7.2 PR05 唯一目标合同
 
-- 在有普通工具确认/能力配置表单时，**主动切会话或接管**前明确提示“离开将结束尚未确认的操作”，允许留在当前会话或继续离开。
-- 能力页/记忆页导航如果没有 detach，不应误弹相同警告。判据是实际 owner 生命周期，不是所有页面点击。
-- reload、网络断开无法可靠依赖离开前弹框：重连后必须明确展示“因控制连接结束而未获授权”，而不是让“已拒绝”看起来像用户主动点击拒绝。
-- 保持 canonical result_state=PERMISSION_DENIED，展示可补充真实 reason；优先利用现有结果/决策引用。若需要 typed reason，只扩展现有结果投影，不新增事件类别。
-- 提示用户重新发送任务；不自动重放原写调用，不把旧“允许”迁移给新 attachment。
-- plan question/draft 保留现有 durable 恢复；不要为了统一 UX 把两套语义强行做成同一生命周期。
+- 普通确认在同一存活 Host 内跨切会话／刷新／重连保留；离开后新产生的普通确认也能进入原 FIFO 等待，不直接 DENY。
+- 重新取得 controller 后展示原 interaction；由 coordinator 联合验证当前控制者、exact 工具对象和有效期，不能只信旧连接 role。
+- 保留原 10 分钟期限，计入 dormant／离线时间，不因显示或重连续期；超时不伪装成用户拒绝。
+- STOP／所属任务取消／能力失效／Host close 仍按原 owner 结算；批准已提交不等于操作完成，未知 ACK 查询原 command，不自动重发。
+- crash 后不恢复内存确认，不 replay 旧工具；按 canonical 决定／attempt／result／中断事实准确展示，不能无证据承诺未发生副作用。
+- 能力配置表单仍按原 detach 取消，未提交秘密草稿不迁移；plan question/draft 沿用各自既有合同，不统一生命周期。
+- 复用 pending/future、live snapshot、MCP admission、决定事务与关闭 machinery，不新增 durable pending、receipt、事件类别、fingerprint 或审批中心。
 
-验收：主动切会话、同会话接管、刷新、断连、批准与detach同时发生、已允许但写入未结算、恢复后重新提交。必须同时验证“未授权时无写入”和“已提交的合法 winner 不被前端误判为回滚”。
+详情、R01–R26、Phase A–D 和 activation 门槛见 [PR05 实施规格](PULSARA_BROWSER_DOGFOOD_PR05_SAME_HOST_TOOL_CONFIRMATION_RETENTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。初次 Phase D 后曾因 reviewer 三项生命周期与恢复缺口撤回 ACTIVATED。现已修正并重新满足第 20 节：Python 1798／前端 236、真实事务／Unix 协议接管、isolated wheel、生产配置 provider/browser、三阶段强杀和视觉验收均通过，重新标记 ACTIVATED。详见[本次重新验收记录](output/playwright/pr05-review-fixes/README.zh.md)；[初次验收记录](output/playwright/pr05-confirmation-retention/README.zh.md) 仅作历史。
+
+2026-09-12 PR05 reviewer 修订：已核对并明确普通决定的窄只读 exact-confirm 尚需接入，不能把公开 command 查询或再次调用 writer 当成完整结算；接管必须先通过原 Host owner 精确撤销旧 attachment 权限，不等待旧 socket 的在途请求结束；提交中到期／取消／能力失效须在核实写入后重新裁定，不能留下 future；已取得 MCP permit 而未发布的原 FIFO head 保留，重连只续接发布。`decision_in_progress` 覆盖写入及核实，按钮同时遵循 app 未知提交意图。R03/R05/R08/R12–R16 与验收已收紧，要求真实协议接管和真实数据库事务证据；reviewer 的替身探针与所报告测试不冒充本轮或 activation 验收。以上为 reviewer 规格阶段记录。初次实施之后的新审查发现 MCP permit 取消交接、确证未接纳响应和未知意图查询饥饿三项缺口，现已通过真正工具 waiter 取消收尾、明确未接纳／未知分类及 exact command 独立查询修正，并完成本轮重新验收；未 stage/commit。
 
 ## 8. 文件工具：保持新语义，修说明，不恢复猜测
 
@@ -351,9 +357,9 @@ F01/F02/F03/F05/F06/F07 属于首批修复；按上方实施文档索引拆分 P
 
 ### Batch B：历史审批与生命周期反馈
 
-本批继续处理 F04、M02；M01 已与 F06 一起归入 PR03，不在本批重复实施。复用既有 plan 正文读取、canonical relation 和 exact owner gate；补历史查询只读投影，不把 history 塞进 active interaction。
+更新后 M02 独立进入 PR05，采用同 Host 普通确认保留，不再实施旧的普通 detach 即拒绝方案。F04 完整历史方案浏览暂缓，不与 PR05 捆绑；M01 已与 F06 一起归入 PR03，不重复实施。
 
-删除：历史卡片只剩“等待确认”的唯一展示、因 controller detach 而失败却让用户误以为主动拒绝的唯一反馈。
+PR05 删除普通确认因 controller 缺席而拒绝／取消的旧路径，保留真正执行失效与能力表单的取消。F04 若后续重开，仍需独立只读投影、权限与 fork 合同，不能把 history 塞进 active interaction。
 
 ### Batch C：descriptor 与组合回归
 
@@ -402,8 +408,8 @@ npm test -- lib/runtime-adapter.test.ts app/pulsara-app.test.tsx
 1. 展开工具结果能核对路径、读取文本或 diff；实时和恢复一致，状态无错配。
 2. 所有已受理待执行输入可查；完全相同的两次输入仍是两项，无重复投递。
 3. 任何迟到的停止 A 都不能误停 B；不承诺取消已发生效果。
-4. 历史 draft1/draft2 与各自决策对应，全文读取权限不扩大，fork 不伪造审批权威。
-5. 取消规划、controller detach、后台继续运行分别给出准确反馈。
+4. 当前审批正文和对象准确，结束后不提供可误操作的旧审批按钮；完整历史 draft1/draft2 浏览暂缓，若后续实施仍不得扩大全文权限或伪造 fork 审批权威。
+5. 取消规划、普通确认保留与到期／失效、能力表单 detach 取消、后台继续运行分别给出准确反馈；M02 以 PR05 为准。
 6. 默认不新增 durable event/job/relation/subject/guard 或 fingerprint；PR03 唯一例外是其第 18.1 节明确列出的 UserControlFeedbackAccepted 事件及配套 EntryKind/input origin，用于记录真实来源，不是投递 receipt。表、关系、subject/guard、durable job、live event 与 fingerprint 仍零增量，协议的精确扩展按 PR03 第 14 节同步。PR01/PR02 原减法合同不变；所有 PR 均无兼容旧路径，provider prefix 规则不变。
 7. 新失败场景先有能失败的断言，再修成绿；无弱化断言、skip/xfail 或改写原报告证据。
 8. 原文内容不被术语中文化改写；复制代码可用，审批时显示的内容与被批准的 draft 一致。

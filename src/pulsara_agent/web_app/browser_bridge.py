@@ -116,7 +116,8 @@ class LocalBrowserBridge:
                     role=role,
                 )
             except ProtocolBridgeError as exc:
-                if role != "controller" or exc.code != "CONTROLLER_UNAVAILABLE":
+                if (role != "controller" or exc.code != "CONTROLLER_UNAVAILABLE"
+                    or (old is not None and takeover)):
                     raise
                 role = "observer"
                 connection = await BrowserRuntimeConnection.open(

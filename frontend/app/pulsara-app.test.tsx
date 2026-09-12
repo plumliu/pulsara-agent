@@ -3500,3 +3500,155 @@ describe('PR04 atomic queue action ownership', () => {
     expect(steer).toHaveBeenCalledTimes(1);
   });
 });
+
+function pr05Projection(busy = false): RuntimeProjection {
+  return { ...projection('PR05'), hostSessionId: 'host:pr05', interaction: {
+    id: 'interaction:pr05', kind: 'tool-confirmation', prompt: 'Allow terminal?', options: ['ALLOW', 'DENY'],
+    expiresAtUtc: '2099-01-01T00:00:00Z', decisionInProgress: busy,
+  } };
+}
+
+it.each([
+  [false, 'PROTOCOL_TRANSPORT_CLOSED'], [true, 'PROTOCOL_TRANSPORT_CLOSED'],
+  [false, 'INTERACTION_OUTCOME_UNKNOWN'], [true, 'INTERACTION_OUTCOME_UNKNOWN'],
+] as const)('PR05 original command survives unknown ACK and card remount, projected busy=%s, code=%s', async (busy, code) => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = pr05Projection();
+  render(<PulsaraApp adapter={adapter} />);
+  const allow = await screen.findByRole('button', { name: /允许本次操作/ });
+  const first = adapter.lastConnection!;
+  const reconnects = code === 'PROTOCOL_TRANSPORT_CLOSED';
+  first.resolveInteraction.mockRejectedValueOnce(new RuntimeApiError(code, 'lost ACK', reconnects));
+  fireEvent.click(allow);
+  await waitFor(() => expect(adapter.connectCalls).toHaveLength(reconnects ? 2 : 1));
+  const submitted = first.resolveInteraction.mock.calls[0][1];
+  expect(submitted.kind).toBe('tool');
+  if (submitted.kind !== 'tool') throw new Error('expected tool command');
+  expect(submitted.commandId).toMatch(/^command:web:/);
+  const recovered = adapter.lastConnection!;
+  await waitFor(() => expect(recovered.queryCommand).toHaveBeenCalledWith(submitted.commandId));
+  expect(screen.getByRole('button', { name: /允许本次操作/ }).hasAttribute('disabled')).toBe(true);
+  await act(async () => recovered.emit({ ...pr05Projection(busy), liveControlRevision: 4 }));
+  fireEvent.click(screen.getByRole('button', { name: /允许本次操作/ }));
+  if (recovered !== first) expect(recovered.resolveInteraction).not.toHaveBeenCalled();
+  expect(first.resolveInteraction).toHaveBeenCalledTimes(1);
+});
+
+it('PR05 projection prevents deciding while another controller is writing or confirming', async () => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = pr05Projection(true);
+  render(<PulsaraApp adapter={adapter} />);
+  const allow = await screen.findByRole('button', { name: /允许本次操作/ });
+  expect(allow.hasAttribute('disabled')).toBe(true);
+  expect(await screen.findByText('正在处理确认')).toBeTruthy();
+  fireEvent.click(allow);
+  expect(adapter.lastConnection!.resolveInteraction).not.toHaveBeenCalled();
+});
+
+it('PR05 late tool decision stays with A while B retains its draft and buttons', async () => {
+  const adapter = new FakeAdapter();
+  adapter.sessions = [initialSession, { ...initialSession, id: 'session-2', title: '另一个会话', live: false }];
+  adapter.connectionValue = pr05Projection();
+  const pending = deferred<CommandReceipt>();
+  render(<PulsaraApp adapter={adapter} />);
+  const allow = await screen.findByRole('button', { name: /允许本次操作/ });
+  const first = adapter.lastConnection!;
+  first.resolveInteraction.mockImplementationOnce(() => pending.promise);
+  fireEvent.click(allow);
+  const submitted = first.resolveInteraction.mock.calls[0][1];
+  if (submitted.kind !== 'tool') throw new Error('expected tool');
+  fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
+  await screen.findByRole('heading', { name: '另一个会话' });
+  const composer = screen.getByLabelText('发送给 Pulsara');
+  fireEvent.change(composer, { target: { value: 'B private draft' } });
+  await act(async () => pending.resolve({ commandId: submitted.commandId, status: 'succeeded', publicCode: 'INTERACTION_ALLOW' }));
+  expect((composer as HTMLTextAreaElement).value).toBe('B private draft');
+  expect(screen.queryByText('已允许本次操作')).toBeNull();
+  expect(adapter.connectCalls).toHaveLength(2);
+});
+
+it('PR05 queries a lost HTTP ACK before waiting for connection cleanup', async () => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = pr05Projection();
+  render(<PulsaraApp adapter={adapter} />);
+  const allow = await screen.findByRole('button', { name: /允许本次操作/ });
+  const first = adapter.lastConnection!;
+  const close = vi.spyOn(first, 'close').mockReturnValue(new Promise(() => {}));
+  first.resolveInteraction.mockRejectedValueOnce(new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', 'HTTP ACK lost', true));
+  first.queryCommand.mockImplementation(async commandId => ({ commandId, status: 'succeeded', publicCode: 'INTERACTION_ALLOW' }));
+  fireEvent.click(allow);
+  await screen.findByText('已允许本次操作');
+  const submitted = first.resolveInteraction.mock.calls[0][1];
+  if (submitted.kind !== 'tool') throw new Error('expected tool');
+  expect(first.queryCommand).toHaveBeenCalledWith(submitted.commandId);
+  expect(first.resolveInteraction).toHaveBeenCalledTimes(1);
+  expect(adapter.connectCalls).toHaveLength(1);
+  expect(close).not.toHaveBeenCalled();
+});
+
+it('PR05 confirmed non-acceptance permits a new explicit click on the same valid confirmation', async () => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = pr05Projection();
+  render(<PulsaraApp adapter={adapter} />);
+  const allow = await screen.findByRole('button', { name: /允许本次操作/ });
+  const active = adapter.lastConnection!;
+  active.resolveInteraction.mockRejectedValueOnce(new RuntimeApiError('INTERACTION_NOT_ACCEPTED', 'confirmed rollback', false));
+  fireEvent.click(allow);
+  await screen.findByText('这项选择没有被接受');
+  expect(active.queryCommand).not.toHaveBeenCalled();
+  await waitFor(() => expect(allow.hasAttribute('disabled')).toBe(false));
+  const first = active.resolveInteraction.mock.calls[0][1];
+  active.resolveInteraction.mockImplementationOnce(async (_, resolution) => {
+    if (resolution.kind !== 'tool') throw new Error('expected tool');
+    return {commandId: resolution.commandId!, status: 'succeeded', publicCode: 'INTERACTION_ALLOW'};
+  });
+  fireEvent.click(allow);
+  await screen.findByText('已允许本次操作');
+  expect(active.resolveInteraction).toHaveBeenCalledTimes(2);
+  const second = active.resolveInteraction.mock.calls[1][1];
+  if (first.kind !== 'tool' || second.kind !== 'tool') throw new Error('expected tool');
+  expect(second.commandId).not.toBe(first.commandId);
+  expect(adapter.connectCalls).toHaveLength(1);
+});
+
+it.each([false, true])('PR05 later unknown command recovers independently of old unresolved query, pending=%s', async pending => {
+  const adapter = new FakeAdapter();
+  adapter.connectionValue = pr05Projection();
+  render(<PulsaraApp adapter={adapter} />);
+  const allow = await screen.findByRole('button', { name: /允许本次操作/ });
+  const active = adapter.lastConnection!;
+  const blocked = deferred<CommandReceipt | undefined>();
+  const queries = new Map<string, number>();
+  let firstCommand: string | undefined;
+  active.resolveInteraction.mockRejectedValue(new RuntimeApiError('SERVER_OPERATION_FAILED', 'unknown', false));
+  active.queryCommand.mockImplementation(commandId => {
+    firstCommand ??= commandId;
+    const count = (queries.get(commandId) ?? 0) + 1;
+    queries.set(commandId, count);
+    if (count === 1) return Promise.resolve(undefined); // Direct post-ACK read.
+    if (commandId === firstCommand) return pending ? blocked.promise : Promise.resolve(undefined);
+    return Promise.resolve({commandId, status: 'succeeded', publicCode: 'INTERACTION_ALLOW'});
+  });
+  fireEvent.click(allow);
+  await waitFor(() => expect(queries.get(firstCommand!)).toBe(2));
+  const next = pr05Projection();
+  if (next.interaction?.kind !== 'tool-confirmation') throw new Error('expected confirmation');
+  next.interaction = {...next.interaction, id: 'interaction:next'};
+  next.liveControlRevision = 8;
+  next.eventSequence = 8;
+  await act(async () => active.emit(next));
+  if (pending) expect(queries.get(firstCommand!)).toBe(2); // One read in flight per command/connection.
+  const nextAllow = screen.getByRole('button', { name: /允许本次操作/ });
+  await waitFor(() => expect(nextAllow.hasAttribute('disabled')).toBe(false));
+  fireEvent.click(nextAllow);
+  await screen.findByText('已允许本次操作');
+  const second = active.resolveInteraction.mock.calls[1][1];
+  if (second.kind !== 'tool') throw new Error('expected tool');
+  expect(queries.get(second.commandId!)).toBe(2);
+  expect(active.resolveInteraction).toHaveBeenCalledTimes(2);
+  await act(async () => blocked.resolve(undefined));
+  const oldQueries = queries.get(firstCommand!);
+  await act(async () => active.emit({...next, eventSequence: 9, liveControlRevision: 9}));
+  expect(queries.get(firstCommand!)).toBe(oldQueries); // Ended old intent is retired.
+  expect(nextAllow.hasAttribute('disabled')).toBe(true); // Accepted is never re-enabled by an empty read.
+});

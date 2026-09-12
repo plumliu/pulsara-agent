@@ -72,10 +72,16 @@ class TerminalProtocolClient:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         role: int,
+        server: TerminalKernelProtocolServer,
+        session_id: str,
+        host_session_id: str,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self.role = role
+        self._server = server
+        self._session_id = session_id
+        self._host_session_id = host_session_id
         self.attachment_id = ""
         self.attachment_generation = 0
         self._lock = asyncio.Lock()
@@ -99,7 +105,8 @@ class TerminalProtocolClient:
             )
         except (ConnectionError, OSError) as exc:
             raise ProtocolTransportClosed() from exc
-        client = cls(reader=reader, writer=writer, role=role)
+        client = cls(reader=reader, writer=writer, role=role, server=server,
+                     session_id=session_id, host_session_id=host_session_id)
         try:
             response = await client._round_trip(
                 wire.ClientFrame(
@@ -232,25 +239,13 @@ class TerminalProtocolClient:
         if self._closed:
             return
         self._closing = True
-        # When no long poll owns the stream, make the logical detach explicit.
-        # A busy stream is closed physically; the gateway's finally block owns
-        # the exact same attachment release.
-        if not self._lock.locked() and self.attachment_id:
-            async with self._lock:
-                with suppress(BaseException):
-                    command_id = f"command:detach:{uuid4().hex}"
-                    await self._round_trip(
-                        wire.ClientFrame(
-                            command=wire.CommandRequest(
-                                request_id=_request_id(),
-                                attachment_id=self.attachment_id,
-                                attachment_generation=self.attachment_generation,
-                                command_id=command_id,
-                                client_submission_id=command_id,
-                                command_kind=wire.DETACH,
-                            )
-                        )
-                    )
+        # Save/use the exact original binding before clearing client fields.
+        # This Host release does not queue behind the stream's in-flight I/O.
+        if self.role == wire.ATTACHMENT_ROLE_CONTROLLER and self.attachment_id:
+            await self._server.controller_attachment_closed(
+                session_id=self._session_id, host_session_id=self._host_session_id,
+                attachment_id=self.attachment_id,
+            )
         self._writer.close()
         with suppress(BaseException):
             await self._writer.wait_closed()

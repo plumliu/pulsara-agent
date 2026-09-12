@@ -21,6 +21,10 @@ from google.protobuf.message import DecodeError, Message
 
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.host import KernelHostSession
+from pulsara_agent.conversation_kernel.interaction import (
+    ToolInteractionDecisionNotAccepted,
+    ToolInteractionDecisionOutcomeUnknown,
+)
 from pulsara_agent.conversation_kernel.user_control import (
     ControlQueryStatus,
     UserControlOperation,
@@ -95,7 +99,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:538c470374cd2f38c1293b2d3605ac6cb97e250ff0ca99726d4f4bdeb6bdfa1c"
+    "sha256:101ab6be8ce1d90eda3d3ddee94712d8662bc2a80d5003a0e67082f161d868d3"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -202,6 +206,23 @@ class TerminalKernelProtocolServer:
             pass
         self._launch_capability = b""
 
+    async def controller_attachment_closed(
+        self, *, session_id: str, host_session_id: str, attachment_id: str,
+    ) -> None:
+        """Private bridge adaptation of its own exact attachment lifecycle.
+
+        The stream can still be settling an admitted decision. Revoke through
+        the original Host now; its later gateway finally is a compare-and-detach
+        of the same unique attachment and cannot revoke a replacement.
+        """
+        try:
+            session = self._session_provider(host_session_id)
+        except (KeyError, RuntimeError):
+            return
+        if session.session_id != session_id or session.host_session_id != host_session_id:
+            raise ConversationKernelConflict("browser attachment Host binding changed")
+        await session.controller_detached(attachment_id)
+
     async def _accept(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -254,7 +275,7 @@ class TerminalKernelProtocolServer:
     ) -> wire.ServerFrame:
         kind = frame.WhichOneof("request")
         if kind == "hello":
-            return self._hello(state, frame.hello)
+            return await self._hello(state, frame.hello)
         if not state.authenticated or state.host_session is None:
             return _error(_request_id(frame), "AUTH_REQUIRED")
         request = getattr(frame, kind) if kind else None
@@ -296,7 +317,7 @@ class TerminalKernelProtocolServer:
             return await self._read_plan_draft(state, request)
         return _error(_request_id(frame), "UNKNOWN_REQUEST")
 
-    def _hello(
+    async def _hello(
         self, state: _Connection, request: wire.HelloRequest
     ) -> wire.ServerFrame:
         if state.authenticated:
@@ -324,15 +345,19 @@ class TerminalKernelProtocolServer:
         ):
             return _error(request.request_id, "ATTACHMENT_ROLE_INVALID")
         self._attachment_generation += 1
+        attachment_generation = self._attachment_generation
         attachment_id = f"terminal-v3-attachment:{uuid4().hex}"
+        # Bind cleanup before the awaitable attach/promote boundary so a
+        # cancelled HELLO cannot leave an ownerless controller attachment.
+        state.attachment_id = attachment_id
+        state.attachment_generation = attachment_generation
+        state.host_session = session
+        state.granted_role = request.requested_role
         if (
             request.requested_role == wire.ATTACHMENT_ROLE_CONTROLLER
-            and not session.attach_controller(attachment_id)
+            and not await session.attach_controller(attachment_id)
         ):
             return _error(request.request_id, "CONTROLLER_UNAVAILABLE")
-        state.attachment_id = attachment_id
-        state.attachment_generation = self._attachment_generation
-        state.host_session = session
         state.protocol_reader = CanonicalProtocolReader(
             session.repository.connection_provider
         )
@@ -615,7 +640,7 @@ class TerminalKernelProtocolServer:
         ):
             return _error(request.request_id, "COMMAND_SOURCE_UNION_INVALID")
         if request.command_kind != wire.DETACH and (
-            state.granted_role != wire.ATTACHMENT_ROLE_CONTROLLER
+            not self._has_controller_capability(state)
         ):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
         if request.force and request.command_kind != wire.COMPACT_CONTEXT:
@@ -822,6 +847,7 @@ class TerminalKernelProtocolServer:
                 return _error(request.request_id, "DETACH_REQUEST_INVALID")
             from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
 
+            await state.host_session.controller_detached(state.attachment_id)
             outcome = KernelCommandOutcome(
                 request.command_id, "SUCCEEDED", "", "DETACHED", "Client detached."
             )
@@ -846,7 +872,7 @@ class TerminalKernelProtocolServer:
     async def _resolve_interaction(
         self, state: _Connection, request: wire.ResolveInteractionRequest
     ) -> wire.ServerFrame:
-        if state.granted_role != wire.ATTACHMENT_ROLE_CONTROLLER:
+        if not self._has_controller_capability(state):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
         if not _valid_command_id(request.command_id) or not request.interaction_id:
             return _error(request.request_id, "INTERACTION_REQUEST_INVALID")
@@ -866,6 +892,10 @@ class TerminalKernelProtocolServer:
                 decision=decision,
                 actor_id=state.attachment_id,
             )
+        except ToolInteractionDecisionNotAccepted:
+            return _error(request.request_id, "INTERACTION_NOT_ACCEPTED")
+        except ToolInteractionDecisionOutcomeUnknown:
+            return _error(request.request_id, "INTERACTION_OUTCOME_UNKNOWN")
         except ConversationKernelConflict:
             return _error(request.request_id, "INTERACTION_STALE")
         return wire.ServerFrame(
@@ -875,7 +905,7 @@ class TerminalKernelProtocolServer:
     async def _resolve_plan_interaction(
         self, state: _Connection, request: wire.ResolvePlanInteractionRequest
     ) -> wire.ServerFrame:
-        if not self._has_plan_content_capability(state):
+        if not self._has_controller_capability(state):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
         if (
             not _valid_command_id(request.command_id)
@@ -984,7 +1014,7 @@ class TerminalKernelProtocolServer:
     async def _read_plan_question(
         self, state: _Connection, request: wire.ReadPlanQuestionContentRequest
     ) -> wire.ServerFrame:
-        if not self._has_plan_content_capability(state):
+        if not self._has_controller_capability(state):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
         try:
             question = await asyncio.to_thread(
@@ -1017,7 +1047,7 @@ class TerminalKernelProtocolServer:
     async def _read_plan_draft(
         self, state: _Connection, request: wire.ReadPlanDraftTextChunkRequest
     ) -> wire.ServerFrame:
-        if not self._has_plan_content_capability(state):
+        if not self._has_controller_capability(state):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
         try:
             chunk = await asyncio.to_thread(
@@ -1060,7 +1090,7 @@ class TerminalKernelProtocolServer:
         if not _valid_command_id(request.command_id):
             return _error(request.request_id, "COMMAND_ID_INVALID")
         if request.HasField("expected_control"):
-            if state.granted_role != wire.ATTACHMENT_ROLE_CONTROLLER:
+            if not self._has_controller_capability(state):
                 return _error(request.request_id, "CONTROLLER_REQUIRED")
             expected = _control_request_from_wire(
                 request.command_id, request.expected_control
@@ -1360,8 +1390,8 @@ class TerminalKernelProtocolServer:
         )
 
     @staticmethod
-    def _has_plan_content_capability(state: _Connection) -> bool:
-        """Bind exact Plan reads to the currently attached controller owner."""
+    def _has_controller_capability(state: _Connection) -> bool:
+        """Join every controller request with the current Host attachment."""
 
         return (
             state.granted_role == wire.ATTACHMENT_ROLE_CONTROLLER
@@ -1689,6 +1719,7 @@ def _interaction_to_wire(value: CurrentInteractionView) -> wire.LiveInteractionV
         public_prompt=value.public_prompt,
         public_options=value.public_options,
         expires_at_utc=value.expires_at_utc,
+        decision_in_progress=value.decision_in_progress,
     )
 
 

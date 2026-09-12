@@ -31,6 +31,7 @@ from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.cli import build_parser, _mcp_command
 from pulsara_agent.conversation_kernel.interaction import (
     KernelInteractionCoordinator,
+    ToolInteractionDecisionNotAccepted,
 )
 from pulsara_agent.conversation_kernel.interaction_arbiter import (
     InteractionAdmissionHooks,
@@ -3199,6 +3200,10 @@ class _BlockingInteractionRepository(_InteractionRepository):
 
 
 class _FailThenBlockingInteractionRepository(_InteractionRepository):
+    def confirm_tool_interaction_decision(self, guard, **kwargs):
+        assert self.calls == 1
+        return None
+
     def __init__(self) -> None:
         self.calls = 0
         self.retry_started = Event()
@@ -3233,7 +3238,7 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller("attachment:1")
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id="host:1",
@@ -3322,7 +3327,7 @@ def test_round6_interaction_close_joins_started_canonical_resolution() -> None:
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller("attachment:1")
         permission = build_run_permission_snapshot(
             snapshot_id="permission:close",
             requested_mode=PermissionMode.ASK_PERMISSIONS,
@@ -3375,7 +3380,7 @@ def test_round6_interaction_retry_installs_fresh_unsettled_edge() -> None:
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert coordinator.attach_controller("attachment:retry")
+        assert await coordinator.attach_controller("attachment:retry")
         permission = build_run_permission_snapshot(
             snapshot_id="permission:retry",
             requested_mode=PermissionMode.ASK_PERMISSIONS,
@@ -3403,8 +3408,9 @@ def test_round6_interaction_retry_installs_fresh_unsettled_edge() -> None:
             "decision": "ALLOW",
             "actor_id": "attachment:retry",
         }
-        with pytest.raises(RuntimeError, match="first settlement failed"):
+        with pytest.raises(ToolInteractionDecisionNotAccepted, match="confirmed not accepted"):
             await coordinator.resolve_tool_interaction(**kwargs)
+        kwargs["expected_live_revision"] = owner.current_snapshot().revision
         retry = asyncio.create_task(coordinator.resolve_tool_interaction(**kwargs))
         assert await asyncio.to_thread(repository.retry_started.wait, 2)
         pending = coordinator._pending  # noqa: SLF001
@@ -3414,7 +3420,9 @@ def test_round6_interaction_retry_installs_fresh_unsettled_edge() -> None:
             coordinator.controller_detached("attachment:retry")
         )
         await asyncio.sleep(0.02)
-        assert not detached.done()
+        assert detached.done()
+        assert not coordinator.is_current_controller("attachment:retry")
+        assert not retry.done()
         repository.release.set()
         await asyncio.wait_for(retry, timeout=2)
         await asyncio.wait_for(detached, timeout=2)
@@ -3441,7 +3449,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller("attachment:1")
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
             host_owner_id="host:1",
@@ -3569,7 +3577,7 @@ def test_round6_confirmation_arbiter_is_single_visible_fifo() -> None:
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller("attachment:1")
         admission_order: list[str] = []
         permission = build_run_permission_snapshot(
             snapshot_id="permission:1",

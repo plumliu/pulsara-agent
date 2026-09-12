@@ -69,6 +69,7 @@ class _CommandHost:
     host_session_id = "host:test"
 
     def __init__(self) -> None:
+        self.controller_id = "attachment:test"
         self.submitted: list[tuple[str, str]] = []
         self.steered: list[tuple[str, str, str]] = []
         self.resolved: list[dict[str, object]] = []
@@ -79,6 +80,13 @@ class _CommandHost:
         self.terminate_requests: list[dict[str, str]] = []
         self.control_queries: list[UserControlRequest] = []
         self.background_reads: list[dict[str, object]] = []
+
+    def has_controller_attachment(self, attachment_id):
+        return attachment_id == self.controller_id
+
+    async def controller_detached(self, attachment_id):
+        if self.controller_id == attachment_id:
+            self.controller_id = None
 
     async def submit_prompt(
         self, *, command_id: str, text: str
@@ -818,7 +826,7 @@ def test_stage2_pending_interaction_is_same_host_ephemeral_and_stale_safe() -> N
             live_bus=LiveAgentEventBus(),
             io_owner=KernelSessionIO(),
         )
-        assert coordinator.attach_controller("attachment:1")
+        assert await coordinator.attach_controller("attachment:1")
         waiter = asyncio.create_task(
             coordinator.request_tool_confirmation(
                 turn_id="turn:1",

@@ -36,6 +36,7 @@ class CurrentInteractionView:
     public_prompt: str
     public_options: tuple[str, ...]
     expires_at_utc: str
+    decision_in_progress: bool = False
 
 
 @dataclass(frozen=True, slots=True)

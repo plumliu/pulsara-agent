@@ -197,6 +197,10 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/extensions.py",
         "src/pulsara_agent/conversation_kernel/host.py",
         "src/pulsara_agent/conversation_kernel/io.py",
+        # PR05 §§9.2–9.3: the original candidate tracks its one decision
+        # write/read-confirm task; close joins settlement_changed. No worker
+        # resumes or retries a decision after the Host disappears.
+        "src/pulsara_agent/conversation_kernel/interaction.py",
         "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
         "src/pulsara_agent/conversation_kernel/mcp/supervisor.py",
         "src/pulsara_agent/conversation_kernel/memory/governor.py",

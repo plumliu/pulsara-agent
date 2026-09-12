@@ -160,6 +160,12 @@ interface PulsaraAppProps {
   adapter?: RuntimeAdapter;
 }
 
+type ToolDecisionIntent = {
+  sessionId: string; hostSessionId: string; interactionId: string;
+  commandId: string; decision: 'allow' | 'deny'; connectionGeneration: number;
+  status: 'submitting' | 'unknown' | 'accepted' | 'rejected' | 'retired';
+};
+
 export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps) {
   const [activeView, setActiveView] = useState<AppView>('workbench');
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
@@ -190,6 +196,20 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [runtimeError, setRuntimeError] = useState<string>();
   const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
   const [queueActions, setQueueActions] = useState<QueuedPromptAction[]>([]);
+  const [toolDecisions, setToolDecisions] = useState<ToolDecisionIntent[]>([]);
+  const toolDecisionsRef = useRef<ToolDecisionIntent[]>([]);
+  const toolDecisionQueries = useRef(new Map<string, { cut: string; generation: number; inFlight: boolean }>());
+  const saveToolDecision = useCallback((intent: ToolDecisionIntent) => {
+    const previous = toolDecisionsRef.current.find(item => item.commandId === intent.commandId);
+    // A late empty/error response cannot downgrade an exact known decision or
+    // revive a retired query. A newer click has its own command identity.
+    if (previous && ['accepted', 'rejected', 'retired'].includes(previous.status)
+      && intent.status !== 'accepted') return;
+    const next = [...toolDecisionsRef.current.filter(item => item.commandId !== intent.commandId), intent];
+    if (['accepted', 'rejected', 'retired'].includes(intent.status)) toolDecisionQueries.current.delete(intent.commandId);
+    toolDecisionsRef.current = next;
+    setToolDecisions(next);
+  }, []);
   const queueActionsInFlight = useRef(new Set<string>());
   const [inspectorOpen, setInspectorOpen] = useState(readInitialInspectorVisibility);
   useEffect(() => {
@@ -1351,6 +1371,102 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return content;
   }, [ownsConnection]);
 
+  const acceptToolDecision = useCallback((intent: ToolDecisionIntent, receipt: CommandReceipt): boolean => {
+    if (receipt.commandId !== intent.commandId
+      || receipt.publicCode !== `INTERACTION_${intent.decision.toUpperCase()}`
+      || receipt.status !== 'succeeded') return false;
+    saveToolDecision({ ...intent, status: 'accepted' });
+    return true;
+  }, [saveToolDecision]);
+
+  // Only read the original command on a new connection/canonical/live cut.
+  // A null query or a false busy projection cannot erase a local unknown intent.
+  useEffect(() => {
+    if (!connection) return;
+    const intents = toolDecisions.filter(item => item.sessionId === connection.sessionId
+      && (item.status === 'unknown' || (item.status === 'submitting'
+        && item.connectionGeneration !== connection.generation)));
+    const cut = `${connection.generation}:${projection.eventSequence}:${projection.liveControlRevision}:${projection.interaction?.id}:${projection.interaction?.kind === 'tool-confirmation' ? projection.interaction.decisionInProgress : ''}`;
+    for (const intent of intents) {
+      const previous = toolDecisionQueries.current.get(intent.commandId);
+      if (previous?.cut === cut || (previous?.generation === connection.generation && previous.inFlight)) continue;
+      const attempt = { cut, generation: connection.generation, inFlight: true };
+      toolDecisionQueries.current.set(intent.commandId, attempt);
+      void connection.queryCommand(intent.commandId).then(receipt => {
+        if (receipt) {
+          if (acceptToolDecision(intent, receipt) && ownsConnection(connection)) {
+            notify(intent.decision === 'allow' ? '已允许本次操作' : '已拒绝本次操作', '决定已接纳；操作结果以实际执行记录为准。', 'success');
+          }
+          return;
+        }
+        if (!ownsConnection(connection)) return;
+        const current = connection.current();
+        if (current.hostSessionId && current.liveControlRevision !== undefined
+          && (current.hostSessionId !== intent.hostSessionId || current.interaction?.id !== intent.interactionId)) {
+          // The original live confirmation has ended. Retire its empty query,
+          // without calling it rejected or reopening any confirmation button.
+          saveToolDecision({ ...intent, status: 'retired' });
+        }
+      }).catch(() => { /* Keep this command unknown; other queries still advance. */ }).finally(() => {
+        if (toolDecisionQueries.current.get(intent.commandId) !== attempt) return;
+        attempt.inFlight = false;
+        const latest = toolDecisionsRef.current.find(item => item.commandId === intent.commandId);
+        if (latest && ownsConnection(connection)
+          && (latest.status === 'unknown' || (latest.status === 'submitting'
+            && latest.connectionGeneration !== connection.generation))) {
+          // Reconsider a newer cut that arrived during this query. The same
+          // completed cut remains remembered, so an empty read cannot poll itself.
+          saveToolDecision({ ...latest, status: 'unknown' });
+        }
+      });
+    }
+  }, [connection, toolDecisions, projection.eventSequence, projection.liveControlRevision, projection.interaction, acceptToolDecision, saveToolDecision, ownsConnection, notify]);
+
+  const submitToolDecision = useCallback(async (
+    active: RuntimeConnection, interaction: Extract<RuntimeInteractionSummary, { kind: 'tool-confirmation' }>,
+    decision: 'allow' | 'deny',
+  ): Promise<boolean> => {
+    const hostSessionId = active.current().hostSessionId;
+    if (!hostSessionId || interaction.decisionInProgress
+      || !interaction.expiresAtUtc || Date.parse(interaction.expiresAtUtc) <= Date.now()
+      || toolDecisionsRef.current.some(item => item.sessionId === active.sessionId
+        && item.hostSessionId === hostSessionId && item.interactionId === interaction.id
+        && item.status !== 'rejected')) return false;
+    const intent: ToolDecisionIntent = {
+      sessionId: active.sessionId, hostSessionId, interactionId: interaction.id,
+      commandId: `command:web:${crypto.randomUUID()}`, decision,
+      connectionGeneration: active.generation, status: 'submitting',
+    };
+    saveToolDecision(intent);
+    try {
+      const receipt = await active.resolveInteraction(interaction, { kind: 'tool', decision, commandId: intent.commandId });
+      if ('submitted' in receipt || !acceptToolDecision(intent, receipt)) {
+        saveToolDecision({ ...intent, status: 'unknown' });
+        return false;
+      }
+      if (ownsConnection(active)) notify(decision === 'allow' ? '已允许本次操作' : '已拒绝本次操作', '决定已接纳；操作结果以实际执行记录为准。', 'success');
+      return true;
+    } catch (error) {
+      const rejected = error instanceof RuntimeApiError && ['INTERACTION_NOT_ACCEPTED', 'INTERACTION_STALE', 'CONTROLLER_REQUIRED', 'INTERACTION_INVALID'].includes(error.code);
+      // A lost HTTP ACK does not prove that the attached Host connection died.
+      // Read the saved command before transport cleanup can delay reconciliation.
+      if (!rejected && ownsConnection(active)) {
+        try {
+          const receipt = await active.queryCommand(intent.commandId);
+          if (receipt && acceptToolDecision(intent, receipt)) {
+            if (ownsConnection(active)) notify(decision === 'allow' ? '已允许本次操作' : '已拒绝本次操作', '决定已接纳；操作结果以实际执行记录为准。', 'success');
+            return true;
+          }
+        } catch { /* The original intent remains blocked through reconnect. */ }
+      }
+      saveToolDecision({ ...intent, status: rejected ? 'rejected' : 'unknown' });
+      const recovered = await recoverConnectionAfterOperation(error, active);
+      if (recovered && ownsConnection(recovered)) notify(rejected ? '这项选择没有被接受' : '正在核实这项决定',
+        rejected ? '请查看当前确认后重新选择。' : '正在查询原决定，操作结果尚待核实。', 'warning');
+      return false;
+    }
+  }, [acceptToolDecision, saveToolDecision, ownsConnection, notify, recoverConnectionAfterOperation]);
+
   const resolveInteraction = useCallback(async (
     interaction: RuntimeInteractionSummary,
     resolution: RuntimeInteractionResolution,
@@ -1363,6 +1479,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (active.role !== 'controller') {
       notify('这个会话正在另一个窗口中操作', '选择“在此窗口继续”后即可完成这项确认。', 'warning');
       return false;
+    }
+    if (resolution.kind === 'tool') {
+      return interaction.kind === 'tool-confirmation'
+        ? submitToolDecision(active, interaction, resolution.decision) : false;
     }
     try {
       const receipt = await active.resolveInteraction(interaction, resolution);
@@ -1389,9 +1509,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         notify(copy[receipt.planDraftDecision][0], copy[receipt.planDraftDecision][1], 'success');
         return true;
       }
-      const title = resolution.kind === 'tool'
-        ? resolution.decision === 'allow' ? '已允许本次操作' : '已拒绝本次操作'
-        : '回答已提交';
+      const title = '回答已提交';
       notify(title, 'Pulsara 将继续处理。', 'success');
       return true;
     } catch (error) {
@@ -1400,7 +1518,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       notify('无法完成这项选择', productMessage(error instanceof Error ? error.message : undefined, '内容可能已经更新，请稍后重试。'), 'warning');
       return false;
     }
-  }, [notify, ownsConnection, recoverConnectionAfterOperation]);
+  }, [notify, ownsConnection, recoverConnectionAfterOperation, submitToolDecision]);
 
   const installDeviceSkill = useCallback(async (input: SkillImportInput): Promise<boolean> => {
     try {
@@ -1825,6 +1943,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           modelConfigurations={bootstrap?.model_configurations ?? []}
           modelCallBinding={activeSession.modelCallBinding}
           interaction={projection.interaction}
+          toolDecisionPending={toolDecisions.some(item => item.sessionId === connection?.sessionId
+            && item.hostSessionId === projection.hostSessionId && item.interactionId === projection.interaction?.id
+            && item.status !== 'rejected')}
           canControl={canControl}
           isObserver={isObserver}
           skills={(capabilities?.skills.items ?? []).filter(

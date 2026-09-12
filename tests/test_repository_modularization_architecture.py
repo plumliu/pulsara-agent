@@ -161,6 +161,8 @@ _PR03_ADDED_METHODS = {
 }
 # PR04 §6: source CAS plus replacement INSERT shares the existing writer transaction.
 _PR04_ADDED_METHODS = {"apply_queued_prompt_action"}
+# PR05 §9.2: one read-only entry and the shared exact fact constructor.
+_PR05_ADDED_METHODS = {"confirm_tool_interaction_decision", "_read_tool_interaction_decision"}
 _PR03_CHANGED_METHODS = {
     "interrupt_turn",
 }
@@ -834,6 +836,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _MODEL_UNIVERSE_ADDED_METHODS
                 | _PR03_ADDED_METHODS
                 | _PR04_ADDED_METHODS
+            | _PR05_ADDED_METHODS
                 | {
                     "_management_connection",
                     "fork_conversation",
@@ -960,6 +963,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _MODEL_UNIVERSE_ADDED_METHODS
             | _PR03_ADDED_METHODS
             | _PR04_ADDED_METHODS
+            | _PR05_ADDED_METHODS
             | {
                 "_management_connection",
                 "fork_conversation",
@@ -1052,6 +1056,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _MODEL_UNIVERSE_ADDED_METHODS
         | _PR03_ADDED_METHODS
         | _PR04_ADDED_METHODS
+            | _PR05_ADDED_METHODS
         | _PR03_CHANGED_METHODS
         | _MODEL_UNIVERSE_CHANGED_METHODS
         | _MODEL_UNIVERSE_REMOVED_METHODS

@@ -370,6 +370,8 @@ export type RuntimeInteractionSummary =
   | {
     id: string;
     kind: 'tool-confirmation';
+    expiresAtUtc: string;
+    decisionInProgress: boolean;
     prompt: string;
     options: string[];
   }
@@ -414,6 +416,11 @@ export type RuntimeInteractionResolution =
     decision: 'approve' | 'revise' | 'cancel';
     feedback?: string;
   };
+
+/** App freezes a tool command before transport; forms/plan keep their own semantics. */
+export type RuntimeInteractionSubmission =
+  | Exclude<RuntimeInteractionResolution, { kind: 'tool' }>
+  | { kind: 'tool'; decision: 'allow' | 'deny'; commandId: string };
 
 /** Browser boundary for the local Pulsara application. */
 export interface RuntimeAdapter {
@@ -764,7 +771,7 @@ export interface RuntimeConnection {
   readInteraction(interaction: RuntimeInteractionSummary): Promise<RuntimeInteractionContent>;
   resolveInteraction(
     interaction: RuntimeInteractionSummary,
-    resolution: RuntimeInteractionResolution,
+    resolution: RuntimeInteractionSubmission,
   ): Promise<CommandReceipt | { submitted: boolean }>;
   queryCommand(commandId: string): Promise<CommandReceipt | undefined>;
   readToolArtifact(resultEntryId: string, offsetChars: number, maxChars?: number): Promise<ToolArtifactPage>;
@@ -1845,7 +1852,16 @@ class LocalRuntimeConnection implements RuntimeConnection {
     }
     this.applyLive(observation.live ?? [], observation.settlements ?? []);
     for (const event of observation.live_control ?? []) {
-      if (event.kind === 'LIVE_INTERACTION_CLOSED') delete this.liveControl.current_interaction;
+      if (event.kind === 'LIVE_INTERACTION_CLOSED') {
+        const previous = this.liveControl.current_interaction;
+        const hasReason = (observation.live ?? []).some((live) =>
+          live.event_type === 'INTERACTION_CLOSED'
+          && live.payload?.interaction_closed?.interaction_id === previous?.interaction_id);
+        if (previous?.interaction_kind === 'TOOL_CONFIRMATION' && !hasReason) {
+          this.presentationNotices.push('这项确认已结束；原因暂不可确认。');
+        }
+        delete this.liveControl.current_interaction;
+      }
       else if (event.interaction) this.liveControl.current_interaction = event.interaction;
     }
     this.eventSequence = numeric(observation.through_event_sequence ?? this.eventSequence);
@@ -2140,7 +2156,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
 
   async resolveInteraction(
     interaction: RuntimeInteractionSummary,
-    resolution: RuntimeInteractionResolution,
+    resolution: RuntimeInteractionSubmission,
   ): Promise<CommandReceipt | { submitted: boolean }> {
     const current = this.project().interaction;
     if (!current || current.id !== interaction.id || current.kind !== interaction.kind) {
@@ -2155,7 +2171,6 @@ class LocalRuntimeConnection implements RuntimeConnection {
       });
     }
     if (resolution.kind === 'capability') throw new RuntimeApiError('INTERACTION_INVALID', '当前不是能力配置表单。', false);
-    const commandId = `command:web:${crypto.randomUUID()}`;
     if (interaction.kind === 'tool-confirmation') {
       if (resolution.kind !== 'tool') {
         throw new RuntimeApiError('INTERACTION_INVALID', '请选择是否允许这次操作。', false);
@@ -2164,7 +2179,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
         command_outcome?: ProtocolCommandOutcome;
         error?: ProtocolError;
       }>('resolve-interaction', {
-        command_id: commandId,
+        command_id: resolution.commandId,
         expected_writer_generation: this.writerGeneration,
         expected_owner_epoch: this.liveControlOwnerEpoch,
         expected_live_revision: this.liveControlRevision,
@@ -2180,6 +2195,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     if (resolution.kind === 'tool') {
       throw new RuntimeApiError('INTERACTION_INVALID', '请选择一个规划操作。', false);
     }
+    const commandId = `command:web:${crypto.randomUUID()}`;
     const resolutionFields = resolution.kind === 'plan-question-option'
       ? { resolution_kind: 'question_option', option_ordinal: resolution.optionOrdinal }
       : resolution.kind === 'plan-question-text'
@@ -2630,6 +2646,23 @@ class LocalRuntimeConnection implements RuntimeConnection {
   private applyLive(events: ProtocolLiveEvent[], settlements: ProtocolSettlement[]) {
     for (const event of events) {
       const payload = event.payload ?? {};
+      if (event.event_type === 'INTERACTION_CLOSED') {
+        const closed = payload.interaction_closed ?? {};
+        if (closed.interaction_id === this.liveControl.current_interaction?.interaction_id) {
+          const reasons: Record<string, string> = {
+            'interaction:expired': '确认已过期，本次操作未获授权。',
+            'interaction:turn-cancelled': '原任务已停止，这项待确认操作已结束。',
+            'interaction:host-closing': '运行环境已关闭，原确认已结束。',
+            'interaction:mcp-config-changed': '操作条件已变化，这项确认已失效。',
+            'interaction:admission-rejected': '操作条件已变化，这项确认已失效。',
+            'interaction:outcome-unknown': '运行已中断，操作结果待核实。',
+          };
+          if (String(closed.reason) !== 'RESOLVED') this.presentationNotices.push(
+            reasons[String(closed.reason)] ?? '这项确认已结束；原因暂不可确认。',
+          );
+        }
+        continue;
+      }
       if (event.event_type === 'TODO_SNAPSHOT_UPDATED') {
         this.applyTodoSnapshot(event, payload.todo_snapshot_updated ?? {});
         continue;
@@ -3827,7 +3860,8 @@ function settleHistoricalTrace(trace: ToolTrace): void {
   if (trace.status !== 'running') return;
   trace.status = 'cancelled';
   trace.subtitle = '已结束';
-  trace.meta = '操作未完成';
+  trace.meta = '结果待核实';
+  trace.resultSummary = '原运行已结束，操作结果尚未记录；需要核实实际状态。';
 }
 
 function createsSubagentTasks(trace: ToolTrace): boolean {
@@ -4169,7 +4203,10 @@ function projectInteraction(
   if (liveId) {
     return {
       id: liveId,
-      kind: live?.interaction_kind === 'CAPABILITY_FORM' ? 'capability-form' : 'tool-confirmation',
+      ...(live?.interaction_kind === 'CAPABILITY_FORM'
+        ? { kind: 'capability-form' as const }
+        : { kind: 'tool-confirmation' as const, expiresAtUtc: String(live?.expires_at_utc ?? ''),
+          decisionInProgress: live?.decision_in_progress === true }),
       prompt: String(live?.public_prompt ?? ''),
       options: Array.isArray(live?.public_options)
         ? live.public_options.map(String)
