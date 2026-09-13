@@ -56,3 +56,6 @@ temp/
 *.log
 logs/
 .pulsara/
+
+# Large local browser trace
+/output/playwright/pr04-dogfood/playwright-cli/pr04-trace.tar.gz
