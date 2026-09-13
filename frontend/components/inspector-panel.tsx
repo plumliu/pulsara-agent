@@ -455,7 +455,12 @@ export function InspectorPanel({
         </nav>
       </header>
       <div className="inspector-scroll">
-        {view === 'tasks' ? (
+        {!session.id ? (
+          <div className="inspector-empty">
+            {view === 'background' ? <TerminalSquare size={18} /> : view === 'tasks' ? <ListChecks size={18} /> : <Blocks size={18} />}
+            <span>创建或选择会话后查看{view === 'background' ? '后台终端' : view === 'tasks' ? '任务' : '项目能力'}</span>
+          </div>
+        ) : view === 'tasks' ? (
           <TaskWorkspace
             tasks={agentTasks}
             loading={loading}

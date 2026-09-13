@@ -47,6 +47,7 @@ extend-exclude = [
 
 [dependency-groups]
 dev = [
+    "pillow>=12.3.0",
     "pytest>=9.0.3",
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.16",

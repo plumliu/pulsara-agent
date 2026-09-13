@@ -2105,6 +2105,12 @@ describe('PulsaraApp', () => {
     expect(screen.queryByRole('button', { name: '先规划' })).toBeNull();
     expect(screen.queryByRole('button', { name: /完全访问/ })).toBeNull();
 
+    const inspector = screen.getByRole('complementary', { name: '当前会话详情' });
+    fireEvent.click(within(inspector).getByRole('button', { name: '后台终端' }));
+    expect(within(inspector).getByText('创建或选择会话后查看后台终端')).toBeTruthy();
+    expect(within(inspector).queryByText('后台终端不可用')).toBeNull();
+    expect(adapter.connectCalls).toHaveLength(0);
+
     fireEvent.click(screen.getByRole('button', { name: '创建会话' }));
     expect(screen.getByRole('heading', { name: '新建会话' })).toBeTruthy();
   });

@@ -1,0 +1,77 @@
+- main [ref=f3e3]:
+  - navigation "主要功能" [ref=f3e4]:
+    - button "返回 Pulsara 总览" [ref=f3e5] [cursor=pointer]
+    - generic [ref=f3e9]:
+      - button "总览" [ref=f3e10] [cursor=pointer]
+      - button "会话" [ref=f3e14] [cursor=pointer]
+      - button "能力" [ref=f3e17] [cursor=pointer]
+      - button "记忆" [ref=f3e21] [cursor=pointer]
+    - generic [ref=f3e30]:
+      - button "命令面板" [ref=f3e31] [cursor=pointer]: 命令面板 ⌘K
+      - button "设置" [ref=f3e34] [cursor=pointer]
+      - generic "本地用户" [ref=f3e38]: PL
+  - complementary [ref=f3e39]:
+    - generic [ref=f3e40]:
+      - generic [ref=f3e42]:
+        - paragraph [ref=f3e43]: 本地智能工作台
+        - heading "Pulsara" [level=1] [ref=f3e44]
+      - generic "正在连接" [ref=f3e45]
+    - button "搜索与命令 ⌘ K" [ref=f3e46] [cursor=pointer]:
+      - generic [ref=f3e50]: 搜索与命令
+      - generic [ref=f3e51]: ⌘ K
+    - button "新建会话 ⌘ N" [ref=f3e52] [cursor=pointer]:
+      - generic [ref=f3e54]: 新建会话
+      - generic [ref=f3e55]: ⌘ N
+    - region "会话目录" [ref=f3e56]:
+      - generic [ref=f3e57]:
+        - region "从目录中打开" [ref=f3e58]:
+          - button [expanded] [ref=f3e59] [cursor=pointer]:
+            - strong [ref=f3e60]: 从目录中打开
+          - generic [ref=f3e63]: 还没有从目录中打开的会话
+        - region "快速开始" [ref=f3e65]:
+          - button [expanded] [ref=f3e66] [cursor=pointer]:
+            - strong [ref=f3e67]: 快速开始
+          - generic [ref=f3e70]: 还没有快速开始会话
+    - generic [ref=f3e72]:
+      - generic [ref=f3e73]:
+        - generic [ref=f3e75]: 正在连接
+        - code [ref=f3e76]: 本机
+      - generic [ref=f3e77]: 数据保存在这台设备上
+  - region "会话工作台" [ref=f3e79]:
+    - generic [ref=f3e80]:
+      - generic [ref=f3e81]:
+        - generic [ref=f3e82]: 草稿
+        - generic [ref=f3e83]:
+          - heading "尚未选择会话" [level=2] [ref=f3e84]
+          - paragraph [ref=f3e85]: 指定目录 · 正在连接…
+      - button "切换检查器" [ref=f3e87] [cursor=pointer]
+    - generic [ref=f3e90]: 正在连接本地服务…
+    - generic [ref=f3e93]:
+      - generic [ref=f3e96]:
+        - generic [ref=f3e101]:
+          - strong [ref=f3e102]: 创建或选择会话后开始
+          - generic [ref=f3e103]: 模型、推理、规划和本轮权限都会跟随当前会话。
+        - button "创建会话" [ref=f3e104] [cursor=pointer]
+      - paragraph [ref=f3e107]: 当前没有活动会话
+  - complementary "当前会话详情":
+    - generic:
+      - generic:
+        - strong: 当前会话
+        - generic: 尚未选择会话
+      - button "关闭检查器"
+      - navigation "详情视图":
+        - button "项目能力": 能力
+        - button "任务"
+        - button "后台终端"
+    - generic:
+      - generic:
+        - generic:
+          - generic: 项目能力
+          - paragraph: 这里的修改会应用到同一目录的所有会话。
+          - generic:
+            - tablist "能力类型":
+              - tab "技能 0" [selected]
+              - tab "MCP 0"
+            - group "能力操作":
+              - button "添加"
+        - generic: 这个目录还没有技能

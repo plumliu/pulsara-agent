@@ -170,6 +170,35 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
 }
 
 describe('InspectorPanel PR03 production navigation', () => {
+  it('keeps an unselected session out of data loading and loads after selection', async () => {
+    const loadBackground = vi.fn(async () => ({ processes: [backgroundProcess] }));
+    const emptyProps = props({
+      session: { id: '', title: '尚未选择会话', subtitle: '', status: 'draft', updatedAt: '', live: false },
+      onLoadBackgroundProcesses: loadBackground,
+      capabilityLoading: false,
+    });
+    const panel = render(<InspectorPanel {...emptyProps} />);
+    expect(screen.getByText('创建或选择会话后查看项目能力')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '添加' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '任务' }));
+    expect(screen.getByText('创建或选择会话后查看任务')).toBeTruthy();
+    expect(screen.queryByText('这个会话还没有子任务')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '后台终端' }));
+    expect(screen.getByText('创建或选择会话后查看后台终端')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+    expect(loadBackground).not.toHaveBeenCalled();
+
+    panel.rerender(<InspectorPanel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
+    expect(await screen.findByText('sleep 30')).toBeTruthy();
+    expect(loadBackground).toHaveBeenCalledWith(undefined);
+
+    panel.rerender(<InspectorPanel {...emptyProps} />);
+    expect(screen.getByText('创建或选择会话后查看后台终端')).toBeTruthy();
+    expect(screen.queryByText('sleep 30')).toBeNull();
+  });
+
   it('keeps capability access and adds task/background tabs in the frozen order', async () => {
     const loadBackground = vi.fn(async () => ({ processes: [backgroundProcess] }));
     render(<InspectorPanel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
