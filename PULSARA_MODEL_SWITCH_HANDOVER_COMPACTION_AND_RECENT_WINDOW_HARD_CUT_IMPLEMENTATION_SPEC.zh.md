@@ -1,6 +1,6 @@
 # Pulsara 模型切换 Handover Compaction 与 Destination-side Projection Compaction Hard-cut 实施规范
 
-> 状态：生产 hard cut 已实施；K4 完整验收尚未完成，2026-09-14
+> 状态：生产 hard cut 已实施；K4 Kernel 验收于 2026-09-15 通过，证据见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)；U1/U2 浏览器链路另行验收。
 >
 > 图片输入修订（2026-09-14）：
 > `PULSARA_KERNEL_IMAGE_INPUT_AND_OPENAI_WIRE_ADAPTER_DESIGN.zh.md` 第 8.1–8.9 节

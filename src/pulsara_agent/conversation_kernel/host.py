@@ -918,6 +918,7 @@ class KernelHostSession:
         attempt_id: str,
         owner_task: asyncio.Task[object],
         admitted_writer: CompactionWriteReservation | None,
+        pending_root_turn_id: str | None,
     ) -> None:
         """Recapture and install one exact-scope fence under the Host lock."""
 
@@ -943,9 +944,31 @@ class KernelHostSession:
                 self._retire_done_active_root_locked()
                 active_owner = self._active_task is owner_task
                 idle_owner = self._active_task is None
+                pending_root_owner = (
+                    pending_root_turn_id is not None
+                    and scope.turn_id != pending_root_turn_id
+                    and (
+                        (
+                            active_owner
+                            and admitted_writer is None
+                            and not admitted_writers
+                            and self._active_turn_id == pending_root_turn_id
+                        )
+                        or (idle_owner and external_recovery_owner)
+                    )
+                )
+                if pending_root_turn_id is not None and not pending_root_owner:
+                    raise RuntimeError(
+                        "compaction pending ROOT owner does not exact-join"
+                    )
                 if not (active_owner or idle_owner or external_recovery_owner):
                     raise RuntimeError("compaction ROOT task ownership changed")
-                if active_owner and self._active_turn_id != scope.turn_id:
+                if (
+                    active_owner
+                    and not external_recovery_owner
+                    and not pending_root_owner
+                    and self._active_turn_id != scope.turn_id
+                ):
                     raise RuntimeError("compaction active ROOT target changed")
                 if idle_owner and not external_recovery_owner and (
                     self._external_new_turn_accepting

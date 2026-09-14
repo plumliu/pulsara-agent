@@ -833,6 +833,16 @@ class PreparedProspectiveRootDispatch:
         return borrow, reservation, decision
 
     @property
+    def has_hook_context_reservation(self) -> bool:
+        with self._lock:
+            return self._hook_context_reservation is not None
+
+    @property
+    def owns_resources(self) -> bool:
+        with self._lock:
+            return self._surface_borrow is not None
+
+    @property
     def model_switch_tier(self) -> Literal[2, 3] | None:
         """Return the adopted handover tier, when preparation required one."""
 
@@ -1701,6 +1711,7 @@ class ProviderDispatchCoordinator:
             allow_steers=False,
             prospective_root_candidate=candidate,
             prospective_root_read_override=canonical_read_override,
+            include_hook_context=False,
         )
         assert isinstance(result, PreparedProspectiveRootCandidateFamily)
         return result
@@ -3179,8 +3190,7 @@ class ProviderDispatchCoordinator:
                 )
             if prospective_root_candidate is not None:
                 if (
-                    prospective_root_candidate is None
-                    or borrow is None
+                    borrow is None
                     or not isinstance(prepared_call, PreparedKernelModelCall)
                 ):
                     raise RuntimeError(
@@ -4060,12 +4070,12 @@ class ProviderDispatchCoordinator:
 
     async def prepare_hook_context_sibling(
         self,
-        base: PreparedProviderDispatch,
+        base: PreparedProviderDispatch | PreparedProspectiveRootDispatch,
         *,
         model_call_index: int,
         deadline: float,
     ) -> PreparedHookContextSibling | None:
-        """Compile the optional Hook cold sibling from the base's exact facts.
+        """Compile an optional Hook sibling from one frozen source basis.
 
         The base remains the final fallback and owns the sole physical borrow.
         This method performs no continuity registration, install, ToolResult
@@ -4073,9 +4083,17 @@ class ProviderDispatchCoordinator:
         """
 
         semantic = base.cold_semantic
-        if semantic is None or base.has_hook_context_reservation:
-            raise ValueError("Hook sibling requires one no-Hook cold base")
-        identity = base.canonical_facts.canonical_input.identity
+        if base.has_hook_context_reservation or (
+            semantic is None and isinstance(base, PreparedProviderDispatch)
+        ):
+            raise ValueError("Hook sibling requires one eligible no-Hook base")
+        canonical_read = (
+            base.canonical_read
+            if isinstance(base, PreparedProviderDispatch)
+            else base.admission.canonical_read
+        )
+        canonical_facts = canonical_read.compile_snapshot
+        identity = canonical_facts.canonical_input.identity
         replacement, reservation = (
             self._context_source_collector.freeze_hook_context_source(
                 scope_kind=identity.conversation_scope_kind.value,
@@ -4087,17 +4105,12 @@ class ProviderDispatchCoordinator:
             return None
         try:
             hook_sources = replace_hook_context_source(base.sources, replacement)
-            hook_non_trigger = replace_frozen_hook_context_source(
-                semantic.non_trigger_sources,
-                replacement,
-                reservation=None,
-            )
-            anchor = semantic.planning.dispatch_anchor
+            anchor = base.planning.dispatch_anchor
             compile_request = StructuredModelInputCompileRequest(
                 context_id=f"model-context-hook-sibling:{uuid4().hex}",
                 model_call_index=model_call_index,
-                canonical_input=base.canonical_facts.canonical_input,
-                canonical_facts=base.canonical_facts,
+                canonical_input=canonical_facts.canonical_input,
+                canonical_facts=canonical_facts,
                 compile_binding=base.prepared_call.compile_binding,
                 sources=hook_sources,
                 dispatch_anchor_entry_id=(
@@ -4112,29 +4125,46 @@ class ProviderDispatchCoordinator:
             )
             compatibility = provider_input_compatibility(
                 prepared_call=base.prepared_call,
-                canonical_facts=base.canonical_facts,
+                canonical_facts=canonical_facts,
                 sources=hook_sources,
             )
-            if compatibility != semantic.compatibility:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            if semantic is None:
+                hook_append = await self._io.run(
+                    compile_structured_append,
+                    self._compiler,
+                    compile_request,
+                    planning=base.planning,
+                    compatibility=compatibility,
+                    deadline_monotonic=deadline,
                 )
-            hook_semantic = await self._io.run(
-                self._cold_epoch_assembler.prepare_semantic,
-                seed=semantic.seed,
-                compile_request=compile_request,
-                planning=semantic.planning,
-                compatibility=compatibility,
-                prepared_call=semantic.prepared_call,
-                capability_dispatch_cut=semantic.capability_dispatch_cut,
-                tool_view=semantic.tool_view,
-                skill_view=semantic.skill_view,
-                tool_exposure_plan=semantic.tool_exposure_plan,
-                non_trigger_sources=hook_non_trigger,
-                replay_target=semantic.replay_target,
-                deadline_monotonic=deadline,
-            )
-            compiled = hook_semantic.compiled_result.compiled_input
+                hook_semantic = None
+            else:
+                if compatibility != semantic.compatibility:
+                    raise StructuredModelInputCompileError(
+                        ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                    )
+                hook_non_trigger = replace_frozen_hook_context_source(
+                    semantic.non_trigger_sources,
+                    replacement,
+                    reservation=None,
+                )
+                hook_semantic = await self._io.run(
+                    self._cold_epoch_assembler.prepare_semantic,
+                    seed=semantic.seed,
+                    compile_request=compile_request,
+                    planning=semantic.planning,
+                    compatibility=compatibility,
+                    prepared_call=semantic.prepared_call,
+                    capability_dispatch_cut=semantic.capability_dispatch_cut,
+                    tool_view=semantic.tool_view,
+                    skill_view=semantic.skill_view,
+                    tool_exposure_plan=semantic.tool_exposure_plan,
+                    non_trigger_sources=hook_non_trigger,
+                    replay_target=semantic.replay_target,
+                    deadline_monotonic=deadline,
+                )
+                hook_append = hook_semantic.compiled_result
+            compiled = hook_append.compiled_input
             base_compiled = base.append_result.compiled_input
             if compiled.system_prompt != base_compiled.system_prompt or (
                 compiled.tools != base_compiled.tools
@@ -4154,12 +4184,12 @@ class ProviderDispatchCoordinator:
                 reservation.retire()
                 return None
             candidate = PreparedProviderWireCandidate(
-                canonical_read=base.canonical_read,
-                semantic_input=hook_semantic.compiled_result.compiled_input,
+                canonical_read=canonical_read,
+                semantic_input=hook_append.compiled_input,
                 prepared_call=base.prepared_call,
                 native_projection_set=base.prepared_call.native_projection_set,
                 planning=base.planning,
-                append_result=hook_semantic.compiled_result,
+                append_result=hook_append,
                 cold_semantic=hook_semantic,
                 sources=hook_sources,
                 tool_exposure_plan=base.tool_exposure_plan,
@@ -4247,6 +4277,79 @@ class ProviderDispatchCoordinator:
                 finally:
                     if reservation is not None:
                         reservation.retire()
+            raise
+
+    def bind_selected_prospective_root_dispatch(
+        self,
+        *,
+        base: PreparedProspectiveRootDispatch,
+        sibling: PreparedHookContextSibling,
+        decision: PreparedWireMeasurementDecision,
+    ) -> PreparedProspectiveRootDispatch:
+        """Move a prospective ROOT's authority into its Hook sibling."""
+
+        selected = sibling.candidate
+        admission = base.admission
+        if (
+            decision.candidate is not selected
+            or decision.wire_input_plan is None
+            or selected.planning is None
+            or selected.append_result is None
+            or selected.sources is None
+            or selected.tool_exposure_plan is None
+            or selected.memory_context is None
+            or selected.canonical_read != admission.canonical_read
+            or selected.prepared_call is not base.prepared_call
+            or selected.native_projection_set
+            != base.prepared_call.native_projection_set
+            or selected.planning != base.planning
+            or selected.tool_exposure_plan != base.tool_exposure_plan
+            or base.has_hook_context_reservation
+        ):
+            sibling.retire()
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        model_switch_tier = base.model_switch_tier
+        borrow, base_reservation, _base_decision = base.take_resources()
+        if base_reservation is not None:
+            try:
+                borrow.close()
+            finally:
+                base_reservation.retire()
+                sibling.retire()
+            raise RuntimeError("prospective ROOT base unexpectedly owns Hook context")
+        reservation: HookContextReservation | None = None
+        try:
+            reservation = sibling.take_reservation()
+            final = PreparedProspectiveRootDispatch(
+                admission=PreparedRootProviderInputAdmission(
+                    candidate=admission.candidate,
+                    canonical_read=selected.canonical_read,
+                    semantic_input=selected.append_result.compiled_input,
+                    wire_quote=decision.quote,
+                ),
+                prepared_target=base.prepared_target,
+                prepared_call=base.prepared_call,
+                capability_dispatch_cut=base.capability_dispatch_cut,
+                tool_exposure_plan=base.tool_exposure_plan,
+                sources=selected.sources,
+                append_result=selected.append_result,
+                memory_context=selected.memory_context,
+                planning=selected.planning,
+                cold_semantic=selected.cold_semantic,
+                _surface_borrow=borrow,
+                _hook_context_reservation=reservation,
+                _wire_decision=decision,
+            )
+            final.bind_model_switch_tier(model_switch_tier)
+            return final
+        except BaseException:
+            try:
+                borrow.close()
+            finally:
+                if reservation is not None:
+                    reservation.retire()
             raise
 
     async def _freeze_candidate_wire_measurement(

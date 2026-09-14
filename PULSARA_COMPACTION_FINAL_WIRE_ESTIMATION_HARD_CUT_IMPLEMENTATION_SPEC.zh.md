@@ -1,6 +1,6 @@
 # Pulsara Compaction Final-Wire 本地估算 Hard-Cut 设计与实施规范
 
-> 状态：生产 hard cut 已实施；K4 完整验收尚未完成，2026-09-14
+> 状态：生产 hard cut 已实施；K4 Kernel 验收于 2026-09-15 通过，证据见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)；U1/U2 浏览器链路另行验收。
 >
 > 图片输入修订（2026-09-14）：
 > `PULSARA_KERNEL_IMAGE_INPUT_AND_OPENAI_WIRE_ADAPTER_DESIGN.zh.md` 第 7、9、9.3 节

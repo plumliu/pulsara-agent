@@ -1798,7 +1798,7 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
             ActiveTurnCancellationIntent(
                 "turn:initial", ModelInputScopeKind.ROOT, None
             ),
-            canonical_facts=SimpleNamespace(run_permission_snapshot=permission),
+            permission_snapshot=permission,
             model_id="model:1",
             deadline_monotonic=initial_deadline,
         )
@@ -1855,6 +1855,125 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
             initial_deadline,
             compact_deadline,
         ]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("failure_kind", ("cancel", "error"))
+def test_pending_root_session_start_failure_retires_hook_context(
+    tmp_path: Path,
+    failure_kind: str,
+) -> None:
+    from pulsara_agent.conversation_kernel.cancellation import (
+        ActiveTurnCancellationIntent,
+    )
+    from pulsara_agent.conversation_kernel.runner import (
+        ConversationKernelRunner,
+        _SessionStartColdBoundaryOwner,
+    )
+    from pulsara_agent.hooks.contracts import HookContextEntry
+    from pulsara_agent.model_input.contracts import ModelInputScopeKind
+    from pulsara_agent.primitives.permission import PermissionMode
+
+    class _Dispatcher:
+        def capture_view(self):
+            return _view(tmp_path, ())
+
+        async def dispatch(self, envelope, *, matcher_subject):
+            del envelope, matcher_subject
+            definition = _definition(
+                tmp_path,
+                HookEventType.SESSION_START_EVENT,
+                "noop",
+                context_limit=0,
+            )
+            return GateOutcome(
+                context_entries=(
+                    HookContextEntry(
+                        definition,
+                        0,
+                        1,
+                        "session start context",
+                        HookSecretScrubSet.capture(),
+                    ),
+                )
+            )
+
+    class _ProviderDispatch:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+
+        async def prepare_hook_context_sibling(self, *args, **kwargs):
+            del args, kwargs
+            self.started.set()
+            if failure_kind == "cancel":
+                await asyncio.Event().wait()
+            raise RuntimeError("Hook sibling preparation failed")
+
+    class _Prepared:
+        def __init__(self) -> None:
+            permission = SimpleNamespace(
+                effective_mode=PermissionMode.BYPASS_PERMISSIONS,
+                plan_workflow_id=None,
+            )
+            self.admission = SimpleNamespace(
+                candidate=SimpleNamespace(
+                    exact_turn_id="turn:pending-root",
+                    permission_snapshot=permission,
+                )
+            )
+            self.prepared_target = SimpleNamespace(
+                target=SimpleNamespace(fact=SimpleNamespace(model_id="model:1"))
+            )
+            self.closed = False
+
+        @property
+        def owns_resources(self) -> bool:
+            return not self.closed
+
+        def close(self) -> None:
+            assert not self.closed
+            self.closed = True
+
+    async def exercise() -> None:
+        scope = _scope()
+        context_owner = HookContextOwner()
+        context_owner.register_scope(scope)
+        provider_dispatch = _ProviderDispatch()
+        prepared = _Prepared()
+        runner = object.__new__(ConversationKernelRunner)
+        runner._session_start_boundary = _SessionStartColdBoundaryOwner("startup")
+        runner._hook_dispatcher = _Dispatcher()
+        runner._hook_context_owner = context_owner
+        runner._hook_scope = scope
+        runner._writer_lease = SimpleNamespace(
+            guard=SimpleNamespace(session_id="session:1")
+        )
+        runner._tools = SimpleNamespace(snapshot_terminal_cwd=lambda: tmp_path)
+        runner._provider_dispatch = provider_dispatch
+        runner._planning_deadline = lambda: monotonic() + 10
+        intent = ActiveTurnCancellationIntent(
+            "turn:pending-root", ModelInputScopeKind.ROOT, None
+        )
+        task = asyncio.create_task(
+            runner._attach_pending_root_hook_context(prepared, intent)
+        )
+        await provider_dispatch.started.wait()
+        if failure_kind == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(RuntimeError, match="preparation failed"):
+                await task
+
+        assert prepared.closed
+        assert (
+            context_owner.freeze_for_target(
+                scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
+            )
+            is None
+        )
 
     asyncio.run(exercise())
 

@@ -1242,7 +1242,8 @@ class ConversationKernelRunner:
                 deadline_monotonic=self._canonical_deadline(),
             )
             prospective_dispatch = await self.prepare_prospective_root_input(
-                prospective_candidate
+                prospective_candidate,
+                cancellation_intent=intent,
             )
             await self._turn_admission.accept_root_intent(
                 candidate,
@@ -1267,6 +1268,7 @@ class ConversationKernelRunner:
         candidate: PreparedRootProviderInputCandidate,
         *,
         admitted_writer: CompactionWriteReservation | None = None,
+        cancellation_intent: ActiveTurnCancellationIntent | None = None,
     ) -> PreparedProspectiveRootDispatch:
         """Prepare one exact first ROOT input before its canonical writer runs."""
 
@@ -1277,6 +1279,14 @@ class ConversationKernelRunner:
             await self._root_control_preparation_barrier(candidate.exact_turn_id)
         if self._before_provider_preparation is not None:
             await self._before_provider_preparation()
+        intent = cancellation_intent or ActiveTurnCancellationIntent(
+            candidate.exact_turn_id, ModelInputScopeKind.ROOT, None
+        )
+        intent.require_exact(
+            turn_id=candidate.exact_turn_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
         try:
             prepared = await self._provider_dispatch.prepare_prospective_root_input(
                 candidate=candidate,
@@ -1292,15 +1302,16 @@ class ConversationKernelRunner:
                 failure=failure,
                 inherited_memory_use_policy=self._root_memory_use_policy,
                 admitted_writer=admitted_writer,
+                session_start_boundary_port=self._session_start_boundary,
             )
             self._emit_pending_root_handover_notice(recovered)
-            return recovered
+            return await self._attach_pending_root_hook_context(recovered, intent)
         handover = self.compaction.prospective_root_model_switch_candidate(prepared)
         if handover is None:
             if not self.compaction.prospective_root_crosses_automatic_threshold(
                 prepared
             ):
-                return prepared
+                return await self._attach_pending_root_hook_context(prepared, intent)
             soft_trigger = StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
             )
@@ -1310,24 +1321,86 @@ class ConversationKernelRunner:
                     failure=soft_trigger,
                     inherited_memory_use_policy=self._root_memory_use_policy,
                     admitted_writer=admitted_writer,
+                    session_start_boundary_port=self._session_start_boundary,
                 )
             except BaseException as error:
                 if error is soft_trigger:
-                    return prepared
+                    return await self._attach_pending_root_hook_context(
+                        prepared, intent
+                    )
                 prepared.close()
                 raise
             prepared.close()
             self._emit_pending_root_handover_notice(compacted)
-            return compacted
+            return await self._attach_pending_root_hook_context(compacted, intent)
         prepared.close()
         switched = await self.compaction.execute_pending_root_model_handover(
             candidate=candidate,
             inherited_memory_use_policy=self._root_memory_use_policy,
             model_switch_candidate=handover,
             admitted_writer=admitted_writer,
+            session_start_boundary_port=self._session_start_boundary,
         )
         self._emit_pending_root_handover_notice(switched)
-        return switched
+        return await self._attach_pending_root_hook_context(switched, intent)
+
+    async def _attach_pending_root_hook_context(
+        self,
+        prepared: PreparedProspectiveRootDispatch,
+        intent: ActiveTurnCancellationIntent,
+    ) -> PreparedProspectiveRootDispatch:
+        """Add pending Hook context to one already-frozen first-call basis."""
+
+        candidate = prepared.admission.candidate
+        intent.require_exact(
+            turn_id=candidate.exact_turn_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        deadline = self._planning_deadline()
+        session_start_context: PendingHookContextReservation | None = None
+        hook_sibling = None
+        try:
+            if self._session_start_boundary.has_pending:
+                session_start_context = await self._dispatch_initial_session_start(
+                    intent,
+                    permission_snapshot=candidate.permission_snapshot,
+                    model_id=prepared.prepared_target.target.fact.model_id,
+                    deadline_monotonic=deadline,
+                )
+            hook_sibling = await self._provider_dispatch.prepare_hook_context_sibling(
+                prepared,
+                model_call_index=1,
+                deadline=deadline,
+            )
+            if hook_sibling is None:
+                session_start_context = None
+                return prepared
+            decision = await self._provider_dispatch.measure_prepared_wire_candidate(
+                hook_sibling.candidate,
+                deadline=deadline,
+            )
+            if decision.wire_input_plan is None:
+                hook_sibling.retire()
+                hook_sibling = None
+                session_start_context = None
+                return prepared
+            selected = self._provider_dispatch.bind_selected_prospective_root_dispatch(
+                base=prepared,
+                sibling=hook_sibling,
+                decision=decision,
+            )
+            hook_sibling = None
+            session_start_context = None
+            return selected
+        except BaseException:
+            if hook_sibling is not None and hook_sibling.owns_reservation:
+                hook_sibling.retire()
+            if session_start_context is not None:
+                session_start_context.retire()
+            if prepared.owns_resources:
+                prepared.close()
+            raise
 
     async def prepare_plan_question_resolution_input(
         self,
@@ -1393,7 +1466,12 @@ class ConversationKernelRunner:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
             )
-        return prepared
+        return await self._attach_pending_root_hook_context(
+            prepared,
+            ActiveTurnCancellationIntent(
+                candidate.exact_turn_id, ModelInputScopeKind.ROOT, None
+            ),
+        )
 
     async def _prepare_active_root_input(
         self,
@@ -1720,7 +1798,9 @@ class ConversationKernelRunner:
                             )
                             session_start_context = await self._dispatch_initial_session_start(
                                 intent,
-                                canonical_facts=session_start_facts,
+                                permission_snapshot=(
+                                    session_start_facts.run_permission_snapshot
+                                ),
                                 model_id=(
                                     headroom_admission.prepared_target.target.fact.model_id
                                 ),
@@ -2459,7 +2539,7 @@ class ConversationKernelRunner:
         self,
         intent: ActiveTurnCancellationIntent,
         *,
-        canonical_facts: FrozenCanonicalCompileSnapshot,
+        permission_snapshot: FrozenRunPermissionSnapshot,
         model_id: str,
         deadline_monotonic: float,
     ) -> PendingHookContextReservation | None:
@@ -2485,9 +2565,9 @@ class ConversationKernelRunner:
             model=model_id,
             source=source,
             permission_mode=external_permission_mode(
-                canonical_facts.run_permission_snapshot.effective_mode.value,
+                permission_snapshot.effective_mode.value,
                 active_plan_workflow=(
-                    canonical_facts.run_permission_snapshot.plan_workflow_id is not None
+                    permission_snapshot.plan_workflow_id is not None
                 ),
             ),
         )
@@ -2602,6 +2682,7 @@ class ConversationKernelRunner:
             prospective_root = await self.prepare_prospective_root_input(
                 candidate,
                 admitted_writer=admitted_writer,
+                cancellation_intent=cancellation_intent,
             )
             accepted = await self._io.run(
                 self._safe_point.accept_subagent_completion,
@@ -2700,6 +2781,7 @@ class ConversationKernelRunner:
             prospective_root = await self.prepare_prospective_root_input(
                 candidate,
                 admitted_writer=admitted_writer,
+                cancellation_intent=cancellation_intent,
             )
             accepted = await self._io.run(
                 self._safe_point.publish_terminal_observation,

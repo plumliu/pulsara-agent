@@ -98,6 +98,7 @@ class HostCompactionRuntimeOwner:
                 str,
                 asyncio.Task[object],
                 CompactionWriteReservation | None,
+                str | None,
             ],
             Awaitable[None],
         ] | None = None
@@ -115,6 +116,7 @@ class HostCompactionRuntimeOwner:
                 str,
                 asyncio.Task[object],
                 CompactionWriteReservation | None,
+                str | None,
             ],
             Awaitable[None],
         ],
@@ -352,6 +354,7 @@ class HostCompactionRuntimeOwner:
         trigger: CompactionTrigger,
         operation: Callable[[], Awaitable[_T]],
         admitted_writer: CompactionWriteReservation | None = None,
+        pending_root_turn_id: str | None = None,
     ) -> _T:
         """Run one exact scope after acquiring the Host-wide summary lane."""
 
@@ -379,6 +382,7 @@ class HostCompactionRuntimeOwner:
                     attempt_id,
                     current,
                     admitted_writer,
+                    pending_root_turn_id,
                 )
             try:
                 return await operation()

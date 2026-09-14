@@ -2757,6 +2757,51 @@ def test_round6_postgres_runner_commits_attempt_before_real_mcp_effect(
     stage2_migrated_postgres_database,
     tmp_path: Path,
 ) -> None:
+    _exercise_postgres_mcp_effect_and_reconnect(
+        stage2_migrated_postgres_database, tmp_path, with_images=False
+    )
+
+
+@pytest.mark.postgres
+def test_k4_images_preserve_prefix_across_real_mcp_effect_and_reconnect(
+    stage2_migrated_postgres_database,
+    tmp_path: Path,
+) -> None:
+    _exercise_postgres_mcp_effect_and_reconnect(
+        stage2_migrated_postgres_database, tmp_path, with_images=True
+    )
+
+
+def _exercise_postgres_mcp_effect_and_reconnect(
+    stage2_migrated_postgres_database,
+    tmp_path: Path,
+    *,
+    with_images: bool,
+) -> None:
+    from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
+    from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
+    from tests.test_kernel_image_input_k2_postgres import _image
+
+    image = _image()
+    first_prompt = (
+        freeze_canonical_prompt(
+            FrozenPromptContent(
+                (
+                    LLMTextPart("use the configured MCP tool"),
+                    image,
+                    LLMTextPart("same image again"),
+                    image,
+                )
+            )
+        )
+        if with_images
+        else frozen_test_prompt("use the configured MCP tool")
+    )
+    second_prompt = (
+        freeze_canonical_prompt(FrozenPromptContent((image, image)))
+        if with_images
+        else frozen_test_prompt("continue after reconnect")
+    )
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = f"session:round6:{uuid4().hex}"
@@ -2813,11 +2858,11 @@ def test_round6_postgres_runner_commits_attempt_before_real_mcp_effect(
             context_source_collector=StaticContextSourceCollector(),
         )
         try:
-            first_result = await runner.run_turn(frozen_test_prompt("use the configured MCP tool"))
+            first_result = await runner.run_turn(first_prompt)
             supervisor.reconnect("fixture")
             connection = supervisor._tasks["fixture"]  # noqa: SLF001
             await connection
-            second_result = await runner.run_turn(frozen_test_prompt("continue after reconnect"))
+            second_result = await runner.run_turn(second_prompt)
             return first_result, second_result, dynamic_name, model
         finally:
             supervisor.stop_admission()
@@ -2837,6 +2882,17 @@ def test_round6_postgres_runner_commits_attempt_before_real_mcp_effect(
         after_reconnect.messages[: len(before_reconnect.messages)]
         == before_reconnect.messages
     )
+    if with_images:
+        # I13: physical reconnect preserves both image occurrences already
+        # installed; the new pure-image turn adds two more by suffix only.
+        for request, expected_count in zip(model.requests, (2, 2, 4), strict=True):
+            images = tuple(
+                part
+                for message in request.compiled_input.messages
+                for part in message.content
+                if isinstance(part, LLMImagePart)
+            )
+            assert images == (image,) * expected_count
     rows = repository.rehydrate_session(
         session_id=session_id,
         deadline_monotonic=monotonic() + 30,

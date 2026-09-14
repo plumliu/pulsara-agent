@@ -70,6 +70,10 @@ from pulsara_agent.conversation_kernel.safe_point import (
     ExternalSourceNotAtSafePoint,
     ProviderSafePointCoordinator,
 )
+from pulsara_agent.conversation_kernel.steer import (
+    PreparedRootProviderInputAdmission,
+    PreparedRootProviderInputCandidate,
+)
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     SubagentResultSource,
     SubagentTaskStatus,
@@ -106,6 +110,14 @@ from tests.support.subagents import accept_active_subagent_fixture
 
 
 pytestmark = pytest.mark.postgres
+
+
+def _root_provider_input_admission(
+    candidate: PreparedRootProviderInputCandidate,
+) -> PreparedRootProviderInputAdmission:
+    admission = object.__new__(PreparedRootProviderInputAdmission)
+    object.__setattr__(admission, "candidate", candidate)
+    return admission
 
 
 def _id(prefix: str) -> str:
@@ -297,6 +309,9 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
     consumed = repository.consume_prepared_prompt_head(
         lease.guard,
         candidate=candidate,
+        provider_input_admission=_root_provider_input_admission(
+            candidate.provider_input_candidate
+        ),
         deadline_monotonic=deadline,
     )
     assert consumed is not None and consumed.accepted is not None
@@ -1396,7 +1411,21 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
     )
     new_root_turn = _id("turn")
     new_revision = _id("revision")
+    provider_candidate = (
+        repository.prepare_manual_subagent_completion_root_provider_input_candidate(
+            lease.guard,
+            turn_id=new_root_turn,
+            new_context_binding_revision_id=new_revision,
+            requested_permission_mode=DEFAULT_PERMISSION_MODE,
+            task_id=task_id,
+            command_id=command_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+    )
+    assert isinstance(provider_candidate, PreparedRootProviderInputCandidate)
+    provider_admission = _root_provider_input_admission(provider_candidate)
     accepted = safe_point.accept_subagent_completion(
+        provider_input_admission=provider_admission,
         turn_id=new_root_turn,
         new_context_binding_revision_id=new_revision,
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
@@ -1432,6 +1461,7 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         second_handle.close()
 
     compatible = safe_point.accept_subagent_completion(
+        provider_input_admission=provider_admission,
         turn_id=new_root_turn,
         new_context_binding_revision_id=new_revision,
         requested_permission_mode=DEFAULT_PERMISSION_MODE,

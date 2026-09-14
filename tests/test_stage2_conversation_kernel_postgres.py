@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from time import monotonic
+from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 import psycopg
@@ -76,6 +78,7 @@ from pulsara_agent.llm.model_connections import (
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.conversation_kernel.steer import (
+    PreparedRootProviderInputAdmission,
     PromptIngressConfirmationKind,
     QueuedRootTurnAdmissionConfirmationKind,
     SteerConsumptionConfirmationKind,
@@ -126,6 +129,13 @@ from tests.support.model_config import (
 
 
 pytestmark = pytest.mark.postgres
+
+
+def _root_provider_input_admission(candidate) -> PreparedRootProviderInputAdmission:
+    return cast(
+        PreparedRootProviderInputAdmission,
+        SimpleNamespace(candidate=candidate),
+    )
 
 
 def _two_connection_resolution_cut():
@@ -304,9 +314,17 @@ def test_direct_root_retry_confirms_turn_binding_not_later_session_choice(
         ),
         occurred_at=datetime.now(timezone.utc),
     )
+    provider_candidate = repository.prepare_root_provider_input_candidate(
+        lease.guard,
+        intent=intent,
+        model_resolution_snapshot=cut,
+        deadline_monotonic=monotonic() + 30,
+    )
+    provider_admission = _root_provider_input_admission(provider_candidate)
     accepted = repository.accept_root_turn_intent(
         lease.guard,
         intent=intent,
+        provider_input_admission=provider_admission,
         model_resolution_snapshot=cut,
         deadline_monotonic=monotonic() + 30,
     )
@@ -325,6 +343,7 @@ def test_direct_root_retry_confirms_turn_binding_not_later_session_choice(
         repository.accept_root_turn_intent(
             lease.guard,
             intent=intent,
+            provider_input_admission=provider_admission,
             model_resolution_snapshot=cut,
             deadline_monotonic=monotonic() + 30,
         ).accepted
@@ -467,6 +486,9 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
     consumed = repository.consume_prepared_prompt_head(
         lease.guard,
         candidate=candidate,
+        provider_input_admission=_root_provider_input_admission(
+            candidate.provider_input_candidate
+        ),
         deadline_monotonic=monotonic() + 30,
     )
     assert consumed is not None
@@ -1510,6 +1532,9 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     consumed = repository.consume_prepared_prompt_head(
         lease.guard,
         candidate=candidate,
+        provider_input_admission=_root_provider_input_admission(
+            candidate.provider_input_candidate
+        ),
         deadline_monotonic=deadline,
     )
     assert consumed is not None

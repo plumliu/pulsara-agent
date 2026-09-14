@@ -23,7 +23,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.repository import PlanQuestionAnswer
 from pulsara_agent.hooks.contracts import HookSourceKind
 from pulsara_agent.hooks.source import LocalHookSourceProvider
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
 from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMTextPart,
@@ -306,7 +305,6 @@ class _QueuedImageK2Model(CallbackScriptedKernelModel):
         ):
             self.semantic_input = semantic_input
             self.image_compile_seen.set()
-            raise RuntimeError("K3 image wire is intentionally not installed")
         return super().freeze_wire_measurement(**kwargs)
 
     async def _stream(self, request):
@@ -375,6 +373,7 @@ def _config(
     events: tuple[str, ...],
     *,
     tool_matcher: str = "write_file",
+    additional_context_limit: int = 2048,
 ) -> dict[str, object]:
     def handler(event: str) -> dict[str, object]:
         value: dict[str, object] = {
@@ -389,7 +388,7 @@ def _config(
             "PostToolUse",
             "SubagentStart",
         }:
-            value["additionalContextLimit"] = 2048
+            value["additionalContextLimit"] = additional_context_limit
         return value
 
     return {
@@ -691,18 +690,6 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
     image_bytes = image_output.getvalue()
     pure_image = PromptContent((PromptImagePart(image_bytes, "image/png"),))
     model = _QueuedImageK2Model()
-    original_estimate_message = PulsaraHeuristicTokenEstimatorV2.estimate_message
-
-    def estimate_message(estimator, message):
-        if any(isinstance(part, LLMImagePart) for part in message.content):
-            return 260
-        return original_estimate_message(estimator, message)
-
-    monkeypatch.setattr(
-        PulsaraHeuristicTokenEstimatorV2,
-        "estimate_message",
-        estimate_message,
-    )
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(
         kernel_host.LocalMcpManagementService,
@@ -1117,6 +1104,11 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
             _command(driver, log_path, "USER"),
             ("PreToolUse", "PostToolUse", "SessionEnd"),
             tool_matcher="write_file|ask_plan_question",
+            # This test exercises the exact Hook/effect settlement lifecycle.
+            # The maximum legal Hook source upper is covered independently;
+            # keeping this occurrence small lets the test's narrow model budget
+            # admit the result and continuation batch it is meant to inspect.
+            additional_context_limit=64,
         ),
         workspace_config=None,
     )

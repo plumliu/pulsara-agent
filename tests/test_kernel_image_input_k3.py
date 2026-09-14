@@ -21,7 +21,10 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionScope,
     CompactionTrigger,
     RecentHumanMessageProof,
+    ResolvedCompactionPolicy,
+    freeze_compaction_canonical_range,
     provider_input_item_canonical_expanded_bytes,
+    resolved_compaction_headroom_bounds,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
     CompactionWriteReservation,
@@ -37,6 +40,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     CompactionPlanningError,
     CompactionReclaimUnavailable,
     compaction_effective_history_has_image,
+    crosses_compaction_resource_headroom,
     project_prompt_content_for_text_only_handover,
     recent_human_window_has_image,
 )
@@ -85,6 +89,7 @@ from pulsara_agent.llm.input import (
     LLMMessage,
     LLMTextPart,
     join_text_content,
+    llm_content_logical_bytes,
 )
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.llm.provider import RouteWireProfile
@@ -525,6 +530,7 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
                 "attempt:foreign",
                 owner_task,
                 foreign,
+                "turn:new",
             )
         with pytest.raises(RuntimeError, match="admitted writer"):
             await host._install_compaction_fence(
@@ -533,6 +539,7 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
                 "attempt:none",
                 owner_task,
                 None,
+                "turn:new",
             )
 
         await host._install_compaction_fence(
@@ -541,6 +548,7 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
             "attempt:exact",
             owner_task,
             exact,
+            "turn:new",
         )
         assert host._compaction.is_fenced(
             scope_kind=ModelInputScopeKind.ROOT,
@@ -548,6 +556,45 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
         )
         await host._remove_compaction_fence(scope, "attempt:exact", owner_task)
         await host._release_compaction_write_reservation(exact)
+
+        host._external_new_turn_accepting = False
+        host._active_task = owner_task
+        host._active_turn_id = "turn:new"
+        with pytest.raises(RuntimeError, match="does not exact-join"):
+            await host._install_compaction_fence(
+                scope,
+                CompactionTrigger.AUTO_ACTIVE_CONTEXT,
+                "attempt:wrong-pending",
+                owner_task,
+                None,
+                "turn:wrong",
+            )
+
+        not_owner = asyncio.create_task(asyncio.sleep(0))
+        host._active_task = not_owner
+        with pytest.raises(RuntimeError, match="does not exact-join"):
+            await host._install_compaction_fence(
+                scope,
+                CompactionTrigger.AUTO_ACTIVE_CONTEXT,
+                "attempt:not-owner",
+                owner_task,
+                None,
+                "turn:new",
+            )
+        await not_owner
+
+        host._active_task = owner_task
+        await host._install_compaction_fence(
+            scope,
+            CompactionTrigger.AUTO_ACTIVE_CONTEXT,
+            "attempt:pending-exact",
+            owner_task,
+            None,
+            "turn:new",
+        )
+        await host._remove_compaction_fence(
+            scope, "attempt:pending-exact", owner_task
+        )
 
     asyncio.run(scenario())
 
@@ -840,6 +887,81 @@ def test_dry_wire_measurement_closes_text_only_target_before_adoption() -> None:
     )
     assert _can_enter_model_switch_tier_three(mismatch)
     assert not _can_retry_compaction_with_smaller_recent(mismatch)
+
+
+def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
+    output = BytesIO()
+    Image.new("RGB", (1024, 1024), (11, 23, 41)).save(
+        output, "PNG", compress_level=0
+    )
+    payload = output.getvalue()
+    assert len(payload) > 2 << 20
+    image = LLMImagePart("image/png", payload, 1024, 1024)
+    scope = CompactionScope(
+        "session:i36",
+        "workspace:i36",
+        "turn:i36",
+        ModelInputScopeKind.ROOT,
+        None,
+    )
+
+    def item_with_occurrences(count: int) -> FrozenProviderInputItem:
+        return FrozenProviderInputItem(
+            FrozenProviderInputItemKind.USER,
+            f"entry:i36:{count}",
+            1,
+            "turn:i36",
+            (image,) * count,
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+        )
+
+    policy = ResolvedCompactionPolicy()
+    bounds = resolved_compaction_headroom_bounds()
+    admitted = item_with_occurrences(1)
+    admitted_tail = freeze_compaction_canonical_range(
+        scope=scope,
+        effective_materialization_lineage_floor=0,
+        source_through_sequence=1,
+        ordered_items=(admitted,),
+        closures=(),
+        late_outcomes=(),
+    )
+    admitted_c = provider_input_item_canonical_expanded_bytes(admitted)
+    admitted_l = llm_content_logical_bytes(admitted.content)
+    assert admitted_tail.canonical_utf8_bytes < (
+        policy.maximum_retained_tail_utf8_bytes
+    )
+    assert admitted_c < bounds.soft_canonical_expanded_byte_limit
+    assert admitted_l < bounds.soft_epoch_logical_byte_limit
+    assert not crosses_compaction_resource_headroom(
+        selected_item_count=1,
+        selected_canonical_expanded_bytes=admitted_c,
+        continuity_epoch_logical_bytes=admitted_l,
+    )
+
+    overbound = item_with_occurrences(4)
+    overbound_tail = freeze_compaction_canonical_range(
+        scope=scope,
+        effective_materialization_lineage_floor=0,
+        source_through_sequence=1,
+        ordered_items=(overbound,),
+        closures=(),
+        late_outcomes=(),
+    )
+    overbound_c = provider_input_item_canonical_expanded_bytes(overbound)
+    overbound_l = llm_content_logical_bytes(overbound.content)
+    assert overbound_tail.canonical_utf8_bytes < (
+        policy.maximum_retained_tail_utf8_bytes
+    )
+    assert (
+        overbound_c >= bounds.soft_canonical_expanded_byte_limit
+        or overbound_l >= bounds.soft_epoch_logical_byte_limit
+    )
+    assert crosses_compaction_resource_headroom(
+        selected_item_count=1,
+        selected_canonical_expanded_bytes=overbound_c,
+        continuity_epoch_logical_bytes=overbound_l,
+    )
 
 
 def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() -> None:

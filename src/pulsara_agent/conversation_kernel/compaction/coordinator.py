@@ -1342,6 +1342,7 @@ class CompactionCoordinator:
         failure: BaseException,
         inherited_memory_use_policy: MemoryUsePolicy,
         admitted_writer: CompactionWriteReservation | None,
+        session_start_boundary_port: SessionStartCompactBoundaryPort | None,
     ) -> PreparedProspectiveRootDispatch:
         """Compact an idle predecessor while keeping the ROOT input unpublished."""
 
@@ -1396,6 +1397,7 @@ class CompactionCoordinator:
             model_switch_candidate=model_switch,
             failure=failure,
             admitted_writer=admitted_writer,
+            session_start_boundary_port=session_start_boundary_port,
         )
 
     async def execute_pending_root_model_handover(
@@ -1405,6 +1407,7 @@ class CompactionCoordinator:
         inherited_memory_use_policy: MemoryUsePolicy,
         model_switch_candidate: ModelSwitchCompactionTriggerCandidate,
         admitted_writer: CompactionWriteReservation | None,
+        session_start_boundary_port: SessionStartCompactBoundaryPort | None,
     ) -> PreparedProspectiveRootDispatch:
         return await self._execute_pending_root_compaction(
             candidate=candidate,
@@ -1414,6 +1417,7 @@ class CompactionCoordinator:
                 ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
             ),
             admitted_writer=admitted_writer,
+            session_start_boundary_port=session_start_boundary_port,
         )
 
     async def _execute_pending_root_compaction(
@@ -1424,6 +1428,7 @@ class CompactionCoordinator:
         model_switch_candidate: ModelSwitchCompactionTriggerCandidate | None,
         failure: BaseException,
         admitted_writer: CompactionWriteReservation | None,
+        session_start_boundary_port: SessionStartCompactBoundaryPort | None,
     ) -> PreparedProspectiveRootDispatch:
         owner = self._compaction_owner
         if (
@@ -1476,6 +1481,7 @@ class CompactionCoordinator:
                 post_adoption_branch=CompactionTargetBranch.IDLE_BASE_ONLY,
                 stable_command_id=None,
                 hook_scope=self._hook_root_scope,
+                session_start_boundary_port=session_start_boundary_port,
                 model_switch_candidate=model_switch_candidate,
                 pending_root_candidate=candidate,
             )
@@ -1486,6 +1492,7 @@ class CompactionCoordinator:
                 trigger=trigger,
                 operation=operation,
                 admitted_writer=admitted_writer,
+                pending_root_turn_id=candidate.exact_turn_id,
             )
         except _PostAdoptionCompactionFailure as adopted:
             raise adopted.error.with_traceback(adopted.error.__traceback__)

@@ -672,8 +672,6 @@ class _ConversationOperations:
                 and str(turn["conversation_scope_kind"]) == "ROOT"
                 and turn["scope_subagent_task_id"] is None
                 and str(turn["initial_entry_id"]) == candidate.entry_id
-                and str(turn["current_context_binding_revision_id"])
-                == candidate.context_binding_revision_id
                 and model_call_binding_from_dict(turn["model_call_binding"])
                 == candidate.model_call_binding
                 and permission.snapshot_id == candidate.permission_snapshot_id

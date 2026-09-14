@@ -575,7 +575,9 @@ def test_round5_each_operation_gets_a_fresh_owner_deadline_without_turn_budget(
     )
 
     assert result.final_text == "done"
-    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 1
+    # The first ROOT call has three additional K3 planning owners before the
+    # ordinary per-call owner: prospective freeze, Hook sibling, and activation.
+    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 4
     assert deadlines.owners.count(KernelWatchdogOwner.FOREGROUND_CANONICAL) >= 4
 
 
@@ -585,17 +587,20 @@ def test_round5_more_than_sixty_four_tool_calls_in_one_turn_finalize(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     _session_id, _workspace_id, lease = _lease(repository)
-    tool_batch: list[object] = []
-    for index in range(65):
-        tool_batch.extend(_tool_stream(index))
+    # Keep the long-horizon claim while making every response batch satisfy the
+    # K3 effect-before-settlement upper bound.  This remains 65 tool effects in
+    # one turn; it does not introduce a turn, call, or tool lifetime cap.
     model = ScriptedKernelModel(
-        [tool_batch, _text_stream("after-65-tools", block_id="final:tools")]
+        [
+            *(_tool_stream(index) for index in range(65)),
+            _text_stream("after-65-tools", block_id="final:tools"),
+        ]
     )
     tool = _KnownReadOnlyTool()
 
     result = asyncio.run(_runner(repository, lease, model, tool).run_turn(frozen_test_prompt("start")))
 
-    assert result.model_call_count == 2
+    assert result.model_call_count == 66
     assert result.tool_call_count == 65
     assert result.final_text == "after-65-tools"
     assert tool.invocations == 65
@@ -759,7 +764,9 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
 
     assert result.model_call_count == 64
     assert result.tool_call_count == 63
-    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 64
+    # Sixty-four ordinary call owners plus the first ROOT prospective freeze,
+    # optional Hook sibling, and activation owners.
+    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 67
     assert result.final_text == "after-steer"
     appended = model.requests[25].compiled_input.messages
     assert any(

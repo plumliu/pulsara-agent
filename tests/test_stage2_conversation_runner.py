@@ -4094,6 +4094,215 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     )
 
 
+@pytest.mark.parametrize(
+    "api",
+    ("openai_chat_completions", "openai_responses"),
+    ids=("chat", "responses"),
+)
+@pytest.mark.parametrize(
+    ("image_side", "text_padding", "expected_disposition"),
+    (
+        (1024, 0, CompactionDisposition.COMPACTED),
+        (2047, 4_000, CompactionDisposition.FAILED),
+    ),
+    ids=("large-image-admitted", "full-d2-overbound"),
+)
+def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
+    stage2_migrated_postgres_database,
+    api: str,
+    image_side: int,
+    text_padding: int,
+    expected_disposition: CompactionDisposition,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=120,
+        deadline_monotonic=monotonic() + 30,
+    )
+    limits = test_model_limits(
+        total_context_tokens=256_000,
+        max_input_tokens=47_192,
+        max_output_tokens=1_000,
+        default_output_tokens=1_000,
+        input_safety_margin_tokens=0,
+    )
+    profile = RouteWireProfile(
+        id=f"test:{api}:large-image-compaction-tail",
+        wire_api=api,
+        thinking=(
+            ThinkingProfile(
+                message_field="reasoning_content",
+                replay_policy=ThinkingReplayPolicy.ALWAYS,
+            )
+            if api == "openai_chat_completions"
+            else ThinkingProfile()
+        ),
+    )
+    final_script = (
+        _round5a1_chat_scripts()[1]
+        if api == "openai_chat_completions"
+        else _round5a1_responses_scripts()[1]
+    )
+    model = _CompactionSequencedDirectKernelModel(
+        model_runtime=test_model_runtime(
+            api_key="sk-fixture-secret",
+            base_url="https://example.invalid/v1",
+            model_id="test-pro",
+            wire_api=api,
+            route_wire_profile=profile,
+            limits=limits,
+            input_modalities=("text", "image"),
+        ),
+        scripts=(
+            _large_native_replay_script(api, ordinal=1),
+            _large_native_replay_script(api, ordinal=2),
+            final_script,
+        ),
+        summary="A concise checkpoint before the large visual suffix.",
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=True,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    image_output = BytesIO()
+    Image.new("RGB", (image_side, image_side), (11, 23, 41)).save(
+        image_output, "PNG", compress_level=0
+    )
+    image = LLMImagePart(
+        "image/png", image_output.getvalue(), image_side, image_side
+    )
+    assert len(image.immutable_bytes) > 2 << 20
+    visual_prompt = freeze_canonical_prompt(
+        FrozenPromptContent(
+            (
+                LLMTextPart("visual suffix" + "x" * text_padding),
+                image,
+            )
+        )
+    )
+    summary_measurements: list[tuple[int, bool, object]] = []
+    freeze_wire_measurement = model.freeze_wire_measurement
+
+    def record_summary_measurement(**kwargs):
+        measurement = freeze_wire_measurement(**kwargs)
+        if kwargs["call"].fact.purpose is ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY:
+            messages = kwargs["semantic_input"].messages
+            summary_measurements.append(
+                (
+                    len(messages),
+                    any(
+                        isinstance(part, LLMImagePart)
+                        for message in messages
+                        for part in message.content
+                    ),
+                    measurement.quote,
+                )
+            )
+        return measurement
+
+    model.freeze_wire_measurement = record_summary_measurement
+
+    async def exercise():
+        await runner.run_turn(frozen_test_prompt("first replay-bearing answer"))
+        await runner.run_turn(frozen_test_prompt("second replay-bearing answer"))
+        result = None
+        failure = None
+        try:
+            result = await runner.run_turn(visual_prompt)
+        except StructuredModelInputCompileError as error:
+            failure = error
+        await owner.aclose()
+        return result, failure
+
+    result, failure = asyncio.run(exercise())
+
+    assert len(summary_measurements) >= 2
+    longest_count, longest_has_image, longest_quote = summary_measurements[0]
+    assert not longest_has_image
+    assert longest_quote.final_wire_estimated_input_tokens > (
+        longest_quote.effective_input_budget_tokens
+    )
+    admitted_count, admitted_has_image, admitted_quote = next(
+        item
+        for item in summary_measurements
+        if item[2].final_wire_estimated_input_tokens
+        <= item[2].effective_input_budget_tokens
+    )
+    assert admitted_count < longest_count
+    assert not admitted_has_image
+    assert admitted_quote.final_wire_estimated_input_tokens <= (
+        admitted_quote.effective_input_budget_tokens
+    )
+    # The selected summary prefix ends before the visual USER.  Its immutable
+    # bytes therefore remain in the mandatory canonical suffix and are checked
+    # by the real dry successor compiler/materializer rather than the 2 MiB
+    # descriptor-only retained-tail policy.
+    assert not any(
+        isinstance(part, LLMImagePart)
+        for message in model.summary_transport.contexts[0].messages
+        for part in message.content
+    )
+    assert not any(
+        isinstance(part, LLMImagePart)
+        for message in model.requests[1].compiled_input.messages
+        for part in message.content
+    )
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        snapshot_count, adoption_count, image_ref_count = connection.execute(
+            "SELECT "
+            "(SELECT count(*) FROM pulsara_v3.context_snapshots "
+            " WHERE session_id = %s), "
+            "(SELECT count(*) FROM pulsara_v3.agent_events "
+            " WHERE session_id = %s AND event_type = 'CompactionAdopted'), "
+            "(SELECT count(*) FROM pulsara_v3.canonical_image_refs "
+            " WHERE session_id = %s)",
+            (session_id, session_id, session_id),
+        ).fetchone()
+    expected_count = 1 if expected_disposition is CompactionDisposition.COMPACTED else 0
+    assert (snapshot_count, adoption_count, image_ref_count) == (
+        expected_count,
+        expected_count,
+        expected_count,
+    )
+    if expected_disposition is CompactionDisposition.COMPACTED:
+        assert failure is None
+        assert result is not None
+        assert result.final_text in {"chat final", "responses final"}
+        assert sum(
+            isinstance(part, LLMImagePart)
+            for message in model.requests[2].compiled_input.messages
+            for part in message.content
+        ) == 1
+    else:
+        assert result is None
+        assert failure is not None
+        assert failure.kind is ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+        assert len(model.requests) == 2
+
+
 def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
@@ -5568,8 +5777,10 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
         base.take_execution_authority()
     with pytest.raises(RuntimeError, match="authority is consumed"):
         base.close()
-    assert len(collector.reservations) == 1
-    assert collector.reservations[0].retire_calls == 1
+    # SessionStart on the first ROOT, the compacted source dispatch, and the
+    # post-adoption Hook sibling each freeze one one-shot reservation.  The
+    # selected sibling transfers authority once and every phase retires once.
+    assert tuple(item.retire_calls for item in collector.reservations) == (1, 1, 1)
     assert len(model.requests) == 2
 
 
@@ -5627,8 +5838,11 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
     async def record_sibling(*args, **kwargs):
         nonlocal hook_candidate
         sibling = await prepare_sibling(*args, **kwargs)
-        assert sibling is not None
-        hook_candidate = sibling.candidate
+        # The pending ROOT is first compiled before compaction with no pending
+        # Hook value.  Only the post-adoption SessionStart produces the sibling
+        # whose optional wire probe is injected below.
+        if sibling is not None:
+            hook_candidate = sibling.candidate
         return sibling
 
     async def timeout_hook(candidate, **kwargs):
@@ -5679,8 +5893,7 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
     assert install_deadline is not None
     assert install_deadline > hook_deadline
     assert bind_calls == 0
-    assert len(collector.reservations) == 1
-    assert collector.reservations[0].retire_calls == 1
+    assert tuple(item.retire_calls for item in collector.reservations) == (1, 1, 1)
     assert len(model.requests) == 2
 
 
@@ -5767,10 +5980,17 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
     assert runner._safe_point._active_handle is None  # noqa: SLF001
     assert len(model.requests) == 1
     if failure_site == "hook_bind":
-        assert len(collector.reservations) == 1
-        assert collector.reservations[0].retire_calls == 1
+        # The first ROOT, compaction source, and failing post-adoption sibling
+        # each relinquish their exact one-shot reservation.
+        assert tuple(item.retire_calls for item in collector.reservations) == (
+            1,
+            1,
+            1,
+        )
     else:
-        assert collector.reservations == []
+        # The rotated read fails before the post-adoption sibling is frozen;
+        # the first ROOT and compaction source reservations are still retired.
+        assert tuple(item.retire_calls for item in collector.reservations) == (1, 1)
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,

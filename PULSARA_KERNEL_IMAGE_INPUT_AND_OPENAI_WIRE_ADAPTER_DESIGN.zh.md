@@ -1,6 +1,6 @@
 # Pulsara Kernel 图片输入与 OpenAI 通用 Wire Adapter 修订设计
 
-> 状态：**D1–D4 设计已冻结；K1–K3 于 2026-09-14 实施；K4–U2 尚未完成，图片输入未激活**
+> 状态：**D1–D4 设计已冻结；K1–K3 已实施，K4 于 2026-09-15 验收通过；U1/U2 浏览器图片产品尚未完成**
 >
 > 修订：2026-09-12，补齐 pre-adoption 内容校验、ROOT 父上下文、typed ingress / Hook 与 multipart headroom 边界；纳入本地 Codex 源码对照。
 >
@@ -18,7 +18,7 @@
 >
 > 设计精简：2026-09-14，按用户确认统一新 snapshot/projection 的展示结构；提交 FULL 确认只核对完整正文、引用及 blob 身份/元数据，图片 payload 完整性在发布与读取时验证；将图片省略的禁止范围限定到普通调用、adapter 与透明重试。D1/D2 算法、参数与接纳规则不变。
 >
-> 实施进度：K1 已落地 input modality 事实与 exact target 冻结、单一 typed content、共享 shape/target 校验、完整内容身份、D1 视觉公式、D2 headroom 常量以及 `pulsara.prompt/v1` codec/occurrence/metadata quote。K2 已将同一内容接入 Host direct/queued/steer、Hook/Skill 文本投影、Pillow 隔离验证、caller-owned transaction publication、`canonical_image_refs` clean-v0/GC、FULL exact-confirm、hydration、typed snapshot/fork、compiler/lowering 与 ROOT parent-context。K3 已接通 Chat/Responses 两套正式图片 wire、单次 final materialization、`pulsara_heuristic/v2`、PRE_FULL/POST_FULL、输入 G 与效果前输出 R/U_W/U_T 检查、ordinary recent 收缩，以及纯文本图片交接的 Tier 1/2/3、P 与 cold 入口。K4 的完整 Kernel 矩阵、真实 provider、isolated wheel 及 U1/U2 仍未完成；尚未激活生产图片输入。
+> 实施进度：K1 已落地 input modality 事实与 exact target 冻结、单一 typed content、共享 shape/target 校验、完整内容身份、D1 视觉公式、D2 headroom 常量以及 `pulsara.prompt/v1` codec/occurrence/metadata quote。K2 已将同一内容接入 Host direct/queued/steer、Hook/Skill 文本投影、Pillow 隔离验证、caller-owned transaction publication、`canonical_image_refs` clean-v0/GC、FULL exact-confirm、hydration、typed snapshot/fork、compiler/lowering 与 ROOT parent-context。K3 已接通 Chat/Responses 两套正式图片 wire、单次 final materialization、`pulsara_heuristic/v2`、PRE_FULL/POST_FULL、输入 G 与效果前输出 R/U_W/U_T 检查、ordinary recent 收缩，以及纯文本图片交接的 Tier 1/2/3、P 与 cold 入口。K4 已完成 I01–I44 核验、1979 项完整 non-live 回归（含 PostgreSQL）及修复后 isolated wheel 的 Chat/Responses 18 次真实调用，详见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)。U1/U2 浏览器链路尚未完成。
 >
 > 范围：kernel 的模型输入、模型事实、wire lowering、预算与连续性，以及第 14 节的首版图文输入和展示。相机、图片加工、分享下载等扩展行为仍另议。
 >
@@ -365,7 +365,7 @@ reader 缺失或损坏按既有 `CanonicalProviderContinuityError` / repository 
 
 新增 attach 与 orphan DELETE 的最终并发仲裁由真实 FK/数据库事务承担：attach 先成功提交则 GC 不得提交删除；DELETE 先成功则旧 blob attach 必须失败并使所在写入事务不提交。原始 ingress 可在其正常 publication 内发布完整 bytes；不能用忽略 FK、悬空 ref、额外 lease 或在确认路径重发 writer 绕过竞争。数据库并发/完整性异常按原事务失败分类处理，不声称任何顺序都保证一次成功。
 
-实施验收必须以真实 PostgreSQL 双连接覆盖两种提交顺序、复用旧 blob、事务回滚与父/子分别删除。K2 已在 disposable PostgreSQL 上以重叠事务覆盖 attach 先提交与 DELETE 先提交、重复 blob 复用、整事务回滚、独立 owner 依次删除及 FK 最终仲裁；更广的 K4 并发与完整产品链路验收仍未完成。
+实施验收必须以真实 PostgreSQL 双连接覆盖两种提交顺序、复用旧 blob、事务回滚与父/子分别删除。K2 已在 disposable PostgreSQL 上以重叠事务覆盖 attach 先提交与 DELETE 先提交、重复 blob 复用、整事务回滚、独立 owner 依次删除及 FK 最终仲裁；K4 已将这些真实事务与并发回归纳入最终完整验收；浏览器链路仍由 U1/U2 完成。
 
 ## 7. 两套 adapter 的唯一编码路径
 
@@ -898,7 +898,7 @@ successor 的 retained content、root/runtime/source reinjection 按各自实际
 - **D3 内容表达：** 有序 body、现有 immutable blob 与可信 MIME/尺寸/长度形成唯一内容来源；metadata quote 与实际 charge 来自同一 cut、同一完整选择范围，前者可以保守但必须覆盖后者。full confirmation、GC、fork 和 carrier 使用同一引用。不能虚构固定 metadata 大小来跳过准确 DTO/schema。
 - **D4 保留与 placement：** active exact 内容无损、retained unit 原子、ROOT advisory 按第 8.1 节；纯文本图片交接采用第 8.6 节 recent 规则（Tier 2 检查所选窗口，Tier 3 置空）与第 8.9 节普通 Text 替换。carrier/suffix 不制造重复 placement，最小 successor 包含真实 continuation 和必须内容，全部按实际 D2 计量。
 
-当前实验和 critic 讨论支撑的是设计选择，不是上述 kernel 验收已经通过。下一步证据来自引用/保留契约的生产实现与路径测试；不需要为 D2 再调用视觉 token provider。
+原资源实验和 critic 讨论属于设计证据；本轮 K4 已另以生产路径、真实 PostgreSQL 与完整回归完成上述验收，见第 12 节及 K4 验收记录。D2 参数不变。
 
 ## 10. 保留的语义与 hard-cut 删除范围
 
@@ -925,7 +925,7 @@ successor 的 retained content、root/runtime/source reinjection 按各自实际
 
 ## 11. 后续实施顺序
 
-按第 13 节冻结决定和下列顺序实施完整 hard cut；K1–K3 已完成，其余阶段仍须沿同一单一路径继续。
+按第 13 节冻结决定和下列顺序实施完整 hard cut；K1–K3 已完成，K4 已验收；U1/U2 继续沿同一单一路径实施。
 
 K2 的调用者迁移也包括既有 Web 纯文本展示、排队正文读取和草稿回填：按新 MIME 解码 `pulsara.prompt/v1`，全 Text 内容按固定 `\n` 投影，保持原话。U1 完成前，旧字符串界面遇到 Image 正文明示无法完整展示，不把 descriptor 或图片占位文字变成可编辑、可重新提交的正文；缩略图、富文本及图片上传仍由 U1 实施。
 
@@ -934,7 +934,7 @@ K2 的调用者迁移也包括既有 Web 纯文本展示、排队正文读取和
 | K1：事实与契约（已实施） | 仅 input 模态事实、target 冻结、共享内容校验；实现已冻结的 typed ingress、identity、预算、headroom 和 canonical 引用契约 | 单一类型与 owner；不依赖 provider 名单；D1–D4 覆盖全部 kernel 边界 |
 | K2：提交、来源与编译（已实施） | Host direct/queued/steer、完整命令身份与 exact-confirm、Hook/Skill 投影、canonical schema/GC、hydration、compiler/lowering、ROOT parent-context 全部消费者 | 纯图经真实提交入口进入既有 compiler；无 child ROOT 也正常；没有第二条生产输入路径 |
 | K3：Wire、采用与资源（已实施） | 两套 semantic wire group、materialization、estimator、PRE_FULL/POST_FULL、multipart headroom，以及纯文本图片交接的 recent 窗口检查/P 和冷入口 | quote 与实际输入一致；原三级与原事务完成交接，无专用许可或省略状态 |
-| K4：Kernel 验证 | 下节测试、真实 PostgreSQL、生产配置的真实 provider、完整回归与 isolated wheel | 有本轮 kernel 验收证据；不声称浏览器图片产品已完成 |
+| K4：Kernel 验证（已验收） | 下节测试、真实 PostgreSQL、生产配置的真实 provider、完整回归与 isolated wheel | 有本轮 kernel 验收证据；不声称浏览器图片产品已完成 |
 | U1：图文编辑器 | 第 14 节的 Tiptap 接入、图片节点、顺序序列化、会话草稿和编辑行为 | 可先独立开发组件；纯文本逐字一致，混合内容顺序、撤销与资源释放正确 |
 | U2：浏览器完整链路 | typed browser command / bridge / Protocol-v3、图片字节读取、队列恢复、历史展示和模型选择，接通 K2/K3 | 依赖 K4 与第 14.8 节浏览器验收；不以组件显示图片冒充正式链路完成 |
 
@@ -942,7 +942,7 @@ U1 可与 kernel 开发并行，U2 沿既有控制与来源接入。图片启用
 
 ## 12. Kernel 验收矩阵与证据要求
 
-以下是完整 Kernel 验收要求。K1 已执行对应的纯契约单元；K2 已执行 Host/validator、typed source/compiler、ROOT/fork 与真实 PostgreSQL owner/GC/confirmation/hydration 测试及既有回归。K3 已执行两套图片 wire/final materialization、v2 estimator、输入 headroom、效果前输出 gate、PRE_FULL/POST_FULL、ordinary recent 与 Tier 1/2/3/P/cold 的聚焦单元和 PostgreSQL 生产入口测试。这不等于 K4 的完整矩阵已经通过；真实 Chat/Responses provider、isolated wheel、完整并发/取消组合及全量激活回归仍未执行。
+以下是完整 Kernel 验收要求。K1 已执行对应的纯契约单元；K2 已执行 Host/validator、typed source/compiler、ROOT/fork 与真实 PostgreSQL owner/GC/confirmation/hydration 测试及既有回归。K3 已执行两套图片 wire/final materialization、v2 estimator、输入 headroom、效果前输出 gate、PRE_FULL/POST_FULL、ordinary recent 与 Tier 1/2/3/P/cold 的聚焦单元和 PostgreSQL 生产入口测试。K4 于 2026-09-15 完成下面 I01–I44 的核验及完整 non-live 回归（1979 passed，含 PostgreSQL，正常退出 0）。修复后的独立 wheel 分别通过 Chat 与 DeepSeek Responses 的正式 Host 图片链路，各九次调用；逐项测试、失败与复验记录见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)。这不代表 U1/U2 浏览器验收已完成。
 
 | 编号 | 必须证明的行为 |
 | --- | --- |
@@ -995,7 +995,7 @@ U1 可与 kernel 开发并行，U2 沿既有控制与来源接入。图片启用
 
 Kernel dogfood 的图片应包含需要观察图像才能回答的内容，并保存实际图像和回复供核验；不能仅测试 HTTP 200，或在文字 prompt 中直接泄露期望答案。真实 provider 覆盖证明所测 target 的行为，不推导出所有 OpenAI-compatible 服务已验证。
 
-K1 阶段只将本轮新增或更新的事实、内容、identity、计量、headroom 与 canonical 纯契约测试记为 K1 证据。K2 证据只覆盖本阶段的真实提交/source/compiler、Pillow worker 与 PostgreSQL 引用链；改动前的 catalog/target 基线及此前 PR05 的 provider/browser 证据都不是图片生产链路验收。K3 证据覆盖本阶段的 wire、资源接纳与模型交接聚焦路径；K4 仍须产生真实 provider、完整并发/取消矩阵、isolated wheel 与完整链路的新证据。
+K1 阶段只将本轮新增或更新的事实、内容、identity、计量、headroom 与 canonical 纯契约测试记为 K1 证据。K2 证据只覆盖本阶段的真实提交/source/compiler、Pillow worker 与 PostgreSQL 引用链；改动前的 catalog/target 基线及此前 PR05 的 provider/browser 证据都不是图片生产链路验收。K3 证据覆盖本阶段的 wire、资源接纳与模型交接聚焦路径；K4 已生成本轮真实 provider、并发/取消、isolated wheel 与完整链路的新证据；provider 结论仅适用于记录中的实际配置。
 
 ## 13. D1–D4 决策与实施出口
 
@@ -1010,11 +1010,11 @@ K1 阶段只将本轮新增或更新的事实、内容、identity、计量、hea
 | D3 | 第 6.1、6.5–6.9 节 | 单一 typed ingress；确定性正文与内容身份；一张三类真实 owner 的 FK 引用关系；原事务发布、完整只读确认、有界 hydration、GC 与 child-local refs |
 | D4 | 第 8.1–8.9 节 | exact active/typed history；ordinary recent；纯文本图片交接的 Tier 2 所选窗口检查、Tier 3 recent=0 和普通 Text 替换；实际 coverage、原子采用、fork 与 ROOT advisory |
 
-K1–K3 已实现事实、纯契约、提交、canonical 来源、hydration、typed compiler、图片 wire、资源接纳与模型交接边界，不宣称 K4–U2 的完整 Kernel 验收或 UI 已实现。后续编码按第 11 节 hard cut；被本设计明确修订的 model-switch/recent 与 final-wire 规范已同步实施状态。旧规范中相应文本字段、字节含义与 carrier 形状由本文替代；未明确修改的权限、safe boundary、tier 失败集合和执行身份规则继续生效。
+K1–K3 已实现事实、纯契约、提交、canonical 来源、hydration、typed compiler、图片 wire、资源接纳与模型交接边界，K4 已完成完整 Kernel 验收，U1/U2 UI 尚未实现。后续编码按第 11 节 hard cut；被本设计明确修订的 model-switch/recent 与 final-wire 规范已同步实施状态。旧规范中相应文本字段、字节含义与 carrier 形状由本文替代；未明确修改的权限、safe boundary、tier 失败集合和执行身份规则继续生效。
 
 第 14 节为随后确认的 UI 产品契约，不构成新的 kernel 决策或另一条 provider 输入路径。实施时同步更新 [前端应用规范](PULSARA_FRONTEND_APPLICATION_SPEC.zh.md)中 composer、草稿、完整内容读取与展示的相关条款；保留原权限、command outcome 和排队动作语义。
 
-激活前必须完成第 12 节生产路径证据。K3 已覆盖 D2 U_W/U_T、两套 adapter 本地真实 payload 形状及模型交接的聚焦行为；K4 仍须完成真实 provider、isolated wheel、完整 SQL/事务/取消组合与全量回归。它们是实施验收，不是未决产品参数；不得因为设计已冻结就跳过它们。
+第 12 节的 Kernel 生产路径证据已由 K4 完成，包括 D2 U_W/U_T、两套真实 adapter/HTTP payload、模型交接、isolated wheel、SQL/事务/取消组合与全量回归。浏览器图片产品仍须完成第 14.8 节 U1/U2 验收；设计冻结或 Kernel 通过不能代替浏览器证据。
 
 ## 14. 首版图文混排输入框与展示
 
