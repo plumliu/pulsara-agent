@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import FrozenPromptContent
+
 import asyncio
 from datetime import datetime, timezone
 from threading import Event
@@ -71,7 +73,7 @@ def pg_owner(database):
         context_binding_revision_id="revision:" + identity,
         permission_snapshot_id=permission.snapshot_id,
         requested_permission_mode=PermissionMode.ASK_PERMISSIONS,
-        content=InlineContent.from_bytes(b"PR05 harmless operation"),
+        content=FrozenPromptContent.text('PR05 harmless operation'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )

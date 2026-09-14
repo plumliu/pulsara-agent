@@ -62,11 +62,23 @@ from pulsara_agent.conversation_kernel.memory.recall import (
     MEMORY_EMBEDDING_CONTRACT_ID,
     MEMORY_EMBEDDING_CONTRACT_VERSION,
 )
+from pulsara_agent.conversation_kernel.prompt_content import (
+    CanonicalPromptImageDescriptor,
+    PROMPT_BODY_CODEC,
+    PROMPT_BODY_MEDIA_TYPE,
+)
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    validate_canonical_prompt_owner_metadata,
+)
 from pulsara_agent.memory.scope import CTX_GLOBAL, FrozenMemoryReadContextBinding
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.llm.model_connections import model_call_binding_from_dict
 from pulsara_agent.retrieval.embedding.validation import (
     freeze_v1_embedding_vector,
+)
+from pulsara_agent.model_input.contracts import (
+    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
 )
 
 from .contracts import (
@@ -727,12 +739,20 @@ class _MemoryOperations(_MemoryManagementOperations):
                     MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN,
                 },
             )
-        body, truncated = cls._read_entry_public_body(
-            connection,
-            session_id=session_id,
-            entry_id=str(row["id"]),
-            maximum_bytes=maximum_bytes,
-        )
+        if _memory_governance_entry_is_human(row):
+            body, truncated = cls._read_prompt_public_body(
+                connection,
+                session_id=session_id,
+                entry_id=str(row["id"]),
+                maximum_bytes=maximum_bytes,
+            )
+        else:
+            body, truncated = cls._read_entry_public_body(
+                connection,
+                session_id=session_id,
+                entry_id=str(row["id"]),
+                maximum_bytes=maximum_bytes,
+            )
         if not body and not truncated:
             return None
         return FrozenMemoryGovernanceSourceItem(
@@ -856,6 +876,55 @@ class _MemoryOperations(_MemoryManagementOperations):
             for fact_id in fact_ids
         )
         return output, True
+
+    @staticmethod
+    def _read_prompt_public_body(
+        connection, *, session_id: str, entry_id: str, maximum_bytes: int
+    ) -> tuple[str, bool]:
+        """Project canonical prompt text without loading image payload bytes."""
+
+        if maximum_bytes <= 0:
+            return "", True
+        row = connection.execute(
+            """
+            SELECT session_id, workspace_id, blob_id,
+                   content_digest, content_size, content_media_type, content_codec
+                   , CASE WHEN content_size BETWEEN 0 AND %s
+                                AND content_media_type = %s
+                                AND content_codec = %s
+                                AND (inline_content IS NULL
+                                     OR octet_length(inline_content) = content_size)
+                          THEN inline_content END AS inline_content
+            FROM pulsara_v3.transcript_entries
+            WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s
+            """,
+            (
+                MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
+                PROMPT_BODY_MEDIA_TYPE,
+                PROMPT_BODY_CODEC,
+                session_id,
+                entry_id,
+            ),
+        ).fetchone()
+        if row is None:
+            raise ConversationKernelConflict("memory governance entry content is absent")
+        decoded = validate_canonical_prompt_owner_metadata(
+            connection,
+            row=row,
+            transcript_entry_id=entry_id,
+        )
+        text_bytes = "\n".join(
+            part.text for part in decoded.parts if isinstance(part, LLMTextPart)
+        ).encode("utf-8")
+        has_image = any(
+            isinstance(part, CanonicalPromptImageDescriptor) for part in decoded.parts
+        )
+        text, truncated = _decode_governance_projection(
+            text_bytes,
+            maximum_bytes=maximum_bytes,
+            truncated=len(text_bytes) > maximum_bytes or has_image,
+        )
+        return text, truncated
 
     @staticmethod
     def _read_entry_public_body(

@@ -59,7 +59,7 @@ from pulsara_agent.model_input.continuity import (
     ProcessLocalSourceHead,
     ProviderInputContinuityScope,
     ProviderInputEpochCompatibility,
-    provider_input_logical_utf8_bytes,
+    provider_input_logical_bytes,
     encode_runtime_observation,
     SourceObservationLifecycle,
     SourceObservationPresence,
@@ -260,7 +260,7 @@ class MemoryDispatchSupport:
                 max(0, estimate.total_input_tokens - base_estimate.total_input_tokens)
             )
             byte_deltas.append(
-                provider_input_logical_utf8_bytes(
+                provider_input_logical_bytes(
                     system_prompt="",
                     tools=(),
                     messages=(message,),
@@ -277,7 +277,7 @@ class MemoryDispatchSupport:
                 contract_version=desired.source_contract_version,
                 body=desired.variants[0].text,
             )
-            full_bytes = provider_input_logical_utf8_bytes(
+            full_bytes = provider_input_logical_bytes(
                 system_prompt="", tools=(), messages=(full_message,)
             )
             full_estimate = estimator.estimate_frozen_input(

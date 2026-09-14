@@ -9,6 +9,7 @@ from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pulsara_agent.conversation_kernel.contracts import AssistantBlockKind, CanonicalContent, CommittedEventDraft, CommittedEventSubject, ConversationScopeKind, EntryKind, HostWriterGuard, StoredCommittedEvent
+from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot, RunPermissionAdmissionSource, RunPermissionOverlay, build_run_permission_snapshot
@@ -37,6 +38,7 @@ class _RepositoryKernel:
         | None = None,
     ) -> None:
         self._provider = connection_provider
+        self._canonical_content_publisher = CanonicalContentPublisher(connection_provider)
         self._post_commit_tap = post_commit_tap
         self._event_batch_local = local()
 
@@ -926,82 +928,16 @@ class _RepositoryKernel:
         )
 
     @staticmethod
-    def _insert_initial_context_binding_revision(
+    def _initial_context_binding_values(
         connection: Connection,
         *,
         session_id: str,
         turn_id: str,
-        revision_id: str,
         initial_entry_sequence: int,
         scope_kind: ConversationScopeKind,
         scope_subagent_task_id: str | None,
-    ) -> None:
-        """Insert revision zero using the latest exact-scope snapshot, if any."""
-
-        predecessor = connection.execute(
-            """
-            SELECT r.base_kind, r.context_snapshot_id,
-                   r.source_through_sequence
-            FROM pulsara_v3.turns AS t
-            JOIN pulsara_v3.transcript_entries AS initial
-              ON initial.entry_owner_kind = 'EXECUTED_TURN' AND initial.session_id = t.session_id
-             AND initial.id = t.initial_entry_id
-            JOIN pulsara_v3.turn_context_binding_revisions AS r
-              ON r.session_id = t.session_id
-             AND r.id = t.current_context_binding_revision_id
-            WHERE t.session_id = %s AND t.id <> %s
-              AND t.conversation_scope_kind = %s
-              AND t.scope_subagent_task_id IS NOT DISTINCT FROM %s
-            ORDER BY initial.entry_sequence DESC
-            LIMIT 1
-            """,
-            (session_id, turn_id, scope_kind.value, scope_subagent_task_id),
-        ).fetchone()
-        if predecessor is None and scope_kind is ConversationScopeKind.ROOT:
-            predecessor = connection.execute(
-                "SELECT base_kind, context_snapshot_id, source_through_sequence "
-                "FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
-                (session_id,),
-            ).fetchone()
-        if predecessor is not None and str(predecessor["base_kind"]) == "SNAPSHOT":
-            base_kind = "SNAPSHOT"
-            snapshot_id = str(predecessor["context_snapshot_id"])
-            source_through_sequence = int(predecessor["source_through_sequence"])
-        else:
-            base_kind = "FULL_HISTORY"
-            snapshot_id = None
-            source_through_sequence = initial_entry_sequence - 1
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                id, session_id, turn_id, revision_ordinal, base_kind,
-                context_snapshot_id, source_through_sequence
-            ) VALUES (%s, %s, %s, 0, %s, %s, %s)
-            """,
-            (
-                revision_id,
-                session_id,
-                turn_id,
-                base_kind,
-                snapshot_id,
-                source_through_sequence,
-            ),
-        )
-
-    @staticmethod
-    def _initial_context_binding_revision_matches(
-        connection: Connection,
-        *,
-        row: object,
-        session_id: str,
-        turn_id: str,
-        revision_id: str,
-        initial_entry_sequence: int,
-        scope_kind: ConversationScopeKind,
-        scope_subagent_task_id: str | None,
-    ) -> bool:
-        if row is None:
-            return False
+    ) -> tuple[str, str | None, int]:
+        """Resolve revision-zero base values from the exact predecessor cut."""
         predecessor = connection.execute(
             """
             SELECT r.base_kind, r.context_snapshot_id,
@@ -1034,15 +970,81 @@ class _RepositoryKernel:
                 "FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
                 (session_id,),
             ).fetchone()
-        inherited = predecessor is not None and str(predecessor["base_kind"]) == "SNAPSHOT"
-        expected_kind = "SNAPSHOT" if inherited else "FULL_HISTORY"
-        expected_snapshot = (
-            str(predecessor["context_snapshot_id"]) if inherited else None
+        if predecessor is not None and str(predecessor["base_kind"]) == "SNAPSHOT":
+            base_kind = "SNAPSHOT"
+            snapshot_id = str(predecessor["context_snapshot_id"])
+            source_through_sequence = int(predecessor["source_through_sequence"])
+        else:
+            base_kind = "FULL_HISTORY"
+            snapshot_id = None
+            source_through_sequence = initial_entry_sequence - 1
+        return base_kind, snapshot_id, source_through_sequence
+
+    @classmethod
+    def _insert_initial_context_binding_revision(
+        cls,
+        connection: Connection,
+        *,
+        session_id: str,
+        turn_id: str,
+        revision_id: str,
+        initial_entry_sequence: int,
+        scope_kind: ConversationScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> None:
+        """Insert revision zero using the latest exact-scope snapshot, if any."""
+
+        base_kind, snapshot_id, source_through_sequence = (
+            cls._initial_context_binding_values(
+                connection,
+                session_id=session_id,
+                turn_id=turn_id,
+                initial_entry_sequence=initial_entry_sequence,
+                scope_kind=scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+            )
         )
-        expected_through = (
-            int(predecessor["source_through_sequence"])
-            if inherited
-            else initial_entry_sequence - 1
+        connection.execute(
+            """
+            INSERT INTO pulsara_v3.turn_context_binding_revisions (
+                id, session_id, turn_id, revision_ordinal, base_kind,
+                context_snapshot_id, source_through_sequence
+            ) VALUES (%s, %s, %s, 0, %s, %s, %s)
+            """,
+            (
+                revision_id,
+                session_id,
+                turn_id,
+                base_kind,
+                snapshot_id,
+                source_through_sequence,
+            ),
+        )
+
+    @classmethod
+    def _initial_context_binding_revision_matches(
+        cls,
+        connection: Connection,
+        *,
+        row: object,
+        session_id: str,
+        turn_id: str,
+        revision_id: str,
+        initial_entry_sequence: int,
+        scope_kind: ConversationScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> bool:
+        if row is None:
+            return False
+        expected_kind, expected_snapshot, expected_through = (
+            cls._initial_context_binding_values(
+                connection,
+                session_id=session_id,
+                turn_id=turn_id,
+                initial_entry_sequence=initial_entry_sequence,
+                scope_kind=scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+            )
         )
         return bool(
             str(row["id"]) == revision_id

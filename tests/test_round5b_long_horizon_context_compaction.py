@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CONTEXT_SNAPSHOT_CODEC,
+    CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionConfirmationKind,
@@ -56,6 +58,7 @@ import pulsara_agent.conversation_kernel.compaction.model_call as compaction_mod
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
     compaction_summary_request,
+    display_json,
     freeze_compaction_summary_output,
     parse_compaction_snapshot_carrier,
 )
@@ -88,8 +91,13 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     LIVE_EVENT_TYPES,
     SUBJECT_SLOTS,
 )
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMMessage,
+    LLMTextPart,
+    join_text_content,
+)
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     FrozenProviderWireInputQuote,
@@ -111,6 +119,7 @@ from pulsara_agent.model_input.contracts import (
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
     provider_input_item_fingerprint,
+    provider_input_item_text,
 )
 from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
@@ -161,14 +170,17 @@ def _wire_quote(
         wire_api=wire_api,
         estimator_fingerprint=(
             estimator_fingerprint
-            or PulsaraHeuristicTokenEstimatorV1().fact.estimator_fingerprint
+            or PulsaraHeuristicTokenEstimatorV2().fact.estimator_fingerprint
         ),
         effective_input_budget_tokens=budget_tokens,
         semantic_estimated_input_tokens=semantic_tokens,
+        semantic_visual_image_tokens=0,
         generic_wire_estimated_input_tokens=final_tokens,
+        generic_wire_visual_image_tokens=0,
         replaced_generic_wire_estimated_tokens=0,
         replay_wire_estimated_tokens=0,
         final_wire_estimated_input_tokens=final_tokens,
+        final_wire_visual_image_tokens=0,
         final_wire_utf8_bytes=wire_bytes or max(1, final_tokens * 2),
     )
 
@@ -231,7 +243,7 @@ def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
         source_entry_id="entry:root:1",
         source_entry_sequence=1,
         source_turn_id="turn:root",
-        text="root exact-scope history",
+        content=(LLMTextPart("root exact-scope history"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
     identity_values = {
@@ -249,15 +261,15 @@ def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
             **identity_values
         ),
     )
-    canonical_bytes = len(item.text.encode("utf-8"))
+    canonical_bytes = len(provider_input_item_text(item).encode("utf-8"))
     snapshot = CanonicalModelInputSnapshot(
         identity=identity,
         items=(item,),
-        canonical_utf8_bytes=canonical_bytes,
+        canonical_expanded_bytes=canonical_bytes,
         snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
             identity=identity,
             items=(item,),
-            canonical_utf8_bytes=canonical_bytes,
+            canonical_expanded_bytes=canonical_bytes,
             closures=(),
             late_outcomes=(),
         ),
@@ -328,34 +340,60 @@ def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> N
             "turn:old",
             (1, 2),
             (
-                DestinationDialogueEntry("user", "old question"),
-                DestinationDialogueEntry("assistant", "old answer"),
+                DestinationDialogueEntry(
+                    "user",
+                    FrozenProviderInputItemKind.USER,
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    (LLMTextPart("old question"),),
+                ),
+                DestinationDialogueEntry(
+                    "assistant",
+                    FrozenProviderInputItemKind.ASSISTANT,
+                    None,
+                    (LLMTextPart("old answer"),),
+                ),
             ),
         ),
         RecentDialogueUnit(
             "turn:new",
             (3, 4),
             (
-                DestinationDialogueEntry("user", "new question"),
-                DestinationDialogueEntry("assistant", "new answer"),
+                DestinationDialogueEntry(
+                    "user",
+                    FrozenProviderInputItemKind.USER,
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    (LLMTextPart("new question"),),
+                ),
+                DestinationDialogueEntry(
+                    "assistant",
+                    FrozenProviderInputItemKind.ASSISTANT,
+                    None,
+                    (LLMTextPart("new answer"),),
+                ),
             ),
         ),
     )
     plan = DestinationDialogueProjectionPlan(
         units,
-        (
-            "prior handover",
-            ("quoted request",),
+            (
+                "prior handover",
+                (
+                    FrozenRetainedHistoricalRequest(
+                        FrozenProviderInputItemKind.USER,
+                        CanonicalInputOriginKind.HUMAN_MESSAGE,
+                        FrozenPromptContent.text("quoted request"),
+                    ),
+                ),
             (
                 FrozenRetainedHistoricalRequest(
                     FrozenProviderInputItemKind.USER,
                     CanonicalInputOriginKind.HUMAN_MESSAGE,
-                    "first retained request",
+                    FrozenPromptContent.text("first retained request"),
                 ),
-                FrozenRetainedHistoricalRequest(
-                    FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
-                    None,
-                    "second retained request",
+                    FrozenRetainedHistoricalRequest(
+                        FrozenProviderInputItemKind.USER,
+                        CanonicalInputOriginKind.HUMAN_MESSAGE,
+                        FrozenPromptContent.text("second retained request"),
                 ),
             ),
         ),
@@ -366,11 +404,14 @@ def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> N
     assert len(candidates) == 4
     assert [len(candidate.units) for candidate in candidates] == [2, 2, 1, 0]
     assert candidates[0].prior_handoff == plan.prior_handoff
-    assert json.loads(candidates[0].body)["prior_handoff"][
-        "retained_historical_requests"
-    ] == [request.canonical_value() for request in plan.prior_handoff[2]]
+    first_text = join_text_content(candidates[0].content)
+    assert "prior handover" in first_text
+    assert "quoted request" in first_text
+    assert "first retained request" in first_text
+    assert "second retained request" in first_text
     assert all(candidate.prior_handoff is None for candidate in candidates[1:])
-    assert json.loads(candidates[-1].body)["turns"] == []
+    assert "old question" not in join_text_content(candidates[-1].content)
+    assert "new question" not in join_text_content(candidates[-1].content)
 
 
 def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> None:
@@ -404,7 +445,7 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             entry_id,
             sequence,
             "turn:history",
-            body,
+            (LLMTextPart(body),),
             tool_call_id=call_id,
             tool_request_entry_id="entry:tool-request",
             tool_result_context=ProviderToolResultContextMetadata(
@@ -426,28 +467,29 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     exact_assistant = "keep assistant text exactly\nincluding markdown"
     first_result = 'first exact result: }], "requested_tools": []'
     second_result = "second exact result"
+    terminal_marker = "runtime observation remains typed destination history"
     items = (
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
             "entry:user:history",
             1,
             "turn:history",
-            exact_user,
+            (LLMTextPart(exact_user),),
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         ),
-        FrozenProviderInputItem(
-            FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
-            "entry:runtime-observation",
-            2,
-            "turn:history",
-            "runtime observation must not enter destination history",
+            FrozenProviderInputItem(
+                FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+                "entry:runtime-observation",
+                2,
+                "turn:history",
+                (LLMTextPart(json.dumps({"output": terminal_marker})),),
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
             "entry:tool-request",
             3,
             "turn:history",
-            "I will inspect both files.",
+            (LLMTextPart("I will inspect both files."),),
             tool_calls=(
                 ProviderToolCall(
                     "call:secret:first",
@@ -478,14 +520,14 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             "entry:assistant:history",
             6,
             "turn:history",
-            exact_assistant,
+            (LLMTextPart(exact_assistant),),
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
             "entry:user:recent",
             7,
             "turn:recent",
-            "recent question",
+            (LLMTextPart("recent question"),),
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         ),
         FrozenProviderInputItem(
@@ -493,14 +535,14 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             "entry:assistant:recent",
             8,
             "turn:recent",
-            "recent answer",
+            (LLMTextPart("recent answer"),),
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
             "entry:user:active",
             9,
             "turn:active",
-            "active request is carried separately",
+            (LLMTextPart("active request is carried separately"),),
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         ),
     )
@@ -509,16 +551,20 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         items=items,
     )
     canonical_read = SimpleNamespace(
+        turn_status="RUNNING",
         dispatch_read=SimpleNamespace(
             compile_snapshot=SimpleNamespace(canonical_input=canonical)
         ),
         safe_head_range=SimpleNamespace(ordered_items=items, closures=()),
+        snapshot_carrier=None,
     )
     active = FrozenCompactionActiveRequest(
         entry_id="entry:user:active",
         entry_sequence=9,
         location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
-        text="active request is carried separately",
+        item_kind=FrozenProviderInputItemKind.USER,
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+        content=FrozenPromptContent.text("active request is carried separately"),
     )
 
     plan = freeze_destination_dialogue_projection_plan(
@@ -526,19 +572,16 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         active_request=active,
     )
     projection = enumerate_destination_backbone_projections(plan)[0]
-    decoded = json.loads(projection.body)
 
     assert len(plan.units) == 2
-    assert [
-        tool["name"] for tool in decoded["turns"][0]["entries"][1]["requested_tools"]
-    ] == [
+    assert [tool.name for tool in plan.units[0].entries[2].requested_tools] == [
         "read_file",
         "read_file",
     ]
-    assert decoded["turns"][0]["entries"][0]["text"] == exact_user
-    assert decoded["turns"][0]["entries"][2]["text"] == exact_assistant
-    rendered = projection.body.decode("utf-8")
-    assert "runtime observation must not enter destination history" not in rendered
+    rendered = join_text_content(projection.content)
+    assert display_json(exact_user) in rendered
+    assert display_json(exact_assistant) in rendered
+    assert terminal_marker in rendered
     assert "active request is carried separately" not in rendered
     assert "call:secret" not in rendered
     assert "secret_argument" not in rendered
@@ -549,10 +592,9 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         projection,
         projection.eligible_evidence[0],
     )
-    retained_decoded = json.loads(retained.body)
-    retained_tools = retained_decoded["turns"][0]["entries"][1]["requested_tools"]
-    assert retained_tools[0]["retained_result"] == first_result
-    assert retained_tools[1]["result_omitted"] is True
+    retained_rendered = join_text_content(retained.content)
+    assert display_json(first_result) in retained_rendered
+    assert display_json(second_result) not in retained_rendered
     assert retained.eligible_evidence == (projection.eligible_evidence[1],)
 
 
@@ -568,6 +610,21 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
     )
 
     def prepare(base_kind: str, context_snapshot_id: str | None) -> object:
+        carrier = build_compaction_snapshot_carrier(
+            summary=freeze_compaction_summary_output(
+                "summary", maximum_utf8_bytes=100
+            ),
+            recent_human_requests=(),
+            continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
+            active_request=FrozenCompactionActiveRequest(
+                entry_id="entry:active",
+                entry_sequence=40,
+                location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
+                item_kind=FrozenProviderInputItemKind.USER,
+                input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+                content=FrozenPromptContent.text("active request"),
+            ),
+        )
         return build_prepared_compaction_canonical_adoption(
             CompactionCanonicalAdoptionFactoryInput(
                 scope=scope,
@@ -587,7 +644,12 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
                 event_id="event:new",
                 source_through_sequence=40,
                 source_digest="sha256:" + "a" * 64,
-                snapshot_content=InlineContent.from_bytes(b"summary"),
+                snapshot_content=InlineContent.from_bytes(
+                    carrier.body,
+                    media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
+                    codec=CONTEXT_SNAPSHOT_CODEC,
+                ),
+                snapshot_carrier=carrier,
                 compiler_contract="compiler:test",
                 prompt_contract="prompt:test",
                 model_contract="model:test",
@@ -627,7 +689,7 @@ def test_retained_historical_requests_reject_non_list_or_invalid_items(invalid) 
 
     carrier = build_compaction_snapshot_carrier(
         summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=65_536),
-        recent_user_messages=(),
+        recent_human_requests=(),
         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
         active_request=None,
     )
@@ -646,15 +708,17 @@ def test_retained_historical_requests_roundtrip_is_ordered_and_has_no_legacy_par
         FrozenRetainedHistoricalRequest(
             FrozenProviderInputItemKind.USER,
             CanonicalInputOriginKind.HUMAN_MESSAGE,
-            "identical text",
+            FrozenPromptContent.text("identical text"),
         ),
         FrozenRetainedHistoricalRequest(
-            FrozenProviderInputItemKind.TERMINAL_OBSERVATION, None, "identical text"
+            FrozenProviderInputItemKind.USER,
+            CanonicalInputOriginKind.HUMAN_STEER,
+            FrozenPromptContent.text("identical text"),
         ),
     )
     carrier = build_compaction_snapshot_carrier(
         summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=65_536),
-        recent_user_messages=(),
+        recent_human_requests=(),
         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
         active_request=None,
         retained_historical_requests=requests,
@@ -683,20 +747,33 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
 
     carrier = build_compaction_snapshot_carrier(
         summary=summary,
-        recent_user_messages=("第一条", "second"),
+        recent_human_requests=(
+            FrozenRetainedHistoricalRequest(
+                FrozenProviderInputItemKind.USER,
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                FrozenPromptContent.text("第一条"),
+            ),
+            FrozenRetainedHistoricalRequest(
+                FrozenProviderInputItemKind.USER,
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                FrozenPromptContent.text("second"),
+            ),
+        ),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request=FrozenCompactionActiveRequest(
             entry_id="entry:active",
             entry_sequence=7,
             location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
-            text="current exact request",
+            item_kind=FrozenProviderInputItemKind.USER,
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+            content=FrozenPromptContent.text("current exact request"),
         ),
     )
     decoded = json.loads(carrier.body)
     assert set(decoded) == {
         "continuation",
         "earlier_context_summary",
-        "recent_user_messages",
+        "recent_human_requests",
         "retained_historical_requests",
     }
     assert decoded["retained_historical_requests"] == []
@@ -705,19 +782,26 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
         "HANDOFF COMPLETE / RESUME NOW"
     )
     assert "newer canonical turn activation" in decoded["continuation"]["instruction"]
-    assert decoded["continuation"]["active_request"] == {
-        "entry_id": "entry:active",
-        "entry_sequence": 7,
-        "location": "SNAPSHOT_EXACT",
-        "text": "current exact request",
-    }
-    assert decoded["recent_user_messages"] == ["第一条", "second"]
+    assert carrier.active_request is not None
+    assert decoded["continuation"]["active_request"] == (
+        json.loads(canonical_json_bytes(carrier.active_request.canonical_value()))
+    )
+    assert decoded["recent_human_requests"] == [
+        json.loads(canonical_json_bytes(request.canonical_value()))
+        for request in carrier.recent_human_requests
+    ]
     assert "body_digest" not in decoded
     assert parse_compaction_snapshot_carrier(carrier.body) == carrier
 
     idle = build_compaction_snapshot_carrier(
         summary=summary,
-        recent_user_messages=("第一条",),
+        recent_human_requests=(
+            FrozenRetainedHistoricalRequest(
+                FrozenProviderInputItemKind.USER,
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                FrozenPromptContent.text("第一条"),
+            ),
+        ),
         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
         active_request=None,
     )
@@ -728,7 +812,7 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
     assert parse_compaction_snapshot_carrier(idle.body) == idle
     with pytest.raises(ValueError, match="fields"):
         parse_compaction_snapshot_carrier(
-            b'{"earlier_context_summary":"legacy","recent_user_messages":[]}'
+            b'{"earlier_context_summary":"legacy","recent_human_requests":[]}'
         )
 
 
@@ -748,13 +832,15 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
     summary = freeze_compaction_summary_output("old handoff", maximum_utf8_bytes=100)
     carrier = build_compaction_snapshot_carrier(
         summary=summary,
-        recent_user_messages=(),
+        recent_human_requests=(),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request=FrozenCompactionActiveRequest(
             entry_id="entry:active",
             entry_sequence=4,
             location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
-            text="exact active request",
+            item_kind=FrozenProviderInputItemKind.USER,
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+            content=FrozenPromptContent.text("exact active request"),
         ),
     )
     snapshot_item = FrozenProviderInputItem(
@@ -762,9 +848,10 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
         source_entry_id=None,
         source_entry_sequence=8,
         source_turn_id=None,
-        text=carrier.body.decode("utf-8"),
+        content=carrier,
     )
     source_view = SimpleNamespace(
+        snapshot_carrier=carrier,
         canonical_dispatch_read=SimpleNamespace(
             compile_snapshot=SimpleNamespace(
                 canonical_input=SimpleNamespace(
@@ -788,7 +875,8 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
     assert active is not None
     assert active.entry_id == "entry:active"
     assert active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-    assert active.text == "exact active request"
+    assert active.content is not None
+    assert join_text_content(active.content.parts) == "exact active request"
 
 
 def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> None:
@@ -797,7 +885,7 @@ def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> Non
         source_entry_id="entry:plan",
         source_entry_sequence=9,
         source_turn_id="turn:plan",
-        text='{"plan_continuation":"resume approved plan"}',
+        content=(LLMTextPart('{"plan_continuation":"resume approved plan"}'),),
         input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
     )
     source_view = SimpleNamespace(
@@ -823,7 +911,8 @@ def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> Non
     assert mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
     assert active is not None
     assert active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-    assert active.text == plan_item.text
+    assert active.content is not None
+    assert join_text_content(active.content.parts) == provider_input_item_text(plan_item)
 
 
 @pytest.mark.parametrize(
@@ -937,13 +1026,15 @@ def test_round5b_has_no_presummary_successor_lower_bound_gate() -> None:
     assert "estimate_unavoidable_compaction_successor_tokens" not in coordinator
 
 
-def test_final_wire_successor_deadline_starts_after_snapshot_publication() -> None:
+def test_final_wire_successor_deadline_starts_after_snapshot_descriptor_freeze() -> None:
     coordinator = (
         ROOT / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py"
     ).read_text(encoding="utf-8")
 
     summary_terminal = coordinator.index("raw = await prepared_summary.open_once()")
-    publication = coordinator.index("content = await self._content(", summary_terminal)
+    publication = coordinator.index(
+        "content = self._content_publisher.describe(", summary_terminal
+    )
     successor_deadline = coordinator.index(
         "successor_deadline = monotonic()", publication
     )
@@ -960,9 +1051,9 @@ def test_round5b_trigger_uses_exact_prepared_target_budget_without_262k_cap() ->
             final_wire_estimated_input_tokens=250_000,
         ),
         physical_working_set=SimpleNamespace(
-            post_base_item_count=1,
-            post_base_canonical_utf8_bytes=1,
-            continuity_epoch_logical_utf8_bytes=1,
+            selected_item_count=1,
+            selected_canonical_expanded_bytes=1,
+            continuity_epoch_logical_bytes=1,
         ),
     )
 
@@ -995,9 +1086,9 @@ def test_round5b_automatic_trigger_uses_final_wire_not_semantic_estimate(
             final_tokens=final_tokens,
         ),
         physical_working_set=SimpleNamespace(
-            post_base_item_count=1,
-            post_base_canonical_utf8_bytes=1,
-            continuity_epoch_logical_utf8_bytes=1,
+            selected_item_count=1,
+            selected_canonical_expanded_bytes=1,
+            continuity_epoch_logical_bytes=1,
         ),
     )
 
@@ -1158,14 +1249,24 @@ def test_compaction_summary_wire_proof_rejects_installed_prefix_truncation() -> 
 def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    estimator = PulsaraHeuristicTokenEstimatorV1()
-    target_fact = SimpleNamespace(target_fingerprint="sha256:" + "1" * 64)
-    profile = SimpleNamespace(
+    estimator = PulsaraHeuristicTokenEstimatorV2()
+    source_target_fact = SimpleNamespace(target_fingerprint="sha256:" + "0" * 64)
+    source_profile = SimpleNamespace(
+        route_wire_profile=SimpleNamespace(wire_api="openai_chat_completions")
+    )
+    source_target = SimpleNamespace(
+        fact=source_target_fact,
+        model_profile=source_profile,
+    )
+    destination_target_fact = SimpleNamespace(
+        target_fingerprint="sha256:" + "1" * 64
+    )
+    destination_profile = SimpleNamespace(
         route_wire_profile=SimpleNamespace(wire_api="openai_responses")
     )
-    target = SimpleNamespace(
-        fact=target_fact,
-        model_profile=profile,
+    destination_target_value = SimpleNamespace(
+        fact=destination_target_fact,
+        model_profile=destination_profile,
         token_estimator=estimator,
     )
     destination_binding = SimpleNamespace(connection_id="destination")
@@ -1186,12 +1287,37 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
         budget_tokens=1_000,
         estimator_fingerprint=estimator.fact.estimator_fingerprint,
     )
+    source_estimate = SimpleNamespace(
+        total_input_tokens=900,
+        visual_image_tokens=0,
+    )
+    source_tool_surface = SimpleNamespace(tool_specs=())
+    source_binding = SimpleNamespace(
+        target_fact=source_target_fact,
+        estimator=estimator,
+        estimator_fingerprint=estimator.fact.estimator_fingerprint,
+        effective_input_budget_tokens=1_000,
+        tool_surface=source_tool_surface,
+        binding_fingerprint="sha256:" + "2" * 64,
+    )
+    source_semantic = SimpleNamespace(
+        canonical_input_identity=identity,
+        compile_binding_fingerprint=source_binding.binding_fingerprint,
+        system_prompt="source system",
+        messages=(),
+        tools=(),
+        final_estimate=source_estimate,
+    )
     source_candidate = SimpleNamespace(
         canonical_read=canonical_read,
-        semantic_input=SimpleNamespace(canonical_input_identity=identity),
+        semantic_input=source_semantic,
+        prepared_call=SimpleNamespace(
+            call=SimpleNamespace(target=source_target),
+            compile_binding=source_binding,
+        ),
     )
     successor_binding = SimpleNamespace(
-        target_fact=target_fact,
+        target_fact=destination_target_fact,
         estimator=estimator,
         estimator_fingerprint=estimator.fact.estimator_fingerprint,
         effective_input_budget_tokens=1_000,
@@ -1200,17 +1326,24 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
         canonical_read=canonical_read,
         semantic_input=SimpleNamespace(canonical_input_identity=identity),
         prepared_call=SimpleNamespace(
-            call=SimpleNamespace(target=target, binding=destination_binding),
+            call=SimpleNamespace(
+                target=destination_target_value,
+                binding=destination_binding,
+            ),
             compile_binding=successor_binding,
         ),
     )
     destination = SimpleNamespace(
-        target=target,
+        target=destination_target_value,
         call=SimpleNamespace(binding=destination_binding),
     )
     source_view = SimpleNamespace(
         canonical_dispatch_read=canonical_read,
         provider_wire_quote=source_quote,
+        normal_compile_binding=source_binding,
+        provider_projection=SimpleNamespace(final_estimate=source_estimate),
+        materialized_system_prompt=lambda: "source system",
+        materialized_messages=lambda: (),
     )
     monkeypatch.setattr(
         compaction_coordinator,
@@ -1239,6 +1372,21 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
     )
     assert transition.successor_quote.final_wire_estimated_input_tokens == 849
     assert transition.reclaim_tokens == 0
+
+    source_semantic.system_prompt = "drifted source system"
+    with pytest.raises(
+        compaction_coordinator.CompactionWireTransitionDrift,
+        match="exact-join",
+    ):
+        compaction_coordinator.validate_model_switch_wire_transition(
+            source_view=source_view,
+            source_candidate=source_candidate,
+            successor_wire=below,
+            destination_target=destination,
+            policy=ResolvedCompactionPolicy(auto_trigger_ratio=0.85),
+            phase="PRE_FULL",
+        )
+    source_semantic.system_prompt = "source system"
 
     at_trigger = SimpleNamespace(
         candidate=successor_candidate,
@@ -1297,7 +1445,7 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
     monkeypatch: pytest.MonkeyPatch,
     drift: str,
 ) -> None:
-    estimator = PulsaraHeuristicTokenEstimatorV1()
+    estimator = PulsaraHeuristicTokenEstimatorV2()
     estimator_fingerprint = estimator.fact.estimator_fingerprint
     source_profile = SimpleNamespace(
         route_wire_profile=SimpleNamespace(wire_api="openai_chat_completions")
@@ -1592,31 +1740,52 @@ def test_compaction_cut_lineage_uses_full_history_materialization_floor() -> Non
         context_snapshot_id="snapshot:test",
         source_through_sequence=11,
     )
-    source_prefix = SimpleNamespace(
-        item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:prefix",
-        source_entry_sequence=11,
-        text="old prefix",
+    source_prefix = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.USER,
+        "entry:prefix",
+        11,
+        "turn:history",
+        (LLMTextPart("old prefix"),),
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
-    retained_suffix = SimpleNamespace(
-        item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:current-user",
-        source_entry_sequence=49,
-        text="current request",
+    retained_suffix = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.USER,
+        "entry:current-user",
+        49,
+        "turn:test",
+        (LLMTextPart("current request"),),
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
-    snapshot = SimpleNamespace(
-        item_kind=FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
-        source_entry_id=None,
-        source_entry_sequence=11,
-        text="summary",
+    snapshot_carrier = build_compaction_snapshot_carrier(
+        summary=freeze_compaction_summary_output(
+            "summary", maximum_utf8_bytes=100
+        ),
+        recent_human_requests=(),
+        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
+        active_request=None,
+    )
+    snapshot = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
+        None,
+        11,
+        None,
+        snapshot_carrier,
     )
     shared_fact = object()
 
     def candidate(*, identity, binding, items):
+        canonical_expanded_bytes = sum(
+            item.content.canonical_expanded_bytes
+            if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+            else compaction_coordinator.provider_input_item_canonical_expanded_bytes(
+                item
+            )
+            for item in items
+        )
         canonical_input = SimpleNamespace(
             identity=identity,
             items=items,
-            canonical_utf8_bytes=sum(len(item.text.encode("utf-8")) for item in items),
+            canonical_expanded_bytes=canonical_expanded_bytes,
             closures=(),
             late_outcomes=(),
         )
@@ -1660,29 +1829,29 @@ def test_round5b_resource_headroom_exact_boundaries() -> None:
         MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES,
         STAGE2_LIMITS.tool_result_hard_bytes,
     )
-    assert bounds.reserved_canonical_utf8_bytes == maximum_admission
-    assert bounds.reserved_epoch_logical_utf8_bytes == maximum_admission
+    assert bounds.reserved_canonical_expanded_bytes == maximum_admission
+    assert bounds.reserved_epoch_logical_bytes == maximum_admission
     assert (
-        bounds.soft_canonical_utf8_byte_limit
+        bounds.soft_canonical_expanded_byte_limit
         + MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES
-        <= bounds.maximum_canonical_utf8_bytes
+        <= bounds.maximum_canonical_expanded_bytes
     )
     assert not crosses_compaction_resource_headroom(
-        post_base_item_count=bounds.soft_canonical_item_limit - 1,
-        post_base_canonical_utf8_bytes=bounds.soft_canonical_utf8_byte_limit - 1,
-        continuity_epoch_logical_utf8_bytes=(
-            bounds.soft_epoch_logical_utf8_byte_limit - 1
+        selected_item_count=bounds.soft_canonical_item_limit - 1,
+        selected_canonical_expanded_bytes=bounds.soft_canonical_expanded_byte_limit - 1,
+        continuity_epoch_logical_bytes=(
+            bounds.soft_epoch_logical_byte_limit - 1
         ),
     )
     assert crosses_compaction_resource_headroom(
-        post_base_item_count=bounds.soft_canonical_item_limit,
-        post_base_canonical_utf8_bytes=0,
-        continuity_epoch_logical_utf8_bytes=0,
+        selected_item_count=bounds.soft_canonical_item_limit,
+        selected_canonical_expanded_bytes=0,
+        continuity_epoch_logical_bytes=0,
     )
     assert crosses_compaction_resource_headroom(
-        post_base_item_count=0,
-        post_base_canonical_utf8_bytes=14 << 20,
-        continuity_epoch_logical_utf8_bytes=0,
+        selected_item_count=0,
+        selected_canonical_expanded_bytes=14 << 20,
+        continuity_epoch_logical_bytes=0,
     )
 
 
@@ -2013,7 +2182,7 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
             )
         }
     ).decode("utf-8")
-    estimator = PulsaraHeuristicTokenEstimatorV1()
+    estimator = PulsaraHeuristicTokenEstimatorV2()
     tokens = estimator.estimate_text(body)
     selection = FrozenRetainedSkillContextSelection(
         ordered_items=(item,),
@@ -2075,7 +2244,7 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message() -> No
         "entry:read-result",
         4,
         "turn:test",
-        '{"status":"ok","content":"1|body"}',
+        (LLMTextPart('{"status":"ok","content":"1|body"}'),),
         tool_call_id="call:read",
         tool_request_entry_id="entry:read-request",
         tool_result_context=ProviderToolResultContextMetadata(
@@ -2205,7 +2374,7 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message() -> No
         "entry:exact-read-result",
         5,
         "turn:test",
-        exact_body,
+        (LLMTextPart(exact_body),),
         tool_call_id="call:exact-read",
         tool_request_entry_id="entry:exact-read-request",
         tool_result_context=item.tool_result_context,
@@ -2299,7 +2468,7 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
             entry_id,
             sequence,
             "turn:test",
-            "",
+            (LLMTextPart(""),),
             tool_calls=(ProviderToolCall("call:reused", "read_file", arguments),),
         )
 
@@ -2312,7 +2481,7 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
             entry_id,
             sequence,
             "turn:test",
-            body,
+            (LLMTextPart(body),),
             tool_call_id="call:reused",
             tool_request_entry_id=request_entry_id,
             tool_result_context=ProviderToolResultContextMetadata(
@@ -2357,7 +2526,8 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert "canonical_image_refs" in CONVERSATION_KERNEL_RELATIONS
     assert not {
         "durable_jobs",
         "durable_job_attempts",
@@ -2485,7 +2655,50 @@ def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> No
             for keyword in call.keywords
         )
     )
-    assert len(no_hook_prepares) == 2
+    assert len(no_hook_prepares) == 0
+    family_prepares = tuple(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "prepare_compaction_candidate_family"
+    )
+    family_candidates = tuple(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "prepare_compaction_candidate"
+    )
+    family_binds = tuple(
+        call
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "bind_selected_compaction_candidate"
+    )
+    assert len(family_prepares) == len(family_binds) == 2
+    assert len(family_candidates) == 4
+    # PRE_FULL and POST_FULL each measure the base and, when present, its
+    # unpublished active suffix using the same frozen family before one bind.
+    for prepare, bind in zip(
+        sorted(family_prepares, key=lambda call: call.lineno),
+        sorted(family_binds, key=lambda call: call.lineno),
+        strict=True,
+    ):
+        candidates = tuple(
+            candidate
+            for candidate in family_candidates
+            if prepare.lineno < candidate.lineno < bind.lineno
+        )
+        assert len(candidates) == 2
+        family = next(keyword.value for keyword in bind.keywords if keyword.arg == "family")
+        assert isinstance(family, ast.Name)
+        assert all(
+            isinstance(candidate.args[0], ast.Name)
+            and candidate.args[0].id == family.id
+            for candidate in candidates
+        )
     assert "SessionStartCompactPort" in source
     assert "child compaction received a ROOT start port" in source
     for forbidden in (

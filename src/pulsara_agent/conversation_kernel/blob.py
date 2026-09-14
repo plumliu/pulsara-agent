@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 
+from psycopg import Connection
 from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.contracts import (
@@ -56,6 +57,30 @@ class PostgresCanonicalBlobStore:
         codec: str,
         deadline_monotonic: float,
     ) -> BlobContent:
+        with self._provider.connection(
+            lane=PostgresConnectionLane.ARTIFACT,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return self.publish_in_connection(
+                connection,
+                workspace_id=workspace_id,
+                content=content,
+                media_type=media_type,
+                codec=codec,
+            )
+
+    @staticmethod
+    def publish_in_connection(
+        connection: Connection,
+        *,
+        workspace_id: str,
+        content: bytes,
+        media_type: str,
+        codec: str,
+    ) -> BlobContent:
+        """Publish or exact-reuse a blob on the caller-owned transaction."""
+
         if not workspace_id or not media_type or not codec:
             raise ValueError("blob publication identity is incomplete")
         value = bytes(content)
@@ -64,48 +89,43 @@ class PostgresCanonicalBlobStore:
         digest = "sha256:" + sha256(value).hexdigest()
         blob_id = _blob_id(workspace_id, digest)
         storage_identity = f"postgres:pulsara_v3.blobs/{blob_id}"
-        with self._provider.connection(
-            lane=PostgresConnectionLane.ARTIFACT,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-        ) as connection:
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.blobs (
-                    id, workspace_id, storage_identity, logical_digest,
-                    logical_size, media_type, codec, body
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO NOTHING
-                """,
-                (
-                    blob_id,
-                    workspace_id,
-                    storage_identity,
-                    digest,
-                    len(value),
-                    media_type,
-                    codec,
-                    value,
-                ),
-            )
-            row = connection.execute(
-                """
-                SELECT workspace_id, storage_identity, logical_digest,
-                       logical_size, media_type, codec, body
-                FROM pulsara_v3.blobs WHERE id = %s
-                """,
-                (blob_id,),
-            ).fetchone()
-            if row is None or (
-                row["workspace_id"] != workspace_id
-                or row["storage_identity"] != storage_identity
-                or row["logical_digest"] != digest
-                or int(row["logical_size"]) != len(value)
-                or row["media_type"] != media_type
-                or row["codec"] != codec
-                or bytes(row["body"]) != value
-            ):
-                raise ConversationKernelConflict("blob identity conflict")
+        connection.execute(
+            """
+            INSERT INTO pulsara_v3.blobs (
+                id, workspace_id, storage_identity, logical_digest,
+                logical_size, media_type, codec, body
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """,
+            (
+                blob_id,
+                workspace_id,
+                storage_identity,
+                digest,
+                len(value),
+                media_type,
+                codec,
+                value,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT workspace_id, storage_identity, logical_digest,
+                   logical_size, media_type, codec, body
+            FROM pulsara_v3.blobs WHERE id = %s
+            """,
+            (blob_id,),
+        ).fetchone()
+        if row is None or (
+            row["workspace_id"] != workspace_id
+            or row["storage_identity"] != storage_identity
+            or row["logical_digest"] != digest
+            or int(row["logical_size"]) != len(value)
+            or row["media_type"] != media_type
+            or row["codec"] != codec
+            or bytes(row["body"]) != value
+        ):
+            raise ConversationKernelConflict("blob identity conflict")
         return BlobContent(blob_id, digest, len(value), media_type, codec)
 
     def read_exact(
@@ -121,20 +141,72 @@ class PostgresCanonicalBlobStore:
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
-            row = connection.execute(
-                """
-                SELECT logical_digest, logical_size, body
-                FROM pulsara_v3.blobs WHERE id = %s
-                """,
-                (blob_id,),
-            ).fetchone()
+            return self.read_exact_in_connection(
+                connection,
+                blob_id=blob_id,
+                expected_digest=expected_digest,
+                expected_size=expected_size,
+            )
+
+    @staticmethod
+    def read_exact_in_connection(
+        connection: Connection,
+        *,
+        blob_id: str,
+        expected_digest: str,
+        expected_size: int,
+        expected_workspace_id: str | None = None,
+        expected_media_type: str | None = None,
+        expected_codec: str | None = None,
+    ) -> bytes:
+        if not 0 <= expected_size <= MAXIMUM_BLOB_BYTES:
+            raise ValueError("blob exact-read size is out of bounds")
+        row = connection.execute(
+            """
+            SELECT workspace_id, logical_digest, logical_size,
+                   media_type, codec,
+                   CASE WHEN logical_digest = %s
+                              AND logical_size = %s
+                              AND octet_length(body) = %s
+                              AND (%s::text IS NULL OR workspace_id = %s)
+                              AND (%s::text IS NULL OR media_type = %s)
+                              AND (%s::text IS NULL OR codec = %s)
+                        THEN body END AS body
+            FROM pulsara_v3.blobs WHERE id = %s
+            """,
+            (
+                expected_digest,
+                expected_size,
+                expected_size,
+                expected_workspace_id,
+                expected_workspace_id,
+                expected_media_type,
+                expected_media_type,
+                expected_codec,
+                expected_codec,
+                blob_id,
+            ),
+        ).fetchone()
         if row is None:
             raise KeyError(blob_id)
-        content = bytes(row["body"])
         if (
             row["logical_digest"] != expected_digest
             or int(row["logical_size"]) != expected_size
-            or len(content) != expected_size
+            or (
+                expected_workspace_id is not None
+                and str(row["workspace_id"]) != expected_workspace_id
+            )
+            or (
+                expected_media_type is not None
+                and str(row["media_type"]) != expected_media_type
+            )
+            or (expected_codec is not None and str(row["codec"]) != expected_codec)
+            or row["body"] is None
+        ):
+            raise ConversationKernelConflict("blob content integrity mismatch")
+        content = bytes(row["body"])
+        if (
+            len(content) != expected_size
             or "sha256:" + sha256(content).hexdigest() != expected_digest
         ):
             raise ConversationKernelConflict("blob content integrity mismatch")
@@ -217,47 +289,66 @@ class PostgresCanonicalBlobStore:
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
-            rows = connection.execute(
-                """
-                WITH candidates AS (
-                    SELECT b.id
-                    FROM pulsara_v3.blobs AS b
-                    WHERE b.created_at <= clock_timestamp()
-                        - make_interval(secs => %s)
-                      AND NOT EXISTS (
-                          SELECT 1 FROM pulsara_v3.context_snapshots AS s
-                          WHERE s.blob_id = b.id
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM pulsara_v3.transcript_entries AS e
-                          WHERE e.blob_id = b.id
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM pulsara_v3.assistant_message_blocks AS m
-                          WHERE m.blob_id = b.id
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM pulsara_v3.prompt_queue_items AS q
-                          WHERE q.blob_id = b.id
-                      )
-                      AND NOT EXISTS (
-                          SELECT 1 FROM pulsara_v3.tool_results AS r
-                          WHERE r.output_artifact_blob_id = b.id
-                      )
-                      AND pg_catalog.pg_try_advisory_xact_lock(
-                          pg_catalog.hashtextextended(b.id, 0)
-                      )
-                    ORDER BY b.created_at, b.id
-                    LIMIT %s
-                )
-                DELETE FROM pulsara_v3.blobs AS b
-                USING candidates AS c
-                WHERE b.id = c.id
-                RETURNING b.id
-                """,
-                (grace_seconds, maximum_items),
-            ).fetchall()
-        return tuple(str(row["id"]) for row in rows)
+            return _delete_orphans_in_connection(
+                connection,
+                grace_seconds=grace_seconds,
+                maximum_items=maximum_items,
+            )
+
+
+def _delete_orphans_in_connection(
+    connection: Connection,
+    *,
+    grace_seconds: int,
+    maximum_items: int,
+) -> tuple[str, ...]:
+    """Run the GC statement inside its caller's transaction."""
+
+    rows = connection.execute(
+        """
+        WITH candidates AS (
+            SELECT b.id
+            FROM pulsara_v3.blobs AS b
+            WHERE b.created_at <= clock_timestamp()
+                - make_interval(secs => %s)
+              AND NOT EXISTS (
+                  SELECT 1 FROM pulsara_v3.context_snapshots AS s
+                  WHERE s.blob_id = b.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM pulsara_v3.transcript_entries AS e
+                  WHERE e.blob_id = b.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM pulsara_v3.assistant_message_blocks AS m
+                  WHERE m.blob_id = b.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM pulsara_v3.prompt_queue_items AS q
+                  WHERE q.blob_id = b.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM pulsara_v3.canonical_image_refs AS i
+                  WHERE i.blob_id = b.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM pulsara_v3.tool_results AS r
+                  WHERE r.output_artifact_blob_id = b.id
+              )
+              AND pg_catalog.pg_try_advisory_xact_lock(
+                  pg_catalog.hashtextextended(b.id, 0)
+              )
+            ORDER BY b.created_at, b.id
+            LIMIT %s
+        )
+        DELETE FROM pulsara_v3.blobs AS b
+        USING candidates AS c
+        WHERE b.id = c.id
+        RETURNING b.id
+        """,
+        (grace_seconds, maximum_items),
+    ).fetchall()
+    return tuple(str(row["id"]) for row in rows)
 
 
 class CanonicalContentPublisher:
@@ -296,6 +387,63 @@ class CanonicalContentPublisher:
             media_type=media_type,
             codec=codec,
             deadline_monotonic=deadline_monotonic,
+        )
+
+    def materialize_in_connection(
+        self,
+        connection: Connection,
+        *,
+        workspace_id: str,
+        content: bytes,
+        media_type: str,
+        codec: str,
+    ) -> CanonicalContent:
+        """Select inline/blob storage inside the caller-owned transaction."""
+
+        value = bytes(content)
+        described = self.describe(
+            workspace_id=workspace_id,
+            content=value,
+            media_type=media_type,
+            codec=codec,
+        )
+        if isinstance(described, InlineContent):
+            return described
+        published = self._store.publish_in_connection(
+            connection,
+            workspace_id=workspace_id,
+            content=value,
+            media_type=media_type,
+            codec=codec,
+        )
+        if published != described:
+            raise ConversationKernelConflict("published content descriptor drifted")
+        return published
+
+    def describe(
+        self,
+        *,
+        workspace_id: str,
+        content: bytes,
+        media_type: str,
+        codec: str,
+    ) -> CanonicalContent:
+        """Describe the deterministic storage shape without performing I/O."""
+
+        if not workspace_id or not media_type or not codec:
+            raise ValueError("canonical content identity is incomplete")
+        value = bytes(content)
+        if len(value) <= self._inline_threshold_bytes:
+            return InlineContent.from_bytes(value, media_type=media_type, codec=codec)
+        if len(value) > MAXIMUM_BLOB_BYTES:
+            raise ValueError("blob exceeds the Stage 2 physical bound")
+        digest = "sha256:" + sha256(value).hexdigest()
+        return BlobContent(
+            _blob_id(workspace_id, digest),
+            digest,
+            len(value),
+            media_type,
+            codec,
         )
 
     def _workspace_id(self, *, session_id: str, deadline_monotonic: float) -> str:

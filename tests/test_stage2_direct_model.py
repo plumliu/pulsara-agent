@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import replace
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    provider_input_item_canonical_expanded_bytes,
+)
 from pulsara_agent.conversation_kernel.direct_model import (
     DirectKernelModelPort,
     KernelModelExecutionRequest,
     KernelModelPreparationRequest,
     KernelModelTargetPreparationRequest,
+    quote_provider_followup_wire_resources,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
@@ -24,15 +31,20 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
     build_chat_completions_payload,
+    chat_semantic_wire_group,
     project_chat_context_bearing_payload_fields,
 )
 from pulsara_agent.llm.adapters.openai.responses import (
     OpenAIResponsesTransport,
     build_responses_payload,
     project_responses_context_bearing_payload_fields,
+    responses_semantic_wire_group,
 )
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
-from pulsara_agent.llm.input import LLMMessage, LLMToolCall
+from pulsara_agent.llm.input import LLMImagePart, LLMMessage, LLMTextPart, LLMToolCall
+from pulsara_agent.llm.provider_replay import (
+    build_prepared_durable_provider_assistant_replay,
+)
 from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.request import MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
 from pulsara_agent.llm.retry import LLMRetryConfig
@@ -46,8 +58,11 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
 )
 from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
     CanonicalModelInputIdentity,
     CanonicalModelInputSnapshot,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
     ModelInputScopeKind,
     PreparedProviderInputCut,
     StructuredModelInputCompileRequest,
@@ -68,6 +83,7 @@ from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     context_fingerprint,
+    freeze_json,
     thaw_json,
 )
 from tests.support.model_config import test_model_binding, test_model_runtime
@@ -337,11 +353,14 @@ def _prepared_execution(
     maximum_input_tokens: int = 4_096,
     scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
+    canonical_items: tuple[FrozenProviderInputItem, ...] = (),
 ) -> tuple[KernelModelExecutionRequest, StructuredToolPort]:
     session_id = "session:test"
     turn_id = "turn:test"
     revision_id = "binding:test"
-    sequence = 0
+    sequence = max(
+        (item.source_entry_sequence or 0 for item in canonical_items), default=0
+    )
     tool_port = StructuredToolPort(object(), tool_names=("read_file",))
     binding = test_model_binding(port._model_runtime)  # noqa: SLF001
     surface = prepare_test_direct_tool_surface(
@@ -381,14 +400,18 @@ def _prepared_execution(
             scope_subagent_task_id=scope_subagent_task_id,
         ),
     )
+    canonical_expanded_bytes = sum(
+        provider_input_item_canonical_expanded_bytes(item)
+        for item in canonical_items
+    )
     snapshot = CanonicalModelInputSnapshot(
         identity=identity,
-        items=(),
-        canonical_utf8_bytes=0,
+        items=canonical_items,
+        canonical_expanded_bytes=canonical_expanded_bytes,
         snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
             identity=identity,
-            items=(),
-            canonical_utf8_bytes=0,
+            items=canonical_items,
+            canonical_expanded_bytes=canonical_expanded_bytes,
             closures=(),
             late_outcomes=(),
         ),
@@ -644,6 +667,193 @@ def test_final_wire_measurement_is_the_exact_adapter_payload_projection(
     assert payload_projection(payload) == projection
     with pytest.raises(RuntimeError, match="already consumed"):
         measurement.discard_materialization_to_quote()
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
+    ("api", "payload_builder", "payload_projection", "input_key", "image_type"),
+    (
+        (
+            "openai_chat_completions",
+            build_chat_completions_payload,
+            project_chat_context_bearing_payload_fields,
+            "messages",
+            "image_url",
+        ),
+        (
+            "openai_responses",
+            build_responses_payload,
+            project_responses_context_bearing_payload_fields,
+            "input",
+            "input_image",
+        ),
+    ),
+)
+def test_k3_typed_image_compiles_once_into_the_exact_final_payload(
+    api,
+    payload_builder,
+    payload_projection,
+    input_key: str,
+    image_type: str,
+) -> None:
+    output = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(output, "PNG")
+    image = LLMImagePart("image/png", output.getvalue(), 7, 5)
+    item = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.USER,
+        source_entry_id="entry:initial",
+        source_entry_sequence=1,
+        source_turn_id="turn:test",
+        content=(LLMTextPart("before"), image, LLMTextPart("after"), image),
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+    )
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port, canonical_items=(item,))
+    plan = request.wire_input_plan
+    projection = thaw_json(plan.materialization.context_bearing_projection)
+    assert isinstance(projection, dict)
+
+    owner, candidate = _continuity_candidate(request)
+    execution = port.preflight_execution(
+        request,
+        append_candidate=candidate,
+        install_authority=owner.install_authority,
+    )
+    payload = payload_builder(
+        call=request.prepared_call.call,
+        context=execution.final_context,
+    )
+
+    assert payload_projection(payload) == projection
+    wire_items = projection[input_key]
+    assert isinstance(wire_items, list)
+    image_wire_items = [
+        wire_item
+        for wire_item in wire_items
+        if isinstance(wire_item, dict)
+        and isinstance(wire_item.get("content"), list)
+        and any(
+            part.get("type") == image_type
+            for part in wire_item["content"]
+            if isinstance(part, dict)
+        )
+    ]
+    assert len(image_wire_items) == 1
+    content = image_wire_items[0]["content"]
+    assert [part["type"] for part in content] == [
+        "text" if api == "openai_chat_completions" else "input_text",
+        image_type,
+        "text" if api == "openai_chat_completions" else "input_text",
+        image_type,
+    ]
+    expected_url = "data:image/png;base64," + base64.b64encode(
+        image.immutable_bytes
+    ).decode("ascii")
+    if api == "openai_chat_completions":
+        actual_urls = [
+            part["image_url"]["url"]
+            for part in content
+            if part["type"] == image_type
+        ]
+    else:
+        actual_urls = [
+            part["image_url"] for part in content if part["type"] == image_type
+        ]
+    assert actual_urls == [expected_url, expected_url]
+    assert plan.quote.final_wire_visual_image_tokens == 512
+    assert plan.quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
+def test_k3_followup_quote_uses_the_exact_installed_wire_owner(api: str) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    assistant = LLMMessage.assistant_turn(
+        text="answer",
+        tool_calls=(
+            LLMToolCall(id="call:1", name="read_file", arguments='{"path":"x"}'),
+        ),
+    )
+    result = LLMMessage.tool_result("result", tool_call_id="call:1")
+
+    quote = quote_provider_followup_wire_resources(
+        request=request,
+        actual_assistant_message=assistant,
+        provider_replay=None,
+        bounded_suffix_messages=(result,),
+    )
+
+    profile = request.prepared_call.call.target.model_profile.route_wire_profile
+    appended = (
+        (*chat_semantic_wire_group(assistant, route_wire_profile=profile),)
+        if api == "openai_chat_completions"
+        else (*responses_semantic_wire_group(assistant),)
+    )
+    appended += (
+        (*chat_semantic_wire_group(result, route_wire_profile=profile),)
+        if api == "openai_chat_completions"
+        else (*responses_semantic_wire_group(result),)
+    )
+    projection = thaw_json(
+        request.wire_input_plan.materialization.context_bearing_projection
+    )
+    assert isinstance(projection, dict)
+    key = "messages" if api == "openai_chat_completions" else "input"
+    existing = projection[key]
+    assert isinstance(existing, list)
+    projection[key] = [*existing, *appended]
+    assert quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
+    assert quote.final_wire_estimated_input_tokens == (
+        request.wire_input_plan.quote.final_wire_estimated_input_tokens
+        + sum(
+            request.prepared_call.call.target.token_estimator.estimate_wire_json_component(
+                item
+            )
+            for item in appended
+        )
+    )
+    assert quote.appended_wire_item_count == len(appended)
+    request.surface_borrow.close()
+
+
+def test_k3_followup_quote_uses_native_replay_in_place_of_generic_assistant() -> None:
+    port = _port(api="openai_chat_completions")
+    request, _tool_port = _prepared_execution(port)
+    assistant = LLMMessage.assistant_turn(text="public")
+    native_item = freeze_json(
+        {
+            "role": "assistant",
+            "content": "public",
+            "reasoning_content": "opaque",
+        }
+    )
+    assert not isinstance(native_item, tuple)
+    replay = build_prepared_durable_provider_assistant_replay(
+        session_id=request.session_id,
+        workspace_id="workspace:test",
+        assistant_entry_id="entry:assistant",
+        target=port.replay_target_for_resolved_call(request.prepared_call.call),
+        public_projection_fingerprint="sha256:" + "1" * 64,
+        ordered_items=(native_item,),
+    )
+
+    quote = quote_provider_followup_wire_resources(
+        request=request,
+        actual_assistant_message=assistant,
+        provider_replay=replay,
+        bounded_suffix_messages=(),
+    )
+
+    projection = thaw_json(
+        request.wire_input_plan.materialization.context_bearing_projection
+    )
+    assert isinstance(projection, dict)
+    messages = projection["messages"]
+    assert isinstance(messages, list)
+    projection["messages"] = [*messages, thaw_json(native_item)]
+    assert quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
+    assert quote.appended_wire_item_count == 1
     request.surface_borrow.close()
 
 

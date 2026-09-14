@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -7,14 +8,19 @@ from time import monotonic
 from uuid import uuid4
 
 import pytest
+from psycopg.rows import dict_row
+
+from pulsara_agent.llm.input import FrozenPromptContent
 
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.cancellation import stable_subagent_turn_id
-from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CONTEXT_SNAPSHOT_CODEC,
+    CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
@@ -51,6 +57,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    PreparedAutomaticSubagentCompletion,
     SubagentCompletionDisposition,
     build_prepared_tool_result_acceptance,
 )
@@ -71,7 +78,9 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 )
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
+    FrozenProviderInputItemKind,
     ModelInputScopeKind,
+    provider_input_item_text,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.terminal_protocol.canonical_v3 import (
@@ -116,7 +125,7 @@ def _start_turn(repository, lease, text: bytes):
         permission_snapshot_id=_id("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=model_call_binding,
-        content=InlineContent.from_bytes(text),
+        content=FrozenPromptContent.text(text.decode("utf-8")),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -152,7 +161,8 @@ def test_protocol_reader_reauthorizes_only_pending_queue_content_in_session(
         deadline_monotonic=deadline,
     )
     queue_item_id = _id("queue")
-    content = InlineContent.from_bytes("同文队列🙂".encode())
+    content = FrozenPromptContent.text("同文队列🙂")
+    canonical_prompt = freeze_canonical_prompt(content)
     enqueue_test_prompt(
         repository,
         lease.guard,
@@ -175,10 +185,13 @@ def test_protocol_reader_reauthorizes_only_pending_queue_content_in_session(
         queue_item_id=queue_item_id,
         deadline_monotonic=deadline,
     )
-    assert bytes(reference["inline_content"]) == content.canonical_bytes
+    assert bytes(reference["inline_content"]) == canonical_prompt.body
     assert reference["blob_id"] is None
-    assert reference["content_digest"] == content.digest
-    assert reference["content_size"] == content.size
+    assert (
+        reference["content_digest"]
+        == "sha256:" + sha256(canonical_prompt.body).hexdigest()
+    )
+    assert reference["content_size"] == len(canonical_prompt.body)
 
     other = repository.acquire_host_writer(
         session_id=_id("session"),
@@ -205,13 +218,16 @@ def test_protocol_reader_reauthorizes_only_pending_queue_content_in_session(
             deadline_monotonic=deadline,
         )
 
-    assert repository.cancel_prompt(
-        lease.guard,
-        queue_item_id=queue_item_id,
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="user",
-        deadline_monotonic=deadline,
-    ) == "CANCELLED"
+    assert (
+        repository.cancel_prompt(
+            lease.guard,
+            queue_item_id=queue_item_id,
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="user",
+            deadline_monotonic=deadline,
+        )
+        == "CANCELLED"
+    )
     with pytest.raises(CanonicalQueueContentNotPending) as terminal:
         reader.resolve_content_reference(
             session_id=lease.guard.session_id,
@@ -239,14 +255,9 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
     )
     queue_item_id = _id("queue")
     content_bytes = ("大正文🙂\n" * 12_000).encode()
-    content = PostgresCanonicalBlobStore(provider).publish(
-        workspace_id=workspace_id,
-        content=content_bytes,
-        media_type="text/plain",
-        codec="utf-8",
-        deadline_monotonic=deadline,
-    )
-    assert content.size > 64 << 10
+    content = FrozenPromptContent.text(content_bytes.decode("utf-8"))
+    canonical_prompt = freeze_canonical_prompt(content)
+    assert len(canonical_prompt.body) > 64 << 10
     enqueue_test_prompt(
         repository,
         lease.guard,
@@ -271,7 +282,10 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
     )
     assert pending["inline_content"] is None
     assert pending["blob_id"] is not None
-    assert pending["content_digest"] == content.digest
+    assert (
+        pending["content_digest"]
+        == "sha256:" + sha256(canonical_prompt.body).hexdigest()
+    )
 
     candidate = repository.prepare_prompt_head_consumption(
         session_id=lease.guard.session_id,
@@ -302,8 +316,10 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
     )
     assert entry["inline_content"] is None
     assert entry["blob_id"] is not None
-    assert entry["content_digest"] == content.digest
-    assert entry["content_size"] == content.size
+    assert (
+        entry["content_digest"] == "sha256:" + sha256(canonical_prompt.body).hexdigest()
+    )
+    assert entry["content_size"] == len(canonical_prompt.body)
 
 
 class _BrokenBlobReader:
@@ -529,7 +545,7 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
     )
     assert materialized.late_outcomes[0].result_entry_id == result_entry_id
-    assert "late-success" in materialized.items[5].text
+    assert "late-success" in provider_input_item_text(materialized.items[5])
 
 
 def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
@@ -739,6 +755,125 @@ def test_reader_rejects_declared_bytes_before_loading_any_payload(
         )
 
 
+def test_reader_preflights_plan_continuation_before_loading_any_payload(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_round4_plan_postgres import (
+        _commit_plan_batch,
+        _fresh_plan_provider_input_admission,
+    )
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    workspace_id = _id("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=workspace_id,
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    origin_turn_id = _start_turn(repository, lease, b"enter plan")
+    prepared = _commit_plan_batch(
+        repository,
+        lease,
+        workspace_id=workspace_id,
+        turn_id=origin_turn_id,
+        selected_tool_name="enter_plan",
+        selected_arguments={"reason": "preflight plan continuation"},
+        workflow_id=_id("plan-workflow"),
+        expected_workflow_revision=None,
+    )
+    accepted = repository.accept_plan_tool_batch(
+        lease.guard,
+        candidate=prepared.candidate,
+        continuation_provider_input_admission=(
+            _fresh_plan_provider_input_admission(
+                repository, lease, prepared.candidate
+            )
+        ),
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert accepted.continuation_turn_id is not None
+    assert accepted.continuation_entry_id is not None
+    cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=accepted.continuation_turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    probe = CanonicalProviderInputReader(provider)
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        entries = tuple(
+            connection.execute(
+                """SELECT id, entry_kind, content_size
+                   FROM pulsara_v3.transcript_entries
+                   WHERE session_id = %s
+                     AND entry_sequence > 0
+                     AND entry_sequence <= %s
+                     AND conversation_scope_kind = 'ROOT'
+                     AND scope_subagent_task_id IS NULL
+                   ORDER BY entry_sequence""",
+                (lease.guard.session_id, cut.provider_input_through_sequence),
+            ).fetchall()
+        )
+        blocks = probe._load_block_metadata(  # noqa: SLF001
+            connection,
+            lease.guard.session_id,
+            tuple(str(row["id"]) for row in entries),
+        )
+    plan_rows = tuple(
+        row for row in entries if str(row["entry_kind"]) == "PLAN_CONTINUATION"
+    )
+    assert tuple(str(row["id"]) for row in plan_rows) == (
+        accepted.continuation_entry_id,
+    )
+    bytes_without_plan = sum(
+        int(row["content_size"])
+        for row in entries
+        if row["entry_kind"]
+        in (
+            "USER_MESSAGE",
+            "USER_STEER",
+            "TERMINAL_OBSERVATION",
+            "USER_CONTROL_FEEDBACK",
+            "INTER_AGENT_MESSAGE",
+            "TOOL_RESULT",
+        )
+    ) + sum(
+        (
+            max(int(row["content_size"]), int(row["inline_content_size"]))
+            if row["block_kind"] in ("TEXT", "DATA")
+            else int(row["tool_arguments_size"])
+        )
+        for row in blocks
+    )
+    assert bytes_without_plan > 0
+    assert int(plan_rows[0]["content_size"]) > 0
+    reader = CanonicalProviderInputReader(
+        provider,
+        maximum_canonical_bytes=bytes_without_plan,
+    )
+
+    def forbidden_payload_load(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("plan payload loaded before metadata size admission")
+
+    monkeypatch.setattr(reader, "_load_entry_payloads", forbidden_payload_load)
+    with pytest.raises(
+        ConversationKernelConflict, match="physical byte bound exceeded"
+    ):
+        reader.read_frozen_snapshot(
+            cut,
+            deadline_monotonic=monotonic() + 30,
+        )
+
+
 def test_reader_has_an_independent_bounded_assistant_block_query(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -857,8 +992,9 @@ def test_round3_reader_uses_ordered_semantic_blocks_not_parent_manifest(
         if item.item_kind is ProviderInputItemKind.ASSISTANT_TOOL_REQUEST
     )
     assert assistant.item_kind is ProviderInputItemKind.ASSISTANT_TOOL_REQUEST
-    assert assistant.text == ("semantic answer" if include_text else "")
-    assert "MUST_NOT_REACH_PROVIDER" not in assistant.text
+    assistant_text = provider_input_item_text(assistant)
+    assert assistant_text == ("semantic answer" if include_text else "")
+    assert "MUST_NOT_REACH_PROVIDER" not in assistant_text
     assert [call.tool_call_id for call in assistant.tool_calls] == [
         "call:first",
         "call:second",
@@ -947,13 +1083,15 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
             summary=freeze_compaction_summary_output(
                 "summary of old history", maximum_utf8_bytes=100
             ),
-            recent_user_messages=(),
+            recent_human_requests=(),
             continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
             active_request=FrozenCompactionActiveRequest(
                 entry_id=str(active_item.source_entry_id),
                 entry_sequence=active_item.source_entry_sequence,
                 location=CompactionActiveRequestLocation.CANONICAL_SUFFIX,
-                text=None,
+                item_kind=FrozenProviderInputItemKind.USER,
+                input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+                content=None,
             ),
         )
         adoption = build_prepared_compaction_canonical_adoption(
@@ -986,7 +1124,12 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
                     compaction_read.lineage_base,
                     source_range,
                 ),
-                snapshot_content=InlineContent.from_bytes(snapshot_carrier.body),
+                snapshot_content=InlineContent.from_bytes(
+                    snapshot_carrier.body,
+                    media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
+                    codec=CONTEXT_SNAPSHOT_CODEC,
+                ),
+                snapshot_carrier=snapshot_carrier,
                 compiler_contract="compiler.v1",
                 prompt_contract="prompt.v1",
                 model_contract="model.v1",
@@ -1040,8 +1183,8 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
         ProviderInputItemKind.CONTEXT_SNAPSHOT,
         ProviderInputItemKind.USER,
     ]
-    assert materialized.items[0].text == snapshot_carrier.body.decode("utf-8")
-    assert materialized.items[1].text == "current question"
+    assert materialized.items[0].content == snapshot_carrier
+    assert provider_input_item_text(materialized.items[1]) == "current question"
 
 
 def test_memory_governance_historical_cut_uses_producer_authority_without_weakening_foreground(
@@ -1115,7 +1258,9 @@ def test_memory_governance_historical_cut_uses_producer_authority_without_weaken
         producer_cut,
         deadline_monotonic=monotonic() + 30,
     )
-    assert tuple(item.text for item in historical.items) == ("exact producer input",)
+    assert tuple(provider_input_item_text(item) for item in historical.items) == (
+        "exact producer input",
+    )
     assert historical.identity.context_binding_revision_id == (
         cut.context_binding_revision_id
     )
@@ -1269,14 +1414,16 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
         materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
             second_handle.cut, deadline_monotonic=monotonic() + 30
         )
-        envelope = json.loads(materialized.items[-1].text)[
+        envelope = json.loads(provider_input_item_text(materialized.items[-1]))[
             "pulsara_inter_agent_message"
         ]
         assert envelope["message_type"] == "FINAL_ANSWER"
         assert envelope["sender"] == {"kind": "SUBAGENT_TASK", "task_id": task_id}
         assert envelope["content"]["result"]["summary"] == child_result_text
         assert "schema_version" not in envelope["content"]
-        assert "pulsara.subagent-completion.v1" not in materialized.items[-1].text
+        assert "pulsara.subagent-completion.v1" not in provider_input_item_text(
+            materialized.items[-1]
+        )
         assert (
             materialized.items[-1].input_origin
             is CanonicalInputOriginKind.INTER_AGENT_MESSAGE
@@ -1373,23 +1520,34 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
     handle = safe_point.freeze_provider_input(
         turn_id=root_turn, deadline_monotonic=monotonic() + 30
     )
-    automatic = safe_point.accept_queued_subagent_completion(
-        handle,
+    prepared = repository.prepare_automatic_subagent_completion(
+        lease.guard,
+        expected_provider_input_cut=handle.cut,
         task_id=task_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert isinstance(prepared, PreparedAutomaticSubagentCompletion)
+    rotated, automatic_batch = safe_point.accept_queued_subagent_completions(
+        handle,
+        candidates=(prepared,),
         actor_id="runtime:test",
         deadline_monotonic=monotonic() + 30,
     )
+    automatic = automatic_batch[0]
     assert automatic.disposition is SubagentCompletionDisposition.CREATED
-    rotated = safe_point.rotate_provider_input(
-        handle,
-        turn_id=root_turn,
+    duplicate = repository.prepare_automatic_subagent_completion(
+        lease.guard,
+        expected_provider_input_cut=rotated.cut,
+        task_id=task_id,
         deadline_monotonic=monotonic() + 30,
     )
     try:
         snapshot = CanonicalProviderInputReader(provider).read_frozen_snapshot(
             rotated.cut, deadline_monotonic=monotonic() + 30
         )
-        envelope = json.loads(snapshot.items[-1].text)["pulsara_inter_agent_message"]
+        envelope = json.loads(provider_input_item_text(snapshot.items[-1]))[
+            "pulsara_inter_agent_message"
+        ]
         completion = envelope["content"]
         assert envelope["message_type"] == "FINAL_ANSWER"
         assert completion["status"] == "FAILED"
@@ -1404,12 +1562,6 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
                 "replacement task."
             ),
         }
-        duplicate = safe_point.accept_queued_subagent_completion(
-            rotated,
-            task_id=task_id,
-            actor_id="runtime:test",
-            deadline_monotonic=monotonic() + 30,
-        )
         assert duplicate.disposition is SubagentCompletionDisposition.ALREADY_DELIVERED
         assert duplicate.entry == automatic.entry
     finally:
@@ -1469,6 +1621,125 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
             "WHERE session_id=%s AND command_kind='ACCEPT_SUBAGENT_COMPLETION'",
             (lease.guard.session_id,),
         ).fetchone() == (1,)
+
+
+def test_automatic_completion_suffix_publishes_as_one_transaction(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    workspace_id = _id("workspace")
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=workspace_id,
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    root_turn = _start_turn(repository, lease, b"collect a completion batch")
+
+    def terminal_task(label: str) -> str:
+        task_id = accept_active_subagent_fixture(
+            repository,
+            lease,
+            parent_turn_id=root_turn,
+            objective=label,
+        )
+        settlement = build_subagent_task_terminal_settlement(
+            session_id=lease.guard.session_id,
+            workspace_id=workspace_id,
+            writer_generation=lease.guard.writer_generation,
+            task_id=task_id,
+            expected_turn_id=stable_subagent_turn_id(
+                session_id=lease.guard.session_id,
+                task_id=task_id,
+            ),
+            status=SubagentTaskStatus.FAILED,
+            reason="CHILD_EXECUTION_FAILED",
+            public_detail=label,
+            require_absent_turn=True,
+            occurred_at=datetime.now(timezone.utc),
+            actor_id="runtime:test",
+        )
+        assert repository.accept_subagent_task_terminal_settlement(
+            lease.guard,
+            candidate=settlement,
+            deadline_monotonic=monotonic() + 30,
+        )
+        return task_id
+
+    first_task = terminal_task("first failure")
+    second_task = terminal_task("second failure")
+    safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
+    handle = safe_point.freeze_provider_input(
+        turn_id=root_turn, deadline_monotonic=monotonic() + 30
+    )
+    first = repository.prepare_automatic_subagent_completion(
+        lease.guard,
+        expected_provider_input_cut=handle.cut,
+        task_id=first_task,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert isinstance(first, PreparedAutomaticSubagentCompletion)
+    second_cut = replace(
+        handle.cut,
+        provider_input_through_sequence=first.entry_sequence,
+    )
+    second = repository.prepare_automatic_subagent_completion(
+        lease.guard,
+        expected_provider_input_cut=second_cut,
+        task_id=second_task,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert isinstance(second, PreparedAutomaticSubagentCompletion)
+    successor, outcomes = safe_point.accept_queued_subagent_completions(
+        handle,
+        candidates=(first, second),
+        actor_id="runtime:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert tuple(item.disposition for item in outcomes) == (
+        SubagentCompletionDisposition.CREATED,
+        SubagentCompletionDisposition.CREATED,
+    )
+    assert successor.cut.provider_input_through_sequence == second.entry_sequence
+    successor.close()
+
+    rollback_task = terminal_task("must roll back")
+    rollback_handle = safe_point.freeze_provider_input(
+        turn_id=root_turn, deadline_monotonic=monotonic() + 30
+    )
+    rollback_first = repository.prepare_automatic_subagent_completion(
+        lease.guard,
+        expected_provider_input_cut=rollback_handle.cut,
+        task_id=rollback_task,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert isinstance(rollback_first, PreparedAutomaticSubagentCompletion)
+    duplicate = replace(
+        rollback_first,
+        expected_provider_input_cut=replace(
+            rollback_handle.cut,
+            provider_input_through_sequence=rollback_first.entry_sequence,
+        ),
+    )
+    with pytest.raises(ConversationKernelConflict, match="suffix changed"):
+        safe_point.accept_queued_subagent_completions(
+            rollback_handle,
+            candidates=(rollback_first, duplicate),
+            actor_id="runtime:test",
+            deadline_monotonic=monotonic() + 30,
+        )
+    rollback_handle.close()
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id=%s AND source_subagent_task_id=%s",
+            (lease.guard.session_id, rollback_task),
+        ).fetchone() == (0,)
 
 
 def test_inspector_reads_canonical_rows_and_selective_events_from_one_kernel(

@@ -172,6 +172,7 @@ class ModelCatalogEntry:
     reasoning: ReasoningControlContract
     tool_call: bool | None
     wire_shape_hint: Literal["responses", "completions"] | None
+    input_modalities: tuple[str, ...] | None = None
     diagnostics: tuple[ModelCatalogDiagnostic, ...] = ()
 
 
@@ -381,6 +382,9 @@ def _parse_model_entry(
     tool_call = raw_tool_call if isinstance(raw_tool_call, bool) else None
     if raw_tool_call is not None and tool_call is None:
         diagnostic("catalog_tool_call_invalid")
+    input_modalities = _parse_input_modalities(
+        raw_model.get("modalities", _MISSING), diagnostic
+    )
     return ModelCatalogEntry(
         key=ModelCatalogEntryKey(route_id, model_id),
         route_name=route_name,
@@ -392,11 +396,38 @@ def _parse_model_entry(
         reasoning=reasoning,
         tool_call=tool_call,
         wire_shape_hint=wire_shape_hint,
+        input_modalities=input_modalities,
         diagnostics=tuple(diagnostics),
     )
 
 
 _MISSING = object()
+
+
+def _parse_input_modalities(
+    raw_modalities: object,
+    diagnostic: Callable[[str, str], None],
+) -> tuple[str, ...] | None:
+    if raw_modalities is _MISSING:
+        diagnostic("catalog_input_modalities_missing")
+        return None
+    if not isinstance(raw_modalities, Mapping):
+        diagnostic("catalog_input_modalities_invalid", "modalities_not_an_object")
+        return None
+    if "input" not in raw_modalities:
+        diagnostic("catalog_input_modalities_missing")
+        return None
+    raw_input = raw_modalities["input"]
+    if not isinstance(raw_input, list):
+        diagnostic("catalog_input_modalities_invalid", "input_not_an_array")
+        return None
+    if any(
+        not isinstance(value, str) or not value or value != value.strip()
+        for value in raw_input
+    ):
+        diagnostic("catalog_input_modalities_invalid", "input_member_invalid")
+        return None
+    return tuple(raw_input)
 
 
 def _parse_reasoning(

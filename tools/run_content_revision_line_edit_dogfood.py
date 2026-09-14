@@ -8,6 +8,7 @@ model API-key values.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import replace
@@ -216,7 +217,7 @@ async def _run(model_id: str) -> dict[str, object]:
                     (CHAIN_PROMPT, STALE_READ_PROMPT), start=1
                 ):
                     outcome = await session.run_turn(
-                        prompt,
+                        PromptContent.text(prompt),
                         command_id=f"command:content-revision-dogfood:{ordinal}",
                         requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                     )
@@ -227,7 +228,7 @@ async def _run(model_id: str) -> dict[str, object]:
                     (STALE_RECOVERY_PROMPT, CREATE_PROMPT), start=3
                 ):
                     outcome = await session.run_turn(
-                        prompt,
+                        PromptContent.text(prompt),
                         command_id=f"command:content-revision-dogfood:{ordinal}",
                         requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                     )

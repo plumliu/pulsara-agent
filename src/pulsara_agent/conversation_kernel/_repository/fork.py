@@ -13,14 +13,18 @@ from psycopg.types.json import Jsonb
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
-    CONTEXT_SNAPSHOT_CODEC,
-    CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionContinuationMode,
     FrozenCompactionSummary,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     build_compaction_snapshot_carrier,
 )
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    copy_canonical_prompt_refs,
+    insert_canonical_prompt_refs,
+    materialize_compaction_snapshot,
+)
+from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.llm.model_connections import model_call_binding_to_dict
 from pulsara_agent.llm.provider_replay import rebind_durable_provider_assistant_replay
@@ -213,6 +217,14 @@ class _ForkOperations:
                             else replay_map[source_id].replay_id,
                         )
                     _insert(connection, "transcript_entries", values)
+                    copy_canonical_prompt_refs(
+                        connection,
+                        session_id=source_session_id,
+                        target_session_id=child_session_id,
+                        workspace_id=material.workspace_id,
+                        source_transcript_entry_id=source_id,
+                        target_transcript_entry_id=entry_map[source_id],
+                    )
                 for block in material.blocks:
                     values = {
                         key: block[key]
@@ -298,13 +310,20 @@ class _ForkOperations:
                     )
                     carrier = build_compaction_snapshot_carrier(
                         summary=summary,
-                        recent_user_messages=old.recent_user_messages,
+                        recent_human_requests=old.recent_human_requests,
                         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
                         active_request=None,
                         retained_historical_requests=material.retained_historical_requests,
                     )
                     snapshot_id = _id("context-snapshot")
                     source = material.snapshot
+                    publication = materialize_compaction_snapshot(
+                        connection,
+                        publisher=self._canonical_content_publisher,
+                        workspace_id=material.workspace_id,
+                        carrier=carrier,
+                    )
+                    body = publication.body
                     _insert(
                         connection,
                         "context_snapshots",
@@ -327,12 +346,24 @@ class _ForkOperations:
                             "compiler_contract": COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
                             "prompt_contract": source["prompt_contract"],
                             "model_contract": source["model_contract"],
-                            "inline_content": carrier.body,
-                            "content_digest": carrier.content_digest,
-                            "content_size": len(carrier.body),
-                            "content_media_type": CONTEXT_SNAPSHOT_MEDIA_TYPE,
-                            "content_codec": CONTEXT_SNAPSHOT_CODEC,
+                            "inline_content": (
+                                body.canonical_bytes
+                                if isinstance(body, InlineContent)
+                                else None
+                            ),
+                            "blob_id": getattr(body, "blob_id", None),
+                            "content_digest": body.digest,
+                            "content_size": body.size,
+                            "content_media_type": body.media_type,
+                            "content_codec": body.codec,
                         },
+                    )
+                    insert_canonical_prompt_refs(
+                        connection,
+                        session_id=child_session_id,
+                        workspace_id=material.workspace_id,
+                        image_blob_ids=publication.image_blob_ids,
+                        context_snapshot_id=snapshot_id,
                     )
                 child_anchor_id = entry_map[anchor_entry_id]
                 _insert(

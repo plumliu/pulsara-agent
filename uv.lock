@@ -1156,6 +1156,7 @@ dependencies = [
     { name = "mcp", extra = ["cli"] },
     { name = "mcp-types" },
     { name = "openai" },
+    { name = "pillow" },
     { name = "prompt-toolkit" },
     { name = "protobuf" },
     { name = "psycopg", extra = ["binary"] },
@@ -1165,7 +1166,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "pillow" },
     { name = "pytest" },
     { name = "pytest-xdist" },
     { name = "ruff" },
@@ -1181,6 +1181,7 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = "==2.1.0" },
     { name = "mcp-types", specifier = "==2.1.0" },
     { name = "openai", specifier = ">=2.43.0" },
+    { name = "pillow", specifier = ">=12.3.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "protobuf", specifier = ">=6.31.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
@@ -1190,7 +1191,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pillow", specifier = ">=12.3.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff", specifier = ">=0.15.16" },

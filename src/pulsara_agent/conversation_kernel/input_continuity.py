@@ -22,7 +22,7 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputAdmissionPredecessorKind,
     ProviderInputContinuityScope,
     ProviderInputDispatchAnchor,
-    provider_input_logical_utf8_bytes,
+    provider_input_logical_bytes,
     provider_input_prefix_fingerprint,
 )
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
@@ -194,6 +194,37 @@ class HostProviderInputContinuityOwner:
         canonical_frontier: ProcessLocalCanonicalFrontier,
         dispatch_anchor: ProviderInputDispatchAnchor,
     ) -> FrozenProviderInputAppendPlanningInput:
+        return self._freeze_planning_input(
+            scope=scope,
+            canonical_frontier=canonical_frontier,
+            dispatch_anchor=dispatch_anchor,
+            detached_destination_projection=False,
+        )
+
+    def freeze_destination_projection_planning_input(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        canonical_frontier: ProcessLocalCanonicalFrontier,
+        dispatch_anchor: ProviderInputDispatchAnchor,
+    ) -> FrozenProviderInputAppendPlanningInput:
+        """Freeze a non-installable Tier-3 projection outside A's prefix."""
+
+        return self._freeze_planning_input(
+            scope=scope,
+            canonical_frontier=canonical_frontier,
+            dispatch_anchor=dispatch_anchor,
+            detached_destination_projection=True,
+        )
+
+    def _freeze_planning_input(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        canonical_frontier: ProcessLocalCanonicalFrontier,
+        dispatch_anchor: ProviderInputDispatchAnchor,
+        detached_destination_projection: bool,
+    ) -> FrozenProviderInputAppendPlanningInput:
         self._require_scope(scope)
         with self._lock:
             if self._closed:
@@ -212,37 +243,44 @@ class HostProviderInputContinuityOwner:
                 )
             if slot.state is _SlotState.CLOSED:
                 raise ProviderInputContinuityConflict("provider-input scope is closed")
-            predecessor_view = slot.installed
-            if predecessor_view is None:
-                predecessor = ProviderInputAdmissionPredecessorKind.EMPTY
-                delta = canonical_frontier.ordered_item_fingerprints
-            else:
-                predecessor = ProviderInputAdmissionPredecessorKind.INSTALLED
-                old = predecessor_view.canonical_frontier
-                if (
-                    old.context_base_semantic_identity
-                    == canonical_frontier.context_base_semantic_identity
-                    and canonical_frontier.ordered_item_fingerprints[
-                        : len(old.ordered_item_fingerprints)
-                    ]
-                    == old.ordered_item_fingerprints
-                ):
-                    delta = canonical_frontier.ordered_item_fingerprints[
-                        len(old.ordered_item_fingerprints) :
-                    ]
-                else:
-                    # A legal context-base reset must be evaluated by the pure
-                    # compiler using the frozen compatibility fact.  Planning
-                    # records the complete rematerialization input; it never
-                    # silently repairs a same-base prefix rewrite.
-                    delta = canonical_frontier.ordered_item_fingerprints
-            return FrozenProviderInputAppendPlanningInput(
-                planning_nonce=f"provider-input-planning:{uuid4().hex}",
+            predecessor_view = (
+                None if detached_destination_projection else slot.installed
+            )
+            return _planning_input_from_predecessor(
                 scope=scope,
-                predecessor=predecessor,
                 predecessor_view=predecessor_view,
+                canonical_frontier=canonical_frontier,
                 dispatch_anchor=dispatch_anchor,
-                canonical_delta_fingerprints=delta,
+            )
+
+    def freeze_planning_sibling(
+        self,
+        *,
+        basis: FrozenProviderInputAppendPlanningInput,
+        canonical_frontier: ProcessLocalCanonicalFrontier,
+        dispatch_anchor: ProviderInputDispatchAnchor,
+    ) -> FrozenProviderInputAppendPlanningInput:
+        """Build a variant against the exact predecessor frozen by ``basis``."""
+
+        self._require_scope(basis.scope)
+        with self._lock:
+            if self._closed:
+                raise ProviderInputContinuityConflict("continuity owner is closed")
+            slot = self._slots.get(basis.scope)
+            if (
+                slot is None
+                or slot.state in {_SlotState.CLOSED, _SlotState.PREPARED}
+                or slot.replay_reservation is not None
+                or slot.installed is not basis.predecessor_view
+            ):
+                raise ProviderInputContinuityConflict(
+                    "provider-input planning predecessor changed during variants"
+                )
+            return _planning_input_from_predecessor(
+                scope=basis.scope,
+                predecessor_view=basis.predecessor_view,
+                canonical_frontier=canonical_frontier,
+                dispatch_anchor=dispatch_anchor,
             )
 
     def register(self, candidate: PreparedProviderInputAppendCandidate) -> None:
@@ -280,7 +318,7 @@ class HostProviderInputContinuityOwner:
                 raise ProviderInputContinuityConflict(
                     "provider wire plan does not exact-join compiled input"
                 )
-            candidate_bytes = provider_input_logical_utf8_bytes(
+            candidate_bytes = provider_input_logical_bytes(
                 system_prompt=candidate.resulting_compiled_input.system_prompt,
                 tools=candidate.resulting_compiled_input.tools,
                 messages=candidate.resulting_compiled_input.messages,
@@ -311,7 +349,7 @@ class HostProviderInputContinuityOwner:
                 )
             prepared_bytes = sum(
                 max(
-                    provider_input_logical_utf8_bytes(
+                    provider_input_logical_bytes(
                         system_prompt=current.prepared.resulting_compiled_input.system_prompt,
                         tools=current.prepared.resulting_compiled_input.tools,
                         messages=current.prepared.resulting_compiled_input.messages,
@@ -440,7 +478,7 @@ class HostProviderInputContinuityOwner:
                 canonical_frontier=candidate.resulting_canonical_frontier,
                 source_heads=candidate.resulting_source_heads,
                 final_estimate=compiled.final_estimate,
-                logical_utf8_bytes=provider_input_logical_utf8_bytes(
+                logical_bytes=provider_input_logical_bytes(
                     system_prompt=compiled.system_prompt,
                     tools=compiled.tools,
                     messages=compiled.messages,
@@ -540,7 +578,7 @@ class HostProviderInputContinuityOwner:
                     )
                 prepared_bytes = sum(
                     max(
-                        provider_input_logical_utf8_bytes(
+                        provider_input_logical_bytes(
                             system_prompt=(
                                 current.prepared.resulting_compiled_input.system_prompt
                             ),
@@ -772,9 +810,48 @@ def _view_resident_bytes(
         if item.fragment_fingerprint not in materialized_fragments
     )
     return max(
-        view.logical_utf8_bytes,
+        view.logical_bytes,
         view.wire_input_plan.quote.final_wire_utf8_bytes,
     ) + unmaterialized
+
+
+def _planning_input_from_predecessor(
+    *,
+    scope: ProviderInputContinuityScope,
+    predecessor_view: FrozenProviderInputEpochView | None,
+    canonical_frontier: ProcessLocalCanonicalFrontier,
+    dispatch_anchor: ProviderInputDispatchAnchor,
+) -> FrozenProviderInputAppendPlanningInput:
+    if predecessor_view is None:
+        predecessor = ProviderInputAdmissionPredecessorKind.EMPTY
+        delta = canonical_frontier.ordered_item_fingerprints
+    else:
+        predecessor = ProviderInputAdmissionPredecessorKind.INSTALLED
+        old = predecessor_view.canonical_frontier
+        if (
+            old.context_base_semantic_identity
+            == canonical_frontier.context_base_semantic_identity
+            and canonical_frontier.ordered_item_fingerprints[
+                : len(old.ordered_item_fingerprints)
+            ]
+            == old.ordered_item_fingerprints
+        ):
+            delta = canonical_frontier.ordered_item_fingerprints[
+                len(old.ordered_item_fingerprints) :
+            ]
+        else:
+            # A legal context-base reset must be evaluated by the pure
+            # compiler using the frozen compatibility fact. Planning records
+            # the full rematerialization input and never repairs a rewrite.
+            delta = canonical_frontier.ordered_item_fingerprints
+    return FrozenProviderInputAppendPlanningInput(
+        planning_nonce=f"provider-input-planning:{uuid4().hex}",
+        scope=scope,
+        predecessor=predecessor,
+        predecessor_view=predecessor_view,
+        dispatch_anchor=dispatch_anchor,
+        canonical_delta_fingerprints=delta,
+    )
 
 
 def _slot_installed_and_reserved_bytes(slot: _Slot) -> int:

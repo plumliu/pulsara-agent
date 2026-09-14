@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 import json
@@ -35,7 +36,15 @@ from pulsara_agent.llm.adapters.openai.retrying import (
     sdk_max_retries_for_transport,
 )
 from pulsara_agent.llm.errors import LLMTransportContractError
-from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
+from pulsara_agent.llm.input import (
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+    LLMToolCall,
+    MessageRole,
+    ToolSpec,
+    join_text_content,
+)
 from pulsara_agent.llm.provider import (
     CHAT_CLOSED_REASONING_FIELD_CONTRACTS,
     ProviderChatFieldAccumulationMode,
@@ -1340,12 +1349,12 @@ def _message_to_chat_message(
         return {
             "role": "tool",
             "tool_call_id": message.tool_call_id,
-            "content": "\n".join(message.content),
+            "content": join_text_content(message.content),
         }
     if message.role is MessageRole.ASSISTANT:
         payload: dict[str, Any] = {
             "role": "assistant",
-            "content": "\n".join(message.content),
+            "content": join_text_content(message.content),
         }
         if _should_replay_thinking(message, route_wire_profile=route_wire_profile):
             message_field = route_wire_profile.thinking.message_field
@@ -1358,8 +1367,34 @@ def _message_to_chat_message(
         return payload
     return {
         "role": _chat_role(message.role),
-        "content": "\n".join(message.content),
+        "content": _chat_message_content(message),
     }
+
+
+def _chat_message_content(message: LLMMessage) -> str | list[dict[str, object]]:
+    images = any(isinstance(part, LLMImagePart) for part in message.content)
+    if not images:
+        return join_text_content(message.content)
+    if message.role is not MessageRole.USER:
+        raise ValueError("Chat image content requires a USER message")
+    content: list[dict[str, object]] = []
+    for part in message.content:
+        if isinstance(part, LLMTextPart):
+            content.append({"type": "text", "text": part.text})
+        elif isinstance(part, LLMImagePart):
+            encoded = base64.b64encode(part.immutable_bytes).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{part.media_type};base64,{encoded}",
+                        "detail": "auto",
+                    },
+                }
+            )
+        else:  # pragma: no cover - LLMMessage closes this union.
+            raise TypeError("Chat message contains an invalid content part")
+    return content
 
 
 def _chat_role(role: MessageRole) -> str:

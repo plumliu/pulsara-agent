@@ -68,6 +68,9 @@ class PreparedAssistantMessageSettlement:
     provider_replay: PreparedDurableProviderAssistantReplay | None = field(
         default=None, repr=False
     )
+    provider_replay_reservation: (
+        ProcessLocalAssistantReplayFragmentReservation | None
+    ) = field(default=None, repr=False, compare=False)
     subagent_result: FrozenSubagentResultPublicFact | None = field(
         default=None, repr=False
     )
@@ -97,6 +100,20 @@ class PreparedAssistantMessageSettlement:
             )
         ):
             raise ValueError("assistant replay composite is invalid")
+        if (self.provider_replay is not None) != (
+            self.provider_replay_reservation is not None
+        ):
+            raise ValueError("assistant replay reservation union is invalid")
+        if self.provider_replay_reservation is not None:
+            reservation = self.provider_replay_reservation
+            assert self.provider_replay is not None
+            if (
+                reservation.scope != self.continuity_scope
+                or reservation.epoch_nonce != self.continuity_epoch_nonce
+                or reservation.epoch_revision != self.continuity_epoch_revision
+                or reservation.fragment != self.provider_replay.fragment()
+            ):
+                raise ValueError("assistant replay reservation does not exact-join")
         if self.subagent_result is not None and (
             not self.complete_turn
             or self.continuity_scope.scope_kind.value != "SUBAGENT_TASK"
@@ -133,15 +150,40 @@ class AssistantMessageSettlementOwner:
         self._attempts: dict[str, _Attempt] = {}
         self._closed = False
 
+    def prepare_replay_reservation(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        epoch_nonce: str,
+        epoch_revision: int,
+        provider_replay: PreparedDurableProviderAssistantReplay,
+    ) -> ProcessLocalAssistantReplayFragmentReservation:
+        """Check replay capacity before Hook/effects; the caller owns it until settle."""
+
+        return self._continuity.reserve_assistant_replay_fragment(
+            scope=scope,
+            epoch_nonce=epoch_nonce,
+            epoch_revision=epoch_revision,
+            fragment=provider_replay.fragment(),
+        )
+
     async def settle(
         self, candidate: PreparedAssistantMessageSettlement
     ) -> AcceptedEntry:
         async with self._lock:
             if self._closed:
+                if candidate.provider_replay_reservation is not None:
+                    self._continuity.release_assistant_replay_fragment_reservation(
+                        candidate.provider_replay_reservation
+                    )
                 raise RuntimeError("assistant settlement owner is closed")
             current = self._attempts.get(candidate.entry_id)
             if current is not None:
                 if current.candidate is not candidate:
+                    if candidate.provider_replay_reservation is not None:
+                        self._continuity.release_assistant_replay_fragment_reservation(
+                            candidate.provider_replay_reservation
+                        )
                     raise ConversationKernelConflict(
                         "assistant settlement candidate identity conflicts"
                     )
@@ -222,17 +264,10 @@ class AssistantMessageSettlementOwner:
     async def _settle_worker(
         self, candidate: PreparedAssistantMessageSettlement
     ) -> AcceptedEntry:
-        reservation: ProcessLocalAssistantReplayFragmentReservation | None = None
-        if candidate.provider_replay is not None:
-            # This is the last fallible capacity gate.  It runs before any
-            # canonical assistant mutation and remains charged across
-            # ACK-unknown confirmation/reissue of the same stable candidate.
-            reservation = self._continuity.reserve_assistant_replay_fragment(
-                scope=candidate.continuity_scope,
-                epoch_nonce=candidate.continuity_epoch_nonce,
-                epoch_revision=candidate.continuity_epoch_revision,
-                fragment=candidate.provider_replay.fragment(),
-            )
+        # K3 admits native replay before any canonical publication, Hook or
+        # effect.  This owner receives that exact reservation and only promotes
+        # it after the canonical assistant winner is FULL.
+        reservation = candidate.provider_replay_reservation
         try:
             for attempt in range(
                 MAXIMUM_ASSISTANT_SETTLEMENT_WRITE_CONFIRM_ATTEMPTS

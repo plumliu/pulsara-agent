@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import FrozenPromptContent
+
 from datetime import datetime, timezone
 from time import monotonic
 from uuid import uuid4
@@ -54,7 +56,7 @@ def _open_turn(repository: ConversationKernelRepository, lease):
         permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"prompt"),
+        content=FrozenPromptContent.text('prompt'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )

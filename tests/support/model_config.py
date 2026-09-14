@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from time import monotonic
+from types import SimpleNamespace
+from typing import cast
 
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 
@@ -35,10 +37,16 @@ from pulsara_agent.llm.route_wires import production_route_wire_registry
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.primitives.model_call import ModelContextLimits
 from pulsara_agent.conversation_kernel.contracts import PromptDeliveryMode
+from pulsara_agent.conversation_kernel.prompt_content import (
+    FrozenCanonicalPrompt,
+    freeze_canonical_prompt,
+)
 from pulsara_agent.conversation_kernel.repository import (
     build_prepared_root_turn_intent,
 )
-from pulsara_agent.conversation_kernel.steer import PreparedPromptIngressCommand
+from pulsara_agent.conversation_kernel.steer import build_prompt_ingress_command
+from pulsara_agent.conversation_kernel.steer import PreparedRootProviderInputAdmission
+from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.settings import LocalModelApiKey, LocalPostgresConfig, LocalSettings
 
 
@@ -103,6 +111,7 @@ def test_model_runtime(
     connection_id: ModelConnectionId | None = None,
     tool_call: bool | None = True,
     reasoning: ReasoningControlContract | None = None,
+    input_modalities: tuple[str, ...] | None = None,
 ) -> TestModelRuntime:
     """Build one exact catalog-backed connection with one typed credential."""
 
@@ -129,6 +138,7 @@ def test_model_runtime(
             if parsed_wire_api is WireApi.OPENAI_CHAT_COMPLETIONS
             else "responses"
         ),
+        input_modalities=input_modalities,
     )
     snapshot = ModelCatalogSnapshot(
         entries={key: entry},
@@ -196,6 +206,14 @@ def test_model_resolution_snapshot():
     return test_model_runtime().freeze_resolution_snapshot()
 
 
+def frozen_test_prompt(text: str) -> FrozenCanonicalPrompt:
+    """Build the exact internal Runner input used by text-only tests."""
+
+    if not isinstance(text, str):
+        raise TypeError("test prompt text must be a string")
+    return freeze_canonical_prompt(FrozenPromptContent.text(text))
+
+
 def enqueue_test_prompt(
     repository,
     guard,
@@ -216,6 +234,10 @@ def enqueue_test_prompt(
 ):
     """Exercise the hard-cut typed prompt-ingress admission in tests."""
 
+    if not isinstance(content, FrozenPromptContent):
+        raise TypeError("test prompt ingress requires FrozenPromptContent")
+    canonical_prompt = freeze_canonical_prompt(content)
+
     if delivery_mode is PromptDeliveryMode.NEW_TURN and model_call_binding is not None:
         repository.update_session_model_call_binding(
             guard,
@@ -232,7 +254,7 @@ def enqueue_test_prompt(
             requested_mode=requested_permission_mode,
             deadline_monotonic=deadline_monotonic,
         )
-    candidate = PreparedPromptIngressCommand(
+    candidate = build_prompt_ingress_command(
         session_id=guard.session_id,
         command_id=command_id,
         queue_item_id=queue_item_id,
@@ -241,8 +263,7 @@ def enqueue_test_prompt(
         target_turn_id=target_turn_id,
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=requested_permission_mode,
-        content_digest=content.digest,
-        content_size=content.size,
+        canonical_prompt=canonical_prompt,
     )
     accepted = repository.enqueue_prompt(
         guard,
@@ -252,7 +273,6 @@ def enqueue_test_prompt(
             if delivery_mode is PromptDeliveryMode.NEW_TURN
             else None
         ),
-        content=content,
         occurred_at=occurred_at,
         actor_id=actor_id,
         deadline_monotonic=deadline_monotonic,
@@ -280,6 +300,10 @@ def start_test_root_turn(
 ):
     """Admit a direct ROOT turn through the canonical binding-under-lock path."""
 
+    if not isinstance(content, FrozenPromptContent):
+        raise TypeError("test ROOT ingress requires FrozenPromptContent")
+    canonical_prompt = freeze_canonical_prompt(content)
+
     repository.update_session_model_call_binding(
         guard,
         binding=model_call_binding,
@@ -293,15 +317,30 @@ def start_test_root_turn(
         context_binding_revision_id=context_binding_revision_id,
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=requested_permission_mode,
-        content=content,
+        canonical_prompt=canonical_prompt,
         occurred_at=occurred_at,
         actor_kind=actor_kind,
         actor_id=actor_id,
     )
+    resolution_snapshot = test_model_resolution_snapshot()
+    candidate = repository.prepare_root_provider_input_candidate(
+        guard,
+        intent=intent,
+        model_resolution_snapshot=resolution_snapshot,
+        deadline_monotonic=deadline_monotonic,
+    )
+    # This helper seeds repository fixtures whose subject is downstream durable
+    # behavior.  Production ROOT admission is exercised through Runner/Host tests;
+    # here the exact candidate still crosses the hard-cut writer precondition.
+    admission = cast(
+        PreparedRootProviderInputAdmission,
+        SimpleNamespace(candidate=candidate),
+    )
     return repository.accept_root_turn_intent(
         guard,
         intent=intent,
-        model_resolution_snapshot=test_model_resolution_snapshot(),
+        provider_input_admission=admission,
+        model_resolution_snapshot=resolution_snapshot,
         deadline_monotonic=deadline_monotonic,
     ).accepted
 

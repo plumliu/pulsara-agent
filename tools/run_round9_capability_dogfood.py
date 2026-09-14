@@ -9,6 +9,7 @@ response text.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import replace
@@ -477,7 +478,7 @@ async def _run_scenario(
         )
         advance("DIRECT_TURN")
         first = await session.run_turn(
-            first_prompt, command_id=f"command:round9:{scenario}:first"
+            PromptContent.text(first_prompt), command_id=f"command:round9:{scenario}:first"
         )
         first_epoch = _epoch_summary(session)
 
@@ -505,7 +506,7 @@ async def _run_scenario(
 
         advance("META_TURN")
         second = await session.run_turn(
-            second_prompt, command_id=f"command:round9:{scenario}:second"
+            PromptContent.text(second_prompt), command_id=f"command:round9:{scenario}:second"
         )
         second_epoch = _epoch_summary(session)
         settlements = _tool_settlement_summary(
@@ -572,7 +573,7 @@ async def _run_scenario(
         )
         advance("FRESH_HOST_CONTINUATION")
         continued = await resumed.run_turn(
-            "Continue this conversation with one short acknowledgement and no tool.",
+            PromptContent.text("Continue this conversation with one short acknowledgement and no tool."),
             command_id=f"command:round9:{scenario}:resume",
         )
         resumed_epoch = _epoch_summary(resumed)

@@ -1,6 +1,15 @@
 # Pulsara 模型切换 Handover Compaction 与 Destination-side Projection Compaction Hard-cut 实施规范
 
-> 状态：实施前规范，2026-09-05
+> 状态：生产 hard cut 已实施；K4 完整验收尚未完成，2026-09-14
+>
+> 图片输入修订（2026-09-14）：
+> `PULSARA_KERNEL_IMAGE_INPUT_AND_OPENAI_WIRE_ADAPTER_DESIGN.zh.md` 第 8.1–8.9 节
+> 已修订本文的 typed content、recent window 与 destination projection 规则。已知含 `text`
+> 且不含 `image` 的 B 才执行 P；Tier 2 只在原规则选出的 recent 含真实 Image 时将整个
+> recent 置空，Tier 3 的纯文本图片交接固定 recent=0；视觉或 unknown B 不执行 P，也不因
+> Image 清空 recent。生产实现已沿原三档、safe boundary、一次采用与 PRE_FULL/POST_FULL
+> 事务边界完成该 hard cut，不保留本文旧 text-only carrier 或双读路径。真实 provider、
+> isolated wheel 与完整矩阵仍属于 K4，不能据此标记图片输入已激活。
 >
 > Conversation Fork 表示补充（2026-09-08）：destination projection 的 prior handoff 包含整个
 > ordered typed `retained_historical_requests`。Tier-3 若省略 predecessor snapshot base，

@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
-from pulsara_agent.conversation_kernel.contracts import InlineContent, WriterLease
+from pulsara_agent.conversation_kernel.contracts import WriterLease
+from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
@@ -21,7 +21,7 @@ from pulsara_agent.conversation_kernel.repository import (
     StaleHostWriter,
 )
 from pulsara_agent.conversation_kernel.steer import (
-    MAXIMUM_STEER_CANDIDATE_UTF8_BYTES,
+    MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES,
     AcceptedSteerDispatchEntry,
     PendingPromptSteerFact,
     PreparedSteerPlanConflictInterruption,
@@ -33,12 +33,6 @@ from pulsara_agent.conversation_kernel.steer import (
     build_steer_plan_conflict_interruption,
     prepared_steer_suffix_plan_identity_fingerprint,
 )
-from pulsara_agent.model_input.contracts import (
-    ModelInputCompileFailureKind,
-    StructuredModelInputCompileError,
-)
-
-
 class PreparedSteerPlanStale(ConversationKernelConflict):
     """The quoted FIFO prefix stopped matching before its first mutation."""
 
@@ -51,13 +45,11 @@ class SteerConsumptionCoordinator:
         *,
         repository: ConversationKernelRepository,
         writer_lease: WriterLease,
-        blob_store: PostgresCanonicalBlobStore,
         io_owner: KernelSessionIO,
         deadline_factory: KernelExecutionDeadlineFactory,
     ) -> None:
         self._repository = repository
         self._writer_lease = writer_lease
-        self._blob_store = blob_store
         self._io = io_owner
         self._deadlines = deadline_factory
 
@@ -69,30 +61,29 @@ class SteerConsumptionCoordinator:
         facts: tuple[PendingPromptSteerFact, ...],
         *,
         deadline: float,
-    ) -> tuple[tuple[PendingPromptSteerFact, bytes], ...]:
-        result: list[tuple[PendingPromptSteerFact, bytes]] = []
+    ) -> tuple[tuple[PendingPromptSteerFact, FrozenCanonicalPrompt], ...]:
+        result: list[tuple[PendingPromptSteerFact, FrozenCanonicalPrompt]] = []
         used = 0
         for fact in facts:
-            if used + fact.content.size > MAXIMUM_STEER_CANDIDATE_UTF8_BYTES:
+            if (
+                used + fact.canonical_expanded_bytes
+                > MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES
+            ):
                 break
-            if isinstance(fact.content, InlineContent):
-                body = fact.content.canonical_bytes
-            else:
-                body = await self._io.run(
-                    self._blob_store.read_exact,
-                    blob_id=fact.content.blob_id,
-                    expected_digest=fact.content.digest,
-                    expected_size=fact.content.size,
-                    deadline_monotonic=deadline,
+            prompt = await self._io.run(
+                self._repository.hydrate_pending_prompt_steer,
+                fact=fact,
+                deadline_monotonic=deadline,
+            )
+            if (
+                prompt.resource_quote.canonical_expanded_bytes
+                > fact.canonical_expanded_bytes
+            ):
+                raise ConversationKernelConflict(
+                    "pending steer expanded metadata underquoted hydration"
                 )
-            try:
-                body.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                ) from exc
-            used += len(body)
-            result.append((fact, body))
+            used += prompt.resource_quote.canonical_expanded_bytes
+            result.append((fact, prompt))
         return tuple(result)
 
     async def consume_plan(

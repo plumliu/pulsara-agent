@@ -6,6 +6,7 @@ API key values are scrubbed. Never mutates the user's configured database.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import replace
@@ -111,12 +112,12 @@ async def run(model_id, report):
                     )
                 )
                 first = await parent.run_turn(
-                    prompt, command_id=f"command:{uuid4().hex}"
+                    PromptContent.text(prompt), command_id=f"command:{uuid4().hex}"
                 )
                 report["source_replies"].append(first.final_text)
                 anchor_a = await asyncio.to_thread(_anchor, parent)
                 later = await parent.run_turn(
-                    "A later branch note is FUTURE_B_913. Acknowledge in one short sentence.",
+                    PromptContent.text("A later branch note is FUTURE_B_913. Acknowledge in one short sentence."),
                     command_id=f"command:{uuid4().hex}",
                 )
                 report["source_replies"].append(later.final_text)
@@ -172,7 +173,7 @@ async def run(model_id, report):
                         else "What project token is present in the inherited conversation? Answer with the exact token only; do not use tools."
                     )
                     outcome = await child.run_turn(
-                        question, command_id=f"command:{uuid4().hex}"
+                        PromptContent.text(question), command_id=f"command:{uuid4().hex}"
                     )
                     actual = json.dumps(
                         [item["wire_input"] for item in records[begin:]],
@@ -228,13 +229,13 @@ async def run(model_id, report):
                 }
                 assert compacted.disposition.value == "COMPACTED", compacted
                 current = await parent.run_turn(
-                    "Now acknowledge COMPACTED_ANCHOR_714; retain the original project token.",
+                    PromptContent.text("Now acknowledge COMPACTED_ANCHOR_714; retain the original project token."),
                     command_id=f"command:{uuid4().hex}",
                 )
                 report["source_replies"].append(current.final_text)
                 anchor_c = await asyncio.to_thread(_anchor, parent)
                 newest = await parent.run_turn(
-                    "Future-only note FUTURE_D_615. Acknowledge briefly.",
+                    PromptContent.text("Future-only note FUTURE_D_615. Acknowledge briefly."),
                     command_id=f"command:{uuid4().hex}",
                 )
                 report["source_replies"].append(newest.final_text)

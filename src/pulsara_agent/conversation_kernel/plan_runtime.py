@@ -24,6 +24,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.llm.input import LLMTextPart
 
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedPlanToolBatch,
@@ -414,7 +415,7 @@ class PlanToolBatchCoordinator:
             source_entry_id=settlement.result_entry_id,
             source_entry_sequence=settlement.accepted_entry_sequence,
             source_turn_id=settlement.turn_id,
-            text=settlement.public_projection.canonical_body,
+            content=(LLMTextPart(settlement.public_projection.canonical_body),),
             tool_call_id=settlement.tool_call_id,
             tool_request_entry_id=settlement.assistant_entry_id,
             tool_result_context=settlement.public_projection.metadata,

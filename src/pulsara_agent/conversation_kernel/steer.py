@@ -19,6 +19,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     CommittedEventSubject,
     PromptDeliveryMode,
 )
+from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
     SubjectSlot,
@@ -34,19 +35,32 @@ from pulsara_agent.model_input.continuity import (
     SourceObservationPresence,
 )
 from pulsara_agent.model_input.contracts import (
+    ApprovedPlanMaterializationFact,
+    CanonicalInputOriginKind,
+    ContextBindingBaseKind,
     ContextSourceKind,
     FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
     FrozenContextBindingCompileFact,
     FrozenPlanWorkflowCompileFact,
+    FrozenPlanHandoffCompileFact,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
+    PreparedProviderInputCut,
+    ProviderWireSemanticInput,
 )
+from pulsara_agent.model_input.provider_replay import (
+    FrozenCanonicalProviderDispatchRead,
+)
+from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.plan_workflow import PlanWorkflowStatus
 
 
 MAXIMUM_STEER_ITEMS_PER_SAFE_POINT = 128
-MAXIMUM_STEER_CANDIDATE_UTF8_BYTES = 16 << 20
+MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES = 16 << 20
 # Bounds cumulative canonical-prefix materialization across longest-first
 # trials.  This is a process-local planning-work quote, not durable capacity.
 MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES = 256 << 20
@@ -63,6 +77,300 @@ class PreparedRootTurnIdentity:
     entry_id: str
     context_revision_id: str
     permission_snapshot_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRootProviderInputCandidate:
+    """Exact future ROOT canonical cut frozen before its writer mutation.
+
+    PostgreSQL still owns every durable fact.  This value carries the complete
+    row-derived basis needed by the canonical reader and lets the writer prove
+    that the input measured before admission is still the input it will create.
+    """
+
+    session_id: str
+    workspace_id: str
+    exact_turn_id: str
+    exact_initial_entry_id: str
+    exact_context_binding_revision_id: str
+    unpublished_items: tuple[FrozenProviderInputItem, ...] = field(repr=False)
+    unpublished_item_canonical_expanded_bytes: tuple[int, ...]
+    permission_snapshot: FrozenRunPermissionSnapshot
+    model_call_binding: ModelCallBinding
+    expected_latest_entry_sequence: int
+    context_base_kind: ContextBindingBaseKind
+    context_snapshot_id: str | None
+    source_through_sequence: int
+    pending_plan_handoff_workflow_id: str | None
+    pending_plan_handoff_interaction_id: str | None
+    pending_plan_handoff_kind: str | None
+    unpublished_plan_workflow_fact: FrozenPlanWorkflowCompileFact | None
+    unpublished_plan_handoff_fact: FrozenPlanHandoffCompileFact | None
+    unpublished_approved_plan_fact: ApprovedPlanMaterializationFact | None
+
+    def __post_init__(self) -> None:
+        if not all(
+            (
+                self.session_id,
+                self.workspace_id,
+                self.exact_turn_id,
+                self.exact_initial_entry_id,
+                self.exact_context_binding_revision_id,
+            )
+        ):
+            raise ValueError("prospective ROOT input identity is incomplete")
+        if self.expected_latest_entry_sequence < 0:
+            raise ValueError("prospective ROOT input head is invalid")
+        if (
+            not self.unpublished_items
+            or any(
+                not isinstance(item, FrozenProviderInputItem)
+                for item in self.unpublished_items
+            )
+            or len(self.unpublished_items)
+            != len(self.unpublished_item_canonical_expanded_bytes)
+            or any(
+                charge < 1
+                for charge in self.unpublished_item_canonical_expanded_bytes
+            )
+        ):
+            raise ValueError("prospective ROOT unpublished suffix is invalid")
+        expected_sequences = tuple(
+            range(
+                self.expected_latest_entry_sequence + 1,
+                self.expected_latest_entry_sequence + 1 + len(self.unpublished_items),
+            )
+        )
+        if tuple(
+            item.source_entry_sequence for item in self.unpublished_items
+        ) != expected_sequences:
+            raise ValueError("prospective ROOT unpublished suffix is not contiguous")
+        item = self.unpublished_items[-1]
+        if (
+            item.source_entry_id != self.exact_initial_entry_id
+            or item.source_entry_sequence != self.exact_initial_entry_sequence
+            or item.source_turn_id != self.exact_turn_id
+            or (item.item_kind, item.input_origin)
+            not in {
+                (
+                    FrozenProviderInputItemKind.USER,
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                ),
+                (
+                    FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
+                    CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
+                ),
+                (
+                    FrozenProviderInputItemKind.PLAN_CONTINUATION,
+                    CanonicalInputOriginKind.PLAN_CONTINUATION,
+                ),
+                (FrozenProviderInputItemKind.TERMINAL_OBSERVATION, None),
+            }
+        ):
+            raise ValueError("prospective ROOT initial item does not exact-join")
+        if not isinstance(self.model_call_binding, ModelCallBinding):
+            raise TypeError("prospective ROOT input lacks a model binding")
+        snapshot = self.context_base_kind is ContextBindingBaseKind.SNAPSHOT
+        if snapshot != (self.context_snapshot_id is not None):
+            raise ValueError("prospective ROOT context base union is invalid")
+        if snapshot:
+            if self.source_through_sequence < 0:
+                raise ValueError("prospective ROOT snapshot source cut is invalid")
+        elif self.source_through_sequence != self.exact_initial_entry_sequence - 1:
+            raise ValueError(
+                "prospective ROOT full-history cut does not precede its initial entry"
+            )
+        handoff_values = (
+            self.pending_plan_handoff_workflow_id,
+            self.pending_plan_handoff_interaction_id,
+            self.pending_plan_handoff_kind,
+        )
+        workflow_id, interaction_id, handoff_kind = handoff_values
+        if (workflow_id is None) != (handoff_kind is None) or (
+            interaction_id is not None and workflow_id is None
+        ):
+            raise ValueError("prospective ROOT Plan handoff union is invalid")
+        workflow_fact = self.unpublished_plan_workflow_fact
+        handoff_fact = self.unpublished_plan_handoff_fact
+        approved_fact = self.unpublished_approved_plan_fact
+        if workflow_fact is not None and (
+            workflow_fact.session_id != self.session_id
+            or workflow_fact.workspace_id != self.workspace_id
+            or workflow_fact.turn_id != self.exact_turn_id
+            or workflow_fact.permission_snapshot_id
+            != self.permission_snapshot.snapshot_id
+            or workflow_fact.permission_snapshot_fingerprint
+            != self.permission_snapshot.snapshot_fingerprint
+        ):
+            raise ValueError("prospective ROOT Plan workflow fact does not exact-join")
+        if handoff_fact is not None and (
+            handoff_fact.session_id != self.session_id
+            or handoff_fact.workspace_id != self.workspace_id
+            or handoff_fact.target_turn_id != self.exact_turn_id
+            or handoff_fact.carrier_entry_id != self.exact_initial_entry_id
+            or handoff_fact.carrier_entry_sequence
+            != self.exact_initial_entry_sequence
+            or handoff_fact.workflow_id
+            != (
+                workflow_fact.workflow_id
+                if workflow_fact is not None
+                else self.pending_plan_handoff_workflow_id
+            )
+        ):
+            raise ValueError("prospective ROOT Plan handoff fact does not exact-join")
+        if approved_fact is not None and (
+            handoff_fact is None
+            or approved_fact.session_id != self.session_id
+            or approved_fact.workspace_id != self.workspace_id
+            or approved_fact.target_turn_id != self.exact_turn_id
+            or approved_fact.workflow_id != handoff_fact.workflow_id
+            or approved_fact.interaction_id != handoff_fact.interaction_id
+        ):
+            raise ValueError("prospective ROOT approved Plan fact does not exact-join")
+        if handoff_fact is None:
+            if workflow_fact is not None:
+                raise ValueError(
+                    "prospective ROOT unpublished Plan facts are incomplete"
+                )
+        elif handoff_fact.workflow_status is PlanWorkflowStatus.ACTIVE:
+            if workflow_fact is None:
+                raise ValueError(
+                    "prospective ROOT active Plan facts are incomplete"
+                )
+        elif workflow_fact is not None:
+            raise ValueError(
+                "prospective ROOT terminal Plan handoff has an active workflow fact"
+            )
+
+    @property
+    def exact_initial_entry_sequence(self) -> int:
+        sequence = self.unpublished_items[-1].source_entry_sequence
+        assert sequence is not None
+        return sequence
+
+    @property
+    def unpublished_canonical_expanded_bytes(self) -> int:
+        return sum(self.unpublished_item_canonical_expanded_bytes)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRootProviderInputAdmission:
+    """A fully compiled and materialized future ROOT input, before publication."""
+
+    candidate: PreparedRootProviderInputCandidate = field(repr=False)
+    canonical_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
+    semantic_input: ProviderWireSemanticInput = field(repr=False)
+    wire_quote: FrozenProviderWireInputQuote
+
+    def __post_init__(self) -> None:
+        identity = self.canonical_read.compile_snapshot.canonical_input.identity
+        if (
+            identity.session_id != self.candidate.session_id
+            or identity.turn_id != self.candidate.exact_turn_id
+            or identity.initial_entry_id
+            != self.candidate.exact_initial_entry_id
+            or identity.context_binding_revision_id
+            != self.candidate.exact_context_binding_revision_id
+            or identity.provider_input_through_sequence
+            != self.candidate.exact_initial_entry_sequence
+            or self.semantic_input.canonical_input_identity != identity
+            or self.wire_quote.semantic_estimated_input_tokens
+            != self.semantic_input.final_estimate.total_input_tokens
+            or self.wire_quote.final_wire_utf8_bytes > (64 << 20)
+            or self.wire_quote.final_wire_estimated_input_tokens
+            > self.wire_quote.effective_input_budget_tokens
+        ):
+            raise ValueError("prospective ROOT provider admission does not exact-join")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedActiveRootInputCandidate:
+    """One unpublished canonical suffix bound to an exact active ROOT cut."""
+
+    workspace_id: str
+    expected_provider_input_cut: PreparedProviderInputCut
+    next_model_call_index: int
+    unpublished_items: tuple[FrozenProviderInputItem, ...] = field(repr=False)
+    unpublished_item_canonical_expanded_bytes: tuple[int, ...]
+    prospective_plan_workflow_fact: FrozenPlanWorkflowCompileFact | None = None
+
+    def __post_init__(self) -> None:
+        cut = self.expected_provider_input_cut
+        if (
+            not self.workspace_id
+            or self.next_model_call_index < 1
+            or not self.unpublished_items
+            or len(self.unpublished_items)
+            != len(self.unpublished_item_canonical_expanded_bytes)
+            or any(
+                not isinstance(item, FrozenProviderInputItem)
+                for item in self.unpublished_items
+            )
+            or any(
+                charge < 1
+                for charge in self.unpublished_item_canonical_expanded_bytes
+            )
+        ):
+            raise ValueError("prospective active ROOT suffix is invalid")
+        expected_sequences = tuple(
+            range(
+                cut.provider_input_through_sequence + 1,
+                cut.provider_input_through_sequence + 1
+                + len(self.unpublished_items),
+            )
+        )
+        if tuple(
+            item.source_entry_sequence for item in self.unpublished_items
+        ) != expected_sequences or any(
+            item.source_turn_id != cut.turn_id for item in self.unpublished_items
+        ):
+            raise ValueError("prospective active ROOT suffix does not extend its cut")
+        workflow = self.prospective_plan_workflow_fact
+        if workflow is not None and (
+            workflow.session_id != cut.session_id
+            or workflow.workspace_id != self.workspace_id
+            or workflow.turn_id != cut.turn_id
+        ):
+            raise ValueError("prospective active ROOT Plan fact does not exact-join")
+
+    @property
+    def resulting_provider_input_through_sequence(self) -> int:
+        sequence = self.unpublished_items[-1].source_entry_sequence
+        assert sequence is not None
+        return sequence
+
+    @property
+    def unpublished_canonical_expanded_bytes(self) -> int:
+        return sum(self.unpublished_item_canonical_expanded_bytes)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedActiveRootInputAdmission:
+    """Compiled final-wire admission for one active ROOT suffix."""
+
+    candidate: PreparedActiveRootInputCandidate = field(repr=False)
+    canonical_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
+    semantic_input: ProviderWireSemanticInput = field(repr=False)
+    wire_quote: FrozenProviderWireInputQuote
+
+    def __post_init__(self) -> None:
+        identity = self.canonical_read.compile_snapshot.canonical_input.identity
+        cut = self.candidate.expected_provider_input_cut
+        if (
+            identity.session_id != cut.session_id
+            or identity.turn_id != cut.turn_id
+            or identity.context_binding_revision_id
+            != cut.context_binding_revision_id
+            or identity.provider_input_through_sequence
+            != self.candidate.resulting_provider_input_through_sequence
+            or self.semantic_input.canonical_input_identity != identity
+            or self.wire_quote.semantic_estimated_input_tokens
+            != self.semantic_input.final_estimate.total_input_tokens
+            or self.wire_quote.final_wire_utf8_bytes > (64 << 20)
+            or self.wire_quote.final_wire_estimated_input_tokens
+            > self.wire_quote.effective_input_budget_tokens
+        ):
+            raise ValueError("prospective active ROOT admission does not exact-join")
 
 
 def build_direct_root_turn_identity(
@@ -155,14 +463,13 @@ class PreparedPromptIngressCommand:
     target_turn_id: str | None
     permission_snapshot_id: str | None
     requested_permission_mode: PermissionMode | None
-    content_digest: str
-    content_size: int
+    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
 
     def __post_init__(self) -> None:
         if not all((self.session_id, self.command_id, self.queue_item_id)):
             raise ValueError("prompt ingress identity is incomplete")
-        if self.content_size < 1 or not self.content_digest.startswith("sha256:"):
-            raise ValueError("prompt ingress content identity is invalid")
+        if not isinstance(self.canonical_prompt, FrozenCanonicalPrompt):
+            raise TypeError("prompt ingress content must be canonical and frozen")
         new_turn = self.delivery_mode is PromptDeliveryMode.NEW_TURN
         new_turn_shape = (
             self.target_turn_id is None
@@ -234,9 +541,11 @@ class PreparedQueuedRootTurnAdmission:
     queue_sequence: int
     command_id: str
     client_submission_id: str
-    content: CanonicalContent = field(repr=False)
+    body_storage: CanonicalContent = field(repr=False)
+    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
     permission_snapshot: FrozenRunPermissionSnapshot
     model_call_binding: ModelCallBinding
+    provider_input_candidate: PreparedRootProviderInputCandidate = field(repr=False)
     pending_plan_handoff_workflow_id: str | None
     pending_plan_handoff_interaction_id: str | None
     pending_plan_handoff_kind: str | None
@@ -268,13 +577,48 @@ class PreparedQueuedRootTurnAdmission:
             raise ValueError("queued ROOT admission identity is incomplete")
         if not isinstance(self.model_call_binding, ModelCallBinding):
             raise ValueError("queued ROOT admission lacks a model binding")
+        prospective = self.provider_input_candidate
+        if (
+            prospective.session_id != self.session_id
+            or prospective.workspace_id != self.workspace_id
+            or prospective.exact_turn_id != self.exact_turn_id
+            or prospective.exact_initial_entry_id != self.exact_initial_entry_id
+            or prospective.exact_context_binding_revision_id
+            != self.exact_context_binding_revision_id
+            or prospective.unpublished_items
+            != (
+                FrozenProviderInputItem(
+                item_kind=FrozenProviderInputItemKind.USER,
+                source_entry_id=self.exact_initial_entry_id,
+                source_entry_sequence=prospective.exact_initial_entry_sequence,
+                source_turn_id=self.exact_turn_id,
+                content=self.canonical_prompt.content.parts,
+                input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+                ),
+            )
+            or prospective.unpublished_item_canonical_expanded_bytes
+            != (self.canonical_prompt.resource_quote.canonical_expanded_bytes,)
+            or prospective.permission_snapshot != self.permission_snapshot
+            or prospective.model_call_binding != self.model_call_binding
+            or prospective.pending_plan_handoff_workflow_id
+            != self.pending_plan_handoff_workflow_id
+            or prospective.pending_plan_handoff_interaction_id
+            != self.pending_plan_handoff_interaction_id
+            or prospective.pending_plan_handoff_kind
+            != self.pending_plan_handoff_kind
+            or prospective.unpublished_plan_workflow_fact is not None
+            or prospective.unpublished_plan_handoff_fact is not None
+            or prospective.unpublished_approved_plan_fact is not None
+        ):
+            raise ValueError("queued ROOT provider candidate does not exact-join")
         handoff_values = (
             self.pending_plan_handoff_workflow_id,
             self.pending_plan_handoff_interaction_id,
             self.pending_plan_handoff_kind,
         )
-        if any(value is None for value in handoff_values) != all(
-            value is None for value in handoff_values
+        workflow_id, interaction_id, handoff_kind = handoff_values
+        if (workflow_id is None) != (handoff_kind is None) or (
+            interaction_id is not None and workflow_id is None
         ):
             raise ValueError("queued ROOT admission Plan handoff union is invalid")
 
@@ -288,8 +632,10 @@ def build_queued_root_turn_admission(
     command_id: str,
     client_submission_id: str,
     content: CanonicalContent,
+    canonical_prompt: FrozenCanonicalPrompt,
     permission_snapshot: FrozenRunPermissionSnapshot,
     model_call_binding: ModelCallBinding,
+    provider_input_candidate: PreparedRootProviderInputCandidate,
     pending_plan_handoff_workflow_id: str | None,
     pending_plan_handoff_interaction_id: str | None,
     pending_plan_handoff_kind: str | None,
@@ -333,9 +679,11 @@ def build_queued_root_turn_admission(
         queue_sequence=queue_sequence,
         command_id=command_id,
         client_submission_id=client_submission_id,
-        content=content,
+        body_storage=content,
+        canonical_prompt=canonical_prompt,
         permission_snapshot=permission_snapshot,
         model_call_binding=model_call_binding,
+        provider_input_candidate=provider_input_candidate,
         pending_plan_handoff_workflow_id=pending_plan_handoff_workflow_id,
         pending_plan_handoff_interaction_id=pending_plan_handoff_interaction_id,
         pending_plan_handoff_kind=pending_plan_handoff_kind,
@@ -385,10 +733,8 @@ def build_prompt_ingress_command(
     target_turn_id: str | None,
     permission_snapshot_id: str | None,
     requested_permission_mode: PermissionMode | None,
-    content_utf8: bytes,
+    canonical_prompt: FrozenCanonicalPrompt,
 ) -> PreparedPromptIngressCommand:
-    digest = "sha256:" + sha256(content_utf8).hexdigest()
-
     return PreparedPromptIngressCommand(
         session_id=session_id,
         command_id=command_id,
@@ -398,8 +744,7 @@ def build_prompt_ingress_command(
         target_turn_id=target_turn_id,
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=requested_permission_mode,
-        content_digest=digest,
-        content_size=len(content_utf8),
+        canonical_prompt=canonical_prompt,
     )
 
 
@@ -412,13 +757,17 @@ def prompt_ingress_semantic_digest(
     ):
         raise ValueError("prompt ingress model binding union is invalid")
     return context_fingerprint(
-        "pulsara:queue-prompt-command:v2",
+        "pulsara:queue-prompt-command:v3",
         {
             "queue_item_id": candidate.queue_item_id,
             "client_submission_id": candidate.client_submission_id,
             "delivery_mode": candidate.delivery_mode.value,
             "target_turn_id": candidate.target_turn_id,
-            "content_digest": candidate.content_digest,
+            "content_digest": "sha256:"
+            + sha256(candidate.canonical_prompt.body).hexdigest(),
+            "content_size": len(candidate.canonical_prompt.body),
+            "content_media_type": "application/vnd.pulsara.prompt+json",
+            "content_codec": "utf-8",
             "permission_snapshot_id": candidate.permission_snapshot_id,
             "requested_permission_mode": (
                 None
@@ -438,10 +787,17 @@ class PendingPromptSteerFact:
     queue_sequence: int
     command_id: str
     exact_target_turn_id: str
-    content: CanonicalContent = field(repr=False)
+    body_storage: CanonicalContent = field(repr=False)
+    canonical_expanded_bytes: int
 
     def __post_init__(self) -> None:
-        if self.queue_sequence < 1 or self.content.size < 1:
+        if (
+            self.queue_sequence < 1
+            or self.body_storage.size < 1
+            or self.canonical_expanded_bytes < self.body_storage.size
+            or self.canonical_expanded_bytes
+            > MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES
+        ):
             raise ValueError("pending steer fact bounds are invalid")
 
 
@@ -454,6 +810,7 @@ def build_pending_prompt_steer_fact(
     command_id: str,
     exact_target_turn_id: str,
     content: CanonicalContent,
+    canonical_expanded_bytes: int,
 ) -> PendingPromptSteerFact:
     return PendingPromptSteerFact(
         session_id=session_id,
@@ -462,7 +819,8 @@ def build_pending_prompt_steer_fact(
         queue_sequence=queue_sequence,
         command_id=command_id,
         exact_target_turn_id=exact_target_turn_id,
-        content=content,
+        body_storage=content,
+        canonical_expanded_bytes=canonical_expanded_bytes,
     )
 
 
@@ -520,8 +878,8 @@ class PreparedSteerConsumptionCandidate:
     queue_sequence: int
     command_id: str
     exact_target_turn_id: str
-    content: CanonicalContent = field(repr=False)
-    body_utf8: bytes = field(repr=False)
+    body_storage: CanonicalContent = field(repr=False)
+    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
     new_entry_id: str
     expected_entry_sequence: int
     occurred_at: datetime
@@ -534,9 +892,12 @@ class PreparedSteerConsumptionCandidate:
     def __post_init__(self) -> None:
         if self.expected_entry_sequence < 1:
             raise ValueError("steer candidate entry sequence is invalid")
-        if len(self.body_utf8) != self.content.size:
+        if len(self.canonical_prompt.body) != self.body_storage.size:
             raise ValueError("steer candidate body size differs from content")
-        if "sha256:" + sha256(self.body_utf8).hexdigest() != self.content.digest:
+        if (
+            "sha256:" + sha256(self.canonical_prompt.body).hexdigest()
+            != self.body_storage.digest
+        ):
             raise ValueError("steer candidate body digest differs from content")
         if (
             self.canonical_base_fence.session_id != self.session_id
@@ -551,7 +912,7 @@ class PreparedSteerConsumptionCandidate:
 def build_steer_consumption_candidate(
     *,
     fact: PendingPromptSteerFact,
-    body_utf8: bytes,
+    canonical_prompt: FrozenCanonicalPrompt,
     expected_entry_sequence: int,
     predecessor: FrozenProviderInputAppendPlanningInput,
     canonical_base_fence: PreparedSteerCanonicalBaseFence,
@@ -591,8 +952,8 @@ def build_steer_consumption_candidate(
         queue_sequence=fact.queue_sequence,
         command_id=fact.command_id,
         exact_target_turn_id=fact.exact_target_turn_id,
-        content=fact.content,
-        body_utf8=bytes(body_utf8),
+        body_storage=fact.body_storage,
+        canonical_prompt=canonical_prompt,
         new_entry_id=entry_id,
         expected_entry_sequence=expected_entry_sequence,
         occurred_at=occurred_at,
@@ -642,7 +1003,7 @@ class AcceptedSteerDispatchBatch:
     session_id: str
     target_turn_id: str
     entries: tuple[AcceptedSteerDispatchEntry, ...]
-    canonical_utf8_bytes: int
+    canonical_expanded_bytes: int
     resulting_epoch_logical_bytes: int
 
     def __post_init__(self) -> None:
@@ -674,10 +1035,14 @@ class AcceptedSteerDispatchBatch:
             for item in self.entries
         ):
             raise ValueError("accepted steer batch target/content identity is invalid")
-        if sum(item.content_size for item in self.entries) != self.canonical_utf8_bytes:
-            raise ValueError("accepted steer batch body total is invalid")
-        if not 0 < self.canonical_utf8_bytes <= MAXIMUM_STEER_CANDIDATE_UTF8_BYTES:
-            raise ValueError("accepted steer batch body bound is invalid")
+        if sum(item.content_size for item in self.entries) > self.canonical_expanded_bytes:
+            raise ValueError("accepted steer batch body total exceeds expanded total")
+        if not (
+            0
+            < self.canonical_expanded_bytes
+            <= MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES
+        ):
+            raise ValueError("accepted steer batch expanded bound is invalid")
         if not 0 < self.resulting_epoch_logical_bytes <= (64 << 20):
             raise ValueError("accepted steer batch epoch bound is invalid")
 
@@ -685,7 +1050,7 @@ class AcceptedSteerDispatchBatch:
 @dataclass(frozen=True, slots=True)
 class SteerSuffixAdmissionQuote:
     selected_item_count: int
-    selected_canonical_utf8_bytes: int
+    selected_canonical_expanded_bytes: int
     prospective_snapshot_hydrated_bytes: int
     resulting_epoch_logical_bytes: int
     resulting_target_estimate: TokenEstimate
@@ -700,8 +1065,8 @@ class SteerSuffixAdmissionQuote:
             raise ValueError("steer quote selects no items")
         if (
             not 0
-            < self.selected_canonical_utf8_bytes
-            <= MAXIMUM_STEER_CANDIDATE_UTF8_BYTES
+            < self.selected_canonical_expanded_bytes
+            <= MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES
         ):
             raise ValueError("steer quote body bound is invalid")
         if not 0 < self.prospective_snapshot_hydrated_bytes <= (16 << 20):
@@ -941,7 +1306,7 @@ def build_steer_resource_rejection(
         queue_sequence=fact.queue_sequence,
         command_id=fact.command_id,
         exact_target_turn_id=fact.exact_target_turn_id,
-        content=fact.content,
+        content=fact.body_storage,
         reason=reason,
         occurred_at=occurred_at,
         actor_id=actor_id,
@@ -1044,6 +1409,7 @@ def _estimate_value(estimate: TokenEstimate) -> dict[str, object]:
         "message_by_index": estimate.message_tokens_by_index,
         "tools": estimate.tool_tokens,
         "envelope": estimate.envelope_tokens,
+        "visual_image": estimate.visual_image_tokens,
         "total": estimate.total_input_tokens,
     }
 
@@ -1062,10 +1428,13 @@ def build_steer_suffix_quote(
         MemorySourceInvalidationReservation | None
     ) = None,
 ) -> SteerSuffixAdmissionQuote:
-    canonical_bytes = sum(item.content.size for item in candidates)
+    canonical_bytes = sum(
+        item.canonical_prompt.resource_quote.canonical_expanded_bytes
+        for item in candidates
+    )
     return SteerSuffixAdmissionQuote(
         selected_item_count=len(candidates),
-        selected_canonical_utf8_bytes=canonical_bytes,
+        selected_canonical_expanded_bytes=canonical_bytes,
         prospective_snapshot_hydrated_bytes=prospective_snapshot_hydrated_bytes,
         resulting_epoch_logical_bytes=resulting_epoch_logical_bytes,
         resulting_target_estimate=resulting_target_estimate,
@@ -1089,7 +1458,7 @@ def _legacy_pending_steer_identity(fact: PendingPromptSteerFact) -> str:
             "queue_sequence": fact.queue_sequence,
             "command_id": fact.command_id,
             "target_turn_id": fact.exact_target_turn_id,
-            "content": _content_manifest(fact.content),
+            "content": _content_manifest(fact.body_storage),
         },
     )
 
@@ -1128,7 +1497,7 @@ def steer_consumption_candidate_identity_fingerprint(
             "queue_sequence": candidate.queue_sequence,
             "command_id": candidate.command_id,
             "target_turn_id": candidate.exact_target_turn_id,
-            "content": _content_manifest(candidate.content),
+            "content": _content_manifest(candidate.body_storage),
             "entry_id": candidate.new_entry_id,
             "entry_sequence": candidate.expected_entry_sequence,
             "predecessor": _predecessor_value(candidate.predecessor),
@@ -1182,7 +1551,7 @@ def _legacy_steer_quote_identity(plan: PreparedSteerSuffixAdmissionPlan) -> str:
                 for item in plan.selected_consumption_candidates
             ),
             "selected_items": quote.selected_item_count,
-            "selected_canonical_bytes": quote.selected_canonical_utf8_bytes,
+            "selected_canonical_bytes": quote.selected_canonical_expanded_bytes,
             "snapshot_bytes": quote.prospective_snapshot_hydrated_bytes,
             "epoch_bytes": quote.resulting_epoch_logical_bytes,
             "estimate": _estimate_value(quote.resulting_target_estimate),
@@ -1277,14 +1646,14 @@ def build_accepted_steer_dispatch_batch(
     session_id: str,
     target_turn_id: str,
     entries: tuple[AcceptedSteerDispatchEntry, ...],
-    canonical_utf8_bytes: int,
+    canonical_expanded_bytes: int,
     resulting_epoch_logical_bytes: int,
 ) -> AcceptedSteerDispatchBatch:
     return AcceptedSteerDispatchBatch(
         session_id=session_id,
         target_turn_id=target_turn_id,
         entries=entries,
-        canonical_utf8_bytes=canonical_utf8_bytes,
+        canonical_expanded_bytes=canonical_expanded_bytes,
         resulting_epoch_logical_bytes=resulting_epoch_logical_bytes,
     )
 
@@ -1292,13 +1661,17 @@ def build_accepted_steer_dispatch_batch(
 __all__ = [
     "AcceptedSteerDispatchBatch",
     "AcceptedSteerDispatchEntry",
-    "MAXIMUM_STEER_CANDIDATE_UTF8_BYTES",
+    "MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES",
     "MAXIMUM_STEER_ITEMS_PER_SAFE_POINT",
     "MemorySourceInvalidationReservation",
     "MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
     "PendingPromptSteerFact",
     "PreparedPromptIngressCommand",
     "PreparedQueuedRootTurnAdmission",
+    "PreparedActiveRootInputAdmission",
+    "PreparedActiveRootInputCandidate",
+    "PreparedRootProviderInputAdmission",
+    "PreparedRootProviderInputCandidate",
     "PreparedRootTurnIdentity",
     "PreparedSteerCanonicalBaseFence",
     "PreparedSteerConsumptionCandidate",

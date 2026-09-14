@@ -7,6 +7,9 @@ from types import SimpleNamespace
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
 )
+from pulsara_agent.conversation_kernel.compaction.runtime import (
+    HostCompactionRuntimeOwner,
+)
 from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 from pulsara_agent.conversation_kernel.subagent import (
@@ -66,6 +69,13 @@ def _host(clock: _Clock) -> KernelHostSession:
     host._active_task = None
     host._active_turn_id = None
     host._control_completion_sealed_turn_id = None
+    host._control_completion_write_reservation = None
+    host._control_completion_seal_changed = asyncio.Event()
+    host._control_completion_seal_changed.set()
+    host._compaction = HostCompactionRuntimeOwner()
+    host._compaction_write_reservations = {}
+    host._root_compaction_write_changed = asyncio.Event()
+    host._root_compaction_write_changed.set()
     host._active_cancellation_intent = None
     host._pending_root_successor = None
     host._closing = False

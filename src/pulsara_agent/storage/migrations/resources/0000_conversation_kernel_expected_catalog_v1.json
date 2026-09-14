@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:f0373586232a0fc165d3a295ffb019ae07ccad89c2316f988c474c93c35da4ff",
+  "observed_catalog_fingerprint": "sha256:800095fccd5901ac02b179db0dde020b6dd36a047621accb3be46e4edcfd5e08",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -26,6 +26,7 @@
     "tool_execution_attempts",
     "tool_results",
     "prompt_queue_items",
+    "canonical_image_refs",
     "interaction_decisions",
     "plan_workflows",
     "plan_interactions",
@@ -41,7 +42,9 @@
     "blobs",
     "agent_events"
   ],
-  "infrastructure_relations": ["public.pulsara_schema_migrations"],
+  "infrastructure_relations": [
+    "public.pulsara_schema_migrations"
+  ],
   "required_functions": [
     "pulsara_v3.enforce_conversation_kernel_invariants",
     "pulsara_v3.enforce_imported_history_invariants",

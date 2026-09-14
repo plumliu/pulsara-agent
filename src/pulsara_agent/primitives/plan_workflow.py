@@ -386,6 +386,55 @@ def read_plan_draft_chunk(
     )
 
 
+def project_plan_continuation_for_provider(
+    *,
+    storage_text: str,
+    transition: str,
+    workflow_id: str,
+    interaction_id: str | None,
+) -> str:
+    """Validate one canonical continuation carrier and render its provider value."""
+
+    if transition not in {"ENTERED_PLAN", "REVISION_REQUESTED", "APPROVED_PLAN"}:
+        raise ValueError("Plan continuation transition is invalid")
+    try:
+        value = json.loads(storage_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Plan continuation storage carrier is invalid") from exc
+    if not isinstance(value, dict) or str(value.get("transition") or "") != transition:
+        raise ValueError("Plan continuation storage transition conflicts")
+    if value.get("workflow_id") is not None and str(value["workflow_id"]) != workflow_id:
+        raise ValueError("Plan continuation workflow conflicts")
+    if value.get("interaction_id") is not None and str(value["interaction_id"]) != str(
+        interaction_id
+    ):
+        raise ValueError("Plan continuation interaction conflicts")
+
+    projected: dict[str, object] = {
+        "status": "APPROVED" if transition == "APPROVED_PLAN" else "ACTIVE",
+        "transition": transition,
+    }
+    if transition == "REVISION_REQUESTED":
+        feedback = value.get("feedback")
+        if feedback is not None and not isinstance(feedback, str):
+            raise ValueError("Plan revision feedback is invalid")
+        projected["feedback"] = (
+            {"presence": "ABSENT"}
+            if feedback is None
+            else {"presence": "PRESENT", "text": feedback}
+        )
+    if transition == "APPROVED_PLAN" and not isinstance(
+        value.get("approved_plan"), dict
+    ):
+        raise ValueError("approved Plan identity carrier is invalid")
+    return json.dumps(
+        {"pulsara_plan_continuation": projected},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 __all__ = [
     "ExtractedPlanDraft",
     "MAXIMUM_PLAN_RESPONSE_BYTES",
@@ -407,6 +456,7 @@ __all__ = [
     "extract_plan_draft",
     "extract_plan_question",
     "plan_draft_utf8_digest",
+    "project_plan_continuation_for_provider",
     "read_plan_draft_chunk",
     "require_plan_interaction_contract",
 ]

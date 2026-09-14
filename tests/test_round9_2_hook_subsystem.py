@@ -382,7 +382,7 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert not hasattr(STAGE2_LIMITS, "model_calls_per_turn_hard")
 
 
@@ -1975,6 +1975,8 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             source_wire_candidate=None,
             model_switch_candidate=None,
             model_switch_tier=None,
+            prospective_root_dispatch=None,
+            pending_active_candidate=None,
             protected_tail_selection_fingerprint="tail:1",
             compaction_read=None,
             trigger=CompactionTrigger.MANUAL,
@@ -2009,8 +2011,11 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     self.settled = None
                     self.policy = SimpleNamespace(enabled=True)
 
-                async def run_fenced(self, *, scope, trigger, operation):
+                async def run_fenced(
+                    self, *, scope, trigger, operation, admitted_writer
+                ):
                     del scope, trigger
+                    assert admitted_writer is None
                     return await operation()
 
                 async def settle_manual(self, request, outcome) -> None:
@@ -2054,6 +2059,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     hook_scope=None,
                     session_start_compact_port=None,
                     session_start_boundary_port=None,
+                    pending_active_candidate=None,
                 )
             assert propagated.value is failure
             assert outer_owner.settled == (manual, carrier.outcome)

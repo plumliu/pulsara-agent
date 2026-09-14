@@ -24,7 +24,11 @@ from pulsara_agent.llm.adapters.openai.responses import (
     responses_semantic_wire_group,
 )
 from pulsara_agent.llm.estimator import estimate_model_context_for_call
-from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.input import (
+    LLMMessage,
+    LLMTextPart,
+    MessageRole,
+)
 from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.model_target import default_reasoning_selection
 from pulsara_agent.llm.request import LLMContext
@@ -223,18 +227,24 @@ class DirectKernelAuxiliaryJsonModel:
             # estimate is diagnostic only. Admission is exclusively based on
             # the adapter's final context-bearing wire materialization below.
             self._context_shape_validator(call=call, context=context)
-            fixed_projection, final_projection, ordered_wire_items = (
+            (
+                fixed_projection,
+                final_projection,
+                ordered_wire_items,
+                ordered_wire_sources,
+            ) = (
                 _materialize_auxiliary_final_wire(call=call, context=context)
             )
             final_wire_estimate = (
                 call.target.token_estimator.estimate_final_wire_json_components(
                     fixed_context=fixed_projection,
                     ordered_input_items=ordered_wire_items,
+                    ordered_input_sources=ordered_wire_sources,
                 )
             )
             final_wire_utf8_bytes = len(canonical_json_bytes(final_projection))
             if (
-                final_wire_estimate > effective_input_cap
+                final_wire_estimate.total_input_tokens > effective_input_cap
                 or final_wire_utf8_bytes > maximum_input_bytes
             ):
                 continue
@@ -242,7 +252,7 @@ class DirectKernelAuxiliaryJsonModel:
                 PreparedAuxiliaryJsonModelCall(
                     call=call,
                     context=context,
-                    estimated_input_tokens=final_wire_estimate,
+                    estimated_input_tokens=final_wire_estimate.total_input_tokens,
                     final_wire_utf8_bytes=final_wire_utf8_bytes,
                     maximum_result_bytes=maximum_result_bytes,
                     transport_timeout_policy_fingerprint=(
@@ -330,7 +340,8 @@ def _validate_auxiliary_message_shape(
         if (
             len(messages) != 2
             or messages[0].role is not MessageRole.SYSTEM
-            or messages[0].content != (MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,)
+            or messages[0].content
+            != (LLMTextPart(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3),)
             or messages[1].role is not MessageRole.USER
         ):
             raise ValueError(
@@ -344,7 +355,9 @@ def _validate_auxiliary_message_shape(
         system_prompt = None
         ordered_messages = messages
     if any(
-        len(message.content) != 1 or not message.content[0]
+        len(message.content) != 1
+        or not isinstance(message.content[0], LLMTextPart)
+        or not message.content[0].text
         for message in messages
     ):
         raise ValueError("auxiliary provider messages require one non-empty text block")
@@ -355,18 +368,25 @@ def _materialize_auxiliary_final_wire(
     *,
     call: ResolvedModelCall,
     context: LLMContext,
-) -> tuple[dict[str, object], dict[str, object], tuple[object, ...]]:
+) -> tuple[
+    dict[str, object],
+    dict[str, object],
+    tuple[object, ...],
+    tuple[LLMMessage | None, ...],
+]:
     """Lower once through the selected adapter's exact context materializer."""
 
     profile = call.target.model_profile.route_wire_profile
     if profile.wire_api == "openai_chat_completions":
-        ordered = tuple(
-            item
+        groups = tuple(
+            chat_semantic_wire_group(message, route_wire_profile=profile)
             for message in context.messages
-            for item in chat_semantic_wire_group(
-                message,
-                route_wire_profile=profile,
-            )
+        )
+        ordered = tuple(item for group in groups for item in group)
+        sources = tuple(
+            message
+            for message, group in zip(context.messages, groups, strict=True)
+            for _ in group
         )
         fixed = materialize_chat_context_bearing_wire_projection(
             call=call,
@@ -382,12 +402,16 @@ def _materialize_auxiliary_final_wire(
             tool_items=(),
             tool_choice=None,
         )
-        return fixed, final, ordered
+        return fixed, final, ordered, sources
     if profile.wire_api == "openai_responses":
-        ordered = tuple(
-            item
-            for message in context.messages
-            for item in responses_semantic_wire_group(message)
+        groups = tuple(
+            responses_semantic_wire_group(message) for message in context.messages
+        )
+        ordered = tuple(item for group in groups for item in group)
+        sources = tuple(
+            message
+            for message, group in zip(context.messages, groups, strict=True)
+            for _ in group
         )
         fixed = materialize_responses_context_bearing_wire_projection(
             call=call,
@@ -403,7 +427,7 @@ def _materialize_auxiliary_final_wire(
             tool_items=(),
             tool_choice=None,
         )
-        return fixed, final, ordered
+        return fixed, final, ordered, sources
     raise ValueError("auxiliary provider wire API is unsupported")
 
 

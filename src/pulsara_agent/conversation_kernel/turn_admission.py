@@ -27,6 +27,9 @@ from pulsara_agent.conversation_kernel.repository import (
     TurnAdmissionConfirmationKind,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
+from pulsara_agent.conversation_kernel.steer import (
+    PreparedRootProviderInputAdmission,
+)
 from pulsara_agent.conversation_kernel.todo_runtime import (
     PreparedTodoChildRunActivation,
     PreparedTodoRootRunActivation,
@@ -92,6 +95,7 @@ class TurnAdmissionCoordinator:
         self,
         intent: PreparedRootTurnIntent,
         *,
+        provider_input_admission: PreparedRootProviderInputAdmission,
         model_resolution_snapshot: FrozenModelResolutionSnapshot,
         cancellation_intent: ActiveTurnCancellationIntent,
     ) -> AcceptedEntry:
@@ -108,12 +112,14 @@ class TurnAdmissionCoordinator:
                 self._repository.accept_root_turn_intent,
                 self._writer_lease.guard,
                 intent=intent,
+                provider_input_admission=provider_input_admission,
                 model_resolution_snapshot=model_resolution_snapshot,
                 deadline_monotonic=self._deadline(),
             )
         except asyncio.CancelledError as cancellation:
             await self._settle_root_intent(
                 intent=intent,
+                provider_input_admission=provider_input_admission,
                 model_resolution_snapshot=model_resolution_snapshot,
                 activation=activation,
                 reissue_allowed=False,
@@ -124,6 +130,7 @@ class TurnAdmissionCoordinator:
         except BaseException:
             accepted = await self._settle_root_intent(
                 intent=intent,
+                provider_input_admission=provider_input_admission,
                 model_resolution_snapshot=model_resolution_snapshot,
                 activation=activation,
                 reissue_allowed=True,
@@ -147,6 +154,7 @@ class TurnAdmissionCoordinator:
         self,
         *,
         intent: PreparedRootTurnIntent,
+        provider_input_admission: PreparedRootProviderInputAdmission,
         model_resolution_snapshot: FrozenModelResolutionSnapshot,
         activation: PreparedTodoRootRunActivation,
         reissue_allowed: bool,
@@ -187,6 +195,7 @@ class TurnAdmissionCoordinator:
                     self._repository.accept_root_turn_intent,
                     self._writer_lease.guard,
                     intent=intent,
+                    provider_input_admission=provider_input_admission,
                     model_resolution_snapshot=model_resolution_snapshot,
                     deadline_monotonic=self._deadline(),
                 )

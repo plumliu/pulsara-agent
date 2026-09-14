@@ -28,6 +28,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.conversation_kernel.repository import (
     build_prepared_root_turn_intent,
     build_prepared_subagent_turn_admission,
@@ -58,6 +59,7 @@ from pulsara_agent.conversation_kernel.tool_runtime import (
     production_builtin_executor_binding_identity_fingerprint,
 )
 from pulsara_agent.llm.adapters.openai import client as openai_client
+from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.terminal_process.manager import ProcessRegistry
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
@@ -107,7 +109,7 @@ def test_round5_architecture_removes_turn_budget_and_preserves_oracles() -> None
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
 
 
 def test_round5_watchdog_policy_is_closed_and_has_no_turn_or_call_budget() -> None:
@@ -161,7 +163,7 @@ def test_round5_turn_admission_candidates_freeze_complete_event_drafts() -> None
         context_binding_revision_id="revision:root:0",
         permission_snapshot_id="permission:root",
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        content=InlineContent.from_bytes(b"root"),
+        canonical_prompt=freeze_canonical_prompt(FrozenPromptContent.text("root")),
         occurred_at=occurred_at,
     )
     child = build_prepared_subagent_turn_admission(
@@ -493,6 +495,7 @@ def _bare_host_core_with_blocked_blob_gc(
 ) -> tuple[KernelHostCore, asyncio.Event, asyncio.Event]:
     core = object.__new__(KernelHostCore)
     core.mcp_management = SimpleNamespace(aclose=AsyncMock())
+    core._image_validator = SimpleNamespace(aclose=AsyncMock())  # noqa: SLF001
     core._deadlines = KernelExecutionDeadlineFactory(  # noqa: SLF001
         KernelExecutionWatchdogPolicy(blob_gc_close_seconds=close_seconds)
     )

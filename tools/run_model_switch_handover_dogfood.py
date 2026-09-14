@@ -10,6 +10,7 @@ and local final-wire measurements; configured API-key values are scrubbed.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from collections import Counter
@@ -32,11 +33,13 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
 from pulsara_agent.conversation_kernel.repository import (
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
+from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     reasoning_selection_to_dict,
@@ -362,7 +365,7 @@ def _seed_completed_history(
             context_binding_revision_id=f"revision:model-switch-dogfood:{suffix}",
             permission_snapshot_id=f"permission:model-switch-dogfood:{suffix}",
             requested_permission_mode=DEFAULT_PERMISSION_MODE,
-            content=InlineContent.from_bytes(body.encode("utf-8")),
+            canonical_prompt=freeze_canonical_prompt(FrozenPromptContent.text(body)),
             occurred_at=datetime.now(timezone.utc),
             actor_id="model-switch-dogfood",
         )
@@ -560,9 +563,9 @@ async def _run(
                     minimum_reclaim_tokens=1,
                 )
                 source_result = await session.run_turn(
-                    "Call read_file exactly once on marker.txt with offset 1 and "
+                    PromptContent.text("Call read_file exactly once on marker.txt with offset 1 and "
                     "limit 200. After its result, reply briefly and include the "
-                    "exact marker MODEL_SWITCH_REAL_TOOL_OK.",
+                    "exact marker MODEL_SWITCH_REAL_TOOL_OK."),
                     command_id="command:model-switch-dogfood:source",
                 )
                 seeded_bytes = _seed_completed_history(
@@ -573,10 +576,10 @@ async def _run(
                 before_switch_evidence = _database_evidence(session)
                 await session.update_model_call_binding(destination_binding)
                 destination_result = await session.run_turn(
-                    "The model connection has changed. Call read_file exactly once on "
+                    PromptContent.text("The model connection has changed. Call read_file exactly once on "
                     "marker.txt with offset 1 and limit 20. After its result, answer "
                     "exactly MODEL_SWITCH_DESTINATION_OK followed by one short sentence "
-                    "explaining what marker.txt contained.",
+                    "explaining what marker.txt contained."),
                     command_id="command:model-switch-dogfood:destination",
                 )
                 presentation_notices = session.take_presentation_notices(controller_id)

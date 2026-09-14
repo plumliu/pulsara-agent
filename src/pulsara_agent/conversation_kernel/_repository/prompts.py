@@ -7,7 +7,6 @@ from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pulsara_agent.conversation_kernel.contracts import (
-    CanonicalContent,
     ConversationScopeKind,
     EntryKind,
     HostWriterGuard,
@@ -15,12 +14,27 @@ from pulsara_agent.conversation_kernel.contracts import (
     TurnStatus,
 )
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    canonical_prompt_owner_is_exact,
+    copy_canonical_prompt_refs,
+    hydrate_canonical_prompt_owner,
+    insert_canonical_prompt_refs,
+    materialize_canonical_prompt,
+    validate_canonical_prompt_owner_metadata,
+)
+from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     model_call_binding_from_dict,
     model_call_binding_to_dict,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
+from pulsara_agent.model_input.contracts import ContextBindingBaseKind
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
+)
 from pulsara_agent.primitives.run_permission import (
     FrozenRunPermissionSnapshot,
     RunPermissionAdmissionSource,
@@ -34,6 +48,8 @@ from pulsara_agent.conversation_kernel.steer import (
     PendingPromptSteerFact,
     PreparedPromptIngressCommand,
     PreparedQueuedRootTurnAdmission,
+    PreparedRootProviderInputAdmission,
+    PreparedRootProviderInputCandidate,
     PreparedSteerConsumptionCandidate,
     PreparedSteerPlanConflictInterruption,
     PreparedSteerResourceRejection,
@@ -52,6 +68,7 @@ from pulsara_agent.conversation_kernel.steer import (
     SteerResourceRejectionConfirmationKind,
     build_pending_prompt_steer_fact,
     build_queued_root_turn_admission,
+    build_queued_root_turn_identity,
     prompt_ingress_semantic_digest,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -126,6 +143,11 @@ class _PromptOperations:
                 raise QueuedPromptActionRejected("PROMPT_NOT_PENDING")
             replacement_id = candidate.replacement_queue_item_id
             if replacement_id is not None:
+                validate_canonical_prompt_owner_metadata(
+                    connection,
+                    row=source,
+                    queue_item_id=candidate.source_queue_item_id,
+                )
                 target = connection.execute(
                     """SELECT conversation_scope_kind, status FROM pulsara_v3.turns
                        WHERE session_id=%s AND id=%s FOR UPDATE""",
@@ -187,6 +209,13 @@ class _PromptOperations:
                          FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s""",
                     (replacement_id, sequence, candidate.command_id, candidate.command_id,
                      candidate.target_turn_id, guard.session_id, candidate.source_queue_item_id),
+                )
+                copy_canonical_prompt_refs(
+                    connection,
+                    session_id=guard.session_id,
+                    workspace_id=str(source["workspace_id"]),
+                    source_queue_item_id=candidate.source_queue_item_id,
+                    target_queue_item_id=replacement_id,
                 )
                 drafts.append(self._event(
                     CommittedEventType.PROMPT_QUEUED, SubjectSlot.QUEUE_ITEM,
@@ -330,6 +359,7 @@ class _PromptOperations:
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
             command = connection.execute(
@@ -343,7 +373,8 @@ class _PromptOperations:
             ).fetchone()
             queue = connection.execute(
                 """
-                SELECT queue_sequence, command_id, client_submission_id,
+                SELECT session_id, workspace_id, queue_sequence,
+                       command_id, client_submission_id,
                        delivery_mode, target_turn_id, permission_snapshot_id,
                        requested_permission_mode, model_call_binding, status,
                        inline_content, blob_id, content_digest, content_size,
@@ -353,6 +384,15 @@ class _PromptOperations:
                 """,
                 (candidate.session_id, candidate.queue_item_id),
             ).fetchone()
+            content_exact = bool(
+                queue is not None
+                and canonical_prompt_owner_is_exact(
+                    connection,
+                    row=queue,
+                    expected=candidate.canonical_prompt,
+                    queue_item_id=candidate.queue_item_id,
+                )
+            )
         if command is None and queue is None:
             return PromptIngressConfirmation(PromptIngressConfirmationKind.NONE)
         try:
@@ -371,7 +411,7 @@ class _PromptOperations:
             command is not None
             and queue is not None
             and str(command["command_kind"]) == "QUEUE_PROMPT"
-            and str(command["request_schema_version"]) == "queue_prompt.v2"
+            and str(command["request_schema_version"]) == "queue_prompt.v3"
             and str(command["semantic_digest"]) == expected_semantic_digest
             and str(command["target_queue_item_id"]) == candidate.queue_item_id
             and str(queue["command_id"]) == candidate.command_id
@@ -399,11 +439,7 @@ class _PromptOperations:
                 if candidate.requested_permission_mode is None
                 else candidate.requested_permission_mode.value
             )
-            and str(queue["content_digest"]) == candidate.content_digest
-            and int(queue["content_size"]) == candidate.content_size
-            and str(queue["content_media_type"]) == "text/plain"
-            and str(queue["content_codec"]) == "utf-8"
-            and ((queue["inline_content"] is None) != (queue["blob_id"] is None))
+            and content_exact
             and (
                 (candidate.delivery_mode is PromptDeliveryMode.NEW_TURN)
                 == (observed_binding is not None)
@@ -426,7 +462,6 @@ class _PromptOperations:
         *,
         candidate: PreparedPromptIngressCommand,
         model_resolution_snapshot: FrozenModelResolutionSnapshot | None,
-        content: CanonicalContent,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
@@ -434,11 +469,6 @@ class _PromptOperations:
     ) -> PromptIngressAccepted:
         if candidate.session_id != guard.session_id:
             raise ValueError("prompt ingress belongs to another session")
-        if (
-            content.digest != candidate.content_digest
-            or content.size != candidate.content_size
-        ):
-            raise ValueError("prompt ingress content drifted before publication")
         new_turn = candidate.delivery_mode is PromptDeliveryMode.NEW_TURN
         if new_turn != (_expected_permission_snapshot is not None):
             raise ValueError("queued permission precondition scope is invalid")
@@ -477,7 +507,7 @@ class _PromptOperations:
                     frozen_binding = None
                 if (
                     existing["command_kind"] != "QUEUE_PROMPT"
-                    or existing["request_schema_version"] != "queue_prompt.v2"
+                    or existing["request_schema_version"] != "queue_prompt.v3"
                     or existing["semantic_digest"] != digest
                     or existing["target_queue_item_id"] != candidate.queue_item_id
                 ):
@@ -512,7 +542,12 @@ class _PromptOperations:
                         if candidate.requested_permission_mode is None
                         else candidate.requested_permission_mode.value
                     )
-                    or self._content_from_row(row) != content
+                    or not canonical_prompt_owner_is_exact(
+                        connection,
+                        row=row,
+                        expected=candidate.canonical_prompt,
+                        queue_item_id=candidate.queue_item_id,
+                    )
                     or (new_turn != (frozen_binding is not None))
                 ):
                     raise PromptIngressRejected(
@@ -594,6 +629,7 @@ class _PromptOperations:
                 (guard.session_id,),
             ).fetchone()
             assert row is not None
+            workspace_id = str(row["workspace_id"])
             queue_sequence = int(row["latest_prompt_queue_sequence"])
             permission = (
                 None
@@ -626,7 +662,7 @@ class _PromptOperations:
                     session_id, command_id, command_kind,
                     request_schema_version, semantic_digest,
                     target_kind, target_queue_item_id
-                ) VALUES (%s, %s, 'QUEUE_PROMPT', 'queue_prompt.v2',
+                ) VALUES (%s, %s, 'QUEUE_PROMPT', 'queue_prompt.v3',
                           %s, 'QUEUE_ITEM', %s)
                 """,
                 (
@@ -635,6 +671,12 @@ class _PromptOperations:
                     digest,
                     candidate.queue_item_id,
                 ),
+            )
+            publication = materialize_canonical_prompt(
+                connection,
+                publisher=self._canonical_content_publisher,
+                workspace_id=workspace_id,
+                prompt=candidate.canonical_prompt,
             )
             connection.execute(
                 """
@@ -664,7 +706,7 @@ class _PromptOperations:
                 (
                     candidate.queue_item_id,
                     guard.session_id,
-                    row["workspace_id"],
+                    workspace_id,
                     queue_sequence,
                     candidate.command_id,
                     candidate.client_submission_id,
@@ -675,7 +717,7 @@ class _PromptOperations:
                         else Jsonb(model_call_binding_to_dict(model_call_binding))
                     ),
                     candidate.target_turn_id,
-                    *_content_columns(content),
+                    *_content_columns(publication.body),
                     *(
                         (None,) * 12
                         if permission is None
@@ -686,10 +728,17 @@ class _PromptOperations:
                     None if handoff is None else handoff.kind.value,
                 ),
             )
+            insert_canonical_prompt_refs(
+                connection,
+                session_id=guard.session_id,
+                workspace_id=workspace_id,
+                queue_item_id=candidate.queue_item_id,
+                image_blob_ids=publication.image_blob_ids,
+            )
             self._append_events(
                 connection,
                 guard,
-                workspace_id=str(row["workspace_id"]),
+                workspace_id=workspace_id,
                 drafts=(
                     self._event(
                         CommittedEventType.PROMPT_QUEUED,
@@ -751,7 +800,12 @@ class _PromptOperations:
             ).fetchone()
             if item is None or self._open_plan_interaction(connection, session_id):
                 return None
-            content = self._content_from_row(item)
+            body_storage = self._content_from_row(item)
+            canonical_prompt = hydrate_canonical_prompt_owner(
+                connection,
+                row=item,
+                queue_item_id=str(item["id"]),
+            )
             permission = self._permission_from_row(item)
             model_call_binding = model_call_binding_from_dict(
                 item["model_call_binding"]
@@ -760,6 +814,71 @@ class _PromptOperations:
                 raise ConversationKernelConflict(
                     "queued ROOT prompt lacks a model binding"
                 )
+            session = connection.execute(
+                "SELECT workspace_id, latest_entry_sequence "
+                "FROM pulsara_v3.sessions WHERE id=%s",
+                (session_id,),
+            ).fetchone()
+            if session is None or str(session["workspace_id"]) != str(
+                item["workspace_id"]
+            ):
+                raise ConversationKernelConflict("queued ROOT session is absent")
+            identity = build_queued_root_turn_identity(session_id, str(item["id"]))
+            latest_sequence = int(session["latest_entry_sequence"])
+            base_kind, snapshot_id, source_through = (
+                self._initial_context_binding_values(
+                    connection,
+                    session_id=session_id,
+                    turn_id=identity.turn_id,
+                    initial_entry_sequence=latest_sequence + 1,
+                    scope_kind=ConversationScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                )
+            )
+            provider_input_candidate = PreparedRootProviderInputCandidate(
+                session_id=session_id,
+                workspace_id=str(item["workspace_id"]),
+                exact_turn_id=identity.turn_id,
+                exact_initial_entry_id=identity.entry_id,
+                exact_context_binding_revision_id=identity.context_revision_id,
+                unpublished_items=(
+                    FrozenProviderInputItem(
+                        item_kind=FrozenProviderInputItemKind.USER,
+                        source_entry_id=identity.entry_id,
+                        source_entry_sequence=latest_sequence + 1,
+                        source_turn_id=identity.turn_id,
+                        content=canonical_prompt.content.parts,
+                        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    ),
+                ),
+                unpublished_item_canonical_expanded_bytes=(
+                    canonical_prompt.resource_quote.canonical_expanded_bytes,
+                ),
+                permission_snapshot=permission,
+                model_call_binding=model_call_binding,
+                expected_latest_entry_sequence=latest_sequence,
+                context_base_kind=ContextBindingBaseKind(base_kind),
+                context_snapshot_id=snapshot_id,
+                source_through_sequence=source_through,
+                pending_plan_handoff_workflow_id=(
+                    None
+                    if item["pending_plan_handoff_workflow_id"] is None
+                    else str(item["pending_plan_handoff_workflow_id"])
+                ),
+                pending_plan_handoff_interaction_id=(
+                    None
+                    if item["pending_plan_handoff_interaction_id"] is None
+                    else str(item["pending_plan_handoff_interaction_id"])
+                ),
+                pending_plan_handoff_kind=(
+                    None
+                    if item["pending_plan_handoff_kind"] is None
+                    else str(item["pending_plan_handoff_kind"])
+                ),
+                unpublished_plan_workflow_fact=None,
+                unpublished_plan_handoff_fact=None,
+                unpublished_approved_plan_fact=None,
+            )
         return build_queued_root_turn_admission(
             session_id=session_id,
             workspace_id=str(item["workspace_id"]),
@@ -767,9 +886,11 @@ class _PromptOperations:
             queue_sequence=int(item["queue_sequence"]),
             command_id=str(item["command_id"]),
             client_submission_id=str(item["client_submission_id"]),
-            content=content,
+            content=body_storage,
+            canonical_prompt=canonical_prompt,
             permission_snapshot=permission,
             model_call_binding=model_call_binding,
+            provider_input_candidate=provider_input_candidate,
             pending_plan_handoff_workflow_id=(
                 None
                 if item["pending_plan_handoff_workflow_id"] is None
@@ -794,12 +915,15 @@ class _PromptOperations:
         guard: HostWriterGuard,
         *,
         candidate: PreparedQueuedRootTurnAdmission,
+        provider_input_admission: PreparedRootProviderInputAdmission,
         deadline_monotonic: float,
     ) -> QueuedRootTurnAdmissionConfirmation | None:
         """Consume one exact stable queue candidate in its canonical batch."""
 
         if candidate.session_id != guard.session_id:
             raise ValueError("queued ROOT candidate belongs to another session")
+        if provider_input_admission.candidate != candidate.provider_input_candidate:
+            raise ValueError("queued ROOT provider input admission differs from head")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -834,7 +958,9 @@ class _PromptOperations:
             ).fetchone()
             if item is None:
                 return None
-            if not self._queued_root_row_matches_candidate(item, candidate):
+            if not self._queued_root_row_matches_candidate(
+                connection, item, candidate
+            ):
                 raise ConversationKernelConflict("queued ROOT FIFO candidate drifted")
             if self._open_plan_interaction(connection, guard.session_id) is not None:
                 return None
@@ -895,6 +1021,42 @@ class _PromptOperations:
                     ),
                 )
                 return None
+            prospective = candidate.provider_input_candidate
+            session = connection.execute(
+                "SELECT workspace_id, latest_entry_sequence "
+                "FROM pulsara_v3.sessions WHERE id=%s",
+                (guard.session_id,),
+            ).fetchone()
+            if session is None or (
+                str(session["workspace_id"]) != prospective.workspace_id
+                or int(session["latest_entry_sequence"])
+                != prospective.expected_latest_entry_sequence
+            ):
+                raise ConversationKernelConflict(
+                    "queued ROOT provider input head drifted"
+                )
+            base_kind, snapshot_id, source_through = (
+                self._initial_context_binding_values(
+                    connection,
+                    session_id=guard.session_id,
+                    turn_id=candidate.exact_turn_id,
+                    initial_entry_sequence=(
+                        prospective.exact_initial_entry_sequence
+                    ),
+                    scope_kind=ConversationScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                )
+            )
+            if (
+                ContextBindingBaseKind(base_kind)
+                is not prospective.context_base_kind
+                or snapshot_id != prospective.context_snapshot_id
+                or source_through != prospective.source_through_sequence
+                or permission != prospective.permission_snapshot
+            ):
+                raise ConversationKernelConflict(
+                    "queued ROOT provider input basis drifted"
+                )
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             connection.execute(
                 """
@@ -942,7 +1104,7 @@ class _PromptOperations:
                 entry_kind=EntryKind.USER_MESSAGE,
                 scope_kind=ConversationScopeKind.ROOT,
                 scope_task_id=None,
-                content=candidate.content,
+                content=candidate.body_storage,
                 source_plan_workflow_id=(candidate.pending_plan_handoff_workflow_id),
                 source_plan_interaction_id=(
                     candidate.pending_plan_handoff_interaction_id
@@ -952,6 +1114,13 @@ class _PromptOperations:
                     if candidate.pending_plan_handoff_kind is None
                     else PlanHandoffKind(candidate.pending_plan_handoff_kind)
                 ),
+            )
+            copy_canonical_prompt_refs(
+                connection,
+                session_id=guard.session_id,
+                workspace_id=candidate.workspace_id,
+                source_queue_item_id=candidate.queue_item_id,
+                target_transcript_entry_id=candidate.exact_initial_entry_id,
             )
             updated = connection.execute(
                 """
@@ -997,9 +1166,46 @@ class _PromptOperations:
     ) -> bool:
         """Reject one exact queued ROOT head whose frozen target is invalid."""
 
+        return self._reject_prepared_prompt_head_before_delivery(
+            guard,
+            candidate=candidate,
+            reason="MODEL_CONFIGURATION_UNAVAILABLE_BEFORE_DELIVERY",
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def reject_prepared_prompt_head_input_resource_exhausted(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedQueuedRootTurnAdmission,
+        deadline_monotonic: float,
+    ) -> bool:
+        """Reject one exact FIFO head that cannot pass full input admission."""
+
+        return self._reject_prepared_prompt_head_before_delivery(
+            guard,
+            candidate=candidate,
+            reason="PROVIDER_INPUT_RESOURCE_EXHAUSTED_BEFORE_DELIVERY",
+            deadline_monotonic=deadline_monotonic,
+        )
+
+    def _reject_prepared_prompt_head_before_delivery(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedQueuedRootTurnAdmission,
+        reason: str,
+        deadline_monotonic: float,
+    ) -> bool:
+        """Settle one exact queued ROOT rejection in its existing transaction."""
+
         if candidate.session_id != guard.session_id:
             raise ValueError("queued ROOT candidate belongs to another session")
-        reason = "MODEL_CONFIGURATION_UNAVAILABLE_BEFORE_DELIVERY"
+        if reason not in {
+            "MODEL_CONFIGURATION_UNAVAILABLE_BEFORE_DELIVERY",
+            "PROVIDER_INPUT_RESOURCE_EXHAUSTED_BEFORE_DELIVERY",
+        }:
+            raise ValueError("queued ROOT rejection reason is invalid")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -1016,7 +1222,9 @@ class _PromptOperations:
             if (
                 str(item["status"]) == "REJECTED"
                 and str(item["terminal_reason"]) == reason
-                and self._queued_root_row_matches_candidate(item, candidate)
+                and self._queued_root_row_matches_candidate(
+                    connection, item, candidate
+                )
             ):
                 return True
             if str(item["status"]) != "PENDING":
@@ -1033,7 +1241,9 @@ class _PromptOperations:
             ).fetchone()
             if head is None or str(head["id"]) != candidate.queue_item_id:
                 return False
-            if not self._queued_root_row_matches_candidate(item, candidate):
+            if not self._queued_root_row_matches_candidate(
+                connection, item, candidate
+            ):
                 raise ConversationKernelConflict("queued ROOT FIFO candidate drifted")
             existing_turn = connection.execute(
                 """
@@ -1044,7 +1254,7 @@ class _PromptOperations:
             ).fetchone()
             if existing_turn is not None:
                 raise ConversationKernelConflict(
-                    "invalid queued model target already created a turn"
+                    "rejected queued ROOT input already created a turn"
                 )
             updated = connection.execute(
                 """
@@ -1132,15 +1342,21 @@ class _PromptOperations:
             revision_matches = self._queued_root_revision_matches_candidate(
                 connection, revision, candidate, entry
             )
+            queue_matches = self._queued_root_row_matches_candidate(
+                connection, queue, candidate
+            )
+            entry_matches = self._queued_root_entry_matches_candidate(
+                connection, entry, candidate
+            )
         winner_rows = (turn, revision, entry, consumed_event, accepted_event)
         if (
             queue is not None
-            and self._queued_root_row_matches_candidate(queue, candidate)
+            and queue_matches
             and str(queue["status"]) == "CONSUMED"
             and str(queue["consumed_entry_id"]) == candidate.exact_initial_entry_id
             and self._queued_root_turn_matches_candidate(turn, candidate)
             and revision_matches
-            and self._queued_root_entry_matches_candidate(entry, candidate)
+            and entry_matches
             and _event_row_matches_draft(
                 consumed_event, candidate.prompt_consumed_occurrence
             )
@@ -1159,7 +1375,7 @@ class _PromptOperations:
             )
         if (
             queue is not None
-            and self._queued_root_row_matches_candidate(queue, candidate)
+            and queue_matches
             and str(queue["status"]) == "PENDING"
             and queue["consumed_entry_id"] is None
             and all(row is None for row in winner_rows)
@@ -1173,6 +1389,7 @@ class _PromptOperations:
 
     def _queued_root_row_matches_candidate(
         self,
+        connection: Connection,
         row: object,
         candidate: PreparedQueuedRootTurnAdmission,
     ) -> bool:
@@ -1186,7 +1403,13 @@ class _PromptOperations:
                 and str(row["client_submission_id"]) == candidate.client_submission_id
                 and str(row["delivery_mode"]) == PromptDeliveryMode.NEW_TURN.value
                 and row["target_turn_id"] is None
-                and self._content_from_row(row) == candidate.content
+                and self._content_from_row(row) == candidate.body_storage
+                and canonical_prompt_owner_is_exact(
+                    connection,
+                    row=row,
+                    expected=candidate.canonical_prompt,
+                    queue_item_id=candidate.queue_item_id,
+                )
                 and self._permission_from_row(row) == candidate.permission_snapshot
                 and model_call_binding_from_dict(row["model_call_binding"])
                 == candidate.model_call_binding
@@ -1264,6 +1487,7 @@ class _PromptOperations:
 
     def _queued_root_entry_matches_candidate(
         self,
+        connection: Connection,
         row: object,
         candidate: PreparedQueuedRootTurnAdmission,
     ) -> bool:
@@ -1279,7 +1503,13 @@ class _PromptOperations:
                 and str(row["conversation_scope_kind"])
                 == ConversationScopeKind.ROOT.value
                 and row["scope_subagent_task_id"] is None
-                and self._content_from_row(row) == candidate.content
+                and self._content_from_row(row) == candidate.body_storage
+                and canonical_prompt_owner_is_exact(
+                    connection,
+                    row=row,
+                    expected=candidate.canonical_prompt,
+                    transcript_entry_id=candidate.exact_initial_entry_id,
+                )
                 and (
                     None
                     if row["source_plan_workflow_id"] is None
@@ -1392,15 +1622,27 @@ class _PromptOperations:
         ) as connection:
             rows = connection.execute(
                 """
-                SELECT id, session_id, workspace_id, queue_sequence,
-                       command_id, target_turn_id, inline_content, blob_id,
-                       content_digest, content_size, content_media_type,
-                       content_codec
-                FROM pulsara_v3.prompt_queue_items
-                WHERE session_id = %s AND status = 'PENDING'
-                  AND delivery_mode = 'STEER_ACTIVE_TURN'
-                  AND target_turn_id = %s
-                ORDER BY queue_sequence, id
+                SELECT q.id, q.session_id, q.workspace_id, q.queue_sequence,
+                       q.command_id, q.target_turn_id, q.inline_content, q.blob_id,
+                       q.content_digest, q.content_size, q.content_media_type,
+                       q.content_codec,
+                       q.content_size + images.image_bytes
+                           AS canonical_expanded_bytes,
+                       images.ref_count, images.blob_count
+                FROM pulsara_v3.prompt_queue_items AS q
+                LEFT JOIN LATERAL (
+                    SELECT coalesce(sum(b.logical_size), 0) AS image_bytes,
+                           count(*) AS ref_count, count(b.id) AS blob_count
+                    FROM pulsara_v3.canonical_image_refs AS r
+                    LEFT JOIN pulsara_v3.blobs AS b
+                      ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
+                    WHERE r.session_id = q.session_id
+                      AND r.queue_item_id = q.id
+                ) AS images ON true
+                WHERE q.session_id = %s AND q.status = 'PENDING'
+                  AND q.delivery_mode = 'STEER_ACTIVE_TURN'
+                  AND q.target_turn_id = %s
+                ORDER BY q.queue_sequence, q.id
                 LIMIT %s
                 """,
                 (session_id, target_turn_id, maximum_items + 1),
@@ -1409,18 +1651,55 @@ class _PromptOperations:
             # The caller quotes the first bounded prefix.  An additional row is
             # deliberately not hydrated and remains pending for the next cut.
             rows = rows[:maximum_items]
-        return tuple(
-            build_pending_prompt_steer_fact(
-                session_id=str(row["session_id"]),
-                workspace_id=str(row["workspace_id"]),
-                queue_item_id=str(row["id"]),
-                queue_sequence=int(row["queue_sequence"]),
-                command_id=str(row["command_id"]),
-                exact_target_turn_id=str(row["target_turn_id"]),
-                content=self._content_from_row(row),
+        facts: list[PendingPromptSteerFact] = []
+        for row in rows:
+            if int(row["ref_count"]) != int(row["blob_count"]):
+                raise ConversationKernelConflict(
+                    "pending steer image ref metadata is incomplete"
+                )
+            facts.append(
+                build_pending_prompt_steer_fact(
+                    session_id=str(row["session_id"]),
+                    workspace_id=str(row["workspace_id"]),
+                    queue_item_id=str(row["id"]),
+                    queue_sequence=int(row["queue_sequence"]),
+                    command_id=str(row["command_id"]),
+                    exact_target_turn_id=str(row["target_turn_id"]),
+                    content=self._content_from_row(row),
+                    canonical_expanded_bytes=int(row["canonical_expanded_bytes"]),
+                )
             )
-            for row in rows
-        )
+        return tuple(facts)
+
+    def hydrate_pending_prompt_steer(
+        self,
+        *,
+        fact: PendingPromptSteerFact,
+        deadline_monotonic: float,
+    ) -> FrozenCanonicalPrompt:
+        """Hydrate one exact pending steer in a single stable repository view."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                """SELECT * FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id = %s AND id = %s
+                     AND status = 'PENDING'
+                     AND delivery_mode = 'STEER_ACTIVE_TURN'
+                     AND target_turn_id = %s""",
+                (fact.session_id, fact.queue_item_id, fact.exact_target_turn_id),
+            ).fetchone()
+            if row is None or self._content_from_row(row) != fact.body_storage:
+                raise ConversationKernelConflict("pending steer changed before hydration")
+            return hydrate_canonical_prompt_owner(
+                connection,
+                row=row,
+                queue_item_id=fact.queue_item_id,
+            )
 
     def consume_prepared_prompt_steer(
         self,
@@ -1447,7 +1726,16 @@ class _PromptOperations:
                 """,
                 (guard.session_id, candidate.exact_target_turn_id),
             ).fetchone()
-            if item is None or not _prompt_steer_row_matches_candidate(item, candidate):
+            if (
+                item is None
+                or not _prompt_steer_row_matches_candidate(item, candidate)
+                or not canonical_prompt_owner_is_exact(
+                    connection,
+                    row=item,
+                    expected=candidate.canonical_prompt,
+                    queue_item_id=candidate.queue_item_id,
+                )
+            ):
                 raise ConversationKernelConflict(
                     "prepared steer no longer owns the exact lane head"
                 )
@@ -1548,7 +1836,14 @@ class _PromptOperations:
                 entry_kind=EntryKind.USER_STEER,
                 scope_kind=ConversationScopeKind.ROOT,
                 scope_task_id=None,
-                content=candidate.content,
+                content=candidate.body_storage,
+            )
+            copy_canonical_prompt_refs(
+                connection,
+                session_id=guard.session_id,
+                workspace_id=workspace_id,
+                source_queue_item_id=candidate.queue_item_id,
+                target_transcript_entry_id=candidate.new_entry_id,
             )
             updated = connection.execute(
                 """
@@ -1577,8 +1872,8 @@ class _PromptOperations:
                 entry_id=candidate.new_entry_id,
                 entry_sequence=entry_sequence,
                 target_turn_id=candidate.exact_target_turn_id,
-                content_digest=candidate.content.digest,
-                content_size=candidate.content.size,
+                content_digest=candidate.body_storage.digest,
+                content_size=candidate.body_storage.size,
                 prompt_consumed_event_id=events[0].event_id,
                 prompt_consumed_event_sequence=events[0].event_sequence,
                 user_steer_event_id=events[1].event_id,
@@ -1626,13 +1921,33 @@ class _PromptOperations:
                     ],
                 ),
             ).fetchall()
+            queue_content_exact = bool(
+                queue is not None
+                and canonical_prompt_owner_is_exact(
+                    connection,
+                    row=queue,
+                    expected=candidate.canonical_prompt,
+                    queue_item_id=candidate.queue_item_id,
+                )
+            )
+            entry_content_exact = bool(
+                entry is not None
+                and canonical_prompt_owner_is_exact(
+                    connection,
+                    row=entry,
+                    expected=candidate.canonical_prompt,
+                    transcript_entry_id=candidate.new_entry_id,
+                )
+            )
         events = {str(row["event_id"]): row for row in event_rows}
         if (
             queue is not None
             and str(queue["status"]) == "CONSUMED"
             and str(queue["consumed_entry_id"]) == candidate.new_entry_id
             and _prompt_steer_row_matches_candidate(queue, candidate)
+            and queue_content_exact
             and _accepted_steer_entry_matches(entry, candidate)
+            and entry_content_exact
             and _event_row_matches_draft(
                 events.get(candidate.prompt_consumed_occurrence.event_id),
                 candidate.prompt_consumed_occurrence,
@@ -1652,8 +1967,8 @@ class _PromptOperations:
                     entry_id=candidate.new_entry_id,
                     entry_sequence=candidate.expected_entry_sequence,
                     target_turn_id=candidate.exact_target_turn_id,
-                    content_digest=candidate.content.digest,
-                    content_size=candidate.content.size,
+                    content_digest=candidate.body_storage.digest,
+                    content_size=candidate.body_storage.size,
                     prompt_consumed_event_id=candidate.prompt_consumed_occurrence.event_id,
                     prompt_consumed_event_sequence=int(prompt_row["event_sequence"]),
                     user_steer_event_id=candidate.user_steer_accepted_occurrence.event_id,
@@ -1664,6 +1979,7 @@ class _PromptOperations:
             queue is not None
             and str(queue["status"]) == "PENDING"
             and _prompt_steer_row_matches_candidate(queue, candidate)
+            and queue_content_exact
             and entry is None
             and not events
         ):

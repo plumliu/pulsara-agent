@@ -23,11 +23,20 @@ from pulsara_agent.conversation_kernel.contracts import (
 from pulsara_agent.conversation_kernel.memory.contracts import (
     PreparedMemoryCandidateAcceptance,
 )
-from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.limits import (
+    PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
+    STAGE2_LIMITS,
+)
+from pulsara_agent.conversation_kernel.prompt_content import (
+    FrozenCanonicalPrompt,
+    PROMPT_BODY_CODEC,
+    PROMPT_BODY_MEDIA_TYPE,
+)
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     model_call_binding_to_dict,
 )
+from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
@@ -177,6 +186,42 @@ class AcceptedSubagentCompletion:
             raise ValueError("subagent completion disposition is inconsistent")
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedAutomaticSubagentCompletion:
+    """Exact immutable completion suffix value prepared before its writer."""
+
+    session_id: str
+    workspace_id: str
+    task_id: str
+    target_turn_id: str
+    entry_id: str
+    expected_provider_input_cut: PreparedProviderInputCut
+    storage_body: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        cut = self.expected_provider_input_cut
+        if (
+            not all(
+                (
+                    self.session_id,
+                    self.workspace_id,
+                    self.task_id,
+                    self.target_turn_id,
+                    self.entry_id,
+                )
+            )
+            or cut.session_id != self.session_id
+            or cut.turn_id != self.target_turn_id
+            or not isinstance(self.storage_body, bytes)
+            or not self.storage_body
+        ):
+            raise ValueError("automatic completion candidate is incomplete")
+
+    @property
+    def entry_sequence(self) -> int:
+        return self.expected_provider_input_cut.provider_input_through_sequence + 1
+
+
 class ToolRemoteIdentityConfirmationKind(StrEnum):
     FULL = "FULL"
     NONE = "NONE"
@@ -193,7 +238,7 @@ class PreparedRootTurnAdmission:
     permission_snapshot_id: str
     requested_permission_mode: PermissionMode
     model_call_binding: ModelCallBinding
-    content: CanonicalContent
+    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
     occurred_at: datetime
     actor_kind: str
     actor_id: str
@@ -212,7 +257,7 @@ class PreparedRootTurnAdmission:
             permission_snapshot_id=self.permission_snapshot_id,
             requested_permission_mode=self.requested_permission_mode,
             model_call_binding=self.model_call_binding,
-            content=self.content,
+            canonical_prompt=self.canonical_prompt,
             occurred_at=self.occurred_at,
             actor_kind=self.actor_kind,
             actor_id=self.actor_id,
@@ -266,7 +311,7 @@ class PreparedRootTurnIntent:
     context_binding_revision_id: str
     permission_snapshot_id: str
     requested_permission_mode: PermissionMode
-    content: CanonicalContent
+    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
     occurred_at: datetime
     actor_kind: str
     actor_id: str
@@ -286,8 +331,8 @@ class PreparedRootTurnIntent:
             )
         ):
             raise ValueError("ROOT turn intent identity is incomplete")
-        if self.content.size < 1:
-            raise ValueError("ROOT turn intent content is empty")
+        if not isinstance(self.canonical_prompt, FrozenCanonicalPrompt):
+            raise TypeError("ROOT turn intent content must be canonical and frozen")
         if self.expected_permission_snapshot is not None and (
             self.expected_permission_snapshot.snapshot_id != self.permission_snapshot_id
             or self.expected_permission_snapshot.requested_mode
@@ -1038,6 +1083,17 @@ def _canonical_content_identity(content: CanonicalContent) -> Mapping[str, objec
     }
 
 
+def _canonical_prompt_identity(
+    canonical_prompt: FrozenCanonicalPrompt,
+) -> Mapping[str, object]:
+    return {
+        "digest": "sha256:" + sha256(canonical_prompt.body).hexdigest(),
+        "size": len(canonical_prompt.body),
+        "media_type": PROMPT_BODY_MEDIA_TYPE,
+        "codec": PROMPT_BODY_CODEC,
+    }
+
+
 def _canonical_content_matches_utf8_text(content: CanonicalContent, value: str) -> bool:
     encoded = value.encode("utf-8")
     return (
@@ -1061,7 +1117,7 @@ def _root_turn_admission_payload(
     permission_snapshot_id: str,
     requested_permission_mode: PermissionMode,
     model_call_binding: ModelCallBinding,
-    content: CanonicalContent,
+    canonical_prompt: FrozenCanonicalPrompt,
     occurred_at: datetime,
     actor_kind: str,
     actor_id: str,
@@ -1075,7 +1131,7 @@ def _root_turn_admission_payload(
         "permission_snapshot_id": permission_snapshot_id,
         "requested_permission_mode": requested_permission_mode.value,
         "model_call_binding": model_call_binding_to_dict(model_call_binding),
-        "content": _canonical_content_identity(content),
+        "content": _canonical_prompt_identity(canonical_prompt),
         "occurred_at": occurred_at.isoformat(),
         "actor_kind": actor_kind,
         "actor_id": actor_id,
@@ -1092,7 +1148,7 @@ def build_prepared_root_turn_admission(
     permission_snapshot_id: str,
     requested_permission_mode: PermissionMode,
     model_call_binding: ModelCallBinding,
-    content: CanonicalContent,
+    canonical_prompt: FrozenCanonicalPrompt,
     occurred_at: datetime,
     actor_kind: str = "human",
     actor_id: str = "user",
@@ -1107,7 +1163,7 @@ def build_prepared_root_turn_admission(
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=requested_permission_mode,
         model_call_binding=model_call_binding,
-        content=content,
+        canonical_prompt=canonical_prompt,
         occurred_at=occurred_at,
         actor_kind=actor_kind,
         actor_id=actor_id,
@@ -1139,7 +1195,7 @@ def build_prepared_root_turn_admission(
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=requested_permission_mode,
         model_call_binding=model_call_binding,
-        content=content,
+        canonical_prompt=canonical_prompt,
         occurred_at=occurred_at,
         actor_kind=actor_kind,
         actor_id=actor_id,
@@ -1159,7 +1215,7 @@ def build_prepared_root_turn_intent(
     context_binding_revision_id: str,
     permission_snapshot_id: str,
     requested_permission_mode: PermissionMode,
-    content: CanonicalContent,
+    canonical_prompt: FrozenCanonicalPrompt,
     occurred_at: datetime,
     actor_kind: str = "human",
     actor_id: str = "user",
@@ -1173,7 +1229,7 @@ def build_prepared_root_turn_intent(
         context_binding_revision_id=context_binding_revision_id,
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=requested_permission_mode,
-        content=content,
+        canonical_prompt=canonical_prompt,
         occurred_at=occurred_at,
         actor_kind=actor_kind,
         actor_id=actor_id,
@@ -1348,7 +1404,7 @@ def _plan_inline(payload: Mapping[str, object]) -> InlineContent:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    if len(encoded) > 48 * 1024:
+    if len(encoded) > PLAN_CONTROL_RESULT_INLINE_HARD_BYTES:
         raise ValueError("Plan control result exceeds its inline bound")
     return InlineContent.from_bytes(
         encoded,

@@ -137,6 +137,7 @@ class ModelTargetFacts:
     tool_call: bool | None
     limits: ModelContextLimits
     wire_shape_hint: Literal["responses", "completions"] | None
+    input_modalities: tuple[str, ...] | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +281,7 @@ def resolve_model_target_contract(
             tool_call=entry.tool_call,
             limits=limits,
             wire_shape_hint=entry.wire_shape_hint,
+            input_modalities=entry.input_modalities,
         ),
         reasoning=reasoning,
         route_wire=route_wire,
@@ -306,6 +308,7 @@ def _entry_for_connection(
             reasoning=declared.reasoning,
             tool_call=declared.tool_call,
             wire_shape_hint=None,
+            input_modalities=None,
         )
     if catalog is None:
         raise ModelTargetNotExecutable("model catalog snapshot is unavailable")

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from tests.support.model_config import frozen_test_prompt
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 from time import monotonic
+from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
 import psycopg
@@ -12,9 +15,13 @@ from psycopg.errors import CheckViolation
 from psycopg.rows import dict_row
 import pytest
 
+from pulsara_agent.llm.input import FrozenPromptContent
+
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CONTEXT_SNAPSHOT_CODEC,
+    CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
@@ -45,6 +52,8 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
 from pulsara_agent.conversation_kernel.steer import (
+    PreparedActiveRootInputAdmission,
+    PreparedRootProviderInputAdmission,
     QueuedRootTurnAdmissionConfirmationKind,
 )
 from pulsara_agent.conversation_kernel.tool_policy import (
@@ -61,9 +70,11 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
     ProviderToolResultClosureKind,
+    provider_input_item_text,
 )
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
@@ -141,7 +152,7 @@ def _start_root(
         permission_snapshot_id=_id("permission-snapshot"),
         requested_permission_mode=mode,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(text),
+        content=FrozenPromptContent.text(text.decode("utf-8")),
         occurred_at=_now(),
         deadline_monotonic=monotonic() + 30,
     )
@@ -282,6 +293,46 @@ def _commit_plan_batch(
         actor_id="plan-runtime:test",
     )
     return _AcceptedAssistantBatch(candidate, assistant_entry_id, selected_call_id)
+
+
+def _fresh_plan_provider_input_admission(
+    repository: ConversationKernelRepository,
+    lease,
+    candidate: PreparedPlanToolBatch,
+) -> PreparedRootProviderInputAdmission:
+    prospective = repository.prepare_fresh_plan_continuation_provider_input_candidate(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+    # These repository tests exercise the transaction and exact candidate join.
+    # Full compiler/materialization admission is covered at the Host boundary.
+    return cast(
+        PreparedRootProviderInputAdmission,
+        SimpleNamespace(candidate=prospective),
+    )
+
+
+def _active_provider_input_admission(
+    candidate,
+) -> PreparedActiveRootInputAdmission:
+    # These repository tests exercise the transaction and exact candidate join.
+    # Full compiler/materialization admission is covered at the Host boundary.
+    return cast(
+        PreparedActiveRootInputAdmission,
+        SimpleNamespace(candidate=candidate),
+    )
+
+
+def _root_provider_input_admission(
+    candidate,
+) -> PreparedRootProviderInputAdmission:
+    # These repository tests exercise the transaction and exact candidate join.
+    # Full compiler/materialization admission is covered at the Host boundary.
+    return cast(
+        PreparedRootProviderInputAdmission,
+        SimpleNamespace(candidate=candidate),
+    )
 
 
 def _open_user_plan(repository, lease, *, resume=PermissionMode.ACCEPT_EDITS):
@@ -534,7 +585,7 @@ def test_round4_database_rejects_permission_mutation_and_wrong_initial_entry(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.READ_ONLY,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"queued read-only request"),
+        content=FrozenPromptContent.text('queued read-only request'),
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -595,6 +646,11 @@ def test_round4_agent_enter_batch_cancels_every_sibling_before_dispatch(
     accepted = repository.accept_plan_tool_batch(
         lease.guard,
         candidate=prepared.candidate,
+        continuation_provider_input_admission=(
+            _fresh_plan_provider_input_admission(
+                repository, lease, prepared.candidate
+            )
+        ),
         deadline_monotonic=monotonic() + 30,
     )
     confirmed = repository.confirm_plan_tool_batch_winner(
@@ -626,6 +682,68 @@ def test_round4_agent_enter_batch_cancels_every_sibling_before_dispatch(
     )
     assert continuation_permission.overlay is RunPermissionOverlay.PLAN_READ_ONLY
     assert continuation_permission.effective_mode is PermissionMode.READ_ONLY
+
+
+def test_k3_fresh_plan_result_and_continuation_exactly_match_prospective_read(
+    stage2_migrated_postgres_database,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    lease = _lease(repository)
+    workspace_id = repository.read_session_workspace_id(
+        lease.guard, deadline_monotonic=monotonic() + 30
+    )
+    origin_turn_id, _ = _start_root(repository, lease)
+    prepared = _commit_plan_batch(
+        repository,
+        lease,
+        workspace_id=workspace_id,
+        turn_id=origin_turn_id,
+        selected_tool_name="enter_plan",
+        selected_arguments={"reason": "quote result and continuation together"},
+        workflow_id=_id("plan-workflow"),
+        expected_workflow_revision=None,
+        sibling_before=True,
+    )
+    candidate = repository.prepare_fresh_plan_continuation_provider_input_candidate(
+        lease.guard,
+        candidate=prepared.candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+    reader = CanonicalProviderInputReader(repository.connection_provider)
+    prospective = reader.read_prospective_root_dispatch(
+        candidate,
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    accepted = repository.accept_plan_tool_batch(
+        lease.guard,
+        candidate=prepared.candidate,
+        continuation_provider_input_admission=cast(
+            PreparedRootProviderInputAdmission,
+            SimpleNamespace(candidate=candidate),
+        ),
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert accepted.continuation_turn_id == candidate.exact_turn_id
+    actual_cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=candidate.exact_turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    actual = reader.read_frozen_dispatch(
+        actual_cut,
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    assert actual == prospective
+    assert tuple(
+        item.item_kind
+        for item in actual.compile_snapshot.canonical_input.items[-3:]
+    ) == (
+        FrozenProviderInputItemKind.TOOL_RESULT,
+        FrozenProviderInputItemKind.TOOL_RESULT,
+        FrozenProviderInputItemKind.PLAN_CONTINUATION,
+    )
 
 
 @pytest.mark.parametrize(
@@ -661,6 +779,11 @@ def test_round4_plan_batch_confirmation_rejects_every_exact_identity_drift(
     repository.accept_plan_tool_batch(
         lease.guard,
         candidate=prepared.candidate,
+        continuation_provider_input_admission=(
+            _fresh_plan_provider_input_admission(
+                repository, lease, prepared.candidate
+            )
+        ),
         deadline_monotonic=monotonic() + 30,
     )
     candidate = prepared.candidate
@@ -799,6 +922,9 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
         return repository.accept_plan_tool_batch(
             lease.guard,
             candidate=candidate,
+            continuation_provider_input_admission=(
+                _fresh_plan_provider_input_admission(repository, lease, candidate)
+            ),
             deadline_monotonic=deadline,
         )
 
@@ -816,7 +942,7 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
     async def exercise():
         try:
             return await runner.run_turn(
-                "Inspect the repository and enter Plan mode before editing."
+                frozen_test_prompt("Inspect the repository and enter Plan mode before editing.")
             )
         finally:
             await tools.aclose()
@@ -923,7 +1049,7 @@ def test_round4_rejected_plan_call_owns_batch_and_continues_without_dispatch(
 
     async def exercise():
         try:
-            return await runner.run_turn("Ask safely, without writing files.")
+            return await runner.run_turn(frozen_test_prompt("Ask safely, without writing files."))
         finally:
             await tools.aclose()
             live_bus.close()
@@ -1019,34 +1145,87 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     )
     assert opened_question.question is not None
     assert opened_question.workflow_revision == 2
+    invalid_answer = PlanQuestionAnswer(
+        PlanQuestionAnswerKind.OPTION,
+        option_ordinal=len(opened_question.question.options),
+    )
     with pytest.raises(ConversationKernelConflict, match="option answer is absent"):
-        repository.resolve_plan_question(
+        repository.prepare_plan_question_resolution_provider_input_candidate(
             lease.guard,
-            command_id=_id("command"),
             workflow_id=workflow_id,
             expected_workflow_revision=2,
             interaction_id=str(opened_question.interaction_id),
-            answer=PlanQuestionAnswer(
-                PlanQuestionAnswerKind.OPTION,
-                option_ordinal=len(opened_question.question.options),
-            ),
+            answer=invalid_answer,
             result_id=_id("tool-result"),
             result_entry_id=_id("entry"),
             occurred_at=_now(),
-            actor_id="user:test",
             deadline_monotonic=monotonic() + 30,
         )
     answer_command = _id("command")
+    answer = PlanQuestionAnswer(PlanQuestionAnswerKind.OPTION, option_ordinal=0)
+    answer_result_id = _id("tool-result")
+    answer_entry_id = _id("entry")
+    answered_at = _now()
+    answer_candidate = (
+        repository.prepare_plan_question_resolution_provider_input_candidate(
+            lease.guard,
+            workflow_id=workflow_id,
+            expected_workflow_revision=2,
+            interaction_id=str(opened_question.interaction_id),
+            answer=answer,
+            result_id=answer_result_id,
+            result_entry_id=answer_entry_id,
+            occurred_at=answered_at,
+            deadline_monotonic=monotonic() + 30,
+        )
+    )
+    with pytest.raises(
+        ConversationKernelConflict,
+        match="Plan question provider admission is stale",
+    ):
+        repository.resolve_plan_question(
+            lease.guard,
+            command_id=answer_command,
+            workflow_id=workflow_id,
+            expected_workflow_revision=2,
+            interaction_id=str(opened_question.interaction_id),
+            answer=answer,
+            result_id=answer_result_id,
+            result_entry_id=answer_entry_id,
+            provider_input_admission=_active_provider_input_admission(
+                replace(
+                    answer_candidate,
+                    next_model_call_index=answer_candidate.next_model_call_index + 1,
+                )
+            ),
+            occurred_at=answered_at,
+            actor_id="user:test",
+            deadline_monotonic=monotonic() + 30,
+        )
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT workflow_revision FROM pulsara_v3.plan_workflows "
+            "WHERE session_id=%s AND id=%s",
+            (lease.guard.session_id, workflow_id),
+        ).fetchone() == (2,)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries WHERE id=%s",
+            (answer_entry_id,),
+        ).fetchone() == (0,)
     answered = repository.resolve_plan_question(
         lease.guard,
         command_id=answer_command,
         workflow_id=workflow_id,
         expected_workflow_revision=2,
         interaction_id=str(opened_question.interaction_id),
-        answer=PlanQuestionAnswer(PlanQuestionAnswerKind.OPTION, option_ordinal=0),
-        result_id=_id("tool-result"),
-        result_entry_id=_id("entry"),
-        occurred_at=_now(),
+        answer=answer,
+        result_id=answer_result_id,
+        result_entry_id=answer_entry_id,
+        provider_input_admission=_active_provider_input_admission(answer_candidate),
+        occurred_at=answered_at,
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
     )
@@ -1092,6 +1271,18 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     revise_turn = _id("turn")
     revise_entry = _id("entry")
     revise_revision = _id("context-revision")
+    revise_candidate = repository.prepare_plan_draft_review_provider_input_candidate(
+        lease.guard,
+        workflow_id=workflow_id,
+        expected_workflow_revision=4,
+        interaction_id=str(opened_draft.interaction_id),
+        decision=PlanDraftDecision.REVISE,
+        feedback="please add rollback",
+        continuation_turn_id=revise_turn,
+        continuation_entry_id=revise_entry,
+        continuation_context_binding_revision_id=revise_revision,
+        deadline_monotonic=monotonic() + 30,
+    )
     revised = repository.resolve_plan_draft_review(
         lease.guard,
         command_id=revise_command,
@@ -1103,6 +1294,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         continuation_turn_id=revise_turn,
         continuation_entry_id=revise_entry,
         continuation_context_binding_revision_id=revise_revision,
+        provider_input_admission=_root_provider_input_admission(revise_candidate),
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1139,6 +1331,60 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     implementation_entry = _id("entry")
     implementation_revision = _id("context-revision")
     approve_command = _id("command")
+    approve_candidate = repository.prepare_plan_draft_review_provider_input_candidate(
+        lease.guard,
+        workflow_id=workflow_id,
+        expected_workflow_revision=6,
+        interaction_id=str(second_draft.interaction_id),
+        decision=PlanDraftDecision.APPROVE,
+        feedback=None,
+        continuation_turn_id=implementation_turn,
+        continuation_entry_id=implementation_entry,
+        continuation_context_binding_revision_id=implementation_revision,
+        deadline_monotonic=monotonic() + 30,
+    )
+    approve_admission = _root_provider_input_admission(approve_candidate)
+    with pytest.raises(
+        ConversationKernelConflict,
+        match="Plan review provider admission is stale",
+    ):
+        repository.resolve_plan_draft_review(
+            lease.guard,
+            command_id=approve_command,
+            workflow_id=workflow_id,
+            expected_workflow_revision=6,
+            interaction_id=str(second_draft.interaction_id),
+            decision=PlanDraftDecision.APPROVE,
+            feedback=None,
+            continuation_turn_id=implementation_turn,
+            continuation_entry_id=implementation_entry,
+            continuation_context_binding_revision_id=implementation_revision,
+            provider_input_admission=_root_provider_input_admission(
+                replace(
+                    approve_candidate,
+                    unpublished_item_canonical_expanded_bytes=(
+                        approve_candidate.unpublished_item_canonical_expanded_bytes[0]
+                        + 1,
+                    ),
+                )
+            ),
+            occurred_at=_now(),
+            actor_id="user:test",
+            deadline_monotonic=monotonic() + 30,
+        )
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT workflow_revision FROM pulsara_v3.plan_workflows "
+            "WHERE session_id=%s AND id=%s",
+            (lease.guard.session_id, workflow_id),
+        ).fetchone() == (6,)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.turns WHERE id=%s",
+            (implementation_turn,),
+        ).fetchone() == (0,)
     approved = repository.resolve_plan_draft_review(
         lease.guard,
         command_id=approve_command,
@@ -1150,6 +1396,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         continuation_turn_id=implementation_turn,
         continuation_entry_id=implementation_entry,
         continuation_context_binding_revision_id=implementation_revision,
+        provider_input_admission=approve_admission,
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1236,7 +1483,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         summary=freeze_compaction_summary_output(
             "bounded adopted summary", maximum_utf8_bytes=100
         ),
-        recent_user_messages=(),
+        recent_human_requests=(),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request=FrozenCompactionActiveRequest(
             entry_id=(
@@ -1244,7 +1491,9 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
             ),
             entry_sequence=initial_sequence,
             location=CompactionActiveRequestLocation.CANONICAL_SUFFIX,
-            text=None,
+            item_kind=FrozenProviderInputItemKind.USER,
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+            content=None,
         ),
     )
     adoption = build_prepared_compaction_canonical_adoption(
@@ -1275,7 +1524,12 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
                 compaction_read.lineage_base,
                 source_range,
             ),
-            snapshot_content=InlineContent.from_bytes(snapshot_carrier.body),
+            snapshot_content=InlineContent.from_bytes(
+                snapshot_carrier.body,
+                media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
+                codec=CONTEXT_SNAPSHOT_CODEC,
+            ),
+            snapshot_carrier=snapshot_carrier,
             compiler_contract="test.compiler.v1",
             prompt_contract="test.prompt.v1",
             model_contract="test.model.v1",
@@ -1338,6 +1592,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         continuation_turn_id=implementation_turn,
         continuation_entry_id=implementation_entry,
         continuation_context_binding_revision_id=implementation_revision,
+        provider_input_admission=approve_admission,
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1414,6 +1669,7 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         continuation_turn_id=None,
         continuation_entry_id=None,
         continuation_context_binding_revision_id=None,
+        provider_input_admission=None,
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1431,7 +1687,7 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.READ_ONLY,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"first real prompt"),
+        content=FrozenPromptContent.text('first real prompt'),
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1460,6 +1716,10 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         confirmation = repository.consume_prepared_prompt_head(
             lease.guard,
             candidate=candidate,
+            provider_input_admission=cast(
+                PreparedRootProviderInputAdmission,
+                SimpleNamespace(candidate=candidate.provider_input_candidate),
+            ),
             deadline_monotonic=monotonic() + 30,
         )
         assert confirmation is not None
@@ -1510,7 +1770,7 @@ def test_round4_draft_cancel_handoff_is_queue_owned_exactly_once(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"second real prompt"),
+        content=FrozenPromptContent.text('second real prompt'),
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1614,4 +1874,6 @@ def test_round4_aborted_plan_question_lowers_without_effect_unknown(
         and item.tool_call_id == question_batch.selected_tool_call_id
     )
     assert len(closure_items) == 1
-    assert "no physical tool effect occurred" in closure_items[0].text
+    assert "no physical tool effect occurred" in provider_input_item_text(
+        closure_items[0]
+    )

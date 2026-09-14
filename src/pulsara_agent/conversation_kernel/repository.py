@@ -20,6 +20,7 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryCandidateStatus,
     PreparedMemoryCandidateAcceptance,
 )
+from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
     ToolOutputArtifactUnavailabilityReason,
@@ -44,6 +45,7 @@ from pulsara_agent.primitives.plan_workflow import (
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
+from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 
 from ._repository.contracts import (
     AcceptedCapabilityDecision,
@@ -67,6 +69,7 @@ from ._repository.contracts import (
     PlanQuestionAnswer,
     PlanToolBatchDisposition,
     PlanToolControlKind,
+    PreparedAutomaticSubagentCompletion,
     PreparedMemoryProposalSideBranch,
     PreparedPlanBatchCall,
     PreparedPlanToolBatch,
@@ -135,6 +138,7 @@ _FACADE_OWNED_SYMBOLS = (
     "ConversationKernelConflict",
     "AcceptedMemoryGovernance",
     "NoToolResultSideBranch",
+    "PreparedAutomaticSubagentCompletion",
     "PlanContinuationDisposition",
     "PlanContinuationInspection",
     "PlanDraftIdentityConflict",
@@ -185,6 +189,7 @@ __all__ = [
     "ConversationKernelRepository",
     "AcceptedMemoryGovernance",
     "NoToolResultSideBranch",
+    "PreparedAutomaticSubagentCompletion",
     "PreparedMemoryProposalSideBranch",
     "PreparedToolResultAcceptance",
     "PlanDraftIdentityConflict",

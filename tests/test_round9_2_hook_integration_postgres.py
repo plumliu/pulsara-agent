@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from io import BytesIO
 import json
 from pathlib import Path
 import shlex
@@ -12,6 +13,7 @@ import threading
 from time import monotonic
 
 from psycopg.rows import dict_row
+from PIL import Image
 import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
@@ -21,7 +23,15 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.repository import PlanQuestionAnswer
 from pulsara_agent.hooks.contracts import HookSourceKind
 from pulsara_agent.hooks.source import LocalHookSourceProvider
-from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
+from pulsara_agent.llm.input import (
+    LLMImagePart,
+    LLMTextPart,
+    MessageRole,
+    PromptContent,
+    PromptImagePart,
+    join_text_content,
+)
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.continuity import decode_runtime_observation
 from pulsara_agent.model_input.contracts import (
@@ -98,6 +108,26 @@ elif event == "Stop" and not value["stop_hook_active"]:
     raise SystemExit(2)
 elif event == "Stop":
     print(json.dumps({"continue": False, "stopReason": "STOP_TERMINALIZED"}))
+"""
+
+
+_IMAGE_INGRESS_HOOK_DRIVER = r"""
+import json
+from pathlib import Path
+import sys
+import time
+
+log_path, gate_path = map(Path, sys.argv[1:3])
+value = json.loads(sys.stdin.read())
+with log_path.open("a", encoding="utf-8") as stream:
+    stream.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+if value["prompt"] == "":
+    deadline = time.monotonic() + 4
+    while not gate_path.exists():
+        if time.monotonic() >= deadline:
+            raise SystemExit(3)
+        time.sleep(0.01)
+print("IMAGE_PROMPT_HOOK:" + value["prompt"])
 """
 
 
@@ -256,6 +286,34 @@ class _QueuedContextIsolationModel(CallbackScriptedKernelModel):
         else:  # pragma: no cover - an extra open is a candidate-binding failure
             raise AssertionError("unexpected queued-context provider open")
         for item in items:
+            yield item
+
+
+class _QueuedImageK2Model(CallbackScriptedKernelModel):
+    def __init__(self) -> None:
+        self.active_provider_started = asyncio.Event()
+        self.active_provider_release = asyncio.Event()
+        self.image_compile_seen = asyncio.Event()
+        self.semantic_input = None
+        super().__init__(self._stream)
+
+    def freeze_wire_measurement(self, **kwargs):
+        semantic_input = kwargs["semantic_input"]
+        if any(
+            isinstance(part, LLMImagePart)
+            for message in semantic_input.messages
+            for part in message.content
+        ):
+            self.semantic_input = semantic_input
+            self.image_compile_seen.set()
+            raise RuntimeError("K3 image wire is intentionally not installed")
+        return super().freeze_wire_measurement(**kwargs)
+
+    async def _stream(self, request):
+        del request
+        self.active_provider_started.set()
+        await self.active_provider_release.wait()
+        for item in _text_stream("ACTIVE_BEFORE_IMAGE_QUEUE", "text:image-queue"):
             yield item
 
 
@@ -418,7 +476,7 @@ def _hook_observations(request: object):
         for message in compiled.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
         and decode_runtime_observation(message).source_kind
         is ContextSourceKind.HOOK_CONTEXT
     ]
@@ -486,7 +544,7 @@ def test_round9_2_host_sources_stop_and_prefix_continuity(
             test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         result = await session.run_turn(
-            "exercise source ordering and Stop",
+            PromptContent.text("exercise source ordering and Stop"),
             command_id="command:round9-2-lifecycle",
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
@@ -567,7 +625,7 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
         )
         running = asyncio.create_task(
             session.run_turn(
-                "active-turn-A",
+                PromptContent.text("active-turn-A"),
                 command_id="command:queued-context:A",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
@@ -575,7 +633,7 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
         await asyncio.wait_for(model.active_provider_started.wait(), timeout=5)
         queued = await session.submit_prompt(
             command_id="command:queued-context:B",
-            text="queued-turn-B",
+            content=PromptContent.text("queued-turn-B"),
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         assert queued.status == "PENDING"
@@ -601,6 +659,159 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
         await core.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage2_migrated_postgres_database,
+) -> None:
+    import pulsara_agent.conversation_kernel.host as kernel_host
+
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    driver = tmp_path / "image_hook_driver.py"
+    log_path = tmp_path / "image-hooks.jsonl"
+    gate_path = tmp_path / "release-image-hook"
+    driver.write_text(_IMAGE_INGRESS_HOOK_DRIVER, encoding="utf-8")
+    command = " ".join(
+        shlex.quote(value)
+        for value in (sys.executable, str(driver), str(log_path), str(gate_path))
+    )
+    _install_trusted_sources(
+        home=home,
+        workspace_root=workspace,
+        user_config=_config(command, ("UserPromptSubmit",)),
+        workspace_config=None,
+    )
+    monkeypatch.setenv("PULSARA_HOME", str(home))
+    image_output = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
+    image_bytes = image_output.getvalue()
+    pure_image = PromptContent((PromptImagePart(image_bytes, "image/png"),))
+    model = _QueuedImageK2Model()
+    original_estimate_message = PulsaraHeuristicTokenEstimatorV2.estimate_message
+
+    def estimate_message(estimator, message):
+        if any(isinstance(part, LLMImagePart) for part in message.content):
+            return 260
+        return original_estimate_message(estimator, message)
+
+    monkeypatch.setattr(
+        PulsaraHeuristicTokenEstimatorV2,
+        "estimate_message",
+        estimate_message,
+    )
+    monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
+    monkeypatch.setattr(
+        kernel_host.LocalMcpManagementService,
+        "load_configs",
+        lambda *_args, **_kwargs: (),
+    )
+
+    async def scenario() -> None:
+        core = KernelHostCore.production(
+            model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn)
+        )
+        session = await core.open_session(
+            HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
+        )
+        await session.update_model_call_binding(
+            test_model_binding(core._model_runtime)  # noqa: SLF001
+        )
+        running = asyncio.create_task(
+            session.run_turn(
+                PromptContent.text("active before image queue"),
+                command_id="command:k2-image-queue-active",
+            )
+        )
+        await asyncio.wait_for(model.active_provider_started.wait(), timeout=5)
+        queued_task = asyncio.create_task(
+            session.submit_prompt(
+                command_id="command:k2-image-queue",
+                content=pure_image,
+            )
+        )
+        deadline = monotonic() + 5
+        while True:
+            values = (
+                [json.loads(line) for line in log_path.read_text().splitlines()]
+                if log_path.exists()
+                else []
+            )
+            if any(value["prompt"] == "" for value in values):
+                break
+            assert monotonic() < deadline
+            await asyncio.sleep(0.01)
+
+        conflict = await session.submit_prompt(
+            command_id="command:k2-image-queue",
+            content=PromptContent(
+                (
+                    LLMTextPart("different"),
+                    PromptImagePart(image_bytes, "image/png"),
+                )
+            ),
+        )
+        assert (conflict.status, conflict.public_code) == (
+            "REJECTED",
+            "COMMAND_CONFLICT",
+        )
+        gate_path.touch()
+        queued = await asyncio.wait_for(queued_task, timeout=5)
+        assert queued.status == "PENDING"
+        exact_retry = await session.submit_prompt(
+            command_id="command:k2-image-queue",
+            content=pure_image,
+        )
+        assert (
+            exact_retry.command_id,
+            exact_retry.status,
+            exact_retry.target_id,
+            exact_retry.public_code,
+            exact_retry.prompt_delivery,
+        ) == (
+            queued.command_id,
+            queued.status,
+            queued.target_id,
+            queued.public_code,
+            queued.prompt_delivery,
+        )
+        with session.repository.connection_provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=monotonic() + 5,
+        ) as connection:
+            refs = connection.execute(
+                """SELECT ref_ordinal, b.body
+                   FROM pulsara_v3.canonical_image_refs r
+                   JOIN pulsara_v3.blobs b ON b.id=r.blob_id
+                   WHERE r.session_id=%s AND r.queue_item_id=%s""",
+                (session.session_id, queued.prompt_delivery.queue_item_id),
+            ).fetchall()
+        assert [(row["ref_ordinal"], bytes(row["body"])) for row in refs] == [
+            (0, image_bytes)
+        ]
+
+        model.active_provider_release.set()
+        active = await asyncio.wait_for(running, timeout=10)
+        assert active.final_text == "ACTIVE_BEFORE_IMAGE_QUEUE"
+        await asyncio.wait_for(model.image_compile_seen.wait(), timeout=10)
+        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.shutdown()
+
+    asyncio.run(scenario())
+    logs = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert [value["prompt"] for value in logs].count("") == 1
+    assert [value["prompt"] for value in logs].count("different") == 0
+    assert len(logs) == 2
+    assert model.semantic_input is not None
+    assert any(
+        message.role is MessageRole.USER
+        and message.content == (LLMImagePart("image/png", image_bytes, 7, 5),)
+        for message in model.semantic_input.messages
+    )
 
 
 def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
@@ -653,7 +864,7 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
             test_model_binding(core._model_runtime)  # noqa: SLF001
         )
         result = await session.run_turn(
-            "exercise tool Hooks",
+            PromptContent.text("exercise tool Hooks"),
             command_id="command:round9-2-tools",
             requested_permission_mode=PermissionMode.ASK_PERMISSIONS,
         )
@@ -823,7 +1034,7 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
         session._hooks.dispatch = capture_dispatch  # type: ignore[method-assign]  # noqa: SLF001
         try:
             result = await session.run_turn(
-                "Reload the reviewed Hook source, then read one file.",
+                PromptContent.text("Reload the reviewed Hook source, then read one file."),
                 command_id="command:round9-2-reload",
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
@@ -958,7 +1169,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
         assert entered.status == "SUCCEEDED"
         running = asyncio.create_task(
             session.run_turn(
-                "Ask the planned question",
+                PromptContent.text("Ask the planned question"),
                 command_id="command:round9-2-plan-question",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
@@ -1095,7 +1306,7 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
         )
         try:
             result = await session.run_turn(
-                "Delegate one child lifecycle probe.",
+                PromptContent.text("Delegate one child lifecycle probe."),
                 command_id="command:round9-2-subagent",
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
@@ -1202,7 +1413,7 @@ def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
         )
         for index in range(3):
             result = await session.run_turn(
-                f"history request {index}: " + ("context " * 4096),
+                PromptContent.text(f"history request {index}: " + ("context " * 4096)),
                 command_id=f"command:round9-2-history:{index}",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
@@ -1228,7 +1439,7 @@ def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
         assert snapshots[0]["id"] == outcome.snapshot_id
         assert snapshots[0]["source_through_sequence"] > 0
         after = await session.run_turn(
-            "continue after idle compaction",
+            PromptContent.text("continue after idle compaction"),
             command_id="command:round9-2-after-idle-compact",
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
@@ -1316,7 +1527,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
         session_id = first.session_id
         for index in range(6):
             result = await first.run_turn(
-                f"resume history {index}: " + ("context " * 4096),
+                PromptContent.text(f"resume history {index}: " + ("context " * 4096)),
                 command_id=f"command:round9-2-resume-history:{index}",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
@@ -1344,7 +1555,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
             minimum_reclaim_tokens=1,
         )
         result = await resumed.run_turn(
-            "resume first physical attempt: " + ("context " * 4096),
+            PromptContent.text("resume first physical attempt: " + ("context " * 4096)),
             command_id="command:round9-2-resume-compaction",
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
@@ -1418,13 +1629,13 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             )
             for index in range(3):
                 await session.run_turn(
-                    f"active history {index}: " + ("context " * 4096),
+                    PromptContent.text(f"active history {index}: " + ("context " * 4096)),
                     command_id=f"command:round9-2-active-history:{index}",
                     requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                 )
             running = asyncio.create_task(
                 session.run_turn(
-                    "active compaction request: " + ("context " * 4096),
+                    PromptContent.text("active compaction request: " + ("context " * 4096)),
                     command_id="command:round9-2-active-turn",
                     requested_permission_mode=PermissionMode.ACCEPT_EDITS,
                 )

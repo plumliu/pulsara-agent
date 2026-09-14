@@ -4550,7 +4550,33 @@ function projectBackgroundProcess(value: ProtocolBackgroundProcess): BackgroundP
 
 function decodeContent(content?: ProtocolContent): string {
   if (!content?.inline_content) return '';
-  return decodeBase64(content.inline_content);
+  const decoded = decodeBase64(content.inline_content);
+  if (content.media_type !== 'application/vnd.pulsara.prompt+json') return decoded;
+  let prompt: Record<string, unknown>;
+  try {
+    prompt = asRecord(JSON.parse(decoded));
+  } catch {
+    throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
+  }
+  if (prompt.schema !== 'pulsara.prompt/v1' || !Array.isArray(prompt.parts)) {
+    throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
+  }
+  return prompt.parts.map((value: unknown) => {
+    const part = asRecord(value);
+    if (part.type === 'image') {
+      // K2 changes canonical storage; the current editor still submits strings.
+      // Do not turn an image descriptor or placeholder into an editable prompt.
+      throw new RuntimeApiError(
+        'IMAGE_CONTENT_PREVIEW_UNAVAILABLE',
+        '当前界面尚不支持完整展示图片输入。',
+        false,
+      );
+    }
+    if (part.type !== 'text' || typeof part.text !== 'string') {
+      throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
+    }
+    return part.text;
+  }).join('\n');
 }
 
 function decodeBase64(value: string): string {

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import LLMMessage, LLMTextPart
 from pulsara_agent.llm.model_connections import ModelConnectionId
 from pulsara_agent.conversation_kernel.process_local_settlement import (
     await_started_settlement,
@@ -78,7 +78,10 @@ def test_round3_1_prefix_fingerprint_changes_on_any_old_message_rewrite() -> Non
     assert expected != provider_input_prefix_fingerprint(
         system_prompt=system,
         tools=tools,
-        messages=(replace(messages[0], content=("rewritten",)), messages[1]),
+        messages=(
+            replace(messages[0], content=(LLMTextPart("rewritten"),)),
+            messages[1],
+        ),
     )
 
 

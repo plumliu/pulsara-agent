@@ -9,15 +9,24 @@ from threading import RLock
 from typing import Callable, Iterator, TypeVar
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
+from pulsara_agent.conversation_kernel.steer import (
+    PreparedActiveRootInputAdmission,
+    PreparedActiveRootInputCandidate,
+    PreparedRootProviderInputAdmission,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
     AcceptedSubagentCompletion,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    PreparedAutomaticSubagentCompletion,
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
-from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
+from pulsara_agent.ports.terminal_observation import (
+    PreparedInstallationTarget,
+    TerminalObservationInstallationAttempt,
+)
 from pulsara_agent.ports.user_control_feedback import (
     UserControlFeedbackInstallationAttempt,
 )
@@ -91,6 +100,31 @@ class ProviderSafePointCoordinator:
             self._active_handle = handle
             return handle
 
+    def freeze_prospective_active_root_input(
+        self,
+        *,
+        candidate: PreparedActiveRootInputCandidate,
+        deadline_monotonic: float,
+    ) -> PreparedProviderInputHandle:
+        """Freeze an exact active suffix, including a result that closes Plan."""
+
+        with self._lock:
+            if self._active_handle is not None:
+                raise RuntimeError("provider input handle is already active")
+            self._repository.require_prospective_active_root_input_safe(
+                self._guard,
+                candidate=candidate,
+                deadline_monotonic=deadline_monotonic,
+            )
+            self._generation += 1
+            handle = PreparedProviderInputHandle(
+                candidate.expected_provider_input_cut,
+                self,
+                self._generation,
+            )
+            self._active_handle = handle
+            return handle
+
     def freeze_compaction_input(
         self,
         *,
@@ -159,6 +193,12 @@ class ProviderSafePointCoordinator:
     def accept_subagent_completion(
         self,
         *,
+        handle: PreparedProviderInputHandle | None = None,
+        provider_input_admission: (
+            PreparedActiveRootInputAdmission
+            | PreparedRootProviderInputAdmission
+            | None
+        ) = None,
         turn_id: str,
         new_context_binding_revision_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
@@ -170,11 +210,38 @@ class ProviderSafePointCoordinator:
         """Explicitly deliver one terminal task at the same cut boundary."""
 
         with self._lock:
-            if self._active_handle is not None:
+            if provider_input_admission is not None:
+                if isinstance(
+                    provider_input_admission, PreparedActiveRootInputAdmission
+                ):
+                    if handle is None:
+                        raise ValueError(
+                            "active completion admission lacks its handle"
+                        )
+                    self._require_current(handle)
+                    if handle._model_active:
+                        raise ExternalSourceNotAtSafePoint(
+                            "provider model operation is active"
+                        )
+                    if (
+                        provider_input_admission.candidate.expected_provider_input_cut
+                        != handle.cut
+                    ):
+                        raise ConversationKernelConflict(
+                            "manual completion admission lost its exact input cut"
+                        )
+                elif handle is not None:
+                    raise ValueError(
+                        "new ROOT completion cannot use an active handle"
+                    )
+            elif self._active_handle is not None:
                 raise ExternalSourceNotAtSafePoint(
                     "provider input/model operation is active"
                 )
-            if new_context_binding_revision_id is None:
+            if (
+                new_context_binding_revision_id is None
+                and provider_input_admission is None
+            ):
                 self._repository.require_provider_safe_turn(
                     self._guard,
                     turn_id=turn_id,
@@ -187,38 +254,56 @@ class ProviderSafePointCoordinator:
                 requested_permission_mode=requested_permission_mode,
                 task_id=task_id,
                 command_id=command_id,
+                provider_input_admission=provider_input_admission,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=actor_id,
                 deadline_monotonic=deadline_monotonic,
             )
 
-    def accept_queued_subagent_completion(
+    def accept_queued_subagent_completions(
         self,
         handle: PreparedProviderInputHandle,
         *,
-        task_id: str,
+        candidates: tuple[PreparedAutomaticSubagentCompletion, ...],
         actor_id: str,
         deadline_monotonic: float,
-    ) -> AcceptedSubagentCompletion:
-        """Append one automatic completion behind the handle's exact base cut."""
+    ) -> tuple[
+        PreparedProviderInputHandle,
+        tuple[AcceptedSubagentCompletion, ...],
+    ]:
+        """Atomically append and rotate one admitted automatic completion suffix."""
 
         with self._lock:
             self._require_current(handle)
             if handle._model_active:
-                raise ExternalSourceNotAtSafePoint(
-                    "provider model operation is active"
+                raise ExternalSourceNotAtSafePoint("provider model operation is active")
+            if (
+                not candidates
+                or candidates[0].expected_provider_input_cut != handle.cut
+            ):
+                raise ConversationKernelConflict(
+                    "automatic completion candidate lost its exact input cut"
                 )
-            return self._repository.accept_subagent_completion_into_root(
+            accepted = self._repository.accept_automatic_subagent_completion_batch(
                 self._guard,
-                task_id=task_id,
-                turn_id=handle.cut.turn_id,
-                expected_provider_input_cut=handle.cut,
+                candidates=candidates,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=actor_id,
                 deadline_monotonic=deadline_monotonic,
             )
+            cut = self._repository.prepare_provider_input_cut(
+                self._guard,
+                turn_id=handle.cut.turn_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+            self._generation += 1
+            successor = PreparedProviderInputHandle(cut, self, self._generation)
+            handle._closed = True
+            handle._model_active = False
+            self._active_handle = successor
+            return successor, accepted
 
-    def install_terminal_observation(
+    def prepare_terminal_observation_installation(
         self,
         *,
         coordinator: TerminalMonitorCoordinator,
@@ -227,8 +312,8 @@ class ProviderSafePointCoordinator:
         workspace_id: str,
         actor_id: str,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        """Freeze and install one monitor draft under the provider-safe lock.
+    ) -> TerminalObservationInstallationAttempt | AcceptedEntry | None:
+        """Freeze or exact-confirm one monitor draft before input admission.
 
         A process-local in-flight candidate survives an ambiguous database
         acknowledgement.  The next invocation exact-confirms that candidate
@@ -260,10 +345,37 @@ class ProviderSafePointCoordinator:
                 )
                 if attempt is None:
                     return None
+            return attempt
+
+    def publish_terminal_observation(
+        self,
+        handle: PreparedProviderInputHandle | None,
+        *,
+        coordinator: TerminalMonitorCoordinator,
+        attempt: TerminalObservationInstallationAttempt,
+        provider_input_admission: (
+            PreparedActiveRootInputAdmission | PreparedRootProviderInputAdmission
+        ),
+        deadline_monotonic: float,
+    ) -> AcceptedEntry:
+        """Publish one already-measured Terminal observation exactly once."""
+
+        with self._lock:
+            if handle is not None:
+                self._require_current(handle)
+                if handle._model_active:
+                    raise ExternalSourceNotAtSafePoint(
+                        "provider model operation is active"
+                    )
+            elif self._active_handle is not None:
+                raise ExternalSourceNotAtSafePoint(
+                    "provider input/model operation is active"
+                )
             try:
                 accepted = self._repository.accept_terminal_observation(
                     self._guard,
                     candidate=attempt,
+                    provider_input_admission=provider_input_admission,
                     deadline_monotonic=deadline_monotonic,
                 )
             except ConversationKernelConflict:
@@ -285,16 +397,24 @@ class ProviderSafePointCoordinator:
 
     def install_user_control_feedback(
         self,
+        handle: PreparedProviderInputHandle,
         *,
         attempt: UserControlFeedbackInstallationAttempt,
+        provider_input_admission: PreparedActiveRootInputAdmission,
         deadline_monotonic: float,
     ) -> AcceptedEntry:
         """Install or exact-confirm one immutable user-control candidate."""
 
         with self._lock:
-            if self._active_handle is not None:
-                raise ExternalSourceNotAtSafePoint(
-                    "provider input/model operation is active"
+            self._require_current(handle)
+            if handle._model_active:
+                raise ExternalSourceNotAtSafePoint("provider model operation is active")
+            if (
+                provider_input_admission.candidate.expected_provider_input_cut
+                != handle.cut
+            ):
+                raise ConversationKernelConflict(
+                    "user control feedback admission lost its exact input cut"
                 )
             confirmed = self._repository.confirm_user_control_feedback_winner(
                 self._guard,
@@ -307,6 +427,7 @@ class ProviderSafePointCoordinator:
                 return self._repository.accept_user_control_feedback(
                     self._guard,
                     candidate=attempt,
+                    provider_input_admission=provider_input_admission,
                     deadline_monotonic=deadline_monotonic,
                 )
             except ConversationKernelConflict:

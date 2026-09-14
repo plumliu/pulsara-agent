@@ -67,13 +67,15 @@ from pulsara_agent.memory.product_contract import (
     MEMORY_GOVERNANCE_CONTRACT_ID,
     MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,
 )
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import LLMImagePart, LLMMessage, LLMTextPart
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     CanonicalModelInputSnapshot,
+    CompactionSnapshotCarrier,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
 )
+from pulsara_agent.model_input.lowering import compaction_snapshot_provider_content
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 
@@ -692,6 +694,12 @@ def _finalize_governance_source_envelope(
     omitted_causal = 0
     origin_human_complete = (
         evidence.source_coverage.origin_turn_human_source_complete
+        and all(
+            not item.truncated
+            and item.item_omitted_before == 0
+            and item.item_omitted_after == 0
+            for item in current_turn_human
+        )
     )
     for item in current_turn_human:
         if id(item) in selected:
@@ -753,7 +761,16 @@ def _finalize_governance_source_envelope(
         and item.item_omitted_after == 0
         for item in (*causal_output, *producer_output, *suffix)
     )
-    causal_complete = omitted_causal == 0 and len(causal_output) == len(causal)
+    causal_complete = (
+        omitted_causal == 0
+        and len(causal_output) == len(causal)
+        and all(
+            not item.truncated
+            and item.item_omitted_before == 0
+            and item.item_omitted_after == 0
+            for item in causal_output
+        )
+    )
     post_complete = (
         evidence.source_coverage.post_proposal_human_source_complete
     )
@@ -795,7 +812,13 @@ def _finalize_governance_source_envelope(
 def _causal_source_item(
     item: FrozenProviderInputItem,
 ) -> FrozenMemoryGovernanceSourceItem | None:
-    if not item.text:
+    if isinstance(item.content, CompactionSnapshotCarrier):
+        parts = compaction_snapshot_provider_content(item.content)
+    else:
+        parts = item.content
+    omitted_images = sum(isinstance(part, LLMImagePart) for part in parts)
+    text = "\n".join(part.text for part in parts if isinstance(part, LLMTextPart))
+    if not text and omitted_images == 0:
         return None
     role = MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT
     label = "主模型当时看到的非用户上下文"
@@ -830,7 +853,8 @@ def _causal_source_item(
         blocks=(
             FrozenMemoryGovernanceSourceBlock(
                 block_kind=MemoryGovernanceSourceBlockKind.TEXT,
-                text=item.text,
+                text=text,
+                truncated=omitted_images > 0,
             ),
         ),
     )

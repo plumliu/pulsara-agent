@@ -4,6 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 
+from pulsara_agent.llm.input import MAXIMUM_PROMPT_TEXT_UTF8_BYTES
+
+
+# Existing Plan control inline result bound, also used for admission before
+# effects.  This names the original 48 KiB contract without changing it.
+PLAN_CONTROL_RESULT_INLINE_HARD_BYTES = 48 * 1024
+# Existing per-safe-point FIFO width for ROOT completion delivery.  K3 uses the
+# same producer bound when quoting every completion that may share a follow-up.
+ROOT_COMPLETION_SUFFIX_BATCH_ITEMS = 16
+
 
 @dataclass(frozen=True, slots=True)
 class Stage2RuntimeLimits:
@@ -55,7 +65,7 @@ class Stage2RuntimeLimits:
     memory_index_lag_warning_generations: int = 2
     memory_index_lag_error_generations: int = 10
     provider_output_tokens_per_call_hard: int = 16_384
-    prompt_hard_bytes: int = 1 << 20
+    prompt_hard_bytes: int = MAXIMUM_PROMPT_TEXT_UTF8_BYTES
     tool_result_hard_bytes: int = 4 << 20
     canonical_blob_hard_bytes: int = 16 << 20
     inline_content_hard_bytes: int = 64 << 10
@@ -127,6 +137,8 @@ STAGE2_STRUCTURAL_BUDGETS = Stage2StructuralBudgets()
 
 
 __all__ = [
+    "PLAN_CONTROL_RESULT_INLINE_HARD_BYTES",
+    "ROOT_COMPLETION_SUFFIX_BATCH_ITEMS",
     "STAGE2_LIMITS",
     "STAGE2_STRUCTURAL_BUDGETS",
     "Stage2RuntimeLimits",

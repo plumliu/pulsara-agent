@@ -10,10 +10,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
+from hashlib import sha256
 from typing import Literal, Mapping, Protocol
 
-from pulsara_agent.llm.estimator import TokenEstimate
-from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.estimator import FinalWireTokenEstimate, TokenEstimate
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMContentPart,
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+    MessageRole,
+    content_has_image,
+    frozen_prompt_content_canonical_value,
+    join_text_content,
+    llm_content_identity_value,
+)
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
     ToolOutputArtifactUnavailabilityReason,
@@ -328,7 +340,8 @@ class ModelInputTokenEstimator(Protocol):
         *,
         fixed_context: object,
         ordered_input_items: tuple[object, ...],
-    ) -> int: ...
+        ordered_input_sources: tuple[LLMMessage | None, ...],
+    ) -> FinalWireTokenEstimate: ...
 
     def estimate_message(self, message: LLMMessage) -> int: ...
 
@@ -726,6 +739,222 @@ class FrozenProviderInputItemKind(StrEnum):
     INTER_AGENT_MESSAGE = "INTER_AGENT_MESSAGE"
 
 
+class CompactionContinuationMode(StrEnum):
+    RESUME_ACTIVE_TURN = "RESUME_ACTIVE_TURN"
+    AWAIT_NEXT_USER = "AWAIT_NEXT_USER"
+
+
+class CompactionActiveRequestLocation(StrEnum):
+    SNAPSHOT_EXACT = "SNAPSHOT_EXACT"
+    CANONICAL_SUFFIX = "CANONICAL_SUFFIX"
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenCompactionActiveRequest:
+    """Runtime-owned location of the exact request driving one active turn."""
+
+    entry_id: str
+    entry_sequence: int
+    location: CompactionActiveRequestLocation
+    item_kind: FrozenProviderInputItemKind
+    input_origin: CanonicalInputOriginKind | None
+    content: FrozenPromptContent | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.entry_id or self.entry_sequence < 0:
+            raise ValueError("compaction active request identity is incomplete")
+        snapshot_exact = self.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+        if snapshot_exact != (self.content is not None):
+            raise ValueError("compaction active request location/content union is invalid")
+        if self.content is not None and not isinstance(
+            self.content, FrozenPromptContent
+        ):
+            raise TypeError("compaction active request content must be frozen")
+        validate_compaction_request_shape(
+            item_kind=self.item_kind,
+            input_origin=self.input_origin,
+            active=True,
+            has_image=(
+                self.content is not None and content_has_image(self.content.parts)
+            ),
+        )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "entry_id": self.entry_id,
+            "entry_sequence": self.entry_sequence,
+            "location": self.location.value,
+            "item_kind": self.item_kind.value,
+            "input_origin": (
+                None if self.input_origin is None else self.input_origin.value
+            ),
+            "content": (
+                None
+                if self.content is None
+                else frozen_prompt_content_canonical_value(self.content)
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenRetainedHistoricalRequest:
+    """Exact historical request, without an execution identity or authority."""
+
+    item_kind: FrozenProviderInputItemKind
+    input_origin: CanonicalInputOriginKind | None
+    content: FrozenPromptContent = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.content, FrozenPromptContent):
+            raise TypeError("retained historical request content must be frozen")
+        validate_compaction_request_shape(
+            item_kind=self.item_kind,
+            input_origin=self.input_origin,
+            active=False,
+            has_image=content_has_image(self.content.parts),
+        )
+
+    def canonical_value(self) -> dict[str, object]:
+        return {
+            "item_kind": self.item_kind.value,
+            "input_origin": (
+                None if self.input_origin is None else self.input_origin.value
+            ),
+            "content": frozen_prompt_content_canonical_value(self.content),
+        }
+
+
+def validate_compaction_request_shape(
+    *,
+    item_kind: FrozenProviderInputItemKind,
+    input_origin: CanonicalInputOriginKind | None,
+    active: bool,
+    has_image: bool,
+) -> None:
+    """Close the shared compaction request kind/origin/content union."""
+
+    origins = {
+        FrozenProviderInputItemKind.USER: {
+            CanonicalInputOriginKind.HUMAN_MESSAGE,
+            CanonicalInputOriginKind.HUMAN_STEER,
+            CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
+            CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
+        },
+        FrozenProviderInputItemKind.PLAN_CONTINUATION: {
+            CanonicalInputOriginKind.PLAN_CONTINUATION
+        },
+        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE: {
+            CanonicalInputOriginKind.INTER_AGENT_MESSAGE
+        },
+        FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {None},
+    }
+    allowed = origins.get(item_kind)
+    if allowed is None or input_origin not in allowed:
+        raise ValueError("compaction request kind/origin union is invalid")
+    if active and input_origin in {
+        CanonicalInputOriginKind.HUMAN_STEER,
+        CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
+    }:
+        raise ValueError("compaction active request origin is invalid")
+    if has_image and not (
+        item_kind is FrozenProviderInputItemKind.USER
+        and input_origin
+        in {
+            CanonicalInputOriginKind.HUMAN_MESSAGE,
+            CanonicalInputOriginKind.HUMAN_STEER,
+        }
+    ):
+        raise ValueError("compaction request origin cannot carry image content")
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionSnapshotCarrier:
+    """The sole typed content value of a canonical CONTEXT_SNAPSHOT item."""
+
+    continuation_mode: CompactionContinuationMode
+    handoff_instruction: str = field(repr=False)
+    active_request: FrozenCompactionActiveRequest | None = field(repr=False)
+    earlier_context_summary: str = field(repr=False)
+    recent_human_requests: tuple[FrozenRetainedHistoricalRequest, ...] = field(
+        repr=False
+    )
+    body: bytes = field(repr=False)
+    content_digest: str
+    retained_historical_requests: tuple[FrozenRetainedHistoricalRequest, ...] = field(
+        default=(), repr=False
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.retained_historical_requests, tuple) or any(
+            not isinstance(request, FrozenRetainedHistoricalRequest)
+            for request in self.retained_historical_requests
+        ):
+            raise ValueError("retained historical requests must be a typed tuple")
+        if not isinstance(self.recent_human_requests, tuple) or any(
+            not isinstance(request, FrozenRetainedHistoricalRequest)
+            or request.item_kind is not FrozenProviderInputItemKind.USER
+            or request.input_origin
+            not in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.HUMAN_STEER,
+            }
+            for request in self.recent_human_requests
+        ):
+            raise ValueError("recent human requests must be a typed human tuple")
+        resume = self.continuation_mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
+        if resume != (self.active_request is not None):
+            raise ValueError("snapshot continuation/active-request union is invalid")
+        self.handoff_instruction.encode("utf-8")
+        if not self.handoff_instruction:
+            raise ValueError("snapshot handoff instruction is empty")
+        expected = canonical_json_bytes(
+            {
+                "continuation": {
+                    "mode": self.continuation_mode.value,
+                    "instruction": self.handoff_instruction,
+                    "active_request": (
+                        None
+                        if self.active_request is None
+                        else self.active_request.canonical_value()
+                    ),
+                },
+                "earlier_context_summary": self.earlier_context_summary,
+                "recent_human_requests": tuple(
+                    request.canonical_value()
+                    for request in self.recent_human_requests
+                ),
+                "retained_historical_requests": tuple(
+                    request.canonical_value()
+                    for request in self.retained_historical_requests
+                ),
+            }
+        )
+        if self.body != expected:
+            raise ValueError("snapshot carrier is not canonical JSON")
+        if self.content_digest != "sha256:" + sha256(self.body).hexdigest():
+            raise ValueError("snapshot carrier digest mismatch")
+
+    @property
+    def canonical_expanded_bytes(self) -> int:
+        """Body bytes plus every ordered image occurrence carried by the snapshot."""
+
+        contents = (
+            (
+                ()
+                if self.active_request is None or self.active_request.content is None
+                else (self.active_request.content,)
+            )
+            + tuple(request.content for request in self.recent_human_requests)
+            + tuple(request.content for request in self.retained_historical_requests)
+        )
+        return len(self.body) + sum(
+            len(part.immutable_bytes)
+            for content in contents
+            for part in content.parts
+            if isinstance(part, LLMImagePart)
+        )
+
+
 class ProviderToolResultClosureKind(StrEnum):
     INTERRUPTED_BEFORE_DISPATCH = "interrupted_before_dispatch"
     INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED = "interrupted_may_have_partially_executed"
@@ -755,7 +984,9 @@ class FrozenProviderInputItem:
     source_entry_id: str | None
     source_entry_sequence: int | None
     source_turn_id: str | None
-    text: str = field(repr=False)
+    content: tuple[LLMContentPart, ...] | CompactionSnapshotCarrier = field(
+        repr=False
+    )
     input_origin: CanonicalInputOriginKind | None = None
     tool_calls: tuple[ProviderToolCall, ...] = field(default=(), repr=False)
     tool_call_id: str | None = None
@@ -769,7 +1000,15 @@ class FrozenProviderInputItem:
     )
 
     def __post_init__(self) -> None:
-        self.text.encode("utf-8")
+        snapshot_kind = self.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+        if snapshot_kind:
+            if not isinstance(self.content, CompactionSnapshotCarrier):
+                raise TypeError("context snapshot content must be its typed carrier")
+        elif not isinstance(self.content, tuple) or any(
+            not isinstance(part, (LLMTextPart, LLMImagePart))
+            for part in self.content
+        ):
+            raise TypeError("provider input content must be typed immutable parts")
         result_kind = self.item_kind in {
             FrozenProviderInputItemKind.TOOL_RESULT,
             FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
@@ -805,6 +1044,20 @@ class FrozenProviderInputItem:
         }
         if has_origin != (self.input_origin is not None):
             raise ValueError("provider input origin union is invalid")
+        images_allowed = (
+            self.item_kind is FrozenProviderInputItemKind.USER
+            and self.input_origin
+            in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.HUMAN_STEER,
+            }
+        )
+        if (
+            not snapshot_kind
+            and content_has_image(self.content)
+            and not images_allowed
+        ):
+            raise ValueError("provider input origin cannot carry image content")
         if self.source_entry_sequence is not None and self.source_entry_sequence < 0:
             raise ValueError("provider input entry sequence is invalid")
         if self.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT and (
@@ -830,9 +1083,19 @@ class FrozenProviderInputItem:
             raise ValueError("provider tool-result request identity union is invalid")
         if (
             self.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
-            and self.tool_result_body_text != self.text
+            and self.tool_result_body_text != join_text_content(self.content)
         ):
             raise ValueError("ordinary tool result body differs from canonical text")
+
+
+def provider_input_item_text(item: FrozenProviderInputItem) -> str:
+    """Return the legacy renderer input only for strictly text-only content."""
+
+    if not isinstance(item, FrozenProviderInputItem):
+        raise TypeError("provider input text accessor requires a frozen item")
+    if isinstance(item.content, CompactionSnapshotCarrier):
+        raise ValueError("text-only consumer cannot consume a context snapshot")
+    return join_text_content(item.content)
 
 
 @dataclass(frozen=True, slots=True)
@@ -965,18 +1228,18 @@ def context_binding_compile_fact_fingerprint(
 class CanonicalModelInputSnapshot:
     identity: CanonicalModelInputIdentity
     items: tuple[FrozenProviderInputItem, ...] = field(repr=False)
-    canonical_utf8_bytes: int
+    canonical_expanded_bytes: int
     snapshot_fingerprint: str
     closures: tuple[ProviderToolResultClosure, ...] = ()
     late_outcomes: tuple[LateToolOutcomeObservation, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.canonical_utf8_bytes < 0:
+        if self.canonical_expanded_bytes < 0:
             raise ValueError("canonical model input byte count is invalid")
         expected = canonical_model_input_snapshot_fingerprint(
             identity=self.identity,
             items=self.items,
-            canonical_utf8_bytes=self.canonical_utf8_bytes,
+            canonical_expanded_bytes=self.canonical_expanded_bytes,
             closures=self.closures,
             late_outcomes=self.late_outcomes,
         )
@@ -1623,6 +1886,17 @@ def provider_input_item_fingerprint(item: FrozenProviderInputItem) -> str:
 def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, object]:
     """Unique stable semantic framing for one canonical provider item."""
 
+    if isinstance(item.content, CompactionSnapshotCarrier):
+        # Import within the call so contracts remain the lower-level owner while
+        # identity uses the one normal provider projection owned by lowering.
+        from pulsara_agent.model_input.lowering import (
+            compaction_snapshot_provider_content,
+        )
+
+        content = compaction_snapshot_provider_content(item.content)
+    else:
+        content = item.content
+
     return {
         "kind": item.item_kind.value,
         "entry_id": item.source_entry_id,
@@ -1631,7 +1905,7 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
         "input_origin": (
             None if item.input_origin is None else item.input_origin.value
         ),
-        "text": item.text,
+        "content": llm_content_identity_value(content),
         "calls": tuple(
             (call.tool_call_id, call.tool_name, call.arguments)
             for call in item.tool_calls
@@ -1710,16 +1984,16 @@ def canonical_model_input_snapshot_fingerprint(
     *,
     identity: CanonicalModelInputIdentity,
     items: tuple[FrozenProviderInputItem, ...],
-    canonical_utf8_bytes: int,
+    canonical_expanded_bytes: int,
     closures: tuple[ProviderToolResultClosure, ...],
     late_outcomes: tuple[LateToolOutcomeObservation, ...],
 ) -> str:
     return context_fingerprint(
-        "canonical-model-input-snapshot:v1",
+        "canonical-model-input-snapshot:v2-expanded-content",
         {
             "identity": identity.identity_fingerprint,
             "items": tuple(provider_input_item_fingerprint(item) for item in items),
-            "canonical_utf8_bytes": canonical_utf8_bytes,
+            "canonical_expanded_bytes": canonical_expanded_bytes,
             "closures": tuple(
                 provider_tool_result_closure_leaf(item) for item in closures
             ),
@@ -1878,7 +2152,7 @@ class ContextCompileBudgetReport:
     total_input_tokens: int
     protected_transcript_tokens: int
     protected_prefix_message_count: int
-    protected_prefix_logical_utf8_bytes: int
+    protected_prefix_logical_bytes: int
     protected_prefix_fingerprint: str | None
     context_source_tokens: int
     degraded_source_count: int
@@ -1899,7 +2173,7 @@ class ContextCompileBudgetReport:
             self.total_input_tokens,
             self.protected_transcript_tokens,
             self.protected_prefix_message_count,
-            self.protected_prefix_logical_utf8_bytes,
+            self.protected_prefix_logical_bytes,
             self.context_source_tokens,
             self.degraded_source_count,
             self.omitted_source_count,
@@ -2180,7 +2454,7 @@ def frozen_compiled_model_input_fingerprint(
 def _llm_message_value(message: LLMMessage) -> dict[str, object]:
     return {
         "role": message.role.value,
-        "content": message.content,
+        "content": llm_content_identity_value(message.content),
         "thinking": message.thinking,
         "tool_calls": tuple(
             (call.id, call.name, call.arguments) for call in message.tool_calls
@@ -2198,6 +2472,7 @@ def _token_estimate_value(estimate: TokenEstimate) -> dict[str, object]:
         "message_tokens_by_index": estimate.message_tokens_by_index,
         "tool_tokens": estimate.tool_tokens,
         "envelope_tokens": estimate.envelope_tokens,
+        "visual_image_tokens": estimate.visual_image_tokens,
         "total_input_tokens": estimate.total_input_tokens,
     }
 
@@ -2216,9 +2491,7 @@ def _budget_report_value(report: ContextCompileBudgetReport) -> dict[str, object
         "total_input_tokens": report.total_input_tokens,
         "protected_transcript_tokens": report.protected_transcript_tokens,
         "protected_prefix_message_count": report.protected_prefix_message_count,
-        "protected_prefix_logical_utf8_bytes": (
-            report.protected_prefix_logical_utf8_bytes
-        ),
+        "protected_prefix_logical_bytes": report.protected_prefix_logical_bytes,
         "protected_prefix_fingerprint": report.protected_prefix_fingerprint,
         "context_source_tokens": report.context_source_tokens,
         "degraded_source_count": report.degraded_source_count,

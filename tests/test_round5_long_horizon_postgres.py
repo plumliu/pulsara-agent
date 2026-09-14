@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tests.support.model_config import frozen_test_prompt
+from pulsara_agent.llm.input import FrozenPromptContent
+
 import asyncio
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -50,7 +53,7 @@ from pulsara_agent.ports.live_agent_event import (
     ToolCallStartPayload,
     live_digest,
 )
-from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.input import LLMTextPart, MessageRole
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
@@ -484,7 +487,7 @@ def _prepare_subagent_task(repository, lease) -> ActiveSubagentFixtureId:
         permission_snapshot_id=_name("parent-permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"delegate"),
+        content=FrozenPromptContent.text('delegate'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -534,7 +537,7 @@ def test_round5_sixty_four_model_calls_finalize_without_a_turn_cap(
         return preflight(request, **kwargs)
 
     model.preflight_execution = renew_before_preflight
-    result = asyncio.run(_runner(repository, lease, model, tool).run_turn("start"))
+    result = asyncio.run(_runner(repository, lease, model, tool).run_turn(frozen_test_prompt("start")))
 
     assert result.model_call_count == 64
     assert result.tool_call_count == 63
@@ -568,7 +571,7 @@ def test_round5_each_operation_gets_a_fresh_owner_deadline_without_turn_budget(
             model,
             tool_names=(),
             deadline_factory=deadlines,
-        ).run_turn("start")
+        ).run_turn(frozen_test_prompt("start"))
     )
 
     assert result.final_text == "done"
@@ -590,7 +593,7 @@ def test_round5_more_than_sixty_four_tool_calls_in_one_turn_finalize(
     )
     tool = _KnownReadOnlyTool()
 
-    result = asyncio.run(_runner(repository, lease, model, tool).run_turn("start"))
+    result = asyncio.run(_runner(repository, lease, model, tool).run_turn(frozen_test_prompt("start")))
 
     assert result.model_call_count == 2
     assert result.tool_call_count == 65
@@ -620,7 +623,7 @@ def test_round5_tool_result_settlement_gets_fresh_canonical_watchdogs(
             model,
             tool,
             deadline_factory=deadlines,
-        ).run_turn("start")
+        ).run_turn(frozen_test_prompt("start"))
     )
 
     assert result.final_text == "done"
@@ -642,7 +645,7 @@ def test_round5_exact_tool_return_is_shielded_through_canonical_settlement(
 
     async def scenario() -> None:
         operation = asyncio.create_task(
-            _runner(repository, lease, model, tool).run_turn("start")
+            _runner(repository, lease, model, tool).run_turn(frozen_test_prompt("start"))
         )
         assert await asyncio.to_thread(repository.acceptance_started.wait, 5)
         operation.cancel()
@@ -685,7 +688,7 @@ def test_round5_remote_identity_lost_ack_cannot_discard_exact_tool_result(
         ]
     )
 
-    result = asyncio.run(_runner(repository, lease, model, tool).run_turn("start"))
+    result = asyncio.run(_runner(repository, lease, model, tool).run_turn(frozen_test_prompt("start")))
 
     assert result.final_text == "done"
     assert tool.invocations == 1
@@ -738,7 +741,7 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
             permission_snapshot_id=None,
             requested_permission_mode=None,
             model_call_binding=None,
-            content=InlineContent.from_bytes(b"late steer"),
+            content=FrozenPromptContent.text('late steer'),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
             deadline_monotonic=monotonic() + 10,
@@ -750,7 +753,7 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
     deadlines = _RecordingDeadlineFactory()
     result = asyncio.run(
         _runner(repository, lease, model, deadline_factory=deadlines).run_turn(
-            "start", command_id=command_id
+            frozen_test_prompt("start"), command_id=command_id
         )
     )
 
@@ -760,7 +763,8 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
     assert result.final_text == "after-steer"
     appended = model.requests[25].compiled_input.messages
     assert any(
-        message.role is MessageRole.USER and message.content == ("late steer",)
+        message.role is MessageRole.USER
+        and message.content == (LLMTextPart("late steer"),)
         for message in appended
     )
     with provider.connection(
@@ -793,7 +797,7 @@ def test_round5_user_cancel_after_twenty_four_calls_interrupts_the_turn(
     model = CallbackScriptedKernelModel(stream)
 
     async def scenario() -> None:
-        task = asyncio.create_task(_runner(repository, lease, model).run_turn("start"))
+        task = asyncio.create_task(_runner(repository, lease, model).run_turn(frozen_test_prompt("start")))
         await asyncio.wait_for(blocked.wait(), timeout=10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -833,12 +837,12 @@ def test_round5_root_turn_admission_full_none_conflict_matrix(
     runner = _runner(repository, lease, model)
 
     if should_open:
-        result = asyncio.run(runner.run_turn("start", command_id=_name("command")))
+        result = asyncio.run(runner.run_turn(frozen_test_prompt("start"), command_id=_name("command")))
         assert result.final_text == "done"
         assert len(model.requests) == 1
     else:
         with pytest.raises(Exception, match="conflicting winner"):
-            asyncio.run(runner.run_turn("start", command_id=_name("command")))
+            asyncio.run(runner.run_turn(frozen_test_prompt("start"), command_id=_name("command")))
         assert model.requests == []
     assert repository.calls == expected_calls if hasattr(repository, "calls") else True
 
@@ -859,7 +863,7 @@ def test_round5_cancelled_root_admission_never_reissues_and_full_is_interrupted(
 
     async def scenario() -> None:
         operation = asyncio.create_task(
-            runner.run_turn("start", command_id=_name("cancelled-command"))
+            runner.run_turn(frozen_test_prompt("start"), command_id=_name("cancelled-command"))
         )
         assert await asyncio.to_thread(repository.started.wait, 5)
         operation.cancel()
@@ -895,7 +899,7 @@ def test_round5_cancelled_root_admission_joins_transient_confirmation_failures(
 
     async def scenario() -> None:
         operation = asyncio.create_task(
-            runner.run_turn("start", command_id=_name("cancelled-command"))
+            runner.run_turn(frozen_test_prompt("start"), command_id=_name("cancelled-command"))
         )
         assert await asyncio.to_thread(repository.started.wait, 5)
         operation.cancel()
@@ -1149,7 +1153,7 @@ def test_round5_observation_physical_exception_becomes_one_known_failure_result(
             model,
             tool,
             tool_names=(tool_name,),
-        ).run_turn("start")
+        ).run_turn(frozen_test_prompt("start"))
     )
 
     assert result.final_text == "recovered"
@@ -1194,7 +1198,7 @@ def test_round5_effectful_physical_exception_keeps_attempt_without_result(
     )
 
     with pytest.raises(KernelToolPhysicalInvocationError):
-        asyncio.run(runner.run_turn("start"))
+        asyncio.run(runner.run_turn(frozen_test_prompt("start")))
 
     assert tool.invocations == 1
     with provider.connection(
@@ -1235,7 +1239,7 @@ def test_round5_stale_writer_never_accepts_or_hands_off_late_tool_result(
     )
 
     async def scenario() -> None:
-        task = asyncio.create_task(runner.run_turn("start"))
+        task = asyncio.create_task(runner.run_turn(frozen_test_prompt("start")))
         await asyncio.wait_for(tool.started.wait(), timeout=5)
         await asyncio.to_thread(
             repository.acquire_host_writer,

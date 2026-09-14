@@ -39,6 +39,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     build_prepared_manual_compaction_command,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
+    CompactionWriteReservation,
     HostCompactionRuntimeOwner,
     ManualCompactionRequest,
 )
@@ -50,7 +51,6 @@ from pulsara_agent.conversation_kernel.activation import (
     require_stage2_runtime_privilege_boundary,
 )
 from pulsara_agent.conversation_kernel.blob import (
-    CanonicalContentPublisher,
     PostgresCanonicalBlobStore,
 )
 from pulsara_agent.conversation_kernel.capability import KernelSkillProjectionComposer
@@ -153,9 +153,19 @@ from pulsara_agent.conversation_kernel.steer import (
     build_prompt_ingress_command,
     build_queued_root_turn_identity,
 )
+from pulsara_agent.conversation_kernel.image_validation import (
+    HostPromptImageValidator,
+)
+from pulsara_agent.conversation_kernel.prompt_content import (
+    FrozenCanonicalPrompt,
+    freeze_canonical_prompt,
+)
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelRunResult,
+)
+from pulsara_agent.conversation_kernel.provider_dispatch import (
+    PreparedProspectiveRootDispatch,
 )
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
 from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
@@ -210,10 +220,19 @@ from pulsara_agent.llm.model_connections import (
     model_call_binding_from_dict,
     model_call_binding_to_dict,
 )
+from pulsara_agent.llm.input import (
+    LLMTextPart,
+    PromptContent,
+    prompt_text_projection,
+)
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
 from pulsara_agent.llm.result import TransportUsageReport
-from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.model_input.contracts import (
+    ModelInputCompileFailureKind,
+    ModelInputScopeKind,
+    StructuredModelInputCompileError,
+)
 from pulsara_agent.tool_permission import (
     EffectivePermissionPolicy,
     default_permission_policy,
@@ -299,9 +318,6 @@ from pulsara_agent.plugins.view import (
     FrozenEnabledPluginView,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
-
-
-MAXIMUM_PROMPT_BYTES = STAGE2_LIMITS.prompt_hard_bytes
 
 
 async def _shielded_plugin_filesystem_call(operation, /, **kwargs):
@@ -460,7 +476,7 @@ class _IngressHookApiVariant(StrEnum):
 class _IngressHookReservationKey:
     api_variant: _IngressHookApiVariant
     command_id: str
-    prompt_utf8: bytes
+    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
     requested_permission_mode: PermissionMode | None
     queue_item_id: str | None
 
@@ -487,6 +503,7 @@ class _PendingRootSuccessorHandoff:
     workflow_id: str
     interaction_id: str | None
     handoff_kind: PlanHandoffKind
+    prospective_root_dispatch: PreparedProspectiveRootDispatch
 
 
 class KernelCompositionUnavailable(ValueError):
@@ -564,6 +581,7 @@ class KernelHostSession:
         plugin_view_owner: EnabledPluginViewOwner,
         initial_plugin_view: FrozenEnabledPluginView,
         credential_boundary: ProcessCredentialBoundary,
+        image_validator: HostPromptImageValidator,
         mcp_management: LocalMcpManagementService,
         capability_change_notifier: Callable[[Path | None], Awaitable[int]]
         | None = None,
@@ -572,6 +590,7 @@ class KernelHostSession:
         control_monotonic: Callable[[], float] = monotonic,
     ) -> None:
         self._model_runtime = model_runtime
+        self._image_validator = image_validator
         self.mcp_management = mcp_management
         self._capability_change_notifier = capability_change_notifier
         self.workspace = workspace
@@ -590,9 +609,6 @@ class KernelHostSession:
         self.query = CanonicalConversationQuery(
             repository.connection_provider,
             watchdog_policy=deadline_factory.policy,
-        )
-        self._content_publisher = CanonicalContentPublisher(
-            repository.connection_provider
         )
         self._io = io_owner
         self._deadlines = deadline_factory
@@ -846,6 +862,11 @@ class KernelHostSession:
         self._active_root_phase: RootChainPhase | None = None
         self._pending_root_successor: _PendingRootSuccessorHandoff | None = None
         self._control_completion_sealed_turn_id: str | None = None
+        self._control_completion_write_reservation: (
+            CompactionWriteReservation | None
+        ) = None
+        self._control_completion_seal_changed = asyncio.Event()
+        self._control_completion_seal_changed.set()
         self._external_new_turn_accepting = False
         self._plan_exit_fence = False
         self._terminal_new_turn_observation_id: str | None = None
@@ -860,8 +881,10 @@ class KernelHostSession:
         self._capability_refresh_attention: str | None = None
         self._ingress_hook_attempts: dict[str, _IngressHookAttempt] = {}
         self._compaction_write_reservations: dict[
-            tuple[ModelInputScopeKind, str | None], int
+            tuple[ModelInputScopeKind, str | None], set[CompactionWriteReservation]
         ] = {}
+        self._root_compaction_write_changed = asyncio.Event()
+        self._root_compaction_write_changed.set()
         self._manual_compaction_command_attempts: dict[
             str, tuple[str, asyncio.Task[CompactionConfirmationKind]]
         ] = {}
@@ -894,6 +917,7 @@ class KernelHostSession:
         trigger: CompactionTrigger,
         attempt_id: str,
         owner_task: asyncio.Task[object],
+        admitted_writer: CompactionWriteReservation | None,
     ) -> None:
         """Recapture and install one exact-scope fence under the Host lock."""
 
@@ -902,17 +926,28 @@ class KernelHostSession:
             key = self._compaction.scope_key(
                 scope.scope_kind, scope.scope_subagent_task_id
             )
-            if self._compaction_write_reservations.get(key, 0):
+            admitted_writers = self._compaction_write_reservations.get(key, set())
+            external_recovery_owner = (
+                admitted_writer is not None
+                and admitted_writers == {admitted_writer}
+                and
+                scope.scope_kind is ModelInputScopeKind.ROOT
+            )
+            if admitted_writer is not None and not external_recovery_owner:
+                raise RuntimeError(
+                    "compaction admitted-writer reservation is not the exact owner"
+                )
+            if admitted_writers and not external_recovery_owner:
                 raise RuntimeError("compaction target has an admitted writer")
             if scope.scope_kind is ModelInputScopeKind.ROOT:
                 self._retire_done_active_root_locked()
                 active_owner = self._active_task is owner_task
                 idle_owner = self._active_task is None
-                if not (active_owner or idle_owner):
+                if not (active_owner or idle_owner or external_recovery_owner):
                     raise RuntimeError("compaction ROOT task ownership changed")
                 if active_owner and self._active_turn_id != scope.turn_id:
                     raise RuntimeError("compaction active ROOT target changed")
-                if idle_owner and (
+                if idle_owner and not external_recovery_owner and (
                     self._external_new_turn_accepting
                     or self._pending_root_successor is not None
                 ):
@@ -954,27 +989,43 @@ class KernelHostSession:
         *,
         scope_kind: ModelInputScopeKind,
         scope_subagent_task_id: str | None,
-    ) -> tuple[ModelInputScopeKind, str | None]:
+    ) -> CompactionWriteReservation:
         key = self._compaction.scope_key(scope_kind, scope_subagent_task_id)
         if self._compaction.is_fenced(
             scope_kind=scope_kind,
             scope_subagent_task_id=scope_subagent_task_id,
         ):
             raise RuntimeError("COMPACTION_IN_PROGRESS")
-        self._compaction_write_reservations[key] = (
-            self._compaction_write_reservations.get(key, 0) + 1
+        reservation = CompactionWriteReservation(
+            scope_kind=scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
         )
-        return key
+        self._compaction_write_reservations.setdefault(key, set()).add(reservation)
+        if scope_kind is ModelInputScopeKind.ROOT:
+            self._root_compaction_write_changed.clear()
+        return reservation
 
     async def _release_compaction_write_reservation(
-        self, key: tuple[ModelInputScopeKind, str | None]
+        self, reservation: CompactionWriteReservation
     ) -> None:
         async with self._lock:
-            count = self._compaction_write_reservations.get(key, 0)
-            if count <= 1:
-                self._compaction_write_reservations.pop(key, None)
-            else:
-                self._compaction_write_reservations[key] = count - 1
+            self._release_compaction_write_reservation_locked(reservation)
+
+    def _release_compaction_write_reservation_locked(
+        self, reservation: CompactionWriteReservation
+    ) -> None:
+        key = self._compaction.scope_key(
+            reservation.scope_kind,
+            reservation.scope_subagent_task_id,
+        )
+        owners = self._compaction_write_reservations.get(key)
+        if owners is None or reservation not in owners:
+            raise RuntimeError("compaction write reservation is not active")
+        owners.remove(reservation)
+        if not owners:
+            self._compaction_write_reservations.pop(key, None)
+        if reservation.scope_kind is ModelInputScopeKind.ROOT:
+            self._root_compaction_write_changed.set()
 
     async def start_mcp(self) -> None:
         await self._mcp_supervisor.start()
@@ -1411,7 +1462,7 @@ class KernelHostSession:
             cwd=str(cwd),
             model=self._model_identity(model_call_binding),
             turn_id=identity.turn_id,
-            prompt=key.prompt_utf8.decode("utf-8"),
+            prompt=prompt_text_projection(key.canonical_prompt.content),
             permission_mode=external_permission_mode(
                 permission.effective_mode.value,
                 active_plan_workflow=permission.plan_workflow_id is not None,
@@ -1477,19 +1528,23 @@ class KernelHostSession:
 
     async def run_turn(
         self,
-        text: str,
+        content: PromptContent,
         *,
         command_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
     ) -> KernelRunResult:
-        _validate_prompt(text)
+        frozen_content = await self._image_validator.freeze(
+            content,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        canonical_prompt = freeze_canonical_prompt(frozen_content)
         command = command_id or f"command:{uuid4().hex}"
         requested = requested_permission_mode or self._launch_permission_mode
         identity = build_direct_root_turn_identity(self.session_id, command)
         key = _IngressHookReservationKey(
             _IngressHookApiVariant.DIRECT,
             command,
-            text.encode("utf-8"),
+            canonical_prompt,
             requested_permission_mode,
             None,
         )
@@ -1559,7 +1614,7 @@ class KernelHostSession:
                     command_id=command,
                     name=f"kernel-turn:{command}",
                     run=lambda intent: self._run_root_turn_chain(
-                        text,
+                        canonical_prompt,
                         command_id=command,
                         requested_permission_mode=requested,
                         expected_permission_snapshot=permission,
@@ -1851,7 +1906,7 @@ class KernelHostSession:
 
     async def _run_root_turn_chain(
         self,
-        text: str,
+        canonical_prompt: FrozenCanonicalPrompt,
         *,
         command_id: str,
         requested_permission_mode: PermissionMode,
@@ -1861,7 +1916,7 @@ class KernelHostSession:
         model_resolution_snapshot: FrozenModelResolutionSnapshot,
     ) -> KernelRunResult:
         result = await self._runner.run_turn(
-            text,
+            canonical_prompt,
             command_id=command_id,
             requested_permission_mode=requested_permission_mode,
             expected_permission_snapshot=expected_permission_snapshot,
@@ -1875,11 +1930,14 @@ class KernelHostSession:
         self,
         turn_id: str,
         cancellation_intent: ActiveTurnCancellationIntent,
+        prospective_root_dispatch: PreparedProspectiveRootDispatch | None = None,
     ) -> KernelRunResult:
         """Run one accepted ROOT turn and every automatic successor."""
 
         result = await self._runner.run_accepted_turn(
-            turn_id, cancellation_intent=cancellation_intent
+            turn_id,
+            cancellation_intent=cancellation_intent,
+            prospective_root_dispatch=prospective_root_dispatch,
         )
         return await self._finish_root_chain(result, cancellation_intent)
 
@@ -1919,7 +1977,12 @@ class KernelHostSession:
                     turn_id=continuation_turn_id,
                 )
                 if self._control_completion_sealed_turn_id == pending.origin_turn_id:
+                    reservation = self._control_completion_write_reservation
+                    if reservation is not None:
+                        self._control_completion_write_reservation = None
+                        self._release_compaction_write_reservation_locked(reservation)
                     self._control_completion_sealed_turn_id = None
+                    self._control_completion_seal_changed.set()
                 self._active_turn_id = continuation_turn_id
                 cancellation_intent = ActiveTurnCancellationIntent(
                     continuation_turn_id, ModelInputScopeKind.ROOT, None
@@ -1930,6 +1993,7 @@ class KernelHostSession:
             result = await self._runner.run_accepted_turn(
                 continuation_turn_id,
                 cancellation_intent=cancellation_intent,
+                prospective_root_dispatch=pending.prospective_root_dispatch,
             )
             total_model_calls += result.model_call_count
             total_tool_calls += result.tool_call_count
@@ -2125,7 +2189,12 @@ class KernelHostSession:
         if active_turn_id is not None:
             self._mark_feedback_target_ended_locked(active_turn_id)
         if getattr(self, "_control_completion_sealed_turn_id", None) == active_turn_id:
+            reservation = self._control_completion_write_reservation
+            if reservation is not None:
+                self._control_completion_write_reservation = None
+                self._release_compaction_write_reservation_locked(reservation)
             self._control_completion_sealed_turn_id = None
+            self._control_completion_seal_changed.set()
         self._active_task = None
         self._active_turn_id = None
         self._active_cancellation_intent = None
@@ -2136,7 +2205,7 @@ class KernelHostSession:
 
     def _admit_plan_resolution_write_locked(
         self, *, creates_turn: bool
-    ) -> tuple[ModelInputScopeKind, str | None]:
+    ) -> CompactionWriteReservation:
         """Linearize every new Plan-resolution write against force exit."""
 
         self._require_open()
@@ -2182,20 +2251,46 @@ class KernelHostSession:
         attempt_id = f"plan-continuation:{candidate.candidate_fingerprint}"
 
         async def accept() -> AcceptedPlanToolBatch:
+            prospective_dispatch: PreparedProspectiveRootDispatch | None = None
             try:
-                result = await self._io.run(
-                    self.repository.accept_plan_tool_batch,
+                provider_candidate = await self._io.run(
+                    self.repository.prepare_fresh_plan_continuation_provider_input_candidate,
                     self._lease.guard,
                     candidate=candidate,
                     deadline_monotonic=deadline_monotonic,
                 )
-            except Exception:
-                winner = await self._io.run(
-                    self.repository.confirm_plan_tool_batch_winner,
-                    candidate=candidate,
-                    deadline_monotonic=self._canonical_deadline(),
+                prospective_dispatch = (
+                    await self._runner.prepare_plan_continuation_input(
+                        provider_candidate
+                    )
                 )
+                result = await self._io.run(
+                    self.repository.accept_plan_tool_batch,
+                    self._lease.guard,
+                    candidate=candidate,
+                    continuation_provider_input_admission=(
+                        prospective_dispatch.admission
+                    ),
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except asyncio.CancelledError:
+                if prospective_dispatch is not None:
+                    prospective_dispatch.close()
+                raise
+            except Exception:
+                try:
+                    winner = await self._io.run(
+                        self.repository.confirm_plan_tool_batch_winner,
+                        candidate=candidate,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                except BaseException:
+                    if prospective_dispatch is not None:
+                        prospective_dispatch.close()
+                    raise
                 if winner is None:
+                    if prospective_dispatch is not None:
+                        prospective_dispatch.close()
                     raise
                 result = winner
             try:
@@ -2210,6 +2305,9 @@ class KernelHostSession:
                     inspection, self._lease.guard
                 )
                 if disposition is PlanContinuationDisposition.HISTORICAL_TERMINAL:
+                    if prospective_dispatch is not None:
+                        prospective_dispatch.close()
+                        prospective_dispatch = None
                     return replace(
                         result,
                         continuation_turn_id=None,
@@ -2251,7 +2349,9 @@ class KernelHostSession:
                             workflow_id=candidate.workflow_id,
                             interaction_id=None,
                             handoff_kind=PlanHandoffKind.ENTERED_PLAN,
+                            prospective_root_dispatch=prospective_dispatch,
                         )
+                        prospective_dispatch = None
                         self._active_root_phase = (
                             RootChainPhase.SUCCESSOR_COMMITTED_PENDING_HANDOFF
                         )
@@ -2261,6 +2361,8 @@ class KernelHostSession:
                 # process-local attempt must own its terminalization until the
                 # exact turn is terminal or belongs to a replacement writer.
                 pass
+            if prospective_dispatch is not None:
+                prospective_dispatch.close()
             await self._terminalize_unbound_plan_successor(
                 attempt_id=attempt_id,
                 turn_id=candidate.continuation_turn_id,
@@ -2310,35 +2412,39 @@ class KernelHostSession:
         self,
         *,
         command_id: str,
-        text: str,
+        content: PromptContent,
         delivery_mode: PromptDeliveryMode = PromptDeliveryMode.NEW_TURN,
         target_turn_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
     ) -> KernelCommandOutcome:
-        if not command_id or (delivery_mode is PromptDeliveryMode.NEW_TURN) != (
+        if not command_id:
+            return KernelCommandOutcome(
+                command_id, "REJECTED", "", "INVALID_REQUEST", "Command is invalid."
+            )
+        if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (
             target_turn_id is None
         ):
-            return await self._submit_prompt_owner(
-                command_id=command_id,
-                text=text,
-                delivery_mode=delivery_mode,
-                target_turn_id=target_turn_id,
-                requested_permission_mode=requested_permission_mode,
+            return KernelCommandOutcome(
+                command_id,
+                "REJECTED",
+                "",
+                "INVALID_STEER_TARGET",
+                "Prompt delivery target is invalid.",
             )
         try:
-            _validate_prompt(text)
-        except ValueError:
-            return await self._submit_prompt_owner(
-                command_id=command_id,
-                text=text,
-                delivery_mode=delivery_mode,
-                target_turn_id=target_turn_id,
-                requested_permission_mode=requested_permission_mode,
+            frozen_content = await self._image_validator.freeze(
+                content,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            canonical_prompt = freeze_canonical_prompt(frozen_content)
+        except ValueError as exc:
+            return KernelCommandOutcome(
+                command_id, "REJECTED", "", "INVALID_PROMPT", str(exc)
             )
         if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
             return await self._submit_prompt_owner(
                 command_id=command_id,
-                text=text,
+                canonical_prompt=canonical_prompt,
                 delivery_mode=delivery_mode,
                 target_turn_id=target_turn_id,
                 requested_permission_mode=requested_permission_mode,
@@ -2347,7 +2453,7 @@ class KernelHostSession:
         key = _IngressHookReservationKey(
             _IngressHookApiVariant.QUEUED,
             command_id,
-            text.encode("utf-8"),
+            canonical_prompt,
             requested_permission_mode,
             queue_item_id,
         )
@@ -2369,7 +2475,7 @@ class KernelHostSession:
         try:
             result = await self._submit_prompt_owner(
                 command_id=command_id,
-                text=text,
+                canonical_prompt=canonical_prompt,
                 delivery_mode=delivery_mode,
                 target_turn_id=target_turn_id,
                 requested_permission_mode=requested_permission_mode,
@@ -2385,31 +2491,15 @@ class KernelHostSession:
         self,
         *,
         command_id: str,
-        text: str,
+        canonical_prompt: FrozenCanonicalPrompt,
         delivery_mode: PromptDeliveryMode = PromptDeliveryMode.NEW_TURN,
         target_turn_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
         hook_attempt: _IngressHookAttempt | None = None,
     ) -> KernelCommandOutcome:
-        if not command_id:
-            return KernelCommandOutcome(
-                command_id, "REJECTED", "", "INVALID_REQUEST", "Command is invalid."
-            )
-        try:
-            _validate_prompt(text)
-        except ValueError:
-            return KernelCommandOutcome(
-                command_id, "REJECTED", "", "INVALID_PROMPT", "Prompt is invalid."
-            )
+        if not isinstance(canonical_prompt, FrozenCanonicalPrompt):
+            raise TypeError("prompt owner requires a frozen canonical prompt")
         self._require_open()
-        if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (target_turn_id is None):
-            return KernelCommandOutcome(
-                command_id,
-                "REJECTED",
-                "",
-                "INVALID_STEER_TARGET",
-                "Prompt delivery target is invalid.",
-            )
         queue_item_id = _stable_id("queue-item", self.session_id, command_id)
         permission_snapshot_id = (
             None
@@ -2421,7 +2511,6 @@ class KernelHostSession:
             if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
             else requested_permission_mode or self._launch_permission_mode
         )
-        content_utf8 = text.encode("utf-8")
         ingress = build_prompt_ingress_command(
             session_id=self.session_id,
             command_id=command_id,
@@ -2431,7 +2520,7 @@ class KernelHostSession:
             target_turn_id=target_turn_id,
             permission_snapshot_id=permission_snapshot_id,
             requested_permission_mode=effective_requested_permission,
-            content_utf8=content_utf8,
+            canonical_prompt=canonical_prompt,
         )
         confirmation = await self._io.run(
             self.repository.confirm_prompt_ingress,
@@ -2518,39 +2607,51 @@ class KernelHostSession:
                     "HOOK_BLOCKED",
                     block_reason,
                 )
-        async with self._lock:
-            if (
-                self._closing
-                or self._plan_exit_fence
-                or (
-                    hook_attempt is not None
-                    and self._ingress_hook_attempts.get(command_id) is not hook_attempt
+        while True:
+            async with self._lock:
+                if (
+                    self._closing
+                    or self._plan_exit_fence
+                    or (
+                        hook_attempt is not None
+                        and self._ingress_hook_attempts.get(command_id)
+                        is not hook_attempt
+                    )
+                ):
+                    if hook_context_reservation is not None:
+                        hook_context_reservation.retire()
+                    return KernelCommandOutcome(
+                        command_id,
+                        "REJECTED",
+                        "",
+                        "PLAN_TRANSITION_BUSY",
+                        "A Plan force-exit transition is in progress.",
+                    )
+                completion_sealed = (
+                    delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN
+                    and self._control_completion_sealed_turn_id == target_turn_id
                 )
-            ):
-                if hook_context_reservation is not None:
-                    hook_context_reservation.retire()
-                return KernelCommandOutcome(
-                    command_id,
-                    "REJECTED",
-                    "",
-                    "PLAN_TRANSITION_BUSY",
-                    "A Plan force-exit transition is in progress.",
-                )
-            try:
-                reservation = self._reserve_compaction_write_locked(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
-                )
-            except RuntimeError:
-                if hook_context_reservation is not None:
-                    hook_context_reservation.retire()
-                return KernelCommandOutcome(
-                    command_id,
-                    "REJECTED",
-                    target_turn_id or "",
-                    "COMPACTION_IN_PROGRESS",
-                    "Context compaction is in progress for the ROOT scope.",
-                )
+                if completion_sealed:
+                    seal_changed = self._control_completion_seal_changed
+                else:
+                    try:
+                        reservation = self._reserve_compaction_write_locked(
+                            scope_kind=ModelInputScopeKind.ROOT,
+                            scope_subagent_task_id=None,
+                        )
+                    except RuntimeError:
+                        if hook_context_reservation is not None:
+                            hook_context_reservation.retire()
+                        return KernelCommandOutcome(
+                            command_id,
+                            "REJECTED",
+                            target_turn_id or "",
+                            "COMPACTION_IN_PROGRESS",
+                            "Context compaction is in progress for the ROOT scope.",
+                        )
+            if not completion_sealed:
+                break
+            await seal_changed.wait()
         try:
             try:
                 return await self._submit_prompt_reserved(
@@ -2560,7 +2661,6 @@ class KernelHostSession:
                     target_turn_id=target_turn_id,
                     permission_snapshot_id=permission_snapshot_id,
                     effective_requested_permission=effective_requested_permission,
-                    content_utf8=content_utf8,
                     ingress=ingress,
                     model_resolution_snapshot=model_resolution_snapshot,
                     expected_permission_snapshot=permission_projection,
@@ -2582,27 +2682,17 @@ class KernelHostSession:
         target_turn_id: str | None,
         permission_snapshot_id: str | None,
         effective_requested_permission: PermissionMode | None,
-        content_utf8: bytes,
         ingress: PreparedPromptIngressCommand,
         model_resolution_snapshot: FrozenModelResolutionSnapshot | None,
         expected_permission_snapshot: FrozenRunPermissionSnapshot | None,
         hook_context_reservation: PendingHookContextReservation | None,
     ) -> KernelCommandOutcome:
-        content = await self._io.run(
-            self._content_publisher.materialize,
-            session_id=self.session_id,
-            content=content_utf8,
-            media_type="text/plain",
-            codec="utf-8",
-            deadline_monotonic=self._canonical_deadline(),
-        )
         try:
             accepted = await self._io.run(
                 self.repository.enqueue_prompt,
                 self._lease.guard,
                 candidate=ingress,
                 model_resolution_snapshot=model_resolution_snapshot,
-                content=content,
                 occurred_at=datetime.now().astimezone(),
                 actor_id=self.host_session_id,
                 deadline_monotonic=self._canonical_deadline(),
@@ -2800,7 +2890,7 @@ class KernelHostSession:
             await self._release_compaction_write_reservation(reservation)
 
     async def steer_active_turn(
-        self, *, command_id: str, text: str, target_turn_id: str
+        self, *, command_id: str, content: PromptContent, target_turn_id: str
     ) -> KernelCommandOutcome:
         # The stable command is queried before any process-local liveness
         # shortcut.  This lets a retry recover a committed queue winner after
@@ -2809,7 +2899,7 @@ class KernelHostSession:
         # repository in the Host-writer transaction.
         return await self.submit_prompt(
             command_id=command_id,
-            text=text,
+            content=content,
             delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
             target_turn_id=target_turn_id,
         )
@@ -3064,10 +3154,35 @@ class KernelHostSession:
                 "Plan resolution writer generation is stale"
             )
 
-        write_reservation: tuple[ModelInputScopeKind, str | None] | None = None
+        write_reservation: CompactionWriteReservation | None = None
+        active_cancellation_intent: ActiveTurnCancellationIntent | None = None
 
         async def resolve() -> AcceptedPlanResolution:
+            prepared = None
+            publication_handle = None
             try:
+                occurred_at = datetime.now().astimezone()
+                provider_candidate = await self._io.run(
+                    self.repository.prepare_plan_question_resolution_provider_input_candidate,
+                    self._lease.guard,
+                    workflow_id=workflow_id,
+                    expected_workflow_revision=expected_workflow_revision,
+                    interaction_id=interaction_id,
+                    answer=answer,
+                    result_id=result_id,
+                    result_entry_id=result_entry_id,
+                    occurred_at=occurred_at,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                assert write_reservation is not None
+                prepared = (
+                    await self._runner.prepare_plan_question_resolution_input(
+                        provider_candidate,
+                        cancellation_intent=active_cancellation_intent,
+                        admitted_writer=write_reservation,
+                    )
+                )
+                publication_handle = prepared.take_handle_for_publication()
                 try:
                     resolution = await self._io.run(
                         self.repository.resolve_plan_question,
@@ -3079,7 +3194,8 @@ class KernelHostSession:
                         answer=answer,
                         result_id=result_id,
                         result_entry_id=result_entry_id,
-                        occurred_at=datetime.now().astimezone(),
+                        provider_input_admission=prepared.admission,
+                        occurred_at=occurred_at,
                         actor_id=self.host_session_id,
                         deadline_monotonic=self._canonical_deadline(),
                     )
@@ -3096,24 +3212,36 @@ class KernelHostSession:
                         answer=answer,
                         result_id=result_id,
                         result_entry_id=result_entry_id,
-                        occurred_at=datetime.now().astimezone(),
+                        provider_input_admission=prepared.admission,
+                        occurred_at=occurred_at,
                         actor_id=self.host_session_id,
                         deadline_monotonic=self._canonical_deadline(),
                     )
+                await self._runner.confirm_published_active_root_input(
+                    prepared,
+                    publication_handle=publication_handle,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                publication_handle = None
                 await self._plan_interactions.settle(
                     interaction_id=interaction_id,
                     resolution=resolution,
                 )
                 return resolution
             finally:
+                if publication_handle is not None:
+                    publication_handle.close()
+                if prepared is not None:
+                    prepared.close()
                 if write_reservation is not None:
                     await self._release_compaction_write_reservation(write_reservation)
 
         def reserve_question_write() -> None:
-            nonlocal write_reservation
+            nonlocal write_reservation, active_cancellation_intent
             write_reservation = self._admit_plan_resolution_write_locked(
                 creates_turn=False
             )
+            active_cancellation_intent = self._active_cancellation_intent
 
         async with self._lock:
             attempt = self._plan_continuations.start(
@@ -3197,11 +3325,39 @@ class KernelHostSession:
                 "Plan resolution writer generation is stale"
             )
         reserved = False
-        write_reservation: tuple[ModelInputScopeKind, str | None] | None = None
+        write_reservation: CompactionWriteReservation | None = None
         attempt_id = f"plan-review-continuation:{command_id}"
 
         async def admit() -> AcceptedPlanResolution:
+            prospective_dispatch: PreparedProspectiveRootDispatch | None = None
             try:
+                occurred_at = datetime.now().astimezone()
+                if creates_turn:
+                    assert continuation_turn_id is not None
+                    assert continuation_entry_id is not None
+                    assert continuation_revision_id is not None
+                    provider_candidate = await self._io.run(
+                        self.repository.prepare_plan_draft_review_provider_input_candidate,
+                        self._lease.guard,
+                        workflow_id=workflow_id,
+                        expected_workflow_revision=expected_workflow_revision,
+                        interaction_id=interaction_id,
+                        decision=decision,
+                        feedback=normalized_feedback,
+                        continuation_turn_id=continuation_turn_id,
+                        continuation_entry_id=continuation_entry_id,
+                        continuation_context_binding_revision_id=(
+                            continuation_revision_id
+                        ),
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    assert write_reservation is not None
+                    prospective_dispatch = (
+                        await self._runner.prepare_plan_review_continuation_input(
+                            provider_candidate,
+                            admitted_writer=write_reservation,
+                        )
+                    )
                 try:
                     resolution = await self._io.run(
                         self.repository.resolve_plan_draft_review,
@@ -3217,7 +3373,12 @@ class KernelHostSession:
                         continuation_context_binding_revision_id=(
                             continuation_revision_id
                         ),
-                        occurred_at=datetime.now().astimezone(),
+                        provider_input_admission=(
+                            None
+                            if prospective_dispatch is None
+                            else prospective_dispatch.admission
+                        ),
+                        occurred_at=occurred_at,
                         actor_id=self.host_session_id,
                         deadline_monotonic=self._canonical_deadline(),
                     )
@@ -3236,11 +3397,19 @@ class KernelHostSession:
                         continuation_context_binding_revision_id=(
                             continuation_revision_id
                         ),
-                        occurred_at=datetime.now().astimezone(),
+                        provider_input_admission=(
+                            None
+                            if prospective_dispatch is None
+                            else prospective_dispatch.admission
+                        ),
+                        occurred_at=occurred_at,
                         actor_id=self.host_session_id,
                         deadline_monotonic=self._canonical_deadline(),
                     )
                 if resolution.continuation_turn_id is None:
+                    if prospective_dispatch is not None:
+                        prospective_dispatch.close()
+                        prospective_dispatch = None
                     if reserved:
                         await self._release_plan_continuation_reservation()
                     return resolution
@@ -3267,12 +3436,17 @@ class KernelHostSession:
                     if await self._bind_plan_review_successor(
                         command_id=command_id,
                         inspection=inspection,
+                        prospective_root_dispatch=prospective_dispatch,
                     ):
+                        prospective_dispatch = None
                         return resolution
                 except BaseException:
                     # FULL canonical acceptance already owns the successor;
                     # this attempt must continue into terminalization.
                     pass
+                if prospective_dispatch is not None:
+                    prospective_dispatch.close()
+                    prospective_dispatch = None
                 await self._terminalize_unbound_plan_successor(
                     attempt_id=attempt_id,
                     turn_id=resolution.continuation_turn_id,
@@ -3284,6 +3458,8 @@ class KernelHostSession:
                 await self._release_plan_continuation_reservation()
                 return resolution
             except BaseException:
+                if prospective_dispatch is not None:
+                    prospective_dispatch.close()
                 if reserved:
                     await self._release_plan_continuation_reservation()
                 raise
@@ -3348,6 +3524,7 @@ class KernelHostSession:
         *,
         command_id: str,
         inspection: PlanContinuationInspection,
+        prospective_root_dispatch: PreparedProspectiveRootDispatch | None,
     ) -> bool:
         async with self._lock:
             self._retire_done_active_root_locked()
@@ -3369,7 +3546,9 @@ class KernelHostSession:
                 command_id=command_id,
                 name=f"kernel-plan-review-turn:{inspection.turn_id}",
                 run=lambda intent: self._run_accepted_root_chain(
-                    inspection.turn_id, intent
+                    inspection.turn_id,
+                    intent,
+                    prospective_root_dispatch=prospective_root_dispatch,
                 ),
             )
             self._external_new_turn_accepting = False
@@ -3407,14 +3586,17 @@ class KernelHostSession:
     async def _terminalize_pending_root_successor(
         self, pending: _PendingRootSuccessorHandoff, *, reason: str
     ) -> None:
-        await self._terminalize_plan_successor_until_safe(
-            turn_id=pending.successor_turn_id,
-            entry_id=pending.successor_entry_id,
-            workflow_id=pending.workflow_id,
-            interaction_id=pending.interaction_id,
-            handoff_kind=pending.handoff_kind,
-            reason=reason,
-        )
+        try:
+            await self._terminalize_plan_successor_until_safe(
+                turn_id=pending.successor_turn_id,
+                entry_id=pending.successor_entry_id,
+                workflow_id=pending.workflow_id,
+                interaction_id=pending.interaction_id,
+                handoff_kind=pending.handoff_kind,
+                reason=reason,
+            )
+        finally:
+            pending.prospective_root_dispatch.close()
 
     async def _terminalize_plan_successor_until_safe(
         self,
@@ -3582,6 +3764,16 @@ class KernelHostSession:
                             continue
                     settlement.result()
                     raise
+                except StructuredModelInputCompileError as error:
+                    if not _is_input_resource_exhaustion(error):
+                        raise
+                    rejected = await self._settle_queued_input_resource_rejection(
+                        candidate
+                    )
+                    if rejected:
+                        self._queue_wake.set()
+                        continue
+                    break
                 if task is None:
                     self._queue_wake.set()
                     break
@@ -3616,18 +3808,48 @@ class KernelHostSession:
                 delay_seconds = min(delay_seconds * 2, 0.5)
         return False
 
+    async def _settle_queued_input_resource_rejection(
+        self,
+        candidate: PreparedQueuedRootTurnAdmission,
+    ) -> bool:
+        """Settle one full-input failure while its FIFO head remains pending."""
+
+        delay_seconds = 0.05
+        while not self._closing:
+            try:
+                return await self._io.run(
+                    self.repository.reject_prepared_prompt_head_input_resource_exhausted,
+                    self._lease.guard,
+                    candidate=candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            except asyncio.CancelledError:
+                raise
+            except StaleHostWriter:
+                return False
+            except Exception:
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(delay_seconds * 2, 0.5)
+        return False
+
     async def _settle_queued_root_admission_reserved(
         self,
         candidate: PreparedQueuedRootTurnAdmission,
-        reservation: tuple[ModelInputScopeKind, str | None],
+        reservation: CompactionWriteReservation,
     ) -> asyncio.Task[KernelRunResult] | None:
         try:
-            return await self._settle_queued_root_admission(candidate)
+            return await self._settle_queued_root_admission(
+                candidate,
+                reservation=reservation,
+            )
         finally:
             await self._release_compaction_write_reservation(reservation)
 
     async def _settle_queued_root_admission(
-        self, candidate: PreparedQueuedRootTurnAdmission
+        self,
+        candidate: PreparedQueuedRootTurnAdmission,
+        *,
+        reservation: CompactionWriteReservation,
     ) -> asyncio.Task[KernelRunResult] | None:
         """Own one queued mutation through confirmation and task installation."""
 
@@ -3642,45 +3864,81 @@ class KernelHostSession:
                 candidate.exact_context_binding_revision_id
             ),
         )
+        self._hook_context.activate_prompt_candidate(
+            scope=self._hook_root_scope,
+            prompt_candidate_id=candidate.queue_item_id,
+        )
+        prospective_dispatch: PreparedProspectiveRootDispatch | None = None
+        try:
+            prospective_dispatch = await self._runner.prepare_prospective_root_input(
+                candidate.provider_input_candidate,
+                admitted_writer=reservation,
+            )
+            if (
+                prospective_dispatch.admission.candidate
+                != candidate.provider_input_candidate
+            ):
+                candidate = replace(
+                    candidate,
+                    provider_input_candidate=(
+                        prospective_dispatch.admission.candidate
+                    ),
+                )
+        except BaseException:
+            self._hook_context.retire_prompt_candidate(
+                scope=self._hook_root_scope,
+                prompt_candidate_id=candidate.queue_item_id,
+            )
+            raise
         confirmation: QueuedRootTurnAdmissionConfirmation | None = None
         delay_seconds = 0.05
-        while confirmation is None:
-            if self._closing:
-                return None
-            try:
-                confirmation = await self._io.run(
-                    self.repository.consume_prepared_prompt_head,
-                    self._lease.guard,
-                    candidate=candidate,
-                    deadline_monotonic=self._canonical_deadline(),
-                )
-                if confirmation is None:
+        try:
+            while confirmation is None:
+                if self._closing:
+                    prospective_dispatch.close()
                     return None
-            except asyncio.CancelledError:
-                raise
-            except StaleHostWriter:
-                return None
-            except Exception:
-                while True:
-                    try:
-                        confirmation = await self._io.run(
-                            self.repository.confirm_prepared_prompt_head_consumption,
-                            candidate=candidate,
-                            deadline_monotonic=self._canonical_deadline(),
-                        )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:
-                        await asyncio.sleep(delay_seconds)
-                        delay_seconds = min(delay_seconds * 2, 0.5)
-                        continue
-                    if (
-                        confirmation.kind
-                        is QueuedRootTurnAdmissionConfirmationKind.NONE
-                    ):
-                        confirmation = None
-                    break
+                try:
+                    confirmation = await self._io.run(
+                        self.repository.consume_prepared_prompt_head,
+                        self._lease.guard,
+                        candidate=candidate,
+                        provider_input_admission=prospective_dispatch.admission,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    if confirmation is None:
+                        prospective_dispatch.close()
+                        return None
+                except asyncio.CancelledError:
+                    raise
+                except StaleHostWriter:
+                    prospective_dispatch.close()
+                    return None
+                except Exception:
+                    while True:
+                        try:
+                            confirmation = await self._io.run(
+                                self.repository.confirm_prepared_prompt_head_consumption,
+                                candidate=candidate,
+                                deadline_monotonic=self._canonical_deadline(),
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            await asyncio.sleep(delay_seconds)
+                            delay_seconds = min(delay_seconds * 2, 0.5)
+                            continue
+                        if (
+                            confirmation.kind
+                            is QueuedRootTurnAdmissionConfirmationKind.NONE
+                        ):
+                            confirmation = None
+                        break
+        except BaseException:
+            if prospective_dispatch is not None:
+                prospective_dispatch.close()
+            raise
         if confirmation.kind is QueuedRootTurnAdmissionConfirmationKind.CONFLICT:
+            prospective_dispatch.close()
             return None
         if confirmation.kind is not QueuedRootTurnAdmissionConfirmationKind.FULL:
             raise RuntimeError("queued ROOT admission has an invalid disposition")
@@ -3701,12 +3959,8 @@ class KernelHostSession:
                         command_id=None,
                         name=f"kernel-queued-turn:{accepted.turn_id}",
                         run=lambda intent: self._run_accepted_root_chain(
-                            accepted.turn_id, intent
+                            accepted.turn_id, intent, prospective_dispatch
                         ),
-                    )
-                    self._hook_context.activate_prompt_candidate(
-                        scope=self._hook_root_scope,
-                        prompt_candidate_id=candidate.queue_item_id,
                     )
                 except BaseException:
                     task = None
@@ -3716,6 +3970,7 @@ class KernelHostSession:
                 task = None
         self._tools.offer_todo_close(closed)
         if task is None:
+            prospective_dispatch.close()
             self._hook_context.retire_prompt_candidate(
                 scope=self._hook_root_scope,
                 prompt_candidate_id=candidate.queue_item_id,
@@ -3817,7 +4072,7 @@ class KernelHostSession:
                 attempt = coordinator.current_installation_attempt(monitor_id)
                 target = None if attempt is None else attempt.target
                 reserved_new_turn = False
-                write_reservation: tuple[ModelInputScopeKind, str | None] | None = None
+                write_reservation: CompactionWriteReservation | None = None
                 if target is None:
                     async with self._lock:
                         self._retire_done_active_root_locked()
@@ -3920,14 +4175,26 @@ class KernelHostSession:
                     await asyncio.sleep(0.05)
                     self._monitor_wake.set()
                     break
+                active_cancellation_intent = None
+                if isinstance(target, ExistingTurnInstallation):
+                    async with self._lock:
+                        if self._active_turn_id == target.turn_id:
+                            active_cancellation_intent = (
+                                self._active_cancellation_intent
+                            )
                 try:
-                    accepted = await self._runner.install_terminal_observation(
+                    assert write_reservation is not None
+                    accepted, prospective_root_dispatch = (
+                        await self._runner.install_terminal_observation(
                         coordinator=coordinator,
                         monitor_id=monitor_id,
                         target=target,
                         workspace_id=self.workspace.workspace_key,
                         actor_id=self.host_session_id,
                         deadline_monotonic=self._canonical_deadline(),
+                        admitted_writer=write_reservation,
+                        cancellation_intent=active_cancellation_intent,
+                        )
                     )
                 except asyncio.CancelledError:
                     if write_reservation is not None:
@@ -3960,6 +4227,8 @@ class KernelHostSession:
                 if write_reservation is not None:
                     await self._release_compaction_write_reservation(write_reservation)
                 if accepted is None:
+                    if prospective_root_dispatch is not None:
+                        prospective_root_dispatch.close()
                     if reserved_new_turn:
                         await self._release_terminal_new_turn_reservation(
                             observation_id
@@ -3968,9 +4237,16 @@ class KernelHostSession:
                 delivered += 1
                 if isinstance(target, NewTurnInstallation):
                     await self._start_terminal_observation_turn(
-                        accepted.turn_id, observation_id
+                        accepted.turn_id,
+                        observation_id,
+                        prospective_root_dispatch=prospective_root_dispatch,
                     )
                     break
+                if prospective_root_dispatch is not None:
+                    prospective_root_dispatch.close()
+                    raise RuntimeError(
+                        "active Terminal observation retained a ROOT dispatch"
+                    )
             if self._closing:
                 await self._release_any_terminal_new_turn_reservation()
                 return
@@ -3994,7 +4270,11 @@ class KernelHostSession:
             self._queue_wake.set()
 
     async def _start_terminal_observation_turn(
-        self, turn_id: str, observation_id: str
+        self,
+        turn_id: str,
+        observation_id: str,
+        *,
+        prospective_root_dispatch: PreparedProspectiveRootDispatch | None,
     ) -> None:
         async with self._lock:
             self._retire_done_active_root_locked()
@@ -4003,6 +4283,8 @@ class KernelHostSession:
                 or not self._external_new_turn_accepting
                 or self._active_task is not None
             ):
+                if prospective_root_dispatch is not None:
+                    prospective_root_dispatch.close()
                 raise RuntimeError("terminal observation turn lost its local admission")
             self._tools.todo_owner.bind_continuation_if_present(
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -4013,7 +4295,11 @@ class KernelHostSession:
                 turn_id=turn_id,
                 command_id=None,
                 name=f"kernel-terminal-observation-turn:{turn_id}",
-                run=lambda intent: self._run_accepted_root_chain(turn_id, intent),
+                run=lambda intent: self._run_accepted_root_chain(
+                    turn_id,
+                    intent,
+                    prospective_root_dispatch,
+                ),
             )
             self._terminal_new_turn_observation_id = None
             self._external_new_turn_accepting = False
@@ -4364,49 +4650,77 @@ class KernelHostSession:
                     raise RuntimeError(
                         "another ROOT control-completion phase is still sealed"
                     )
-                self._control_completion_sealed_turn_id = turn_id
-                attempts = self._root_feedback_attempts_locked(turn_id)
+                root_write_key = self._compaction.scope_key(
+                    ModelInputScopeKind.ROOT, None
+                )
+                admitted_writers = self._compaction_write_reservations.get(
+                    root_write_key, set()
+                )
+                if sealed_turn_id is None and admitted_writers:
+                    self._root_compaction_write_changed.clear()
+                    wait_for_root_writer = True
+                else:
+                    wait_for_root_writer = False
                 wait_events: list[asyncio.Event] = []
                 deadlines: list[float] = []
                 should_fence = False
-                now = monotonic()
-                for attempt in attempts:
-                    control = attempt.outcome.user_control
-                    assert control is not None and control.feedback is not None
-                    feedback = control.feedback
-                    if attempt.normal_end_coordination_deadline is None:
-                        attempt.normal_end_coordination_deadline = (
-                            self._canonical_deadline()
+                if not wait_for_root_writer:
+                    if sealed_turn_id is None:
+                        reservation = self._reserve_compaction_write_locked(
+                            scope_kind=ModelInputScopeKind.ROOT,
+                            scope_subagent_task_id=None,
                         )
-                    deadline = attempt.normal_end_coordination_deadline
-                    if now >= deadline:
-                        attempt.normal_end_coordination_exhausted = True
-                        continue
-                    if (
-                        feedback.canonical_status is FeedbackCanonicalStatus.PENDING
-                        and attempt.feedback_candidate is None
-                    ):
-                        wait_events.append(attempt.feedback_candidate_ready)
-                        deadlines.append(deadline)
-                    elif feedback.canonical_status is FeedbackCanonicalStatus.PENDING:
-                        attempt.normal_end_coordination_fenced = True
-                        should_fence = True
-                    elif (
-                        feedback.canonical_status is FeedbackCanonicalStatus.ACCEPTED
-                        and feedback.inclusion_status is FeedbackInclusionStatus.PENDING
-                    ):
-                        # No future request can be observed while this reply is
-                        # itself waiting to complete.  Keep the ROOT open so
-                        # the runner prepares the exact next request instead
-                        # of timing out on an inclusion event with no producer.
-                        attempt.normal_end_coordination_fenced = True
-                        should_fence = True
-                if wait_events:
-                    deadline = min(deadlines)
-                elif should_fence:
-                    return True
-                else:
-                    return False
+                        self._control_completion_write_reservation = reservation
+                        self._control_completion_sealed_turn_id = turn_id
+                        self._control_completion_seal_changed.clear()
+                    attempts = self._root_feedback_attempts_locked(turn_id)
+                    now = monotonic()
+                    for attempt in attempts:
+                        control = attempt.outcome.user_control
+                        assert control is not None and control.feedback is not None
+                        feedback = control.feedback
+                        if attempt.normal_end_coordination_deadline is None:
+                            attempt.normal_end_coordination_deadline = (
+                                self._canonical_deadline()
+                            )
+                        deadline = attempt.normal_end_coordination_deadline
+                        if now >= deadline:
+                            attempt.normal_end_coordination_exhausted = True
+                            continue
+                        if (
+                            feedback.canonical_status
+                            is FeedbackCanonicalStatus.PENDING
+                            and attempt.feedback_candidate is None
+                        ):
+                            wait_events.append(attempt.feedback_candidate_ready)
+                            deadlines.append(deadline)
+                        elif (
+                            feedback.canonical_status
+                            is FeedbackCanonicalStatus.PENDING
+                        ):
+                            attempt.normal_end_coordination_fenced = True
+                            should_fence = True
+                        elif (
+                            feedback.canonical_status
+                            is FeedbackCanonicalStatus.ACCEPTED
+                            and feedback.inclusion_status
+                            is FeedbackInclusionStatus.PENDING
+                        ):
+                            # No future request can be observed while this reply is
+                            # itself waiting to complete.  Keep the ROOT open so
+                            # the runner prepares the exact next request instead
+                            # of timing out on an inclusion event with no producer.
+                            attempt.normal_end_coordination_fenced = True
+                            should_fence = True
+                    if wait_events:
+                        deadline = min(deadlines)
+                    elif should_fence:
+                        return True
+                    else:
+                        return False
+            if wait_for_root_writer:
+                await self._root_compaction_write_changed.wait()
+                continue
             remaining = max(0.0, deadline - monotonic())
             try:
                 await asyncio.wait_for(
@@ -4432,8 +4746,14 @@ class KernelHostSession:
         async with self._lock:
             if getattr(self, "_control_completion_sealed_turn_id", None) != turn_id:
                 return
+            reservation = self._control_completion_write_reservation
+            if reservation is None:
+                raise RuntimeError("ROOT completion seal lost its writer reservation")
+            self._control_completion_write_reservation = None
+            self._release_compaction_write_reservation_locked(reservation)
             if not turn_completed:
                 self._control_completion_sealed_turn_id = None
+                self._control_completion_seal_changed.set()
 
     async def _await_user_control_feedback_before_root_provider(
         self, turn_id: str
@@ -4442,6 +4762,14 @@ class KernelHostSession:
 
         while True:
             async with self._lock:
+                root_write_key = self._compaction.scope_key(
+                    ModelInputScopeKind.ROOT, None
+                )
+                if self._compaction_write_reservations.get(root_write_key, 0):
+                    self._root_compaction_write_changed.clear()
+                    wait_for_root_writer = True
+                else:
+                    wait_for_root_writer = False
                 waiting = tuple(
                     attempt
                     for attempt in self._root_feedback_attempts_locked(turn_id)
@@ -4451,16 +4779,24 @@ class KernelHostSession:
                     and attempt.outcome.user_control.feedback.canonical_status
                     is FeedbackCanonicalStatus.PENDING
                 )
-                if not waiting:
+                if not waiting and not wait_for_root_writer:
                     return
-                deadline = min(
-                    attempt.normal_end_coordination_deadline
-                    for attempt in waiting
-                    if attempt.normal_end_coordination_deadline is not None
-                )
-                events = tuple(
-                    attempt.feedback_canonical_settled for attempt in waiting
-                )
+                if wait_for_root_writer:
+                    deadline = None
+                    events = ()
+                else:
+                    deadline = min(
+                        attempt.normal_end_coordination_deadline
+                        for attempt in waiting
+                        if attempt.normal_end_coordination_deadline is not None
+                    )
+                    events = tuple(
+                        attempt.feedback_canonical_settled for attempt in waiting
+                    )
+            if wait_for_root_writer:
+                await self._root_compaction_write_changed.wait()
+                continue
+            assert deadline is not None
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*(event.wait() for event in events)),
@@ -5259,15 +5595,35 @@ class KernelHostSession:
                         else:
                             self._mark_feedback_target_ended_locked(target_turn_id)
                 return
+            write_reservation: CompactionWriteReservation | None = None
             async with self._lock:
-                attempt.feedback_install_attempted = True
-                # Until the exact write owner answers, target closure cannot
-                # infer rollback from the absence of a Host-local ACK.
-                attempt.feedback_commit_outcome_unknown = True
+                try:
+                    write_reservation = self._reserve_compaction_write_locked(
+                        scope_kind=ModelInputScopeKind.ROOT,
+                        scope_subagent_task_id=None,
+                    )
+                except RuntimeError:
+                    pass
+                else:
+                    attempt.feedback_install_attempted = True
+                    # Until the exact write owner answers, target closure cannot
+                    # infer rollback from the absence of a Host-local ACK.
+                    attempt.feedback_commit_outcome_unknown = True
+                    active_cancellation_intent = (
+                        self._active_cancellation_intent
+                        if self._active_turn_id == target_turn_id
+                        else None
+                    )
+            if write_reservation is None:
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(delay_seconds * 2, 0.5)
+                continue
             try:
                 accepted = await self._runner.install_user_control_feedback(
                     attempt=candidate,
                     deadline_monotonic=self._canonical_deadline(),
+                    admitted_writer=write_reservation,
+                    cancellation_intent=active_cancellation_intent,
                 )
             except asyncio.CancelledError:
                 raise
@@ -5277,6 +5633,28 @@ class KernelHostSession:
                 await asyncio.sleep(delay_seconds)
                 delay_seconds = min(delay_seconds * 2, 0.5)
                 continue
+            except StructuredModelInputCompileError as exc:
+                async with self._lock:
+                    attempt.feedback_commit_outcome_unknown = False
+                    control = attempt.outcome.user_control
+                    feedback = None if control is None else control.feedback
+                    if feedback is not None:
+                        self._replace_control_feedback_locked(
+                            attempt,
+                            replace(
+                                feedback,
+                                canonical_status=FeedbackCanonicalStatus.FAILED,
+                                inclusion_status=(
+                                    FeedbackInclusionStatus.NOT_APPLICABLE
+                                ),
+                                reason=(
+                                    "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
+                                    if _is_input_resource_exhaustion(exc)
+                                    else "CANONICAL_REJECTED"
+                                ),
+                            ),
+                        )
+                return
             except ConversationKernelConflict as exc:
                 async with self._lock:
                     attempt.feedback_commit_outcome_unknown = False
@@ -5343,6 +5721,8 @@ class KernelHostSession:
                 await asyncio.sleep(delay_seconds)
                 delay_seconds = min(delay_seconds * 2, 0.5)
                 continue
+            finally:
+                await self._release_compaction_write_reservation(write_reservation)
             async with self._lock:
                 attempt.feedback_commit_outcome_unknown = False
                 control = attempt.outcome.user_control
@@ -5417,7 +5797,8 @@ class KernelHostSession:
                         strict=True,
                     )
                     if placement.origin_entry_id == exact_entry_id
-                    and message.content == (attempt.feedback_provider_text,)
+                    and message.content
+                    == (LLMTextPart(attempt.feedback_provider_text),)
                 )
                 if len(exact_matches) != 1:
                     continue
@@ -5845,16 +6226,19 @@ class KernelHostSession:
         new_revision_id = (
             _stable_id("context-revision", resolved_turn_id, "0") if new_turn else None
         )
-        write_reservation: tuple[ModelInputScopeKind, str | None] | None = None
-        if new_turn and not await self._reserve_external_new_turn():
-            return KernelCommandOutcome(
-                command_id,
-                "REJECTED",
-                task_id,
-                "ROOT_TURN_ALREADY_RUNNING",
-                "A ROOT turn is already running.",
-            )
-        if not new_turn:
+        write_reservation: CompactionWriteReservation | None = None
+        active_cancellation_intent: ActiveTurnCancellationIntent | None = None
+        if new_turn:
+            write_reservation = await self._reserve_external_new_turn()
+            if write_reservation is None:
+                return KernelCommandOutcome(
+                    command_id,
+                    "REJECTED",
+                    task_id,
+                    "ROOT_TURN_ALREADY_RUNNING",
+                    "A ROOT turn is already running.",
+                )
+        else:
             async with self._lock:
                 try:
                     write_reservation = self._reserve_compaction_write_locked(
@@ -5869,8 +6253,12 @@ class KernelHostSession:
                         "COMPACTION_IN_PROGRESS",
                         "Context compaction is in progress for the ROOT scope.",
                     )
+                if self._active_turn_id == resolved_turn_id:
+                    active_cancellation_intent = self._active_cancellation_intent
         try:
-            accepted = await self._runner.accept_subagent_completion(
+            assert write_reservation is not None
+            accepted, prospective_root_dispatch = (
+                await self._runner.accept_subagent_completion(
                 turn_id=resolved_turn_id,
                 new_context_binding_revision_id=new_revision_id,
                 requested_permission_mode=requested_permission_mode,
@@ -5878,6 +6266,9 @@ class KernelHostSession:
                 command_id=command_id,
                 actor_id=actor_id,
                 deadline_monotonic=self._canonical_deadline(),
+                admitted_writer=write_reservation,
+                cancellation_intent=active_cancellation_intent,
+                )
             )
         except ExternalSourceNotAtSafePoint:
             if new_turn:
@@ -5913,6 +6304,8 @@ class KernelHostSession:
             if write_reservation is not None:
                 await self._release_compaction_write_reservation(write_reservation)
         if accepted.disposition is SubagentCompletionDisposition.TARGET_STALE:
+            if prospective_root_dispatch is not None:
+                prospective_root_dispatch.close()
             if new_turn:
                 await self._release_external_new_turn_reservation()
             return KernelCommandOutcome(
@@ -5925,10 +6318,17 @@ class KernelHostSession:
         assert accepted.entry is not None
         if new_turn and accepted.disposition is SubagentCompletionDisposition.CREATED:
             await self._start_subagent_completion_turn(
-                accepted.entry.turn_id, command_id
+                accepted.entry.turn_id,
+                command_id,
+                prospective_root_dispatch=prospective_root_dispatch,
             )
         elif new_turn:
+            if prospective_root_dispatch is not None:
+                prospective_root_dispatch.close()
             await self._release_external_new_turn_reservation()
+        elif prospective_root_dispatch is not None:
+            prospective_root_dispatch.close()
+            raise RuntimeError("active completion returned a ROOT dispatch")
         return KernelCommandOutcome(
             command_id,
             "SUCCEEDED",
@@ -5937,7 +6337,9 @@ class KernelHostSession:
             "The delegated task outcome was delivered to Pulsara.",
         )
 
-    async def _reserve_external_new_turn(self) -> bool:
+    async def _reserve_external_new_turn(
+        self,
+    ) -> CompactionWriteReservation | None:
         async with self._lock:
             self._retire_done_active_root_locked()
             if (
@@ -5950,10 +6352,14 @@ class KernelHostSession:
                 or self._external_new_turn_accepting
                 or self._active_task is not None
             ):
-                return False
+                return None
+            reservation = self._reserve_compaction_write_locked(
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            )
             self._external_new_turn_accepting = True
             self._external_new_turn_settled.clear()
-            return True
+            return reservation
 
     async def _confirm_subagent_completion_command(
         self,
@@ -5993,7 +6399,11 @@ class KernelHostSession:
             self._queue_wake.set()
 
     async def _start_subagent_completion_turn(
-        self, turn_id: str, command_id: str
+        self,
+        turn_id: str,
+        command_id: str,
+        *,
+        prospective_root_dispatch: PreparedProspectiveRootDispatch | None = None,
     ) -> None:
         async with self._lock:
             self._retire_done_active_root_locked()
@@ -6010,7 +6420,11 @@ class KernelHostSession:
                 turn_id=turn_id,
                 command_id=command_id,
                 name=f"kernel-subagent-completion-turn:{turn_id}",
-                run=lambda intent: self._run_accepted_root_chain(turn_id, intent),
+                run=lambda intent: self._run_accepted_root_chain(
+                    turn_id,
+                    intent,
+                    prospective_root_dispatch=prospective_root_dispatch,
+                ),
             )
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
@@ -6450,14 +6864,6 @@ def _stable_id(namespace: str, *parts: str) -> str:
     return f"{namespace}:{digest}"
 
 
-def _validate_prompt(value: str) -> None:
-    encoded = value.encode("utf-8")
-    if not encoded or len(encoded) > MAXIMUM_PROMPT_BYTES:
-        raise ValueError("prompt is outside its finite byte bound")
-    if any(character not in "\n\t" and ord(character) < 0x20 for character in value):
-        raise ValueError("prompt contains a forbidden control character")
-
-
 def _list_resumable_session_rows(
     repository: ConversationKernelRepository,
     workspace_id: str,
@@ -6629,6 +7035,7 @@ class KernelHostCore:
         self._deadlines = KernelExecutionDeadlineFactory(
             watchdog_policy or DEFAULT_KERNEL_WATCHDOG_POLICY
         )
+        self._image_validator = HostPromptImageValidator()
         self._access: VerifiedPostgresAccessLease | None = None
         self._repository: ConversationKernelRepository | None = None
         self._blob_store: PostgresCanonicalBlobStore | None = None
@@ -7025,6 +7432,7 @@ class KernelHostCore:
                 plugin_view_owner=plugin_view_owner,
                 initial_plugin_view=initial_plugin_view,
                 credential_boundary=self._credential_boundary,
+                image_validator=self._image_validator,
                 local_mcp_configs=local_mcp_configs,
                 mcp_configs=mcp_configs,
             )
@@ -7463,6 +7871,7 @@ class KernelHostCore:
             session_ids = tuple(self._sessions)
         for host_session_id in session_ids:
             await self.close_session(host_session_id, close_conversation=False)
+        await self._image_validator.aclose()
         async with self._lock:
             self._extension_routes.clear()
         blob_close_deadline = self._deadlines.deadline(
@@ -7598,6 +8007,22 @@ async def _acquire_lock_before_deadline(
 def _raise_if_deadline_expired(deadline_monotonic: float, message: str) -> None:
     if monotonic() >= deadline_monotonic:
         raise TimeoutError(message)
+
+
+def _is_input_resource_exhaustion(
+    error: StructuredModelInputCompileError,
+) -> bool:
+    return error.kind in {
+        ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED,
+        ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED,
+        ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
+        ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
+        ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
+        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
+        ModelInputCompileFailureKind.TOOL_SCHEMA_EXCEEDS_BUDGET,
+        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE,
+        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
+    }
 
 
 def _plan_workflow_command_outcome(

@@ -8,6 +8,7 @@ credential values are scrubbed from the report.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import replace
@@ -28,6 +29,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     build_prepared_root_turn_intent,
@@ -40,6 +42,7 @@ from pulsara_agent.model_input.continuity import (
 )
 from pulsara_agent.model_input.contracts import ContextSourceKind, ModelInputScopeKind
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
+from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettings, LocalSettingsStore
@@ -257,8 +260,10 @@ def _seed_completed_history(session, *, segments: int = 5) -> None:
             context_binding_revision_id=f"revision:round10-seed:{suffix}",
             permission_snapshot_id=f"permission:round10-seed:{suffix}",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-            content=InlineContent.from_bytes(
-                (f"round10-history-{index}:" + " context" * 6_000).encode()
+            canonical_prompt=freeze_canonical_prompt(
+                FrozenPromptContent.text(
+                    f"round10-history-{index}:" + " context" * 6_000
+                )
             ),
             occurred_at=datetime.now(timezone.utc),
             actor_id="round10-dogfood",
@@ -504,7 +509,7 @@ Fork/join:
 
 Use the general_worker profile. Briefly state the graph outcome currently visible to you and the independently observed project version; do not claim unfinished work is complete."""
     result = await session.run_turn(
-        prompt,
+        PromptContent.text(prompt),
         command_id="command:round10:graph",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
@@ -567,7 +572,7 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
     initial_prompt = f"""Create exactly one worker with spawn_agent and task_name context_worker. Use context mode last_n with turns=1. Its objective must tell it to inspect PARENT_CONTEXT, then call terminal once with command {hold_command!r}, wait for that tool result, incorporate any inter-agent message delivered after the tool group, and finally call report_agent_result alone with a summary listing every distinct ROOT marker and mailbox instruction it actually observed. Do not copy marker values into the objective. Return immediately after spawn; do not wait for the worker."""
     run = asyncio.create_task(
         session.run_turn(
-            initial_prompt,
+            PromptContent.text(initial_prompt),
             command_id="command:round10:last-n-spawn",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -575,12 +580,12 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
     turn_id = await _active_root_turn_id(session, timeout_seconds=10)
     steer_one = await session.steer_active_turn(
         command_id="command:round10:last-n-steer-one",
-        text="ROOT_CONTEXT_MARKER_ONE_7C1A",
+        content=PromptContent.text("ROOT_CONTEXT_MARKER_ONE_7C1A"),
         target_turn_id=turn_id,
     )
     steer_two = await session.steer_active_turn(
         command_id="command:round10:last-n-steer-two",
-        text="ROOT_CONTEXT_MARKER_TWO_9B4E",
+        content=PromptContent.text("ROOT_CONTEXT_MARKER_TWO_9B4E"),
         target_turn_id=turn_id,
     )
     spawn_result = await run
@@ -597,9 +602,9 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
     message_text = "MIDFLIGHT_GUIDANCE_MARKER_2D6F"
     send_result = await session.run_turn(
         (
-            "Call send_agent_message exactly once for task_id "
+            PromptContent.text("Call send_agent_message exactly once for task_id "
             f"{task_id!r} with message {message_text!r}. Return immediately after "
-            "the tool reports queued; do not wait for the worker."
+            "the tool reports queued; do not wait for the worker.")
         ),
         command_id="command:round10:message",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
@@ -610,9 +615,9 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
     release_path.touch()
     wait_result = await session.run_turn(
         (
-            "Call wait_agent for task_id "
+            PromptContent.text("Call wait_agent for task_id "
             f"{task_id!r} with timeout_seconds 120. After it settles, quote its "
-            "result summary exactly and stop."
+            "result summary exactly and stop.")
         ),
         command_id="command:round10:last-n-wait",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
@@ -673,7 +678,7 @@ async def _run_wait_input_matrix(session, workspace: Path) -> dict[str, object]:
     prompt = f"""Create exactly one general_worker task with task_key wait_input_child. Its objective must call terminal once with command {hold_command!r}; after the command completes it must call report_agent_result alone with summary WAIT_INPUT_CHILD_DONE. After create_agent_tasks succeeds, call wait_agent exactly once for its exact task ID with settle=all and timeout_seconds=120. If that wait is interrupted by an exact steer, acknowledge the exact steer marker and finish this ROOT without calling wait again. Do not return before create_agent_tasks and wait_agent have both been called."""
     root_run = asyncio.create_task(
         session.run_turn(
-            prompt,
+            PromptContent.text(prompt),
             command_id="command:round10:wait-input-root",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -690,17 +695,15 @@ async def _run_wait_input_matrix(session, workspace: Path) -> dict[str, object]:
     )
     queued = await session.submit_prompt(
         command_id="command:round10:wait-input-next-turn",
-        text="NEXT_TURN_WAIT_SENTINEL: reply only NEXT_TURN_WAIT_PROCESSED.",
+        content=PromptContent.text("NEXT_TURN_WAIT_SENTINEL: reply only NEXT_TURN_WAIT_PROCESSED."),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     await asyncio.sleep(0.75)
     queued_left_wait_suspended = not root_run.done()
     steer = await session.steer_active_turn(
         command_id="command:round10:wait-input-steer",
-        text=(
-            "EXACT_WAIT_STEER_SENTINEL: acknowledge this exact marker, do not call "
-            "wait_agent again, and finish the current ROOT."
-        ),
+        content=PromptContent.text("EXACT_WAIT_STEER_SENTINEL: acknowledge this exact marker, do not call "
+            "wait_agent again, and finish the current ROOT."),
         target_turn_id=turn_id,
     )
     try:
@@ -789,7 +792,7 @@ async def _run_untargeted_completion_wait(
         "do sleep 0.1; done; echo UNTARGETED_BLOCKER_DONE"
     )
     spawn_result = await session.run_turn(
-        f"""Use create_agent_tasks exactly once to create five independent general_worker tasks in this exact order. Task untargeted_waker must call terminal once with command {waker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_WAKER_DONE. Tasks untargeted_blocker1, untargeted_blocker2, untargeted_blocker3, and untargeted_blocker4 must each call terminal once with command {blocker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_BLOCKER_DONE. Return immediately after creation. Do not call wait_agent or list_agents.""",
+        PromptContent.text(f"""Use create_agent_tasks exactly once to create five independent general_worker tasks in this exact order. Task untargeted_waker must call terminal once with command {waker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_WAKER_DONE. Tasks untargeted_blocker1, untargeted_blocker2, untargeted_blocker3, and untargeted_blocker4 must each call terminal once with command {blocker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_BLOCKER_DONE. Return immediately after creation. Do not call wait_agent or list_agents."""),
         command_id="command:round10:untargeted-spawn",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
@@ -820,9 +823,9 @@ async def _run_untargeted_completion_wait(
     )
     wait_run = asyncio.create_task(
         session.run_turn(
-            "Call wait_agent exactly once with no task_ids and timeout_seconds=120. "
+            PromptContent.text("Call wait_agent exactly once with no task_ids and timeout_seconds=120. "
             "After it returns, use only the completion message delivered after the "
-            "tool closes and quote the exact child summary. Do not call list_agents.",
+            "tool closes and quote the exact child summary. Do not call list_agents."),
             command_id="command:round10:untargeted-wait",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -923,7 +926,7 @@ For the fifth task use key mcp_queued, general_worker, default context, and this
 The first four slow tasks must precede mcp_queued in the batch so the Host-global four-worker capacity leaves mcp_queued pending. Do not wait for any task."""
     root_run = asyncio.create_task(
         session.run_turn(
-            prompt,
+            PromptContent.text(prompt),
             command_id="command:round10:capacity-spawn",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -971,10 +974,10 @@ The first four slow tasks must precede mcp_queued in the batch so the Host-globa
     task_ids = tuple(str(row["id"]) for row in await _task_rows(session))
     wait_result = await session.run_turn(
         (
-            "Call wait_agent exactly once for these exact task IDs with settle=all "
+            PromptContent.text("Call wait_agent exactly once for these exact task IDs with settle=all "
             "and timeout_seconds=180. Its ToolResult is only a synchronization "
             "outcome; summarize the task outcomes from the completion messages "
-            "that Pulsara delivers after the tool closes: " + json.dumps(task_ids)
+            "that Pulsara delivers after the tool closes: " + json.dumps(task_ids))
         ),
         command_id="command:round10:capacity-wait",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,

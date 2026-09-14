@@ -53,8 +53,8 @@ def test_stage3_5_final_oracles_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 29
 
 
 def test_stage3_5_obsolete_authority_paths_are_physically_absent() -> None:
@@ -145,7 +145,7 @@ def test_stage3_5_clean_migration_universe_is_the_only_packaged_universe() -> No
     )
 
     baseline = (sql_root / BASELINE_RESOURCE).read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 28
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 29
     assert "CREATE TABLE public.pulsara_schema_migrations" in baseline
     assert "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public" in baseline
     for token in (
@@ -196,6 +196,9 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/compaction/runtime.py",
         "src/pulsara_agent/conversation_kernel/extensions.py",
         "src/pulsara_agent/conversation_kernel/host.py",
+        # K2 owns one short-lived decoder process and joins its result/cleanup
+        # tasks before releasing the single Host-wide validation slot.
+        "src/pulsara_agent/conversation_kernel/image_validation.py",
         "src/pulsara_agent/conversation_kernel/io.py",
         # PR05 §§9.2–9.3: the original candidate tracks its one decision
         # write/read-confirm task; close joins settlement_changed. No worker

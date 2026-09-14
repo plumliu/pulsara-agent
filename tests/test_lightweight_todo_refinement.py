@@ -671,7 +671,7 @@ def test_todo_refinement_preserves_the_closed_durability_oracle() -> None:
     )
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
 
     root = Path(__file__).resolve().parents[1]
     migration = (
@@ -785,6 +785,7 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         task = asyncio.create_task(
             coordinator.accept_root_intent(
                 candidate,
+                provider_input_admission=object(),
                 model_resolution_snapshot=object(),
                 cancellation_intent=intent,
             )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from pulsara_agent.llm.adapters.openai.chat_completions import (
@@ -11,8 +13,17 @@ from pulsara_agent.llm.adapters.openai.responses import (
     build_responses_payload,
     project_responses_context_bearing_payload_fields,
 )
-from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
-from pulsara_agent.llm.input import LLMMessage, ToolSpec
+from pulsara_agent.llm.errors import (
+    ModelContextIdentityMismatch,
+    ModelTargetCapabilityMismatch,
+)
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+    ToolSpec,
+)
 from pulsara_agent.llm.model_catalog import (
     ModelTargetKey,
     ReasoningEffortChoices,
@@ -563,6 +574,7 @@ def test_reasoning_selection_is_excluded_from_target_compatibility_digest() -> N
             "v6-route-target-reasoning-and-tool-correlation"
         ),
         "model_identity_policy": "accept_reported",
+        "input_modalities": ("text",),
         "limits": {
             "total_context_tokens": 1_000_000,
             "max_input_tokens": 1_000_000,
@@ -608,6 +620,117 @@ def test_explicit_tool_rejection_happens_before_provider_open() -> None:
     )
     with pytest.raises(ModelTargetCapabilityMismatch, match="does not support tools"):
         validate_model_context_shape_for_call(call=call, context=context)
+
+
+@pytest.mark.parametrize(
+    ("input_modalities", "accepted"),
+    (
+        (["text", "image"], True),
+        (["text"], False),
+        (None, True),
+    ),
+)
+def test_frozen_target_input_modalities_gate_image_shape_before_provider_open(
+    input_modalities: list[str] | None,
+    accepted: bool,
+) -> None:
+    fixture = catalog_fixture()
+    model = fixture["zhipuai"]["models"]["glm-5.3"]  # type: ignore[index]
+    if input_modalities is None:
+        model.pop("modalities")  # type: ignore[union-attr]
+    else:
+        model["modalities"] = {"input": input_modalities}  # type: ignore[index]
+    call, context = _resolved_call(
+        "zhipuai",
+        "glm-5.3",
+        WireApi.OPENAI_CHAT_COMPLETIONS,
+        ReasoningEffortSelection("high"),
+        fixture=fixture,
+    )
+    image = LLMImagePart(
+        media_type="image/png",
+        immutable_bytes=b"validated-image-value",
+        width=31,
+        height=31,
+    )
+    context = replace(
+        context,
+        messages=(
+            LLMMessage.user_content(
+                FrozenPromptContent(
+                    (LLMTextPart("before"), image, LLMTextPart("after"))
+                )
+            ),
+        ),
+    )
+
+    expected = None if input_modalities is None else tuple(input_modalities)
+    assert call.target.fact.input_modalities == expected
+    if accepted:
+        validate_model_context_shape_for_call(call=call, context=context)
+        validate_model_context_shape_for_call(
+            call=call,
+            context=replace(
+                context,
+                messages=(
+                    LLMMessage.user_content(FrozenPromptContent((image,))),
+                ),
+            ),
+        )
+    else:
+        with pytest.raises(ModelTargetCapabilityMismatch, match="image input"):
+            validate_model_context_shape_for_call(call=call, context=context)
+
+
+def test_internal_empty_user_text_keeps_its_existing_closed_shape() -> None:
+    call, context = _resolved_call(
+        "zhipuai",
+        "glm-5.3",
+        WireApi.OPENAI_CHAT_COMPLETIONS,
+        ReasoningEffortSelection("high"),
+    )
+
+    validate_model_context_shape_for_call(
+        call=call,
+        context=replace(context, messages=(LLMMessage.user(""),)),
+    )
+    with pytest.raises(ModelContextIdentityMismatch, match="invalid closed shape"):
+        validate_model_context_shape_for_call(
+            call=call,
+            context=replace(
+                context,
+                messages=(LLMMessage(role=LLMMessage.user("").role),),
+            ),
+        )
+
+
+def test_input_modalities_are_part_of_the_frozen_target_identity() -> None:
+    text_fixture = catalog_fixture()
+    image_fixture = catalog_fixture()
+    image_fixture["zhipuai"]["models"]["glm-5.3"]["modalities"] = {  # type: ignore[index]
+        "input": ["text", "image"]
+    }
+    text_call, _ = _resolved_call(
+        "zhipuai",
+        "glm-5.3",
+        WireApi.OPENAI_CHAT_COMPLETIONS,
+        ReasoningEffortSelection("high"),
+        fixture=text_fixture,
+    )
+    image_call, _ = _resolved_call(
+        "zhipuai",
+        "glm-5.3",
+        WireApi.OPENAI_CHAT_COMPLETIONS,
+        ReasoningEffortSelection("high"),
+        fixture=image_fixture,
+    )
+
+    assert text_call.target.fact.input_modalities == ("text",)
+    assert image_call.target.fact.input_modalities == ("text", "image")
+    assert (
+        text_call.target.fact.target_fingerprint
+        != image_call.target.fact.target_fingerprint
+    )
 
 
 @pytest.mark.parametrize(
@@ -700,6 +823,8 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat() -
 
     assert target.contract.target_facts.route_name == "Local Gateway"
     assert target.contract.target_facts.limits.total_context_tokens == 300_000
+    assert target.contract.target_facts.input_modalities is None
+    assert target.fact.input_modalities is None
     assert target.contract.canonical_endpoint_base_url == "http://127.0.0.1:9000/v1"
     assert build_chat_completions_payload(call=call, context=context)[
         "reasoning_effort"

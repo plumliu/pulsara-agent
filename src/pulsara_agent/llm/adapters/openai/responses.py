@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 import json
@@ -35,7 +36,15 @@ from pulsara_agent.llm.adapters.openai.retrying import (
     provider_failure_code_hint,
     sdk_max_retries_for_transport,
 )
-from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
+from pulsara_agent.llm.input import (
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+    LLMToolCall,
+    MessageRole,
+    ToolSpec,
+    join_text_content,
+)
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.provider import (
@@ -1615,7 +1624,7 @@ def _message_to_responses_inputs(message: LLMMessage) -> list[dict[str, Any]]:
             {
                 "type": "function_call_output",
                 "call_id": message.tool_call_id,
-                "output": "\n".join(message.content),
+                "output": join_text_content(message.content),
             }
         ]
     if message.role is MessageRole.ASSISTANT and message.tool_calls:
@@ -1636,8 +1645,32 @@ def _textual_responses_input(message: LLMMessage) -> dict[str, Any]:
         # Use Responses' EasyInputMessage string form for maximum compatibility
         # with OpenAI-compatible gateways. Some gateways parse prior assistant
         # messages incorrectly when they are sent as input_text content parts.
-        "content": "\n".join(message.content),
+        "content": _responses_message_content(message),
     }
+
+
+def _responses_message_content(message: LLMMessage) -> str | list[dict[str, object]]:
+    images = any(isinstance(part, LLMImagePart) for part in message.content)
+    if not images:
+        return join_text_content(message.content)
+    if message.role is not MessageRole.USER:
+        raise ValueError("Responses image content requires a USER message")
+    content: list[dict[str, object]] = []
+    for part in message.content:
+        if isinstance(part, LLMTextPart):
+            content.append({"type": "input_text", "text": part.text})
+        elif isinstance(part, LLMImagePart):
+            encoded = base64.b64encode(part.immutable_bytes).decode("ascii")
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": f"data:{part.media_type};base64,{encoded}",
+                    "detail": "auto",
+                }
+            )
+        else:  # pragma: no cover - LLMMessage closes this union.
+            raise TypeError("Responses message contains an invalid content part")
+    return content
 
 
 def _tool_call_to_responses_input(tool_call: LLMToolCall) -> dict[str, Any]:

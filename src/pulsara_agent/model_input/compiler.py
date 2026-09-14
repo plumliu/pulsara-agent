@@ -12,11 +12,22 @@ import heapq
 import json
 from time import monotonic
 
-from pulsara_agent.llm.estimator import TokenEstimate
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.estimator import (
+    TokenEstimate,
+    estimate_image_visual_tokens,
+)
+from pulsara_agent.llm.input import (
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+    join_text_content,
+    llm_content_identity_value,
+    llm_content_logical_bytes,
+)
 from pulsara_agent.model_input.contracts import (
     CompiledSourceDecision,
     CompiledToolResultDecision,
+    CompactionSnapshotCarrier,
     ContextBudgetClass,
     ContextChannel,
     ContextCompileBudgetReport,
@@ -56,7 +67,7 @@ from pulsara_agent.model_input.continuity import (
     SourceObservationPresence,
     encode_runtime_observation,
     provider_input_dispatch_anchor_value,
-    provider_input_logical_utf8_bytes,
+    provider_input_logical_bytes,
 )
 from pulsara_agent.model_input.lowering import (
     LoweredCanonicalItem,
@@ -69,7 +80,7 @@ from pulsara_agent.primitives.plan_workflow import (
 )
 from pulsara_agent.primitives.tool_result_projection import (
     ToolResultDeliveryRequirement,
-    provider_neutral_message_logical_utf8_bytes as _message_logical_utf8_bytes,
+    provider_neutral_message_logical_bytes as _message_logical_bytes,
 )
 
 
@@ -838,7 +849,7 @@ class StructuredModelInputCompiler:
             total_input_tokens=full.total_input_tokens,
             protected_transcript_tokens=0,
             protected_prefix_message_count=0,
-            protected_prefix_logical_utf8_bytes=0,
+            protected_prefix_logical_bytes=0,
             protected_prefix_fingerprint=None,
             context_source_tokens=source_tokens,
             degraded_source_count=len(degraded_source_ids),
@@ -1282,7 +1293,7 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
             )
-        if provider_input_logical_utf8_bytes(
+        if provider_input_logical_bytes(
             system_prompt=system_prompt, tools=tools, messages=messages
         ) > (64 << 20):
             raise StructuredModelInputCompileError(
@@ -1602,19 +1613,19 @@ class StructuredModelInputCompiler:
             for variant in state.lowered.tool_result_variants
         )
         fixed_observation_bytes = sum(
-            _message_logical_utf8_bytes(item.fixed_message)
+            _message_logical_bytes(item.fixed_message)
             for item in emissions
             if item.fixed_message is not None
         )
         delta_carrier_bytes = sum(
-            _message_logical_utf8_bytes(item.fixed_message)
+            _message_logical_bytes(item.fixed_message)
             for item in lowered_delta
             if item.fixed_message is not None
         )
         if (
-            request.canonical_input.canonical_utf8_bytes
+            request.canonical_input.canonical_expanded_bytes
             > self._limits.maximum_canonical_input_bytes
-            or predecessor.logical_utf8_bytes
+            or predecessor.logical_bytes
             + aggregate_source_variants
             + aggregate_tool_variants
             + fixed_observation_bytes
@@ -1759,10 +1770,10 @@ class StructuredModelInputCompiler:
                 ModelInputCompileFailureKind.FINAL_ESTIMATE_MISMATCH
             )
         suffix_logical_bytes = sum(
-            _message_logical_utf8_bytes(item)
+            _message_logical_bytes(item)
             for item in layout.messages[len(previous_messages) :]
         )
-        if predecessor.logical_utf8_bytes + suffix_logical_bytes > (
+        if predecessor.logical_bytes + suffix_logical_bytes > (
             self._limits.maximum_compile_working_set_bytes
         ):
             raise StructuredModelInputCompileError(
@@ -1920,7 +1931,7 @@ class StructuredModelInputCompiler:
             total_input_tokens=layout.estimate.total_input_tokens,
             protected_transcript_tokens=prefix_message_tokens,
             protected_prefix_message_count=len(previous_messages),
-            protected_prefix_logical_utf8_bytes=predecessor.logical_utf8_bytes,
+            protected_prefix_logical_bytes=predecessor.logical_bytes,
             protected_prefix_fingerprint=prefix_fingerprint,
             context_source_tokens=source_tokens,
             degraded_source_count=len(degraded_source_ids),
@@ -2063,12 +2074,22 @@ class StructuredModelInputCompiler:
             *suffix_token_values,
         )
         message_tokens = sum(message_tokens_by_index)
+        suffix_visual_image_tokens = sum(
+            estimate_image_visual_tokens(width=part.width, height=part.height)
+            for message in suffix
+            for part in message.content
+            if isinstance(part, LLMImagePart)
+        )
         estimate = TokenEstimate(
             system_tokens=previous_estimate.system_tokens,
             message_tokens=message_tokens,
             message_tokens_by_index=message_tokens_by_index,
             tool_tokens=previous_estimate.tool_tokens,
             envelope_tokens=previous_estimate.envelope_tokens,
+            visual_image_tokens=(
+                previous_estimate.visual_image_tokens
+                + suffix_visual_image_tokens
+            ),
             total_input_tokens=(
                 previous_estimate.system_tokens
                 + message_tokens
@@ -2093,7 +2114,7 @@ class StructuredModelInputCompiler:
                 _observation_origin_fingerprint(
                     source_kind=kind,
                     semantic_fingerprint=semantic,
-                    text="\n".join(message.content),
+                    text=join_text_content(message.content),
                 ),
             )
             for _placement, kind_value, message in sorted(
@@ -2316,7 +2337,7 @@ class StructuredModelInputCompiler:
         if (
             len(request.canonical_input.items)
             > self._limits.maximum_canonical_input_items
-            or request.canonical_input.canonical_utf8_bytes
+            or request.canonical_input.canonical_expanded_bytes
             > self._limits.maximum_canonical_input_bytes
         ):
             raise StructuredModelInputCompileError(
@@ -2355,7 +2376,7 @@ class StructuredModelInputCompiler:
         source_carrier_bytes = sum(
             max(
                 0,
-                _message_logical_utf8_bytes(
+                _message_logical_bytes(
                     source_variant_message(candidate, variant.text, mode=variant.mode)
                 )
                 - variant.utf8_bytes,
@@ -2371,12 +2392,12 @@ class StructuredModelInputCompiler:
             "\n\n".encode("utf-8")
         )
         fixed_envelopes = sum(
-            _fixed_message_envelope_utf8_bytes(item)
+            _fixed_message_envelope_logical_bytes(item)
             for item in lowered
             if item.fixed_message is not None
         )
         working = (
-            request.canonical_input.canonical_utf8_bytes
+            request.canonical_input.canonical_expanded_bytes
             + materialized_plan_bytes
             + aggregate_all
             + source_carrier_bytes
@@ -2426,7 +2447,8 @@ class StructuredModelInputCompiler:
         index = indexes[0]
         original = request.canonical_input.items[index]
         try:
-            storage_value = json.loads(original.text)
+            original_text = join_text_content(original.content)
+            storage_value = json.loads(original_text)
         except (TypeError, ValueError) as exc:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
@@ -2460,7 +2482,7 @@ class StructuredModelInputCompiler:
             source_entry_id=original.source_entry_id,
             source_entry_sequence=original.source_entry_sequence,
             source_turn_id=original.source_turn_id,
-            text=materialized_text,
+            content=(LLMTextPart(materialized_text),),
             input_origin=original.input_origin,
             tool_calls=original.tool_calls,
             tool_call_id=original.tool_call_id,
@@ -2471,7 +2493,7 @@ class StructuredModelInputCompiler:
         items = list(request.canonical_input.items)
         items[index] = replacement
         added = len(materialized_text.encode("utf-8")) - len(
-            original.text.encode("utf-8")
+            original_text.encode("utf-8")
         )
         return tuple(items), added
 
@@ -2586,7 +2608,7 @@ class StructuredModelInputCompiler:
                 _observation_origin_fingerprint(
                     source_kind=state.candidate.source_kind,
                     semantic_fingerprint=state.candidate.domain_semantic_fingerprint,
-                    text="\n".join(state.message().content),
+                    text=join_text_content(state.message().content),
                 ),
             )
             for state in sorted(
@@ -2864,22 +2886,26 @@ class StructuredModelInputCompiler:
         diagnostics.append(code)
 
 
-def _fixed_message_envelope_utf8_bytes(item: LoweredCanonicalItem) -> int:
+def _fixed_message_envelope_logical_bytes(item: LoweredCanonicalItem) -> int:
     message = item.fixed_message
     assert message is not None
     source = item.source
-    source_bytes = len(source.text.encode("utf-8"))
+    source_bytes = (
+        source.content.canonical_expanded_bytes
+        if isinstance(source.content, CompactionSnapshotCarrier)
+        else llm_content_logical_bytes(source.content)
+    )
     # The reader's canonical byte charge is content-oriented and does not
     # promise to include JSONB-backed tool arguments.  Count every non-body
     # provider carrier byte here, even when a parent manifest conservatively
     # causes some identity bytes to be charged twice.
-    return max(0, _message_logical_utf8_bytes(message) - source_bytes)
+    return max(0, _message_logical_bytes(message) - source_bytes)
 
 
 def _llm_message_value(message: LLMMessage) -> object:
     return {
         "role": message.role.value,
-        "content": message.content,
+        "content": llm_content_identity_value(message.content),
         "thinking": message.thinking,
         "tool_calls": tuple(
             (item.id, item.name, item.arguments) for item in message.tool_calls

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.llm.input import FrozenPromptContent
+
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -10,11 +12,13 @@ from uuid import uuid4
 
 import pytest
 
-from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import (
     KernelCommandOutcome,
     KernelHostSession,
     _UserControlAttempt,
+)
+from pulsara_agent.conversation_kernel.compaction.runtime import (
+    HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
@@ -22,6 +26,7 @@ from pulsara_agent.conversation_kernel.reader import (
 )
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
 from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordinator
+from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.conversation_kernel.user_control import (
     FeedbackCanonicalStatus,
     FeedbackInclusionStatus,
@@ -37,6 +42,7 @@ from pulsara_agent.conversation_kernel.user_control import (
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     ModelInputScopeKind,
+    provider_input_item_text,
 )
 from pulsara_agent.ports.user_control_feedback import (
     USER_CONTROL_FEEDBACK_MEDIA_TYPE,
@@ -91,9 +97,17 @@ def _feedback_host() -> tuple[KernelHostSession, _UserControlAttempt, str]:
     host._control_monotonic = lambda: 100.0
     host._active_task = None
     host._active_turn_id = None
+    host._active_cancellation_intent = None
     host._control_completion_sealed_turn_id = None
+    host._control_completion_write_reservation = None
+    host._control_completion_seal_changed = asyncio.Event()
+    host._control_completion_seal_changed.set()
     host._closing = False
     host._closed = False
+    host._compaction = HostCompactionRuntimeOwner()
+    host._compaction_write_reservations = {}
+    host._root_compaction_write_changed = asyncio.Event()
+    host._root_compaction_write_changed.set()
     provider_text = project_user_control_feedback_for_provider(
         _content().canonical_bytes()
     )
@@ -149,7 +163,7 @@ def _provider_request(
                 conversation_scope_kind=ModelInputScopeKind.ROOT,
                 provider_input_through_sequence=999,
             ),
-            messages=(SimpleNamespace(content=(body,)),),
+            messages=(SimpleNamespace(content=(LLMTextPart(body),)),),
             message_placements=(SimpleNamespace(origin_entry_id=entry_id),),
         ),
         cut=SimpleNamespace(context_binding_revision_id=revision),
@@ -309,6 +323,9 @@ def test_pr03_normal_root_completion_fences_feedback_into_the_next_request() -> 
         )
 
         assert await host._coordinate_user_control_feedback_at_root_completion("turn:A")
+        await host._settle_user_control_feedback_root_completion(
+            "turn:A", turn_completed=False
+        )
         barrier = asyncio.create_task(
             host._await_user_control_feedback_before_root_provider("turn:A")
         )
@@ -336,8 +353,53 @@ def test_pr03_normal_root_completion_fences_feedback_into_the_next_request() -> 
         assert not await host._coordinate_user_control_feedback_at_root_completion(
             "turn:A"
         )
+        await host._settle_user_control_feedback_root_completion(
+            "turn:A", turn_completed=True
+        )
         active.cancel()
         await asyncio.gather(active, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_pr03_cancelled_completion_wait_releases_its_exact_writer_seal() -> None:
+    async def scenario() -> None:
+        host, attempt, _provider_text = _feedback_host()
+        host._canonical_deadline = lambda: monotonic() + 30
+        feedback = attempt.outcome.user_control.feedback
+        assert feedback is not None
+        host._replace_control_feedback_locked(
+            attempt,
+            replace(
+                feedback,
+                canonical_status=FeedbackCanonicalStatus.PENDING,
+                entry_id=None,
+            ),
+        )
+
+        coordinating = asyncio.create_task(
+            host._coordinate_user_control_feedback_at_root_completion("turn:A")
+        )
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if host._control_completion_write_reservation is not None:
+                break
+        reservation = host._control_completion_write_reservation
+        assert reservation is not None
+        assert not coordinating.done()
+
+        coordinating.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await coordinating
+        await host._settle_user_control_feedback_root_completion(
+            "turn:A", turn_completed=False
+        )
+
+        assert host._control_completion_write_reservation is None
+        assert host._control_completion_sealed_turn_id is None
+        assert host._control_completion_seal_changed.is_set()
+        root_key = host._compaction.scope_key(ModelInputScopeKind.ROOT, None)
+        assert host._compaction_write_reservations.get(root_key, set()) == set()
 
     asyncio.run(scenario())
 
@@ -431,9 +493,19 @@ def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit() -> None:
 
         class _AmbiguousRunner:
             async def install_user_control_feedback(
-                self, *, attempt, deadline_monotonic
+                self,
+                *,
+                attempt,
+                deadline_monotonic,
+                admitted_writer,
+                cancellation_intent,
             ):
-                del attempt, deadline_monotonic
+                del (
+                    attempt,
+                    deadline_monotonic,
+                    admitted_writer,
+                    cancellation_intent,
+                )
                 install_observed.set()
                 raise ConnectionError("commit response lost")
 
@@ -515,9 +587,19 @@ def test_pr03_host_close_exact_confirms_an_ambiguous_feedback_commit() -> None:
 
         class _AmbiguousRunner:
             async def install_user_control_feedback(
-                self, *, attempt, deadline_monotonic
+                self,
+                *,
+                attempt,
+                deadline_monotonic,
+                admitted_writer,
+                cancellation_intent,
             ):
-                del attempt, deadline_monotonic
+                del (
+                    attempt,
+                    deadline_monotonic,
+                    admitted_writer,
+                    cancellation_intent,
+                )
                 install_observed.set()
                 await release_install.wait()
                 raise ConnectionError("commit response lost")
@@ -669,7 +751,7 @@ def test_pr03_feedback_entry_and_unique_event_commit_together_and_lower_exactly(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=binding,
-        content=InlineContent.from_bytes(b"keep working"),
+        content=FrozenPromptContent.text('keep working'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
@@ -686,12 +768,29 @@ def test_pr03_feedback_entry_and_unique_event_commit_together_and_lower_exactly(
         actor_id="host:one",
     )
     safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
+    prospective = repository.prepare_user_control_feedback_provider_input_candidate(
+        lease.guard,
+        candidate=candidate,
+        deadline_monotonic=deadline,
+    )
+    handle = safe_point.freeze_provider_input(
+        turn_id=turn_id, deadline_monotonic=deadline
+    )
+    assert handle.cut == prospective.expected_provider_input_cut
+    admission = SimpleNamespace(candidate=prospective)
     accepted = safe_point.install_user_control_feedback(
-        attempt=candidate, deadline_monotonic=deadline
+        handle,
+        attempt=candidate,
+        provider_input_admission=admission,
+        deadline_monotonic=deadline,
     )
     confirmed = safe_point.install_user_control_feedback(
-        attempt=candidate, deadline_monotonic=deadline
+        handle,
+        attempt=candidate,
+        provider_input_admission=admission,
+        deadline_monotonic=deadline,
     )
+    handle.close()
     assert confirmed == accepted
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -719,7 +818,7 @@ def test_pr03_feedback_entry_and_unique_event_commit_together_and_lower_exactly(
     )
     assert item.item_kind is ProviderInputItemKind.USER
     assert item.input_origin is CanonicalInputOriginKind.USER_CONTROL_FEEDBACK
-    assert item.text == project_user_control_feedback_for_provider(
+    assert provider_input_item_text(item) == project_user_control_feedback_for_provider(
         candidate.content.canonical_bytes()
     )
 

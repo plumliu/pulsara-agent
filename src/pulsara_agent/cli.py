@@ -44,6 +44,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     DEFAULT_KERNEL_WATCHDOG_POLICY,
 )
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
+from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.model_target import (
     default_reasoning_selection,
@@ -390,7 +391,7 @@ async def _kernel_host_run(args) -> object:
             permission_policy=_permission_policy(args),
             active_skill_names=_active_skill_names_from_args(args),
         )
-        return await session.run_turn(args.prompt)
+        return await session.run_turn(PromptContent.text(args.prompt))
     finally:
         if session is not None:
             await core.close_session(session.host_session_id, close_conversation=True)
@@ -543,7 +544,7 @@ async def _kernel_host_repl(args) -> None:
                     )
                     session = next_session
                 continue
-            _print_agent_run_result(await session.run_turn(prompt))
+            _print_agent_run_result(await session.run_turn(PromptContent.text(prompt)))
     finally:
         await core.shutdown()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from tests.support.model_config import frozen_test_prompt
 import asyncio
 import ast
 from dataclasses import fields
@@ -121,7 +122,7 @@ from pulsara_agent.hooks.contracts import (
 from pulsara_agent.llm.adapters.openai.function_tools import (
     lower_openai_function_parameters,
 )
-from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.input import MessageRole, join_text_content
 from pulsara_agent.mcp_config import (
     LocalConfiguredMcpRuntimeSource,
     McpConfiguredEffect,
@@ -851,7 +852,9 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
                     for item in reversed(request.compiled_input.messages)
                     if item.role is MessageRole.TOOL_RESULT
                 )
-                outer = json.loads(result.content[0])["pulsara_tool_result"]
+                outer = json.loads(join_text_content(result.content))[
+                    "pulsara_tool_result"
+                ]
                 inspected = json.loads(outer["body"])
                 events = _generic_tool_stream(
                     block_id="call:use-meta",
@@ -884,7 +887,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
             hook_scope=hook_scope,
         )
         try:
-            result = await runner.run_turn("inspect and invoke the new MCP tool")
+            result = await runner.run_turn(frozen_test_prompt("inspect and invoke the new MCP tool"))
             client = _MixedSchemaFakeMcpClient.instances[-1]
             return result, model, client.session, hooks
         finally:
@@ -2810,11 +2813,11 @@ def test_round6_postgres_runner_commits_attempt_before_real_mcp_effect(
             context_source_collector=StaticContextSourceCollector(),
         )
         try:
-            first_result = await runner.run_turn("use the configured MCP tool")
+            first_result = await runner.run_turn(frozen_test_prompt("use the configured MCP tool"))
             supervisor.reconnect("fixture")
             connection = supervisor._tasks["fixture"]  # noqa: SLF001
             await connection
-            second_result = await runner.run_turn("continue after reconnect")
+            second_result = await runner.run_turn(frozen_test_prompt("continue after reconnect"))
             return first_result, second_result, dynamic_name, model
         finally:
             supervisor.stop_admission()
@@ -2931,7 +2934,7 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
             context_source_collector=StaticContextSourceCollector(),
         )
         try:
-            return await runner.run_turn("invoke the long-name MCP tool")
+            return await runner.run_turn(frozen_test_prompt("invoke the long-name MCP tool"))
         finally:
             supervisor.stop_admission()
             close = asyncio.create_task(supervisor.aclose())
@@ -4156,7 +4159,7 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

@@ -1,20 +1,43 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from io import BytesIO
 from time import monotonic
+from types import SimpleNamespace
+from typing import cast
 from uuid import uuid4
 
+from PIL import Image
+import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
 import pytest
 
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.fork_history import read_fork_anchor
+from pulsara_agent.conversation_kernel.prompt_content import (
+    hydrate_canonical_prompt_body,
+)
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
+    LLMTextPart,
+    join_text_content,
+)
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    CompactionSnapshotCarrier,
+    FrozenProviderInputItemKind,
+    StructuredModelInputLimits,
+    provider_input_item_text,
+)
+from pulsara_agent.model_input.lowering import lower_canonical_item
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     ConversationKernelRepository,
 )
+from pulsara_agent.conversation_kernel.steer import PreparedActiveRootInputAdmission
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from tests.support.model_config import (
@@ -27,6 +50,8 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     COMPACTION_MODEL_CONTRACT,
     COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
     COMPACTION_SUMMARY_PROMPT_CONTRACT,
+    CONTEXT_SNAPSHOT_CODEC,
+    CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
     CompactionCanonicalWritePreconditions,
@@ -77,7 +102,7 @@ def turn(repo, guard, text, *, finish=True, answer="answer", complete=True):
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         entry_id=identity("entry"),
         context_binding_revision_id=identity("revision"),
-        content=InlineContent.from_bytes(text.encode()),
+        content=FrozenPromptContent.text(text),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
         model_call_binding=model_binding(model_runtime()),
@@ -176,6 +201,19 @@ def compact(
         "SELECT e.* FROM pulsara_v3.turns t JOIN pulsara_v3.transcript_entries e ON e.id=t.initial_entry_id WHERE t.id=%s",
         (turn_id,),
     )[0]
+    canonical_initial = tuple(
+        item for item in canonical.items if item.source_entry_id == initial["id"]
+    )
+    active_content = None
+    if initial["entry_sequence"] <= boundary:
+        if len(canonical_initial) == 1 and isinstance(
+            canonical_initial[0].content, tuple
+        ):
+            active_content = FrozenPromptContent(canonical_initial[0].content)
+        else:
+            active_content = hydrate_canonical_prompt_body(
+                body=bytes(initial["inline_content"]), image_payloads=()
+            ).content
     active = (
         None
         if idle
@@ -185,14 +223,14 @@ def compact(
             location=CompactionActiveRequestLocation.SNAPSHOT_EXACT
             if initial["entry_sequence"] <= boundary
             else CompactionActiveRequestLocation.CANONICAL_SUFFIX,
-            text=bytes(initial["inline_content"]).decode()
-            if initial["entry_sequence"] <= boundary
-            else None,
+            item_kind=FrozenProviderInputItemKind.USER,
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+            content=active_content,
         )
     )
     carrier = build_compaction_snapshot_carrier(
         summary=freeze_compaction_summary_output(summary, maximum_utf8_bytes=65536),
-        recent_user_messages=(),
+        recent_human_requests=(),
         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER
         if idle
         else CompactionContinuationMode.RESUME_ACTIVE_TURN,
@@ -226,7 +264,12 @@ def compact(
             event_id=identity("event"),
             source_through_sequence=boundary,
             source_digest=canonical_compaction_range_digest(lineage, scope_range),
-            snapshot_content=InlineContent.from_bytes(carrier.body),
+            snapshot_content=InlineContent.from_bytes(
+                carrier.body,
+                media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
+                codec=CONTEXT_SNAPSHOT_CODEC,
+            ),
+            snapshot_carrier=carrier,
             compiler_contract=COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
             prompt_contract=COMPACTION_SUMMARY_PROMPT_CONTRACT,
             model_contract=COMPACTION_MODEL_CONTRACT,
@@ -294,15 +337,28 @@ def test_historical_snapshot_ignores_future_idle_compaction_and_retains_exact_re
         and carrier.active_request is None
     )
     assert len(carrier.retained_historical_requests) == 1
-    assert carrier.retained_historical_requests[0].text == "precise active request"
+    assert join_text_content(
+        carrier.retained_historical_requests[0].content.parts
+    ) == "precise active request"
     assert carrier.retained_historical_requests[0].item_kind.value == "USER"
     child_guard = child_lease(repo, child).guard
     _, cut, _ = turn(repo, child_guard, "new child request", finish=False)
     actual = CanonicalProviderInputReader(
         repo.connection_provider
     ).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
-    assert [item.text for item in actual.items[1:]] == ["C1 final", "new child request"]
-    assert "C2 future summary" not in actual.items[0].text
+    assert [provider_input_item_text(item) for item in actual.items[1:]] == [
+        "C1 final",
+        "new child request",
+    ]
+    snapshot_projection = lower_canonical_item(
+        actual.items[0],
+        artifact_read_available=False,
+        limits=StructuredModelInputLimits(),
+    )
+    assert snapshot_projection.fixed_message is not None
+    assert "C2 future summary" not in join_text_content(
+        snapshot_projection.fixed_message.content
+    )
     nested = fork(repo, child, copied[0]["id"])
     assert nested.created, nested.public_code
     nested_snapshot = rows(
@@ -333,7 +389,10 @@ def test_midturn_multiple_compactions_copy_only_last_adopted_base_and_retained_s
     parsed = parse_compaction_snapshot_carrier(bytes(carriers[0]["inline_content"]))
     assert (
         parsed.earlier_context_summary == "C2"
-        and parsed.retained_historical_requests[0].text == "long horizon objective"
+        and join_text_content(
+            parsed.retained_historical_requests[0].content.parts
+        )
+        == "long horizon objective"
     )
 
 
@@ -383,7 +442,10 @@ def test_repeated_fork_appends_exact_requests_without_overwrite_or_dedup(
         (nested.child_session_id,),
     )[0]
     settled = parse_compaction_snapshot_carrier(bytes(snapshot["inline_content"]))
-    assert [request.text for request in settled.retained_historical_requests] == [
+    assert [
+        join_text_content(request.content.parts)
+        for request in settled.retained_historical_requests
+    ] == [
         "first exact request",
         second_request,
     ]
@@ -957,11 +1019,208 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
     snapshot = CanonicalProviderInputReader(
         repo.connection_provider
     ).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
-    assert [item.text for item in snapshot.items] == [
+    assert [provider_input_item_text(item) for item in snapshot.items] == [
         "first prompt",
         "first final",
         "continue child",
     ]
+
+
+def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(repo):
+    lease = new_session(repo)
+    payload = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
+    image = LLMImagePart("image/png", payload.getvalue(), 7, 5)
+    content = FrozenPromptContent(
+        (LLMTextPart("before"), image, LLMTextPart("after"), image)
+    )
+    turn_id = identity("turn")
+    start_test_root_turn(
+        repo,
+        lease.guard,
+        command_id=identity("command"),
+        turn_id=turn_id,
+        permission_snapshot_id=identity("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        entry_id=identity("entry"),
+        context_binding_revision_id=identity("revision"),
+        content=content,
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+        model_call_binding=model_binding(model_runtime()),
+    )
+    anchor = final(repo, lease.guard, turn_id)
+
+    created = fork(repo, lease.guard.session_id, anchor)
+    assert created.created, created.public_code
+    child = created.child_session_id
+    copied_user = rows(
+        repo,
+        """SELECT id FROM pulsara_v3.transcript_entries
+           WHERE session_id=%s AND entry_kind='USER_MESSAGE'""",
+        (child,),
+    )[0]["id"]
+    source_refs = rows(
+        repo,
+        """SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs
+           WHERE session_id=%s AND transcript_entry_id IS NOT NULL
+           ORDER BY ref_ordinal""",
+        (lease.guard.session_id,),
+    )
+    child_refs = rows(
+        repo,
+        """SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs
+           WHERE session_id=%s AND transcript_entry_id=%s ORDER BY ref_ordinal""",
+        (child, copied_user),
+    )
+    assert [(row["ref_ordinal"], row["blob_id"]) for row in child_refs] == [
+        (row["ref_ordinal"], row["blob_id"]) for row in source_refs
+    ]
+    assert [row["ref_ordinal"] for row in child_refs] == [0, 1]
+
+    guard = child_lease(repo, child).guard
+    _, cut, _ = turn(repo, guard, "continue child", finish=False)
+    snapshot = CanonicalProviderInputReader(
+        repo.connection_provider
+    ).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
+    assert snapshot.items[0].content == content.parts
+    assert provider_input_item_text(snapshot.items[-1]) == "continue child"
+
+
+def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_delete(
+    repo,
+    stage2_migrated_postgres_database,
+):
+    lease = new_session(repo)
+    payload = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
+    image = LLMImagePart("image/png", payload.getvalue(), 7, 5)
+    content = FrozenPromptContent((LLMTextPart("before"), image, image))
+    turn_id = identity("turn")
+    start_test_root_turn(
+        repo,
+        lease.guard,
+        command_id=identity("command"),
+        turn_id=turn_id,
+        permission_snapshot_id=identity("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        entry_id=identity("entry"),
+        context_binding_revision_id=identity("revision"),
+        content=content,
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+        model_call_binding=model_binding(model_runtime()),
+    )
+    carrier = compact(repo, lease.guard, turn_id, 1, "image snapshot")
+    parent_snapshot = rows(
+        repo,
+        """SELECT s.id
+           FROM pulsara_v3.context_snapshots s
+           WHERE s.session_id=%s""",
+        (lease.guard.session_id,),
+    )[0]["id"]
+    parent_refs = rows(
+        repo,
+        """SELECT ref_ordinal, blob_id
+           FROM pulsara_v3.canonical_image_refs
+           WHERE session_id=%s AND context_snapshot_id=%s
+           ORDER BY ref_ordinal""",
+        (lease.guard.session_id, parent_snapshot),
+    )
+    assert [row["ref_ordinal"] for row in parent_refs] == [0, 1]
+    assert parent_refs[0]["blob_id"] == parent_refs[1]["blob_id"]
+    assert carrier.active_request is not None
+    assert carrier.active_request.content == content
+
+    anchor = final(repo, lease.guard, turn_id)
+    created = fork(repo, lease.guard.session_id, anchor)
+    assert created.created, created.public_code
+    child = created.child_session_id
+    child_snapshot = rows(
+        repo,
+        "SELECT id FROM pulsara_v3.context_snapshots WHERE session_id=%s",
+        (child,),
+    )[0]["id"]
+    child_refs = rows(
+        repo,
+        """SELECT ref_ordinal, blob_id
+           FROM pulsara_v3.canonical_image_refs
+           WHERE session_id=%s AND context_snapshot_id=%s
+           ORDER BY ref_ordinal""",
+        (child, child_snapshot),
+    )
+    assert child_refs == parent_refs
+
+    # Remove the actual adopted parent snapshot owner after rewinding its
+    # completed turn to the still-valid revision-zero binding. The owner-local
+    # cascade must not affect the fork's independent snapshot refs.
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
+        revision_zero = connection.execute(
+            """SELECT id FROM pulsara_v3.turn_context_binding_revisions
+               WHERE session_id=%s AND turn_id=%s AND revision_ordinal=0""",
+            (lease.guard.session_id, turn_id),
+        ).fetchone()[0]
+        connection.execute(
+            """UPDATE pulsara_v3.turns
+               SET current_context_binding_revision_id=%s
+               WHERE session_id=%s AND id=%s""",
+            (revision_zero, lease.guard.session_id, turn_id),
+        )
+        connection.execute(
+            """UPDATE pulsara_v3.transcript_entries
+               SET context_binding_revision_id=%s
+               WHERE session_id=%s AND turn_id=%s
+                 AND context_binding_revision_id<>%s""",
+            (revision_zero, lease.guard.session_id, turn_id, revision_zero),
+        )
+        connection.execute(
+            """DELETE FROM pulsara_v3.agent_events
+               WHERE session_id=%s AND subject_context_binding_revision_id IN (
+                   SELECT id FROM pulsara_v3.turn_context_binding_revisions
+                   WHERE session_id=%s AND turn_id=%s AND revision_ordinal>0
+               )""",
+            (lease.guard.session_id, lease.guard.session_id, turn_id),
+        )
+        connection.execute(
+            """DELETE FROM pulsara_v3.turn_context_binding_revisions
+               WHERE session_id=%s AND turn_id=%s AND revision_ordinal>0""",
+            (lease.guard.session_id, turn_id),
+        )
+        connection.execute(
+            "DELETE FROM pulsara_v3.context_snapshots WHERE session_id=%s AND id=%s",
+            (lease.guard.session_id, parent_snapshot),
+        )
+    assert rows(
+        repo,
+        """SELECT 1 FROM pulsara_v3.canonical_image_refs
+           WHERE session_id=%s AND context_snapshot_id=%s""",
+        (lease.guard.session_id, parent_snapshot),
+    ) == []
+    assert rows(
+        repo,
+        """SELECT ref_ordinal, blob_id FROM pulsara_v3.canonical_image_refs
+           WHERE session_id=%s AND context_snapshot_id=%s ORDER BY ref_ordinal""",
+        (child, child_snapshot),
+    ) == child_refs
+
+    guard = child_lease(repo, child).guard
+    _, cut, _ = turn(repo, guard, "continue child", finish=False)
+    hydrated = CanonicalProviderInputReader(
+        repo.connection_provider
+    ).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
+    snapshot_item = hydrated.items[0]
+    assert isinstance(snapshot_item.content, CompactionSnapshotCarrier)
+    lowered = lower_canonical_item(
+        snapshot_item,
+        artifact_read_available=False,
+        limits=StructuredModelInputLimits(),
+    )
+    assert lowered.fixed_message is not None
+    assert tuple(
+        part
+        for part in lowered.fixed_message.content
+        if isinstance(part, LLMImagePart)
+    ) == (image, image)
 
 
 def test_fork_imported_anchor_is_only_entry_and_stays_fixed_after_local_turn(repo):
@@ -1081,19 +1340,40 @@ def test_fork_plan_history_retains_origin_and_attribution_without_live_authority
         continued, _ = _start_root(repo, lease, text=b"continue outside Plan")
         anchor = final(repo, lease.guard, continued)
     else:
+        answer = PlanQuestionAnswer(
+            PlanQuestionAnswerKind.FREE_TEXT,
+            free_text="Proceed exactly as discussed",
+        )
+        result_id = identity("result")
+        result_entry_id = identity("entry")
+        occurred_at = datetime.now(timezone.utc)
+        provider_candidate = (
+            repo.prepare_plan_question_resolution_provider_input_candidate(
+                lease.guard,
+                workflow_id=workflow,
+                expected_workflow_revision=2,
+                interaction_id=opened.interaction_id,
+                answer=answer,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+                occurred_at=occurred_at,
+                deadline_monotonic=monotonic() + 30,
+            )
+        )
         repo.resolve_plan_question(
             lease.guard,
             command_id=identity("command"),
             workflow_id=workflow,
             expected_workflow_revision=2,
             interaction_id=opened.interaction_id,
-            answer=PlanQuestionAnswer(
-                PlanQuestionAnswerKind.FREE_TEXT,
-                free_text="Proceed exactly as discussed",
+            answer=answer,
+            result_id=result_id,
+            result_entry_id=result_entry_id,
+            provider_input_admission=cast(
+                PreparedActiveRootInputAdmission,
+                SimpleNamespace(candidate=provider_candidate),
             ),
-            result_id=identity("result"),
-            result_entry_id=identity("entry"),
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=occurred_at,
             actor_id="user",
             deadline_monotonic=monotonic() + 30,
         )

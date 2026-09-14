@@ -9,6 +9,7 @@
     "assistant_message_blocks": ["SELECT", "INSERT"],
     "provider_assistant_replay_fragments": ["SELECT", "INSERT"],
     "blobs": ["SELECT", "INSERT", "DELETE"],
+    "canonical_image_refs": ["SELECT", "INSERT"],
     "context_snapshots": ["SELECT", "INSERT"],
     "imported_history_groups": ["SELECT", "INSERT"],
     "session_context_genesis": ["SELECT", "INSERT"],

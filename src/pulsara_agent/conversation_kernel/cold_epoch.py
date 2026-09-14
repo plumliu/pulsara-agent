@@ -50,6 +50,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
     StructuredModelInputCompileRequest,
+    provider_input_item_text,
 )
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
@@ -169,7 +170,7 @@ class SubagentInitialSeed:
             or not isinstance(self.profile_kind, SubagentProfileKind)
             or len(objective_items) != 1
             or objective_items[0] != self.objective_item
-            or self.objective_item.text != self.objective
+            or provider_input_item_text(self.objective_item) != self.objective
             or self.objective_item.source_turn_id != identity.turn_id
             or self.parent_call_subject.session_id != identity.session_id
             or self.parent_context_selection != expected_selection

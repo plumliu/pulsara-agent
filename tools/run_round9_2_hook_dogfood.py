@@ -9,6 +9,7 @@ written or printed.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import asdict, is_dataclass, replace
@@ -42,7 +43,7 @@ from pulsara_agent.conversation_kernel.repository import (
 from pulsara_agent.hooks.contracts import HookSourceKind
 from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.hooks.source import LocalHookSourceProvider
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import LLMMessage, text_part_values
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
@@ -437,7 +438,7 @@ def _view_public(view: object) -> list[dict[str, object]]:
 def _message_public(message: LLMMessage) -> dict[str, object]:
     return {
         "role": message.role.value,
-        "content": list(message.content),
+        "content": list(text_part_values(message.content)),
         "thinking": list(message.thinking),
         "tool_calls": [
             {"id": call.id, "name": call.name, "arguments": call.arguments}
@@ -974,7 +975,7 @@ async def _run_scenarios(
         )
         primary_start = len(recorder.requests)
         primary = await session.run_turn(
-            "PRIMARY_TRACE: execute the exact controlled recovery flow now.",
+            PromptContent.text("PRIMARY_TRACE: execute the exact controlled recovery flow now."),
             command_id="command:round9-2-dogfood-primary",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -1005,7 +1006,7 @@ async def _run_scenarios(
 
         permission_start = len(recorder.requests)
         permission = await session.run_turn(
-            "PERMISSION_TRACE: execute the exact deny-then-allow recovery flow now.",
+            PromptContent.text("PERMISSION_TRACE: execute the exact deny-then-allow recovery flow now."),
             command_id="command:round9-2-dogfood-permission",
             requested_permission_mode=PermissionMode.ASK_PERMISSIONS,
         )
@@ -1031,7 +1032,7 @@ async def _run_scenarios(
         queued_start = len(recorder.requests)
         queued_a_task = asyncio.create_task(
             session.run_turn(
-                "QUEUED_CONTEXT_A: keep this ROOT turn active for the exact queue probe.",
+                PromptContent.text("QUEUED_CONTEXT_A: keep this ROOT turn active for the exact queue probe."),
                 command_id="command:round9-2-dogfood-queued-a",
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
@@ -1039,7 +1040,7 @@ async def _run_scenarios(
         await asyncio.wait_for(recorder.active_provider_started.wait(), timeout=30)
         queued_b_ingress = await session.submit_prompt(
             command_id="command:round9-2-dogfood-queued-b",
-            text="QUEUED_CONTEXT_B: run only after the exact queue head is admitted.",
+            content=PromptContent.text("QUEUED_CONTEXT_B: run only after the exact queue head is admitted."),
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
         if queued_b_ingress.status != "PENDING":
@@ -1092,7 +1093,7 @@ async def _run_scenarios(
         )
         origin = asyncio.create_task(
             session.run_turn(
-                "PLAN_TRACE: ask and settle the controlled question, then submit the plan.",
+                PromptContent.text("PLAN_TRACE: ask and settle the controlled question, then submit the plan."),
                 command_id="command:round9-2-dogfood-plan",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
@@ -1129,7 +1130,7 @@ async def _run_scenarios(
         recorder.arm_gate("ACTIVE_COMPACTION_TRACE")
         active = asyncio.create_task(
             session.run_turn(
-                "ACTIVE_COMPACTION_TRACE: execute the exact controlled read flow now.",
+                PromptContent.text("ACTIVE_COMPACTION_TRACE: execute the exact controlled read flow now."),
                 command_id="command:round9-2-dogfood-active",
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
@@ -1190,7 +1191,7 @@ async def _run_scenarios(
                 f"idle compaction did not adopt: {idle_compaction!r}"
             )
         idle_result = await session.run_turn(
-            "IDLE_COMPACTION_TRACE: prove the next actual cold open now.",
+            PromptContent.text("IDLE_COMPACTION_TRACE: prove the next actual cold open now."),
             command_id="command:round9-2-dogfood-after-idle-compact",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -1211,7 +1212,7 @@ async def _run_scenarios(
             )
 
         subagent = await session.run_turn(
-            "SUBAGENT_TRACE: execute the exact controlled worker lifecycle now.",
+            PromptContent.text("SUBAGENT_TRACE: execute the exact controlled worker lifecycle now."),
             command_id="command:round9-2-dogfood-subagent",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -1246,7 +1247,7 @@ async def _run_scenarios(
             raise RuntimeError("edited USER definition did not become MODIFIED")
         reload_start = len(_hook_logs(log_dir))
         reload_result = await reload_session.run_turn(
-            "RELOAD_TRACE: execute the exact Hook reload flow now.",
+            PromptContent.text("RELOAD_TRACE: execute the exact Hook reload flow now."),
             command_id="command:round9-2-dogfood-reload",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -1271,7 +1272,7 @@ async def _run_scenarios(
         )
         before_next = len(logs_after_reload)
         after_reload_result = await reload_session.run_turn(
-            "AFTER_RELOAD_TRACE: execute the controlled read now.",
+            PromptContent.text("AFTER_RELOAD_TRACE: execute the controlled read now."),
             command_id="command:round9-2-dogfood-after-reload",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )

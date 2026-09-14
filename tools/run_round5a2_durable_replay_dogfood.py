@@ -7,6 +7,7 @@ diagnosed from the actual trajectory rather than inferred from a status code.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import replace
@@ -207,7 +208,7 @@ async def _child(args: argparse.Namespace) -> dict[str, object]:
     )
     try:
         result = await session.run_turn(
-            "Reply with a short acknowledgement.",
+            PromptContent.text("Reply with a short acknowledgement."),
             command_id=f"command:round5a2:{args.mode}",
         )
         report = {

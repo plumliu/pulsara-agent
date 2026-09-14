@@ -33,12 +33,15 @@ from pulsara_agent.conversation_kernel.blob import (
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
 )
+from pulsara_agent.capability.render import MAX_SKILL_CATALOG_UTF8_BYTES
+from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
     CompactionOutcome,
     CompactionTrigger,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
+    CompactionWriteReservation,
     HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.compaction.coordinator import (
@@ -65,10 +68,14 @@ from pulsara_agent.conversation_kernel.direct_model import (
     KernelModelExecutionRequest,
     PreparedKernelModelCall,
     PreparedKernelModelExecution,
+    ProviderFollowupWireResourceQuote,
+    quote_provider_followup_wire_resources,
 )
 from pulsara_agent.capability.planner import KernelToolCapabilityPlanner
-from pulsara_agent.llm.input import LLMToolCall
+from pulsara_agent.llm.input import LLMMessage, LLMToolCall
+from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.llm.request import (
+    MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     provider_assistant_public_projection_fingerprint,
 )
 from pulsara_agent.llm.provider_replay import (
@@ -108,14 +115,22 @@ from pulsara_agent.conversation_kernel.extensions import (
     OperationalHookOffer,
     OperationalHookType,
 )
-from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
+from pulsara_agent.conversation_kernel.limits import (
+    PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
+    ROOT_COMPLETION_SUFFIX_BATCH_ITEMS,
+    STAGE2_LIMITS,
+)
 from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryUsePolicy,
+)
+from pulsara_agent.conversation_kernel.mcp.contracts import (
+    MAXIMUM_MCP_CATALOG_FULL_BYTES,
 )
 from pulsara_agent.conversation_kernel.memory.citations import (
     ProcessLocalMemoryCallContextOwner,
 )
 from pulsara_agent.conversation_kernel.tool_artifacts import (
+    CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
     ToolOutputArtifactProcessor,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
@@ -127,7 +142,15 @@ from pulsara_agent.conversation_kernel.subagents.runtime_port import (
     SubagentRuntimePort,
 )
 from pulsara_agent.conversation_kernel.subagents.contracts import (
+    MAXIMUM_RESULT_SUMMARY_UTF8_BYTES,
+    MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES,
     PreparedSubagentLaunch,
+    SubagentProfileKind,
+    SubagentResultSource,
+    SubagentTaskStatus,
+    SubagentTerminalReason,
+    build_subagent_completion_storage_body,
+    project_subagent_completion_for_provider,
 )
 from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
 from pulsara_agent.conversation_kernel.repository import (
@@ -139,6 +162,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelRepository,
     ConversationKernelConflict,
+    SubagentCompletionDisposition,
     build_prepared_root_turn_intent,
     build_prepared_subagent_turn_admission,
 )
@@ -155,12 +179,19 @@ from pulsara_agent.conversation_kernel.memory.dispatch import (
 from pulsara_agent.conversation_kernel.provider_dispatch import (
     KernelModelPort,
     PreparedProviderDispatch,
+    PreparedProspectiveActiveRootInput,
+    PreparedProspectiveRootDispatch,
+    PreparedWireMeasurementDecision,
     ProviderDispatchCoordinator,
 )
 from pulsara_agent.conversation_kernel.steer_consumption import (
     PreparedSteerPlanStale,
 )
-from pulsara_agent.conversation_kernel.steer import build_direct_root_turn_identity
+from pulsara_agent.conversation_kernel.steer import (
+    PreparedActiveRootInputCandidate,
+    PreparedRootProviderInputCandidate,
+    build_direct_root_turn_identity,
+)
 from pulsara_agent.primitives.plan_workflow import (
     PlanInteractionKind,
 )
@@ -169,9 +200,15 @@ from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
 )
 from pulsara_agent.conversation_kernel.safe_point import (
+    PreparedProviderInputHandle,
     ProviderSafePointCoordinator,
 )
-from pulsara_agent.ports.terminal_observation import PreparedInstallationTarget
+from pulsara_agent.ports.terminal_observation import (
+    ExistingTurnInstallation,
+    NewTurnInstallation,
+    PreparedInstallationTarget,
+    TerminalObservationInstallationAttempt,
+)
 from pulsara_agent.ports.user_control_feedback import (
     UserControlFeedbackInstallationAttempt,
 )
@@ -185,13 +222,23 @@ from pulsara_agent.model_input.diagnostics import (
 from pulsara_agent.model_input.contracts import (
     FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
+    ContextSourceKind,
+    ContextTrustClass,
     ModelInputCompileFailureKind,
     ModelInputScopeKind,
     StructuredModelInputCompileError,
+    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
+    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
+    ProviderToolResultClosureKind,
+    STRUCTURED_MODEL_INPUT_LIMITS,
 )
 from pulsara_agent.model_input.continuity import (
+    MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES,
     ProcessLocalProviderInputInstallPermit,
     ProviderInputContinuityScope,
+    SourceObservationLifecycle,
+    SourceObservationPresence,
+    encode_runtime_observation,
 )
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
@@ -207,12 +254,14 @@ from pulsara_agent.conversation_kernel.tool_surface import (
 from pulsara_agent.hooks.context import (
     HookContextOwner,
     PendingHookContextReservation,
+    maximum_hook_context_provider_body_bytes,
 )
 from pulsara_agent.hooks.contracts import (
     ContinuationDecision,
     GateDecision,
     HookDispatchEnvelope,
     HookDispatchScopeRef,
+    HookEventType,
     SessionStartInput,
     SessionStartRef,
     StopInput,
@@ -221,6 +270,11 @@ from pulsara_agent.hooks.contracts import (
 )
 from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
 from pulsara_agent.hooks.matcher import event_matcher_subject
+from pulsara_agent.primitives.tool_result_projection import (
+    ToolResultLogicalMessageKind,
+    conservative_tool_result_logical_message,
+    provider_neutral_message_logical_bytes,
+)
 
 
 _MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE = (
@@ -241,6 +295,69 @@ class KernelRunResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FrozenPostResponseResourceQuote:
+    current_canonical_expanded_bytes: int
+    actual_assistant_canonical_bytes: int
+    bounded_followup_canonical_bytes: int
+    canonical_upper_after: int
+    current_epoch_logical_bytes: int
+    actual_assistant_logical_bytes: int
+    bounded_followup_logical_bytes: int
+    logical_upper_after: int
+    current_canonical_items: int
+    bounded_followup_items: int
+    item_upper_after: int
+    followup_wire: ProviderFollowupWireResourceQuote | None = dataclass_field(
+        default=None,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        values = (
+            self.current_canonical_expanded_bytes,
+            self.actual_assistant_canonical_bytes,
+            self.bounded_followup_canonical_bytes,
+            self.canonical_upper_after,
+            self.current_epoch_logical_bytes,
+            self.actual_assistant_logical_bytes,
+            self.bounded_followup_logical_bytes,
+            self.logical_upper_after,
+            self.current_canonical_items,
+            self.bounded_followup_items,
+            self.item_upper_after,
+        )
+        if min(values) < 0:
+            raise ValueError("post-response resource quote is invalid")
+        if self.canonical_upper_after != sum(values[:3]):
+            raise ValueError("post-response canonical quote is inconsistent")
+        if self.logical_upper_after != sum(values[4:7]):
+            raise ValueError("post-response logical quote is inconsistent")
+        # The accepted assistant is one item; each bounded follow-up item is
+        # the exact result/closure/late occurrence counted by the reader.
+        if self.item_upper_after != (
+            self.current_canonical_items + 1 + self.bounded_followup_items
+        ):
+            raise ValueError("post-response item quote is inconsistent")
+
+
+class OutputResourceInterruption(RuntimeError):
+    """A complete provider response cannot be settled before its effects."""
+
+    def __init__(self, reason: str, quote: FrozenPostResponseResourceQuote) -> None:
+        self.reason = reason
+        self.quote = quote
+        super().__init__(
+            "provider output resource interruption: "
+            f"{reason}; canonical={quote.canonical_upper_after}/"
+            f"{MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES}, "
+            f"logical={quote.logical_upper_after}/"
+            f"{MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES}, "
+            f"items={quote.item_upper_after}/"
+            f"{MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _CollectedModelResponse:
     completed: CompletedAssistantMessage
     provider_completion: CompletedProviderModelExecution
@@ -249,6 +366,278 @@ class _CollectedModelResponse:
     provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
         default=None, repr=False
     )
+
+
+_PLAN_CONTROL_TOOL_NAMES = frozenset({"enter_plan", "ask_plan_question", "exit_plan"})
+_MCP_ONLY_CAPABILITY_ACTIONS = frozenset(
+    {
+        "ADD_LOCAL_MCP",
+        "UPDATE_LOCAL_MCP",
+        "REMOVE_LOCAL_MCP",
+        "CONFIGURE_PLUGIN_MCP_CONNECTION",
+        "AUTHORIZE_MCP",
+        "CLEAR_MCP_AUTHORIZATION",
+    }
+)
+_LONGEST_TOOL_RESULT_STATE = "CANCELLED_BEFORE_DISPATCH"
+_LONGEST_TOOL_CLOSURE = (
+    ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
+)
+
+
+def _completed_assistant_semantic_message(
+    completed: CompletedAssistantMessage,
+) -> LLMMessage:
+    text = "".join(
+        block.text
+        if isinstance(block, CompletedTextBlock)
+        else block.data
+        if isinstance(block, CompletedDataBlock)
+        else ""
+        for block in completed.blocks
+    )
+    calls = tuple(
+        LLMToolCall(
+            id=block.tool_call_id,
+            name=block.tool_name,
+            arguments=canonical_json_bytes(thaw_json(block.arguments)).decode("utf-8"),
+        )
+        for block in completed.blocks
+        if isinstance(block, CompletedToolCallBlock)
+    )
+    return LLMMessage.assistant_turn(text=text or None, tool_calls=calls)
+
+
+def _completed_assistant_canonical_bytes(
+    completed: CompletedAssistantMessage,
+) -> int:
+    total = 0
+    for block in completed.blocks:
+        if isinstance(block, CompletedTextBlock):
+            total += len(block.text.encode("utf-8"))
+        elif isinstance(block, CompletedDataBlock):
+            total += len(block.data.encode("utf-8"))
+        elif isinstance(block, CompletedToolCallBlock):
+            total += len(canonical_json_bytes(thaw_json(block.arguments)))
+    return total
+
+
+def _tool_result_closure_storage_text(tool_call_id: str) -> str:
+    return canonical_json_bytes(
+        {
+            "schema_version": "provider_tool_result_closure.v1",
+            "tool_call_id": tool_call_id,
+            "disposition": _LONGEST_TOOL_CLOSURE.value,
+        }
+    ).decode("utf-8")
+
+
+def _tool_result_closure_message(tool_call_id: str) -> LLMMessage:
+    return LLMMessage.tool_result(
+        canonical_json_bytes({"disposition": _LONGEST_TOOL_CLOSURE.value}).decode(
+            "utf-8"
+        ),
+        tool_call_id=tool_call_id,
+    )
+
+
+def _ordinary_result_followup_upper(
+    call: CompletedToolCallBlock,
+) -> tuple[int, int, int, tuple[LLMMessage, ...]]:
+    """Quote the larger result versus closure+late branch for one call."""
+
+    late = conservative_tool_result_logical_message(
+        message_kind=ToolResultLogicalMessageKind.LATE_TOOL_OUTCOME,
+        tool_call_id=call.tool_call_id,
+    ).message
+    closure = _tool_result_closure_message(call.tool_call_id)
+    logical = provider_neutral_message_logical_bytes(closure) + (
+        provider_neutral_message_logical_bytes(late)
+    )
+    result_body = "\\" * CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
+    late_storage = canonical_json_bytes(
+        {
+            "schema_version": "late_tool_outcome_observation.v1",
+            "tool_call_id": call.tool_call_id,
+            "result_state": _LONGEST_TOOL_RESULT_STATE,
+            "result": result_body,
+        }
+    )
+    closure_storage = _tool_result_closure_storage_text(call.tool_call_id).encode(
+        "utf-8"
+    )
+    canonical = max(
+        CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
+        len(closure_storage) + len(late_storage),
+    )
+    return canonical, logical, 2, (closure, late)
+
+
+def _plan_result_followup_upper(
+    call: CompletedToolCallBlock,
+) -> tuple[int, int, int, tuple[LLMMessage, ...]]:
+    result = conservative_tool_result_logical_message(
+        message_kind=ToolResultLogicalMessageKind.TOOL_RESULT,
+        tool_call_id=call.tool_call_id,
+    ).message
+    return (
+        PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
+        provider_neutral_message_logical_bytes(result),
+        1,
+        (result,),
+    )
+
+
+def _entered_plan_continuation_followup_upper() -> tuple[
+    int, int, int, tuple[LLMMessage, ...]
+]:
+    """Quote the continuation created with a successful fresh ``enter_plan``.
+
+    The workflow id is a ``plan-workflow:`` prefix plus one SHA-256 hex digest,
+    so every real id has the same encoded length.  The provider projection is
+    the closed value produced by the canonical reader for ENTERED_PLAN.
+    """
+
+    workflow_id_shape = "plan-workflow:" + ("0" * 64)
+    canonical = canonical_json_bytes(
+        {
+            "transition": "ENTERED_PLAN",
+            "workflow_id": workflow_id_shape,
+        }
+    )
+    message = LLMMessage.user(
+        canonical_json_bytes(
+            {
+                "pulsara_plan_continuation": {
+                    "status": "ACTIVE",
+                    "transition": "ENTERED_PLAN",
+                }
+            }
+        ).decode("utf-8")
+    )
+    return (
+        len(canonical),
+        provider_neutral_message_logical_bytes(message),
+        1,
+        (message,),
+    )
+
+
+def _root_completion_followup_upper(
+    item_count: int = ROOT_COMPLETION_SUFFIX_BATCH_ITEMS,
+) -> tuple[int, int, int, tuple[LLMMessage, ...]]:
+    """Quote every completion in the existing per-safe-point FIFO batch.
+
+    Source rows are created only through the bounded subagent task/result
+    contracts.  Control characters produce the largest JSON escaping expansion
+    admitted by those text contracts, so the selected failure projection also
+    bounds both OpenAI wire encoders after their second JSON escape.
+    """
+
+    control_fill = "\x01"
+    task_id = control_fill * 512
+    dependencies = tuple(control_fill * 509 + f"{index:03d}" for index in range(16))
+    profile = max(SubagentProfileKind, key=lambda item: len(item.value)).value
+    projections: list[str] = []
+    for reason in SubagentTerminalReason:
+        body = build_subagent_completion_storage_body(
+            task_id=task_id,
+            task_key="a" * 64,
+            label=control_fill * 256,
+            display_role=control_fill * 256,
+            profile=profile,
+            status=SubagentTaskStatus.FAILED,
+            terminal_reason=reason.value,
+            terminal_public_detail=(
+                control_fill * MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES
+            ),
+            failed_dependency_task_ids=dependencies,
+            result_id=None,
+            result_source=None,
+            result_summary=None,
+        )
+        projections.append(
+            project_subagent_completion_for_provider(
+                body,
+                source_task_id=task_id,
+            )
+        )
+    completed_body = build_subagent_completion_storage_body(
+        task_id=task_id,
+        task_key="a" * 64,
+        label=control_fill * 256,
+        display_role=control_fill * 256,
+        profile=profile,
+        status=SubagentTaskStatus.COMPLETED,
+        terminal_reason=None,
+        terminal_public_detail=None,
+        failed_dependency_task_ids=(),
+        result_id=control_fill * 512,
+        result_source=SubagentResultSource.EXPLICIT.value,
+        result_summary=control_fill * MAXIMUM_RESULT_SUMMARY_UTF8_BYTES,
+    )
+    projections.append(
+        project_subagent_completion_for_provider(
+            completed_body,
+            source_task_id=task_id,
+        )
+    )
+    projection = max(projections, key=lambda value: len(value.encode("utf-8")))
+    message = LLMMessage.user(projection)
+    canonical = len(projection.encode("utf-8"))
+    logical = provider_neutral_message_logical_bytes(message)
+    if not 0 <= item_count <= ROOT_COMPLETION_SUFFIX_BATCH_ITEMS:
+        raise ValueError("ROOT completion follow-up count is invalid")
+    return (
+        canonical * item_count,
+        logical * item_count,
+        item_count,
+        (message,) * item_count,
+    )
+
+
+def _runtime_source_message_upper(
+    *,
+    source_kind: ContextSourceKind,
+    trust_class: ContextTrustClass,
+    lifecycle: SourceObservationLifecycle,
+    maximum_body_utf8_bytes: int,
+) -> LLMMessage:
+    """Build the escaping maximum for one existing bounded source body."""
+
+    if (
+        not 0
+        <= maximum_body_utf8_bytes
+        <= (STRUCTURED_MODEL_INPUT_LIMITS.maximum_single_source_variant_bytes)
+    ):
+        raise ValueError("runtime source upper exceeds the compiler source bound")
+    return encode_runtime_observation(
+        source_kind=source_kind,
+        trust_class=trust_class,
+        lifecycle=lifecycle,
+        presence=SourceObservationPresence.VALUE,
+        contract_version="post-response-resource-upper",
+        body="\x01" * maximum_body_utf8_bytes,
+    )
+
+
+def _capability_catalog_source_kinds(
+    call: CompletedToolCallBlock,
+) -> tuple[ContextSourceKind, ...]:
+    """Return catalogs that a valid capability call can change before follow-up."""
+
+    if call.tool_name == "reload_capabilities":
+        return (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG)
+    if call.tool_name != "manage_capability":
+        return ()
+    action = thaw_json(call.arguments).get("action")
+    if action in _MCP_ONLY_CAPABILITY_ACTIONS:
+        return (ContextSourceKind.MCP_CATALOG,)
+    if action in {"INSTALL_PLUGIN", "SET_PLUGIN_ENABLED", "REMOVE_PLUGIN"}:
+        return (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG)
+    # The closed capability intent parser rejects unknown actions before any
+    # mutation or adoption, so they cannot change a subsequent source.
+    return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,6 +956,7 @@ class ConversationKernelRunner:
             todo_finalizer=todo_admission_finalizer,
         )
         self._subagent_runtime = subagent_runtime
+        self._context_source_collector = context_source_collector
         self._hook_dispatcher = hook_dispatcher
         self._hook_context_owner = hook_context_owner
         self._hook_scope = hook_scope
@@ -704,7 +1094,7 @@ class ConversationKernelRunner:
 
     async def run_turn(
         self,
-        text: str,
+        canonical_prompt: FrozenCanonicalPrompt,
         *,
         command_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
@@ -714,7 +1104,7 @@ class ConversationKernelRunner:
         model_resolution_snapshot: FrozenModelResolutionSnapshot | None = None,
     ) -> KernelRunResult:
         return await self._run_turn(
-            text,
+            canonical_prompt,
             command_id=command_id,
             requested_permission_mode=(
                 requested_permission_mode or self._launch_permission_mode
@@ -793,7 +1183,7 @@ class ConversationKernelRunner:
 
     async def _run_turn(
         self,
-        text: str,
+        canonical_prompt: FrozenCanonicalPrompt,
         *,
         command_id: str | None,
         requested_permission_mode: PermissionMode | None,
@@ -802,16 +1192,13 @@ class ConversationKernelRunner:
         cancellation_intent: ActiveTurnCancellationIntent | None,
         model_resolution_snapshot: FrozenModelResolutionSnapshot | None,
     ) -> KernelRunResult:
-        if not text:
-            raise ValueError("user message must be non-empty")
+        if not isinstance(canonical_prompt, FrozenCanonicalPrompt):
+            raise TypeError("ROOT turn requires a frozen canonical prompt")
         stable_command_id = command_id or _id("command")
         identity = build_direct_root_turn_identity(
             self._writer_lease.guard.session_id, stable_command_id
         )
         turn_id = identity.turn_id
-        content = await self._content(
-            text.encode("utf-8"), deadline=self._canonical_deadline()
-        )
         frozen_model_resolution = model_resolution_snapshot
         if frozen_model_resolution is None:
             provider = self._model_resolution_snapshot_provider
@@ -831,7 +1218,7 @@ class ConversationKernelRunner:
             requested_permission_mode=(
                 requested_permission_mode or self._launch_permission_mode
             ),
-            content=content,
+            canonical_prompt=canonical_prompt,
             occurred_at=occurred_at,
             expected_permission_snapshot=expected_permission_snapshot,
         )
@@ -843,19 +1230,218 @@ class ConversationKernelRunner:
             scope_kind=ModelInputScopeKind.ROOT,
             scope_subagent_task_id=None,
         )
+        prospective_dispatch: PreparedProspectiveRootDispatch | None = None
         try:
+            if hook_context_reservation is not None:
+                hook_context_reservation.commit()
+            prospective_candidate = await self._io.run(
+                self._repository.prepare_root_provider_input_candidate,
+                self._writer_lease.guard,
+                intent=candidate,
+                model_resolution_snapshot=frozen_model_resolution,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            prospective_dispatch = await self.prepare_prospective_root_input(
+                prospective_candidate
+            )
             await self._turn_admission.accept_root_intent(
                 candidate,
+                provider_input_admission=prospective_dispatch.admission,
                 model_resolution_snapshot=frozen_model_resolution,
                 cancellation_intent=intent,
             )
         except BaseException:
+            if prospective_dispatch is not None:
+                prospective_dispatch.close()
             if hook_context_reservation is not None:
                 hook_context_reservation.retire()
             raise
-        if hook_context_reservation is not None:
-            hook_context_reservation.commit()
-        return await self.run_accepted_turn(turn_id, cancellation_intent=intent)
+        return await self.run_accepted_turn(
+            turn_id,
+            cancellation_intent=intent,
+            prospective_root_dispatch=prospective_dispatch,
+        )
+
+    async def prepare_prospective_root_input(
+        self,
+        candidate: PreparedRootProviderInputCandidate,
+        *,
+        admitted_writer: CompactionWriteReservation | None = None,
+    ) -> PreparedProspectiveRootDispatch:
+        """Prepare one exact first ROOT input before its canonical writer runs."""
+
+        if (
+            admitted_writer is None
+            and self._root_control_preparation_barrier is not None
+        ):
+            await self._root_control_preparation_barrier(candidate.exact_turn_id)
+        if self._before_provider_preparation is not None:
+            await self._before_provider_preparation()
+        try:
+            prepared = await self._provider_dispatch.prepare_prospective_root_input(
+                candidate=candidate,
+                inherited_memory_use_policy=self._root_memory_use_policy,
+                deadline=self._planning_deadline(),
+            )
+        except (
+            StructuredModelInputCompileError,
+            ModelTargetCapabilityMismatch,
+        ) as failure:
+            recovered = await self.compaction.recover_pending_root_input(
+                candidate=candidate,
+                failure=failure,
+                inherited_memory_use_policy=self._root_memory_use_policy,
+                admitted_writer=admitted_writer,
+            )
+            self._emit_pending_root_handover_notice(recovered)
+            return recovered
+        handover = self.compaction.prospective_root_model_switch_candidate(prepared)
+        if handover is None:
+            if not self.compaction.prospective_root_crosses_automatic_threshold(
+                prepared
+            ):
+                return prepared
+            soft_trigger = StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
+            )
+            try:
+                compacted = await self.compaction.recover_pending_root_input(
+                    candidate=candidate,
+                    failure=soft_trigger,
+                    inherited_memory_use_policy=self._root_memory_use_policy,
+                    admitted_writer=admitted_writer,
+                )
+            except BaseException as error:
+                if error is soft_trigger:
+                    return prepared
+                prepared.close()
+                raise
+            prepared.close()
+            self._emit_pending_root_handover_notice(compacted)
+            return compacted
+        prepared.close()
+        switched = await self.compaction.execute_pending_root_model_handover(
+            candidate=candidate,
+            inherited_memory_use_policy=self._root_memory_use_policy,
+            model_switch_candidate=handover,
+            admitted_writer=admitted_writer,
+        )
+        self._emit_pending_root_handover_notice(switched)
+        return switched
+
+    async def prepare_plan_question_resolution_input(
+        self,
+        candidate: PreparedActiveRootInputCandidate,
+        *,
+        cancellation_intent: ActiveTurnCancellationIntent | None,
+        admitted_writer: CompactionWriteReservation,
+    ) -> PreparedProspectiveActiveRootInput:
+        """Prepare the exact question result before its Plan writer runs."""
+
+        return await self._prepare_active_root_input(
+            candidate,
+            deadline=self._planning_deadline(),
+            cancellation_intent=cancellation_intent,
+            admitted_writer=admitted_writer,
+        )
+
+    async def prepare_plan_review_continuation_input(
+        self,
+        candidate: PreparedRootProviderInputCandidate,
+        *,
+        admitted_writer: CompactionWriteReservation,
+    ) -> PreparedProspectiveRootDispatch:
+        """Prepare a user-resolved Plan successor under its admitted writer."""
+
+        return await self.prepare_prospective_root_input(
+            candidate,
+            admitted_writer=admitted_writer,
+        )
+
+    async def confirm_published_active_root_input(
+        self,
+        prepared: PreparedProspectiveActiveRootInput,
+        *,
+        publication_handle: PreparedProviderInputHandle,
+        deadline_monotonic: float,
+    ) -> None:
+        await self._provider_dispatch.confirm_published_active_root_input(
+            prepared,
+            publication_handle=publication_handle,
+            deadline=deadline_monotonic,
+        )
+
+    async def prepare_plan_continuation_input(
+        self, candidate: PreparedRootProviderInputCandidate
+    ) -> PreparedProspectiveRootDispatch:
+        """Prepare a continuation already covered by the response output gate."""
+
+        if self._root_control_preparation_barrier is not None:
+            await self._root_control_preparation_barrier(candidate.exact_turn_id)
+        if self._before_provider_preparation is not None:
+            await self._before_provider_preparation()
+        prepared = await self._provider_dispatch.prepare_prospective_root_input(
+            candidate=candidate,
+            inherited_memory_use_policy=self._root_memory_use_policy,
+            deadline=self._planning_deadline(),
+        )
+        if (
+            self.compaction.prospective_root_model_switch_candidate(prepared)
+            is not None
+        ):
+            prepared.close()
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
+            )
+        return prepared
+
+    async def _prepare_active_root_input(
+        self,
+        candidate: PreparedActiveRootInputCandidate,
+        *,
+        deadline: float,
+        cancellation_intent: ActiveTurnCancellationIntent | None,
+        admitted_writer: CompactionWriteReservation,
+    ) -> PreparedProspectiveActiveRootInput:
+        """Prepare one active suffix, compacting before publication if needed."""
+
+        try:
+            return await self._provider_dispatch.prepare_prospective_active_root_input(
+                candidate=candidate,
+                inherited_memory_use_policy=self._root_memory_use_policy,
+                deadline=deadline,
+            )
+        except StructuredModelInputCompileError as failure:
+            if cancellation_intent is None:
+                raise
+            cut = candidate.expected_provider_input_cut
+            cancellation_intent.require_exact(
+                turn_id=cut.turn_id,
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            )
+            return await self.compaction.recover_pending_active_root_input(
+                candidate=candidate,
+                failure=failure,
+                inherited_memory_use_policy=self._root_memory_use_policy,
+                hook_scope=self._hook_scope,
+                session_start_compact_port=(
+                    self._compact_session_start_port(cancellation_intent)
+                ),
+                session_start_boundary_port=(
+                    self._compact_session_start_boundary_port(cancellation_intent)
+                ),
+                admitted_writer=admitted_writer,
+            )
+
+    def _emit_pending_root_handover_notice(
+        self, prepared: PreparedProspectiveRootDispatch
+    ) -> None:
+        if (
+            prepared.model_switch_tier == 3
+            and self._presentation_notice_sink is not None
+        ):
+            self._presentation_notice_sink(_MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE)
 
     async def run_accepted_turn(
         self,
@@ -863,6 +1449,7 @@ class ConversationKernelRunner:
         *,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
         expected_first_model_identity: str | None = None,
+        prospective_root_dispatch: PreparedProspectiveRootDispatch | None = None,
     ) -> KernelRunResult:
         """Execute a ROOT/task turn whose user entry is already canonical."""
 
@@ -889,6 +1476,8 @@ class ConversationKernelRunner:
         )
         active_surface_borrow: ProcessLocalToolSurfaceBorrow | None = None
         successor_dispatch: PreparedProviderDispatch | None = None
+        successor_wire_decision: PreparedWireMeasurementDecision | None = None
+        pending_prospective_root_dispatch = prospective_root_dispatch
         completed_tool_batch = False
         stop_continuation_used = False
         input_selection_in_progress = False
@@ -900,15 +1489,21 @@ class ConversationKernelRunner:
             await self._subagent_runtime.open_root_completion_delivery(turn_id)
             root_completion_phase_opened = True
         try:
+            if pending_prospective_root_dispatch is not None:
+                if intent.scope_kind is not ModelInputScopeKind.ROOT:
+                    pending_prospective_root_dispatch.close()
+                    raise ValueError("prospective ROOT input was given to a child turn")
             while True:
                 if (
                     successor_dispatch is None
+                    and pending_prospective_root_dispatch is None
                     and intent.scope_kind is ModelInputScopeKind.ROOT
                     and self._root_control_preparation_barrier is not None
                 ):
                     await self._root_control_preparation_barrier(turn_id)
                 if (
                     successor_dispatch is None
+                    and pending_prospective_root_dispatch is None
                     and self._before_provider_preparation is not None
                 ):
                     # No input/surface handle exists here. A transferred compaction
@@ -938,6 +1533,9 @@ class ConversationKernelRunner:
                         turn_id=turn_id,
                     )
                 if manual_request is not None:
+                    if pending_prospective_root_dispatch is not None:
+                        pending_prospective_root_dispatch.close()
+                        pending_prospective_root_dispatch = None
                     compaction = await self.compaction.execute_active(
                         turn_id=turn_id,
                         model_call_index=model_call_count + 1,
@@ -959,6 +1557,19 @@ class ConversationKernelRunner:
                     successor_dispatch = compaction.successor_dispatch
                     completed_tool_batch = False
                     continue
+                if pending_prospective_root_dispatch is not None:
+                    prepared_root_dispatch = pending_prospective_root_dispatch
+                    pending_prospective_root_dispatch = None
+                    activated_root = await self._provider_dispatch.activate_prospective_root_input(
+                        prepared_root_dispatch,
+                        deadline=self._planning_deadline(),
+                    )
+                    if activated_root is None:
+                        continue
+                    (
+                        successor_dispatch,
+                        successor_wire_decision,
+                    ) = activated_root
                 model_call_count += 1
                 input_selection_in_progress = True
                 planning_deadline = self._planning_deadline()
@@ -966,7 +1577,8 @@ class ConversationKernelRunner:
                 successor_dispatch = None
                 automatic_compaction_decided = dispatch is not None
                 reusable_wire_observation = None
-                wire_decision = None
+                wire_decision = successor_wire_decision
+                successor_wire_decision = None
                 if dispatch is None:
                     headroom_admission = None
                     allow_model_switch = (
@@ -1197,7 +1809,10 @@ class ConversationKernelRunner:
                         if completed_tool_batch
                         else CompactionTrigger.AUTO_ACTIVE_CONTEXT
                     )
-                    if dispatch.installed_provider_open is None:
+                    if (
+                        dispatch.installed_provider_open is None
+                        and wire_decision is None
+                    ):
                         wire_decision = await self.compaction.measure_dispatch_wire(
                             dispatch,
                             deadline=planning_deadline,
@@ -1265,6 +1880,9 @@ class ConversationKernelRunner:
                     raise RuntimeError(
                         "provider execution lacks an execution-backed surface"
                     )
+                provider_replay_reservation = None
+                root_answer_fenced = False
+                control_answer_fenced = False
                 try:
                     canonical_facts = dispatch.canonical_facts
                     canonical_input = canonical_facts.canonical_input
@@ -1321,12 +1939,116 @@ class ConversationKernelRunner:
                         proposed_entry_id=entry_id,
                     )
                     completed = collected.completed
-                    canonical_blocks = await self._canonical_blocks(completed)
                     calls = tuple(
                         item
                         for item in completed.blocks
                         if isinstance(item, CompletedToolCallBlock)
                     )
+                    pending_completion_count = 0
+                    root_completion_followup_items = 0
+                    if (
+                        identity.conversation_scope_kind is ModelInputScopeKind.ROOT
+                        and self._subagent_runtime is not None
+                    ):
+                        if not calls:
+                            pending_completion_count = await self._subagent_runtime.seal_root_completion_delivery(
+                                turn_id
+                            )
+                            root_answer_fenced = True
+                            root_completion_followup_items = pending_completion_count
+                        elif (
+                            any(
+                                call.tool_name == "create_agent_tasks" for call in calls
+                            )
+                            or await self._subagent_runtime.root_completion_followup_possible(
+                                turn_id
+                            )
+                        ):
+                            root_completion_followup_items = (
+                                ROOT_COMPLETION_SUFFIX_BATCH_ITEMS
+                            )
+                    pending_control_feedback = False
+                    pending_steer_before_settlement = False
+                    if (
+                        not calls
+                        and identity.conversation_scope_kind
+                        is ModelInputScopeKind.ROOT
+                        and self._root_control_completion_fence is not None
+                    ):
+                        # The Host callback may wait after installing its exact
+                        # process-local seal.  Transfer cleanup ownership before
+                        # awaiting so cancellation cannot strand that writer
+                        # reservation ahead of idle/manual compaction.
+                        control_answer_fenced = True
+                        pending_control_feedback = (
+                            await self._root_control_completion_fence(turn_id)
+                        )
+                        pending_steer_before_settlement = bool(
+                            await self._io.run(
+                                self._repository.read_pending_prompt_steer_facts,
+                                session_id=identity.session_id,
+                                target_turn_id=turn_id,
+                                deadline_monotonic=self._canonical_deadline(),
+                            )
+                        )
+                    output_quote = self._quote_post_response_resources(
+                        request=request,
+                        permit=permit,
+                        collected=collected,
+                        canonical_facts=canonical_facts,
+                        root_completion_followup_items=(root_completion_followup_items),
+                        pending_root_dynamic_followup=(
+                            pending_control_feedback
+                            or pending_steer_before_settlement
+                        ),
+                    )
+                    try:
+                        self._require_post_response_resources(
+                            output_quote,
+                            effective_input_budget_tokens=(
+                                request.wire_input_plan.quote.effective_input_budget_tokens
+                            ),
+                        )
+                    except OutputResourceInterruption as exc:
+                        if root_answer_fenced and self._subagent_runtime is not None:
+                            await (
+                                self._subagent_runtime.settle_root_completion_delivery(
+                                    turn_id, turn_completed=False
+                                )
+                            )
+                            root_answer_fenced = False
+                        if (
+                            control_answer_fenced
+                            and self._root_control_completion_settlement is not None
+                        ):
+                            await self._root_control_completion_settlement(
+                                turn_id, turn_completed=False
+                            )
+                            control_answer_fenced = False
+                        self._live_bus.offer_settlement_nowait(
+                            kind=LiveSettlementKind.ABORTED,
+                            session_id=request.session_id,
+                            turn_id=turn_id,
+                            draft_identity=entry_id,
+                            reason_code=f"OUTPUT_RESOURCE_{exc.reason}",
+                            scope_kind=(identity.conversation_scope_kind.value),
+                            scope_subagent_task_id=(identity.scope_subagent_task_id),
+                            channel_kind=LiveChannelKind.MODEL_OUTPUT,
+                            generation_id=f"model-output:{entry_id}",
+                            proposed_entry_id=entry_id,
+                        )
+                        raise
+                    provider_replay_reservation = (
+                        None
+                        if collected.provider_replay is None
+                        else self._assistant_settlements.prepare_replay_reservation(
+                            scope=permit.scope,
+                            epoch_nonce=permit.epoch_nonce,
+                            epoch_revision=permit.epoch_revision,
+                            provider_replay=collected.provider_replay,
+                        )
+                    )
+                    canonical_blocks = await self._canonical_blocks(completed)
                     parent_bytes = json.dumps(
                         {
                             "draft_identity": completed.draft_identity,
@@ -1418,24 +2140,18 @@ class ConversationKernelRunner:
                         if completion_prepared is None
                         else completion_prepared.result
                     )
-                    root_answer_fenced = False
-                    control_answer_fenced = False
-                    pending_control_feedback = False
                     if (
                         complete_turn
                         and identity.conversation_scope_kind is ModelInputScopeKind.ROOT
                     ):
                         pending_completion = False
                         if self._subagent_runtime is not None:
-                            pending_completion = await self._subagent_runtime.seal_root_completion_delivery(
-                                turn_id
-                            )
-                            root_answer_fenced = True
-                        if self._root_control_completion_fence is not None:
-                            pending_control_feedback = (
-                                await self._root_control_completion_fence(turn_id)
-                            )
-                            control_answer_fenced = True
+                            if not root_answer_fenced:
+                                pending_completion_count = await self._subagent_runtime.seal_root_completion_delivery(
+                                    turn_id
+                                )
+                                root_answer_fenced = True
+                            pending_completion = bool(pending_completion_count)
                         complete_turn = not (
                             pending_completion or pending_control_feedback
                         )
@@ -1456,8 +2172,12 @@ class ConversationKernelRunner:
                             collected.provider_replay_disposition
                         ),
                         provider_replay=collected.provider_replay,
+                        provider_replay_reservation=(provider_replay_reservation),
                         subagent_result=subagent_result,
                     )
+                    # The settlement owner now owns promotion/release across
+                    # exact-confirm and caller cancellation.
+                    provider_replay_reservation = None
                     try:
                         accepted = await self._assistant_settlements.settle(settlement)
                     except BaseException:
@@ -1468,12 +2188,14 @@ class ConversationKernelRunner:
                             await self._root_control_completion_settlement(
                                 turn_id, turn_completed=False
                             )
+                            control_answer_fenced = False
                         if root_answer_fenced and self._subagent_runtime is not None:
                             await (
                                 self._subagent_runtime.settle_root_completion_delivery(
                                     turn_id, turn_completed=False
                                 )
                             )
+                            root_answer_fenced = False
                         if completion_prepared is not None:
                             await self._subagent_runtime.finish_completion(
                                 completion_prepared.permit, committed=False
@@ -1486,10 +2208,12 @@ class ConversationKernelRunner:
                         await self._root_control_completion_settlement(
                             turn_id, turn_completed=accepted.turn_completed
                         )
+                        control_answer_fenced = False
                     if root_answer_fenced and self._subagent_runtime is not None:
                         await self._subagent_runtime.settle_root_completion_delivery(
                             turn_id, turn_completed=accepted.turn_completed
                         )
+                        root_answer_fenced = False
                     if completion_prepared is not None:
                         await self._subagent_runtime.finish_completion(
                             completion_prepared.permit, committed=True
@@ -1526,6 +2250,21 @@ class ConversationKernelRunner:
                         proposed_entry_id=entry_id,
                     )
                 finally:
+                    if (
+                        control_answer_fenced
+                        and self._root_control_completion_settlement is not None
+                    ):
+                        await self._root_control_completion_settlement(
+                            turn_id, turn_completed=False
+                        )
+                    if root_answer_fenced and self._subagent_runtime is not None:
+                        await self._subagent_runtime.settle_root_completion_delivery(
+                            turn_id, turn_completed=False
+                        )
+                    if provider_replay_reservation is not None:
+                        self._continuity.release_assistant_replay_fragment_reservation(
+                            provider_replay_reservation
+                        )
                     active_surface_borrow = dispatch.finish_model_operation()
                 if not calls and accepted.turn_completed:
                     active_surface_borrow.close()
@@ -1711,6 +2450,8 @@ class ConversationKernelRunner:
             self._memory_dispatch.offer_governance_wake()
             raise
         finally:
+            if pending_prospective_root_dispatch is not None:
+                pending_prospective_root_dispatch.close()
             if root_completion_phase_opened and self._subagent_runtime is not None:
                 await self._subagent_runtime.close_root_completion_delivery(turn_id)
 
@@ -1786,17 +2527,101 @@ class ConversationKernelRunner:
         command_id: str,
         actor_id: str,
         deadline_monotonic: float,
-    ) -> AcceptedSubagentCompletion:
-        return await self._io.run(
-            self._safe_point.accept_subagent_completion,
+        admitted_writer: CompactionWriteReservation,
+        cancellation_intent: ActiveTurnCancellationIntent | None = None,
+    ) -> tuple[
+        AcceptedSubagentCompletion,
+        PreparedProspectiveRootDispatch | None,
+    ]:
+        if new_context_binding_revision_id is None:
+            candidate = await self._io.run(
+                self._repository.prepare_manual_subagent_completion_provider_input_candidate,
+                self._writer_lease.guard,
+                turn_id=turn_id,
+                task_id=task_id,
+                command_id=command_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if isinstance(candidate, AcceptedSubagentCompletion):
+                return candidate, None
+            prepared: PreparedProspectiveActiveRootInput | None = None
+            publication_handle = None
+            try:
+                prepared = await self._prepare_active_root_input(
+                    candidate,
+                    deadline=deadline_monotonic,
+                    cancellation_intent=cancellation_intent,
+                    admitted_writer=admitted_writer,
+                )
+                publication_handle = prepared.take_handle_for_publication()
+                accepted = await self._io.run(
+                    self._safe_point.accept_subagent_completion,
+                    handle=publication_handle,
+                    provider_input_admission=prepared.admission,
+                    turn_id=turn_id,
+                    new_context_binding_revision_id=None,
+                    requested_permission_mode=None,
+                    task_id=task_id,
+                    command_id=command_id,
+                    actor_id=actor_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                if accepted.disposition is not SubagentCompletionDisposition.CREATED:
+                    raise ConversationKernelConflict(
+                        "prepared manual completion was not published"
+                    )
+                await self._provider_dispatch.confirm_published_active_root_input(
+                    prepared,
+                    publication_handle=publication_handle,
+                    deadline=deadline_monotonic,
+                )
+                publication_handle = None
+                return accepted, None
+            finally:
+                if publication_handle is not None:
+                    publication_handle.close()
+                if prepared is not None:
+                    prepared.close()
+
+        if requested_permission_mode is None:
+            raise ValueError("new ROOT completion requires a permission mode")
+        candidate = await self._io.run(
+            self._repository.prepare_manual_subagent_completion_root_provider_input_candidate,
+            self._writer_lease.guard,
             turn_id=turn_id,
             new_context_binding_revision_id=new_context_binding_revision_id,
             requested_permission_mode=requested_permission_mode,
             task_id=task_id,
             command_id=command_id,
-            actor_id=actor_id,
             deadline_monotonic=deadline_monotonic,
         )
+        if isinstance(candidate, AcceptedSubagentCompletion):
+            return candidate, None
+        prospective_root: PreparedProspectiveRootDispatch | None = None
+        try:
+            prospective_root = await self.prepare_prospective_root_input(
+                candidate,
+                admitted_writer=admitted_writer,
+            )
+            accepted = await self._io.run(
+                self._safe_point.accept_subagent_completion,
+                provider_input_admission=prospective_root.admission,
+                turn_id=turn_id,
+                new_context_binding_revision_id=new_context_binding_revision_id,
+                requested_permission_mode=requested_permission_mode,
+                task_id=task_id,
+                command_id=command_id,
+                actor_id=actor_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+            if accepted.disposition is not SubagentCompletionDisposition.CREATED:
+                prospective_root.close()
+                prospective_root = None
+            return accepted, prospective_root
+        except BaseException:
+            if prospective_root is not None:
+                prospective_root.close()
+            raise
 
     async def install_terminal_observation(
         self,
@@ -1807,9 +2632,11 @@ class ConversationKernelRunner:
         workspace_id: str,
         actor_id: str,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
-        return await self._io.run(
-            self._safe_point.install_terminal_observation,
+        admitted_writer: CompactionWriteReservation,
+        cancellation_intent: ActiveTurnCancellationIntent | None = None,
+    ) -> tuple[AcceptedEntry | None, PreparedProspectiveRootDispatch | None]:
+        prepared_attempt = await self._io.run(
+            self._safe_point.prepare_terminal_observation_installation,
             coordinator=coordinator,
             monitor_id=monitor_id,
             target=target,
@@ -1817,18 +2644,127 @@ class ConversationKernelRunner:
             actor_id=actor_id,
             deadline_monotonic=deadline_monotonic,
         )
+        if prepared_attempt is None or isinstance(prepared_attempt, AcceptedEntry):
+            return prepared_attempt, None
+        attempt: TerminalObservationInstallationAttempt = prepared_attempt
+        if isinstance(attempt.target, ExistingTurnInstallation):
+            candidate = await self._io.run(
+                self._repository.prepare_active_terminal_observation_provider_input_candidate,
+                self._writer_lease.guard,
+                candidate=attempt,
+                deadline_monotonic=deadline_monotonic,
+            )
+            prepared_active: PreparedProspectiveActiveRootInput | None = None
+            publication_handle = None
+            try:
+                prepared_active = await self._prepare_active_root_input(
+                    candidate,
+                    deadline=deadline_monotonic,
+                    cancellation_intent=cancellation_intent,
+                    admitted_writer=admitted_writer,
+                )
+                publication_handle = prepared_active.take_handle_for_publication()
+                accepted = await self._io.run(
+                    self._safe_point.publish_terminal_observation,
+                    publication_handle,
+                    coordinator=coordinator,
+                    attempt=attempt,
+                    provider_input_admission=prepared_active.admission,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                await self._provider_dispatch.confirm_published_active_root_input(
+                    prepared_active,
+                    publication_handle=publication_handle,
+                    deadline=deadline_monotonic,
+                )
+                publication_handle = None
+                return accepted, None
+            except (StructuredModelInputCompileError, ModelTargetCapabilityMismatch):
+                coordinator.settle_installation(attempt, accepted=False)
+                raise
+            finally:
+                if publication_handle is not None:
+                    publication_handle.close()
+                if prepared_active is not None:
+                    prepared_active.close()
+        if not isinstance(attempt.target, NewTurnInstallation):
+            raise TypeError("terminal observation target is unknown")
+        candidate = await self._io.run(
+            self._repository.prepare_new_terminal_observation_provider_input_candidate,
+            self._writer_lease.guard,
+            candidate=attempt,
+            deadline_monotonic=deadline_monotonic,
+        )
+        prospective_root: PreparedProspectiveRootDispatch | None = None
+        try:
+            prospective_root = await self.prepare_prospective_root_input(
+                candidate,
+                admitted_writer=admitted_writer,
+            )
+            accepted = await self._io.run(
+                self._safe_point.publish_terminal_observation,
+                None,
+                coordinator=coordinator,
+                attempt=attempt,
+                provider_input_admission=prospective_root.admission,
+                deadline_monotonic=deadline_monotonic,
+            )
+            return accepted, prospective_root
+        except BaseException:
+            if prospective_root is not None:
+                prospective_root.close()
+            raise
 
     async def install_user_control_feedback(
         self,
         *,
         attempt: UserControlFeedbackInstallationAttempt,
         deadline_monotonic: float,
+        admitted_writer: CompactionWriteReservation,
+        cancellation_intent: ActiveTurnCancellationIntent | None = None,
     ) -> AcceptedEntry:
-        return await self._io.run(
-            self._safe_point.install_user_control_feedback,
+        confirmed = await self._io.run(
+            self._safe_point.confirm_user_control_feedback,
             attempt=attempt,
             deadline_monotonic=deadline_monotonic,
         )
+        if confirmed is not None:
+            return confirmed
+        candidate = await self._io.run(
+            self._repository.prepare_user_control_feedback_provider_input_candidate,
+            self._writer_lease.guard,
+            candidate=attempt,
+            deadline_monotonic=deadline_monotonic,
+        )
+        prepared: PreparedProspectiveActiveRootInput | None = None
+        publication_handle = None
+        try:
+            prepared = await self._prepare_active_root_input(
+                candidate,
+                deadline=deadline_monotonic,
+                cancellation_intent=cancellation_intent,
+                admitted_writer=admitted_writer,
+            )
+            publication_handle = prepared.take_handle_for_publication()
+            accepted = await self._io.run(
+                self._safe_point.install_user_control_feedback,
+                publication_handle,
+                attempt=attempt,
+                provider_input_admission=prepared.admission,
+                deadline_monotonic=deadline_monotonic,
+            )
+            await self._provider_dispatch.confirm_published_active_root_input(
+                prepared,
+                publication_handle=publication_handle,
+                deadline=deadline_monotonic,
+            )
+            publication_handle = None
+            return accepted
+        finally:
+            if publication_handle is not None:
+                publication_handle.close()
+            if prepared is not None:
+                prepared.close()
 
     async def confirm_user_control_feedback(
         self,
@@ -1975,6 +2911,245 @@ class ConversationKernelRunner:
         except Exception:
             return
 
+    def _hook_output_source_upper(
+        self,
+        *,
+        call_count: int,
+        scope_kind: ModelInputScopeKind,
+    ) -> LLMMessage | None:
+        if (
+            self._hook_dispatcher is None
+            or self._hook_context_owner is None
+            or self._hook_scope is None
+        ):
+            return None
+        view = self._hook_dispatcher.capture_view()
+        event_occurrences = (
+            (
+                (HookEventType.PRE_TOOL_USE_EVENT, call_count, False),
+                (HookEventType.PERMISSION_REQUEST_EVENT, call_count, False),
+                (HookEventType.POST_TOOL_USE_EVENT, call_count, False),
+            )
+            if call_count
+            else (
+                (
+                    HookEventType.STOP_EVENT
+                    if scope_kind is ModelInputScopeKind.ROOT
+                    else HookEventType.SUBAGENT_STOP_EVENT,
+                    1,
+                    True,
+                ),
+            )
+        )
+        body_bytes = maximum_hook_context_provider_body_bytes(
+            view,
+            event_occurrences=event_occurrences,
+        )
+        if not body_bytes:
+            return None
+        return _runtime_source_message_upper(
+            source_kind=ContextSourceKind.HOOK_CONTEXT,
+            trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
+            lifecycle=SourceObservationLifecycle.ONE_SHOT,
+            maximum_body_utf8_bytes=body_bytes,
+        )
+
+    def _quote_post_response_resources(
+        self,
+        *,
+        request: KernelModelExecutionRequest,
+        permit: ProcessLocalProviderInputInstallPermit,
+        collected: _CollectedModelResponse,
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        root_completion_followup_items: int,
+        pending_root_dynamic_followup: bool = False,
+    ) -> FrozenPostResponseResourceQuote:
+        completed = collected.completed
+        assistant = _completed_assistant_semantic_message(completed)
+        calls = tuple(
+            item
+            for item in completed.blocks
+            if isinstance(item, CompletedToolCallBlock)
+        )
+        if pending_root_dynamic_followup and (
+            calls
+            or canonical_facts.canonical_input.identity.conversation_scope_kind
+            is not ModelInputScopeKind.ROOT
+        ):
+            raise ValueError("dynamic ROOT follow-up quote has an invalid response")
+        plan_batch = any(call.tool_name in _PLAN_CONTROL_TOOL_NAMES for call in calls)
+        canonical_followup = 0
+        logical_followup = 0
+        followup_items = 0
+        suffix_messages: list[LLMMessage] = []
+        for call in calls:
+            quote = (
+                _plan_result_followup_upper(call)
+                if plan_batch
+                else _ordinary_result_followup_upper(call)
+            )
+            canonical_followup += quote[0]
+            logical_followup += quote[1]
+            followup_items += quote[2]
+            suffix_messages.extend(quote[3])
+
+        selected_plan_call = next(
+            (call for call in calls if call.tool_name in _PLAN_CONTROL_TOOL_NAMES),
+            None,
+        )
+        fresh_enter_plan = (
+            selected_plan_call is not None
+            and selected_plan_call.tool_name == "enter_plan"
+            and canonical_facts.plan_workflow_fact is None
+        )
+        if fresh_enter_plan:
+            continuation_quote = _entered_plan_continuation_followup_upper()
+            canonical_followup += continuation_quote[0]
+            logical_followup += continuation_quote[1]
+            followup_items += continuation_quote[2]
+            suffix_messages.extend(continuation_quote[3])
+
+        epoch = self._continuity.current_view(permit.scope)
+        if (
+            epoch is None
+            or epoch.epoch_nonce != permit.epoch_nonce
+            or epoch.epoch_revision != permit.epoch_revision
+            or epoch.wire_input_plan is not request.wire_input_plan
+        ):
+            raise ConversationKernelConflict(
+                "provider output resource quote lost its installed prefix"
+            )
+        canonical_input = canonical_facts.canonical_input
+        if canonical_input.identity != request.compiled_input.canonical_input_identity:
+            raise ConversationKernelConflict(
+                "provider output resource quote lost its canonical input"
+            )
+        assistant_canonical = _completed_assistant_canonical_bytes(completed)
+        assistant_logical = provider_neutral_message_logical_bytes(assistant)
+        identity = canonical_input.identity
+        source_messages: list[LLMMessage] = []
+        changed_catalogs = {
+            source_kind
+            for call in calls
+            for source_kind in _capability_catalog_source_kinds(call)
+        }
+        if ContextSourceKind.SKILL_CATALOG in changed_catalogs:
+            source_messages.append(
+                _runtime_source_message_upper(
+                    source_kind=ContextSourceKind.SKILL_CATALOG,
+                    trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
+                    lifecycle=SourceObservationLifecycle.SNAPSHOT,
+                    maximum_body_utf8_bytes=MAX_SKILL_CATALOG_UTF8_BYTES,
+                )
+            )
+        if ContextSourceKind.MCP_CATALOG in changed_catalogs:
+            source_messages.append(
+                _runtime_source_message_upper(
+                    source_kind=ContextSourceKind.MCP_CATALOG,
+                    trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
+                    lifecycle=SourceObservationLifecycle.SNAPSHOT,
+                    maximum_body_utf8_bytes=MAXIMUM_MCP_CATALOG_FULL_BYTES,
+                )
+            )
+        if fresh_enter_plan:
+            source_messages.extend(
+                self._context_source_collector.freeze_fresh_entered_plan_source_upper(
+                    canonical_facts.run_permission_snapshot
+                )
+            )
+        hook_source = self._hook_output_source_upper(
+            call_count=len(calls),
+            scope_kind=identity.conversation_scope_kind,
+        )
+        if hook_source is not None:
+            source_messages.append(hook_source)
+        if root_completion_followup_items:
+            if (
+                identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
+                or self._subagent_runtime is None
+            ):
+                raise ValueError("ROOT completion quote belongs to a non-ROOT response")
+            completion_quote = _root_completion_followup_upper(
+                root_completion_followup_items
+            )
+            canonical_followup += completion_quote[0]
+            logical_followup += completion_quote[1]
+            followup_items += completion_quote[2]
+            suffix_messages.extend(completion_quote[3])
+        no_call_continuation_possible = (
+            not calls
+            and identity.conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK
+            and self._subagent_runtime is not None
+        )
+        needs_followup = (
+            bool(calls)
+            or hook_source is not None
+            or bool(root_completion_followup_items)
+            or no_call_continuation_possible
+            or pending_root_dynamic_followup
+        )
+        if needs_followup:
+            source_messages.extend(
+                self._context_source_collector.freeze_post_response_call_source_upper()
+            )
+        if any(not isinstance(message, LLMMessage) for message in source_messages):
+            raise TypeError("context source upper returned a foreign message")
+        logical_followup += sum(
+            provider_neutral_message_logical_bytes(message)
+            for message in source_messages
+        )
+        suffix_messages.extend(source_messages)
+        wire = (
+            quote_provider_followup_wire_resources(
+                request=request,
+                actual_assistant_message=assistant,
+                provider_replay=collected.provider_replay,
+                bounded_suffix_messages=tuple(suffix_messages),
+            )
+            if needs_followup
+            else None
+        )
+        return FrozenPostResponseResourceQuote(
+            current_canonical_expanded_bytes=(canonical_input.canonical_expanded_bytes),
+            actual_assistant_canonical_bytes=assistant_canonical,
+            bounded_followup_canonical_bytes=canonical_followup,
+            canonical_upper_after=(
+                canonical_input.canonical_expanded_bytes
+                + assistant_canonical
+                + canonical_followup
+            ),
+            current_epoch_logical_bytes=epoch.logical_bytes,
+            actual_assistant_logical_bytes=assistant_logical,
+            bounded_followup_logical_bytes=logical_followup,
+            logical_upper_after=(
+                epoch.logical_bytes + assistant_logical + logical_followup
+            ),
+            current_canonical_items=len(canonical_input.items),
+            bounded_followup_items=followup_items,
+            item_upper_after=(len(canonical_input.items) + 1 + followup_items),
+            followup_wire=wire,
+        )
+
+    @staticmethod
+    def _require_post_response_resources(
+        quote: FrozenPostResponseResourceQuote,
+        *,
+        effective_input_budget_tokens: int,
+    ) -> None:
+        if quote.canonical_upper_after > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
+            raise OutputResourceInterruption("CANONICAL_BYTES", quote)
+        if quote.logical_upper_after > MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES:
+            raise OutputResourceInterruption("EPOCH_LOGICAL_BYTES", quote)
+        if quote.item_upper_after > MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS:
+            raise OutputResourceInterruption("CANONICAL_ITEMS", quote)
+        wire = quote.followup_wire
+        if wire is None:
+            return
+        if wire.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
+            raise OutputResourceInterruption("FOLLOWUP_WIRE_BYTES", quote)
+        if wire.final_wire_estimated_input_tokens > effective_input_budget_tokens:
+            raise OutputResourceInterruption("FOLLOWUP_INPUT_TOKENS", quote)
+
     async def _canonical_blocks(
         self,
         completed: CompletedAssistantMessage,
@@ -2095,6 +3270,8 @@ def _model_input_terminal_reason(error: BaseException) -> str | None:
         return "HOOK_SESSION_START_BLOCKED"
     if isinstance(error, CompactionContinuationBlocked):
         return "HOOK_COMPACTION_BLOCKED"
+    if isinstance(error, OutputResourceInterruption):
+        return "PROVIDER_OUTPUT_RESOURCE_EXHAUSTED"
     if not isinstance(error, StructuredModelInputCompileError):
         return None
     if error.kind in {
@@ -2115,5 +3292,7 @@ def _json_digest(value: FrozenJsonObjectFact) -> str:
 
 __all__ = [
     "ConversationKernelRunner",
+    "FrozenPostResponseResourceQuote",
     "KernelRunResult",
+    "OutputResourceInterruption",
 ]

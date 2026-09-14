@@ -9,6 +9,7 @@ non-empty ``PULSARA_API_KEY`` value is scrubbed.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import asdict, is_dataclass
@@ -207,11 +208,11 @@ async def _run(
         )
 
         bundled = await session.run_turn(
-            prompts["bundled"],
+            PromptContent.text(prompts["bundled"]),
             command_id="command:unified-skill:bundled",
         )
         loose = await session.run_turn(
-            prompts["loose"],
+            PromptContent.text(prompts["loose"]),
             command_id="command:unified-skill:loose",
         )
         _seed_completed_history(session, segments=5)
@@ -219,7 +220,7 @@ async def _run(
         snapshots_before = _snapshot_fingerprints(session)
         compaction_state["armed"] = True
         retained = await session.run_turn(
-            prompts["retained"],
+            PromptContent.text(prompts["retained"]),
             command_id="command:unified-skill:retained",
         )
         after_compaction = _current_epoch(session)

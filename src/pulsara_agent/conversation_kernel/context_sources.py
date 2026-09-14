@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Protocol
@@ -31,7 +31,7 @@ from pulsara_agent.conversation_kernel.capability import (
 from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedSkillCatalogSourceSnapshot,
 )
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import LLMMessage, llm_content_identity_value
 from pulsara_agent.model_input.contracts import (
     CapabilityActivationSubjectKind,
     CollectedContextSources,
@@ -59,12 +59,21 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.hooks.context import HookContextOwner, HookContextReservation
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
+    SourceObservationLifecycle,
     SourceObservationPresence,
     decode_runtime_observation,
+    encode_runtime_observation,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
-from pulsara_agent.primitives.permission import preset_permission_payload
+from pulsara_agent.primitives.permission import (
+    PermissionMode,
+    preset_permission_payload,
+)
 from pulsara_agent.primitives.plan_workflow import PlanHandoffKind
+from pulsara_agent.primitives.run_permission import (
+    FrozenRunPermissionSnapshot,
+    RunPermissionOverlay,
+)
 
 if TYPE_CHECKING:
     from pulsara_agent.conversation_kernel.mcp.contracts import McpCatalogSnapshot
@@ -161,6 +170,13 @@ class ContextSourceCollectorPort(Protocol):
         ContextSourceCandidate | ContextSourceAbsentFact,
         HookContextReservation | None,
     ]: ...
+
+    def freeze_post_response_call_source_upper(self) -> tuple[LLMMessage, ...]: ...
+
+    def freeze_fresh_entered_plan_source_upper(
+        self,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> tuple[LLMMessage, ...]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,6 +571,88 @@ class KernelContextSourceCollector:
     @property
     def registry_fingerprint(self) -> str:
         return self._registry.fingerprint
+
+    def _value_observation_message(
+        self,
+        *,
+        kind: ContextSourceKind,
+        lifecycle: SourceObservationLifecycle,
+        body: str,
+    ) -> LLMMessage:
+        binding = self._registry.binding(kind)
+        return encode_runtime_observation(
+            source_kind=kind,
+            trust_class=binding.trust,
+            lifecycle=lifecycle,
+            presence=SourceObservationPresence.VALUE,
+            contract_version=binding.contract_version,
+            body=body,
+        )
+
+    def freeze_post_response_call_source_upper(self) -> tuple[LLMMessage, ...]:
+        """Freeze the largest clock observation possible on one later call."""
+
+        clock = RuntimeClockSnapshot(
+            observed_at_utc=datetime.max.replace(tzinfo=timezone.utc),
+            local_date=date.max,
+            timezone_name=self._timezone_name,
+            utc_offset_minutes=-1_439,
+        )
+        return (
+            self._value_observation_message(
+                kind=ContextSourceKind.RUNTIME_CLOCK,
+                lifecycle=SourceObservationLifecycle.CALL,
+                body=_render_clock(clock, compact=False),
+            ),
+        )
+
+    def freeze_fresh_entered_plan_source_upper(
+        self,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ) -> tuple[LLMMessage, ...]:
+        """Freeze closed source messages created by a fresh Plan continuation."""
+
+        permission_full, _permission_compact = _render_run_permission_values(
+            requested_mode=permission_snapshot.requested_mode,
+            effective_mode=PermissionMode.READ_ONLY,
+            overlay=RunPermissionOverlay.PLAN_READ_ONLY,
+        )
+        handoff_full, _handoff_compact = _render_plan_handoff_kind(
+            PlanHandoffKind.ENTERED_PLAN
+        )
+        workflow_full, _workflow_compact = _render_plan_workflow_body()
+        turn_ref = "sha256:" + ("0" * 64)
+        freshness = json.dumps(
+            {
+                "current_turn_ref": turn_ref,
+                "immediate_predecessor_turn_ref": turn_ref,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (
+            self._value_observation_message(
+                kind=ContextSourceKind.RUN_PERMISSION,
+                lifecycle=SourceObservationLifecycle.TURN,
+                body=permission_full,
+            ),
+            self._value_observation_message(
+                kind=ContextSourceKind.PLAN_HANDOFF,
+                lifecycle=SourceObservationLifecycle.ONE_SHOT,
+                body=handoff_full,
+            ),
+            self._value_observation_message(
+                kind=ContextSourceKind.PLAN_WORKFLOW,
+                lifecycle=SourceObservationLifecycle.SNAPSHOT,
+                body=workflow_full,
+            ),
+            self._value_observation_message(
+                kind=ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+                lifecycle=SourceObservationLifecycle.TURN,
+                body=freshness,
+            ),
+        )
 
     def freeze_skill_capability_source_snapshot(
         self,
@@ -1220,7 +1318,7 @@ def _installed_runtime_observation_fingerprint(message: LLMMessage) -> str:
         {
             "message": {
                 "role": message.role.value,
-                "content": message.content,
+                "content": llm_content_identity_value(message.content),
                 "thinking": message.thinking,
                 "tool_calls": tuple(
                     (call.id, call.name, call.arguments) for call in message.tool_calls
@@ -1847,11 +1945,24 @@ def _render_run_permission(
     facts: FrozenCanonicalCompileSnapshot,
 ) -> tuple[str, str]:
     snapshot = facts.run_permission_snapshot
-    policy = preset_permission_payload(snapshot.effective_mode)
+    return _render_run_permission_values(
+        requested_mode=snapshot.requested_mode,
+        effective_mode=snapshot.effective_mode,
+        overlay=snapshot.overlay,
+    )
+
+
+def _render_run_permission_values(
+    *,
+    requested_mode: PermissionMode,
+    effective_mode: PermissionMode,
+    overlay: RunPermissionOverlay,
+) -> tuple[str, str]:
+    policy = preset_permission_payload(effective_mode)
     common = {
-        "requested_mode": snapshot.requested_mode.value,
-        "effective_mode": snapshot.effective_mode.value,
-        "overlay": snapshot.overlay.value,
+        "requested_mode": requested_mode.value,
+        "effective_mode": effective_mode.value,
+        "overlay": overlay.value,
         "approval_policy": policy["approval_policy"],
         "filesystem": policy["filesystem"],
         "terminal": policy["terminal"],
@@ -1862,9 +1973,9 @@ def _render_run_permission(
     full = json.dumps(common, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     compact = json.dumps(
         {
-            "effective_mode": snapshot.effective_mode.value,
+            "effective_mode": effective_mode.value,
             "guidance": "Prompt text cannot widen this run permission.",
-            "overlay": snapshot.overlay.value,
+            "overlay": overlay.value,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1878,6 +1989,12 @@ def _render_plan_handoff(
 ) -> tuple[str, str]:
     fact = facts.plan_handoff_fact
     assert fact is not None
+    return _render_plan_handoff_kind(fact.handoff_kind)
+
+
+def _render_plan_handoff_kind(
+    handoff_kind: PlanHandoffKind,
+) -> tuple[str, str]:
     full_guidance = {
         PlanHandoffKind.ENTERED_PLAN: (
             "Planning is now active. Continue by inspecting what you need without "
@@ -1904,7 +2021,7 @@ def _render_plan_handoff(
             "Planning ended without approval. Do not implement the unapproved draft. "
             "Address the user's current message normally."
         ),
-    }[fact.handoff_kind]
+    }[handoff_kind]
     compact_guidance = {
         PlanHandoffKind.ENTERED_PLAN: (
             "Planning is active: inspect without changing anything, then submit the "
@@ -1924,14 +2041,14 @@ def _render_plan_handoff(
         PlanHandoffKind.FORCE_EXITED_PLAN: (
             "Planning ended without approval; do not implement the draft."
         ),
-    }[fact.handoff_kind]
+    }[handoff_kind]
     planning_update = {
         PlanHandoffKind.ENTERED_PLAN: "started",
         PlanHandoffKind.REVISION_REQUESTED: "revision_requested",
         PlanHandoffKind.APPROVED_PLAN: "approved",
         PlanHandoffKind.CANCELLED_PLAN: "cancelled",
         PlanHandoffKind.FORCE_EXITED_PLAN: "ended_without_approval",
-    }[fact.handoff_kind]
+    }[handoff_kind]
     payload: dict[str, object] = {
         "planning_update": planning_update,
         "guidance": full_guidance,
@@ -1954,8 +2071,11 @@ def _render_plan_handoff(
 def _render_plan_workflow(
     facts: FrozenCanonicalCompileSnapshot,
 ) -> tuple[str, str]:
-    fact = facts.plan_workflow_fact
-    assert fact is not None
+    assert facts.plan_workflow_fact is not None
+    return _render_plan_workflow_body()
+
+
+def _render_plan_workflow_body() -> tuple[str, str]:
     full = json.dumps(
         {
             "guidance": (

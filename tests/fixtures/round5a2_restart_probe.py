@@ -6,6 +6,7 @@ no continuity or replay object is serialized between invocations.
 
 from __future__ import annotations
 
+from tests.support.model_config import frozen_test_prompt
 import argparse
 import asyncio
 import json
@@ -92,9 +93,9 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
         context_source_collector=StaticContextSourceCollector(),
     )
     result = await runner.run_turn(
-        "create durable native history"
+        frozen_test_prompt("create durable native history"
         if args.mode == "create"
-        else "continue from durable native history"
+        else "continue from durable native history")
     )
     wire_plan = model.requests[0].wire_input_plan
     return {

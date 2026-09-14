@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from tests.support.model_config import frozen_test_prompt
+from pulsara_agent.llm.input import FrozenPromptContent
+
 import asyncio
 from dataclasses import fields, replace
 from datetime import datetime, timezone
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -14,6 +18,7 @@ from uuid import uuid4
 
 import pytest
 import psycopg
+from PIL import Image
 
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
 from pulsara_agent.conversation_kernel.contracts import (
@@ -29,6 +34,7 @@ from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
     build_memory_context_source,
 )
+from pulsara_agent.conversation_kernel.cancellation import ActiveTurnCancellationIntent
 from pulsara_agent.conversation_kernel.cold_epoch import (
     CanonicalColdContinuationSeed,
     CompactionContinuationSeed,
@@ -43,6 +49,7 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
     CompactionTrigger,
+    ResolvedCompactionHeadroomBounds,
     ResolvedCompactionPolicy,
 )
 from pulsara_agent.conversation_kernel.compaction.coordinator import (
@@ -51,10 +58,12 @@ from pulsara_agent.conversation_kernel.compaction.coordinator import (
 from pulsara_agent.conversation_kernel.provider_dispatch import (
     PreparedWireMeasurementDecision,
 )
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.conversation_kernel.compaction.prompt import (
     compaction_summary_request,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
+    CompactionWriteReservation,
     HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
@@ -90,6 +99,8 @@ from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordi
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
+    FrozenPostResponseResourceQuote,
+    OutputResourceInterruption,
     _stable_id,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
@@ -108,7 +119,13 @@ from pulsara_agent.conversation_kernel.todo_runtime import (
     PreparedTodoRootRunActivation,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
-from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.input import (
+    LLMImagePart,
+    LLMTextPart,
+    MessageRole,
+    join_text_content,
+    text_part_values,
+)
 from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
 from pulsara_agent.llm.provider import (
     RouteWireProfile,
@@ -137,6 +154,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     ModelInputCompileFailureKind,
     StructuredModelInputCompileError,
+    provider_input_item_text,
 )
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.continuity import (
@@ -156,6 +174,11 @@ from pulsara_agent.ports.artifact import (
     ToolResultDisplayKind,
 )
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+from pulsara_agent.ports.user_control_feedback import (
+    UserControlFeedbackContentV1,
+    UserControlFeedbackInstallationAttempt,
+    UserControlProcessFact,
+)
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
@@ -242,7 +265,7 @@ def _seed_artifact_result_with_memory_provenance(
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"read an artifact page"),
+        content=FrozenPromptContent.text("read an artifact page"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -504,11 +527,18 @@ class _CompactionScriptedModel(_ScriptedModel):
 
 
 class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
-    def __init__(self, calls: list[list[object]], summary: str) -> None:
+    def __init__(
+        self,
+        calls: list[list[object]],
+        summary: str,
+        *,
+        total_context_tokens: int = 256_000,
+        max_input_tokens: int = 47_192,
+    ) -> None:
         super().__init__(calls, summary)
         limits = test_model_limits(
-            total_context_tokens=256_000,
-            max_input_tokens=47_192,
+            total_context_tokens=total_context_tokens,
+            max_input_tokens=max_input_tokens,
             max_output_tokens=1_000,
             default_output_tokens=1_000,
             input_safety_margin_tokens=0,
@@ -526,15 +556,55 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
 
 def _context_snapshot_payload(request) -> dict[str, object]:
     matches = tuple(
-        message.content[0].split("\n", 1)[1]
+        message
         for message in request.compiled_input.messages
         if message.role is MessageRole.USER
         and message.content
-        and message.content[0].startswith("[CONTEXT_SNAPSHOT ")
+        and isinstance(message.content[0], LLMTextPart)
+        and message.content[0].text.startswith(
+            "This Runtime-authored context snapshot contains quoted retained content."
+        )
     )
     assert len(matches) == 1
-    value = json.loads(matches[0])
+    message = matches[0]
+    value = json.loads(message.content[0].text.split("\n", 1)[1])
     assert isinstance(value, dict)
+    sections: list[dict[str, object]] = []
+    index = 1
+    while index < len(message.content):
+        opener = message.content[index]
+        assert isinstance(opener, LLMTextPart)
+        prefix = "\n[PULSARA_RETAINED_CONTENT "
+        assert opener.text.startswith(prefix) and opener.text.endswith("]\n")
+        metadata = json.loads(opener.text[len(prefix) : -2])
+        index += 1
+        parts: list[object] = []
+        while message.content[index] != LLMTextPart("\n[/PULSARA_RETAINED_CONTENT]\n"):
+            part = message.content[index]
+            parts.append(
+                json.loads(part.text) if isinstance(part, LLMTextPart) else part
+            )
+            index += 1
+        sections.append({"metadata": metadata, "parts": tuple(parts)})
+        index += 1
+    value["sections"] = tuple(sections)
+    active = tuple(
+        section
+        for section in sections
+        if section["metadata"] == {"role": "user", "section": "active"}
+    )
+    assert len(active) <= 1
+    continuation = value["continuation"]
+    assert isinstance(continuation, dict)
+    continuation["active_request"] = (
+        None
+        if not active
+        else {
+            "text": "".join(
+                part for part in active[0]["parts"] if isinstance(part, str)
+            )
+        }
+    )
     return value
 
 
@@ -544,7 +614,7 @@ def _hook_context_bodies(request) -> tuple[str, ...]:
         for message in request.compiled_input.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
         for decoded in (decode_runtime_observation(message),)
         if decoded.source_kind is ContextSourceKind.HOOK_CONTEXT
     )
@@ -972,6 +1042,29 @@ class _BlockingSourceCollector(StaticContextSourceCollector):
         return super().complete_frozen_sources(frozen, **kwargs)
 
 
+class _PostAdmissionPendingSteerReadGate:
+    """Pause the first pending read after the target ROOT writer commits."""
+
+    def __init__(self, delegate: object, *, target_turn_id: str) -> None:
+        self._delegate = delegate
+        self._target_turn_id = target_turn_id
+        self.started = Event()
+        self.release = Event()
+        self.calls = 0
+        self._blocked = False
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        if (
+            not self._blocked
+            and kwargs.get("target_turn_id") == self._target_turn_id
+        ):
+            self._blocked = True
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise TimeoutError("post-admission pending read was not released")
+        return self._delegate(*args, **kwargs)  # type: ignore[operator]
+
 class _PolicyMemoryProjection:
     def __init__(self) -> None:
         self._write = MemoryWriteOptOut()
@@ -1116,12 +1209,22 @@ class _HeadroomOrderingReader(CanonicalProviderInputReader):
             cut, deadline_monotonic=deadline_monotonic
         )
 
-    def read_frozen_dispatch(self, cut, *, deadline_monotonic: float, _connection=None):
+    def read_frozen_dispatch(
+        self,
+        cut,
+        *,
+        deadline_monotonic: float,
+        _connection=None,
+        _historical_memory_authority=None,
+        _prospective_root_candidate=None,
+    ):
         self.operations.append("dispatch")
         return super().read_frozen_dispatch(
             cut,
             deadline_monotonic=deadline_monotonic,
             _connection=_connection,
+            _historical_memory_authority=_historical_memory_authority,
+            _prospective_root_candidate=_prospective_root_candidate,
         )
 
 
@@ -1213,7 +1316,7 @@ class _NearBoundReplayContinuityOwner(HostProviderInputContinuityOwner):
         original = input_continuity.MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES
         input_continuity.MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = (
             max(
-                view.logical_utf8_bytes,
+                view.logical_bytes,
                 view.wire_input_plan.quote.final_wire_utf8_bytes,
             )
             + fragment.logical_utf8_bytes
@@ -1240,9 +1343,17 @@ class _FailingPostConsumptionReader:
             cut, deadline_monotonic=deadline_monotonic
         )
 
+    def read_prospective_root_dispatch(self, candidate, *, deadline_monotonic):
+        return self._delegate.read_prospective_root_dispatch(
+            candidate, deadline_monotonic=deadline_monotonic
+        )
+
     def read_frozen_dispatch(self, cut, *, deadline_monotonic):
         self.calls += 1
-        if self.calls == 2:
+        # Post-writer activation and steer preparation account for the first
+        # two frozen-cut reads.  Fail only the exact read after the canonical
+        # consumption transaction.
+        if self.calls == 3:
             raise RuntimeError("injected post-consumption canonical mismatch")
         return self._delegate.read_frozen_dispatch(
             cut, deadline_monotonic=deadline_monotonic
@@ -1270,6 +1381,12 @@ class _RecordingReplayHydrationReader:
     def read_compaction_headroom_preflight(self, cut, *, deadline_monotonic):
         return self._delegate.read_compaction_headroom_preflight(
             cut, deadline_monotonic=deadline_monotonic
+        )
+
+    def read_prospective_root_dispatch(self, candidate, *, deadline_monotonic):
+        self.dispatch_deadlines.append(deadline_monotonic)
+        return self._delegate.read_prospective_root_dispatch(
+            candidate, deadline_monotonic=deadline_monotonic
         )
 
     def read_frozen_dispatch(self, cut, *, deadline_monotonic):
@@ -1312,6 +1429,28 @@ def _tool_stream() -> list[object]:
             digest=live_digest(arguments),
         ),
     ]
+
+
+def _many_tool_stream(count: int) -> list[object]:
+    result: list[object] = []
+    arguments = "{}"
+    for ordinal in range(count):
+        tool_call_id = f"call:output-resource:{ordinal}"
+        result.extend(
+            (
+                ToolCallStartPayload(tool_call_id, tool_call_id, "terminal"),
+                ToolCallDeltaPayload(tool_call_id, tool_call_id, arguments),
+                ToolCallEndPayload(
+                    block_identity=tool_call_id,
+                    tool_call_id=tool_call_id,
+                    tool_name="terminal",
+                    arguments_json=arguments,
+                    utf8_bytes=len(arguments.encode("utf-8")),
+                    digest=live_digest(arguments),
+                ),
+            )
+        )
+    return result
 
 
 def _named_tool_stream(
@@ -1559,10 +1698,11 @@ def test_capability_adoption_runs_before_each_unprepared_dispatch(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
+    workspace_id = _name("workspace")
     lease = _acquire_bound_host_writer(
         repository,
         session_id=session_id,
-        workspace_id=_name("workspace"),
+        workspace_id=workspace_id,
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -1585,12 +1725,358 @@ def test_capability_adoption_runs_before_each_unprepared_dispatch(
         context_source_collector=StaticContextSourceCollector(),
         before_provider_preparation=adopt,
     )
-    result = asyncio.run(runner.run_turn("call a tool and continue"))
+    result = asyncio.run(
+        runner.run_turn(frozen_test_prompt("call a tool and continue"))
+    )
     assert result.final_text == "after update"
     assert result.model_call_count == 2
     assert len(observations) == 2
     assert observations[0] == ()
     assert len(observations[1]) == 1
+
+
+def test_k3_user_control_feedback_is_measured_before_atomic_publication(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    turn_id = _stable_id("turn", session_id, command_id)
+    model = _ScriptedModel([_tool_stream(), _text_stream("feedback observed")])
+    tool = _AssertingTool(provider, session_id)
+    installed: list[AcceptedEntry] = []
+    runner: ConversationKernelRunner
+
+    async def install_feedback_before_followup() -> bool:
+        if len(model.requests) != 1 or installed:
+            return True
+        content = UserControlFeedbackContentV1(
+            command_id=_name("control"),
+            session_id=session_id,
+            host_session_id="host:test",
+            process_id="process:test",
+            command="python worker.py",
+            cwd="/tmp",
+            origin_turn_id=turn_id,
+            origin_subagent_task_id=None,
+            target_root_turn_id=turn_id,
+            process=UserControlProcessFact(
+                "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
+            ),
+            monitor=None,
+            public_code="BACKGROUND_CONTROL_COMPLETED",
+            public_detail="The process was stopped.",
+        )
+        installed.append(
+            await runner.install_user_control_feedback(
+                attempt=UserControlFeedbackInstallationAttempt(
+                    session_id=session_id,
+                    workspace_id=workspace_id,
+                    writer_generation=lease.guard.writer_generation,
+                    target_root_turn_id=turn_id,
+                    entry_id=_name("entry:user-control"),
+                    content=content,
+                    occurred_at=datetime.now(timezone.utc),
+                    actor_id="host:test",
+                ),
+                deadline_monotonic=monotonic() + 30,
+                admitted_writer=CompactionWriteReservation(
+                    ModelInputScopeKind.ROOT, None
+                ),
+            )
+        )
+        return True
+
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(tool, tool_names=("terminal",)),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        before_provider_preparation=install_feedback_before_followup,
+    )
+    result = asyncio.run(
+        runner.run_turn(
+            frozen_test_prompt("call a tool, then observe control feedback"),
+            command_id=command_id,
+        )
+    )
+
+    assert result.final_text == "feedback observed"
+    assert len(installed) == 1
+    feedback_messages = tuple(
+        message
+        for placement, message in zip(
+            model.requests[1].compiled_input.message_placements,
+            model.requests[1].compiled_input.messages,
+            strict=True,
+        )
+        if placement.origin_entry_id == installed[0].entry_id
+    )
+    assert len(feedback_messages) == 1
+    assert "pulsara_user_control_feedback" in join_text_content(
+        feedback_messages[0].content
+    )
+
+
+def test_k3_user_control_feedback_resource_failure_precedes_publication(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    command_id = _name("command")
+    feedback_entry_id = _name("entry:user-control")
+    turn_id = _name("turn")
+    start_test_root_turn(
+        repository,
+        lease.guard,
+        command_id=command_id,
+        turn_id=turn_id,
+        entry_id=_name("entry"),
+        context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
+        content=FrozenPromptContent.text("existing active input"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([])
+
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        maximum_input_tokens_per_call=100,
+    )
+    with pytest.raises(StructuredModelInputCompileError):
+        asyncio.run(
+            runner.install_user_control_feedback(
+                attempt=UserControlFeedbackInstallationAttempt(
+                    session_id=session_id,
+                    workspace_id=workspace_id,
+                    writer_generation=lease.guard.writer_generation,
+                    target_root_turn_id=turn_id,
+                    entry_id=feedback_entry_id,
+                    content=UserControlFeedbackContentV1(
+                        command_id=_name("control"),
+                        session_id=session_id,
+                        host_session_id="host:test",
+                        process_id="process:test",
+                        command="python worker.py",
+                        cwd="/tmp",
+                        origin_turn_id=turn_id,
+                        origin_subagent_task_id=None,
+                        target_root_turn_id=turn_id,
+                        process=UserControlProcessFact(
+                            "TERMINATION_COMPLETED",
+                            "killed",
+                            -15,
+                            "TERMINAL",
+                            False,
+                        ),
+                        monitor=None,
+                        public_code="BACKGROUND_CONTROL_COMPLETED",
+                        public_detail="\\" * 28_000,
+                    ),
+                    occurred_at=datetime.now(timezone.utc),
+                    actor_id="host:test",
+                ),
+                deadline_monotonic=monotonic() + 30,
+                admitted_writer=CompactionWriteReservation(
+                    ModelInputScopeKind.ROOT, None
+                ),
+            )
+        )
+    assert model.requests == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id=%s AND id=%s",
+            (session_id, feedback_entry_id),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.agent_events "
+            "WHERE session_id=%s AND event_type='UserControlFeedbackAccepted'",
+            (session_id,),
+        ).fetchone() == (0,)
+
+
+def test_k3_active_feedback_compacts_before_atomic_publication(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    turn_id = _name("turn")
+    start_test_root_turn(
+        repository,
+        lease.guard,
+        command_id=_name("command"),
+        turn_id=turn_id,
+        entry_id=_name("entry:user"),
+        context_binding_revision_id=_name("revision"),
+        permission_snapshot_id=_name("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        model_call_binding=test_model_binding(test_model_runtime()),
+        content=FrozenPromptContent.text("active request"),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    repository.commit_assistant_message(
+        lease.guard,
+        cut=source_cut,
+        entry_id=_name("entry:assistant"),
+        parent_content=InlineContent.from_bytes(b"x" * 60_000),
+        blocks=(
+            AssistantTextBlock(
+                block_id=_name("block"),
+                text=InlineContent.from_bytes(b"x" * 60_000),
+            ),
+        ),
+        complete_turn=False,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _LimitedCompactionScriptedModel(
+        [], "A concise handoff retaining the active request."
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            auto_trigger_ratio=0.90,
+            post_compaction_target_ratio=0.75,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    feedback_entry_id = _name("entry:user-control")
+    attempt = UserControlFeedbackInstallationAttempt(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_generation=lease.guard.writer_generation,
+        target_root_turn_id=turn_id,
+        entry_id=feedback_entry_id,
+        content=UserControlFeedbackContentV1(
+            command_id=_name("control"),
+            session_id=session_id,
+            host_session_id="host:test",
+            process_id="process:test",
+            command="python worker.py",
+            cwd="/tmp",
+            origin_turn_id=turn_id,
+            origin_subagent_task_id=None,
+            target_root_turn_id=turn_id,
+            process=UserControlProcessFact(
+                "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
+            ),
+            monitor=None,
+            public_code="BACKGROUND_CONTROL_COMPLETED",
+            public_detail="\\" * 18_000,
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="host:test",
+    )
+
+    async def exercise():
+        accepted = await runner.install_user_control_feedback(
+            attempt=attempt,
+            deadline_monotonic=monotonic() + 30,
+            admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT, None),
+            cancellation_intent=ActiveTurnCancellationIntent(
+                turn_id, ModelInputScopeKind.ROOT, None
+            ),
+        )
+        await owner.aclose()
+        return accepted
+
+    accepted = asyncio.run(exercise())
+
+    assert accepted.entry_id == feedback_entry_id
+    assert model.requests == []
+    assert len(model.summary_transport.contexts) == 1
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        snapshot_count, feedback_count = connection.execute(
+            "SELECT "
+            "(SELECT count(*) FROM pulsara_v3.context_snapshots "
+            " WHERE session_id=%s), "
+            "(SELECT count(*) FROM pulsara_v3.transcript_entries "
+            " WHERE session_id=%s AND id=%s)",
+            (session_id, session_id, feedback_entry_id),
+        ).fetchone()
+    assert snapshot_count == 1
+    assert feedback_count == 1
+    final_cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert (
+        final_cut.context_binding_revision_id != source_cut.context_binding_revision_id
+    )
+    final_read = CanonicalProviderInputReader(
+        provider, blob_reader=runner._provider_dispatch._input_reader._blob_reader
+    ).read_frozen_dispatch(final_cut, deadline_monotonic=monotonic() + 30)
+    assert any(
+        item.source_entry_id == feedback_entry_id
+        for item in final_read.compile_snapshot.canonical_input.items
+    )
 
 
 def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_completes(
@@ -1629,7 +2115,7 @@ def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_compl
                 permission_snapshot_id=None,
                 requested_permission_mode=None,
                 model_call_binding=None,
-                content=InlineContent.from_bytes(steer_text.encode("utf-8")),
+                content=FrozenPromptContent.text(steer_text),
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="test",
                 deadline_monotonic=monotonic() + 10,
@@ -1680,7 +2166,9 @@ def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_compl
     )
 
     result = asyncio.run(
-        runner.run_turn("create the dependent task", command_id=command_id)
+        runner.run_turn(
+            frozen_test_prompt("create the dependent task"), command_id=command_id
+        )
     )
 
     assert result.final_text == "invalid arguments were reported without interrupting"
@@ -1699,11 +2187,13 @@ def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_compl
         if message.role is MessageRole.TOOL_RESULT
     )
     assert len(retry_tool_results) == 1
-    assert "dependency reference is unknown" in retry_tool_results[0].content[0]
+    assert "dependency reference is unknown" in join_text_content(
+        retry_tool_results[0].content
+    )
     assert any(
         message.role is MessageRole.USER
         and message.content
-        and message.content[0] == steer_text
+        and message.content == (LLMTextPart(steer_text),)
         for message in retry_input.messages
     )
     with provider.connection(
@@ -1749,6 +2239,7 @@ def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_compl
 
 
 def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
+    monkeypatch: pytest.MonkeyPatch,
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -1790,12 +2281,80 @@ def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
         root_control_completion_fence=fence,
         root_control_completion_settlement=settle_fence,
     )
-    result = asyncio.run(runner.run_turn("question"))
+    resource_quotes: list[FrozenPostResponseResourceQuote] = []
+    require_resources = runner._require_post_response_resources
+
+    def observe_resources(
+        quote: FrozenPostResponseResourceQuote,
+        *,
+        effective_input_budget_tokens: int,
+    ) -> None:
+        resource_quotes.append(quote)
+        require_resources(
+            quote,
+            effective_input_budget_tokens=effective_input_budget_tokens,
+        )
+
+    monkeypatch.setattr(runner, "_require_post_response_resources", observe_resources)
+    result = asyncio.run(runner.run_turn(frozen_test_prompt("question")))
     assert result.final_text == "feedback-aware answer"
     assert result.model_call_count == 2
     assert len(barriers) == 2
     assert fences == [result.turn_id, result.turn_id]
     assert settlements == [(result.turn_id, False), (result.turn_id, True)]
+    assert len(resource_quotes) == 2
+    assert resource_quotes[0].followup_wire is not None
+    assert resource_quotes[1].followup_wire is None
+
+
+def test_root_control_feedback_fence_cancellation_settles_installed_seal(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    seal_installed = asyncio.Event()
+    hold_fence = asyncio.Event()
+    settlements: list[tuple[str, bool]] = []
+
+    async def fence(_turn_id: str) -> bool:
+        seal_installed.set()
+        await hold_fence.wait()
+        return False
+
+    async def settle_fence(turn_id: str, *, turn_completed: bool) -> None:
+        settlements.append((turn_id, turn_completed))
+
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=_ScriptedModel([_text_stream("answer")]),
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        root_control_completion_fence=fence,
+        root_control_completion_settlement=settle_fence,
+    )
+
+    async def exercise() -> None:
+        running = asyncio.create_task(runner.run_turn(frozen_test_prompt("question")))
+        await asyncio.wait_for(seal_installed.wait(), timeout=2)
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+
+    asyncio.run(exercise())
+    assert len(settlements) == 1
+    assert settlements[0][1] is False
 
 
 def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
@@ -1822,7 +2381,7 @@ def test_stage2_runner_text_turn_has_two_entry_transactions_and_no_segments(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    result = asyncio.run(runner.run_turn("question"))
+    result = asyncio.run(runner.run_turn(frozen_test_prompt("question")))
     assert result.final_text == "answer"
     assert result.model_call_count == 1
     assert repository.host_write_transactions == 2
@@ -1876,7 +2435,7 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
     )
     runner._provider_dispatch._cold_epoch_assembler = recorder
 
-    result = asyncio.run(runner.run_turn("question"))
+    result = asyncio.run(runner.run_turn(frozen_test_prompt("question")))
 
     assert result.final_text == "answer"
     assert len(recorder.semantic_seeds) == 1
@@ -1884,11 +2443,20 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
     assert recorder.finalized == 1
 
 
-@pytest.mark.parametrize("lose_adoption_ack", [False, True])
+@pytest.mark.parametrize(
+    ("lose_adoption_ack", "retry_recent"),
+    ((False, False), (True, False), (False, True)),
+)
 def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
     lose_adoption_ack: bool,
+    retry_recent: bool,
 ) -> None:
+    from pulsara_agent.conversation_kernel.compaction import (
+        coordinator as compaction_coordinator,
+    )
+
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = (
         _LostCompactionAdoptionAckRepository(provider)
@@ -1919,6 +2487,45 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
             minimum_reclaim_tokens=1,
         )
     )
+    source_collector = StaticContextSourceCollector()
+    freeze_non_trigger_calls = 0
+    freeze_non_trigger_sources = source_collector.freeze_non_trigger_sources
+
+    def count_non_trigger_freeze(*args, **kwargs):
+        nonlocal freeze_non_trigger_calls
+        freeze_non_trigger_calls += 1
+        return freeze_non_trigger_sources(*args, **kwargs)
+
+    monkeypatch.setattr(
+        source_collector,
+        "freeze_non_trigger_sources",
+        count_non_trigger_freeze,
+    )
+    pre_full_attempts = 0
+    if retry_recent:
+        transition = compaction_coordinator.validate_compaction_wire_transition
+
+        def reject_first_recent(**kwargs):
+            nonlocal pre_full_attempts
+            if kwargs["phase"] == "PRE_FULL":
+                pre_full_attempts += 1
+                if pre_full_attempts == 1:
+                    raise compaction_coordinator.CompactionPlanningError(
+                        "compaction successor exceeds its post target"
+                    )
+            return transition(**kwargs)
+
+        monkeypatch.setattr(
+            compaction_coordinator,
+            "validate_compaction_wire_transition",
+            reject_first_recent,
+        )
+        monkeypatch.setattr(
+            compaction_coordinator,
+            "_ordinary_recent_suffixes",
+            lambda recent: (recent, recent),
+        )
+
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
@@ -1926,7 +2533,7 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
         model=model,
         tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
+        context_source_collector=source_collector,
         compaction_owner=owner,
         workspace_id=workspace_id,
     )
@@ -1936,7 +2543,7 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     runner._provider_dispatch._cold_epoch_assembler = cold_recorder
 
     async def exercise():
-        first = await runner.run_turn("first question")
+        first = await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("second-command")
         turn_id = _stable_id("turn", session_id, command_id)
         _request, outcome = await owner.request_manual(
@@ -1946,7 +2553,9 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
             expected_turn_id=turn_id,
             force=True,
         )
-        second = await runner.run_turn("second question", command_id=command_id)
+        second = await runner.run_turn(
+            frozen_test_prompt("second question"), command_id=command_id
+        )
         compacted = await outcome
         await owner.aclose()
         return first, second, compacted
@@ -1958,9 +2567,16 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert compacted.disposition is CompactionDisposition.COMPACTED
     assert compacted.snapshot_id is not None
     assert len(model.summary_transport.contexts) == 1
+    # Initial/follow-up provider work and PRE/POST compaction own five source
+    # freezes in this scenario. The injected second recent candidate adds none.
+    assert freeze_non_trigger_calls == 5
+    if retry_recent:
+        assert pre_full_attempts == 2
     summary_context = model.summary_transport.contexts[0]
     assert summary_context.tool_choice == "auto"
-    assert summary_context.messages[-1].content == (compaction_summary_request(),)
+    assert summary_context.messages[-1].content == (
+        LLMTextPart(compaction_summary_request()),
+    )
     assert len(model.requests) == 2
     successor_snapshot = _context_snapshot_payload(model.requests[1])
     assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
@@ -2158,17 +2774,17 @@ def test_model_switch_uses_exact_three_tier_handover_path(
         presentation_notice_sink=presentation_notices.append,
     )
     switch_results: list[object] = []
-    execute_switch = runner.compaction.execute_model_switch_active
+    execute_switch = runner.compaction.recover_pending_root_input
 
     async def record_switch(**kwargs):
         result = await execute_switch(**kwargs)
         switch_results.append(result)
         return result
 
-    runner.compaction.execute_model_switch_active = record_switch
+    runner.compaction.recover_pending_root_input = record_switch
 
     async def exercise():
-        first = await runner.run_turn("source request")
+        first = await runner.run_turn(frozen_test_prompt("source request"))
         active_runtime[0] = destination_runtime
         model._model_runtime = destination_runtime
         model._preparer = DirectKernelModelPort(model_runtime=destination_runtime)
@@ -2177,7 +2793,7 @@ def test_model_switch_uses_exact_three_tier_handover_path(
             binding=test_model_binding(destination_runtime),
             deadline_monotonic=monotonic() + 30,
         )
-        second = await runner.run_turn("destination request")
+        second = await runner.run_turn(frozen_test_prompt("destination request"))
         await owner.aclose()
         return first, second
 
@@ -2217,6 +2833,771 @@ def test_model_switch_uses_exact_three_tier_handover_path(
     assert (snapshot_count, event_count) == (
         (0, 0) if expected_tier is None else (1, 1)
     )
+
+
+def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_runtime = test_model_runtime(
+        model_id="source-vision-model",
+        wire_api="openai_chat_completions",
+        input_modalities=("text", "image"),
+    )
+    destination_runtime = test_model_runtime(
+        model_id="destination-text-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        input_modalities=("text",),
+    )
+    active_runtime = [source_runtime]
+    model = _CompactionScriptedModel(
+        [_text_stream("source answer"), _text_stream("destination answer")],
+        "source model summary of the visual history",
+    )
+    model._model_runtime = source_runtime
+    model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            manual_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=(
+            lambda: active_runtime[0].freeze_resolution_snapshot()
+        ),
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    switch_results: list[object] = []
+    execute_switch = runner.compaction.recover_pending_root_input
+
+    async def record_switch(**kwargs):
+        result = await execute_switch(**kwargs)
+        switch_results.append(result)
+        return result
+
+    runner.compaction.recover_pending_root_input = record_switch
+    image_output = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
+    image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
+    image_prompt = freeze_canonical_prompt(
+        FrozenPromptContent((LLMTextPart("inspect"), image))
+    )
+
+    async def exercise():
+        first = await runner.run_turn(image_prompt)
+        active_runtime[0] = destination_runtime
+        model._model_runtime = destination_runtime
+        model._preparer = DirectKernelModelPort(model_runtime=destination_runtime)
+        repository.update_session_model_call_binding(
+            lease.guard,
+            binding=test_model_binding(destination_runtime),
+            deadline_monotonic=monotonic() + 30,
+        )
+        second = await runner.run_turn(frozen_test_prompt("destination request"))
+        await owner.aclose()
+        return first, second
+
+    first, second = asyncio.run(exercise())
+
+    assert first.final_text == "source answer"
+    assert second.final_text == "destination answer"
+    assert len(switch_results) == 1
+    assert switch_results[0].model_switch_tier == 2
+    assert [call.target.fact.model_id for call in model.summary_transport.calls] == [
+        "source-vision-model"
+    ]
+    assert any(
+        isinstance(part, LLMImagePart)
+        for message in model.summary_transport.contexts[0].messages
+        for part in message.content
+    )
+    assert not any(
+        isinstance(part, LLMImagePart)
+        for message in model.requests[1].compiled_input.messages
+        for part in message.content
+    )
+    successor = _context_snapshot_payload(model.requests[1])
+    assert not any(
+        section["metadata"].get("section") == "recent"
+        for section in successor["sections"]
+    )
+
+
+def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_runtime = test_model_runtime(
+        model_id="source-vision-model",
+        wire_api="openai_chat_completions",
+        input_modalities=("text", "image"),
+    )
+    destination_runtime = test_model_runtime(
+        model_id="destination-text-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        input_modalities=("text",),
+    )
+    active_runtime = [source_runtime]
+    model = _CompactionScriptedModel(
+        [
+            _text_stream("image turn answer"),
+            _text_stream("recent one answer"),
+            _text_stream("recent two answer"),
+            _text_stream("recent three answer"),
+            _text_stream("destination answer"),
+        ],
+        "source model summary of the complete visual history",
+    )
+    model._model_runtime = source_runtime
+    model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            manual_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=(
+            lambda: active_runtime[0].freeze_resolution_snapshot()
+        ),
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    switch_results: list[object] = []
+    execute_switch = runner.compaction.recover_pending_root_input
+
+    async def record_switch(**kwargs):
+        result = await execute_switch(**kwargs)
+        switch_results.append(result)
+        return result
+
+    runner.compaction.recover_pending_root_input = record_switch
+    image_output = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
+    image_prompt = freeze_canonical_prompt(
+        FrozenPromptContent(
+            (
+                LLMTextPart("old visual request"),
+                LLMImagePart("image/png", image_output.getvalue(), 7, 5),
+            )
+        )
+    )
+
+    async def exercise():
+        await runner.run_turn(image_prompt)
+        for text in ("recent one", "recent two", "recent three"):
+            await runner.run_turn(frozen_test_prompt(text))
+        active_runtime[0] = destination_runtime
+        model._model_runtime = destination_runtime
+        model._preparer = DirectKernelModelPort(model_runtime=destination_runtime)
+        repository.update_session_model_call_binding(
+            lease.guard,
+            binding=test_model_binding(destination_runtime),
+            deadline_monotonic=monotonic() + 30,
+        )
+        result = await runner.run_turn(frozen_test_prompt("destination request"))
+        await owner.aclose()
+        return result
+
+    result = asyncio.run(exercise())
+
+    assert result.final_text == "destination answer"
+    assert len(switch_results) == 1
+    assert switch_results[0].model_switch_tier == 2
+    assert any(
+        isinstance(part, LLMImagePart)
+        for message in model.summary_transport.contexts[0].messages
+        for part in message.content
+    )
+    successor = _context_snapshot_payload(model.requests[-1])
+    recent_sections = [
+        section
+        for section in successor["sections"]
+        if section["metadata"].get("section") == "recent"
+    ]
+    assert [section["parts"] for section in recent_sections] == [
+        ("recent one",),
+        ("recent two",),
+        ("recent three",),
+    ]
+    assert not any(
+        isinstance(part, LLMImagePart)
+        for message in model.requests[-1].compiled_input.messages
+        for part in message.content
+    )
+
+
+def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_runtime = test_model_runtime(
+        model_id="source-vision-model",
+        wire_api="openai_chat_completions",
+        input_modalities=("text", "image"),
+    )
+    source_model = _ScriptedModel([_text_stream("source answer")])
+    source_model._model_runtime = source_runtime
+    source_model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
+    source_owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(automatic_enabled=False)
+    )
+    source_runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=source_runtime.freeze_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=source_model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=source_owner,
+        workspace_id=workspace_id,
+    )
+    image_output = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
+    image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
+    image_prompt = freeze_canonical_prompt(
+        FrozenPromptContent(
+            (
+                LLMTextPart("before"),
+                image,
+                LLMTextPart("between"),
+                image,
+            )
+        )
+    )
+
+    async def seed_history():
+        result = await source_runner.run_turn(image_prompt)
+        await source_owner.aclose()
+        return result
+
+    first = asyncio.run(seed_history())
+    assert first.final_text == "source answer"
+
+    destination_runtime = test_model_runtime(
+        model_id="destination-text-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        input_modalities=("text",),
+    )
+    repository.update_session_model_call_binding(
+        lease.guard,
+        binding=test_model_binding(destination_runtime),
+        deadline_monotonic=monotonic() + 30,
+    )
+    destination_model = _CompactionScriptedModel(
+        [_text_stream("destination answer")],
+        "destination model summary after image omission",
+    )
+    destination_model._model_runtime = destination_runtime
+    destination_model._preparer = DirectKernelModelPort(
+        model_runtime=destination_runtime
+    )
+    destination_owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            manual_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    notices: list[str] = []
+    destination_runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=(
+            destination_runtime.freeze_resolution_snapshot
+        ),
+        repository=repository,
+        writer_lease=lease,
+        model=destination_model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=destination_owner,
+        workspace_id=workspace_id,
+        presentation_notice_sink=notices.append,
+    )
+    switch_results: list[object] = []
+    execute_switch = destination_runner.compaction.recover_pending_root_input
+
+    async def record_switch(**kwargs):
+        result = await execute_switch(**kwargs)
+        switch_results.append(result)
+        return result
+
+    destination_runner.compaction.recover_pending_root_input = record_switch
+
+    async def exercise_destination():
+        result = await destination_runner.run_turn(
+            frozen_test_prompt("destination request")
+        )
+        await destination_owner.aclose()
+        return result
+
+    second = asyncio.run(exercise_destination())
+
+    assert second.final_text == "destination answer"
+    assert len(switch_results) == 1
+    assert switch_results[0].model_switch_tier == 3
+    assert [
+        call.target.fact.model_id for call in destination_model.summary_transport.calls
+    ] == ["destination-text-model"]
+    summary_context = destination_model.summary_transport.contexts[0]
+    assert not any(
+        isinstance(part, LLMImagePart)
+        for message in summary_context.messages
+        for part in message.content
+    )
+    assert (
+        sum(
+            join_text_content(message.content).count("[图片已省略]")
+            for message in summary_context.messages
+        )
+        == 2
+    )
+    assert not any(
+        isinstance(part, LLMImagePart)
+        for message in destination_model.requests[0].compiled_input.messages
+        for part in message.content
+    )
+    successor = _context_snapshot_payload(destination_model.requests[0])
+    assert not any(
+        section["metadata"].get("section") == "recent"
+        for section in successor["sections"]
+    )
+    assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
+
+
+def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_runtime = test_model_runtime(
+        model_id="source-vision-model",
+        wire_api="openai_chat_completions",
+        input_modalities=("text", "image"),
+    )
+    destination_runtime = test_model_runtime(
+        model_id="destination-text-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        input_modalities=("text",),
+    )
+    source_failure = [
+        ProviderStreamTerminal(
+            terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
+            usage=TransportUsageReport(usage_status="missing", usage=None),
+            error=sanitize_provider_failure(
+                message="source provider is unavailable",
+                code_hint="503",
+            ),
+        )
+    ]
+    active_runtime = [source_runtime]
+    model = _CompactionScriptedModel(
+        [_text_stream("source answer"), _text_stream("destination answer")],
+        [source_failure, "destination summary after image omission"],
+    )
+    model._model_runtime = source_runtime
+    model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            manual_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    notices: list[str] = []
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=(
+            lambda: active_runtime[0].freeze_resolution_snapshot()
+        ),
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+        presentation_notice_sink=notices.append,
+    )
+    switch_results: list[object] = []
+    execute_switch = runner.compaction.recover_pending_root_input
+
+    async def record_switch(**kwargs):
+        result = await execute_switch(**kwargs)
+        switch_results.append(result)
+        return result
+
+    runner.compaction.recover_pending_root_input = record_switch
+    image_output = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
+    image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
+    image_prompt = freeze_canonical_prompt(
+        FrozenPromptContent(
+            (
+                LLMTextPart("before"),
+                image,
+                LLMTextPart("between"),
+                image,
+            )
+        )
+    )
+
+    async def exercise():
+        first = await runner.run_turn(image_prompt)
+        active_runtime[0] = destination_runtime
+        model._model_runtime = destination_runtime
+        model._preparer = DirectKernelModelPort(model_runtime=destination_runtime)
+        repository.update_session_model_call_binding(
+            lease.guard,
+            binding=test_model_binding(destination_runtime),
+            deadline_monotonic=monotonic() + 30,
+        )
+        second = await runner.run_turn(frozen_test_prompt("destination request"))
+        await owner.aclose()
+        return first, second
+
+    first, second = asyncio.run(exercise())
+
+    assert first.final_text == "source answer"
+    assert second.final_text == "destination answer"
+    assert len(switch_results) == 1
+    assert switch_results[0].model_switch_tier == 3
+    assert [call.target.fact.model_id for call in model.summary_transport.calls] == [
+        "source-vision-model",
+        "destination-text-model",
+    ]
+    destination_summary = model.summary_transport.contexts[1]
+    assert not any(
+        isinstance(part, LLMImagePart)
+        for message in destination_summary.messages
+        for part in message.content
+    )
+    assert (
+        sum(
+            join_text_content(message.content).count("[图片已省略]")
+            for message in destination_summary.messages
+        )
+        == 2
+    )
+    assert not any(
+        isinstance(part, LLMImagePart)
+        for message in model.requests[-1].compiled_input.messages
+        for part in message.content
+    )
+    successor = _context_snapshot_payload(model.requests[-1])
+    assert not any(
+        section["metadata"].get("section") == "recent"
+        for section in successor["sections"]
+    )
+    assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
+
+
+def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    source_runtime = test_model_runtime(
+        model_id="source-vision-model",
+        wire_api="openai_chat_completions",
+        input_modalities=("text", "image"),
+    )
+    destination_runtime = test_model_runtime(
+        model_id="destination-vision-model",
+        wire_api="openai_chat_completions",
+        connection_id=ModelConnectionId("model-connection:" + "2" * 32),
+        limits=test_model_limits(
+            total_context_tokens=256_000,
+            max_input_tokens=12_000,
+            max_output_tokens=1_000,
+            default_output_tokens=1_000,
+            input_safety_margin_tokens=0,
+        ),
+        input_modalities=("text", "image"),
+    )
+    source_failure = [
+        ProviderStreamTerminal(
+            terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
+            usage=TransportUsageReport(usage_status="missing", usage=None),
+            error=sanitize_provider_failure(
+                message="source provider is unavailable",
+                code_hint="503",
+            ),
+        )
+    ]
+    active_runtime = [source_runtime]
+    model = _CompactionScriptedModel(
+        [
+            _text_stream("old large answer:" + "h" * 50_000),
+            _text_stream("recent visual answer"),
+            _text_stream("destination answer"),
+        ],
+        [source_failure, "destination summary preserving recent visual context"],
+    )
+    model._model_runtime = source_runtime
+    model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            automatic_enabled=False,
+            manual_enabled=False,
+            minimum_reclaim_tokens=1,
+        )
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=(
+            lambda: active_runtime[0].freeze_resolution_snapshot()
+        ),
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    switch_results: list[object] = []
+    execute_switch = runner.compaction.recover_pending_root_input
+
+    async def record_switch(**kwargs):
+        result = await execute_switch(**kwargs)
+        switch_results.append(result)
+        return result
+
+    runner.compaction.recover_pending_root_input = record_switch
+    image_output = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
+    image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
+
+    async def exercise():
+        await runner.run_turn(frozen_test_prompt("old large request"))
+        await runner.run_turn(
+            freeze_canonical_prompt(
+                FrozenPromptContent((LLMTextPart("recent visual request"), image))
+            )
+        )
+        active_runtime[0] = destination_runtime
+        model._model_runtime = destination_runtime
+        model._preparer = DirectKernelModelPort(model_runtime=destination_runtime)
+        repository.update_session_model_call_binding(
+            lease.guard,
+            binding=test_model_binding(destination_runtime),
+            deadline_monotonic=monotonic() + 30,
+        )
+        result = await runner.run_turn(frozen_test_prompt("destination request"))
+        await owner.aclose()
+        return result
+
+    result = asyncio.run(exercise())
+
+    assert result.final_text == "destination answer"
+    assert len(switch_results) == 1
+    assert switch_results[0].model_switch_tier == 3
+    assert [call.target.fact.model_id for call in model.summary_transport.calls] == [
+        "source-vision-model",
+        "destination-vision-model",
+    ]
+    destination_summary = model.summary_transport.contexts[1]
+    assert any(
+        isinstance(part, LLMImagePart)
+        for message in destination_summary.messages
+        for part in message.content
+    )
+    successor = _context_snapshot_payload(model.requests[-1])
+    recent_sections = [
+        section
+        for section in successor["sections"]
+        if section["metadata"].get("section") == "recent"
+    ]
+    assert any(
+        isinstance(part, LLMImagePart)
+        for section in recent_sections
+        for part in section["parts"]
+    )
+    assert any(
+        isinstance(part, LLMImagePart)
+        for message in model.requests[-1].compiled_input.messages
+        for part in message.content
+    )
+
+
+@pytest.mark.parametrize(
+    ("canonical_capacity_delta", "admitted"),
+    ((0, True), (-1, False)),
+    ids=("exact-headroom", "one-byte-short"),
+)
+def test_k3_multipart_input_keeps_exact_canonical_service_headroom_before_open(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+    canonical_capacity_delta: int,
+    admitted: bool,
+) -> None:
+    from pulsara_agent.conversation_kernel import provider_dispatch
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    image_output = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
+    image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
+    prompt = freeze_canonical_prompt(
+        FrozenPromptContent((LLMTextPart("before"), image, image))
+    )
+    quote = prompt.resource_quote
+    values = {
+        "maximum_canonical_items": 4_096,
+        "maximum_canonical_expanded_bytes": (
+            quote.canonical_expanded_bytes + (4 << 20) + canonical_capacity_delta
+        ),
+        "maximum_epoch_logical_bytes": 64 << 20,
+        "reserved_canonical_items": 296,
+        "reserved_canonical_expanded_bytes": 4 << 20,
+        "reserved_epoch_logical_bytes": 4 << 20,
+    }
+    bounds = ResolvedCompactionHeadroomBounds(
+        **values,
+        resolved_hard_bound_set_fingerprint=context_fingerprint(
+            "pulsara.compaction-resource-headroom.v3-expanded-content",
+            {"role": "minimum_service_headroom", **values},
+        ),
+    )
+    monkeypatch.setattr(
+        provider_dispatch,
+        "resolved_compaction_headroom_bounds",
+        lambda: bounds,
+    )
+    runtime = test_model_runtime(
+        wire_api="openai_chat_completions",
+        input_modalities=("text", "image"),
+    )
+    model = _ScriptedModel([_text_stream("answer")])
+    model._model_runtime = runtime
+    model._preparer = DirectKernelModelPort(model_runtime=runtime)
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=runtime.freeze_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        workspace_id=workspace_id,
+    )
+
+    if admitted:
+        result = asyncio.run(runner.run_turn(prompt))
+        assert result.final_text == "answer"
+        assert len(model.requests) == 1
+        assert sum(
+            len(part.immutable_bytes)
+            for message in model.requests[0].compiled_input.messages
+            for part in message.content
+            if isinstance(part, LLMImagePart)
+        ) == 2 * len(image.immutable_bytes)
+    else:
+        with pytest.raises(StructuredModelInputCompileError) as failure:
+            asyncio.run(runner.run_turn(prompt))
+        assert failure.value.kind is (
+            ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+        )
+        assert model.requests == []
+        assert not repository.rehydrate_session(
+            session_id=session_id, deadline_monotonic=monotonic() + 30
+        )
+        with provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic() + 30,
+        ) as connection:
+            assert connection.execute(
+                "SELECT "
+                "(SELECT count(*) FROM pulsara_v3.turns WHERE session_id = %s), "
+                "(SELECT count(*) FROM pulsara_v3.session_commands WHERE session_id = %s), "
+                "(SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id = %s)",
+                (session_id, session_id, session_id),
+            ).fetchone() == (0, 0, 0)
 
 
 def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
@@ -2278,7 +3659,7 @@ def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
     )
 
     async def exercise():
-        first = await runner.run_turn("source request")
+        first = await runner.run_turn(frozen_test_prompt("source request"))
         source_epoch = runner._continuity.current_view(scope)
         assert source_epoch is not None
         active_runtime[0] = destination_runtime
@@ -2289,7 +3670,7 @@ def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
             binding=test_model_binding(destination_runtime),
             deadline_monotonic=monotonic() + 30,
         )
-        second = await runner.run_turn("destination request")
+        second = await runner.run_turn(frozen_test_prompt("destination request"))
         destination_epoch = runner._continuity.current_view(scope)
         assert destination_epoch is not None
         await owner.aclose()
@@ -2372,7 +3753,7 @@ def test_reasoning_only_change_keeps_the_installed_epoch(
     )
 
     async def exercise():
-        first = await runner.run_turn("first request")
+        first = await runner.run_turn(frozen_test_prompt("first request"))
         first_epoch = runner._continuity.current_view(scope)
         assert first_epoch is not None
         repository.update_session_model_call_binding(
@@ -2380,7 +3761,7 @@ def test_reasoning_only_change_keeps_the_installed_epoch(
             binding=high,
             deadline_monotonic=monotonic() + 30,
         )
-        second = await runner.run_turn("second request")
+        second = await runner.run_turn(frozen_test_prompt("second request"))
         second_epoch = runner._continuity.current_view(scope)
         assert second_epoch is not None
         await owner.aclose()
@@ -2465,7 +3846,7 @@ def test_disabled_compaction_rejects_nonfit_model_switch_without_mutation(
     )
 
     async def exercise():
-        first = await runner.run_turn("source request")
+        first = await runner.run_turn(frozen_test_prompt("source request"))
         source_epoch = runner._continuity.current_view(scope)
         assert source_epoch is not None
         active_runtime[0] = destination_runtime
@@ -2477,7 +3858,7 @@ def test_disabled_compaction_rejects_nonfit_model_switch_without_mutation(
             deadline_monotonic=monotonic() + 30,
         )
         with pytest.raises(StructuredModelInputCompileError) as raised:
-            await runner.run_turn("destination request")
+            await runner.run_turn(frozen_test_prompt("destination request"))
         current_epoch = runner._continuity.current_view(scope)
         await owner.aclose()
         return first, source_epoch, current_epoch, raised.value
@@ -2548,7 +3929,7 @@ def test_final_wire_compaction_trigger_and_adoption_ignore_provider_usage(
     )
 
     async def exercise():
-        first = await runner.run_turn("identical source question")
+        first = await runner.run_turn(frozen_test_prompt("identical source question"))
         outcome = await runner.compaction.compact_idle_turn(
             turn_id=first.turn_id,
             command_id="command:usage-independent-compaction",
@@ -2669,8 +4050,10 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     model.freeze_wire_measurement = record_summary_measurement
 
     async def exercise():
-        first = await runner.run_turn("first replay-bearing answer")
-        second = await runner.run_turn("second replay-bearing answer")
+        first = await runner.run_turn(frozen_test_prompt("first replay-bearing answer"))
+        second = await runner.run_turn(
+            frozen_test_prompt("second replay-bearing answer")
+        )
         outcome = await runner.compaction.compact_idle_turn(
             turn_id=second.turn_id,
             command_id="command:replay-heavy-wire-prefix-search",
@@ -2801,7 +4184,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
                 if (
                     not messages
                     or messages[-1].role is not MessageRole.USER
-                    or messages[-1].content != (summary_request,)
+                    or messages[-1].content != (LLMTextPart(summary_request),)
                 ):
                     return estimate
                 addend = 100_000
@@ -2831,8 +4214,12 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     )
 
     async def exercise():
-        await runner.run_turn("create a replay-bearing assistant answer")
-        second = await runner.run_turn("freeze an ordinary replay input")
+        await runner.run_turn(
+            frozen_test_prompt("create a replay-bearing assistant answer")
+        )
+        second = await runner.run_turn(
+            frozen_test_prompt("freeze an ordinary replay input")
+        )
         outcome = await runner.compaction.compact_idle_turn(
             turn_id=second.turn_id,
             command_id="command:semantic-overbudget-wire-fit",
@@ -2866,7 +4253,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
         for index, message in enumerate(ordinary_messages)
         if message.role is MessageRole.ASSISTANT
         and message.content
-        and message.content[0].startswith("native replay answer 1:")
+        and text_part_values(message.content)[0].startswith("native replay answer 1:")
     )
     ordinary_messages[ordinary_index] = replace(
         ordinary_messages[ordinary_index],
@@ -2972,17 +4359,18 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
         workspace_id=workspace_id,
     )
     automatic_executions: list[object] = []
-    execute_active = runner.compaction.execute_active
+    execute_pending = runner.compaction._execute_compaction_fenced
 
     async def record_automatic_execution(**kwargs):
-        execution = await execute_active(**kwargs)
+        execution = await execute_pending(**kwargs)
         automatic_executions.append(execution)
         return execution
 
-    runner.compaction.execute_active = record_automatic_execution
+    if trigger == "automatic":
+        runner.compaction._execute_compaction_fenced = record_automatic_execution
 
     async def exercise():
-        first = await runner.run_turn("first input")
+        first = await runner.run_turn(frozen_test_prompt("first input"))
         if trigger == "manual":
             outcome = await runner.compaction.compact_idle_turn(
                 turn_id=first.turn_id,
@@ -2991,7 +4379,9 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
             )
             second_text = None
         else:
-            second = await runner.run_turn("second input triggers compaction")
+            second = await runner.run_turn(
+                frozen_test_prompt("second input triggers compaction")
+            )
             outcome = automatic_executions[0].outcome
             second_text = second.final_text
         await owner.aclose()
@@ -3076,6 +4466,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     measure_wire = runner.compaction._provider_dispatch.measure_prepared_wire_candidate
     pre_compact_calls = 0
     rejected_successor_quotes = []
+    measured_snapshot_successors = []
 
     async def record_pre_compact(**kwargs):
         nonlocal pre_compact_calls
@@ -3091,10 +4482,11 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
             else canonical_read.compile_snapshot.context_binding_fact
         )
         if (
-            not rejected_successor_quotes
-            and binding is not None
+            binding is not None
             and binding.base_kind is ContextBindingBaseKind.SNAPSHOT
         ):
+            measured_snapshot_successors.append(decision.quote)
+        if not rejected_successor_quotes and measured_snapshot_successors:
             quote = decision.quote
             over_budget = max(
                 quote.effective_input_budget_tokens + 1,
@@ -3129,8 +4521,10 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     )
 
     async def exercise():
-        await runner.run_turn("historical question")
-        tool_turn = await runner.run_turn("create one complete tool group")
+        await runner.run_turn(frozen_test_prompt("historical question"))
+        tool_turn = await runner.run_turn(
+            frozen_test_prompt("create one complete tool group")
+        )
         # Exercise the candidate-shrink algorithm from an approved cold-epoch
         # boundary.  An installed compatible prefix may not be truncated merely
         # to retain a tool group, which is covered independently below.
@@ -3159,7 +4553,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
                 force=True,
             )
             active_turn = await runner.run_turn(
-                "continue actively", command_id=command_id
+                frozen_test_prompt("continue actively"), command_id=command_id
             )
             outcome = await waiter
             final_text = active_turn.final_text
@@ -3170,13 +4564,14 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
 
     assert outcome.disposition is CompactionDisposition.COMPACTED
     assert outcome.snapshot_id is not None
-    assert len(model.summary_transport.contexts) == 2
-    assert len(model.summary_transport.contexts[0].messages) < len(
-        model.summary_transport.contexts[1].messages
-    )
+    # K3 freezes one summary and retries only the local recent suffixes before
+    # restarting with a smaller protected tail.  Rejecting the first successor
+    # must therefore measure a second candidate without another model call.
+    assert len(model.summary_transport.contexts) == 1
+    assert len(measured_snapshot_successors) >= 2
     assert {
         context.messages[-1].content for context in model.summary_transport.contexts
-    } == {(compaction_summary_request(),)}
+    } == {(LLMTextPart(compaction_summary_request()),)}
     assert final_text == (None if idle else "active turn continued")
     assert pre_compact_calls == 1
     assert runner._safe_point._active_handle is None  # noqa: SLF001
@@ -3289,9 +4684,11 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
     )
 
     async def exercise():
-        await runner.run_turn("historical question")
+        await runner.run_turn(frozen_test_prompt("historical question"))
         if retained_group_count:
-            await runner.run_turn("create one complete retained tool group")
+            await runner.run_turn(
+                frozen_test_prompt("create one complete retained tool group")
+            )
         command_id = _name("active-command")
         turn_id = _stable_id("turn", session_id, command_id)
         _request, waiter = await owner.request_manual(
@@ -3301,7 +4698,9 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
             expected_turn_id=turn_id,
             force=True,
         )
-        result = await runner.run_turn("continue actively", command_id=command_id)
+        result = await runner.run_turn(
+            frozen_test_prompt("continue actively"), command_id=command_id
+        )
         outcome = await waiter
         await owner.aclose()
         return result, outcome
@@ -3368,7 +4767,7 @@ def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
     )
 
     async def exercise():
-        await runner.run_turn("first question")
+        await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("second-command")
         turn_id = _stable_id("turn", session_id, command_id)
         _request, waiter = await owner.request_manual(
@@ -3378,7 +4777,9 @@ def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
             expected_turn_id=turn_id,
             force=True,
         )
-        second = await runner.run_turn("second question", command_id=command_id)
+        second = await runner.run_turn(
+            frozen_test_prompt("second question"), command_id=command_id
+        )
         outcome = await waiter
         await owner.aclose()
         return second, outcome
@@ -3446,7 +4847,7 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
     second_waiters: list[asyncio.Future[object]] = []
 
     async def exercise():
-        await runner.run_turn("first question")
+        await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("second-command")
         turn_id = _stable_id("turn", session_id, command_id)
         first_request, first_waiter = await owner.request_manual(
@@ -3479,7 +4880,9 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
 
         runner.compaction.execute_active = inject_second_after_first_settlement
         try:
-            result = await runner.run_turn("second question", command_id=command_id)
+            result = await runner.run_turn(
+                frozen_test_prompt("second question"), command_id=command_id
+            )
             first_outcome = await first_waiter
             assert len(second_waiters) == 1
             assert not second_waiters[0].done()
@@ -3548,7 +4951,7 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
     )
 
     async def exercise():
-        await runner.run_turn("first question")
+        await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("second-command")
         turn_id = _stable_id("turn", session_id, command_id)
         _request, outcome = await owner.request_manual(
@@ -3558,7 +4961,9 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
             expected_turn_id=turn_id,
             force=True,
         )
-        result = await runner.run_turn("second question", command_id=command_id)
+        result = await runner.run_turn(
+            frozen_test_prompt("second question"), command_id=command_id
+        )
         compacted = await outcome
         await owner.aclose()
         return result, compacted
@@ -3636,7 +5041,7 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
     )
 
     async def exercise():
-        await runner.run_turn("first question")
+        await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("second-command")
         turn_id = _stable_id("turn", session_id, command_id)
         _request, outcome = await owner.request_manual(
@@ -3646,7 +5051,9 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
             expected_turn_id=turn_id,
             force=True,
         )
-        result = await runner.run_turn("second question", command_id=command_id)
+        result = await runner.run_turn(
+            frozen_test_prompt("second question"), command_id=command_id
+        )
         failed = await outcome
         await owner.aclose()
         return result, failed
@@ -3713,7 +5120,7 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
     )
 
     async def exercise():
-        await runner.run_turn("first question")
+        await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("second-command")
         turn_id = _stable_id("turn", session_id, command_id)
         _request, outcome = await owner.request_manual(
@@ -3724,7 +5131,9 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
             force=True,
         )
         task = asyncio.create_task(
-            runner.run_turn("second question", command_id=command_id)
+            runner.run_turn(
+                frozen_test_prompt("second question"), command_id=command_id
+            )
         )
         await asyncio.wait_for(blocking.started.wait(), timeout=5)
         task.cancel()
@@ -3757,14 +5166,20 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
         deadline_monotonic=monotonic() + 30,
     )
     summary = "A concise free-form handoff for the mid-turn continuation."
+    first_response = _text_stream(
+        "accepted assistant context " + "a" * 460_000,
+        block="text:large-before-tool",
+    ) + _tool_stream()
     model = _LimitedCompactionScriptedModel(
-        [_tool_stream(), _text_stream("finished after mid-turn compaction")],
+        [first_response, _text_stream("finished after mid-turn compaction")],
         summary,
+        total_context_tokens=360_000,
+        max_input_tokens=330_000,
     )
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
-            auto_trigger_ratio=0.90,
-            post_compaction_target_ratio=0.75,
+            auto_trigger_ratio=0.75,
+            post_compaction_target_ratio=0.60,
             minimum_reclaim_tokens=1,
             maximum_retained_tail_utf8_bytes=1,
         )
@@ -3791,9 +5206,10 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     runner.compaction.execute_active = record_trigger
 
     async def exercise():
-        # The complete pre-summary source crosses the 90% final-wire trigger,
-        # while its exact summary candidate and successor remain executable.
-        result = await runner.run_turn("p" * 40_000)
+        # K3 first admits the worst legal result wire before executing the tool.
+        # The large actual assistant then makes the settled follow-up cross the
+        # configured soft trigger while its compacted successor remains executable.
+        result = await runner.run_turn(frozen_test_prompt("p" * 40_000))
         await owner.aclose()
         return result
 
@@ -3890,7 +5306,7 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
     owner.run_fenced = record_fence
 
     async def exercise():
-        result = await runner.run_turn("small ordinary request")
+        result = await runner.run_turn(frozen_test_prompt("small ordinary request"))
         await owner.aclose()
         return result
 
@@ -3899,7 +5315,9 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
     assert result.final_text == "ordinary final-wire dispatch"
     assert measurements == 1
     assert hydrations == 1
-    assert source_preparations == 1
+    # A valid unpublished ROOT candidate already carries the exact measured
+    # successor.  The below-trigger case must not reopen the compaction source.
+    assert source_preparations == 0
     assert installs == 1
     assert fences == 0
     assert len(model.requests) == 1
@@ -3942,7 +5360,9 @@ def test_final_wire_successful_install_is_not_rejected_by_post_cas_clock_expiry(
 
     monkeypatch.setattr(continuity, "install", install_then_cross_deadline)
 
-    result = asyncio.run(runner.run_turn("complete the atomic install"))
+    result = asyncio.run(
+        runner.run_turn(frozen_test_prompt("complete the atomic install"))
+    )
 
     assert result.final_text == "installed before the clock crossed"
     assert len(model.requests) == 1
@@ -3951,7 +5371,7 @@ def test_final_wire_successful_install_is_not_rejected_by_post_cas_clock_expiry(
 @pytest.mark.parametrize(
     "failure_call",
     (1, 2),
-    ids=("first_measurement", "post_compaction_reprepare_measurement"),
+    ids=("first_measurement", "measurement_after_one_accepted_turn"),
 )
 def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
     failure_call: int,
@@ -3969,14 +5389,22 @@ def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    model = _ScriptedModel([_text_stream("recovered after measurement failure")])
+    model = _ScriptedModel(
+        [
+            *(
+                [_text_stream("initial accepted turn")]
+                if failure_call == 2
+                else []
+            ),
+            _text_stream("recovered after measurement failure"),
+        ]
+    )
     tools = _RecordingBorrowToolPort(
         _AssertingTool(provider, session_id), tool_names=()
     )
-    hook_reservations: list[_RecordingHookReservation] = []
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
-            automatic_enabled=failure_call == 2,
+            automatic_enabled=False,
             minimum_reclaim_tokens=1,
         )
     )
@@ -3991,45 +5419,37 @@ def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
         compaction_owner=owner,
         workspace_id=workspace_id,
     )
-    measure = runner.compaction.measure_dispatch_wire
-    crosses_threshold = runner.compaction.wire_decision_crosses_automatic_threshold
+    measure = runner._provider_dispatch.measure_prepared_wire_candidate
     measurement_calls = 0
 
     async def fail_selected_measurement(*args, **kwargs):
         nonlocal measurement_calls
         measurement_calls += 1
-        dispatch = args[0]
-        reservation = _RecordingHookReservation()
-        with dispatch._authority_lock:  # noqa: SLF001
-            assert dispatch._hook_context_reservation is None  # noqa: SLF001
-            dispatch._hook_context_reservation = reservation  # noqa: SLF001
-        hook_reservations.append(reservation)
         if measurement_calls == failure_call:
             raise TimeoutError("injected late final-wire measurement failure")
         return await measure(*args, **kwargs)
 
-    runner.compaction.measure_dispatch_wire = fail_selected_measurement
-    if failure_call == 2:
-        # Force only the advisory late decision across threshold.  The fenced
-        # fresh recapture remains below threshold, so Runner reprepares the
-        # ordinary dispatch and exercises its second measurement site.
-        runner.compaction.wire_decision_crosses_automatic_threshold = (
-            lambda *_args, **_kwargs: True
-        )
+    runner._provider_dispatch.measure_prepared_wire_candidate = (
+        fail_selected_measurement
+    )
 
     async def exercise():
+        if failure_call == 2:
+            accepted = await runner.run_turn(
+                frozen_test_prompt("accepted before the injected failure")
+            )
+            assert accepted.final_text == "initial accepted turn"
         with pytest.raises(
             TimeoutError, match="injected late final-wire measurement failure"
         ):
-            await runner.run_turn("fail before provider open")
+            await runner.run_turn(frozen_test_prompt("fail before provider open"))
         assert runner._safe_point._active_handle is None  # noqa: SLF001
         assert tools._active == set()  # noqa: SLF001
         assert tools.release_calls == [1] * failure_call
-        assert len(hook_reservations) == failure_call
-        assert all(item.retire_calls == 1 for item in hook_reservations)
 
-        runner.compaction.wire_decision_crosses_automatic_threshold = crosses_threshold
-        recovered = await runner.run_turn("acquire the next safe point")
+        recovered = await runner.run_turn(
+            frozen_test_prompt("acquire the next safe point")
+        )
         await owner.aclose()
         return recovered
 
@@ -4040,8 +5460,6 @@ def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
     assert runner._safe_point._active_handle is None  # noqa: SLF001
     assert tools._active == set()  # noqa: SLF001
     assert tools.release_calls == [1] * (failure_call + 1)
-    assert len(hook_reservations) == failure_call + 1
-    assert all(item.retire_calls == 1 for item in hook_reservations)
 
 
 def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
@@ -4111,7 +5529,7 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
         return await install(*args, **kwargs)
 
     async def exercise():
-        await runner.run_turn("first question")
+        await runner.run_turn(frozen_test_prompt("first question"))
         runner._provider_dispatch.measure_prepared_wire_candidate = record_measurement
         runner._provider_dispatch.bind_selected_provider_dispatch = record_transfer
         runner._provider_dispatch.install_provider_open = record_install
@@ -4124,7 +5542,9 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
             expected_turn_id=turn_id,
             force=True,
         )
-        result = await runner.run_turn("second question", command_id=command_id)
+        result = await runner.run_turn(
+            frozen_test_prompt("second question"), command_id=command_id
+        )
         outcome = await waiter
         await owner.aclose()
         return result, outcome
@@ -4134,9 +5554,10 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
     assert result.final_text == "final after Hook sibling"
     assert outcome.disposition is CompactionDisposition.COMPACTED
     assert _hook_context_bodies(model.requests[-1]) == (hook_text,)
-    # PRE_FULL source proof, summary call, post-FULL no-Hook base, and optional
-    # Hook sibling each own one exact candidate measurement.
-    assert len(measured_deadlines) == 4
+    # The unpublished direct admission, PRE_FULL source proof, summary call,
+    # post-FULL no-Hook base, and optional Hook sibling each own one exact
+    # candidate measurement.
+    assert len(measured_deadlines) == 5
     assert measured_deadlines == sorted(measured_deadlines)
     assert len(install_deadlines) == 1
     assert install_deadlines[0] > measured_deadlines[-1]
@@ -4228,7 +5649,7 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
         return await install(*args, **kwargs)
 
     async def exercise():
-        await runner.run_turn("first question")
+        await runner.run_turn(frozen_test_prompt("first question"))
         runner._provider_dispatch.prepare_hook_context_sibling = record_sibling
         runner._provider_dispatch.measure_prepared_wire_candidate = timeout_hook
         runner._provider_dispatch.bind_selected_provider_dispatch = record_bind
@@ -4242,7 +5663,9 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
             expected_turn_id=turn_id,
             force=True,
         )
-        result = await runner.run_turn("second question", command_id=command_id)
+        result = await runner.run_turn(
+            frozen_test_prompt("second question"), command_id=command_id
+        )
         outcome = await waiter
         await owner.aclose()
         return result, outcome
@@ -4304,7 +5727,7 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
     )
 
     async def exercise():
-        await runner.run_turn("first question")
+        await runner.run_turn(frozen_test_prompt("first question"))
         if failure_site == "rotated_read":
             read_dispatch = runner._provider_dispatch.read_dispatch_read
 
@@ -4331,7 +5754,9 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
             force=True,
         )
         with pytest.raises(RuntimeError, match="injected"):
-            await runner.run_turn("second question", command_id=command_id)
+            await runner.run_turn(
+                frozen_test_prompt("second question"), command_id=command_id
+            )
         outcome = await waiter
         await owner.aclose()
         return outcome
@@ -4357,9 +5782,16 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
     assert snapshot_count == 1
 
 
+@pytest.mark.parametrize("retry_recent", (False, True))
 def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_recent: bool,
 ) -> None:
+    from pulsara_agent.conversation_kernel.compaction import (
+        coordinator as compaction_coordinator,
+    )
+
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
@@ -4391,6 +5823,31 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
             minimum_reclaim_tokens=1,
         )
     )
+    source_collector = StaticContextSourceCollector()
+    pending_root_freezes = 0
+    second_command_id = _name("automatic-second-command")
+    second_turn_id = _stable_id("turn", session_id, second_command_id)
+    freeze_non_trigger_sources = source_collector.freeze_non_trigger_sources
+
+    def record_non_trigger_freeze(*args, **kwargs):
+        nonlocal pending_root_freezes
+        facts = kwargs["canonical_facts"]
+        if facts.canonical_input.identity.turn_id == second_turn_id:
+            pending_root_freezes += 1
+        return freeze_non_trigger_sources(*args, **kwargs)
+
+    monkeypatch.setattr(
+        source_collector,
+        "freeze_non_trigger_sources",
+        record_non_trigger_freeze,
+    )
+    if retry_recent:
+        monkeypatch.setattr(
+            compaction_coordinator,
+            "_ordinary_recent_suffixes",
+            lambda recent: (recent, ()),
+        )
+    memory_projection = _PolicyMemoryProjection()
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
@@ -4398,9 +5855,10 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         model=model,
         tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
+        context_source_collector=source_collector,
         compaction_owner=owner,
         workspace_id=workspace_id,
+        memory_projection=memory_projection,
     )
     input_reader = _HeadroomOrderingReader(
         provider,
@@ -4408,6 +5866,40 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     )
     runner._provider_dispatch._input_reader = input_reader
     runner.compaction._input_reader = input_reader
+    prospective_family_calls = 0
+    prospective_candidate_calls = 0
+    prepare_family = (
+        runner._provider_dispatch.prepare_prospective_root_candidate_family
+    )
+    prepare_candidate = runner._provider_dispatch.prepare_prospective_root_candidate
+
+    async def record_prospective_family(**kwargs):
+        nonlocal prospective_family_calls
+        if kwargs["candidate"].exact_turn_id == second_turn_id:
+            prospective_family_calls += 1
+        return await prepare_family(**kwargs)
+
+    async def record_prospective_candidate(family, **kwargs):
+        nonlocal prospective_candidate_calls
+        if kwargs["candidate"].exact_turn_id == second_turn_id:
+            prospective_candidate_calls += 1
+        selected = await prepare_candidate(family, **kwargs)
+        if (
+            retry_recent
+            and kwargs["candidate"].exact_turn_id == second_turn_id
+            and prospective_candidate_calls == 2
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
+            )
+        return selected
+
+    runner._provider_dispatch.prepare_prospective_root_candidate_family = (
+        record_prospective_family
+    )
+    runner._provider_dispatch.prepare_prospective_root_candidate = (
+        record_prospective_candidate
+    )
     triggers: list[object] = []
     trigger_candidates: list[AutomaticCompactionTriggerCandidate] = []
     source_wire_quotes: list[tuple[int, int]] = []
@@ -4427,6 +5919,13 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         return await execute(**kwargs)
 
     runner.compaction.execute_active = record_trigger
+    recover_pending_root = runner.compaction.recover_pending_root_input
+
+    async def record_pending_root_recovery(**kwargs):
+        triggers.append(CompactionTrigger.AUTO_ACTIVE_CONTEXT)
+        return await recover_pending_root(**kwargs)
+
+    runner.compaction.recover_pending_root_input = record_pending_root_recovery
     automatic_order: list[str] = []
     prepare_source = runner._provider_dispatch.prepare_compaction_source
     run_fenced = owner.run_fenced
@@ -4450,10 +5949,14 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     owner.run_fenced = record_fence
 
     async def exercise():
-        first = await runner.run_turn("first")
+        first = await runner.run_turn(frozen_test_prompt("first"))
         automatic_order.clear()
         source_wire_quotes.clear()
-        second = await runner.run_turn("y" * 40_000)
+        input_reader.operations.clear()
+        second = await runner.run_turn(
+            frozen_test_prompt("y" * 40_000),
+            command_id=second_command_id,
+        )
         await owner.aclose()
         return first, second
 
@@ -4462,9 +5965,21 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert first.final_text.startswith("historical")
     assert second.final_text == "automatic compaction final"
     assert triggers == [CompactionTrigger.AUTO_ACTIVE_CONTEXT]
-    assert automatic_order == ["source", "fence", "source"]
-    assert len(trigger_candidates) == 1
-    assert source_wire_quotes[0][0] > source_wire_quotes[0][1]
+    assert automatic_order == ["fence", "source"]
+    # The unpublished next ROOT request now reaches the same compaction owner
+    # before its writer, so it does not first become an active auto-trigger.
+    assert trigger_candidates == []
+    # One pre-compaction prospective attempt discovers the hard pressure.  The
+    # compaction retry loop then freezes exactly one successor family; removing
+    # another recent item adds only one authority-free candidate compilation.
+    assert prospective_family_calls == 2
+    assert prospective_candidate_calls == (3 if retry_recent else 2)
+    assert pending_root_freezes == 2
+    assert memory_projection.preference_calls == 3
+    assert memory_projection.recall_calls == 2
+    # The predecessor remains executable by itself; the exact predecessor plus
+    # unpublished next request is the candidate that crosses the hard budget.
+    assert source_wire_quotes[0][0] <= source_wire_quotes[0][1]
     assert len(model.summary_transport.contexts) == 1
     assert (
         model.summary_transport.contexts[0].compiler_estimated_input_tokens
@@ -4472,18 +5987,16 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     )
     assert len(model.requests) == 2
     successor_snapshot = _context_snapshot_payload(model.requests[1])
-    active_request = successor_snapshot["continuation"]["active_request"]
-    assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
-    assert active_request["location"] == "CANONICAL_SUFFIX"
-    assert active_request["text"] is None
+    assert successor_snapshot["continuation"]["mode"] == "AWAIT_NEXT_USER"
+    assert successor_snapshot["continuation"]["active_request"] is None
     assert (
         sum(
-            message.content == ("y" * 40_000,)
+            message.content == (LLMTextPart("y" * 40_000),)
             for message in model.requests[1].compiled_input.messages
         )
         == 1
     )
-    assert input_reader.operations[:2] == ["headroom", "dispatch"]
+    assert input_reader.operations.count("dispatch") >= 2
 
 
 def test_round5b_idle_manual_compaction_adopts_without_successor_open(
@@ -4524,7 +6037,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     )
 
     async def exercise():
-        first = await runner.run_turn("question")
+        first = await runner.run_turn(frozen_test_prompt("question"))
         outcome = await runner.compaction.compact_idle_turn(
             turn_id=first.turn_id,
             command_id=_name("idle-compact"),
@@ -4539,7 +6052,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     assert outcome.snapshot_id is not None
     assert len(model.summary_transport.contexts) == 1
     assert model.summary_transport.contexts[0].messages[-1].content == (
-        compaction_summary_request(),
+        LLMTextPart(compaction_summary_request()),
     )
     assert len(model.requests) == 1
     scope = ProviderInputContinuityScope(
@@ -4580,7 +6093,9 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
         workspace_id=workspace_id,
     )
 
-    restarted = asyncio.run(replacement_runner.run_turn("question after restart"))
+    restarted = asyncio.run(
+        replacement_runner.run_turn(frozen_test_prompt("question after restart"))
+    )
 
     assert restarted.final_text == "answer after restart"
     assert len(replacement_model.requests) == 1
@@ -4592,7 +6107,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     )
     assert (
         sum(
-            message.content == ("question after restart",)
+            message.content == (LLMTextPart("question after restart"),)
             for message in replacement_model.requests[0].compiled_input.messages
         )
         == 1
@@ -4637,7 +6152,7 @@ def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
     )
 
     async def exercise():
-        first = await runner.run_turn("question")
+        first = await runner.run_turn(frozen_test_prompt("question"))
         outcome = await runner.compaction.compact_idle_turn(
             turn_id=first.turn_id,
             command_id=_name("idle-compact"),
@@ -4665,6 +6180,7 @@ def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
 
 def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -4679,7 +6195,6 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
     )
     command_id = _name("command")
     turn_id = _stable_id("turn", session_id, command_id)
-    collector = _BlockingSourceCollector()
     model = _ScriptedModel([_text_stream("one call")])
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
@@ -4688,12 +6203,37 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
         model=model,
         tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
-        context_source_collector=collector,
+        context_source_collector=StaticContextSourceCollector(),
+    )
+    pending_read = repository.read_pending_prompt_steer_facts
+    pending_read_started = Event()
+    release_pending_read = Event()
+    pending_read_calls = 0
+
+    def block_first_post_admission_pending_read(*args, **kwargs):
+        nonlocal pending_read_calls
+        pending_read_calls += 1
+        if pending_read_calls == 1:
+            pending_read_started.set()
+            if not release_pending_read.wait(timeout=5):
+                raise TimeoutError("post-admission pending read was not released")
+        return pending_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repository,
+        "read_pending_prompt_steer_facts",
+        block_first_post_admission_pending_read,
     )
 
     async def exercise():
-        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
-        assert await asyncio.to_thread(collector.started.wait, 5)
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt("initial"), command_id=command_id)
+        )
+        # The direct prompt has passed its writer gate and now owns the first
+        # provider safe point.  Steers that become addressable in this interval
+        # must still enter that first exact input through the ordinary steer
+        # prospective-admission owner.
+        assert await asyncio.to_thread(pending_read_started.wait, 5)
         for index, text in enumerate(("steer one", "steer two"), start=1):
             steer_command = _name(f"steer-command-{index}")
             enqueue_test_prompt(
@@ -4707,25 +6247,24 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
                 permission_snapshot_id=None,
                 requested_permission_mode=None,
                 model_call_binding=None,
-                content=InlineContent.from_bytes(text.encode("utf-8")),
+                content=FrozenPromptContent.text(text),
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="test",
                 deadline_monotonic=monotonic() + 10,
             )
-        collector.release.set()
+        release_pending_read.set()
         return await task
 
     result = asyncio.run(exercise())
     assert result.final_text == "one call"
     assert len(model.requests) == 1
-    assert collector.freeze_calls == 1
-    assert collector.complete_calls == 1
+    assert pending_read_calls >= 2
     user_messages = [
-        message.content[0]
+        text_part_values(message.content)[0]
         for message in model.requests[0].compiled_input.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" not in message.content[0]
+        and "pulsara_runtime_observation" not in join_text_content(message.content)
     ]
     assert user_messages == ["initial", "steer one", "steer two"]
 
@@ -4806,9 +6345,11 @@ def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
 
     async def exercise():
         try:
-            first = await runner.run_turn("Please save the test memory")
+            first = await runner.run_turn(
+                frozen_test_prompt("Please save the test memory")
+            )
             assert first.final_text == "记忆引用无效，本次未保存。"
-            second = await runner.run_turn("Continue normally")
+            second = await runner.run_turn(frozen_test_prompt("Continue normally"))
             assert second.final_text == "下一轮仍可以正常回复。"
         finally:
             await memory.aclose()
@@ -4855,6 +6396,7 @@ def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
 
 def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -4867,7 +6409,6 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    collector = _BlockingSourceCollector()
     projection = _PolicyMemoryProjection()
     model = _ScriptedModel(
         [
@@ -4883,15 +6424,31 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         model=model,
         tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
-        context_source_collector=collector,
+        context_source_collector=StaticContextSourceCollector(),
         memory_projection=projection,
+    )
+    pending_read = repository.read_pending_prompt_steer_facts
+    pending_read_started = Event()
+    release_pending_read = Event()
+    blocked_turn_id: str | None = None
+
+    def block_selected_post_admission_pending_read(*args, **kwargs):
+        nonlocal blocked_turn_id
+        if kwargs["target_turn_id"] == blocked_turn_id:
+            blocked_turn_id = None
+            pending_read_started.set()
+            if not release_pending_read.wait(timeout=5):
+                raise TimeoutError("post-admission pending read was not released")
+        return pending_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        repository,
+        "read_pending_prompt_steer_facts",
+        block_selected_post_admission_pending_read,
     )
 
     async def exercise() -> None:
-        first = asyncio.create_task(runner.run_turn("normal initial root message"))
-        assert await asyncio.to_thread(collector.started.wait, 5)
-        collector.release.set()
-        await first
+        await runner.run_turn(frozen_test_prompt("normal initial root message"))
         assert model.requests[0].memory_context.memory_use_policy is (
             MemoryUsePolicy.ENABLED
         )
@@ -4899,17 +6456,17 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         assert projection.recall_calls == 1
         assert projection.governance_wakes == 1
 
-        collector.started.clear()
-        collector.release.clear()
         second_command = _name("command")
         second_turn = _stable_id("turn", session_id, second_command)
+        nonlocal blocked_turn_id
+        blocked_turn_id = second_turn
         second = asyncio.create_task(
             runner.run_turn(
-                "don't use saved memory for this answer",
+                frozen_test_prompt("don't use saved memory for this answer"),
                 command_id=second_command,
             )
         )
-        assert await asyncio.to_thread(collector.started.wait, 5)
+        assert await asyncio.to_thread(pending_read_started.wait, 5)
         steer_command = _name("steer-command")
         enqueue_test_prompt(
             repository,
@@ -4922,12 +6479,12 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
             permission_snapshot_id=None,
             requested_permission_mode=None,
             model_call_binding=None,
-            content=InlineContent.from_bytes(b"continue normally"),
+            content=FrozenPromptContent.text("continue normally"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
             deadline_monotonic=monotonic() + 10,
         )
-        collector.release.set()
+        release_pending_read.set()
         await second
         assert model.requests[1].memory_context.memory_use_policy is (
             MemoryUsePolicy.ALL_DISABLED_BY_USER
@@ -4936,7 +6493,7 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         assert projection.recall_calls == 1
         assert projection.governance_wakes == 2
 
-        await runner.run_turn("normal next root message")
+        await runner.run_turn(frozen_test_prompt("normal next root message"))
         assert model.requests[2].memory_context.memory_use_policy is (
             MemoryUsePolicy.ENABLED
         )
@@ -4959,7 +6516,7 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         for message in second_input.messages[len(first_input.messages) :]
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
     )
     cleared_memory_sources = {
         item.source_kind
@@ -5007,7 +6564,9 @@ def test_round8_memory_write_hint_is_gated_before_the_real_provider_wire(
             context_source_collector=StaticContextSourceCollector(),
             memory_projection=_PolicyMemoryProjection() if memory_enabled else None,
         )
-        result = await runner.run_turn(text, requested_permission_mode=permission)
+        result = await runner.run_turn(
+            frozen_test_prompt(text), requested_permission_mode=permission
+        )
         assert result.final_text == "done"
         assert len(model.requests) == 1
         with provider.connection(
@@ -5058,7 +6617,7 @@ def test_round8_memory_write_hint_is_gated_before_the_real_provider_wire(
                 for message in compiled.messages  # type: ignore[attr-defined]
                 if message.role is MessageRole.USER
                 and message.content
-                and "pulsara_runtime_observation" in message.content[0]
+                and "pulsara_runtime_observation" in join_text_content(message.content)
                 for decoded in (decode_runtime_observation(message),)
                 if decoded.source_kind is ContextSourceKind.MEMORY_WRITE_HINT
             )
@@ -5110,7 +6669,9 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
 
     async def exercise():
         task = asyncio.create_task(
-            runner.run_turn("Inspect the current request", command_id=command_id)
+            runner.run_turn(
+                frozen_test_prompt("Inspect the current request"), command_id=command_id
+            )
         )
         await asyncio.wait_for(model.started.wait(), timeout=5)
         steer_command = _name("steer-command")
@@ -5125,8 +6686,8 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
             permission_snapshot_id=None,
             requested_permission_mode=None,
             model_call_binding=None,
-            content=InlineContent.from_bytes(
-                b"Please remember that I prefer concise answers"
+            content=FrozenPromptContent.text(
+                "Please remember that I prefer concise answers"
             ),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
@@ -5148,7 +6709,7 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
             for index, message in enumerate(compiled.messages)
             if message.role is MessageRole.USER
             and message.content
-            and "pulsara_runtime_observation" in message.content[0]
+            and "pulsara_runtime_observation" in join_text_content(message.content)
             and decode_runtime_observation(message).source_kind
             is ContextSourceKind.MEMORY_WRITE_HINT
         )
@@ -5161,7 +6722,8 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
         for index, message in enumerate(second.messages)
         if message.role is MessageRole.USER
         and message.content
-        and message.content[0] == "Please remember that I prefer concise answers"
+        and message.content
+        == (LLMTextPart("Please remember that I prefer concise answers"),)
     )
     assert second_hints[0] == steer_index - 1
     assert hint_indexes(third) == second_hints
@@ -5207,6 +6769,14 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
         context_source_collector=collector,
         compiler=compiler,
     )
+    collector.release.set()
+    pending_gate = _PostAdmissionPendingSteerReadGate(
+        repository.read_pending_prompt_steer_facts,
+        target_turn_id=turn_id,
+    )
+    monkeypatch.setattr(
+        repository, "read_pending_prompt_steer_facts", pending_gate
+    )
     # Nested prefixes share the same 64 KiB canonical base.  The injected
     # target admits only one steer.  A 512 KiB planning bound admits the unique
     # base + suffix materialization, while charging the base for each of the
@@ -5216,8 +6786,10 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
     queue_ids = tuple(_name(f"steer-queue-{index}") for index in range(1, 17))
 
     async def exercise():
-        task = asyncio.create_task(runner.run_turn(initial, command_id=command_id))
-        assert await asyncio.to_thread(collector.started.wait, 5)
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt(initial), command_id=command_id)
+        )
+        assert await asyncio.to_thread(pending_gate.started.wait, 5)
         for index, queue_id in enumerate(queue_ids, start=1):
             steer_command = _name(f"steer-command-{index}")
             enqueue_test_prompt(
@@ -5231,7 +6803,7 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
                 permission_snapshot_id=None,
                 requested_permission_mode=None,
                 model_call_binding=None,
-                content=InlineContent.from_bytes(body),
+                content=FrozenPromptContent.text(body.decode("utf-8")),
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="test",
                 deadline_monotonic=monotonic() + 10,
@@ -5240,14 +6812,14 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
             "pulsara_agent.conversation_kernel.provider_dispatch.MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
             512 << 10,
         )
-        collector.release.set()
+        pending_gate.release.set()
         await asyncio.wait_for(model.started.wait(), timeout=5)
         user_messages = [
-            message.content[0]
+            text_part_values(message.content)[0]
             for message in model.requests[0].compiled_input.messages
             if message.role is MessageRole.USER
             and message.content
-            and "pulsara_runtime_observation" not in message.content[0]
+            and "pulsara_runtime_observation" not in join_text_content(message.content)
         ]
         with provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -5275,6 +6847,7 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
 
 def test_round3_1_expired_steer_planning_rejects_terminal_steer_and_io_closes(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -5305,10 +6878,20 @@ def test_round3_1_expired_steer_planning_rejects_terminal_steer_and_io_closes(
         compiler=_ExpiredSteerCompiler(),
         io_owner=io_owner,
     )
+    collector.release.set()
+    pending_gate = _PostAdmissionPendingSteerReadGate(
+        repository.read_pending_prompt_steer_facts,
+        target_turn_id=turn_id,
+    )
+    monkeypatch.setattr(
+        repository, "read_pending_prompt_steer_facts", pending_gate
+    )
 
     async def exercise() -> None:
-        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
-        assert await asyncio.to_thread(collector.started.wait, 5)
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt("initial"), command_id=command_id)
+        )
+        assert await asyncio.to_thread(pending_gate.started.wait, 5)
         enqueue_test_prompt(
             repository,
             lease.guard,
@@ -5320,12 +6903,12 @@ def test_round3_1_expired_steer_planning_rejects_terminal_steer_and_io_closes(
             permission_snapshot_id=None,
             requested_permission_mode=None,
             model_call_binding=None,
-            content=InlineContent.from_bytes(b"must remain pending"),
+            content=FrozenPromptContent.text("must remain pending"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
             deadline_monotonic=monotonic() + 10,
         )
-        collector.release.set()
+        pending_gate.release.set()
         with pytest.raises(StructuredModelInputCompileError) as failure:
             await task
         assert failure.value.kind is ModelInputCompileFailureKind.DEADLINE_EXPIRED
@@ -5351,6 +6934,7 @@ def test_round3_1_expired_steer_planning_rejects_terminal_steer_and_io_closes(
 
 def test_round3_1_future_lane_does_not_block_active_steer_batch(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -5380,10 +6964,20 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
         live_bus=LiveAgentEventBus(),
         context_source_collector=collector,
     )
+    collector.release.set()
+    pending_gate = _PostAdmissionPendingSteerReadGate(
+        repository.read_pending_prompt_steer_facts,
+        target_turn_id=turn_id,
+    )
+    monkeypatch.setattr(
+        repository, "read_pending_prompt_steer_facts", pending_gate
+    )
 
     async def exercise():
-        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
-        assert await asyncio.to_thread(collector.started.wait, 5)
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt("initial"), command_id=command_id)
+        )
+        assert await asyncio.to_thread(pending_gate.started.wait, 5)
         enqueue_test_prompt(
             repository,
             lease.guard,
@@ -5395,7 +6989,7 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
             permission_snapshot_id="permission:future",
             requested_permission_mode=DEFAULT_PERMISSION_MODE,
             model_call_binding=test_model_binding(test_model_runtime()),
-            content=InlineContent.from_bytes(b"future"),
+            content=FrozenPromptContent.text("future"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
             deadline_monotonic=monotonic() + 10,
@@ -5411,17 +7005,17 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
             permission_snapshot_id=None,
             requested_permission_mode=None,
             model_call_binding=None,
-            content=InlineContent.from_bytes(b"steer now"),
+            content=FrozenPromptContent.text("steer now"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
             deadline_monotonic=monotonic() + 10,
         )
-        collector.release.set()
+        pending_gate.release.set()
         return await task
 
     asyncio.run(exercise())
-    assert collector.freeze_calls == 1
-    assert collector.complete_calls == 1
+    assert collector.freeze_calls == 2
+    assert collector.complete_calls == 2
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -5467,7 +7061,9 @@ def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
     )
 
     async def exercise():
-        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt("initial"), command_id=command_id)
+        )
         await asyncio.wait_for(model.started.wait(), timeout=5)
         for index, text in enumerate(("steer one", "steer two"), start=1):
             steer_command = _name(f"command-steer-{index}")
@@ -5483,7 +7079,7 @@ def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
                 permission_snapshot_id=None,
                 requested_permission_mode=None,
                 model_call_binding=None,
-                content=InlineContent.from_bytes(text.encode("utf-8")),
+                content=FrozenPromptContent.text(text),
                 occurred_at=datetime.now(timezone.utc),
                 actor_id="test",
                 deadline_monotonic=monotonic() + 10,
@@ -5500,11 +7096,11 @@ def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
     assert second.tools == first.tools
     assert second.messages[: len(first.messages)] == first.messages
     appended_users = [
-        message.content[0]
+        text_part_values(message.content)[0]
         for message in second.messages[len(first.messages) :]
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" not in message.content[0]
+        and "pulsara_runtime_observation" not in join_text_content(message.content)
     ]
     assert appended_users == ["steer one", "steer two"]
     with provider.connection(
@@ -5520,6 +7116,7 @@ def test_round3_1_installed_epoch_absorbs_two_steers_in_one_followup_call(
 
 def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recompile(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -5549,10 +7146,20 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
         input_reader=reader,
         context_source_collector=collector,
     )
+    collector.release.set()
+    pending_gate = _PostAdmissionPendingSteerReadGate(
+        repository.read_pending_prompt_steer_facts,
+        target_turn_id=turn_id,
+    )
+    monkeypatch.setattr(
+        repository, "read_pending_prompt_steer_facts", pending_gate
+    )
 
     async def exercise() -> None:
-        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
-        assert await asyncio.to_thread(collector.started.wait, 5)
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt("initial"), command_id=command_id)
+        )
+        assert await asyncio.to_thread(pending_gate.started.wait, 5)
         enqueue_test_prompt(
             repository,
             lease.guard,
@@ -5564,21 +7171,21 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
             permission_snapshot_id=None,
             requested_permission_mode=None,
             model_call_binding=None,
-            content=InlineContent.from_bytes(b"accepted then mismatched"),
+            content=FrozenPromptContent.text("accepted then mismatched"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
             deadline_monotonic=monotonic() + 10,
         )
-        collector.release.set()
+        pending_gate.release.set()
         with pytest.raises(
             RuntimeError, match="injected post-consumption canonical mismatch"
         ):
             await task
 
     asyncio.run(exercise())
-    assert reader.calls == 2
-    assert collector.freeze_calls == 1
-    assert collector.complete_calls == 1
+    assert reader.calls == 3
+    assert collector.freeze_calls == 2
+    assert collector.complete_calls == 2
     assert model.requests == []
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -5598,6 +7205,7 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
 
 def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_entry(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _CancellingFirstSteerRepository(provider)
@@ -5625,10 +7233,20 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
         live_bus=LiveAgentEventBus(),
         context_source_collector=collector,
     )
+    collector.release.set()
+    pending_gate = _PostAdmissionPendingSteerReadGate(
+        repository.read_pending_prompt_steer_facts,
+        target_turn_id=turn_id,
+    )
+    monkeypatch.setattr(
+        repository, "read_pending_prompt_steer_facts", pending_gate
+    )
 
     async def exercise():
-        task = asyncio.create_task(runner.run_turn("initial", command_id=command_id))
-        assert await asyncio.to_thread(collector.started.wait, 5)
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt("initial"), command_id=command_id)
+        )
+        assert await asyncio.to_thread(pending_gate.started.wait, 5)
         enqueue_test_prompt(
             repository,
             lease.guard,
@@ -5640,12 +7258,12 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
             permission_snapshot_id=None,
             requested_permission_mode=None,
             model_call_binding=None,
-            content=InlineContent.from_bytes(b"cancel before consume"),
+            content=FrozenPromptContent.text("cancel before consume"),
             occurred_at=datetime.now(timezone.utc),
             actor_id="test",
             deadline_monotonic=monotonic() + 10,
         )
-        collector.release.set()
+        pending_gate.release.set()
         return await task
 
     result = asyncio.run(exercise())
@@ -5653,11 +7271,11 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
     assert repository.cancelled_once
     assert len(model.requests) == 1
     assert [
-        message.content[0]
+        text_part_values(message.content)[0]
         for message in model.requests[0].compiled_input.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" not in message.content[0]
+        and "pulsara_runtime_observation" not in join_text_content(message.content)
     ] == ["initial"]
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -5675,7 +7293,7 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
         ).fetchone() == (0,)
 
 
-def test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open(
+def test_k3_direct_input_failure_rejects_before_user_acceptance_and_provider_open(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -5701,7 +7319,7 @@ def test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open(
         maximum_input_tokens_per_call=4,
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(runner.run_turn("accepted before compile"))
+        asyncio.run(runner.run_turn(frozen_test_prompt("reject before acceptance")))
     assert failure.value.kind is (
         ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
     )
@@ -5710,16 +7328,83 @@ def test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open(
     rows = repository.rehydrate_session(
         session_id=session_id, deadline_monotonic=monotonic() + 30
     )
-    assert [row["entry_kind"] for row in rows] == ["USER_MESSAGE"]
+    assert not rows
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 30,
     ) as connection:
-        status = connection.execute(
-            "SELECT status FROM pulsara_v3.turns WHERE session_id = %s",
+        counts = connection.execute(
+            "SELECT "
+            "(SELECT count(*) FROM pulsara_v3.turns WHERE session_id = %s), "
+            "(SELECT count(*) FROM pulsara_v3.session_commands WHERE session_id = %s), "
+            "(SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id = %s)",
+            (session_id, session_id, session_id),
+        ).fetchone()
+        assert counts == (0, 0, 0)
+        assert connection.execute(
+            "SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id = %s",
             (session_id,),
-        ).fetchone()[0]
-    assert status == "INTERRUPTED"
+        ).fetchone() == (0,)
+
+
+@pytest.mark.parametrize("failure_type", (TimeoutError, asyncio.CancelledError))
+def test_k3_soft_trigger_recovery_failure_closes_unpublished_prepared_input(
+    failure_type: type[BaseException],
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    workspace_id = _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    model = _ScriptedModel([_text_stream("must not open")])
+    tools = _RecordingBorrowToolPort(
+        _AssertingTool(provider, session_id), tool_names=()
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(minimum_reclaim_tokens=1)
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=tools,
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    runner.compaction.prospective_root_crosses_automatic_threshold = (
+        lambda _prepared: True
+    )
+
+    async def fail_recovery(**_kwargs):
+        raise failure_type("injected prospective compaction failure")
+
+    runner.compaction.recover_pending_root_input = fail_recovery
+
+    async def exercise() -> None:
+        with pytest.raises(failure_type, match="injected prospective compaction"):
+            await runner.run_turn(frozen_test_prompt("unpublished input"))
+        await owner.aclose()
+
+    asyncio.run(exercise())
+
+    assert runner._safe_point._active_handle is None  # noqa: SLF001
+    assert tools._active == set()  # noqa: SLF001
+    assert tools.release_calls == [1]
+    assert model.requests == []
+    assert repository.rehydrate_session(
+        session_id=session_id, deadline_monotonic=monotonic() + 30
+    ) == ()
 
 
 def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
@@ -5749,7 +7434,11 @@ def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
     )
 
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(runner.run_turn("accepted before required FULL delivery"))
+        asyncio.run(
+            runner.run_turn(
+                frozen_test_prompt("accepted before required FULL delivery")
+            )
+        )
 
     assert failure.value.kind is (
         ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
@@ -5761,10 +7450,13 @@ def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         assert connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.turns "
-            "WHERE session_id = %s",
+            "SELECT count(*) FROM pulsara_v3.turns WHERE session_id = %s",
             (session_id,),
-        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id = %s",
+            (session_id,),
+        ).fetchone() == (0,)
 
 
 def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_open(
@@ -5805,7 +7497,9 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
     with pytest.raises(StructuredModelInputCompileError) as failure:
         asyncio.run(
             runner.run_turn(
-                "new turn cannot fit the required full artifact page",
+                frozen_test_prompt(
+                    "new turn cannot fit the required full artifact page"
+                ),
                 command_id=command_id,
             )
         )
@@ -5824,11 +7518,22 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
             "FROM pulsara_v3.tool_results WHERE session_id = %s AND id = %s",
             (session_id, result_id),
         ).fetchone() == ("SUCCESS", 50)
-        assert connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.turns "
-            "WHERE session_id = %s AND id = %s",
-            (session_id, _stable_id("turn", session_id, command_id)),
-        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
+        assert (
+            connection.execute(
+                "SELECT status, terminal_reason FROM pulsara_v3.turns "
+                "WHERE session_id = %s AND id = %s",
+                (session_id, _stable_id("turn", session_id, command_id)),
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT 1 FROM pulsara_v3.session_commands "
+                "WHERE session_id = %s AND command_id = %s",
+                (session_id, command_id),
+            ).fetchone()
+            is None
+        )
 
 
 def test_round3_compile_failure_observer_cannot_block_turn_interruption(
@@ -5858,17 +7563,17 @@ def test_round3_compile_failure_observer_cannot_block_turn_interruption(
         extensions=_FailingOperationalExtension(),  # type: ignore[arg-type]
     )
     with pytest.raises(StructuredModelInputCompileError):
-        asyncio.run(runner.run_turn("accepted before compile"))
+        asyncio.run(runner.run_turn(frozen_test_prompt("accepted before compile")))
     assert model.requests == []
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 30,
     ) as connection:
-        status = connection.execute(
-            "SELECT status FROM pulsara_v3.turns WHERE session_id = %s",
+        turn_count = connection.execute(
+            "SELECT count(*) FROM pulsara_v3.turns WHERE session_id = %s",
             (session_id,),
         ).fetchone()[0]
-    assert status == "INTERRUPTED"
+    assert turn_count == 0
 
 
 def test_round3_source_registry_drift_interrupts_with_zero_provider_open(
@@ -5896,7 +7601,9 @@ def test_round3_source_registry_drift_interrupts_with_zero_provider_open(
         context_source_collector=_ChangingRegistryCollector(),
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(runner.run_turn("accepted before registry drift"))
+        asyncio.run(
+            runner.run_turn(frozen_test_prompt("accepted before registry drift"))
+        )
     assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
     assert model.requests == []
 
@@ -5929,7 +7636,9 @@ def test_round3_surface_revoked_before_borrow_has_zero_provider_open(
         context_source_collector=_SurfaceRevokingCollector(tools),
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(runner.run_turn("accepted before surface revocation"))
+        asyncio.run(
+            runner.run_turn(frozen_test_prompt("accepted before surface revocation"))
+        )
     assert failure.value.kind is ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
     assert model.requests == []
 
@@ -5959,7 +7668,7 @@ def test_round9_native_planning_timeout_is_typed_before_provider_open(
         context_source_collector=StaticContextSourceCollector(),
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(runner.run_turn("native planning expires"))
+        asyncio.run(runner.run_turn(frozen_test_prompt("native planning expires")))
     assert failure.value.kind is ModelInputCompileFailureKind.DEADLINE_EXPIRED
     assert model.requests == []
 
@@ -5989,7 +7698,7 @@ def test_stage2_runner_commits_tool_message_and_attempt_before_invoke(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    result = asyncio.run(runner.run_turn("run it"))
+    result = asyncio.run(runner.run_turn(frozen_test_prompt("run it")))
     assert result.final_text == "done"
     assert result.tool_call_count == 1
     assert len(tool.invocations) == 1
@@ -6140,7 +7849,7 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
     async def run():
         try:
             return await runner.run_turn(
-                "configure this MCP",
+                frozen_test_prompt("configure this MCP"),
                 requested_permission_mode=PermissionMode(permission),
             )
         finally:
@@ -6225,7 +7934,9 @@ def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(
 
     async def exercise():
         try:
-            return await runner.run_turn("recover from terminal preflight failure")
+            return await runner.run_turn(
+                frozen_test_prompt("recover from terminal preflight failure")
+            )
         finally:
             await tools.aclose(timeout_seconds=2)
 
@@ -6306,7 +8017,9 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
 
     async def exercise():
         try:
-            return await runner.run_turn("maintain an exact TODO checklist")
+            return await runner.run_turn(
+                frozen_test_prompt("maintain an exact TODO checklist")
+            )
         finally:
             await tools.aclose(timeout_seconds=2)
 
@@ -6436,7 +8149,7 @@ def test_stage2_no_attempt_result_is_committed_before_any_physical_invoke(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    asyncio.run(runner.run_turn("do not dispatch"))
+    asyncio.run(runner.run_turn(frozen_test_prompt("do not dispatch")))
     assert tools.invocations == []
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -6475,7 +8188,7 @@ def test_stage2_lost_assistant_commit_ack_exact_confirms_single_winner(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    accepted = asyncio.run(runner.run_turn("confirm the winner"))
+    accepted = asyncio.run(runner.run_turn(frozen_test_prompt("confirm the winner")))
     assert accepted is not None
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -6515,7 +8228,9 @@ def test_round5a1_assistant_settlement_retries_same_candidate_after_transient_no
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    result = asyncio.run(runner.run_turn("retry the exact assistant candidate"))
+    result = asyncio.run(
+        runner.run_turn(frozen_test_prompt("retry the exact assistant candidate"))
+    )
     assert result.final_text == "settled after NONE"
     assert repository.commit_calls == 2
     assert repository.confirm_calls == 1
@@ -6547,7 +8262,9 @@ def test_round5a1_assistant_settlement_conflict_cold_resets_without_hanging(
 
     async def exercise() -> None:
         with pytest.raises(ConversationKernelConflict):
-            await asyncio.wait_for(runner.run_turn("conflicting candidate"), timeout=5)
+            await asyncio.wait_for(
+                runner.run_turn(frozen_test_prompt("conflicting candidate")), timeout=5
+            )
 
     asyncio.run(exercise())
     scope = ProviderInputContinuityScope(
@@ -6610,7 +8327,9 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
     )
 
     with pytest.raises(ProviderModelOutputIncomplete):
-        asyncio.run(runner.run_turn("produce a virtual tool request"))
+        asyncio.run(
+            runner.run_turn(frozen_test_prompt("produce a virtual tool request"))
+        )
     assert tools.invocations == []
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -6643,19 +8362,82 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
     observed = bus.observe(observer_id, after_revision=0, maximum_events=64)
     assert any(item.kind is LiveSettlementKind.ABORTED for item in observed.settlements)
 
-    recovered = asyncio.run(runner.run_turn("continue after the failed response"))
+    recovered = asyncio.run(
+        runner.run_turn(frozen_test_prompt("continue after the failed response"))
+    )
     assert recovered.final_text == "recovered"
     previous_outcomes = [
         decode_runtime_observation(message)
         for message in model.requests[1].compiled_input.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
     ]
     assert any(
         item.source_kind is ContextSourceKind.PREVIOUS_TURN_OUTCOME
         and json.loads(item.body)["kind"] == "EXECUTION_FAILED"
         for item in previous_outcomes
+    )
+
+
+def test_k3_output_resource_gate_precedes_assistant_and_tool_effects(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = _name("session")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=_name("workspace"),
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    tools = _AssertingTool(provider, session_id)
+    bus = LiveAgentEventBus(maximum_events=4_096)
+    observer_id, _generation, _revision = bus.subscribe()
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=_ScriptedModel([_many_tool_stream(256)]),
+        tools=StructuredToolPort(tools),
+        live_bus=bus,
+        context_source_collector=StaticContextSourceCollector(),
+    )
+
+    with pytest.raises(OutputResourceInterruption) as caught:
+        asyncio.run(runner.run_turn(frozen_test_prompt("produce an oversized batch")))
+
+    assert caught.value.reason == "CANONICAL_BYTES"
+    assert caught.value.quote.canonical_upper_after > 16 << 20
+    assert tools.invocations == []
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id = %s AND entry_kind IN "
+            "('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT')",
+            (session_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts "
+            "WHERE session_id = %s",
+            (session_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT terminal_reason FROM pulsara_v3.turns "
+            "WHERE session_id = %s ORDER BY accepted_at LIMIT 1",
+            (session_id,),
+        ).fetchone() == ("PROVIDER_OUTPUT_RESOURCE_EXHAUSTED",)
+    observed = bus.observe(observer_id, after_revision=0, maximum_events=2_048)
+    assert any(
+        item.kind is LiveSettlementKind.ABORTED
+        and item.reason_code == "OUTPUT_RESOURCE_CANONICAL_BYTES"
+        for item in observed.settlements
     )
 
 
@@ -6684,7 +8466,9 @@ def test_round5a1_assistant_settlement_survives_caller_cancellation(
     )
 
     async def exercise() -> None:
-        task = asyncio.create_task(runner.run_turn("cancel the API waiter"))
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt("cancel the API waiter"))
+        )
         assert await asyncio.to_thread(repository.started.wait, 5)
         task.cancel()
         await asyncio.sleep(0)
@@ -6770,7 +8554,7 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    first = asyncio.run(runner.run_turn("first"))
+    first = asyncio.run(runner.run_turn(frozen_test_prompt("first")))
     scope = ProviderInputContinuityScope(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
@@ -6782,7 +8566,7 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
         item.assistant_entry_id for item in first_view.assistant_replay_fragments
     ) == (first.final_entry_id,)
 
-    second = asyncio.run(runner.run_turn("second"))
+    second = asyncio.run(runner.run_turn(frozen_test_prompt("second")))
     assert second.final_text == "answer"
     second_view = runner._continuity.current_view(scope)
     assert second_view is not None
@@ -6859,7 +8643,9 @@ def test_round5a1_complete_tool_loop_replays_exact_reasoning_on_second_call(
         context_source_collector=StaticContextSourceCollector(),
     )
 
-    result = asyncio.run(runner.run_turn("use the virtual terminal and finish"))
+    result = asyncio.run(
+        runner.run_turn(frozen_test_prompt("use the virtual terminal and finish"))
+    )
 
     assert result.final_text == expected_text
     assert result.model_call_count == 2
@@ -6979,7 +8765,9 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    first = asyncio.run(first_runner.run_turn("first native answer"))
+    first = asyncio.run(
+        first_runner.run_turn(frozen_test_prompt("first native answer"))
+    )
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -7013,7 +8801,9 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
         replacement_runner._provider_dispatch._cold_epoch_assembler
     )
     replacement_runner._provider_dispatch._cold_epoch_assembler = cold_recorder
-    asyncio.run(replacement_runner.run_turn("continue after restart"))
+    asyncio.run(
+        replacement_runner.run_turn(frozen_test_prompt("continue after restart"))
+    )
 
     assert len(second_model.requests) == 1
     wire_plan = second_model.requests[0].wire_input_plan
@@ -7071,7 +8861,9 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    first = asyncio.run(first_runner.run_turn("create native replay"))
+    first = asyncio.run(
+        first_runner.run_turn(frozen_test_prompt("create native replay"))
+    )
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         connection.execute(
             "UPDATE pulsara_v3.provider_assistant_replay_fragments "
@@ -7099,7 +8891,9 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
         context_source_collector=StaticContextSourceCollector(),
     )
     with pytest.raises(StructuredModelInputCompileError) as captured:
-        asyncio.run(exact_runner.run_turn("same target must fail closed"))
+        asyncio.run(
+            exact_runner.run_turn(frozen_test_prompt("same target must fail closed"))
+        )
     assert captured.value.kind is ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
     assert exact_model.requests == []
 
@@ -7126,7 +8920,11 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
         cold_runner._provider_dispatch._input_reader
     )
     cold_runner._provider_dispatch._input_reader = cold_reader
-    cold = asyncio.run(cold_runner.run_turn("incompatible target uses public history"))
+    cold = asyncio.run(
+        cold_runner.run_turn(
+            frozen_test_prompt("incompatible target uses public history")
+        )
+    )
     assert cold.final_text == "chat final"
     assert len(cold_model.requests) == 1
     assert cold_model.requests[0].wire_input_plan.replacements == ()
@@ -7243,7 +9041,7 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
             ),
             live_bus=LiveAgentEventBus(),
             context_source_collector=StaticContextSourceCollector(),
-        ).run_turn("create selected replay")
+        ).run_turn(frozen_test_prompt("create selected replay"))
     )
 
     replacement_repository = ConversationKernelRepository(provider)
@@ -7271,11 +9069,19 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
     )
     if fail_hydration:
         with pytest.raises(StructuredModelInputCompileError) as captured:
-            asyncio.run(runner.run_turn("deadline expires before provider open"))
+            asyncio.run(
+                runner.run_turn(
+                    frozen_test_prompt("deadline expires before provider open")
+                )
+            )
         assert captured.value.kind is ModelInputCompileFailureKind.DEADLINE_EXPIRED
         assert replacement_model.requests == []
     else:
-        asyncio.run(runner.run_turn("same deadline continues into hydration"))
+        asyncio.run(
+            runner.run_turn(
+                frozen_test_prompt("same deadline continues into hydration")
+            )
+        )
         assert len(replacement_model.requests) == 1
         assert (
             replacement_model.requests[
@@ -7283,9 +9089,13 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
             ].wire_input_plan.provider_replay_hydration_fingerprint
             is not None
         )
-    assert len(reader.dispatch_deadlines) == 1
+    assert len(reader.dispatch_deadlines) == (1 if fail_hydration else 2)
     assert len(reader.hydration_deadlines) == 1
-    assert reader.dispatch_deadlines == reader.hydration_deadlines
+    assert reader.dispatch_deadlines[0] == reader.hydration_deadlines[0]
+    if not fail_hydration:
+        # Post-writer activation performs one exact canonical reread under its
+        # fresh safe-point deadline; it does not rehydrate the selected replay.
+        assert reader.dispatch_deadlines[1] >= reader.dispatch_deadlines[0]
 
 
 def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(
@@ -7336,7 +9146,9 @@ def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(
         ProviderInputContinuityConflict,
         match="exhausts the epoch byte bound",
     ):
-        asyncio.run(runner.run_turn("reject the oversized replay carrier"))
+        asyncio.run(
+            runner.run_turn(frozen_test_prompt("reject the oversized replay carrier"))
+        )
 
     assert repository.assistant_commit_calls == 0
     with provider.connection(
@@ -7378,7 +9190,7 @@ def test_stage2_lost_tool_request_ack_confirms_before_single_dispatch(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    asyncio.run(runner.run_turn("dispatch exactly once"))
+    asyncio.run(runner.run_turn(frozen_test_prompt("dispatch exactly once")))
     assert len(tools.invocations) == 1
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -7421,7 +9233,7 @@ def test_stage2_subagent_runner_produces_durable_message_child(
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"delegate"),
+        content=FrozenPromptContent.text("delegate"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -7504,7 +9316,7 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"delegate an exact child tool loop"),
+        content=FrozenPromptContent.text("delegate an exact child tool loop"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -7609,7 +9421,7 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"delegate explicit result"),
+        content=FrozenPromptContent.text("delegate explicit result"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -7706,15 +9518,18 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
             (session_id,),
         ).fetchone() == (1,)
 
-    safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
-    accepted = safe_point.accept_subagent_completion(
-        turn_id=parent_turn_id,
-        task_id=task_id,
-        command_id=_name("command"),
-        actor_id="host:test",
-        deadline_monotonic=monotonic() + 30,
+    accepted = asyncio.run(
+        runner.accept_subagent_completion(
+            turn_id=parent_turn_id,
+            task_id=task_id,
+            command_id=_name("command"),
+            actor_id="host:test",
+            deadline_monotonic=monotonic() + 30,
+            admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT, None),
+        )
     )
     assert accepted is not None
+    safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
     handle = safe_point.freeze_provider_input(
         turn_id=parent_turn_id,
         deadline_monotonic=monotonic() + 30,
@@ -7726,7 +9541,9 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         )
     finally:
         handle.close()
-    envelope = json.loads(materialized.items[-1].text)["pulsara_inter_agent_message"]
+    envelope = json.loads(provider_input_item_text(materialized.items[-1]))[
+        "pulsara_inter_agent_message"
+    ]
     assert envelope["content_semantics"] == "ADVISORY_COLLABORATION_DATA"
     assert "recorded child attribution and result source" in envelope["handling"]
     assert envelope["content"]["result"]["summary"] == "exact explicit summary"
@@ -7761,7 +9578,7 @@ def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_re
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"delegate mixed report rejection"),
+        content=FrozenPromptContent.text("delegate mixed report rejection"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -7849,7 +9666,7 @@ def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"delegate"),
+        content=FrozenPromptContent.text("delegate"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -7934,7 +9751,7 @@ def test_stage2_confirmation_without_controller_keeps_policy_and_result_closed(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    asyncio.run(runner.run_turn("ask before dispatch"))
+    asyncio.run(runner.run_turn(frozen_test_prompt("ask before dispatch")))
     assert tools.invocations == []
     assert repository.host_write_transactions == 5
     with provider.connection(
@@ -7989,7 +9806,7 @@ def test_stage2_large_assistant_content_uses_immutable_blob_reference(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    asyncio.run(runner.run_turn("large answer"))
+    asyncio.run(runner.run_turn(frozen_test_prompt("large answer")))
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -8033,7 +9850,9 @@ def test_stage2_cancellation_does_not_turn_a_live_tool_into_system_error(
     )
 
     async def exercise() -> None:
-        task = asyncio.create_task(runner.run_turn("block in a tool"))
+        task = asyncio.create_task(
+            runner.run_turn(frozen_test_prompt("block in a tool"))
+        )
         await asyncio.wait_for(tools.started.wait(), timeout=5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -8083,14 +9902,14 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
     )
-    asyncio.run(runner.run_turn("return a large result"))
+    asyncio.run(runner.run_turn(frozen_test_prompt("return a large result")))
     tool_messages = [
         item
         for item in model.requests[1].compiled_input.messages
         if item.role is MessageRole.TOOL_RESULT
     ]
     assert len(tool_messages) == 1
-    preview = tool_messages[0].content[0]
+    preview = text_part_values(tool_messages[0].content)[0]
     assert len(preview.encode("utf-8")) <= 65_536
     assert "OUTPUT TRUNCATED / PREVIEW" in preview
     assert "If the omitted content is necessary" in preview

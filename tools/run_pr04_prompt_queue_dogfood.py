@@ -6,6 +6,7 @@ barriers. Production receives no flags, endpoints, queues or delivery owners.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import replace
@@ -199,7 +200,7 @@ async def _provider_cases(session, workspace, directory, installs, calls):
     prompt = f"""Create exactly one general_worker task with task_key pr04_child. Its objective must call terminal exactly once with command {hold!r}; after that command completes, report_agent_result alone with summary PR04_CHILD_DONE. Then call wait_agent for that exact task ID with settle=all and timeout_seconds=120. If an exact steer wakes the wait, acknowledge its marker and finish this ROOT without calling wait again. Do not finish before both create_agent_tasks and wait_agent have been called."""
     run = asyncio.create_task(
         session.run_turn(
-            prompt,
+            PromptContent.text(prompt),
             command_id="command:pr04:wait-root",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -219,7 +220,7 @@ async def _provider_cases(session, workspace, directory, installs, calls):
     queued = [
         await session.submit_prompt(
             command_id=f"command:pr04:source:{index}",
-            text=text,
+            content=PromptContent.text(text),
             requested_permission_mode=PermissionMode.READ_ONLY,
         )
         for index, text in enumerate(texts)
@@ -253,7 +254,7 @@ async def _provider_cases(session, workspace, directory, installs, calls):
         )
     edited = await session.submit_prompt(
         command_id="command:pr04:edited-resubmit",
-        text=texts[2],
+        content=PromptContent.text(texts[2]),
         requested_permission_mode=PermissionMode.READ_ONLY,
     )
     try:
@@ -304,14 +305,14 @@ async def _provider_cases(session, workspace, directory, installs, calls):
     _arm(directory, "before")
     run = asyncio.create_task(
         session.run_turn(
-            "Reply exactly PR04_FINAL_VISIBLE.", command_id="command:pr04:final-root"
+            PromptContent.text("Reply exactly PR04_FINAL_VISIBLE."), command_id="command:pr04:final-root"
         )
     )
     await _ready(directory, "before")
     root = session.active_root_turn_id()
     source = await session.submit_prompt(
         command_id="command:pr04:final-source",
-        text="PR04_AFTER_FINAL: reply exactly SAME_TURN_DONE.",
+        content=PromptContent.text("PR04_AFTER_FINAL: reply exactly SAME_TURN_DONE."),
     )
     count_before = len(calls)
     redirect = await session.steer_queued_prompt(
@@ -341,14 +342,14 @@ async def _provider_cases(session, workspace, directory, installs, calls):
     _arm(directory, "after")
     run = asyncio.create_task(
         session.run_turn(
-            "Reply exactly PR04_FENCE_FIRST.", command_id="command:pr04:fence-root"
+            PromptContent.text("Reply exactly PR04_FENCE_FIRST."), command_id="command:pr04:fence-root"
         )
     )
     await _ready(directory, "before")
     root = session.active_root_turn_id()
     source = await session.submit_prompt(
         command_id="command:pr04:fence-source",
-        text="PR04_FIFO_AFTER_FENCE: reply exactly FIFO_AFTER_FENCE_DONE.",
+        content=PromptContent.text("PR04_FIFO_AFTER_FENCE: reply exactly FIFO_AFTER_FENCE_DONE."),
     )
     _release(directory, "before")
     await _ready(directory, "after")
@@ -373,7 +374,7 @@ async def _provider_cases(session, workspace, directory, installs, calls):
     _arm(directory, "before")
     run = asyncio.create_task(
         session.run_turn(
-            "Reply exactly PR04_LARGE_SOURCE_READY.",
+            PromptContent.text("Reply exactly PR04_LARGE_SOURCE_READY."),
             command_id="command:pr04:large-root",
         )
     )
@@ -381,7 +382,7 @@ async def _provider_cases(session, workspace, directory, installs, calls):
     root = session.active_root_turn_id()
     body = "PR04_LARGE_RAW\n" + "x" * (70 << 10) + "\nReply only LARGE_STEER_DONE."
     source = await session.submit_prompt(
-        command_id="command:pr04:large-source", text=body
+        command_id="command:pr04:large-source", content=PromptContent.text(body)
     )
     redirected = await session.steer_queued_prompt(
         command_id="command:pr04:large-action",

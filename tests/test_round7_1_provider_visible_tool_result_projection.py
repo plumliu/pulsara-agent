@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from pulsara_agent.llm.input import LLMTextPart
+
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -94,7 +96,14 @@ def _body_with_exact_logical_bytes(
     repeats, remainder = divmod(target - base, unit)
     body = (seed * repeats) + ("a" * remainder)
     assert quote(body) == target
-    return replace(template, text=body, tool_result_body_text=body), body
+    return (
+        replace(
+            template,
+            content=(LLMTextPart(body),),
+            tool_result_body_text=body,
+        ),
+        body,
+    )
 
 
 @pytest.mark.parametrize("target", (39_999, 40_000, 40_001))
@@ -253,7 +262,7 @@ def test_round7_1_compatible_append_keeps_installed_prefix_and_actual_mode() -> 
         "entry:2",
         2,
         "turn:test",
-        "",
+        (LLMTextPart(""),),
         tool_calls=(call,),
     )
     result_item, _body = _body_with_exact_logical_bytes(40_001, seed="中")
@@ -289,7 +298,7 @@ def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result(
         "entry:request",
         1,
         "turn:test",
-        "",
+        (LLMTextPart(""),),
         tool_calls=calls,
     )
     results = tuple(
@@ -439,7 +448,7 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT.endswith(".v2")
 
     production = ROOT / "src/pulsara_agent"

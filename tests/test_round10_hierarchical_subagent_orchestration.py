@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import FrozenPromptContent
+
 import asyncio
 from dataclasses import replace
 from hashlib import sha256
@@ -72,6 +74,7 @@ from pulsara_agent.primitives.run_permission import (
 from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
+    provider_input_item_text,
 )
 from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -972,7 +975,7 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"delegate exact seed"),
+        content=FrozenPromptContent.text('delegate exact seed'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -1530,7 +1533,7 @@ def _prepare_root_tool_attempt(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"delegate bounded work"),
+        content=FrozenPromptContent.text('delegate bounded work'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -1631,7 +1634,7 @@ def _prepare_root_tool_batch(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"orchestrate and send exact messages"),
+        content=FrozenPromptContent.text('orchestrate and send exact messages'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -2584,19 +2587,25 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
             if item.item_kind is FrozenProviderInputItemKind.INTER_AGENT_MESSAGE
         ]
         assert [
-            json.loads(item.text)["pulsara_inter_agent_message"]["content"]
+            json.loads(provider_input_item_text(item))["pulsara_inter_agent_message"][
+                "content"
+            ]
             for item in messages
         ] == [
             "first exact message",
             "second exact message",
         ]
         assert all(
-            json.loads(item.text)["pulsara_inter_agent_message"]["sender"]
+            json.loads(provider_input_item_text(item))["pulsara_inter_agent_message"][
+                "sender"
+            ]
             == {"kind": "ROOT"}
             for item in messages
         )
         assert all(
-            json.loads(item.text)["pulsara_inter_agent_message"]["content_semantics"]
+            json.loads(provider_input_item_text(item))["pulsara_inter_agent_message"][
+                "content_semantics"
+            ]
             == "ADVISORY_COLLABORATION_DATA"
             for item in messages
         )

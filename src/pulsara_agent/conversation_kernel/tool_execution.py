@@ -23,6 +23,7 @@ from psycopg import InterfaceError, OperationalError
 from pulsara_agent.conversation_kernel.assembler import (
     CompletedToolCallBlock,
 )
+from pulsara_agent.llm.input import LLMTextPart
 
 
 from pulsara_agent.conversation_kernel.blob import (
@@ -545,7 +546,7 @@ class ToolBatchExecutor:
             source_entry_id=settlement.result_entry_id,
             source_entry_sequence=settlement.accepted_entry_sequence,
             source_turn_id=settlement.turn_id,
-            text=projection_input.canonical_body,
+            content=(LLMTextPart(projection_input.canonical_body),),
             tool_call_id=settlement.tool_call_id,
             tool_request_entry_id=settlement.assistant_entry_id,
             tool_result_context=projection_input.metadata,

@@ -7,6 +7,7 @@ provider responses, environment values, hidden reasoning or private URLs.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from datetime import datetime, timezone
@@ -156,7 +157,7 @@ async def _run_case(
                 "keys marker and artifact_read_used."
             )
         result = await session.run_turn(
-            prompt,
+            PromptContent.text(prompt),
             command_id=f"command:round7-1-dogfood:{scenario}:{settings.llm.api}",
         )
         _require_exact_markers(result.final_text, expected_markers)

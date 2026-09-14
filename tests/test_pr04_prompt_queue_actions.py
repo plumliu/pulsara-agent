@@ -11,6 +11,8 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     PromptDeliveryMode,
 )
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
+from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.conversation_kernel.queued_prompt_actions import (
     QueuedPromptAction,
     QueuedPromptActionRejected,
@@ -46,7 +48,7 @@ def queue_case(stage2_migrated_postgres_database):
         turn_id=turn_id,
         entry_id=_name("initial-entry"),
         context_binding_revision_id=revision_id,
-        content=InlineContent.from_bytes(b"initial"),
+        content=FrozenPromptContent.text('initial'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -59,7 +61,7 @@ def queue_case(stage2_migrated_postgres_database):
         client_submission_id=submission,
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
-        content=InlineContent.from_bytes(b"exact queued\ninput"),
+        content=FrozenPromptContent.text('exact queued\ninput'),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=monotonic() + 30,
@@ -145,7 +147,7 @@ def test_two_request_cancel_then_steer_can_lose_input(queue_case):
             client_submission_id=_name("client"),
             delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
             target_turn_id=turn,
-            content=InlineContent.from_bytes(b"exact queued\ninput"),
+            content=FrozenPromptContent.text('exact queued\ninput'),
             occurred_at=datetime.now(timezone.utc),
             actor_id="user",
             deadline_monotonic=monotonic() + 30,
@@ -166,7 +168,7 @@ def test_two_request_steer_then_cancel_can_duplicate_input(queue_case):
         client_submission_id=_name("client"),
         delivery_mode=PromptDeliveryMode.STEER_ACTIVE_TURN,
         target_turn_id=turn,
-        content=InlineContent.from_bytes(b"exact queued\ninput"),
+        content=FrozenPromptContent.text('exact queued\ninput'),
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
         deadline_monotonic=monotonic() + 30,
@@ -272,22 +274,11 @@ def test_cancel_command_is_durably_idempotent(queue_case):
 
 
 def test_redirect_reuses_large_blob_without_materializing_another_copy(queue_case):
-    from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
-
     repository, guard, _, _, _, _ = queue_case
-    workspace = repository.read_session_workspace_id(
-        guard, deadline_monotonic=monotonic() + 30
-    )
-    store = PostgresCanonicalBlobStore(repository.connection_provider)
     body = ("  原文\n" * 20000).encode("utf-8")
     assert len(body) > 64 << 10
-    content = store.publish(
-        workspace_id=workspace,
-        content=body,
-        media_type="text/plain",
-        codec="utf-8",
-        deadline_monotonic=monotonic() + 30,
-    )
+    content = FrozenPromptContent.text(body.decode("utf-8"))
+    canonical_prompt = freeze_canonical_prompt(content)
     source = _name("large-source")
     _enqueue_prompt(
         repository,
@@ -305,17 +296,21 @@ def test_redirect_reuses_large_blob_without_materializing_another_copy(queue_cas
     candidate = action(queue_case, source=source)
     apply(queue_case, candidate)
     original, replacement = rows(queue_case)[1:]
-    assert original["blob_id"] == replacement["blob_id"] == content.blob_id
+    assert original["blob_id"] == replacement["blob_id"]
+    assert original["blob_id"] is not None
     assert original["inline_content"] is replacement["inline_content"] is None
-    assert repository._content_from_row(replacement) == content
+    assert repository._content_from_row(replacement) == repository._content_from_row(
+        original
+    )
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30
     ) as connection:
         assert (
             connection.execute(
-                "SELECT body FROM pulsara_v3.blobs WHERE id=%s", (content.blob_id,)
+                "SELECT body FROM pulsara_v3.blobs WHERE id=%s",
+                (original["blob_id"],),
             ).fetchone()[0]
-            == body
+            == canonical_prompt.body
         )
 
 
@@ -368,7 +363,7 @@ def test_plan_handoff_redirect_rejects_without_changing_source_or_action(
         client_submission_id=_name("submission"),
         delivery_mode=PromptDeliveryMode.NEW_TURN,
         target_turn_id=None,
-        content=InlineContent.from_bytes(b"handoff"),
+        content=FrozenPromptContent.text('handoff'),
         requested_permission_mode=PermissionMode.READ_ONLY,
         occurred_at=datetime.now(timezone.utc),
         actor_id="user",
@@ -382,7 +377,7 @@ def test_plan_handoff_redirect_rejects_without_changing_source_or_action(
         turn_id=turn,
         entry_id=_name("entry"),
         context_binding_revision_id=revision,
-        content=InlineContent.from_bytes(b"root"),
+        content=FrozenPromptContent.text('root'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )

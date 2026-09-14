@@ -14,10 +14,16 @@ from enum import StrEnum
 import json
 from typing import Mapping
 
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import (
+    LLMMessage,
+    LLMTextPart,
+    llm_content_logical_bytes,
+    text_part_values,
+)
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_observation import (
     FrozenToolObservationTimingFact,
+    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
     MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS,
     ToolObservationDurationDisposition,
     ToolObservationOrigin,
@@ -182,11 +188,11 @@ class RenderedProviderToolResultLogicalMessage:
     content: str
 
     def __post_init__(self) -> None:
-        if self.logical_utf8_bytes != provider_neutral_message_logical_utf8_bytes(
+        if self.logical_utf8_bytes != provider_neutral_message_logical_bytes(
             self.message
         ):
             raise ValueError("tool result logical message quote mismatch")
-        if self.message.content != (self.content,):
+        if self.message.content != (LLMTextPart(self.content),):
             raise ValueError("tool result logical content differs from its message")
 
 
@@ -248,20 +254,21 @@ def render_provider_tool_result_logical_message(
                 }
             ).decode("utf-8")
         )
-        content = message.content[0]
+        content = text_part_values(message.content)[0]
     else:  # pragma: no cover - StrEnum closes ordinary construction.
         raise TypeError(message_kind)
     return RenderedProviderToolResultLogicalMessage(
         message=message,
-        logical_utf8_bytes=provider_neutral_message_logical_utf8_bytes(message),
+        logical_utf8_bytes=provider_neutral_message_logical_bytes(message),
         content=content,
     )
 
 
-def provider_neutral_message_logical_utf8_bytes(message: LLMMessage) -> int:
-    """Count only provider-neutral string scalars, never adapter JSON framing."""
+def provider_neutral_message_logical_bytes(message: LLMMessage) -> int:
+    """Count provider-neutral scalars/image bytes, never adapter JSON framing."""
 
-    values = [*message.content, *message.thinking]
+    content_bytes = llm_content_logical_bytes(message.content)
+    values = [*message.thinking]
     for call in message.tool_calls:
         values.extend((call.id, call.name, call.arguments))
     values.extend(
@@ -269,7 +276,7 @@ def provider_neutral_message_logical_utf8_bytes(message: LLMMessage) -> int:
         for value in (message.tool_call_id, message.name, message.arguments)
         if value is not None
     )
-    return sum(len(value.encode("utf-8")) for value in values)
+    return content_bytes + sum(len(value.encode("utf-8")) for value in values)
 
 
 def conservative_artifact_page_logical_utf8_bytes(
@@ -301,6 +308,76 @@ def conservative_artifact_page_logical_utf8_bytes(
         for kind in ToolResultLogicalMessageKind
     )
     return max(quotes)
+
+
+def conservative_tool_result_logical_message(
+    *,
+    message_kind: ToolResultLogicalMessageKind,
+    tool_call_id: str,
+) -> RenderedProviderToolResultLogicalMessage:
+    """Build the largest existing FULL projection needed before Tool execution.
+
+    The normal compiler may select FULL whenever the complete rendered message
+    fits ``MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES``.  Before an effect
+    runs the result body, timing, citation and memory provenance are unknown.
+    Their largest scalar values do not maximize the eventual provider wire:
+    they consume the same logical budget with mostly unescaped text.  Use the
+    smallest legal fixed envelope and spend every remaining byte on a body of
+    JSON-escaping characters instead.  This bounds both wire bytes and the D1
+    JSON-character estimate for every legal FULL projection with this exact
+    call ID.  It is a process-local admission value; it is never sent, stored,
+    or offered as a ToolResult variant.
+    """
+
+    timing = _minimum_full_projection_timing()
+
+    def render(body_chars: int) -> RenderedProviderToolResultLogicalMessage:
+        return render_provider_tool_result_logical_message(
+            message_kind=message_kind,
+            tool_call_id=tool_call_id,
+            body="\\" * body_chars,
+            result_state="SUCCESS",
+            timing=timing,
+            citation_handle=None,
+            model_visible_memory_ids=(),
+        )
+
+    empty = render(0)
+    if empty.logical_utf8_bytes >= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES:
+        return empty
+    low = 0
+    high = MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+    winner = empty
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = render(middle)
+        if (
+            candidate.logical_utf8_bytes
+            <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+        ):
+            winner = candidate
+            low = middle + 1
+        else:
+            high = middle - 1
+    remaining = MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES - (
+        winner.logical_utf8_bytes
+    )
+    if remaining:
+        candidate = render_provider_tool_result_logical_message(
+            message_kind=message_kind,
+            tool_call_id=tool_call_id,
+            body=("\\" * high) + ("x" * remaining),
+            result_state="SUCCESS",
+            timing=timing,
+            citation_handle=None,
+            model_visible_memory_ids=(),
+        )
+        if (
+            candidate.logical_utf8_bytes
+            <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+        ):
+            winner = candidate
+    return winner
 
 
 def decode_provider_tool_result_observation(text: str) -> Mapping[str, object]:
@@ -426,6 +503,29 @@ def _maximum_artifact_page_timing() -> FrozenToolObservationTimingFact:
     )
 
 
+def _minimum_full_projection_timing() -> FrozenToolObservationTimingFact:
+    """Return the shortest legal timing envelope for the FULL wire upper."""
+
+    values = {
+        "source_turn_ref": "sha256:" + ("0" * 64),
+        "observed_at_utc": "1970-01-01T00:00:00.000000Z",
+        "observation_duration_microseconds": 0,
+        "duration_disposition": ToolObservationDurationDisposition.MEASURED,
+        "tool_reported_duration_microseconds": 0,
+        "observation_origin": ToolObservationOrigin.BUILTIN,
+    }
+    provisional = FrozenToolObservationTimingFact.__new__(
+        FrozenToolObservationTimingFact
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    return FrozenToolObservationTimingFact(
+        **values,
+        fact_fingerprint=tool_observation_timing_fingerprint(provisional),
+    )
+
+
 def _validate_model_visible_memory_ids(values: tuple[str, ...]) -> None:
     if (
         len(values) > MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS
@@ -451,9 +551,10 @@ __all__ = [
     "ToolResultLogicalMessageKind",
     "classify_tool_result_delivery",
     "conservative_artifact_page_logical_utf8_bytes",
+    "conservative_tool_result_logical_message",
     "decode_provider_tool_result_observation",
     "full_required_tool_result_delivery",
-    "provider_neutral_message_logical_utf8_bytes",
+    "provider_neutral_message_logical_bytes",
     "project_tool_result_storage_body",
     "render_provider_tool_result_logical_message",
 ]

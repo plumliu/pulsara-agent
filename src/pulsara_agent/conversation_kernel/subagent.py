@@ -41,6 +41,9 @@ from pulsara_agent.conversation_kernel.live import (
     LiveBlockKind,
     LiveChannelKind,
 )
+from pulsara_agent.conversation_kernel.limits import (
+    ROOT_COMPLETION_SUFFIX_BATCH_ITEMS,
+)
 from pulsara_agent.ports.live_agent_event import (
     SubagentProgressPayload,
     live_digest,
@@ -442,7 +445,7 @@ class KernelSubagentManager:
             self._root_completion_delivery_open = True
             self._notify_state_changed_locked()
 
-    async def seal_root_completion_delivery(self, turn_id: str) -> bool:
+    async def seal_root_completion_delivery(self, turn_id: str) -> int:
         """Linearize a no-tool answer fence against completion offers."""
 
         async with self._state_changed:
@@ -451,10 +454,28 @@ class KernelSubagentManager:
                 or not self._root_completion_delivery_open
             ):
                 raise RuntimeError("ROOT completion phase is not open")
-            pending = bool(self._root_completion_queue)
+            pending = min(
+                len(self._root_completion_queue), ROOT_COMPLETION_SUFFIX_BATCH_ITEMS
+            )
             self._root_completion_delivery_open = False
             self._notify_state_changed_locked()
             return pending
+
+    async def root_completion_followup_possible(self, turn_id: str) -> bool:
+        """Report whether existing delegated work can append before a follow-up."""
+
+        async with self._lock:
+            if (
+                self._root_completion_turn_id != turn_id
+                or not self._root_completion_delivery_open
+            ):
+                raise RuntimeError("ROOT completion phase is not open")
+            return bool(
+                self._root_completion_queue
+                or self._tasks
+                or self._start_materials
+                or self._completing
+            )
 
     async def settle_root_completion_delivery(
         self, turn_id: str, *, turn_completed: bool

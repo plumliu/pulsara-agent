@@ -25,18 +25,45 @@ ROOT = Path(__file__).resolve().parents[1]
 # owners; public signatures remain unchanged. Behavioral rejection is covered
 # by test_conversation_fork, rather than old implementation AST equality.
 _FORK_CHANGED_METHODS = {
-    "accept_explicit_subagent_result", "accept_inter_agent_mailbox_batch", "accept_subagent_task_batch",
-    "confirm_inter_agent_mailbox_batch", "confirm_subagent_task_batch", "confirm_subagent_turn_admission", "confirm_explicit_subagent_result",
-    "list_subagent_tasks", "query_subagent_task", "_accepted_entry", "_initial_context_binding_revision_matches",
-    "_insert_entry", "_insert_initial_context_binding_revision", "_require_provider_safe_turn_in_transaction",
-    "_resolve_event_turn_id", "_read_entry_public_body", "_read_memory_governance_terminal_suffix",
-    "claim_memory_candidate_for_governance", "_require_compaction_target", "confirm_assistant_message_winner",
-    "confirm_root_turn_intent", "confirm_terminal_observation_winner", "query_command", "accept_tool_attempt",
-    "accept_tool_capability_decision", "accept_tool_interaction_decision", "accept_tool_result",
-    "confirm_tool_result_winner", "confirm_prepared_prompt_head_consumption", "confirm_prepared_prompt_steer",
-    "_accepted_completion_row", "accept_subagent_completion_into_root", "_accept_rejected_plan_tool_batch_in_transaction",
-    "_confirm_plan_resolution_in_transaction", "_confirm_plan_tool_batch_in_transaction", "_eligible_plan_handoff",
-    "accept_plan_tool_batch", "inspect_plan_continuation", "resolve_plan_question",
+    "accept_explicit_subagent_result",
+    "accept_inter_agent_mailbox_batch",
+    "accept_subagent_task_batch",
+    "confirm_inter_agent_mailbox_batch",
+    "confirm_subagent_task_batch",
+    "confirm_subagent_turn_admission",
+    "confirm_explicit_subagent_result",
+    "list_subagent_tasks",
+    "query_subagent_task",
+    "_accepted_entry",
+    "_initial_context_binding_revision_matches",
+    "_insert_entry",
+    "_insert_initial_context_binding_revision",
+    "_require_provider_safe_turn_in_transaction",
+    "_resolve_event_turn_id",
+    "_read_entry_public_body",
+    "_read_memory_governance_terminal_suffix",
+    "claim_memory_candidate_for_governance",
+    "_require_compaction_target",
+    "confirm_assistant_message_winner",
+    "confirm_root_turn_intent",
+    "confirm_terminal_observation_winner",
+    "query_command",
+    "accept_tool_attempt",
+    "accept_tool_capability_decision",
+    "accept_tool_interaction_decision",
+    "accept_tool_result",
+    "confirm_tool_result_winner",
+    "confirm_prepared_prompt_head_consumption",
+    "confirm_prepared_prompt_steer",
+    "_accepted_completion_row",
+    "accept_subagent_completion_into_root",
+    "_accept_rejected_plan_tool_batch_in_transaction",
+    "_confirm_plan_resolution_in_transaction",
+    "_confirm_plan_tool_batch_in_transaction",
+    "_eligible_plan_handoff",
+    "accept_plan_tool_batch",
+    "inspect_plan_continuation",
+    "resolve_plan_question",
 }
 TOOL = ROOT / "tools/repository_modularization_inventory.py"
 BASELINE = ROOT / "tests/fixtures/repository_modularization_baseline.json"
@@ -116,6 +143,14 @@ _MODEL_UNIVERSE_HARD_CUT_RETIRED_PYTEST_NODES = {
     "tests/test_settings.py::test_settings_redacted_llm_endpoint_never_exposes_userinfo_path_or_query",
     "tests/test_settings.py::test_storage_config_rejects_empty_postgres_dsn",
 }
+
+_KERNEL_IMAGE_K3_RETIRED_PYTEST_NODES = {
+    # K3 moves direct input compilation ahead of canonical acceptance.  The
+    # replacement node asserts the new pre-writer state instead of preserving
+    # the superseded "accepted before compile" behavior.
+    "tests/test_stage2_conversation_runner.py::"
+    "test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open",
+}
 _MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS = {
     "PreparedRootTurnIntent",
     "build_prepared_root_turn_intent",
@@ -162,13 +197,87 @@ _PR03_ADDED_METHODS = {
 # PR04 §6: source CAS plus replacement INSERT shares the existing writer transaction.
 _PR04_ADDED_METHODS = {"apply_queued_prompt_action"}
 # PR05 §9.2: one read-only entry and the shared exact fact constructor.
-_PR05_ADDED_METHODS = {"confirm_tool_interaction_decision", "_read_tool_interaction_decision"}
+_PR05_ADDED_METHODS = {
+    "confirm_tool_interaction_decision",
+    "_read_tool_interaction_decision",
+}
 _PR03_CHANGED_METHODS = {
     "interrupt_turn",
 }
 _MODEL_UNIVERSE_CHANGED_METHODS = {
     "confirm_prompt_ingress",
     "enqueue_prompt",
+}
+_KERNEL_IMAGE_K2_ADDED_TOP_LEVEL_FUNCTIONS = {"_canonical_prompt_identity"}
+_KERNEL_IMAGE_K3_ADDED_OBSERVED_IMPORTS = {
+    "PreparedAutomaticSubagentCompletion",
+}
+_KERNEL_IMAGE_K3_ADDED_ALL = {"PreparedAutomaticSubagentCompletion"}
+_KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_CLASSES = {
+    "PreparedAutomaticSubagentCompletion",
+}
+_KERNEL_IMAGE_K3_ADDED_RUNTIME_DATACLASSES = {
+    "PreparedAutomaticSubagentCompletion",
+}
+_KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_FUNCTIONS = {
+    "_applied_plan_tool_result_values",
+    "_freeze_active_plan_workflow_fact",
+    "_freeze_plan_handoff_fact",
+    "_fresh_entered_plan_compile_facts",
+    "_plan_question_result_values",
+    "_plan_review_body",
+    "_plan_review_permission",
+}
+_KERNEL_IMAGE_K3_CHANGED_TOP_LEVEL_FUNCTIONS = {"_plan_inline"}
+_KERNEL_IMAGE_K2_CHANGED_TOP_LEVEL_FUNCTIONS = {
+    "_accepted_steer_entry_matches",
+    "_prompt_steer_row_matches_candidate",
+}
+_KERNEL_IMAGE_K2_ADDED_METHODS = {
+    "hydrate_pending_prompt_steer",
+    "_read_prompt_public_body",
+}
+_KERNEL_IMAGE_K3_ADDED_METHODS = {
+    "_accept_subagent_completion_in_transaction",
+    "_build_active_completion_provider_candidate",
+    "_build_active_terminal_provider_input_candidate",
+    "_build_fresh_plan_continuation_provider_candidate",
+    "_build_new_completion_provider_candidate",
+    "_build_new_terminal_provider_input_candidate",
+    "_build_plan_draft_review_provider_candidate",
+    "_build_plan_question_resolution_provider_candidate",
+    "_build_user_control_feedback_provider_input_candidate",
+    "_completion_storage_body",
+    "_initial_context_binding_values",
+    "_plan_draft_review_source_row",
+    "_plan_question_resolution_source_row",
+    "_reject_prepared_prompt_head_before_delivery",
+    "_require_open_plan_draft_review_source",
+    "_require_open_plan_question_resolution_source",
+    "accept_automatic_subagent_completion_batch",
+    "prepare_active_terminal_observation_provider_input_candidate",
+    "prepare_automatic_subagent_completion",
+    "prepare_fresh_plan_continuation_provider_input_candidate",
+    "prepare_manual_subagent_completion_provider_input_candidate",
+    "prepare_manual_subagent_completion_root_provider_input_candidate",
+    "prepare_new_terminal_observation_provider_input_candidate",
+    "prepare_plan_draft_review_provider_input_candidate",
+    "prepare_plan_question_resolution_provider_input_candidate",
+    "prepare_root_provider_input_candidate",
+    "prepare_user_control_feedback_provider_input_candidate",
+    "reject_prepared_prompt_head_input_resource_exhausted",
+    "require_prospective_active_root_input_safe",
+}
+_KERNEL_IMAGE_K3_CHANGED_METHODS = {
+    "accept_plan_tool_batch",
+    "accept_terminal_observation",
+    "resolve_plan_draft_review",
+    "resolve_plan_question",
+}
+_KERNEL_IMAGE_K2_CHANGED_METHODS = {
+    "__init__",
+    "consume_prepared_prompt_steer",
+    "read_pending_prompt_steer_facts",
 }
 _MODEL_UNIVERSE_REMOVED_METHODS = {
     "accept_root_turn",
@@ -768,12 +877,16 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     module = _inventory_module()
     current = module.build_inventory(include_pytest_nodes=False)
     baseline = _baseline()
-    assert set(current["observed_imports"]) == (
-        set(baseline["observed_imports"])
-        - _ROUND5B_REMOVED_OBSERVED_IMPORTS
-        - _MODEL_UNIVERSE_REMOVED_OBSERVED_IMPORTS
-    ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS | (
-        _MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS
+    assert (
+        set(current["observed_imports"])
+        == (
+            set(baseline["observed_imports"])
+            - _ROUND5B_REMOVED_OBSERVED_IMPORTS
+            - _MODEL_UNIVERSE_REMOVED_OBSERVED_IMPORTS
+        )
+        | _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
+        | (_MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS)
+        | _KERNEL_IMAGE_K3_ADDED_OBSERVED_IMPORTS
     )
     for key in ("closed_owner_renames", "override_seams"):
         assert current[key] == baseline[key], key
@@ -788,6 +901,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND8_ADDED_ALL
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_ALL
         | _MODEL_UNIVERSE_ADDED_ALL
+        | _KERNEL_IMAGE_K3_ADDED_ALL
     )
     assert (
         set(current["top_level_classes"])
@@ -799,6 +913,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND8_ADDED_TOP_LEVEL_CLASSES
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_TOP_LEVEL_CLASSES
         | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_CLASSES
+        | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_CLASSES
         | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation"}
     )
     for key, added, changed in (
@@ -811,6 +926,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS
                 | _ROUND9_2_ADDED_TOP_LEVEL_FUNCTIONS
                 | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_FUNCTIONS
+                | _KERNEL_IMAGE_K2_ADDED_TOP_LEVEL_FUNCTIONS
+                | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_FUNCTIONS
                 | {"_freeze", "_frozen_rows", "_remaining", "_insert"}
             )
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
@@ -820,6 +937,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _FINGERPRINT_HARD_CUT_CHANGED_TOP_LEVEL_FUNCTIONS
                 | _ROUND9_2_CHANGED_TOP_LEVEL_FUNCTIONS
                 | _MODEL_UNIVERSE_CHANGED_TOP_LEVEL_FUNCTIONS
+                | _KERNEL_IMAGE_K2_CHANGED_TOP_LEVEL_FUNCTIONS
+                | _KERNEL_IMAGE_K3_CHANGED_TOP_LEVEL_FUNCTIONS
             ),
         ),
         (
@@ -836,7 +955,9 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _MODEL_UNIVERSE_ADDED_METHODS
                 | _PR03_ADDED_METHODS
                 | _PR04_ADDED_METHODS
-            | _PR05_ADDED_METHODS
+                | _PR05_ADDED_METHODS
+                | _KERNEL_IMAGE_K2_ADDED_METHODS
+                | _KERNEL_IMAGE_K3_ADDED_METHODS
                 | {
                     "_management_connection",
                     "fork_conversation",
@@ -862,7 +983,10 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND9_2_CHANGED_METHODS
             | _ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS
             | _PR03_CHANGED_METHODS
-            | _MODEL_UNIVERSE_CHANGED_METHODS | _FORK_CHANGED_METHODS,
+            | _MODEL_UNIVERSE_CHANGED_METHODS
+            | _FORK_CHANGED_METHODS
+            | _KERNEL_IMAGE_K2_CHANGED_METHODS
+            | _KERNEL_IMAGE_K3_CHANGED_METHODS,
         ),
     ):
         removed = (
@@ -895,18 +1019,23 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
     }:
         assert current_runtime[key] == baseline_runtime[key], ("runtime", key)
     for key in ("observed_symbols", "owned_observed_symbols"):
-        assert set(current_runtime[key]) == (
-            set(baseline_runtime[key])
-            - _ROUND5B_REMOVED_OBSERVED_IMPORTS
-            - _MODEL_UNIVERSE_REMOVED_OBSERVED_IMPORTS
-        ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS | (
-            _MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS
+        assert (
+            set(current_runtime[key])
+            == (
+                set(baseline_runtime[key])
+                - _ROUND5B_REMOVED_OBSERVED_IMPORTS
+                - _MODEL_UNIVERSE_REMOVED_OBSERVED_IMPORTS
+            )
+            | _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
+            | (_MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS)
+            | _KERNEL_IMAGE_K3_ADDED_OBSERVED_IMPORTS
         )
         if isinstance(current_runtime[key], dict):
             for name in (
                 set(current_runtime[key])
                 - _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
                 - _MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS
+                - _KERNEL_IMAGE_K3_ADDED_OBSERVED_IMPORTS
             ):
                 assert current_runtime[key][name] == baseline_runtime[key][name]
     assert (
@@ -925,7 +1054,9 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
         - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
     ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_RUNTIME_DATACLASSES | (
-        _MODEL_UNIVERSE_RUNTIME_ADDED_DATACLASSES | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation"}
+        _MODEL_UNIVERSE_RUNTIME_ADDED_DATACLASSES
+        | _KERNEL_IMAGE_K3_ADDED_RUNTIME_DATACLASSES
+        | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation"}
     )
     for name in (
         set(baseline_runtime["dataclasses"])
@@ -964,6 +1095,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _PR03_ADDED_METHODS
             | _PR04_ADDED_METHODS
             | _PR05_ADDED_METHODS
+            | _KERNEL_IMAGE_K2_ADDED_METHODS
+            | _KERNEL_IMAGE_K3_ADDED_METHODS
             | {
                 "_management_connection",
                 "fork_conversation",
@@ -1001,6 +1134,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _MODEL_UNIVERSE_REMOVED_METHODS
         - _MODEL_UNIVERSE_CHANGED_METHODS
         - _PR03_CHANGED_METHODS
+        - _KERNEL_IMAGE_K2_CHANGED_METHODS
+        - _KERNEL_IMAGE_K3_CHANGED_METHODS
     ):
         assert current_runtime["methods"][name] == baseline_runtime["methods"][name]
     assert set(
@@ -1056,7 +1191,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _MODEL_UNIVERSE_ADDED_METHODS
         | _PR03_ADDED_METHODS
         | _PR04_ADDED_METHODS
-            | _PR05_ADDED_METHODS
+        | _PR05_ADDED_METHODS
         | _PR03_CHANGED_METHODS
         | _MODEL_UNIVERSE_CHANGED_METHODS
         | _MODEL_UNIVERSE_REMOVED_METHODS
@@ -1067,6 +1202,14 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ROUND5B_ADDED_TOP_LEVEL_FUNCTIONS
         | _ROUND5B_REMOVED_TOP_LEVEL_FUNCTIONS
         | _FORK_CHANGED_METHODS
+        | _KERNEL_IMAGE_K2_ADDED_METHODS
+        | _KERNEL_IMAGE_K2_CHANGED_METHODS
+        | _KERNEL_IMAGE_K2_ADDED_TOP_LEVEL_FUNCTIONS
+        | _KERNEL_IMAGE_K2_CHANGED_TOP_LEVEL_FUNCTIONS
+        | _KERNEL_IMAGE_K3_ADDED_METHODS
+        | _KERNEL_IMAGE_K3_CHANGED_METHODS
+        | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_FUNCTIONS
+        | _KERNEL_IMAGE_K3_CHANGED_TOP_LEVEL_FUNCTIONS
         | {"fork_conversation", "_insert"}
     )
     for key in ("database_calls", "physical_checkouts"):
@@ -1107,10 +1250,13 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
         | _MEMORY_TAXONOMY_HARD_CUT_RETIRED_PYTEST_NODES
         | _PERMISSION_HOST_SCOPE_HARD_CUT_RETIRED_PYTEST_NODES
         | _MODEL_UNIVERSE_HARD_CUT_RETIRED_PYTEST_NODES
+        | _KERNEL_IMAGE_K3_RETIRED_PYTEST_NODES
         # SDK transport owns buffering. The capability hard-cut §6.3 explicitly
         # retires the old per-slot raw byte reservation, rather than keeping an
         # unused implementation merely to retain this historical unit test.
-        | {"tests/test_round6_mcp_production.py::test_round6_slot_wire_budget_is_shared_and_released"}
+        | {
+            "tests/test_round6_mcp_production.py::test_round6_slot_wire_budget_is_shared_and_released"
+        }
     )
     assert (
         "tests/test_stage2_architecture.py::"
@@ -1162,7 +1308,7 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
 
 
 def test_repository_modularization_internal_package_is_not_a_second_public_api() -> (

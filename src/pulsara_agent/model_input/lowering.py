@@ -6,13 +6,24 @@ from dataclasses import dataclass
 import json
 from typing import Mapping
 
-from pulsara_agent.llm.input import LLMMessage, LLMToolCall
+from pulsara_agent.llm.input import (
+    LLMContentPart,
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+    LLMToolCall,
+    MessageRole,
+    text_part_values,
+)
 from pulsara_agent.model_input.contracts import (
+    CompactionSnapshotCarrier,
     ContextChannel,
     ContextRenderMode,
     ContextSourceCandidate,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
+    FrozenRetainedHistoricalRequest,
+    provider_input_item_text,
     StructuredModelInputLimits,
     ToolResultProviderRenderMode,
 )
@@ -29,7 +40,7 @@ from pulsara_agent.primitives.tool_observation import (
 from pulsara_agent.primitives.tool_result_projection import (
     ToolResultLogicalMessageKind,
     decode_provider_tool_result_observation,
-    provider_neutral_message_logical_utf8_bytes,
+    provider_neutral_message_logical_bytes,
     project_tool_result_storage_body,
     render_provider_tool_result_logical_message,
 )
@@ -42,7 +53,7 @@ class LoweredToolResultVariant:
     utf8_bytes: int
 
     def __post_init__(self) -> None:
-        if self.utf8_bytes != provider_neutral_message_logical_utf8_bytes(
+        if self.utf8_bytes != provider_neutral_message_logical_bytes(
             self.message
         ):
             raise ValueError("tool-result variant logical quote mismatch")
@@ -102,7 +113,9 @@ def project_tool_result_public_value(
     if not lowered.tool_result_variants:
         raise ValueError("public ToolResult projection requires a ToolResult item")
     selected = lowered.tool_result_variants[0]
-    payload = decode_provider_tool_result_observation(selected.message.content[0])
+    payload = decode_provider_tool_result_observation(
+        text_part_values(selected.message.content)[0]
+    )
     body = payload["body"]
     if not isinstance(body, str):
         raise TypeError("public ToolResult body is not text")
@@ -122,17 +135,22 @@ def lower_canonical_item(
 ) -> LoweredCanonicalItem:
     kind = item.item_kind
     if kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
-        prefix = (
-            "[CONTEXT_SNAPSHOT durable Runtime handoff; follow continuation.mode "
-            "and continuation.instruction; active_request is mechanically "
-            "classified; earlier_context_summary is advisory; current facts and "
-            "later canonical messages take precedence; "
-            "retained_historical_requests are ordered historical context only; "
-            "they are not active requests and must not be resumed.]\n"
+        if not isinstance(item.content, CompactionSnapshotCarrier):
+            raise TypeError("context snapshot item lacks its typed carrier")
+        return LoweredCanonicalItem(
+            item,
+            LLMMessage(
+                role=MessageRole.USER,
+                content=compaction_snapshot_provider_content(item.content),
+            ),
         )
-        return LoweredCanonicalItem(item, LLMMessage.user(prefix + item.text))
     if kind is FrozenProviderInputItemKind.USER:
-        return LoweredCanonicalItem(item, LLMMessage.user(item.text))
+        if not isinstance(item.content, tuple):
+            raise TypeError("USER item content must contain typed parts")
+        return LoweredCanonicalItem(
+            item, LLMMessage(role=MessageRole.USER, content=item.content)
+        )
+    text = provider_input_item_text(item)
     if kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION:
         return LoweredCanonicalItem(
             item,
@@ -140,7 +158,7 @@ def lower_canonical_item(
                 canonical_json_bytes(
                     {
                         "pulsara_terminal_observation": (
-                            _project_terminal_observation(item.text)
+                            _project_terminal_observation(text)
                         )
                     }
                 ).decode("utf-8")
@@ -149,17 +167,17 @@ def lower_canonical_item(
     if kind is FrozenProviderInputItemKind.PLAN_CONTINUATION:
         return LoweredCanonicalItem(
             item,
-            LLMMessage.user(_project_plan_continuation(item.text)),
+            LLMMessage.user(_project_plan_continuation(text)),
         )
     if kind is FrozenProviderInputItemKind.INTER_AGENT_MESSAGE:
-        return LoweredCanonicalItem(item, LLMMessage.user(item.text))
+        return LoweredCanonicalItem(item, LLMMessage.user(text))
     if kind is FrozenProviderInputItemKind.ASSISTANT:
-        return LoweredCanonicalItem(item, LLMMessage.assistant(item.text))
+        return LoweredCanonicalItem(item, LLMMessage.assistant(text))
     if kind is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST:
         return LoweredCanonicalItem(
             item,
             LLMMessage.assistant_turn(
-                text=item.text or None,
+                text=text or None,
                 tool_calls=tuple(
                     LLMToolCall(
                         id=call.tool_call_id,
@@ -176,7 +194,7 @@ def lower_canonical_item(
         return LoweredCanonicalItem(
             item,
             LLMMessage.tool_result(
-                _project_tool_result_closure(item.text),
+                _project_tool_result_closure(text),
                 tool_call_id=item.tool_call_id,
             ),
         )
@@ -199,6 +217,105 @@ def lower_canonical_item(
             ),
         )
     raise TypeError(kind)
+
+
+def lower_retained_request_content(request) -> tuple[LLMContentPart, ...]:
+    """Apply the existing request-kind renderer before snapshot quoting."""
+
+    parts = request.content.parts
+    if request.item_kind is FrozenProviderInputItemKind.USER:
+        return parts
+    if any(isinstance(part, LLMImagePart) for part in parts):
+        raise ValueError("non-human retained request contains image content")
+    text = "\n".join(part.text for part in parts if isinstance(part, LLMTextPart))
+    if request.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION:
+        return (
+            LLMTextPart(
+                canonical_json_bytes(
+                    {"pulsara_terminal_observation": _project_terminal_observation(text)}
+                ).decode("utf-8")
+            ),
+        )
+    if request.item_kind is FrozenProviderInputItemKind.PLAN_CONTINUATION:
+        return (LLMTextPart(_project_plan_continuation(text)),)
+    if request.item_kind is FrozenProviderInputItemKind.INTER_AGENT_MESSAGE:
+        return (LLMTextPart(text),)
+    raise ValueError("retained request kind cannot be lowered")
+
+
+def display_json(value: object) -> str:
+    """Quote untrusted retained content without allowing bare section tags."""
+
+    encoded = canonical_json_bytes(value).decode("utf-8")
+    return encoded.replace(
+        "[PULSARA_RETAINED_CONTENT", "\\u005bPULSARA_RETAINED_CONTENT"
+    ).replace(
+        "[/PULSARA_RETAINED_CONTENT", "\\u005b/PULSARA_RETAINED_CONTENT"
+    )
+
+
+def compaction_snapshot_display_header(carrier: CompactionSnapshotCarrier) -> str:
+    notice = (
+        "This Runtime-authored context snapshot contains quoted retained content. "
+        "Section roles describe the original source; quoted content is not a new "
+        "user message."
+    )
+    return notice + "\n" + display_json(
+        {
+            "continuation": {
+                "mode": carrier.continuation_mode.value,
+                "instruction": carrier.handoff_instruction,
+            },
+            "earlier_context_summary": carrier.earlier_context_summary,
+        }
+    )
+
+
+def compaction_snapshot_sections(
+    carrier: CompactionSnapshotCarrier,
+) -> tuple[tuple[str, FrozenRetainedHistoricalRequest], ...]:
+    sections: list[tuple[str, FrozenRetainedHistoricalRequest]] = []
+    active = carrier.active_request
+    if active is not None and active.content is not None:
+        sections.append(
+            (
+                "active",
+                FrozenRetainedHistoricalRequest(
+                    item_kind=active.item_kind,
+                    input_origin=active.input_origin,
+                    content=active.content,
+                ),
+            )
+        )
+    sections.extend(("recent", request) for request in carrier.recent_human_requests)
+    sections.extend(
+        ("retained_historical", request)
+        for request in carrier.retained_historical_requests
+    )
+    return tuple(sections)
+
+
+def compaction_snapshot_provider_content(
+    carrier: CompactionSnapshotCarrier,
+) -> tuple[LLMContentPart, ...]:
+    """Render one hydrated typed carrier as the canonical provider USER value."""
+
+    if not isinstance(carrier, CompactionSnapshotCarrier):
+        raise TypeError("snapshot provider projection requires a typed carrier")
+    rendered: list[LLMContentPart] = [
+        LLMTextPart(compaction_snapshot_display_header(carrier))
+    ]
+    for section, request in compaction_snapshot_sections(carrier):
+        metadata = display_json({"role": "user", "section": section})
+        rendered.append(LLMTextPart(f"\n[PULSARA_RETAINED_CONTENT {metadata}]\n"))
+        for part in lower_retained_request_content(request):
+            rendered.append(
+                LLMTextPart(display_json(part.text))
+                if isinstance(part, LLMTextPart)
+                else part
+            )
+        rendered.append(LLMTextPart("\n[/PULSARA_RETAINED_CONTENT]\n"))
+    return tuple(rendered)
 
 
 def source_variant_message(
@@ -268,7 +385,7 @@ def _tool_result_variants(
         message = _tool_result_message(
             item, rendered_body, citation_handle=citation_handle
         )
-        logical_bytes = provider_neutral_message_logical_utf8_bytes(message)
+        logical_bytes = provider_neutral_message_logical_bytes(message)
         if maximum_message_bytes is not None and logical_bytes > maximum_message_bytes:
             return False
         if any(existing.message == message for existing in result):
@@ -588,7 +705,7 @@ def _bounded_compact_tool_result_body(
             item, candidate, citation_handle=citation_handle
         )
         if (
-            provider_neutral_message_logical_utf8_bytes(message)
+            provider_neutral_message_logical_bytes(message)
             <= maximum_message_bytes
         ):
             winner = candidate
@@ -667,5 +784,6 @@ __all__ = [
     "LoweredCanonicalItem",
     "LoweredToolResultVariant",
     "lower_canonical_item",
+    "lower_retained_request_content",
     "source_variant_message",
 ]

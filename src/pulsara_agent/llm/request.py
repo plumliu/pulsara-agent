@@ -5,7 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
+from pulsara_agent.llm.input import (
+    LLMMessage,
+    LLMToolCall,
+    MessageRole,
+    ToolSpec,
+    join_text_content,
+)
 from pulsara_agent.llm.model_connections import ReasoningSelection
 from pulsara_agent.llm.user_carrier import compose_provider_root_policy
 from pulsara_agent.primitives.context import (
@@ -48,11 +54,12 @@ def provider_assistant_message_public_projection_fingerprint(
 ) -> str:
     if message.role is not MessageRole.ASSISTANT:
         raise ValueError("provider assistant projection requires assistant role")
+    text = join_text_content(message.content, separator="")
     return provider_assistant_public_projection_fingerprint(
-        text="".join(message.content),
+        text=text,
         tool_calls=message.tool_calls,
         ordered_blocks=(
-            *((("TEXT", "".join(message.content)),) if any(message.content) else ()),
+            *((("TEXT", text),) if text else ()),
             *(
                 ("TOOL_CALL", item.id, item.name, item.arguments)
                 for item in message.tool_calls
@@ -100,20 +107,26 @@ class FrozenProviderWireInputQuote:
     estimator_fingerprint: str
     effective_input_budget_tokens: int
     semantic_estimated_input_tokens: int
+    semantic_visual_image_tokens: int
     generic_wire_estimated_input_tokens: int
+    generic_wire_visual_image_tokens: int
     replaced_generic_wire_estimated_tokens: int
     replay_wire_estimated_tokens: int
     final_wire_estimated_input_tokens: int
+    final_wire_visual_image_tokens: int
     final_wire_utf8_bytes: int
 
     def __post_init__(self) -> None:
         values = (
             self.effective_input_budget_tokens,
             self.semantic_estimated_input_tokens,
+            self.semantic_visual_image_tokens,
             self.generic_wire_estimated_input_tokens,
+            self.generic_wire_visual_image_tokens,
             self.replaced_generic_wire_estimated_tokens,
             self.replay_wire_estimated_tokens,
             self.final_wire_estimated_input_tokens,
+            self.final_wire_visual_image_tokens,
             self.final_wire_utf8_bytes,
         )
         if (
@@ -124,6 +137,17 @@ class FrozenProviderWireInputQuote:
             or not self.estimator_fingerprint.startswith("sha256:")
         ):
             raise ValueError("provider wire quote is invalid")
+        if (
+            self.semantic_visual_image_tokens
+            > self.semantic_estimated_input_tokens
+            or self.generic_wire_visual_image_tokens
+            > self.generic_wire_estimated_input_tokens
+            or self.final_wire_visual_image_tokens
+            > self.final_wire_estimated_input_tokens
+            or self.generic_wire_visual_image_tokens
+            != self.final_wire_visual_image_tokens
+        ):
+            raise ValueError("provider wire image token quote is invalid")
         if self.final_wire_estimated_input_tokens != (
             self.generic_wire_estimated_input_tokens
             - self.replaced_generic_wire_estimated_tokens
@@ -273,14 +297,19 @@ def provider_wire_input_plan_identity_fingerprint(
                 "estimator": plan.quote.estimator_fingerprint,
                 "budget": plan.quote.effective_input_budget_tokens,
                 "semantic_estimated": (plan.quote.semantic_estimated_input_tokens),
+                "semantic_visual": plan.quote.semantic_visual_image_tokens,
                 "generic_wire_estimated": (
                     plan.quote.generic_wire_estimated_input_tokens
+                ),
+                "generic_wire_visual": (
+                    plan.quote.generic_wire_visual_image_tokens
                 ),
                 "replaced_generic_wire_estimated": (
                     plan.quote.replaced_generic_wire_estimated_tokens
                 ),
                 "replay_wire_estimated": (plan.quote.replay_wire_estimated_tokens),
                 "final_wire_estimated": (plan.quote.final_wire_estimated_input_tokens),
+                "final_wire_visual": plan.quote.final_wire_visual_image_tokens,
                 "final_wire_bytes": plan.quote.final_wire_utf8_bytes,
             },
         },

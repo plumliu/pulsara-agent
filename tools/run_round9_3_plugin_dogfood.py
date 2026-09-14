@@ -9,6 +9,7 @@ postchecked before any report is persisted or printed.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import asdict, is_dataclass
@@ -790,23 +791,23 @@ async def _run_real_provider(
 
         results["control"] = _jsonable(
             await session.run_turn(
-                prompts["control"], command_id="command:round9-3:control"
+                PromptContent.text(prompts["control"]), command_id="command:round9-3:control"
             )
         )
         results["skill"] = _jsonable(
             await session.run_turn(
-                prompts["skill"], command_id="command:round9-3:skill"
+                PromptContent.text(prompts["skill"]), command_id="command:round9-3:skill"
             )
         )
         results["mcp"] = _jsonable(
-            await session.run_turn(prompts["mcp"], command_id="command:round9-3:mcp")
+            await session.run_turn(PromptContent.text(prompts["mcp"]), command_id="command:round9-3:mcp")
         )
 
         epoch_before_reload = _current_epoch(session)
         reload_same = await session.reload_capabilities(deadline_monotonic=monotonic() + 120)
         results["after_reload"] = _jsonable(
             await session.run_turn(
-                prompts["after_reload"],
+                PromptContent.text(prompts["after_reload"]),
                 command_id="command:round9-3:reload-prefix",
             )
         )
@@ -819,7 +820,7 @@ async def _run_real_provider(
         recorder.arm_gate("PLUGIN_ACTIVE_COMPACTION_TRACE")
         active_compaction_turn = asyncio.create_task(
             session.run_turn(
-                prompts["after_compact"],
+                PromptContent.text(prompts["after_compact"]),
                 command_id="command:round9-3:active-compaction-turn",
             ),
             name="round9-3-active-compaction-turn",
@@ -913,7 +914,7 @@ async def _run_real_provider(
         logs_before_modified_turn = len(_read_hook_logs(data_root))
         results["modified_untrusted"] = _jsonable(
             await session.run_turn(
-                prompts["modified_untrusted"],
+                PromptContent.text(prompts["modified_untrusted"]),
                 command_id="command:round9-3:modified-untrusted",
             )
         )
@@ -932,7 +933,7 @@ async def _run_real_provider(
             raise RuntimeError("separately trusted replacement Hook stayed inert")
         results["trusted_v2"] = _jsonable(
             await session.run_turn(
-                prompts["trusted_v2"],
+                PromptContent.text(prompts["trusted_v2"]),
                 command_id="command:round9-3:trusted-v2",
             )
         )
@@ -953,7 +954,7 @@ async def _run_real_provider(
         )
         results["disabled_direct"] = _jsonable(
             await session.run_turn(
-                prompts["disabled_direct"],
+                PromptContent.text(prompts["disabled_direct"]),
                 command_id="command:round9-3:disabled-direct",
             )
         )

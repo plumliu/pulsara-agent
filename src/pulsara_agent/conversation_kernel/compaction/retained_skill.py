@@ -14,7 +14,11 @@ from pulsara_agent.capability.contracts import LocalSkillRootKind
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     FrozenCompactionCanonicalRead,
 )
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import (
+    LLMMessage,
+    llm_content_identity_value,
+    text_part_values,
+)
 from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     FrozenProviderInputItem,
@@ -303,8 +307,12 @@ def _was_installed_full(
     ):
         return False
     try:
-        actual_payload = dict(decode_tool_result_observation(actual.content[0]))
-        expected_payload = dict(decode_tool_result_observation(full.content[0]))
+        actual_payload = dict(
+            decode_tool_result_observation(text_part_values(actual.content)[0])
+        )
+        expected_payload = dict(
+            decode_tool_result_observation(text_part_values(full.content)[0])
+        )
     except ValueError:
         return False
     # Citation handles are sealed process-local references.  They can differ
@@ -648,7 +656,7 @@ def _installed_observation_fingerprint(message: LLMMessage) -> str:
         {
             "message": {
                 "role": message.role.value,
-                "content": message.content,
+                "content": llm_content_identity_value(message.content),
                 "thinking": message.thinking,
                 "tool_calls": tuple(
                     (call.id, call.name, call.arguments)

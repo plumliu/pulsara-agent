@@ -1,6 +1,14 @@
 # Pulsara Compaction Final-Wire 本地估算 Hard-Cut 设计与实施规范
 
-> 状态：实施前规范，2026-09-01
+> 状态：生产 hard cut 已实施；K4 完整验收尚未完成，2026-09-14
+>
+> 图片输入修订（2026-09-14）：
+> `PULSARA_KERNEL_IMAGE_INPUT_AND_OPENAI_WIRE_ADAPTER_DESIGN.zh.md` 第 7、9、9.3 节
+> 已将唯一生产 estimator hard cut 为 `pulsara_heuristic/v2`，冻结 D1 图片尺寸估值、正式
+> USER 图片位置识别、base64 payload 扣减与逐 item/occurrence 计量。Chat/Responses 的
+> adapter-owned materialization、generic/native replacement、direct traversal、PRE_FULL、
+> POST_FULL 与效果前 U_W/U_T 均消费同一 quote；生产 V1 路径已删除。真实 provider、
+> isolated wheel 与完整矩阵仍属于 K4，不能据此标记图片输入已激活。
 >
 > 范围：Conversation Kernel、provider-input planning、durable provider replay、context compaction
 >

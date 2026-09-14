@@ -18,6 +18,7 @@ dependencies = [
     "google-re2>=1.1.20240702",
     "mcp[cli]==2.1.0",
     "mcp-types==2.1.0",
+    "pillow>=12.3.0",
 ]
 
 [project.scripts]
@@ -47,7 +48,6 @@ extend-exclude = [
 
 [dependency-groups]
 dev = [
-    "pillow>=12.3.0",
     "pytest>=9.0.3",
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.16",

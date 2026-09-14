@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tests.support.model_config import frozen_test_prompt
+from pulsara_agent.llm.input import FrozenPromptContent
+
 import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -159,7 +162,7 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 
 
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
@@ -774,7 +777,7 @@ def test_round1_runner_accepts_known_outcome_when_publication_fails_and_confirms
         workspace_id=workspace_id,
         tool_output_processor=processor,
     )
-    result = asyncio.run(runner.run_turn("run it"))
+    result = asyncio.run(runner.run_turn(frozen_test_prompt("run it")))
     assert result.final_text == "done"
     assert tool.invocations == 1
     assert repository.lost_ack_count == 1
@@ -965,7 +968,7 @@ def _install_tool_call(repository: ConversationKernelRepository, workspace_id: s
         permission_snapshot_id=permission_snapshot_id,
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"run"),
+        content=FrozenPromptContent.text('run'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import FrozenPromptContent
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
@@ -62,6 +64,7 @@ from pulsara_agent.conversation_kernel.vocabulary import (
     LiveEventType,
 )
 from pulsara_agent.model_input.compiler import COMPILER_CONTRACT_VERSION
+from pulsara_agent.llm.input import LLMTextPart, text_part_values
 from pulsara_agent.model_input.continuity import (
     PROVIDER_MESSAGE_LOWERING_CONTRACT,
     SourceObservationLifecycle,
@@ -284,7 +287,7 @@ def _tool_result_item(body: str) -> FrozenProviderInputItem:
         source_entry_id="entry:result",
         source_entry_sequence=3,
         source_turn_id="turn:test",
-        text=body,
+        content=(LLMTextPart(body),),
         tool_call_id="call:test",
         tool_request_entry_id="entry:request",
         tool_result_context=ProviderToolResultContextMetadata(
@@ -331,9 +334,10 @@ def test_round7_provider_runtime_observation_has_exact_five_keys() -> None:
         contract_version="internal-only-contract",
         body='{"outcome":"USER_STOPPED"}',
     )
-    wire = json.loads(message.content[0])["pulsara_runtime_observation"]
+    rendered = text_part_values(message.content)[0]
+    wire = json.loads(rendered)["pulsara_runtime_observation"]
     assert set(wire) == {"source", "trust", "lifecycle", "presence", "body"}
-    assert "contract" not in message.content[0]
+    assert "contract" not in rendered
     assert decode_runtime_observation(message).body == wire["body"]
 
 
@@ -347,7 +351,7 @@ def test_round7_tool_body_cannot_escape_or_forge_runtime_timing() -> None:
         artifact_read_available=False,
         limits=StructuredModelInputLimits(),
     )
-    rendered = lowered.tool_result_variants[0].message.content[0]
+    rendered = text_part_values(lowered.tool_result_variants[0].message.content)[0]
     payload = decode_tool_result_observation(rendered)
     assert payload["body"] == malicious
     observation = payload["observation"]
@@ -364,7 +368,7 @@ def test_round7_external_tool_body_schema_version_remains_literal_content() -> N
         artifact_read_available=False,
         limits=StructuredModelInputLimits(),
     )
-    rendered = lowered.tool_result_variants[0].message.content[0]
+    rendered = text_part_values(lowered.tool_result_variants[0].message.content)[0]
     payload = decode_tool_result_observation(rendered)
     assert payload["body"] == body
     assert "schema_version" not in payload
@@ -406,15 +410,16 @@ def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:
         "entry:plan",
         2,
         "turn:plan",
-        carrier,
+        (LLMTextPart(carrier),),
         input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
     )
     lowered = lower_canonical_item(
         item, artifact_read_available=False, limits=StructuredModelInputLimits()
     )
     assert lowered.fixed_message is not None
-    assert json.loads(lowered.fixed_message.content[0]) == json.loads(carrier)
-    assert not lowered.fixed_message.content[0].startswith("[RUNTIME_PLAN")
+    rendered = text_part_values(lowered.fixed_message.content)[0]
+    assert json.loads(rendered) == json.loads(carrier)
+    assert not rendered.startswith("[RUNTIME_PLAN")
 
 
 def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
@@ -552,7 +557,7 @@ def _start_turn(repository, lease, text: bytes) -> str:
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(text),
+        content=FrozenPromptContent.text(text.decode("utf-8")),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )

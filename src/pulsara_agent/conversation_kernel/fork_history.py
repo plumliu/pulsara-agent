@@ -21,8 +21,13 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     FrozenRetainedHistoricalRequest,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
-    parse_compaction_snapshot_carrier,
+    compaction_snapshot_image_parts,
 )
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    hydrate_canonical_prompt_owner,
+    hydrate_canonical_snapshot_owner,
+)
+from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
@@ -244,13 +249,18 @@ def read_fork_historical_material(
             raise ConversationKernelConflict(
                 "Fork snapshot base is absent or inconsistent"
             )
-        body = reader._read_content(
-            snapshot,
-            deadline_monotonic=deadline_monotonic,
-            remaining_bytes=budget,
-            connection=connection,
+        carrier = hydrate_canonical_snapshot_owner(
+            connection,
+            row=snapshot,
+            context_snapshot_id=str(snapshot["id"]),
         )
-        carrier = parse_compaction_snapshot_carrier(body)
+        budget.consume(
+            len(carrier.body)
+            + sum(
+                len(image.immutable_bytes)
+                for image in compaction_snapshot_image_parts(carrier)
+            )
+        )
         retained = carrier.retained_historical_requests
         active = carrier.active_request
         if (
@@ -303,11 +313,17 @@ def read_fork_historical_material(
                     "Fork retained request origin is invalid"
                 )
             kind, origin = kinds[initial["entry_kind"]]
+            if kind is not active.item_kind or origin is not active.input_origin:
+                raise ConversationKernelConflict(
+                    "Fork snapshot active request attribution drifted"
+                )
             # A later exact request follows all retained predecessor requests.
             # Equal text can be a distinct request; do not deduplicate history.
             retained += (
                 FrozenRetainedHistoricalRequest(
-                    item_kind=kind, input_origin=origin, text=active.text
+                    item_kind=kind,
+                    input_origin=origin,
+                    content=active.content,
                 ),
             )
 
@@ -391,14 +407,27 @@ def read_fork_historical_material(
                 "ASSISTANT_TOOL_REQUEST",
             }
             # Storage manifests never consume the canonical provider budget.
-            body = reader._read_content(
-                raw,
-                deadline_monotonic=deadline_monotonic,
-                remaining_bytes=_RemainingReadBudget(int(raw["content_size"]))
-                if assistant
-                else budget,
-                connection=connection,
-            )
+            if raw["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}:
+                if raw["content_media_type"] != PROMPT_BODY_MEDIA_TYPE:
+                    raise ConversationKernelConflict(
+                        "Fork ROOT human prompt is not canonical typed content"
+                    )
+                prompt = hydrate_canonical_prompt_owner(
+                    connection,
+                    row=raw,
+                    transcript_entry_id=str(raw["id"]),
+                )
+                budget.consume(prompt.resource_quote.canonical_expanded_bytes)
+                body = prompt.body
+            else:
+                body = reader._read_content(
+                    raw,
+                    deadline_monotonic=deadline_monotonic,
+                    remaining_bytes=_RemainingReadBudget(int(raw["content_size"]))
+                    if assistant
+                    else budget,
+                    connection=connection,
+                )
             attributed = historical_source_attribution(raw)
             if raw["content_codec"] == "utf-8":
                 text = body.decode("utf-8")

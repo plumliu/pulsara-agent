@@ -47,9 +47,9 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
+from pulsara_agent.llm.input import MAXIMUM_PROMPT_TEXT_UTF8_BYTES
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import (
-    MAXIMUM_PROMPT_BYTES,
     TerminalKernelProtocolServer,
     _Connection,
 )
@@ -609,7 +609,11 @@ def test_pr03_observer_can_page_background_processes_and_read_exact_log() -> Non
 def test_stage2_controller_prompt_bounds_are_authoritative() -> None:
     server = _server()
     controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
-    for text in ("", "bad\x00text", "x" * (MAXIMUM_PROMPT_BYTES + 1)):
+    for text in (
+        "",
+        "bad\x00text",
+        "x" * (MAXIMUM_PROMPT_TEXT_UTF8_BYTES + 1),
+    ):
         result = asyncio.run(
             server._command(
                 controller,

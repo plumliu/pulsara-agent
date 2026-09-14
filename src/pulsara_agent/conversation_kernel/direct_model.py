@@ -40,7 +40,7 @@ from pulsara_agent.llm.adapters.openai.responses import (
     materialize_responses_context_bearing_wire_projection,
     responses_semantic_wire_group,
 )
-from pulsara_agent.llm.input import LLMToolCall, ToolSpec
+from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.model_target import default_reasoning_selection
 from pulsara_agent.llm.runtime import ModelRuntime
@@ -70,7 +70,10 @@ from pulsara_agent.llm.resolution import (
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.user_carrier import compose_provider_root_policy
-from pulsara_agent.llm.validation import validate_model_context_for_call
+from pulsara_agent.llm.validation import (
+    validate_model_context_for_call,
+    validate_model_message_content_for_call,
+)
 from pulsara_agent.model_input.contracts import (
     FrozenCompiledModelInput,
     FrozenModelToolSurface,
@@ -376,6 +379,23 @@ class CompletedProviderModelExecution:
                 ordered_items=payload.ordered_items,
             ),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFollowupWireResourceQuote:
+    """Exact installed prefix plus conservative process-local follow-up suffix."""
+
+    final_wire_utf8_bytes: int
+    final_wire_estimated_input_tokens: int
+    appended_wire_item_count: int
+
+    def __post_init__(self) -> None:
+        if min(
+            self.final_wire_utf8_bytes,
+            self.final_wire_estimated_input_tokens,
+            self.appended_wire_item_count,
+        ) < 0:
+            raise ValueError("provider follow-up wire quote is invalid")
 
 
 class PreparedKernelModelExecution:
@@ -1327,6 +1347,10 @@ def freeze_provider_wire_measurement(
         or call.target.fact != binding.target_fact
     ):
         raise ValueError("provider wire planning input does not join preparation")
+    validate_model_message_content_for_call(
+        call=call,
+        messages=semantic_input.messages,
+    )
     recomputed_semantic = binding.estimator.estimate_frozen_input(
         system_prompt=semantic_input.system_prompt,
         messages=semantic_input.messages,
@@ -1360,6 +1384,7 @@ def freeze_provider_wire_measurement(
 
     replacements: list[FrozenProviderWireReplacementIdentity] = []
     final_items: list[dict[str, object]] = []
+    final_sources: list[LLMMessage | None] = []
     used_entries: set[str] = set()
     replaced_generic_wire_tokens = 0
     replay_wire_tokens = 0
@@ -1370,6 +1395,9 @@ def freeze_provider_wire_measurement(
         fragment = None if entry_id is None else fragment_by_entry.get(entry_id)
         if fragment is None:
             final_items.extend(generic_groups[index])
+            final_sources.extend(
+                semantic_input.messages[index] for _ in generic_groups[index]
+            )
             index += 1
             continue
         if entry_id in used_entries:
@@ -1422,6 +1450,7 @@ def freeze_provider_wire_measurement(
             )
         )
         final_items.extend(replacement)  # type: ignore[arg-type]
+        final_sources.extend(None for _ in replacement)
         used_entries.add(entry_id or "")
         replaced_generic_wire_tokens += generic_tokens
         replay_wire_tokens += replacement_tokens
@@ -1451,6 +1480,13 @@ def freeze_provider_wire_measurement(
     tools_plain = tuple(thaw_json(item) for item in frozen_tools)
     inputs_plain = tuple(thaw_json(item) for item in frozen_inputs)
     generic_items = tuple(item for group in generic_groups for item in group)
+    generic_sources = tuple(
+        message
+        for message, group in zip(
+            semantic_input.messages, generic_groups, strict=True
+        )
+        for _ in group
+    )
     fixed_projection = _materialize_context_bearing_projection(
         call=call,
         root_policy=root_plain,
@@ -1477,15 +1513,23 @@ def freeze_provider_wire_measurement(
     generic_wire_tokens = binding.estimator.estimate_final_wire_json_components(
         fixed_context=fixed_projection,
         ordered_input_items=generic_items,
+        ordered_input_sources=generic_sources,
     )
-    final_wire_tokens = (
-        generic_wire_tokens - replaced_generic_wire_tokens + replay_wire_tokens
+    final_wire_total_tokens = (
+        generic_wire_tokens.total_input_tokens
+        - replaced_generic_wire_tokens
+        + replay_wire_tokens
     )
     direct_final_wire_tokens = binding.estimator.estimate_final_wire_json_components(
         fixed_context=fixed_projection,
         ordered_input_items=inputs_plain,
+        ordered_input_sources=tuple(final_sources),
     )
-    if direct_final_wire_tokens != final_wire_tokens:
+    if (
+        direct_final_wire_tokens.total_input_tokens != final_wire_total_tokens
+        or direct_final_wire_tokens.visual_image_tokens
+        != generic_wire_tokens.visual_image_tokens
+    ):
         raise ValueError("provider wire component traversal is inconsistent")
     final_wire_bytes = len(canonical_json_bytes(final_projection))
     quote = FrozenProviderWireInputQuote(
@@ -1495,10 +1539,21 @@ def freeze_provider_wire_measurement(
         semantic_estimated_input_tokens=(
             semantic_input.final_estimate.total_input_tokens
         ),
-        generic_wire_estimated_input_tokens=generic_wire_tokens,
+        semantic_visual_image_tokens=(
+            semantic_input.final_estimate.visual_image_tokens
+        ),
+        generic_wire_estimated_input_tokens=(
+            generic_wire_tokens.total_input_tokens
+        ),
+        generic_wire_visual_image_tokens=(
+            generic_wire_tokens.visual_image_tokens
+        ),
         replaced_generic_wire_estimated_tokens=(replaced_generic_wire_tokens),
         replay_wire_estimated_tokens=replay_wire_tokens,
-        final_wire_estimated_input_tokens=final_wire_tokens,
+        final_wire_estimated_input_tokens=final_wire_total_tokens,
+        final_wire_visual_image_tokens=(
+            direct_final_wire_tokens.visual_image_tokens
+        ),
         final_wire_utf8_bytes=final_wire_bytes,
     )
     wire_system = context_fingerprint("pulsara.provider-wire-system:v1", root_plain)
@@ -1610,6 +1665,114 @@ def _materialize_context_bearing_projection(
     raise ValueError("provider wire API is unsupported")
 
 
+def quote_provider_followup_wire_resources(
+    *,
+    request: KernelModelExecutionRequest,
+    actual_assistant_message: LLMMessage,
+    provider_replay: PreparedDurableProviderAssistantReplay | None,
+    bounded_suffix_messages: tuple[LLMMessage, ...],
+) -> ProviderFollowupWireResourceQuote:
+    """Quote one direct successor from the installed exact wire prefix.
+
+    The response carrier is exact (native replay where the adapter returned
+    one); only result/closure and source messages supplied by the caller are
+    conservative existing-owner bounds.  The function rematerializes the same
+    Chat/Responses context projection and uses the resolved target's frozen D1
+    estimator.  It has no install or provider-open authority.
+    """
+
+    if actual_assistant_message.role is not MessageRole.ASSISTANT:
+        raise ValueError("provider follow-up requires an assistant response")
+    plan = request.wire_input_plan
+    call = request.prepared_call.call
+    profile = call.target.model_profile.route_wire_profile
+    if plan.wire_api != profile.wire_api:
+        raise ValueError("provider follow-up wire API differs from its prefix")
+
+    existing_items = tuple(
+        thaw_json(item) for item in plan.materialization.ordered_input_items
+    )
+    if any(not isinstance(item, dict) for item in existing_items):
+        raise TypeError("installed provider input item is not an object")
+    root = thaw_json(plan.materialization.root_policy_value)
+    tools = tuple(thaw_json(item) for item in plan.materialization.tool_items)
+    current_projection = thaw_json(
+        plan.materialization.context_bearing_projection
+    )
+    if not isinstance(current_projection, dict):
+        raise TypeError("installed provider context projection is not an object")
+    tool_choice = current_projection.get("tool_choice")
+    if tool_choice is not None and not isinstance(tool_choice, str):
+        raise TypeError("installed provider tool choice is invalid")
+    reproduced = _materialize_context_bearing_projection(
+        call=call,
+        root_policy=root,
+        tool_items=tools,
+        ordered_input_items=existing_items,  # type: ignore[arg-type]
+        tool_choice=tool_choice,
+    )
+    if reproduced != current_projection:
+        raise ValueError("installed provider context cannot be rematerialized")
+
+    appended_items: list[dict[str, object]] = []
+    if provider_replay is None:
+        if profile.wire_api == "openai_chat_completions":
+            appended_items.extend(
+                chat_semantic_wire_group(
+                    actual_assistant_message,
+                    route_wire_profile=profile,
+                )
+            )
+        elif profile.wire_api == "openai_responses":
+            appended_items.extend(
+                responses_semantic_wire_group(actual_assistant_message)
+            )
+        else:  # pragma: no cover - resolved transport registry is closed
+            raise ValueError("provider wire API is unsupported")
+    else:
+        target = DirectKernelModelPort.replay_target_for_resolved_call(call)
+        if (
+            provider_replay.wire_api != profile.wire_api
+            or provider_replay.replay_target_fingerprint
+            != target.replay_target_fingerprint
+        ):
+            raise ValueError("provider follow-up replay targets another wire")
+        for frozen in provider_replay.ordered_items:
+            item = thaw_json(frozen)
+            if not isinstance(item, dict):
+                raise TypeError("provider replay item is not an object")
+            appended_items.append(item)
+
+    for message in bounded_suffix_messages:
+        if profile.wire_api == "openai_chat_completions":
+            appended_items.extend(
+                chat_semantic_wire_group(message, route_wire_profile=profile)
+            )
+        elif profile.wire_api == "openai_responses":
+            appended_items.extend(responses_semantic_wire_group(message))
+        else:  # pragma: no cover - resolved transport registry is closed
+            raise ValueError("provider wire API is unsupported")
+
+    final_projection = _materialize_context_bearing_projection(
+        call=call,
+        root_policy=root,
+        tool_items=tools,
+        ordered_input_items=(*existing_items, *appended_items),  # type: ignore[arg-type]
+        tool_choice=tool_choice,
+    )
+    suffix_tokens = sum(
+        call.target.token_estimator.estimate_wire_json_component(item)
+        for item in appended_items
+    )
+    return ProviderFollowupWireResourceQuote(
+        final_wire_utf8_bytes=len(canonical_json_bytes(final_projection)),
+        final_wire_estimated_input_tokens=(
+            plan.quote.final_wire_estimated_input_tokens + suffix_tokens
+        ),
+        appended_wire_item_count=len(appended_items),
+    )
+
+
 __all__ = [
     "DirectKernelModelPort",
     "KernelModelExecutionRequest",
@@ -1617,7 +1780,9 @@ __all__ = [
     "PreparedKernelModelExecution",
     "PreparedKernelModelCall",
     "PreparedKernelSemanticModelCall",
+    "ProviderFollowupWireResourceQuote",
     "ProviderWireMeasurement",
     "freeze_provider_wire_measurement",
     "provider_wire_profile_fingerprint",
+    "quote_provider_followup_wire_resources",
 ]

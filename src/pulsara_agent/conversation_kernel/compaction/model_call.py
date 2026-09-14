@@ -19,6 +19,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     FrozenCompactionActiveRequest,
     FrozenCompactionCanonicalRead,
     FrozenCompactionSourceView,
+    FrozenRetainedHistoricalRequest,
     ProviderPrefixCutProof,
     canonical_compaction_range_digest,
     compaction_summary_message_prefix_fingerprint,
@@ -35,7 +36,14 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
 from pulsara_agent.conversation_kernel.direct_model import (
     provider_wire_profile_fingerprint,
 )
-from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
+from pulsara_agent.llm.input import (
+    LLMMessage,
+    LLMToolCall,
+    MessageRole,
+    ToolSpec,
+    llm_content_identity_value,
+)
+from pulsara_agent.model_input.lowering import lower_retained_request_content
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
@@ -159,9 +167,9 @@ class DestinationProjectionSummarySourceProof:
     source_through_sequence: int
     cumulative_source_digest: str
     projection: DestinationDialogueProjection = field(repr=False)
-    active_request: FrozenCompactionActiveRequest = field(repr=False)
+    active_request: FrozenCompactionActiveRequest | None = field(repr=False)
     projection_message_ordinal: int
-    active_request_message_ordinal: int
+    active_request_message_ordinal: int | None
     _seal: _CompactionSummarySourceSeal = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -176,17 +184,27 @@ class DestinationProjectionSummarySourceProof:
             != canonical_compaction_range_digest(
                 source.lineage_base, source.safe_head_range
             )
-            or self.active_request.location
-            is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
-            or self.active_request.text is None
-            or self.active_request.entry_id
-            != source.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
             or self.projection_message_ordinal < 0
-            or self.active_request_message_ordinal
-            != self.projection_message_ordinal + 1
             or self.source_projection.canonical_input_identity
             != source.dispatch_read.compile_snapshot.canonical_input.identity
             or not self.source_projection.compile_binding_fingerprint
+        ):
+            raise ValueError("destination-projection summary proof is invalid")
+        active = self.active_request
+        if active is None:
+            if (
+                source.turn_status not in {"COMPLETED", "INTERRUPTED"}
+                or self.active_request_message_ordinal is not None
+            ):
+                raise ValueError("destination-projection summary proof is invalid")
+        elif (
+            source.turn_status != "RUNNING"
+            or active.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
+            or active.content is None
+            or active.entry_id
+            != source.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
+            or self.active_request_message_ordinal
+            != self.projection_message_ordinal + 1
         ):
             raise ValueError("destination-projection summary proof is invalid")
 
@@ -257,7 +275,11 @@ class PreparedCompactionSummarySemantic:
             identity = proof.canonical_source.dispatch_read.compile_snapshot.canonical_input.identity
             projection_ordinal = proof.projection_message_ordinal
             active_ordinal = proof.active_request_message_ordinal
-            summary_ordinal = active_ordinal + 1
+            summary_ordinal = (
+                projection_ordinal + 1
+                if active_ordinal is None
+                else active_ordinal + 1
+            )
             current_messages, current_placements, active_placement = (
                 _destination_source_messages_and_active_placement(
                     source_projection=proof.source_projection,
@@ -288,22 +310,37 @@ class PreparedCompactionSummarySemantic:
                 or compiled.message_placements[:projection_ordinal]
                 != current_placements
                 or projection_ordinal >= len(compiled.messages)
-                or active_ordinal >= len(compiled.messages)
                 or summary_ordinal >= len(compiled.messages)
                 or compiled.messages[projection_ordinal]
-                != LLMMessage.user(proof.projection.body.decode("utf-8"))
-                or compiled.messages[active_ordinal]
-                != LLMMessage.user(proof.active_request.text)
+                != LLMMessage(
+                    role=MessageRole.USER,
+                    content=proof.projection.content,
+                )
                 or compiled.messages[summary_ordinal]
                 != LLMMessage.user(self.summary_request)
                 or compiled.message_placements[projection_ordinal].origin_entry_id
                 is not None
-                or compiled.message_placements[active_ordinal].origin_entry_id
-                != proof.active_request.entry_id
-                or compiled.message_placements[active_ordinal]
-                != replace(active_placement, message_ordinal=active_ordinal)
                 or compiled.message_placements[summary_ordinal]
                 != expected_summary_placement
+            ):
+                raise ValueError(
+                    "destination-projection summary proof does not exact-join"
+                )
+            if proof.active_request is None:
+                if active_ordinal is not None or active_placement is not None:
+                    raise ValueError(
+                        "destination-projection summary proof does not exact-join"
+                    )
+            elif (
+                active_ordinal is None
+                or active_ordinal >= len(compiled.messages)
+                or compiled.messages[active_ordinal]
+                != _active_request_message(proof.active_request)
+                or compiled.message_placements[active_ordinal].origin_entry_id
+                != proof.active_request.entry_id
+                or active_placement is None
+                or compiled.message_placements[active_ordinal]
+                != replace(active_placement, message_ordinal=active_ordinal)
             ):
                 raise ValueError(
                     "destination-projection summary proof does not exact-join"
@@ -612,25 +649,30 @@ def prepare_compaction_summary_semantic(
 def _destination_source_messages_and_active_placement(
     *,
     source_projection: FrozenModelInputSemanticProjection,
-    active_request: FrozenCompactionActiveRequest,
+    active_request: FrozenCompactionActiveRequest | None,
 ) -> tuple[
     tuple[LLMMessage, ...],
     tuple[FrozenCompiledMessagePlacement, ...],
-    FrozenCompiledMessagePlacement,
+    FrozenCompiledMessagePlacement | None,
 ]:
-    active_matches = tuple(
-        (message, placement)
-        for message, placement in zip(
-            source_projection.messages,
-            source_projection.message_placements,
-            strict=True,
+    if active_request is None:
+        active_matches: tuple[
+            tuple[LLMMessage, FrozenCompiledMessagePlacement], ...
+        ] = ()
+    else:
+        active_matches = tuple(
+            (message, placement)
+            for message, placement in zip(
+                source_projection.messages,
+                source_projection.message_placements,
+                strict=True,
+            )
+            if placement.origin_entry_id == active_request.entry_id
         )
-        if placement.origin_entry_id == active_request.entry_id
-    )
-    if (
+    if active_request is not None and (
         len(active_matches) != 1
-        or active_request.text is None
-        or active_matches[0][0] != LLMMessage.user(active_request.text)
+        or active_request.content is None
+        or active_matches[0][0] != _active_request_message(active_request)
     ):
         raise ValueError("destination active request has no exact source placement")
     current: list[tuple[LLMMessage, FrozenCompiledMessagePlacement]] = []
@@ -650,7 +692,27 @@ def _destination_source_messages_and_active_placement(
     current_placements = tuple(
         replace(item[1], message_ordinal=index) for index, item in enumerate(current)
     )
-    return current_messages, current_placements, active_matches[0][1]
+    return (
+        current_messages,
+        current_placements,
+        None if active_request is None else active_matches[0][1],
+    )
+
+
+def _active_request_message(
+    active_request: FrozenCompactionActiveRequest,
+) -> LLMMessage:
+    if active_request.content is None:
+        raise ValueError("active request content is absent")
+    request = FrozenRetainedHistoricalRequest(
+        item_kind=active_request.item_kind,
+        input_origin=active_request.input_origin,
+        content=active_request.content,
+    )
+    return LLMMessage(
+        role=MessageRole.USER,
+        content=lower_retained_request_content(request),
+    )
 
 
 def prepare_destination_projection_summary_semantic(
@@ -661,7 +723,7 @@ def prepare_destination_projection_summary_semantic(
     native_projection_set: FrozenNativeToolProjectionSet,
     source_projection: FrozenModelInputSemanticProjection,
     projection: DestinationDialogueProjection,
-    active_request: FrozenCompactionActiveRequest,
+    active_request: FrozenCompactionActiveRequest | None,
     summary_request: str,
     resolved_trigger_tokens: int,
 ) -> PreparedCompactionSummarySemantic:
@@ -681,9 +743,21 @@ def prepare_destination_projection_summary_semantic(
         or source_projection.tools != compile_binding.tool_surface.tool_specs
         or source_projection.compile_binding_fingerprint
         != compile_binding.binding_fingerprint
-        or active_request.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
-        or active_request.text is None
+    ):
+        raise ValueError("destination projection summary inputs do not exact-join")
+    if active_request is None:
+        if (
+            canonical_source.turn_status not in {"COMPLETED", "INTERRUPTED"}
+            or active_request_placement is not None
+        ):
+            raise ValueError("destination projection summary inputs do not exact-join")
+    elif (
+        canonical_source.turn_status != "RUNNING"
+        or active_request.location
+        is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
+        or active_request.content is None
         or active_request.entry_id != identity.initial_entry_id
+        or active_request_placement is None
         or active_request_placement.origin_entry_id != active_request.entry_id
     ):
         raise ValueError("destination projection summary inputs do not exact-join")
@@ -692,16 +766,12 @@ def prepare_destination_projection_summary_semantic(
         for index, item in enumerate(current_source_placements)
     )
     projection_ordinal = len(current_source_messages)
-    active_ordinal = projection_ordinal + 1
-    projection_message = LLMMessage.user(projection.body.decode("utf-8"))
-    active_message = LLMMessage.user(active_request.text)
-    messages = (
-        *current_source_messages,
-        projection_message,
-        active_message,
-        LLMMessage.user(summary_request),
+    projection_message = LLMMessage(
+        role=MessageRole.USER,
+        content=projection.content,
     )
-    placements = (
+    message_values = [*current_source_messages, projection_message]
+    placement_values = [
         *normalized_source_placements,
         _ephemeral_summary_placement(
             message_ordinal=projection_ordinal,
@@ -709,17 +779,30 @@ def prepare_destination_projection_summary_semantic(
             domain="destination-projection",
             identity={
                 "source": canonical_source.dispatch_read.composite_fingerprint,
-                "body": projection.body.decode("utf-8"),
+                "content": llm_content_identity_value(projection.content),
             },
         ),
-        replace(active_request_placement, message_ordinal=active_ordinal),
+    ]
+    active_ordinal: int | None = None
+    if active_request is not None:
+        assert active_request_placement is not None
+        active_ordinal = len(message_values)
+        message_values.append(_active_request_message(active_request))
+        placement_values.append(
+            replace(active_request_placement, message_ordinal=active_ordinal)
+        )
+    summary_ordinal = len(message_values)
+    message_values.append(LLMMessage.user(summary_request))
+    placement_values.append(
         _ephemeral_summary_placement(
-            message_ordinal=active_ordinal + 1,
+            message_ordinal=summary_ordinal,
             role=MessageRole.USER,
             domain="destination-request",
             identity={"prompt": summary_request_fingerprint(summary_request)},
-        ),
+        )
     )
+    messages = tuple(message_values)
+    placements = tuple(placement_values)
     estimate = compile_binding.estimator.estimate_frozen_input(
         system_prompt=source_projection.system_prompt,
         messages=messages,
@@ -995,8 +1078,12 @@ def _summary_source_identity_value(
         "source_digest": proof.cumulative_source_digest,
         "target": proof.target_fact.target_fingerprint,
         "trigger": proof.resolved_trigger_tokens,
-        "projection": proof.projection.body.decode("utf-8"),
-        "active_request": proof.active_request.canonical_value(),
+        "projection": llm_content_identity_value(proof.projection.content),
+        "active_request": (
+            None
+            if proof.active_request is None
+            else proof.active_request.canonical_value()
+        ),
     }
 
 
@@ -1066,6 +1153,7 @@ def _estimate_value(estimate: TokenEstimate) -> dict[str, object]:
         "message_by_index": estimate.message_tokens_by_index,
         "tools": estimate.tool_tokens,
         "envelope": estimate.envelope_tokens,
+        "visual_image": estimate.visual_image_tokens,
         "total": estimate.total_input_tokens,
     }
 

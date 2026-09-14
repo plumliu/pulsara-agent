@@ -78,6 +78,13 @@ class TokenEstimatorFact(BaseModel):
 
     estimator_id: str = Field(min_length=1)
     estimator_version: str = Field(min_length=1)
+    image_grid_pixels: int = Field(ge=1)
+    image_scale_numerator: int = Field(ge=1)
+    image_scale_denominator: int = Field(ge=1)
+    image_min_tokens: int = Field(ge=1)
+    image_wire_accounting_contract: Literal[
+        "formal_user_image_parts:v1-payload-elided-per-item-rounding"
+    ]
     estimator_fingerprint: str = Field(min_length=1)
 
 
@@ -143,7 +150,7 @@ class ModelTokenUsageFact(BaseModel):
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-target:v5"] = "resolved-model-target:v5"
+    contract_version: Literal["resolved-model-target:v6"] = "resolved-model-target:v6"
     target_fingerprint: str
     route_id: str = Field(min_length=1)
     wire_api: Literal["openai_chat_completions", "openai_responses"]
@@ -153,6 +160,7 @@ class ResolvedModelTargetFact(BaseModel):
     transport_binding_id: str = Field(min_length=1)
     transport_contract_version: str = Field(min_length=1)
     model_identity_policy: Literal["accept_reported", "exact"]
+    input_modalities: tuple[str, ...] | None
     limits: ModelContextLimits
     context_budget: ResolvedModelContextBudgetFact
     token_estimator: TokenEstimatorFact
@@ -186,7 +194,7 @@ class ResolvedModelTargetFact(BaseModel):
 
 def resolved_model_target_fingerprint(payload_without_fingerprint: dict[str, Any]) -> str:
     return sha256_fingerprint(
-        "resolved-model-target-compatibility:v5", payload_without_fingerprint
+        "resolved-model-target-compatibility:v6", payload_without_fingerprint
     )
 
 

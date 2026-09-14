@@ -29,6 +29,18 @@ function inlineContent(value: string) {
   return inlineBytes(bytes);
 }
 
+function promptBody(...texts: string[]): string {
+  return JSON.stringify({ schema: 'pulsara.prompt/v1', parts: texts.map((text) => ({ type: 'text', text })) });
+}
+
+function inlinePrompt(...texts: string[]) {
+  return { ...inlineContent(promptBody(...texts)), media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8' };
+}
+
+function blobPrompt(text: string) {
+  return { ...blobContent(promptBody(text)), media_type: 'application/vnd.pulsara.prompt+json' };
+}
+
 function inlineBytes(bytes: Uint8Array) {
   const pieces: string[] = [];
   for (let offset = 0; offset < bytes.length; offset += 0x8000) {
@@ -859,7 +871,7 @@ describe('exact prompt projection', () => {
     expect(new TextEncoder().encode(queuedBody).length).toBeGreaterThan(65_536);
     const entries = [{
       entry_id: 'consumed-prompt', turn_id: 'turn-blob', entry_sequence: '1',
-      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: blobContent(queuedBody),
+      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: blobPrompt(queuedBody),
       input_source: {
         queue_item_id: 'queue-blob', command_id: 'command-blob', delivery_mode: 'NEW_TURN',
       },
@@ -881,7 +893,7 @@ describe('exact prompt projection', () => {
     }];
     const responses = [
       connectPayload(entries),
-      contentChunk(queuedBody),
+      contentChunk(promptBody(queuedBody)),
       contentChunk(assistantBody),
       contentChunk(toolBody),
     ];
@@ -914,12 +926,12 @@ describe('exact prompt projection', () => {
       prompt_queue_total_count: '1',
       prompt_queue: [{
         queue_item_id: 'queue-race', command_id: 'command-race', queue_sequence: '1',
-        status: 'PENDING', delivery_mode: 'NEW_TURN', content: blobContent(body),
+        status: 'PENDING', delivery_mode: 'NEW_TURN', content: blobPrompt(body),
       }],
     };
     const consumed = {
       entry_id: 'entry-race', turn_id: 'turn-race', entry_sequence: '1',
-      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: blobContent(body),
+      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: blobPrompt(body),
       input_source: {
         queue_item_id: 'queue-race', command_id: 'command-race', delivery_mode: 'NEW_TURN',
       },
@@ -931,7 +943,7 @@ describe('exact prompt projection', () => {
         session_id: 'session-1', writer_generation: '1', event_sequence_cut: '1',
         entries: [consumed], control: { prompt_queue_total_count: '0', prompt_queue: [] },
       } } },
-      contentChunk(body),
+      contentChunk(promptBody(body)),
     ];
     const operations: string[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -1589,12 +1601,12 @@ describe('exact prompt projection', () => {
       prompt_queue: [
         {
           queue_item_id: 'queue-2', command_id: 'command-2', queue_sequence: '2',
-          status: 'PENDING', delivery_mode: 'NEW_TURN', content: inlineContent('相同正文'),
+          status: 'PENDING', delivery_mode: 'NEW_TURN', content: inlinePrompt('相同正文'),
         },
         {
           queue_item_id: 'queue-1', command_id: 'command-1', queue_sequence: '1',
           status: 'PENDING', delivery_mode: 'STEER_ACTIVE_TURN', target_turn_id: 'turn-1',
-          content: inlineContent('相同正文'),
+          content: inlinePrompt('相同正文'),
         },
       ],
     };
@@ -1918,10 +1930,47 @@ describe('capability catalog adapter', () => {
 });
 
 describe('source text fidelity hard cut', () => {
+  it('projects ordered canonical Text parts without exposing their storage JSON', async () => {
+    const texts = ['', '第一段\n原换行', '', '最后一段🙂'];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload([{
+      entry_id: 'multipart-text', turn_id: 'turn-1', entry_sequence: '1',
+      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: inlinePrompt(...texts),
+    }])), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    expect(projection.messages[0].body).toBe(texts.join('\n'));
+  });
+
+  it.each(['history', 'queue'])('never exposes %s image descriptors as editable text', async (location) => {
+    const content = {
+      ...inlineContent(JSON.stringify({
+        schema: 'pulsara.prompt/v1',
+        parts: [{ type: 'text', text: '看图' }, {
+          type: 'image', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 4,
+          media_type: 'image/png', width: 7, height: 5,
+        }],
+      })),
+      media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8',
+    };
+    const payload = location === 'history'
+      ? connectPayload([{
+        entry_id: 'image', turn_id: 'turn-1', entry_sequence: '1',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content,
+      }])
+      : connectPayload([], { prompt_queue: [{
+        queue_item_id: 'queue-image', command_id: 'command-image', queue_sequence: '1',
+        status: 'PENDING', delivery_mode: 'NEW_TURN', content,
+      }] });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+    await expect((async () => (await new LocalHttpRuntimeAdapter().connect('session-1')).current())())
+      .rejects.toMatchObject({ code: 'IMAGE_CONTENT_PREVIEW_UNAVAILABLE' });
+  });
+
   it('preserves accepted user prompts and steers byte-for-byte before rendering', async () => {
     const entries = ['USER_MESSAGE', 'USER_STEER'].map((entryKind, index) => ({
       entry_id: `user-${index}`, turn_id: 'turn-user', entry_sequence: String(index + 1),
-      entry_kind: entryKind, scope_kind: 'ROOT', content: inlineContent(SOURCE_FIDELITY_TEXT),
+      entry_kind: entryKind, scope_kind: 'ROOT', content: inlinePrompt(SOURCE_FIDELITY_TEXT),
     }));
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
       status: 200, headers: { 'Content-Type': 'application/json' },

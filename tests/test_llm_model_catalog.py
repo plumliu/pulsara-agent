@@ -34,6 +34,7 @@ def catalog_fixture() -> dict[str, object]:
                         {"type": "effort", "values": ["low", "high", "max"]}
                     ],
                     "tool_call": True,
+                    "modalities": {"input": ["text"]},
                     "limit": {"context": 1_000_000, "output": 131_072},
                 },
                 "glm-small": {
@@ -41,6 +42,7 @@ def catalog_fixture() -> dict[str, object]:
                     "name": "Small",
                     "reasoning": False,
                     "tool_call": True,
+                    "modalities": {"input": ["text"]},
                     "limit": {"context": 255_999, "output": 8_192},
                 },
             },
@@ -61,6 +63,7 @@ def catalog_fixture() -> dict[str, object]:
                         {"type": "budget_tokens", "min": 1024, "max": 4096},
                     ],
                     "tool_call": True,
+                    "modalities": {"input": ["text"]},
                     "provider": {"shape": "responses"},
                     "limit": {
                         "context": 1_048_576,
@@ -71,14 +74,17 @@ def catalog_fixture() -> dict[str, object]:
                 "anthropic/claude-sonnet": {
                     "reasoning": True,
                     "reasoning_options": [],
+                    "modalities": {"input": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 },
                 "google/gemini-pro": {
                     "reasoning": True,
+                    "modalities": {"input": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 },
                 "~~claude-kept": {
                     "reasoning": True,
+                    "modalities": {"input": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 },
                 "broken-options": {
@@ -88,6 +94,7 @@ def catalog_fixture() -> dict[str, object]:
                         {"type": "effort", "values": ["low", "low"]},
                     ],
                     "tool_call": "yes",
+                    "modalities": {"input": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 },
             },
@@ -100,6 +107,7 @@ def catalog_fixture() -> dict[str, object]:
                 "ordinary-model": {
                     "name": "Gemini display label is not a filter",
                     "reasoning": False,
+                    "modalities": {"input": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 }
             },
@@ -117,6 +125,7 @@ def catalog_fixture() -> dict[str, object]:
                         {"type": "effort", "values": ["low", "high", "max"]},
                     ],
                     "tool_call": True,
+                    "modalities": {"input": ["text"]},
                     "limit": {"context": 1_000_000, "output": 384_000},
                 }
             },
@@ -291,6 +300,74 @@ def test_catalog_client_distinguishes_invalid_fetch_payload_from_unavailability(
             await client.fetch()
 
     asyncio.run(exercise())
+
+
+def test_input_modalities_preserve_known_unknown_and_missing_facts() -> None:
+    fixture = catalog_fixture()
+    models = fixture["zhipuai"]["models"]  # type: ignore[index]
+    models["glm-5.3"]["modalities"] = {  # type: ignore[index]
+        "input": ["text", "image", "future-modality", "image"]
+    }
+    models["glm-small"].pop("modalities")  # type: ignore[index]
+    snapshot = parse_models_dev_catalog(fixture)
+    known = snapshot.entries[ModelCatalogEntryKey("zhipuai", "glm-5.3")]
+    missing = snapshot.entries[ModelCatalogEntryKey("zhipuai", "glm-small")]
+
+    assert known.input_modalities == (
+        "text",
+        "image",
+        "future-modality",
+        "image",
+    )
+    assert "catalog_input_modalities_invalid" not in {
+        item.code for item in known.diagnostics
+    }
+    assert missing.input_modalities is None
+    assert "catalog_input_modalities_missing" in {
+        item.code for item in missing.diagnostics
+    }
+
+
+@pytest.mark.parametrize(
+    "modalities",
+    (
+        ["text", "image"],
+        {"input": "text"},
+        {"input": ["text", 7]},
+        {"input": ["text", " image"]},
+    ),
+)
+def test_invalid_input_modality_shape_remains_unknown_with_local_diagnostic(
+    modalities: object,
+) -> None:
+    fixture = catalog_fixture()
+    model = fixture["zhipuai"]["models"]["glm-5.3"]  # type: ignore[index]
+    model["modalities"] = modalities  # type: ignore[index]
+    entry = parse_models_dev_catalog(fixture).entries[
+        ModelCatalogEntryKey("zhipuai", "glm-5.3")
+    ]
+
+    assert entry.input_modalities is None
+    assert "catalog_input_modalities_invalid" in {
+        item.code for item in entry.diagnostics
+    }
+
+
+def test_attachment_does_not_grant_or_remove_image_input_authority() -> None:
+    fixture = catalog_fixture()
+    models = fixture["zhipuai"]["models"]  # type: ignore[index]
+    models["glm-5.3"]["attachment"] = False  # type: ignore[index]
+    models["glm-5.3"]["modalities"] = {"input": ["text", "image"]}  # type: ignore[index]
+    models["glm-small"]["attachment"] = True  # type: ignore[index]
+    models["glm-small"]["modalities"] = {"input": ["text"]}  # type: ignore[index]
+    snapshot = parse_models_dev_catalog(fixture)
+
+    assert snapshot.entries[
+        ModelCatalogEntryKey("zhipuai", "glm-5.3")
+    ].input_modalities == ("text", "image")
+    assert snapshot.entries[
+        ModelCatalogEntryKey("zhipuai", "glm-small")
+    ].input_modalities == ("text",)
 
 
 catalog_fixture.__test__ = False

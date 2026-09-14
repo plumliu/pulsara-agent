@@ -13,7 +13,7 @@ import json
 import httpx
 import openai
 
-from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV1
+from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
 from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundary,
     ProcessCredentialBoundAsyncClient,
@@ -168,7 +168,7 @@ class OpenAICompatibleEmbeddingProvider:
 def _validate_embedding_inputs(texts: Sequence[str]) -> None:
     if not 1 <= len(texts) <= 10:
         raise EmbeddingServiceError("Embedding batch is outside 1..10 items.")
-    estimator = PulsaraHeuristicTokenEstimatorV1()
+    estimator = PulsaraHeuristicTokenEstimatorV2()
     token_ceilings = tuple(estimator.estimate_text(value) for value in texts)
     if any(value < 1 or value > 8_192 for value in token_ceilings):
         raise EmbeddingServiceError("Embedding item exceeds 8192 local token units.")

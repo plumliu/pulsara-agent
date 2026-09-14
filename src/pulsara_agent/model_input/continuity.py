@@ -11,7 +11,13 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import json
 
-from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.input import (
+    LLMMessage,
+    LLMTextPart,
+    MessageRole,
+    llm_content_identity_value,
+    llm_content_logical_bytes,
+)
 from pulsara_agent.llm.model_connections import ModelConnectionId
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
@@ -249,10 +255,14 @@ def encode_runtime_observation(
 
 
 def decode_runtime_observation(message: LLMMessage) -> ProviderRuntimeObservation:
-    if message.role is not MessageRole.USER or len(message.content) != 1:
+    if (
+        message.role is not MessageRole.USER
+        or len(message.content) != 1
+        or not isinstance(message.content[0], LLMTextPart)
+    ):
         raise ValueError("runtime observation must be one user-role JSON message")
     try:
-        value = json.loads(message.content[0])
+        value = json.loads(message.content[0].text)
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValueError("runtime observation JSON is invalid") from exc
     if not isinstance(value, dict) or set(value) != {"pulsara_runtime_observation"}:
@@ -304,7 +314,7 @@ class ProviderInputEpochResetReason(StrEnum):
 def _message_value(message: LLMMessage) -> object:
     return {
         "role": message.role.value,
-        "content": message.content,
+        "content": llm_content_identity_value(message.content),
         "thinking": message.thinking,
         "tool_calls": tuple(
             (item.id, item.name, item.arguments) for item in message.tool_calls
@@ -331,7 +341,7 @@ def provider_input_prefix_fingerprint(
     )
 
 
-def provider_input_logical_utf8_bytes(
+def provider_input_logical_bytes(
     *,
     system_prompt: str,
     tools: tuple[FrozenToolSpec, ...],
@@ -339,8 +349,9 @@ def provider_input_logical_utf8_bytes(
 ) -> int:
     values: list[str] = [system_prompt]
     values.extend(item.canonical_bytes.decode("utf-8") for item in tools)
+    content_bytes = 0
     for message in messages:
-        values.extend(message.content)
+        content_bytes += llm_content_logical_bytes(message.content)
         values.extend(message.thinking)
         for call in message.tool_calls:
             values.extend((call.id, call.name, call.arguments))
@@ -349,7 +360,7 @@ def provider_input_logical_utf8_bytes(
             for value in (message.tool_call_id, message.name, message.arguments)
             if value is not None
         )
-    return sum(len(item.encode("utf-8")) for item in values)
+    return content_bytes + sum(len(item.encode("utf-8")) for item in values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,7 +378,7 @@ class FrozenProviderInputEpochView:
     canonical_frontier: ProcessLocalCanonicalFrontier
     source_heads: tuple[ProcessLocalSourceHead, ...]
     final_estimate: TokenEstimate
-    logical_utf8_bytes: int
+    logical_bytes: int
     semantic_prefix_fingerprint: str
     assistant_replay_fragments: tuple[ProviderAssistantReplayFragment, ...] = field(
         default=(), repr=False
@@ -409,11 +420,11 @@ class FrozenProviderInputEpochView:
             )
         ):
             raise ValueError("installed native tool proof drifted")
-        if self.logical_utf8_bytes != provider_input_logical_utf8_bytes(
+        if self.logical_bytes != provider_input_logical_bytes(
             system_prompt=self.system_prompt, tools=self.tools, messages=self.messages
         ):
             raise ValueError("provider-input epoch logical size mismatch")
-        if self.logical_utf8_bytes > MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES:
+        if self.logical_bytes > MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES:
             raise ValueError("provider-input epoch exceeds its hard bound")
         expected = provider_input_prefix_fingerprint(
             system_prompt=self.system_prompt, tools=self.tools, messages=self.messages
@@ -637,7 +648,7 @@ __all__ = [
     "SourceObservationPresence",
     "decode_runtime_observation",
     "encode_runtime_observation",
-    "provider_input_logical_utf8_bytes",
+    "provider_input_logical_bytes",
     "provider_input_dispatch_anchor_value",
     "provider_input_prefix_fingerprint",
 ]

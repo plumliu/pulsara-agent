@@ -17,7 +17,31 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
     build_accepted_canonical_tool_result_settlement,
 )
-from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.conversation_kernel.steer import (
+    PreparedActiveRootInputAdmission,
+    PreparedActiveRootInputCandidate,
+    PreparedRootProviderInputAdmission,
+    PreparedRootProviderInputCandidate,
+)
+from pulsara_agent.llm.input import LLMTextPart
+from pulsara_agent.llm.model_connections import model_call_binding_from_dict
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    ContextBindingBaseKind,
+    FrozenPlanHandoffCompileFact,
+    FrozenPlanWorkflowCompileFact,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
+    ModelInputScopeKind,
+    PreparedProviderInputCut,
+    plan_handoff_compile_fact_fingerprint,
+    plan_workflow_compile_fact_fingerprint,
+)
+from pulsara_agent.primitives.plan_workflow import (
+    PlanWorkflowEnteredBy,
+    project_plan_continuation_for_provider,
+)
+from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
@@ -65,6 +89,184 @@ def _plan_question_response(
     return {"answer_kind": "FREE_TEXT", "answer": answer.free_text}
 
 
+def _plan_question_result_values(
+    *,
+    interaction: Mapping[str, object],
+    answer: PlanQuestionAnswer,
+) -> tuple[FrozenJsonObjectFact, dict[str, object], InlineContent]:
+    frozen = freeze_json(dict(interaction["tool_arguments"]))
+    if not isinstance(frozen, FrozenJsonObjectFact):
+        raise ConversationKernelConflict("Plan question arguments are invalid")
+    content = extract_plan_question(
+        interaction_id=str(interaction["id"]),
+        binding=PlanInteractionBinding(
+            str(interaction["request_contract_id"]),
+            str(interaction["request_contract_version"]),
+            str(interaction["request_contract_fingerprint"]),
+        ),
+        arguments=frozen,
+    )
+    response = _plan_question_response(content=content, answer=answer)
+    return (
+        frozen,
+        response,
+        _plan_inline(
+            {
+                "status": "success",
+                "plan_control": "QUESTION_ANSWERED",
+                "interaction_id": str(interaction["id"]),
+                **response,
+            }
+        ),
+    )
+
+
+def _freeze_active_plan_workflow_fact(
+    *,
+    row: Mapping[str, object],
+    permission: FrozenRunPermissionSnapshot,
+    turn_id: str,
+    workflow_revision: int,
+) -> FrozenPlanWorkflowCompileFact:
+    values = {
+        "session_id": str(row["session_id"]),
+        "workspace_id": str(row["workspace_id"]),
+        "turn_id": turn_id,
+        "permission_snapshot_id": permission.snapshot_id,
+        "permission_snapshot_fingerprint": permission.snapshot_fingerprint,
+        "workflow_id": str(row["plan_workflow_id"]),
+        "workflow_ordinal": int(row["workflow_ordinal"]),
+        "current_workflow_revision": workflow_revision,
+        "workflow_status": PlanWorkflowStatus.ACTIVE,
+        "entered_by": PlanWorkflowEnteredBy(str(row["entered_by"])),
+        "resume_permission_mode": PermissionMode(str(row["resume_permission_mode"])),
+        "permission_contract_id": str(row["permission_contract_id"]),
+        "permission_contract_fingerprint": str(
+            row["permission_contract_fingerprint"]
+        ),
+    }
+    provisional = FrozenPlanWorkflowCompileFact.__new__(
+        FrozenPlanWorkflowCompileFact
+    )
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    return FrozenPlanWorkflowCompileFact(
+        **values,
+        fact_fingerprint=plan_workflow_compile_fact_fingerprint(provisional),
+    )
+
+
+def _freeze_plan_handoff_fact(
+    *,
+    row: Mapping[str, object],
+    target_turn_id: str,
+    carrier_entry_id: str,
+    carrier_entry_sequence: int,
+    workflow_revision: int,
+    interaction_id: str,
+    handoff_kind: PlanHandoffKind,
+    workflow_status: PlanWorkflowStatus,
+) -> FrozenPlanHandoffCompileFact:
+    transition_digest = context_fingerprint(
+        "pulsara:plan-transition:v1",
+        {
+            "workflow_id": str(row["plan_workflow_id"]),
+            "workflow_revision": workflow_revision,
+            "interaction_id": interaction_id,
+            "handoff_kind": handoff_kind.value,
+            "workflow_status": workflow_status.value,
+        },
+    )
+    values = {
+        "session_id": str(row["session_id"]),
+        "workspace_id": str(row["workspace_id"]),
+        "target_turn_id": target_turn_id,
+        "carrier_entry_id": carrier_entry_id,
+        "carrier_entry_sequence": carrier_entry_sequence,
+        "workflow_id": str(row["plan_workflow_id"]),
+        "workflow_ordinal": int(row["workflow_ordinal"]),
+        "workflow_revision_at_transition": workflow_revision,
+        "interaction_id": interaction_id,
+        "handoff_kind": handoff_kind,
+        "workflow_status": workflow_status,
+        "resume_permission_mode": PermissionMode(str(row["resume_permission_mode"])),
+        "transition_semantic_digest": transition_digest,
+    }
+    provisional = FrozenPlanHandoffCompileFact.__new__(FrozenPlanHandoffCompileFact)
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    return FrozenPlanHandoffCompileFact(
+        **values,
+        fact_fingerprint=plan_handoff_compile_fact_fingerprint(provisional),
+    )
+
+
+def _plan_review_permission(
+    *,
+    row: Mapping[str, object],
+    decision: PlanDraftDecision,
+    continuation_turn_id: str,
+    workflow_revision: int,
+) -> FrozenRunPermissionSnapshot:
+    requested = PermissionMode(str(row["resume_permission_mode"]))
+    if decision is PlanDraftDecision.REVISE:
+        return build_run_permission_snapshot(
+            snapshot_id=_stable_identity(
+                "permission-snapshot", continuation_turn_id
+            ),
+            requested_mode=requested,
+            effective_mode=PermissionMode.READ_ONLY,
+            admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
+            overlay=RunPermissionOverlay.PLAN_READ_ONLY,
+            plan_context_ordinal_at_admission=int(row["workflow_ordinal"]),
+            plan_workflow_id=str(row["plan_workflow_id"]),
+            plan_workflow_revision_at_admission=workflow_revision,
+            inherited_from_turn_id=str(row["origin_turn_id"]),
+        )
+    if decision is not PlanDraftDecision.APPROVE:
+        raise ValueError("cancelled Plan review has no continuation permission")
+    return build_run_permission_snapshot(
+        snapshot_id=_stable_identity("permission-snapshot", continuation_turn_id),
+        requested_mode=requested,
+        effective_mode=requested,
+        admission_source=RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
+        overlay=RunPermissionOverlay.NONE,
+        plan_context_ordinal_at_admission=int(row["workflow_ordinal"]),
+        inherited_from_turn_id=str(row["origin_turn_id"]),
+    )
+
+
+def _plan_review_body(
+    *,
+    row: Mapping[str, object],
+    decision: PlanDraftDecision,
+    normalized_feedback: str | None,
+    extracted: ExtractedPlanDraft,
+) -> InlineContent:
+    handoff_kind = (
+        PlanHandoffKind.APPROVED_PLAN
+        if decision is PlanDraftDecision.APPROVE
+        else PlanHandoffKind.REVISION_REQUESTED
+    )
+    payload: dict[str, object] = {
+        "transition": handoff_kind.value,
+        "workflow_id": str(row["plan_workflow_id"]),
+        "interaction_id": str(row["id"]),
+    }
+    if normalized_feedback is not None:
+        payload["feedback"] = normalized_feedback
+    if decision is PlanDraftDecision.APPROVE:
+        payload["approved_plan"] = {
+            "plan_utf8_size": extracted.identity.plan_utf8_size,
+            "plan_utf8_digest": extracted.identity.plan_utf8_digest,
+            "assistant_entry_id": extracted.identity.assistant_entry_id,
+            "tool_call_id": extracted.identity.tool_call_id,
+        }
+    return _plan_inline(payload)
+
+
 def _plan_tool_result_settlement(
     *,
     candidate: PreparedPlanToolBatch,
@@ -102,18 +304,347 @@ def _plan_tool_result_settlement(
     )
 
 
+def _applied_plan_tool_result_values(
+    candidate: PreparedPlanToolBatch,
+    call_ordinal: int,
+) -> tuple[dict[str, object], str, str, str | None, str | None]:
+    """Return the canonical result representation shared by prepare and write."""
+
+    selected = call_ordinal == candidate.selected_call_ordinal
+    if selected:
+        if candidate.control_kind is PlanToolControlKind.ENTER:
+            return (
+                {
+                    "status": "success",
+                    "plan_control": (
+                        "PLAN_ALREADY_ACTIVE"
+                        if candidate.idempotent_existing
+                        else "ENTERED_PLAN"
+                    ),
+                    "workflow_id": candidate.workflow_id,
+                },
+                "SUCCESS",
+                "PLAN_CONTROL",
+                candidate.workflow_id,
+                None,
+            )
+        if candidate.control_kind is PlanToolControlKind.DRAFT:
+            return (
+                {
+                    "status": "success",
+                    "plan_control": "DRAFT_SUBMITTED_FOR_REVIEW",
+                    "workflow_id": candidate.workflow_id,
+                    "interaction_id": candidate.interaction_id,
+                },
+                "SUCCESS",
+                "PLAN_CONTROL",
+                None,
+                candidate.interaction_id,
+            )
+        raise ValueError("open Plan question has no selected result")
+    return (
+        {
+            "status": "cancelled_before_dispatch",
+            "reason": "plan_workflow_batch_barrier",
+        },
+        "CANCELLED_BEFORE_DISPATCH",
+        "POLICY_NO_ATTEMPT",
+        None,
+        None,
+    )
+
+
+def _fresh_entered_plan_compile_facts(
+    *,
+    candidate: PreparedPlanToolBatch,
+    permission: FrozenRunPermissionSnapshot,
+    workflow_ordinal: int,
+    continuation_entry_sequence: int,
+) -> tuple[FrozenPlanWorkflowCompileFact, FrozenPlanHandoffCompileFact]:
+    assert candidate.continuation_turn_id is not None
+    assert candidate.continuation_entry_id is not None
+    workflow_values = {
+        "session_id": candidate.session_id,
+        "workspace_id": candidate.workspace_id,
+        "turn_id": candidate.continuation_turn_id,
+        "permission_snapshot_id": permission.snapshot_id,
+        "permission_snapshot_fingerprint": permission.snapshot_fingerprint,
+        "workflow_id": candidate.workflow_id,
+        "workflow_ordinal": workflow_ordinal,
+        "current_workflow_revision": 1,
+        "workflow_status": PlanWorkflowStatus.ACTIVE,
+        "entered_by": PlanWorkflowEnteredBy.AGENT,
+        "resume_permission_mode": candidate.permission_snapshot.requested_mode,
+        "permission_contract_id": candidate.permission_snapshot.permission_contract_id,
+        "permission_contract_fingerprint": (
+            candidate.permission_snapshot.permission_contract_fingerprint
+        ),
+    }
+    provisional_workflow = FrozenPlanWorkflowCompileFact.__new__(
+        FrozenPlanWorkflowCompileFact
+    )
+    for name, value in workflow_values.items():
+        object.__setattr__(provisional_workflow, name, value)
+    object.__setattr__(provisional_workflow, "fact_fingerprint", "")
+    workflow = FrozenPlanWorkflowCompileFact(
+        **workflow_values,
+        fact_fingerprint=plan_workflow_compile_fact_fingerprint(
+            provisional_workflow
+        ),
+    )
+    transition_digest = context_fingerprint(
+        "pulsara:plan-transition:v1",
+        {
+            "workflow_id": candidate.workflow_id,
+            "workflow_revision": 1,
+            "interaction_id": None,
+            "handoff_kind": PlanHandoffKind.ENTERED_PLAN.value,
+            "workflow_status": PlanWorkflowStatus.ACTIVE.value,
+        },
+    )
+    handoff_values = {
+        "session_id": candidate.session_id,
+        "workspace_id": candidate.workspace_id,
+        "target_turn_id": candidate.continuation_turn_id,
+        "carrier_entry_id": candidate.continuation_entry_id,
+        "carrier_entry_sequence": continuation_entry_sequence,
+        "workflow_id": candidate.workflow_id,
+        "workflow_ordinal": workflow_ordinal,
+        "workflow_revision_at_transition": 1,
+        "interaction_id": None,
+        "handoff_kind": PlanHandoffKind.ENTERED_PLAN,
+        "workflow_status": PlanWorkflowStatus.ACTIVE,
+        "resume_permission_mode": candidate.permission_snapshot.requested_mode,
+        "transition_semantic_digest": transition_digest,
+    }
+    provisional_handoff = FrozenPlanHandoffCompileFact.__new__(
+        FrozenPlanHandoffCompileFact
+    )
+    for name, value in handoff_values.items():
+        object.__setattr__(provisional_handoff, name, value)
+    object.__setattr__(provisional_handoff, "fact_fingerprint", "")
+    handoff = FrozenPlanHandoffCompileFact(
+        **handoff_values,
+        fact_fingerprint=plan_handoff_compile_fact_fingerprint(provisional_handoff),
+    )
+    return workflow, handoff
+
+
 class _PlanOperations:
+    def prepare_fresh_plan_continuation_provider_input_candidate(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidate: PreparedPlanToolBatch,
+        deadline_monotonic: float,
+    ) -> PreparedRootProviderInputCandidate:
+        """Freeze the result-plus-continuation ROOT cut before Plan publication."""
+
+        if (
+            candidate.session_id != guard.session_id
+            or candidate.control_kind is not PlanToolControlKind.ENTER
+            or candidate.idempotent_existing
+            or candidate.selected_disposition is not PlanToolBatchDisposition.APPLY
+            or candidate.continuation_turn_id is None
+            or candidate.continuation_entry_id is None
+            or candidate.continuation_context_binding_revision_id is None
+        ):
+            raise ValueError("fresh Plan continuation candidate is invalid")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            active = connection.execute(
+                "SELECT 1 FROM pulsara_v3.plan_workflows "
+                "WHERE session_id=%s AND status='ACTIVE'",
+                (guard.session_id,),
+            ).fetchone()
+            if active is not None:
+                raise ConversationKernelConflict(
+                    "Plan enter candidate lost the no-active-workflow cut"
+                )
+            workflow_ordinal = int(
+                connection.execute(
+                    "SELECT coalesce(max(workflow_ordinal), 0) + 1 AS next "
+                    "FROM pulsara_v3.plan_workflows WHERE session_id=%s",
+                    (guard.session_id,),
+                ).fetchone()["next"]
+            )
+            permission = build_run_permission_snapshot(
+                snapshot_id=_stable_identity(
+                    "permission-snapshot", candidate.continuation_turn_id
+                ),
+                requested_mode=candidate.permission_snapshot.requested_mode,
+                effective_mode=PermissionMode.READ_ONLY,
+                admission_source=(
+                    RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION
+                ),
+                overlay=RunPermissionOverlay.PLAN_READ_ONLY,
+                plan_context_ordinal_at_admission=workflow_ordinal,
+                plan_workflow_id=candidate.workflow_id,
+                plan_workflow_revision_at_admission=1,
+                inherited_from_turn_id=candidate.origin_turn_id,
+            )
+            session = connection.execute(
+                "SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id=%s",
+                (guard.session_id,),
+            ).fetchone()
+            if session is None:
+                raise ConversationKernelConflict("Plan continuation session is absent")
+            return self._build_fresh_plan_continuation_provider_candidate(
+                connection,
+                candidate=candidate,
+                permission=permission,
+                workflow_ordinal=workflow_ordinal,
+                expected_latest_entry_sequence=int(session["latest_entry_sequence"]),
+            )
+
+    def _build_fresh_plan_continuation_provider_candidate(
+        self,
+        connection: Connection,
+        *,
+        candidate: PreparedPlanToolBatch,
+        permission: FrozenRunPermissionSnapshot,
+        workflow_ordinal: int,
+        expected_latest_entry_sequence: int,
+    ) -> PreparedRootProviderInputCandidate:
+        assert candidate.continuation_turn_id is not None
+        assert candidate.continuation_entry_id is not None
+        assert candidate.continuation_context_binding_revision_id is not None
+        origin = connection.execute(
+            "SELECT model_call_binding FROM pulsara_v3.turns "
+            "WHERE session_id=%s AND id=%s",
+            (candidate.session_id, candidate.origin_turn_id),
+        ).fetchone()
+        binding = (
+            None
+            if origin is None
+            else model_call_binding_from_dict(origin["model_call_binding"])
+        )
+        if binding is None:
+            raise ConversationKernelConflict(
+                "Plan continuation origin lacks a model binding"
+            )
+        items: list[FrozenProviderInputItem] = []
+        charges: list[int] = []
+        sequence = expected_latest_entry_sequence
+        for ordinal, call in enumerate(candidate.calls):
+            if call.result_entry_id is None:
+                continue
+            payload, state, origin_kind, _, _ = _applied_plan_tool_result_values(
+                candidate, ordinal
+            )
+            sequence += 1
+            settlement = _plan_tool_result_settlement(
+                candidate=candidate,
+                call_ordinal=ordinal,
+                payload=payload,
+                result_state=state,
+                result_origin_kind=origin_kind,
+                accepted_entry_sequence=sequence,
+            )
+            body = settlement.public_projection.canonical_body
+            items.append(
+                FrozenProviderInputItem(
+                    item_kind=FrozenProviderInputItemKind.TOOL_RESULT,
+                    source_entry_id=settlement.result_entry_id,
+                    source_entry_sequence=sequence,
+                    source_turn_id=candidate.origin_turn_id,
+                    content=(LLMTextPart(body),),
+                    tool_call_id=settlement.tool_call_id,
+                    tool_request_entry_id=settlement.assistant_entry_id,
+                    tool_result_context=settlement.public_projection.metadata,
+                    tool_result_body_text=body,
+                    tool_result_delivery=settlement.public_projection.delivery,
+                )
+            )
+            charges.append(len(body.encode("utf-8")))
+        sequence += 1
+        storage = _plan_inline(
+            {
+                "transition": PlanHandoffKind.ENTERED_PLAN.value,
+                "workflow_id": candidate.workflow_id,
+            }
+        )
+        provider_text = project_plan_continuation_for_provider(
+            storage_text=storage.canonical_bytes.decode("utf-8"),
+            transition=PlanHandoffKind.ENTERED_PLAN.value,
+            workflow_id=candidate.workflow_id,
+            interaction_id=None,
+        )
+        items.append(
+            FrozenProviderInputItem(
+                item_kind=FrozenProviderInputItemKind.PLAN_CONTINUATION,
+                source_entry_id=candidate.continuation_entry_id,
+                source_entry_sequence=sequence,
+                source_turn_id=candidate.continuation_turn_id,
+                content=(LLMTextPart(provider_text),),
+                input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
+            )
+        )
+        charges.append(len(provider_text.encode("utf-8")))
+        workflow_fact, handoff_fact = _fresh_entered_plan_compile_facts(
+            candidate=candidate,
+            permission=permission,
+            workflow_ordinal=workflow_ordinal,
+            continuation_entry_sequence=sequence,
+        )
+        base_kind, snapshot_id, source_through = self._initial_context_binding_values(
+            connection,
+            session_id=candidate.session_id,
+            turn_id=candidate.continuation_turn_id,
+            initial_entry_sequence=sequence,
+            scope_kind=ConversationScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        return PreparedRootProviderInputCandidate(
+            session_id=candidate.session_id,
+            workspace_id=candidate.workspace_id,
+            exact_turn_id=candidate.continuation_turn_id,
+            exact_initial_entry_id=candidate.continuation_entry_id,
+            exact_context_binding_revision_id=(
+                candidate.continuation_context_binding_revision_id
+            ),
+            unpublished_items=tuple(items),
+            unpublished_item_canonical_expanded_bytes=tuple(charges),
+            permission_snapshot=permission,
+            model_call_binding=binding,
+            expected_latest_entry_sequence=expected_latest_entry_sequence,
+            context_base_kind=ContextBindingBaseKind(base_kind),
+            context_snapshot_id=snapshot_id,
+            source_through_sequence=source_through,
+            pending_plan_handoff_workflow_id=candidate.workflow_id,
+            pending_plan_handoff_interaction_id=None,
+            pending_plan_handoff_kind=PlanHandoffKind.ENTERED_PLAN.value,
+            unpublished_plan_workflow_fact=workflow_fact,
+            unpublished_plan_handoff_fact=handoff_fact,
+            unpublished_approved_plan_fact=None,
+        )
+
     def accept_plan_tool_batch(
         self,
         guard: HostWriterGuard,
         *,
         candidate: PreparedPlanToolBatch,
+        continuation_provider_input_admission: (
+            PreparedRootProviderInputAdmission | None
+        ) = None,
         deadline_monotonic: float,
     ) -> AcceptedPlanToolBatch:
         """Accept one Plan control and cancel every sibling atomically."""
 
         if candidate.session_id != guard.session_id:
             raise ValueError("prepared Plan batch belongs to another session")
+        fresh_continuation = (
+            candidate.control_kind is PlanToolControlKind.ENTER
+            and not candidate.idempotent_existing
+            and candidate.selected_disposition is PlanToolBatchDisposition.APPLY
+        )
+        if fresh_continuation != (continuation_provider_input_admission is not None):
+            raise ValueError("Plan continuation provider admission union is invalid")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -122,6 +653,15 @@ class _PlanOperations:
             )
             if winner is not None:
                 return winner
+            session_head = connection.execute(
+                "SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id=%s",
+                (guard.session_id,),
+            ).fetchone()
+            if session_head is None:
+                raise ConversationKernelConflict("Plan session is absent")
+            expected_latest_entry_sequence = int(
+                session_head["latest_entry_sequence"]
+            )
             turn = connection.execute(
                 """
                 SELECT * FROM pulsara_v3.turns
@@ -219,6 +759,43 @@ class _PlanOperations:
                     workflow_revision=workflow_revision,
                 )
 
+            continuation_permission: FrozenRunPermissionSnapshot | None = None
+            if fresh_continuation:
+                assert continuation_provider_input_admission is not None
+                assert candidate.continuation_turn_id is not None
+                continuation_permission = self._freeze_root_permission_snapshot(
+                    connection,
+                    session_id=guard.session_id,
+                    snapshot_id=_stable_identity(
+                        "permission-snapshot", candidate.continuation_turn_id
+                    ),
+                    requested_mode=candidate.permission_snapshot.requested_mode,
+                    admission_source=(
+                        RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION
+                    ),
+                    inherited_from_turn_id=candidate.origin_turn_id,
+                    force_plan_workflow_id=candidate.workflow_id,
+                    force_plan_read_only=True,
+                )
+                actual_provider_candidate = (
+                    self._build_fresh_plan_continuation_provider_candidate(
+                        connection,
+                        candidate=candidate,
+                        permission=continuation_permission,
+                        workflow_ordinal=workflow_ordinal,
+                        expected_latest_entry_sequence=(
+                            expected_latest_entry_sequence
+                        ),
+                    )
+                )
+                if (
+                    continuation_provider_input_admission.candidate
+                    != actual_provider_candidate
+                ):
+                    raise ConversationKernelConflict(
+                        "Plan continuation provider admission drifted"
+                    )
+
             event_drafts: list[CommittedEventDraft] = []
             settlements: list[AcceptedCanonicalToolResultSettlement] = []
             selected_result_entry_id: str | None = None
@@ -230,38 +807,13 @@ class _PlanOperations:
                 selected = ordinal == candidate.selected_call_ordinal
                 if selected:
                     selected_result_entry_id = call.result_entry_id
-                    if candidate.control_kind is PlanToolControlKind.ENTER:
-                        payload = {
-                            "status": "success",
-                            "plan_control": (
-                                "PLAN_ALREADY_ACTIVE"
-                                if candidate.idempotent_existing
-                                else "ENTERED_PLAN"
-                            ),
-                            "workflow_id": candidate.workflow_id,
-                        }
-                        control_workflow_id = candidate.workflow_id
-                        control_interaction_id = None
-                    else:
-                        payload = {
-                            "status": "success",
-                            "plan_control": "DRAFT_SUBMITTED_FOR_REVIEW",
-                            "workflow_id": candidate.workflow_id,
-                            "interaction_id": candidate.interaction_id,
-                        }
-                        control_workflow_id = None
-                        control_interaction_id = candidate.interaction_id
-                    result_state = "SUCCESS"
-                    origin_kind = "PLAN_CONTROL"
-                else:
-                    payload = {
-                        "status": "cancelled_before_dispatch",
-                        "reason": "plan_workflow_batch_barrier",
-                    }
-                    control_workflow_id = None
-                    control_interaction_id = None
-                    result_state = "CANCELLED_BEFORE_DISPATCH"
-                    origin_kind = "POLICY_NO_ATTEMPT"
+                (
+                    payload,
+                    result_state,
+                    origin_kind,
+                    control_workflow_id,
+                    control_interaction_id,
+                ) = _applied_plan_tool_result_values(candidate, ordinal)
                 entry_sequence = self._allocate_entry_sequence(
                     connection, guard.session_id
                 )
@@ -391,24 +943,14 @@ class _PlanOperations:
                 continuation_sequence = self._allocate_entry_sequence(
                     connection, guard.session_id
                 )
-                permission = self._freeze_root_permission_snapshot(
-                    connection,
-                    session_id=guard.session_id,
-                    snapshot_id=_stable_identity(
-                        "permission-snapshot", candidate.continuation_turn_id
-                    ),
-                    requested_mode=candidate.permission_snapshot.requested_mode,
-                    admission_source=(
-                        RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION
-                    ),
-                    inherited_from_turn_id=candidate.origin_turn_id,
-                    force_plan_workflow_id=candidate.workflow_id,
-                    force_plan_read_only=True,
-                )
+                if continuation_permission is None:
+                    raise ConversationKernelConflict(
+                        "Plan continuation permission was not admitted"
+                    )
                 self._insert_plan_continuation_turn(
                     connection,
                     candidate=candidate,
-                    permission=permission,
+                    permission=continuation_permission,
                     entry_sequence=continuation_sequence,
                     handoff_kind=PlanHandoffKind.ENTERED_PLAN,
                     interaction_id=None,
@@ -590,6 +1132,232 @@ class _PlanOperations:
                 connection, candidate=candidate
             )
 
+    def prepare_plan_question_resolution_provider_input_candidate(
+        self,
+        guard: HostWriterGuard,
+        *,
+        workflow_id: str,
+        expected_workflow_revision: int,
+        interaction_id: str,
+        answer: PlanQuestionAnswer,
+        result_id: str,
+        result_entry_id: str,
+        occurred_at: datetime,
+        deadline_monotonic: float,
+    ) -> PreparedActiveRootInputCandidate:
+        """Freeze the unanswered Plan result before its canonical publication."""
+
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            interaction = self._plan_question_resolution_source_row(
+                connection,
+                session_id=guard.session_id,
+                interaction_id=interaction_id,
+                lock=False,
+            )
+            self._require_open_plan_question_resolution_source(
+                interaction,
+                workflow_id=workflow_id,
+                expected_workflow_revision=expected_workflow_revision,
+            )
+            return self._build_plan_question_resolution_provider_candidate(
+                connection,
+                guard,
+                interaction=interaction,
+                answer=answer,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+                occurred_at=occurred_at,
+                lock=False,
+            )
+
+    @staticmethod
+    def _plan_question_resolution_source_row(
+        connection: Connection,
+        *,
+        session_id: str,
+        interaction_id: str,
+        lock: bool,
+    ) -> Mapping[str, object] | None:
+        lock_clause = "FOR UPDATE OF w, i" if lock else ""
+        return connection.execute(
+            f"""
+            SELECT i.*, w.status AS workflow_status,
+                   w.workflow_revision, w.workflow_ordinal,
+                   w.resume_permission_mode, w.entered_by,
+                   w.permission_contract_id,
+                   w.permission_contract_fingerprint,
+                   b.tool_arguments, t.permission_snapshot_fingerprint,
+                   (
+                     SELECT COUNT(*) - 1
+                     FROM pulsara_v3.assistant_message_blocks AS prior
+                     WHERE prior.session_id = b.session_id
+                       AND prior.assistant_entry_id = b.assistant_entry_id
+                       AND prior.block_kind = 'TOOL_CALL'
+                       AND (prior.block_ordinal, prior.id)
+                           <= (b.block_ordinal, b.id)
+                   ) AS selected_call_ordinal
+            FROM pulsara_v3.plan_interactions AS i
+            JOIN pulsara_v3.plan_workflows AS w
+              ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
+            JOIN pulsara_v3.assistant_message_blocks AS b
+              ON b.session_id = i.session_id
+             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.tool_call_id = i.tool_call_id
+            JOIN pulsara_v3.turns AS t
+              ON t.session_id = i.session_id AND t.id = i.origin_turn_id
+            WHERE i.session_id = %s AND i.id = %s
+            {lock_clause}
+            """,
+            (session_id, interaction_id),
+        ).fetchone()
+
+    @staticmethod
+    def _require_open_plan_question_resolution_source(
+        interaction: Mapping[str, object] | None,
+        *,
+        workflow_id: str,
+        expected_workflow_revision: int,
+    ) -> None:
+        if (
+            interaction is None
+            or str(interaction["plan_workflow_id"]) != workflow_id
+            or int(interaction["workflow_revision"])
+            != expected_workflow_revision
+            or str(interaction["kind"]) != PlanInteractionKind.QUESTION.value
+            or str(interaction["status"]) != "OPEN"
+            or str(interaction["workflow_status"])
+            != PlanWorkflowStatus.ACTIVE.value
+        ):
+            raise ConversationKernelConflict("Plan question is not open")
+
+    def _build_plan_question_resolution_provider_candidate(
+        self,
+        connection: Connection,
+        guard: HostWriterGuard,
+        *,
+        interaction: Mapping[str, object],
+        answer: PlanQuestionAnswer,
+        result_id: str,
+        result_entry_id: str,
+        occurred_at: datetime,
+        lock: bool,
+    ) -> PreparedActiveRootInputCandidate:
+        frozen, _response, result_content = _plan_question_result_values(
+            interaction=interaction,
+            answer=answer,
+        )
+        lock_clause = "FOR UPDATE OF t" if lock else ""
+        turn = connection.execute(
+            f"""
+            SELECT t.*, s.latest_entry_sequence,
+                   EXISTS (
+                       SELECT 1 FROM pulsara_v3.prompt_queue_items AS q
+                       WHERE q.session_id = t.session_id
+                         AND q.target_turn_id = t.id
+                         AND q.status = 'PENDING'
+                         AND q.delivery_mode = 'STEER_ACTIVE_TURN'
+                   ) AS has_pending_steer
+            FROM pulsara_v3.turns AS t
+            JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
+            WHERE t.session_id = %s AND t.id = %s AND t.status = 'RUNNING'
+            {lock_clause}
+            """,
+            (guard.session_id, str(interaction["origin_turn_id"])),
+        ).fetchone()
+        if (
+            turn is None
+            or str(turn["conversation_scope_kind"])
+            != ConversationScopeKind.ROOT.value
+            or turn["scope_subagent_task_id"] is not None
+            or str(turn["workspace_id"]) != str(interaction["workspace_id"])
+            or bool(turn["has_pending_steer"])
+        ):
+            raise ConversationKernelConflict(
+                "Plan question result is not at its exact ROOT boundary"
+            )
+        permission = self._permission_from_row(turn)
+        if (
+            permission.snapshot_fingerprint
+            != str(interaction["permission_snapshot_fingerprint"])
+        ):
+            raise ConversationKernelConflict(
+                "Plan question permission snapshot changed"
+            )
+        latest_sequence = int(turn["latest_entry_sequence"])
+        accepted_assistant_count = int(
+            connection.execute(
+                """
+                SELECT count(*) AS total
+                FROM pulsara_v3.transcript_entries
+                WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND turn_id = %s
+                  AND entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
+                """,
+                (guard.session_id, str(interaction["origin_turn_id"])),
+            ).fetchone()["total"]
+        )
+        accepted_settlement = build_accepted_canonical_tool_result_settlement(
+            session_id=guard.session_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            turn_id=str(interaction["origin_turn_id"]),
+            assistant_entry_id=str(interaction["assistant_entry_id"]),
+            call_ordinal=int(interaction["selected_call_ordinal"]),
+            tool_name="ask_plan_question",
+            tool_call_id=str(interaction["tool_call_id"]),
+            public_arguments=frozen,
+            result_id=result_id,
+            result_entry_id=result_entry_id,
+            accepted_entry_sequence=latest_sequence + 1,
+            result_state="SUCCESS",
+            result_origin_kind="PLAN_CONTROL",
+            canonical_body=result_content.canonical_bytes.decode("utf-8"),
+            observed_at=occurred_at,
+            observation_origin=ToolObservationOrigin.PLAN_CONTROL,
+        )
+        body = accepted_settlement.public_projection.canonical_body
+        revision = int(interaction["workflow_revision"]) + 1
+        return PreparedActiveRootInputCandidate(
+            workspace_id=str(interaction["workspace_id"]),
+            expected_provider_input_cut=PreparedProviderInputCut(
+                session_id=guard.session_id,
+                turn_id=str(interaction["origin_turn_id"]),
+                context_binding_revision_id=str(
+                    turn["current_context_binding_revision_id"]
+                ),
+                provider_input_through_sequence=latest_sequence,
+            ),
+            next_model_call_index=accepted_assistant_count + 1,
+            unpublished_items=(
+                FrozenProviderInputItem(
+                    item_kind=FrozenProviderInputItemKind.TOOL_RESULT,
+                    source_entry_id=result_entry_id,
+                    source_entry_sequence=latest_sequence + 1,
+                    source_turn_id=str(interaction["origin_turn_id"]),
+                    content=(LLMTextPart(body),),
+                    tool_call_id=str(interaction["tool_call_id"]),
+                    tool_request_entry_id=str(interaction["assistant_entry_id"]),
+                    tool_result_context=accepted_settlement.public_projection.metadata,
+                    tool_result_body_text=body,
+                    tool_result_delivery=accepted_settlement.public_projection.delivery,
+                ),
+            ),
+            unpublished_item_canonical_expanded_bytes=(
+                len(result_content.canonical_bytes),
+            ),
+            prospective_plan_workflow_fact=_freeze_active_plan_workflow_fact(
+                row=interaction,
+                permission=permission,
+                turn_id=str(interaction["origin_turn_id"]),
+                workflow_revision=revision,
+            ),
+        )
+
     def resolve_plan_question(
         self,
         guard: HostWriterGuard,
@@ -601,6 +1369,7 @@ class _PlanOperations:
         answer: PlanQuestionAnswer,
         result_id: str,
         result_entry_id: str,
+        provider_input_admission: PreparedActiveRootInputAdmission,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
@@ -644,63 +1413,35 @@ class _PlanOperations:
             )
             if winner is not None:
                 return winner
-            interaction = connection.execute(
-                """
-                SELECT i.*, w.status AS workflow_status,
-                       w.workflow_revision, w.resume_permission_mode,
-                       b.tool_arguments, t.permission_snapshot_fingerprint,
-                       (
-                         SELECT COUNT(*) - 1
-                         FROM pulsara_v3.assistant_message_blocks AS prior
-                         WHERE prior.session_id = b.session_id
-                           AND prior.assistant_entry_id = b.assistant_entry_id
-                           AND prior.block_kind = 'TOOL_CALL'
-                           AND (prior.block_ordinal, prior.id)
-                               <= (b.block_ordinal, b.id)
-                       ) AS selected_call_ordinal
-                FROM pulsara_v3.plan_interactions AS i
-                JOIN pulsara_v3.plan_workflows AS w
-                  ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
-                JOIN pulsara_v3.assistant_message_blocks AS b
-                  ON b.session_id = i.session_id
-                 AND b.assistant_entry_id = i.assistant_entry_id
-                 AND b.tool_call_id = i.tool_call_id
-                JOIN pulsara_v3.turns AS t
-                  ON t.session_id = i.session_id AND t.id = i.origin_turn_id
-                WHERE i.session_id = %s AND i.id = %s
-                FOR UPDATE OF w, i
-                """,
-                (guard.session_id, interaction_id),
-            ).fetchone()
-            if (
-                interaction is None
-                or str(interaction["plan_workflow_id"]) != workflow_id
-                or int(interaction["workflow_revision"]) != expected_workflow_revision
-                or str(interaction["kind"]) != PlanInteractionKind.QUESTION.value
-                or str(interaction["status"]) != "OPEN"
-                or str(interaction["workflow_status"]) != "ACTIVE"
-            ):
-                raise ConversationKernelConflict("Plan question is not open")
-            frozen = freeze_json(dict(interaction["tool_arguments"]))
-            if not isinstance(frozen, FrozenJsonObjectFact):
-                raise ConversationKernelConflict("Plan question arguments are invalid")
-            content = extract_plan_question(
+            interaction = self._plan_question_resolution_source_row(
+                connection,
+                session_id=guard.session_id,
                 interaction_id=interaction_id,
-                binding=PlanInteractionBinding(
-                    str(interaction["request_contract_id"]),
-                    str(interaction["request_contract_version"]),
-                    str(interaction["request_contract_fingerprint"]),
-                ),
-                arguments=frozen,
+                lock=True,
             )
-            response = _plan_question_response(content=content, answer=answer)
-            result_content = _plan_inline(
-                {
-                    "status": "success",
-                    "plan_control": "QUESTION_ANSWERED",
-                    "interaction_id": interaction_id,
-                    **response,
-                }
+            self._require_open_plan_question_resolution_source(
+                interaction,
+                workflow_id=workflow_id,
+                expected_workflow_revision=expected_workflow_revision,
+            )
+            assert interaction is not None
+            prospective = self._build_plan_question_resolution_provider_candidate(
+                connection,
+                guard,
+                interaction=interaction,
+                answer=answer,
+                result_id=result_id,
+                result_entry_id=result_entry_id,
+                occurred_at=occurred_at,
+                lock=True,
+            )
+            if provider_input_admission.candidate != prospective:
+                raise ConversationKernelConflict(
+                    "Plan question provider admission is stale"
+                )
+            frozen, response, result_content = _plan_question_result_values(
+                interaction=interaction,
+                answer=answer,
             )
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
@@ -1356,6 +2097,265 @@ class _PlanOperations:
                 next_revision,
             )
 
+    def prepare_plan_draft_review_provider_input_candidate(
+        self,
+        guard: HostWriterGuard,
+        *,
+        workflow_id: str,
+        expected_workflow_revision: int,
+        interaction_id: str,
+        decision: PlanDraftDecision,
+        feedback: str | None,
+        continuation_turn_id: str,
+        continuation_entry_id: str,
+        continuation_context_binding_revision_id: str,
+        deadline_monotonic: float,
+    ) -> PreparedRootProviderInputCandidate:
+        """Freeze an approved/revision continuation before creating its turn."""
+
+        if decision not in {PlanDraftDecision.APPROVE, PlanDraftDecision.REVISE}:
+            raise ValueError("Plan review decision does not create a continuation")
+        normalized_feedback, _values, _digest = (
+            plan_draft_review_semantic_candidate(
+                workflow_id=workflow_id,
+                expected_workflow_revision=expected_workflow_revision,
+                interaction_id=interaction_id,
+                decision=decision,
+                feedback=feedback,
+                continuation_turn_id=continuation_turn_id,
+                continuation_entry_id=continuation_entry_id,
+                continuation_context_binding_revision_id=(
+                    continuation_context_binding_revision_id
+                ),
+            )
+        )
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            interaction = self._plan_draft_review_source_row(
+                connection,
+                session_id=guard.session_id,
+                interaction_id=interaction_id,
+                lock=False,
+            )
+            self._require_open_plan_draft_review_source(
+                interaction,
+                workflow_id=workflow_id,
+                expected_workflow_revision=expected_workflow_revision,
+            )
+            assert interaction is not None
+            return self._build_plan_draft_review_provider_candidate(
+                connection,
+                guard,
+                interaction=interaction,
+                decision=decision,
+                normalized_feedback=normalized_feedback,
+                continuation_turn_id=continuation_turn_id,
+                continuation_entry_id=continuation_entry_id,
+                continuation_context_binding_revision_id=(
+                    continuation_context_binding_revision_id
+                ),
+            )
+
+    @staticmethod
+    def _plan_draft_review_source_row(
+        connection: Connection,
+        *,
+        session_id: str,
+        interaction_id: str,
+        lock: bool,
+    ) -> Mapping[str, object] | None:
+        lock_clause = "FOR UPDATE OF w, i" if lock else ""
+        return connection.execute(
+            f"""
+            SELECT i.*, w.status AS workflow_status,
+                   w.workflow_revision, w.workflow_ordinal,
+                   w.resume_permission_mode, w.entered_by,
+                   w.permission_contract_id,
+                   w.permission_contract_fingerprint,
+                   b.tool_arguments, t.permission_snapshot_fingerprint,
+                   t.model_call_binding AS origin_model_call_binding
+            FROM pulsara_v3.plan_interactions AS i
+            JOIN pulsara_v3.plan_workflows AS w
+              ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
+            JOIN pulsara_v3.assistant_message_blocks AS b
+              ON b.session_id = i.session_id
+             AND b.assistant_entry_id = i.assistant_entry_id
+             AND b.tool_call_id = i.tool_call_id
+            JOIN pulsara_v3.turns AS t
+              ON t.session_id = i.session_id AND t.id = i.origin_turn_id
+            WHERE i.session_id = %s AND i.id = %s
+            {lock_clause}
+            """,
+            (session_id, interaction_id),
+        ).fetchone()
+
+    @staticmethod
+    def _require_open_plan_draft_review_source(
+        interaction: Mapping[str, object] | None,
+        *,
+        workflow_id: str,
+        expected_workflow_revision: int,
+    ) -> None:
+        if (
+            interaction is None
+            or str(interaction["plan_workflow_id"]) != workflow_id
+            or int(interaction["workflow_revision"])
+            != expected_workflow_revision
+            or str(interaction["kind"])
+            != PlanInteractionKind.DRAFT_REVIEW.value
+            or str(interaction["status"]) != "OPEN"
+            or str(interaction["workflow_status"])
+            != PlanWorkflowStatus.ACTIVE.value
+        ):
+            raise ConversationKernelConflict("Plan draft review is not open")
+
+    def _build_plan_draft_review_provider_candidate(
+        self,
+        connection: Connection,
+        guard: HostWriterGuard,
+        *,
+        interaction: Mapping[str, object],
+        decision: PlanDraftDecision,
+        normalized_feedback: str | None,
+        continuation_turn_id: str,
+        continuation_entry_id: str,
+        continuation_context_binding_revision_id: str,
+    ) -> PreparedRootProviderInputCandidate:
+        raw_arguments = interaction["tool_arguments"]
+        if not isinstance(raw_arguments, Mapping):
+            raise ConversationKernelConflict("Plan draft arguments are unavailable")
+        frozen = freeze_json(dict(raw_arguments))
+        if not isinstance(frozen, FrozenJsonObjectFact):
+            raise ConversationKernelConflict("Plan draft arguments are invalid")
+        extracted = extract_plan_draft(
+            interaction_id=str(interaction["id"]),
+            assistant_entry_id=str(interaction["assistant_entry_id"]),
+            tool_call_id=str(interaction["tool_call_id"]),
+            binding=PlanInteractionBinding(
+                str(interaction["request_contract_id"]),
+                str(interaction["request_contract_version"]),
+                str(interaction["request_contract_fingerprint"]),
+            ),
+            request_semantic_digest=str(interaction["request_semantic_digest"]),
+            arguments=frozen,
+        )
+        binding = model_call_binding_from_dict(
+            interaction["origin_model_call_binding"]
+        )
+        if binding is None:
+            raise ConversationKernelConflict(
+                "Plan continuation origin lacks a model binding"
+            )
+        session = connection.execute(
+            "SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id=%s",
+            (guard.session_id,),
+        ).fetchone()
+        if session is None:
+            raise ConversationKernelConflict("Plan continuation session is absent")
+        expected_latest = int(session["latest_entry_sequence"])
+        entry_sequence = expected_latest + 1
+        revision = int(interaction["workflow_revision"]) + 1
+        status = (
+            PlanWorkflowStatus.APPROVED
+            if decision is PlanDraftDecision.APPROVE
+            else PlanWorkflowStatus.ACTIVE
+        )
+        handoff_kind = (
+            PlanHandoffKind.APPROVED_PLAN
+            if decision is PlanDraftDecision.APPROVE
+            else PlanHandoffKind.REVISION_REQUESTED
+        )
+        permission = _plan_review_permission(
+            row=interaction,
+            decision=decision,
+            continuation_turn_id=continuation_turn_id,
+            workflow_revision=revision,
+        )
+        storage = _plan_review_body(
+            row=interaction,
+            decision=decision,
+            normalized_feedback=normalized_feedback,
+            extracted=extracted,
+        )
+        provider_text = project_plan_continuation_for_provider(
+            storage_text=storage.canonical_bytes.decode("utf-8"),
+            transition=handoff_kind.value,
+            workflow_id=str(interaction["plan_workflow_id"]),
+            interaction_id=str(interaction["id"]),
+        )
+        workflow_fact = (
+            _freeze_active_plan_workflow_fact(
+                row=interaction,
+                permission=permission,
+                turn_id=continuation_turn_id,
+                workflow_revision=revision,
+            )
+            if status is PlanWorkflowStatus.ACTIVE
+            else None
+        )
+        handoff_fact = _freeze_plan_handoff_fact(
+            row=interaction,
+            target_turn_id=continuation_turn_id,
+            carrier_entry_id=continuation_entry_id,
+            carrier_entry_sequence=entry_sequence,
+            workflow_revision=revision,
+            interaction_id=str(interaction["id"]),
+            handoff_kind=handoff_kind,
+            workflow_status=status,
+        )
+        base_kind, snapshot_id, source_through = self._initial_context_binding_values(
+            connection,
+            session_id=guard.session_id,
+            turn_id=continuation_turn_id,
+            initial_entry_sequence=entry_sequence,
+            scope_kind=ConversationScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        return PreparedRootProviderInputCandidate(
+            session_id=guard.session_id,
+            workspace_id=str(interaction["workspace_id"]),
+            exact_turn_id=continuation_turn_id,
+            exact_initial_entry_id=continuation_entry_id,
+            exact_context_binding_revision_id=(
+                continuation_context_binding_revision_id
+            ),
+            unpublished_items=(
+                FrozenProviderInputItem(
+                    item_kind=FrozenProviderInputItemKind.PLAN_CONTINUATION,
+                    source_entry_id=continuation_entry_id,
+                    source_entry_sequence=entry_sequence,
+                    source_turn_id=continuation_turn_id,
+                    content=(LLMTextPart(provider_text),),
+                    input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
+                ),
+            ),
+            unpublished_item_canonical_expanded_bytes=(
+                len(provider_text.encode("utf-8")),
+            ),
+            permission_snapshot=permission,
+            model_call_binding=binding,
+            expected_latest_entry_sequence=expected_latest,
+            context_base_kind=ContextBindingBaseKind(base_kind),
+            context_snapshot_id=snapshot_id,
+            source_through_sequence=source_through,
+            pending_plan_handoff_workflow_id=str(
+                interaction["plan_workflow_id"]
+            ),
+            pending_plan_handoff_interaction_id=str(interaction["id"]),
+            pending_plan_handoff_kind=handoff_kind.value,
+            unpublished_plan_workflow_fact=workflow_fact,
+            unpublished_plan_handoff_fact=handoff_fact,
+            # The reader derives approved-plan placement from the same
+            # prospective canonical items; no parallel pinned-item guess lives
+            # in the writer candidate.
+            unpublished_approved_plan_fact=None,
+        )
+
     def resolve_plan_draft_review(
         self,
         guard: HostWriterGuard,
@@ -1369,6 +2369,7 @@ class _PlanOperations:
         continuation_turn_id: str | None,
         continuation_entry_id: str | None,
         continuation_context_binding_revision_id: str | None,
+        provider_input_admission: PreparedRootProviderInputAdmission | None,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
@@ -1391,6 +2392,8 @@ class _PlanOperations:
             PlanDraftDecision.APPROVE,
             PlanDraftDecision.REVISE,
         }
+        if creates_turn != (provider_input_admission is not None):
+            raise ValueError("Plan review provider admission union is invalid")
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
@@ -1416,36 +2419,18 @@ class _PlanOperations:
             )
             if winner is not None:
                 return winner
-            interaction = connection.execute(
-                """
-                SELECT i.*, w.status AS workflow_status,
-                       w.workflow_revision, w.workflow_ordinal,
-                       w.resume_permission_mode, w.permission_contract_id,
-                       w.permission_contract_fingerprint,
-                       b.tool_arguments, t.permission_snapshot_fingerprint
-                FROM pulsara_v3.plan_interactions AS i
-                JOIN pulsara_v3.plan_workflows AS w
-                  ON w.session_id = i.session_id AND w.id = i.plan_workflow_id
-                JOIN pulsara_v3.assistant_message_blocks AS b
-                  ON b.session_id = i.session_id
-                 AND b.assistant_entry_id = i.assistant_entry_id
-                 AND b.tool_call_id = i.tool_call_id
-                JOIN pulsara_v3.turns AS t
-                  ON t.session_id = i.session_id AND t.id = i.origin_turn_id
-                WHERE i.session_id = %s AND i.id = %s
-                FOR UPDATE OF w, i
-                """,
-                (guard.session_id, interaction_id),
-            ).fetchone()
-            if (
-                interaction is None
-                or str(interaction["plan_workflow_id"]) != workflow_id
-                or int(interaction["workflow_revision"]) != expected_workflow_revision
-                or str(interaction["kind"]) != PlanInteractionKind.DRAFT_REVIEW.value
-                or str(interaction["status"]) != "OPEN"
-                or str(interaction["workflow_status"]) != "ACTIVE"
-            ):
-                raise ConversationKernelConflict("Plan draft review is not open")
+            interaction = self._plan_draft_review_source_row(
+                connection,
+                session_id=guard.session_id,
+                interaction_id=interaction_id,
+                lock=True,
+            )
+            self._require_open_plan_draft_review_source(
+                interaction,
+                workflow_id=workflow_id,
+                expected_workflow_revision=expected_workflow_revision,
+            )
+            assert interaction is not None
             extracted: ExtractedPlanDraft | None = None
             if decision is not PlanDraftDecision.CANCEL:
                 raw_arguments = interaction["tool_arguments"]
@@ -1468,6 +2453,27 @@ class _PlanOperations:
                     request_semantic_digest=str(interaction["request_semantic_digest"]),
                     arguments=frozen,
                 )
+            if creates_turn:
+                assert continuation_turn_id is not None
+                assert continuation_entry_id is not None
+                assert continuation_context_binding_revision_id is not None
+                prospective = self._build_plan_draft_review_provider_candidate(
+                    connection,
+                    guard,
+                    interaction=interaction,
+                    decision=decision,
+                    normalized_feedback=normalized_feedback,
+                    continuation_turn_id=continuation_turn_id,
+                    continuation_entry_id=continuation_entry_id,
+                    continuation_context_binding_revision_id=(
+                        continuation_context_binding_revision_id
+                    ),
+                )
+                assert provider_input_admission is not None
+                if provider_input_admission.candidate != prospective:
+                    raise ConversationKernelConflict(
+                        "Plan review provider admission is stale"
+                    )
             status = {
                 PlanDraftDecision.APPROVE: "APPROVED",
                 PlanDraftDecision.REVISE: "REVISION_REQUESTED",
@@ -1538,64 +2544,16 @@ class _PlanOperations:
                     if decision is PlanDraftDecision.APPROVE
                     else PlanHandoffKind.REVISION_REQUESTED
                 )
-                if decision is PlanDraftDecision.REVISE:
-                    permission = build_run_permission_snapshot(
-                        snapshot_id=_stable_identity(
-                            "permission-snapshot", continuation_turn_id
-                        ),
-                        requested_mode=PermissionMode(
-                            str(interaction["resume_permission_mode"])
-                        ),
-                        effective_mode=PermissionMode.READ_ONLY,
-                        admission_source=(
-                            RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION
-                        ),
-                        overlay=RunPermissionOverlay.PLAN_READ_ONLY,
-                        plan_context_ordinal_at_admission=int(
-                            interaction["workflow_ordinal"]
-                        ),
-                        plan_workflow_id=str(interaction["plan_workflow_id"]),
-                        plan_workflow_revision_at_admission=revision,
-                        inherited_from_turn_id=str(interaction["origin_turn_id"]),
-                    )
-                else:
-                    permission = build_run_permission_snapshot(
-                        snapshot_id=_stable_identity(
-                            "permission-snapshot", continuation_turn_id
-                        ),
-                        requested_mode=PermissionMode(
-                            str(interaction["resume_permission_mode"])
-                        ),
-                        effective_mode=PermissionMode(
-                            str(interaction["resume_permission_mode"])
-                        ),
-                        admission_source=(
-                            RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION
-                        ),
-                        overlay=RunPermissionOverlay.NONE,
-                        plan_context_ordinal_at_admission=int(
-                            interaction["workflow_ordinal"]
-                        ),
-                        inherited_from_turn_id=str(interaction["origin_turn_id"]),
-                    )
+                permission = _plan_review_permission(
+                    row=interaction,
+                    decision=decision,
+                    continuation_turn_id=continuation_turn_id,
+                    workflow_revision=revision,
+                )
                 entry_sequence = self._allocate_entry_sequence(
                     connection, guard.session_id
                 )
-                body_payload: dict[str, object] = {
-                    "transition": handoff_kind.value,
-                    "workflow_id": str(interaction["plan_workflow_id"]),
-                    "interaction_id": interaction_id,
-                }
-                if normalized_feedback is not None:
-                    body_payload["feedback"] = normalized_feedback
-                if decision is PlanDraftDecision.APPROVE:
-                    assert extracted is not None
-                    body_payload["approved_plan"] = {
-                        "plan_utf8_size": extracted.identity.plan_utf8_size,
-                        "plan_utf8_digest": extracted.identity.plan_utf8_digest,
-                        "assistant_entry_id": extracted.identity.assistant_entry_id,
-                        "tool_call_id": extracted.identity.tool_call_id,
-                    }
+                assert extracted is not None
                 self._insert_resolution_plan_continuation(
                     connection,
                     session_id=guard.session_id,
@@ -1611,7 +2569,12 @@ class _PlanOperations:
                     entry_sequence=entry_sequence,
                     permission=permission,
                     handoff_kind=handoff_kind,
-                    body=_plan_inline(body_payload),
+                    body=_plan_review_body(
+                        row=interaction,
+                        decision=decision,
+                        normalized_feedback=normalized_feedback,
+                        extracted=extracted,
+                    ),
                 )
             connection.execute(
                 """

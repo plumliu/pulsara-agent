@@ -91,6 +91,11 @@ from pulsara_agent.primitives.plan_workflow import (
     PlanDraftDecision,
     PlanQuestionAnswerKind,
 )
+from pulsara_agent.llm.input import (
+    LLMTextPart,
+    PromptContent,
+    prompt_text_utf8_bytes,
+)
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_process.models import TerminalProcessInfo
@@ -104,7 +109,6 @@ PROTOCOL_SCHEMA_FINGERPRINT = (
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
 HEARTBEAT_INTERVAL_MS = 10_000
-MAXIMUM_PROMPT_BYTES = STAGE2_LIMITS.prompt_hard_bytes
 MAXIMUM_COMMAND_ID_BYTES = 512
 MAXIMUM_LIVE_CONTROL_EVENTS = STAGE2_LIMITS.live_control_hard_events
 SessionProvider = Callable[[str], KernelHostSession]
@@ -705,7 +709,7 @@ class TerminalKernelProtocolServer:
                 return _error(request.request_id, "PERMISSION_MODE_REQUIRED")
             outcome = await state.host_session.submit_prompt(
                 command_id=request.command_id,
-                text=request.text,
+                content=PromptContent.text(request.text),
                 requested_permission_mode=requested_permission,
             )
         elif request.command_kind == wire.CANCEL_QUEUED_PROMPT:
@@ -2098,10 +2102,13 @@ def _valid_command_id(value: str) -> bool:
 
 
 def _valid_prompt(value: str) -> bool:
-    encoded = value.encode("utf-8")
-    if not encoded or len(encoded) > MAXIMUM_PROMPT_BYTES:
+    if not value:
         return False
-    return all(character in "\n\t" or ord(character) >= 0x20 for character in value)
+    try:
+        prompt_text_utf8_bytes((LLMTextPart(value),))
+    except (UnicodeEncodeError, ValueError):
+        return False
+    return True
 
 
 def _permission_from_wire(value: int) -> PermissionMode | None:

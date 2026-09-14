@@ -128,7 +128,12 @@ from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
 )
 from pulsara_agent.model_input.continuity import FULL_HISTORY_CONTEXT_BASE_IDENTITY
-from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
+from pulsara_agent.model_input.continuity import (
+    ProcessLocalProviderInputInstallPermit,
+    SourceObservationLifecycle,
+    SourceObservationPresence,
+    encode_runtime_observation,
+)
 from pulsara_agent.primitives.context import context_fingerprint, freeze_json
 from pulsara_agent.llm.adapters.openai.function_tools import (
     freeze_openai_native_tool_eligibility,
@@ -139,7 +144,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderNormalizedTerminalKind,
     ProviderStreamTerminal,
 )
-from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE, PermissionMode
 from pulsara_agent.primitives.run_permission import (
     FrozenRunPermissionSnapshot,
     RunPermissionAdmissionSource,
@@ -410,6 +415,54 @@ class StaticContextSourceCollector:
     @property
     def registry_fingerprint(self) -> str:
         return ContextSourceRegistry().fingerprint
+
+    @staticmethod
+    def _value_observation_message(
+        kind: ContextSourceKind,
+        lifecycle: SourceObservationLifecycle,
+        body: str,
+    ):
+        binding = ContextSourceRegistry().binding(kind)
+        return encode_runtime_observation(
+            source_kind=kind,
+            trust_class=binding.trust,
+            lifecycle=lifecycle,
+            presence=SourceObservationPresence.VALUE,
+            contract_version=binding.contract_version,
+            body=body,
+        )
+
+    def freeze_post_response_call_source_upper(self):
+        return ()
+
+    def freeze_fresh_entered_plan_source_upper(
+        self,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+    ):
+        del permission_snapshot
+        turn_ref = "sha256:" + ("0" * 64)
+        return (
+            self._value_observation_message(
+                ContextSourceKind.RUN_PERMISSION,
+                SourceObservationLifecycle.TURN,
+                f"permission={PermissionMode.READ_ONLY.value}",
+            ),
+            self._value_observation_message(
+                ContextSourceKind.PLAN_HANDOFF,
+                SourceObservationLifecycle.ONE_SHOT,
+                "plan handoff full",
+            ),
+            self._value_observation_message(
+                ContextSourceKind.PLAN_WORKFLOW,
+                SourceObservationLifecycle.SNAPSHOT,
+                "plan workflow full",
+            ),
+            self._value_observation_message(
+                ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
+                SourceObservationLifecycle.TURN,
+                turn_ref,
+            ),
+        )
 
     def freeze_skill_capability_source_snapshot(
         self,
@@ -1096,7 +1149,9 @@ class _EmptyTestMcpCapabilityOwner:
         )
 
 
-def seal_test_direct_tool_port(port: DirectKernelToolPort, *, interaction=None, capability_reload=None) -> None:
+def seal_test_direct_tool_port(
+    port: DirectKernelToolPort, *, interaction=None, capability_reload=None
+) -> None:
     """Complete the production composition boundary for a standalone test port."""
 
     port.bind_interaction_port(interaction if interaction is not None else object())  # type: ignore[arg-type]
@@ -1107,7 +1162,9 @@ def seal_test_direct_tool_port(port: DirectKernelToolPort, *, interaction=None, 
         type("_EmptyMemoryPort", (), {"tool_names": ()})()
     )
     port.bind_mcp_supervisor(_EmptyTestMcpCapabilityOwner())  # type: ignore[arg-type]
-    port.bind_capability_reload_port(capability_reload if capability_reload is not None else object())  # type: ignore[arg-type]
+    port.bind_capability_reload_port(
+        capability_reload if capability_reload is not None else object()
+    )  # type: ignore[arg-type]
     port.seal_builtin_composition()
 
 
@@ -1441,6 +1498,36 @@ class Round10TestSubagentRuntime:
     async def consume_mailbox_safe_point(self, task_id: str) -> bool:
         self._require_task(task_id)
         return False
+
+    async def open_root_completion_delivery(self, turn_id: str) -> None:
+        del turn_id
+
+    async def seal_root_completion_delivery(self, turn_id: str) -> int:
+        del turn_id
+        return 0
+
+    async def root_completion_followup_possible(self, turn_id: str) -> bool:
+        del turn_id
+        return False
+
+    async def settle_root_completion_delivery(
+        self, turn_id: str, *, turn_completed: bool
+    ) -> None:
+        del turn_id, turn_completed
+
+    async def close_root_completion_delivery(self, turn_id: str) -> None:
+        del turn_id
+
+    async def snapshot_pending_root_completions(self, turn_id: str) -> tuple[str, ...]:
+        del turn_id
+        return ()
+
+    async def retire_root_completion(self, task_id: str) -> bool:
+        self._require_task(task_id)
+        return False
+
+    async def notify_root_input_activity(self) -> None:
+        return None
 
     async def prepare_inferred_completion(
         self,

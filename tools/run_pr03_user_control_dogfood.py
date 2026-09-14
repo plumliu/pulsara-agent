@@ -8,6 +8,7 @@ read-only and configured API-key values are scrubbed from the report.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 import base64
@@ -34,6 +35,7 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlTargetKind,
 )
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
+from pulsara_agent.llm.input import text_part_values
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
@@ -330,9 +332,9 @@ async def _run_stop_race(session) -> dict[str, object]:
     hold = _shell_python("import time; print('STOP_A_STARTED', flush=True); time.sleep(60)")
     turn_a_task = asyncio.create_task(
         session.run_turn(
-            "Call terminal exactly once with command "
+            PromptContent.text("Call terminal exactly once with command "
             f"{hold!r}, yield_time_ms 30000 and max_output_chars 2000. "
-            "Wait for that tool call and do not call anything else.",
+            "Wait for that tool call and do not call anything else."),
             command_id="command:pr03:stop-race-a",
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -341,7 +343,7 @@ async def _run_stop_race(session) -> dict[str, object]:
     await _wait_tool_command(session, hold)
     queued = await session.submit_prompt(
         command_id="command:pr03:stop-race-b",
-        text="Reply exactly B_CONTINUED. Do not call tools.",
+        content=PromptContent.text("Reply exactly B_CONTINUED. Do not call tools."),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
     delayed_io = _DelayedTurnOutcomeIO(session._io, turn_a)  # noqa: SLF001
@@ -403,12 +405,12 @@ async def _run_background_controls(session) -> dict[str, object]:
         "import time; print('BACKGROUND_WITH_MONITOR', flush=True); time.sleep(120)"
     )
     start = await session.run_turn(
-        "Run this controlled sequence exactly. First call terminal with command "
+        PromptContent.text("Run this controlled sequence exactly. First call terminal with command "
         f"{command_a!r}, yield_time_ms 50, max_output_chars 2000. Then call terminal "
         f"with command {command_b!r}, yield_time_ms 50, max_output_chars 2000. "
         "Both must return running. Register terminal_monitor for only the second "
         "process with action register and otherwise default settings. Do not poll or "
-        "kill either process. Finish with one short sentence.",
+        "kill either process. Finish with one short sentence."),
         command_id="command:pr03:background-start",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
@@ -441,10 +443,10 @@ async def _run_background_controls(session) -> dict[str, object]:
     try:
         active = asyncio.create_task(
             session.run_turn(
-                "Call terminal exactly once with command "
+                PromptContent.text("Call terminal exactly once with command "
                 f"{delay!r}, yield_time_ms 10000 and max_output_chars 2000. "
                 "After it returns, summarize any typed user-control feedback visible in "
-                "your next request. Do not call other tools.",
+                "your next request. Do not call other tools."),
                 command_id="command:pr03:feedback-active-root",
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
@@ -527,9 +529,9 @@ async def _run_background_controls(session) -> dict[str, object]:
         "import time; print('NATURAL_SHORT', flush=True); time.sleep(1)"
     )
     idle_start = await session.run_turn(
-        "Call terminal for each command exactly once and do not register monitors. "
+        PromptContent.text("Call terminal for each command exactly once and do not register monitors. "
         f"First command {idle_long!r}, yield_time_ms 50. Second command {natural!r}, "
-        "yield_time_ms 50. Use max_output_chars 2000 for both, then stop.",
+        "yield_time_ms 50. Use max_output_chars 2000 for both, then stop."),
         command_id="command:pr03:idle-processes",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
@@ -660,7 +662,7 @@ async def _run_task_controls(session, workspace: Path) -> dict[str, object]:
         + json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
     )
     root_result = await session.run_turn(
-        prompt,
+        PromptContent.text(prompt),
         command_id="command:pr03:task-group",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
@@ -721,8 +723,8 @@ async def _run_task_controls(session, workspace: Path) -> dict[str, object]:
         raise RuntimeError("unrelated task did not continue after sibling cancellation")
 
     single_result = await session.run_turn(
-        "Call spawn_agent exactly once with task_name single_worker and objective "
-        "'Call report_agent_result alone with summary SINGLE_OK'. Return immediately.",
+        PromptContent.text("Call spawn_agent exactly once with task_name single_worker and objective "
+        "'Call report_agent_result alone with summary SINGLE_OK'. Return immediately."),
         command_id="command:pr03:single-task",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
@@ -846,7 +848,9 @@ async def _run(connection_id: str) -> dict[str, object]:
                             "messages": [
                                 {
                                     "role": message.role.value,
-                                    "content": list(message.content),
+                                    "content": list(
+                                        text_part_values(message.content)
+                                    ),
                                     "origin_entry_id": placement.origin_entry_id,
                                 }
                                 for message, placement in zip(

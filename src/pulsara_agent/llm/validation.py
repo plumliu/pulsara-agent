@@ -12,7 +12,13 @@ from pulsara_agent.llm.errors import (
     ModelTargetCapabilityMismatch,
 )
 from pulsara_agent.llm.estimator import TokenEstimate, estimate_model_context_for_call
-from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.input import (
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+    MessageRole,
+    content_has_image,
+)
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.primitives.model_call import ModelContextMode
@@ -81,18 +87,10 @@ def validate_model_context_shape_for_call(
         raise ModelContextIdentityMismatch(
             "ordered model history cannot contain a privileged system message"
         )
-    for message in context.messages:
-        if message.role is MessageRole.USER and (
-            len(message.content) != 1
-            or message.tool_call_id is not None
-            or message.name is not None
-            or message.arguments is not None
-            or message.tool_calls
-            or message.thinking
-        ):
-            raise ModelContextIdentityMismatch(
-                "user provider message has an invalid closed shape"
-            )
+    validate_model_message_content_for_call(
+        call=call,
+        messages=context.messages,
+    )
     transport = call.target.transport
     if (
         transport.binding_id != target_fact.transport_binding_id
@@ -104,4 +102,45 @@ def validate_model_context_shape_for_call(
     if call.binding != call.fact.binding:
         raise ModelTargetBindingMismatch(
             "model call binding changed after target resolution"
+        )
+
+
+def validate_model_message_content_for_call(
+    *,
+    call: ResolvedModelCall,
+    messages: tuple[LLMMessage, ...],
+) -> None:
+    """Validate the shared content/target shape without identity or token gates."""
+
+    target_fact = call.target.fact
+    has_image = False
+    for message in messages:
+        if any(
+            not isinstance(part, (LLMTextPart, LLMImagePart))
+            for part in message.content
+        ):
+            raise ModelContextIdentityMismatch(
+                "provider message contains an invalid content part"
+            )
+        message_has_image = content_has_image(message.content)
+        has_image = has_image or message_has_image
+        if message.role is not MessageRole.USER and message_has_image:
+            raise ModelContextIdentityMismatch(
+                "image content is only valid in a USER message"
+            )
+        if message.role is MessageRole.USER and (
+            not message.content
+            or message.tool_call_id is not None
+            or message.name is not None
+            or message.arguments is not None
+            or message.tool_calls
+            or message.thinking
+        ):
+            raise ModelContextIdentityMismatch(
+                "user provider message has an invalid closed shape"
+            )
+    modalities = target_fact.input_modalities
+    if has_image and modalities is not None and "image" not in modalities:
+        raise ModelTargetCapabilityMismatch(
+            "model target does not declare image input"
         )

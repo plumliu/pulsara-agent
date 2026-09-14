@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import asyncio
 import json
 from pathlib import Path
@@ -12,7 +13,7 @@ import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.direct_model import KernelModelExecutionRequest
-from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.input import MessageRole, text_part_values
 from pulsara_agent.model_input.lowering import decode_tool_result_observation
 from pulsara_agent.ports.live_agent_event import (
     TextDeltaPayload,
@@ -115,7 +116,9 @@ class _TerminalMonitorDogfoodModel:
             for item in reversed(request.compiled_input.messages):
                 if item.role is not MessageRole.TOOL_RESULT or not item.content:
                     continue
-                provider_result = decode_tool_result_observation(item.content[0])
+                provider_result = decode_tool_result_observation(
+                    text_part_values(item.content)[0]
+                )
                 decoded = json.loads(str(provider_result["body"]))
                 candidate = decoded.get("process_id")
                 if isinstance(candidate, str):
@@ -131,11 +134,15 @@ class _TerminalMonitorDogfoodModel:
             payloads = _text("text:round2-waiting", "MONITOR_REGISTERED_WAITING")
         else:
             terminal_items = tuple(
-                json.loads(item.content[0])["pulsara_terminal_observation"]
+                json.loads(text_part_values(item.content)[0])[
+                    "pulsara_terminal_observation"
+                ]
                 for item in request.compiled_input.messages
                 if item.role is MessageRole.USER
                 and item.content
-                and item.content[0].startswith('{"pulsara_terminal_observation":')
+                and text_part_values(item.content)[0].startswith(
+                    '{"pulsara_terminal_observation":'
+                )
             )
             assert len(terminal_items) == 1
             assert "R2_COMPLETION_SENTINEL" in terminal_items[0]["output"]
@@ -180,7 +187,7 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
             )
         )
         await session.update_model_call_binding(test_model_binding(model_runtime))
-        first = await session.run_turn("run and monitor the process")
+        first = await session.run_turn(PromptContent.text("run and monitor the process"))
         assert first.final_text == "MONITOR_REGISTERED_WAITING"
         await asyncio.wait_for(model.autonomous_seen.wait(), timeout=8)
 

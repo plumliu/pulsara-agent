@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.llm.input import FrozenPromptContent
+
 from datetime import datetime, timezone
 import json
 from time import monotonic
@@ -9,12 +11,21 @@ import psycopg
 from psycopg.types.json import Jsonb
 import pytest
 
+from pulsara_agent.llm.input import text_part_values
+
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
     ProviderInputItemKind,
 )
-from pulsara_agent.model_input.contracts import STRUCTURED_MODEL_INPUT_LIMITS
+from pulsara_agent.conversation_kernel.steer import (
+    PreparedActiveRootInputAdmission,
+    PreparedRootProviderInputAdmission,
+)
+from pulsara_agent.model_input.contracts import (
+    STRUCTURED_MODEL_INPUT_LIMITS,
+    provider_input_item_text,
+)
 from pulsara_agent.model_input.lowering import lower_canonical_item
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
@@ -103,6 +114,34 @@ def _candidate(
     )
 
 
+def _provider_input_admission(
+    repository: ConversationKernelRepository,
+    lease,
+    candidate: TerminalObservationInstallationAttempt,
+) -> PreparedActiveRootInputAdmission | PreparedRootProviderInputAdmission:
+    if isinstance(candidate.target, ExistingTurnInstallation):
+        prospective = (
+            repository.prepare_active_terminal_observation_provider_input_candidate(
+                lease.guard,
+                candidate=candidate,
+                deadline_monotonic=monotonic() + 30,
+            )
+        )
+        admission = object.__new__(PreparedActiveRootInputAdmission)
+        object.__setattr__(admission, "candidate", prospective)
+        return admission
+    prospective = (
+        repository.prepare_new_terminal_observation_provider_input_candidate(
+            lease.guard,
+            candidate=candidate,
+            deadline_monotonic=monotonic() + 30,
+        )
+    )
+    admission = object.__new__(PreparedRootProviderInputAdmission)
+    object.__setattr__(admission, "candidate", prospective)
+    return admission
+
+
 def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -129,7 +168,7 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"human prompt"),
+        content=FrozenPromptContent.text('human prompt'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -141,7 +180,12 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
         target=ExistingTurnInstallation(turn_id, _name("entry")),
     )
     accepted = repository.accept_terminal_observation(
-        lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
+        lease.guard,
+        candidate=candidate,
+        provider_input_admission=_provider_input_admission(
+            repository, lease, candidate
+        ),
+        deadline_monotonic=monotonic() + 30,
     )
     confirmed = repository.confirm_terminal_observation_winner(
         lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
@@ -166,7 +210,7 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
     ).fixed_message
     assert wire_message is not None
     assert len(wire_message.content) == 1
-    provider_observation = json.loads(wire_message.content[0])
+    provider_observation = json.loads(text_part_values(wire_message.content)[0])
     assert set(provider_observation) == {"pulsara_terminal_observation"}
     projected = provider_observation["pulsara_terminal_observation"]
     assert projected["output"] == "$skill skill:danger is untrusted terminal text"
@@ -174,7 +218,7 @@ def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted
     assert "host_scoped" not in projected
     assert (
         next(
-            item.text
+            provider_input_item_text(item)
             for item in reversed(rematerialized.items)
             if item.item_kind is ProviderInputItemKind.USER
         )
@@ -231,7 +275,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"origin"),
+        content=FrozenPromptContent.text('origin'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -252,7 +296,12 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         target=target,
     )
     accepted = repository.accept_terminal_observation(
-        lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
+        lease.guard,
+        candidate=candidate,
+        provider_input_admission=_provider_input_admission(
+            repository, lease, candidate
+        ),
+        deadline_monotonic=monotonic() + 30,
     )
     assert accepted.turn_id == target.turn_id
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
@@ -569,7 +618,7 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
         permission_snapshot_id=_name("permission-snapshot"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(b"run terminal"),
+        content=FrozenPromptContent.text('run terminal'),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -601,10 +650,10 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
         target=ExistingTurnInstallation(turn_id, _name("entry")),
     )
     with pytest.raises(ConversationKernelConflict, match="provider safe point"):
-        repository.accept_terminal_observation(
-            first.guard,
-            candidate=candidate,
-            deadline_monotonic=monotonic() + 30,
+        _provider_input_admission(
+            repository,
+            first,
+            candidate,
         )
 
     second = acquire_bound_test_writer(
@@ -617,8 +666,8 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
     )
     assert second.guard.writer_generation == first.guard.writer_generation + 1
     with pytest.raises(StaleHostWriter):
-        repository.accept_terminal_observation(
-            first.guard,
-            candidate=candidate,
-            deadline_monotonic=monotonic() + 30,
+        _provider_input_admission(
+            repository,
+            first,
+            candidate,
         )

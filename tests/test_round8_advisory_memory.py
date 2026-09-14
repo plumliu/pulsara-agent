@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import FrozenPromptContent
+
 import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -174,7 +176,7 @@ def _start_human_turn(repository, lease, text: str) -> tuple[str, str]:
         permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=InlineContent.from_bytes(text.encode()),
+        content=FrozenPromptContent.text(text),
         occurred_at=now,
         deadline_monotonic=monotonic() + 30,
     )
@@ -418,7 +420,7 @@ def test_round8_closed_taxonomy_tokenizer_and_process_local_architecture() -> No
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert tuple(item.value for item in MemoryRelationKind) == (
         "BASED_ON",
         "SUPERSEDES",

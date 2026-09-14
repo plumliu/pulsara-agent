@@ -37,7 +37,7 @@ def _prompt_steer_row_matches_candidate(
 ) -> bool:
     if row is None:
         return False
-    content = candidate.content
+    content = candidate.body_storage
     storage_matches = (
         (
             bytes(row["inline_content"]) == content.canonical_bytes
@@ -88,7 +88,7 @@ def _accepted_steer_entry_matches(
 ) -> bool:
     if row is None:
         return False
-    content = candidate.content
+    content = candidate.body_storage
     storage_matches = (
         (
             bytes(row["inline_content"]) == content.canonical_bytes

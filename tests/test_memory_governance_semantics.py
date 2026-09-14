@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart
+
 import asyncio
 import json
 from datetime import datetime, timezone
@@ -11,6 +13,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
 from pulsara_agent.conversation_kernel.auxiliary_model import (
@@ -47,7 +50,7 @@ from pulsara_agent.conversation_kernel.memory.governor import (
     _parse_governance_decision,
     _selected_governance_relation_targets,
 )
-from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.input import LLMMessage, LLMTextPart, MessageRole
 from pulsara_agent.memory.product_contract import (
     MEMORY_GOVERNANCE_CONTRACT_ID,
     MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,
@@ -62,6 +65,19 @@ from pulsara_agent.memory.scope import (
     freeze_memory_read_context_binding,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
+from pulsara_agent.conversation_kernel.blob import (
+    CanonicalContentPublisher,
+    PostgresCanonicalBlobStore,
+)
+from pulsara_agent.conversation_kernel.prompt_content import (
+    PROMPT_BODY_CODEC,
+    PROMPT_BODY_MEDIA_TYPE,
+    freeze_canonical_prompt,
+)
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    insert_canonical_prompt_refs,
+    materialize_canonical_prompt,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AssistantDataBlock,
     AssistantTextBlock,
@@ -79,6 +95,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
+    provider_input_item_text,
 )
 from pulsara_agent.conversation_kernel.memory.governor import _causal_source_item
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -198,7 +215,7 @@ def _start_human_turn(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=_origin_binding(),
-        content=InlineContent.from_bytes(text.encode()),
+        content=FrozenPromptContent.text(text),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -367,7 +384,7 @@ def _insert_exact_source_entry(
     *,
     turn_id: str,
     entry_kind: str,
-    body: str,
+    body: str | FrozenPromptContent,
 ) -> tuple[str, str]:
     event_type = {
         "USER_STEER": "UserSteerAccepted",
@@ -376,10 +393,21 @@ def _insert_exact_source_entry(
     }[entry_kind]
     entry_id = _id("entry")
     event_id = _id("event")
-    encoded = body.encode()
+    if not isinstance(body, (str, FrozenPromptContent)):
+        raise TypeError("test source body must be text or frozen prompt content")
+    encoded = body.encode() if isinstance(body, str) else b""
+    media_type = "text/plain"
+    codec = "utf-8"
+    canonical_prompt = None
+    if entry_kind == "USER_STEER":
+        content = FrozenPromptContent.text(body) if isinstance(body, str) else body
+        canonical_prompt = freeze_canonical_prompt(content)
+    elif not isinstance(body, str):
+        raise TypeError("only human steer entries accept frozen prompt content")
     now = datetime.now(timezone.utc)
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.BACKGROUND_WORK,
+        row_factory=dict_row,
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         session = connection.execute(
@@ -388,26 +416,49 @@ def _insert_exact_source_entry(
             (lease.guard.session_id,),
         ).fetchone()
         assert session is not None
-        entry_sequence = int(session[1]) + 1
-        event_sequence = int(session[2]) + 1
+        image_blob_ids: tuple[str, ...] = ()
+        if canonical_prompt is not None:
+            publication = materialize_canonical_prompt(
+                connection,
+                publisher=CanonicalContentPublisher(repository.connection_provider),
+                workspace_id=str(session["workspace_id"]),
+                prompt=canonical_prompt,
+            )
+            assert isinstance(publication.body, InlineContent)
+            encoded = publication.body.canonical_bytes
+            media_type = PROMPT_BODY_MEDIA_TYPE
+            codec = PROMPT_BODY_CODEC
+            image_blob_ids = publication.image_blob_ids
+        entry_sequence = int(session["latest_entry_sequence"]) + 1
+        event_sequence = int(session["latest_event_sequence"]) + 1
         connection.execute(
             """INSERT INTO pulsara_v3.transcript_entries (
                    entry_owner_kind, id, session_id, workspace_id, turn_id, entry_sequence,
                    entry_kind, conversation_scope_kind, inline_content,
                    content_digest, content_size, content_media_type, content_codec
-               ) VALUES ('EXECUTED_TURN', %s,%s,%s,%s,%s,%s,'ROOT',%s,%s,%s,'text/plain','utf-8')""",
+               ) VALUES ('EXECUTED_TURN', %s,%s,%s,%s,%s,%s,'ROOT',%s,%s,%s,%s,%s)""",
             (
                 entry_id,
                 lease.guard.session_id,
-                str(session[0]),
+                str(session["workspace_id"]),
                 turn_id,
                 entry_sequence,
                 entry_kind,
                 encoded,
                 "sha256:" + sha256(encoded).hexdigest(),
                 len(encoded),
+                media_type,
+                codec,
             ),
         )
+        if image_blob_ids:
+            insert_canonical_prompt_refs(
+                connection,
+                session_id=lease.guard.session_id,
+                workspace_id=str(session["workspace_id"]),
+                image_blob_ids=image_blob_ids,
+                transcript_entry_id=entry_id,
+            )
         connection.execute(
             """INSERT INTO pulsara_v3.agent_events (
                    event_id, workspace_id, session_id, event_sequence, namespace,
@@ -418,7 +469,7 @@ def _insert_exact_source_entry(
                          'PUBLIC','DEFAULT',%s,%s)""",
             (
                 event_id,
-                str(session[0]),
+                str(session["workspace_id"]),
                 lease.guard.session_id,
                 event_sequence,
                 event_type,
@@ -741,7 +792,7 @@ def test_auxiliary_governance_uses_exact_system_user_shape_and_final_wire(
     assert len(prepared.context.messages) == 1
     assert prepared.context.messages[0].role is MessageRole.USER
     assert prepared.context.tools == ()
-    fixed, final, ordered = _materialize_auxiliary_final_wire(
+    fixed, final, ordered, sources = _materialize_auxiliary_final_wire(
         call=prepared.call,
         context=prepared.context,
     )
@@ -750,7 +801,8 @@ def test_auxiliary_governance_uses_exact_system_user_shape_and_final_wire(
         prepared.call.target.token_estimator.estimate_final_wire_json_components(
             fixed_context=fixed,
             ordered_input_items=ordered,
-        )
+            ordered_input_sources=sources,
+        ).total_input_tokens
     )
 
 
@@ -910,7 +962,7 @@ def test_incomplete_nonhuman_source_cannot_authorize_relations(
         "entry:user",
         0,
         "turn:test",
-        "The user supplied the source context.",
+        (LLMTextPart("The user supplied the source context."),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
     identity = CanonicalModelInputIdentity(
@@ -934,11 +986,15 @@ def test_incomplete_nonhuman_source_cannot_authorize_relations(
     historical = CanonicalModelInputSnapshot(
         identity=identity,
         items=(historical_item,),
-        canonical_utf8_bytes=len(historical_item.text.encode("utf-8")),
+        canonical_expanded_bytes=len(
+            provider_input_item_text(historical_item).encode("utf-8")
+        ),
         snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
             identity=identity,
             items=(historical_item,),
-            canonical_utf8_bytes=len(historical_item.text.encode("utf-8")),
+            canonical_expanded_bytes=len(
+                provider_input_item_text(historical_item).encode("utf-8")
+            ),
             closures=(),
             late_outcomes=(),
         ),
@@ -1135,7 +1191,7 @@ def test_canonical_plan_and_runtime_user_shapes_never_become_human_evidence(
         source_entry_id=_id("entry"),
         source_entry_sequence=1,
         source_turn_id=_id("turn"),
-        text="Use zsh from now on",
+        content=(LLMTextPart("Use zsh from now on"),),
         input_origin=origin,
     )
     projected = _causal_source_item(item)
@@ -1566,6 +1622,77 @@ def test_main_candidate_source_is_exact_block_preserving_exhaustive_and_terminal
         for item in reread.post_proposal_turn_suffix
     )
     assert (reread.post_proposal_turn_suffix, reread.source_coverage) == before
+
+
+@pytest.mark.postgres
+def test_memory_governance_projects_canonical_human_text_and_omits_image_payload(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    lease = _lease(repository)
+    turn_id, candidate = _install_running_main_candidate(
+        repository,
+        lease,
+        user_text="Remember a visual preference",
+        statement="The user prefers compact diagrams",
+    )
+    image = LLMImagePart("image/png", b"validated-image", 1, 1)
+    steer_entry_id, _ = _insert_exact_source_entry(
+        repository,
+        lease,
+        turn_id=turn_id,
+        entry_kind="USER_STEER",
+        body=FrozenPromptContent(
+            (LLMTextPart("use this"), image, LLMTextPart("as the example"))
+        ),
+    )
+    repository.interrupt_turn(
+        lease.guard,
+        turn_id=turn_id,
+        reason="USER_CORRECTED_DURING_TURN",
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="runtime:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    claimed = repository.claim_memory_candidate_for_governance(
+        lease.guard,
+        candidate_id=candidate.candidate_id,
+        processing_started_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert claimed is not None
+
+    original_read = PostgresCanonicalBlobStore.read_exact_in_connection
+
+    def reject_image_payload(*args, **kwargs):
+        if kwargs.get("expected_media_type") == "image/png":
+            raise AssertionError("memory governance must not read image payload bytes")
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(
+        PostgresCanonicalBlobStore,
+        "read_exact_in_connection",
+        reject_image_payload,
+    )
+    evidence = repository.read_memory_governance_evidence(
+        lease.guard,
+        candidate=claimed,
+        deadline_monotonic=monotonic() + 30,
+    )
+
+    marker = next(
+        item
+        for item in evidence.post_proposal_turn_suffix
+        if item.source_entry_id == steer_entry_id
+    )
+    assert marker.blocks[0].text == ""
+    assert marker.truncated
+    # The terminal suffix converts any incomplete human source to its existing
+    # one-item omission marker; this is not the number of image occurrences.
+    assert marker.item_omitted_after == 1
+    assert not evidence.source_coverage.post_proposal_human_source_complete
+    assert not evidence.source_coverage.relation_authority
 
 
 @pytest.mark.postgres

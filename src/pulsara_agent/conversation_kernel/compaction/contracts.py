@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from hashlib import sha256
 from typing import Literal
 
 from pulsara_agent.conversation_kernel.contracts import (
@@ -13,18 +12,19 @@ from pulsara_agent.conversation_kernel.contracts import (
     CommittedEventDraft,
     CommittedEventSubject,
 )
-from pulsara_agent.conversation_kernel.assembler import (
-    MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES,
-)
-from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
     SubjectSlot,
 )
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
+    CompactionActiveRequestLocation,
+    CompactionContinuationMode,
+    CompactionSnapshotCarrier,
+    FrozenCompactionActiveRequest,
     FrozenProviderInputItemKind,
     FrozenProviderInputItem,
+    FrozenRetainedHistoricalRequest,
     LateToolOutcomeObservation,
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
     MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
@@ -45,15 +45,27 @@ from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
 )
 from pulsara_agent.llm.estimator import TokenEstimate
-from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+)
+from pulsara_agent.conversation_kernel.prompt_content import (
+    canonical_prompt_body_bytes,
+)
 from pulsara_agent.llm.request import FrozenProviderWireInputQuote
-from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives.context import (
+    canonical_json_bytes,
+    context_fingerprint,
+    thaw_json,
+)
 
 
 COMPACTION_SOURCE_LINEAGE_CONTRACT = "pulsara.compaction-source-lineage.v1"
 COMPACTION_CANONICAL_RANGE_CONTRACT = "pulsara.compaction-canonical-range.v1"
 COMPACTION_SNAPSHOT_COMPILER_CONTRACT = (
-    "pulsara.context-snapshot-carrier.v3-retained-history"
+    "pulsara.context-snapshot-carrier.v4-typed-content"
 )
 COMPACTION_SUMMARY_PROMPT_CONTRACT = (
     "pulsara.context-compaction-summary.v4-temporal-handoff"
@@ -61,6 +73,9 @@ COMPACTION_SUMMARY_PROMPT_CONTRACT = (
 COMPACTION_MODEL_CONTRACT = "pulsara.primary-model-compaction.v1"
 CONTEXT_SNAPSHOT_MEDIA_TYPE = "application/vnd.pulsara.context-snapshot+json"
 CONTEXT_SNAPSHOT_CODEC = "utf-8"
+CANONICAL_MINIMUM_SERVICE_HEADROOM_BYTES = 4 << 20
+EPOCH_MINIMUM_SERVICE_HEADROOM_BYTES = 4 << 20
+CANONICAL_MINIMUM_SERVICE_HEADROOM_ITEMS = 296
 
 
 def compaction_summary_message_prefix_fingerprint(
@@ -89,16 +104,6 @@ class CompactionTrigger(StrEnum):
 class CompactionTargetBranch(StrEnum):
     ACTIVE_INSTALLATION = "ACTIVE_INSTALLATION"
     IDLE_BASE_ONLY = "IDLE_BASE_ONLY"
-
-
-class CompactionContinuationMode(StrEnum):
-    RESUME_ACTIVE_TURN = "RESUME_ACTIVE_TURN"
-    AWAIT_NEXT_USER = "AWAIT_NEXT_USER"
-
-
-class CompactionActiveRequestLocation(StrEnum):
-    SNAPSHOT_EXACT = "SNAPSHOT_EXACT"
-    CANONICAL_SUFFIX = "CANONICAL_SUFFIX"
 
 
 class CompactionDisposition(StrEnum):
@@ -248,7 +253,7 @@ class ResolvedCompactionPolicy:
     maximum_retained_tool_groups: int = 3
     maximum_retained_tail_utf8_bytes: int = 2 << 20
     maximum_recent_human_messages: int = 3
-    maximum_recent_human_utf8_bytes: int = 65_536
+    maximum_recent_human_text_utf8_bytes: int = 65_536
     maximum_runtime_handoff_utf8_bytes: int = 32_768
     planning_attempt_seconds: float = 120.0
     maximum_consecutive_auto_failures: int = 3
@@ -278,10 +283,10 @@ class ResolvedCompactionPolicy:
 class CompatibleAppendCompactionProjection:
     append_only_messages: tuple[LLMMessage, ...] = field(repr=False)
     final_estimate: TokenEstimate
-    logical_utf8_bytes: int
+    logical_bytes: int
 
     def __post_init__(self) -> None:
-        if self.logical_utf8_bytes < 0:
+        if self.logical_bytes < 0:
             raise ValueError("compatible compaction projection is invalid")
 
 
@@ -290,10 +295,10 @@ class ColdRebuildCompactionProjection:
     system_prompt: str
     full_messages: tuple[LLMMessage, ...] = field(repr=False)
     final_estimate: TokenEstimate
-    logical_utf8_bytes: int
+    logical_bytes: int
 
     def __post_init__(self) -> None:
-        if not self.system_prompt or self.logical_utf8_bytes < 0:
+        if not self.system_prompt or self.logical_bytes < 0:
             raise ValueError("cold compaction projection is invalid")
 
 
@@ -304,39 +309,40 @@ FrozenCompactionProviderProjection = (
 
 @dataclass(frozen=True, slots=True)
 class ResolvedCompactionHeadroomBounds:
-    """One mechanically-derived quote for the largest legal admission."""
+    """Frozen hard limits and D2 minimum service headroom G."""
 
     maximum_canonical_items: int
-    maximum_canonical_utf8_bytes: int
-    maximum_epoch_logical_utf8_bytes: int
+    maximum_canonical_expanded_bytes: int
+    maximum_epoch_logical_bytes: int
     reserved_canonical_items: int
-    reserved_canonical_utf8_bytes: int
-    reserved_epoch_logical_utf8_bytes: int
+    reserved_canonical_expanded_bytes: int
+    reserved_epoch_logical_bytes: int
     resolved_hard_bound_set_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
             not 0 < self.reserved_canonical_items < self.maximum_canonical_items
             or not 0
-            < self.reserved_canonical_utf8_bytes
-            < self.maximum_canonical_utf8_bytes
+            < self.reserved_canonical_expanded_bytes
+            < self.maximum_canonical_expanded_bytes
             or not 0
-            < self.reserved_epoch_logical_utf8_bytes
-            < self.maximum_epoch_logical_utf8_bytes
+            < self.reserved_epoch_logical_bytes
+            < self.maximum_epoch_logical_bytes
         ):
             raise ValueError("compaction headroom bounds are invalid")
-        values = {
+        values: dict[str, object] = {
+            "role": "minimum_service_headroom",
             "maximum_canonical_items": self.maximum_canonical_items,
-            "maximum_canonical_utf8_bytes": self.maximum_canonical_utf8_bytes,
-            "maximum_epoch_logical_utf8_bytes": (self.maximum_epoch_logical_utf8_bytes),
+            "maximum_canonical_expanded_bytes": self.maximum_canonical_expanded_bytes,
+            "maximum_epoch_logical_bytes": (self.maximum_epoch_logical_bytes),
             "reserved_canonical_items": self.reserved_canonical_items,
-            "reserved_canonical_utf8_bytes": self.reserved_canonical_utf8_bytes,
-            "reserved_epoch_logical_utf8_bytes": (
-                self.reserved_epoch_logical_utf8_bytes
+            "reserved_canonical_expanded_bytes": self.reserved_canonical_expanded_bytes,
+            "reserved_epoch_logical_bytes": (
+                self.reserved_epoch_logical_bytes
             ),
         }
         if self.resolved_hard_bound_set_fingerprint != context_fingerprint(
-            "pulsara.compaction-resource-headroom.v1", values
+            "pulsara.compaction-resource-headroom.v3-expanded-content", values
         ):
             raise ValueError("compaction headroom fingerprint mismatch")
 
@@ -345,57 +351,54 @@ class ResolvedCompactionHeadroomBounds:
         return self.maximum_canonical_items - self.reserved_canonical_items
 
     @property
-    def soft_canonical_utf8_byte_limit(self) -> int:
-        return self.maximum_canonical_utf8_bytes - self.reserved_canonical_utf8_bytes
+    def soft_canonical_expanded_byte_limit(self) -> int:
+        return (
+            self.maximum_canonical_expanded_bytes
+            - self.reserved_canonical_expanded_bytes
+        )
 
     @property
-    def soft_epoch_logical_utf8_byte_limit(self) -> int:
+    def soft_epoch_logical_byte_limit(self) -> int:
         return (
-            self.maximum_epoch_logical_utf8_bytes
-            - self.reserved_epoch_logical_utf8_bytes
+            self.maximum_epoch_logical_bytes
+            - self.reserved_epoch_logical_bytes
         )
 
 
 def resolved_compaction_headroom_bounds() -> ResolvedCompactionHeadroomBounds:
-    # These reserves are admission maxima, not tuning knobs.  In particular,
-    # the canonical and epoch byte reserves must cover one largest assistant
-    # message that the live assembler can legally accept; otherwise a response
-    # below the old soft boundary could make the next reader call cross its
-    # hard limit before compaction gets another chance to run.
-    maximum_next_admission_bytes = max(
-        STAGE2_LIMITS.prompt_hard_bytes,
-        MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES,
-        STAGE2_LIMITS.tool_result_hard_bytes,
-    )
+    # These are D2's minimum service headroom G values.  They deliberately do
+    # not claim to bound a whole assistant/tool execution window; K3 must quote
+    # that actual batch before assistant settlement and tool effects.
     values = {
         "maximum_canonical_items": MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
-        "maximum_canonical_utf8_bytes": MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-        "maximum_epoch_logical_utf8_bytes": MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES,
-        "reserved_canonical_items": 296,
-        "reserved_canonical_utf8_bytes": maximum_next_admission_bytes,
-        "reserved_epoch_logical_utf8_bytes": maximum_next_admission_bytes,
+        "maximum_canonical_expanded_bytes": MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
+        "maximum_epoch_logical_bytes": MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES,
+        "reserved_canonical_items": CANONICAL_MINIMUM_SERVICE_HEADROOM_ITEMS,
+        "reserved_canonical_expanded_bytes": CANONICAL_MINIMUM_SERVICE_HEADROOM_BYTES,
+        "reserved_epoch_logical_bytes": EPOCH_MINIMUM_SERVICE_HEADROOM_BYTES,
     }
     return ResolvedCompactionHeadroomBounds(
         **values,
         resolved_hard_bound_set_fingerprint=context_fingerprint(
-            "pulsara.compaction-resource-headroom.v1", values
+            "pulsara.compaction-resource-headroom.v3-expanded-content",
+            {"role": "minimum_service_headroom", **values},
         ),
     )
 
 
 @dataclass(frozen=True, slots=True)
 class CompactionPhysicalWorkingSetReport:
-    post_base_item_count: int
-    post_base_canonical_utf8_bytes: int
-    continuity_epoch_logical_utf8_bytes: int
+    selected_item_count: int
+    selected_canonical_expanded_bytes: int
+    continuity_epoch_logical_bytes: int
     resolved_hard_bound_set_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
             min(
-                self.post_base_item_count,
-                self.post_base_canonical_utf8_bytes,
-                self.continuity_epoch_logical_utf8_bytes,
+                self.selected_item_count,
+                self.selected_canonical_expanded_bytes,
+                self.continuity_epoch_logical_bytes,
             )
             < 0
         ):
@@ -413,8 +416,8 @@ class FrozenCompactionHeadroomPreflight:
     scope_subagent_task_id: str | None
     effective_materialization_lineage_floor: int
     provider_input_through_sequence: int
-    post_base_item_count: int
-    post_base_canonical_utf8_bytes: int
+    selected_item_count: int
+    selected_canonical_expanded_bytes: int
     resolved_hard_bound_set_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -427,8 +430,8 @@ class FrozenCompactionHeadroomPreflight:
             or min(
                 self.effective_materialization_lineage_floor,
                 self.provider_input_through_sequence,
-                self.post_base_item_count,
-                self.post_base_canonical_utf8_bytes,
+                self.selected_item_count,
+                self.selected_canonical_expanded_bytes,
             )
             < 0
             or self.effective_materialization_lineage_floor
@@ -446,8 +449,8 @@ def freeze_compaction_headroom_preflight(
     scope_subagent_task_id: str | None,
     effective_materialization_lineage_floor: int,
     provider_input_through_sequence: int,
-    post_base_item_count: int,
-    post_base_canonical_utf8_bytes: int,
+    selected_item_count: int,
+    selected_canonical_expanded_bytes: int,
 ) -> FrozenCompactionHeadroomPreflight:
     bounds = resolved_compaction_headroom_bounds()
     return FrozenCompactionHeadroomPreflight(
@@ -460,8 +463,8 @@ def freeze_compaction_headroom_preflight(
             effective_materialization_lineage_floor
         ),
         provider_input_through_sequence=provider_input_through_sequence,
-        post_base_item_count=post_base_item_count,
-        post_base_canonical_utf8_bytes=post_base_canonical_utf8_bytes,
+        selected_item_count=selected_item_count,
+        selected_canonical_expanded_bytes=selected_canonical_expanded_bytes,
         resolved_hard_bound_set_fingerprint=(
             bounds.resolved_hard_bound_set_fingerprint
         ),
@@ -480,6 +483,7 @@ def _compaction_projection_identity_digest(
         "message_by_index": estimate.message_tokens_by_index,
         "tools": estimate.tool_tokens,
         "envelope": estimate.envelope_tokens,
+        "visual_image": estimate.visual_image_tokens,
         "total": estimate.total_input_tokens,
     }
     if isinstance(projection, CompatibleAppendCompactionProjection):
@@ -495,7 +499,7 @@ def _compaction_projection_identity_digest(
                     system_prompt="", tools=(), messages=projection.append_only_messages
                 ),
                 "estimate": estimate_value,
-                "logical_bytes": projection.logical_utf8_bytes,
+                "logical_bytes": projection.logical_bytes,
             },
         )
     return context_fingerprint(
@@ -508,7 +512,7 @@ def _compaction_projection_identity_digest(
                 messages=projection.full_messages,
             ),
             "estimate": estimate_value,
-            "logical_bytes": projection.logical_utf8_bytes,
+            "logical_bytes": projection.logical_bytes,
         },
     )
 
@@ -517,11 +521,11 @@ def _compaction_working_set_identity_digest(
     report: CompactionPhysicalWorkingSetReport,
 ) -> str:
     return context_fingerprint(
-        "pulsara.compaction-working-set-report.v1",
+        "pulsara.compaction-working-set-report.v2-expanded-content",
         {
-            "items": report.post_base_item_count,
-            "canonical_bytes": report.post_base_canonical_utf8_bytes,
-            "epoch_bytes": report.continuity_epoch_logical_utf8_bytes,
+            "items": report.selected_item_count,
+            "canonical_expanded_bytes": report.selected_canonical_expanded_bytes,
+            "epoch_bytes": report.continuity_epoch_logical_bytes,
             "resolved_hard_bounds": report.resolved_hard_bound_set_fingerprint,
         },
     )
@@ -591,6 +595,12 @@ class FrozenCompactionSourceView:
         )
         if self.source_view_fingerprint != expected:
             raise ValueError("compaction source view fingerprint mismatch")
+
+    @property
+    def snapshot_carrier(self) -> CompactionSnapshotCarrier | None:
+        return _canonical_snapshot_carrier(
+            self.canonical_dispatch_read.compile_snapshot.canonical_input.items
+        )
 
     def materialized_system_prompt(self) -> str:
         if isinstance(self.provider_projection, CompatibleAppendCompactionProjection):
@@ -745,8 +755,36 @@ class FrozenCompactionCanonicalRead:
             != identity.provider_input_through_sequence
             or self.safe_head_range.effective_materialization_lineage_floor
             != self.lineage_base.effective_materialization_lineage_floor
+            or (
+                self.lineage_base.kind is CompactionLineageBaseKind.CURRENT_SNAPSHOT
+            )
+            != (self.snapshot_carrier is not None)
         ):
             raise ValueError("compaction canonical read does not exact-join")
+
+    @property
+    def snapshot_carrier(self) -> CompactionSnapshotCarrier | None:
+        return _canonical_snapshot_carrier(
+            self.dispatch_read.compile_snapshot.canonical_input.items
+        )
+
+
+def _canonical_snapshot_carrier(
+    items: tuple[FrozenProviderInputItem, ...],
+) -> CompactionSnapshotCarrier | None:
+    carriers = tuple(
+        item.content
+        for item in items
+        if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+    )
+    if len(carriers) > 1:
+        raise ValueError("canonical input contains multiple context snapshots")
+    if not carriers:
+        return None
+    carrier = carriers[0]
+    if not isinstance(carrier, CompactionSnapshotCarrier):
+        raise TypeError("canonical snapshot item lacks its typed carrier")
+    return carrier
 
 
 def freeze_compaction_canonical_read(
@@ -817,6 +855,35 @@ def freeze_compaction_canonical_range(
         "canonical_utf8_bytes": canonical_bytes,
     }
     return FrozenCompactionCanonicalRange(**values)
+
+
+def provider_input_item_canonical_expanded_bytes(
+    item: FrozenProviderInputItem,
+) -> int:
+    """Measure the reader C charge of one already hydrated canonical item."""
+
+    if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
+        raise ValueError("snapshot C charge belongs to its typed carrier")
+    if (
+        item.item_kind is FrozenProviderInputItemKind.USER
+        and item.input_origin
+        in {
+            CanonicalInputOriginKind.HUMAN_MESSAGE,
+            CanonicalInputOriginKind.HUMAN_STEER,
+        }
+    ):
+        content = FrozenPromptContent(item.content)
+        return len(canonical_prompt_body_bytes(content)) + sum(
+            len(part.immutable_bytes)
+            for part in content.parts
+            if isinstance(part, LLMImagePart)
+        )
+    if any(not isinstance(part, LLMTextPart) for part in item.content):
+        raise ValueError("non-prompt canonical item contains image content")
+    return sum(len(part.text.encode("utf-8")) for part in item.content) + sum(
+        len(canonical_json_bytes(thaw_json(call.arguments)))
+        for call in item.tool_calls
+    )
 
 
 def _compaction_canonical_range_identity_digest(
@@ -971,7 +1038,19 @@ class ProviderPrefixCutProof:
 class RecentHumanMessageProof:
     entry_id: str
     entry_sequence: int
-    text: str = field(repr=False)
+    input_origin: CanonicalInputOriginKind
+    content: FrozenPromptContent = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.entry_id or self.entry_sequence < 0:
+            raise ValueError("recent human request identity is invalid")
+        if not isinstance(self.content, FrozenPromptContent):
+            raise TypeError("recent human request content must be frozen")
+        if self.input_origin not in {
+            CanonicalInputOriginKind.HUMAN_MESSAGE,
+            CanonicalInputOriginKind.HUMAN_STEER,
+        }:
+            raise ValueError("recent request origin is not human")
 
 
 @dataclass(frozen=True, slots=True)
@@ -991,131 +1070,6 @@ class FrozenCompactionSummary:
 
 
 @dataclass(frozen=True, slots=True)
-class FrozenCompactionActiveRequest:
-    """Runtime-owned location of the exact request driving one active turn."""
-
-    entry_id: str
-    entry_sequence: int
-    location: CompactionActiveRequestLocation
-    text: str | None = field(default=None, repr=False)
-
-    def __post_init__(self) -> None:
-        if not self.entry_id or self.entry_sequence < 0:
-            raise ValueError("compaction active request identity is incomplete")
-        snapshot_exact = self.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-        if snapshot_exact != (self.text is not None):
-            raise ValueError("compaction active request location/text union is invalid")
-        if self.text is not None:
-            self.text.encode("utf-8")
-            if not self.text:
-                raise ValueError("compaction active request text is empty")
-
-    def canonical_value(self) -> dict[str, object]:
-        return {
-            "entry_id": self.entry_id,
-            "entry_sequence": self.entry_sequence,
-            "location": self.location.value,
-            "text": self.text,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class FrozenRetainedHistoricalRequest:
-    """Exact historical request, without an execution identity or authority."""
-
-    item_kind: FrozenProviderInputItemKind
-    input_origin: CanonicalInputOriginKind | None
-    text: str = field(repr=False)
-
-    def __post_init__(self) -> None:
-        origins = {
-            FrozenProviderInputItemKind.USER: {
-                CanonicalInputOriginKind.HUMAN_MESSAGE,
-                CanonicalInputOriginKind.HUMAN_STEER,
-                CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
-                CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
-            },
-            FrozenProviderInputItemKind.PLAN_CONTINUATION: {
-                CanonicalInputOriginKind.PLAN_CONTINUATION
-            },
-            FrozenProviderInputItemKind.INTER_AGENT_MESSAGE: {
-                CanonicalInputOriginKind.INTER_AGENT_MESSAGE
-            },
-            FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {None},
-        }
-        if (
-            self.item_kind not in origins
-            or self.input_origin not in origins[self.item_kind]
-        ):
-            raise ValueError("retained historical request kind/origin union is invalid")
-        if not isinstance(self.text, str) or not self.text.strip():
-            raise ValueError("retained historical request is empty")
-        if len(self.text.encode("utf-8")) > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
-            raise ValueError(
-                "retained historical request exceeds canonical input bound"
-            )
-
-    def canonical_value(self) -> dict[str, object]:
-        return {
-            "item_kind": self.item_kind.value,
-            "input_origin": None
-            if self.input_origin is None
-            else self.input_origin.value,
-            "text": self.text,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class CompactionSnapshotCarrier:
-    continuation_mode: CompactionContinuationMode
-    handoff_instruction: str = field(repr=False)
-    active_request: FrozenCompactionActiveRequest | None = field(repr=False)
-    earlier_context_summary: str = field(repr=False)
-    recent_user_messages: tuple[str, ...] = field(repr=False)
-    body: bytes = field(repr=False)
-    content_digest: str
-    retained_historical_requests: tuple[FrozenRetainedHistoricalRequest, ...] = field(
-        default=(), repr=False
-    )
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.retained_historical_requests, tuple) or any(
-            not isinstance(request, FrozenRetainedHistoricalRequest)
-            for request in self.retained_historical_requests
-        ):
-            raise ValueError("retained historical requests must be a typed tuple")
-        resume = self.continuation_mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
-        if resume != (self.active_request is not None):
-            raise ValueError("snapshot continuation/active-request union is invalid")
-        self.handoff_instruction.encode("utf-8")
-        if not self.handoff_instruction:
-            raise ValueError("snapshot handoff instruction is empty")
-        expected = canonical_json_bytes(
-            {
-                "continuation": {
-                    "mode": self.continuation_mode.value,
-                    "instruction": self.handoff_instruction,
-                    "active_request": (
-                        None
-                        if self.active_request is None
-                        else self.active_request.canonical_value()
-                    ),
-                },
-                "earlier_context_summary": self.earlier_context_summary,
-                "recent_user_messages": self.recent_user_messages,
-                "retained_historical_requests": tuple(
-                    request.canonical_value()
-                    for request in self.retained_historical_requests
-                ),
-            }
-        )
-        if self.body != expected:
-            raise ValueError("snapshot carrier is not canonical JSON")
-        if self.content_digest != "sha256:" + sha256(self.body).hexdigest():
-            raise ValueError("snapshot carrier digest mismatch")
-
-
-@dataclass(frozen=True, slots=True)
 class ContextSnapshotDraft:
     snapshot_id: str
     session_id: str
@@ -1126,6 +1080,18 @@ class ContextSnapshotDraft:
     prompt_contract: str
     model_contract: str
     content: CanonicalContent = field(repr=False)
+    carrier: CompactionSnapshotCarrier = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.carrier, CompactionSnapshotCarrier):
+            raise TypeError("context snapshot draft requires a typed carrier")
+        if (
+            self.content.digest != self.carrier.content_digest
+            or self.content.size != len(self.carrier.body)
+            or self.content.media_type != CONTEXT_SNAPSHOT_MEDIA_TYPE
+            or self.content.codec != CONTEXT_SNAPSHOT_CODEC
+        ):
+            raise ValueError("context snapshot body descriptor drifted")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1182,6 +1148,7 @@ class CompactionCanonicalAdoptionFactoryInput:
     source_through_sequence: int
     source_digest: str
     snapshot_content: CanonicalContent = field(repr=False)
+    snapshot_carrier: CompactionSnapshotCarrier = field(repr=False)
     compiler_contract: str
     prompt_contract: str
     model_contract: str
@@ -1220,9 +1187,17 @@ class PreparedCompactionCanonicalAdoption:
         ):
             raise ValueError("compaction adoption row drafts do not exact-join")
         if self.target_branch is CompactionTargetBranch.ACTIVE_INSTALLATION:
-            if self.expected_turn_status != "RUNNING":
+            if (
+                self.expected_turn_status != "RUNNING"
+                or self.snapshot.carrier.continuation_mode
+                is not CompactionContinuationMode.RESUME_ACTIVE_TURN
+            ):
                 raise ValueError("active compaction requires a running turn")
-        elif self.expected_turn_status == "RUNNING":
+        elif (
+            self.expected_turn_status == "RUNNING"
+            or self.snapshot.carrier.continuation_mode
+            is not CompactionContinuationMode.AWAIT_NEXT_USER
+        ):
             raise ValueError("idle compaction requires a terminal turn")
 
 
@@ -1258,6 +1233,7 @@ def build_prepared_compaction_canonical_adoption(
         prompt_contract=value.prompt_contract,
         model_contract=value.model_contract,
         content=value.snapshot_content,
+        carrier=value.snapshot_carrier,
     )
     binding = TurnContextBindingRevisionDraft(
         binding_revision_id=value.binding_revision_id,
@@ -1314,6 +1290,8 @@ class CompactionOutcome:
 
 
 __all__ = [
+    "CANONICAL_MINIMUM_SERVICE_HEADROOM_BYTES",
+    "CANONICAL_MINIMUM_SERVICE_HEADROOM_ITEMS",
     "COMPACTION_CANONICAL_RANGE_CONTRACT",
     "COMPACTION_MODEL_CONTRACT",
     "COMPACTION_SNAPSHOT_COMPILER_CONTRACT",
@@ -1321,6 +1299,7 @@ __all__ = [
     "COMPACTION_SUMMARY_PROMPT_CONTRACT",
     "CONTEXT_SNAPSHOT_CODEC",
     "CONTEXT_SNAPSHOT_MEDIA_TYPE",
+    "EPOCH_MINIMUM_SERVICE_HEADROOM_BYTES",
     "ColdRebuildCompactionProjection",
     "CompactionAdoptionConfirmation",
     "CompactionAttemptPhase",
@@ -1349,6 +1328,7 @@ __all__ = [
     "FrozenCompactionHeadroomPreflight",
     "FrozenCompactionProviderProjection",
     "FrozenCompactionSourceView",
+    "FrozenRetainedHistoricalRequest",
     "PreparedCompactionCanonicalAdoption",
     "PreparedManualCompactionCommand",
     "ProtectedTailSelectionFact",
@@ -1367,5 +1347,6 @@ __all__ = [
     "freeze_compaction_headroom_preflight",
     "manual_compaction_command_semantic_digest",
     "manual_compaction_stable_suffix",
+    "provider_input_item_canonical_expanded_bytes",
     "resolved_compaction_headroom_bounds",
 ]

@@ -1014,6 +1014,43 @@ CREATE UNIQUE INDEX uq_pulsara_v3_queue_plan_handoff_claim
         session_id, pending_plan_handoff_workflow_id
     ) WHERE pending_plan_handoff_workflow_id IS NOT NULL;
 
+CREATE TABLE pulsara_v3.canonical_image_refs (
+    session_id text NOT NULL,
+    workspace_id text NOT NULL,
+    queue_item_id text,
+    transcript_entry_id text,
+    context_snapshot_id text,
+    ref_ordinal integer NOT NULL CHECK (ref_ordinal >= 0),
+    blob_id text NOT NULL,
+    FOREIGN KEY (session_id, workspace_id)
+        REFERENCES pulsara_v3.sessions (id, workspace_id),
+    FOREIGN KEY (session_id, queue_item_id)
+        REFERENCES pulsara_v3.prompt_queue_items (session_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, transcript_entry_id)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, context_snapshot_id)
+        REFERENCES pulsara_v3.context_snapshots (session_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (blob_id, workspace_id)
+        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
+    CHECK (num_nonnulls(
+        queue_item_id, transcript_entry_id, context_snapshot_id
+    ) = 1)
+);
+CREATE UNIQUE INDEX uq_pulsara_v3_image_ref_queue_ordinal
+    ON pulsara_v3.canonical_image_refs (
+        session_id, queue_item_id, ref_ordinal
+    ) WHERE queue_item_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_pulsara_v3_image_ref_entry_ordinal
+    ON pulsara_v3.canonical_image_refs (
+        session_id, transcript_entry_id, ref_ordinal
+    ) WHERE transcript_entry_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_pulsara_v3_image_ref_snapshot_ordinal
+    ON pulsara_v3.canonical_image_refs (
+        session_id, context_snapshot_id, ref_ordinal
+    ) WHERE context_snapshot_id IS NOT NULL;
+CREATE INDEX ix_pulsara_v3_image_ref_blob
+    ON pulsara_v3.canonical_image_refs (blob_id, workspace_id);
+
 CREATE TABLE pulsara_v3.interaction_decisions (
     id text PRIMARY KEY,
     session_id text NOT NULL,

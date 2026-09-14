@@ -13,6 +13,7 @@ state.  The exact non-empty ``PULSARA_API_KEY`` is the only scrubbed value.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import asdict, is_dataclass
@@ -513,7 +514,7 @@ async def _run_fixture(
             ),
         )
         turn = await session.run_turn(
-            prompt,
+            PromptContent.text(prompt),
             command_id=f"command:round9-3:installer-discovery:{plugin_id}",
         )
         rows = _tool_rows(session)

@@ -142,7 +142,7 @@ def test_round2_active_provider_handle_prevents_monitor_freeze() -> None:
         turn_id="turn:active", deadline_monotonic=monotonic() + 5
     )
     with pytest.raises(ExternalSourceNotAtSafePoint):
-        safe_point.install_terminal_observation(
+        safe_point.prepare_terminal_observation_installation(
             coordinator=coordinator,  # type: ignore[arg-type]
             monitor_id="monitor:safe-point",
             target=_target("blocked"),
@@ -160,13 +160,21 @@ def test_round2_canonical_safe_predicate_conflict_retires_mutable_candidate() ->
     repository.accept_error = ConversationKernelConflict("tool request is not terminal")
     safe_point = _safe_point(repository)
     coordinator = _Coordinator()
+    attempt = safe_point.prepare_terminal_observation_installation(
+        coordinator=coordinator,  # type: ignore[arg-type]
+        monitor_id="monitor:safe-point",
+        target=_target("conflict"),
+        workspace_id="workspace:safe-point",
+        actor_id="host:safe-point",
+        deadline_monotonic=monotonic() + 5,
+    )
+    assert isinstance(attempt, TerminalObservationInstallationAttempt)
     with pytest.raises(ConversationKernelConflict, match="tool request"):
-        safe_point.install_terminal_observation(
+        safe_point.publish_terminal_observation(
+            None,
             coordinator=coordinator,  # type: ignore[arg-type]
-            monitor_id="monitor:safe-point",
-            target=_target("conflict"),
-            workspace_id="workspace:safe-point",
-            actor_id="host:safe-point",
+            attempt=attempt,
+            provider_input_admission=object(),  # type: ignore[arg-type]
             deadline_monotonic=monotonic() + 5,
         )
     assert repository.accept_calls == 1
@@ -180,13 +188,21 @@ def test_round2_ack_unknown_exact_confirms_original_attempt_without_retarget() -
     safe_point = _safe_point(repository)
     coordinator = _Coordinator()
     original = _target("original")
+    attempt = safe_point.prepare_terminal_observation_installation(
+        coordinator=coordinator,  # type: ignore[arg-type]
+        monitor_id="monitor:safe-point",
+        target=original,
+        workspace_id="workspace:safe-point",
+        actor_id="host:safe-point",
+        deadline_monotonic=monotonic() + 5,
+    )
+    assert isinstance(attempt, TerminalObservationInstallationAttempt)
     with pytest.raises(TimeoutError, match="ACK unknown"):
-        safe_point.install_terminal_observation(
+        safe_point.publish_terminal_observation(
+            None,
             coordinator=coordinator,  # type: ignore[arg-type]
-            monitor_id="monitor:safe-point",
-            target=original,
-            workspace_id="workspace:safe-point",
-            actor_id="host:safe-point",
+            attempt=attempt,
+            provider_input_admission=object(),  # type: ignore[arg-type]
             deadline_monotonic=monotonic() + 5,
         )
     assert coordinator.attempt is not None
@@ -196,7 +212,7 @@ def test_round2_ack_unknown_exact_confirms_original_attempt_without_retarget() -
     repository.confirmed = AcceptedEntry(
         original.initial_entry_id, original.turn_id, 2, 2
     )
-    accepted = safe_point.install_terminal_observation(
+    accepted = safe_point.prepare_terminal_observation_installation(
         coordinator=coordinator,  # type: ignore[arg-type]
         monitor_id="monitor:safe-point",
         target=_target("must-not-replace-original"),

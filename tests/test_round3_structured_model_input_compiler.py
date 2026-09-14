@@ -89,7 +89,12 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     enumerate_safe_summary_prefixes,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
+    build_compaction_snapshot_carrier,
     compaction_summary_request,
+    freeze_compaction_summary_output,
+)
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionContinuationMode,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.extensions import OperationalHookType
@@ -112,7 +117,13 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-from pulsara_agent.llm.input import LLMMessage, MessageRole
+from pulsara_agent.llm.input import (
+    LLMMessage,
+    LLMTextPart,
+    MessageRole,
+    join_text_content,
+    text_part_values,
+)
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     build_chat_completions_payload,
     project_chat_context_bearing_payload_fields,
@@ -142,7 +153,7 @@ from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.compiler import (
     COMPILER_CONTRACT_VERSION,
     StructuredModelInputCompiler,
-    _message_logical_utf8_bytes,
+    _message_logical_bytes,
 )
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
@@ -183,6 +194,7 @@ from pulsara_agent.model_input.contracts import (
     ToolResultProviderRenderMode,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
+    provider_input_item_text,
     canonical_compile_snapshot_fingerprint,
     context_binding_compile_fact_fingerprint,
     approved_plan_materialization_fingerprint,
@@ -808,7 +820,7 @@ def _snapshot(
     scope: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     turn_id: str = "turn:test",
     scope_subagent_task_id: str | None = None,
-    canonical_utf8_bytes: int | None = None,
+    canonical_expanded_bytes: int | None = None,
 ) -> CanonicalModelInputSnapshot:
     scope_task = (
         None
@@ -846,21 +858,21 @@ def _snapshot(
         ),
     )
     logical_bytes = (
-        sum(len(item.text.encode("utf-8")) for item in items)
-        if canonical_utf8_bytes is None
-        else canonical_utf8_bytes
+        sum(len(provider_input_item_text(item).encode("utf-8")) for item in items)
+        if canonical_expanded_bytes is None
+        else canonical_expanded_bytes
     )
     fingerprint = canonical_model_input_snapshot_fingerprint(
         identity=identity,
         items=tuple(items),
-        canonical_utf8_bytes=logical_bytes,
+        canonical_expanded_bytes=logical_bytes,
         closures=(),
         late_outcomes=(),
     )
     return CanonicalModelInputSnapshot(
         identity=identity,
         items=tuple(items),
-        canonical_utf8_bytes=logical_bytes,
+        canonical_expanded_bytes=logical_bytes,
         snapshot_fingerprint=fingerprint,
     )
 
@@ -877,7 +889,7 @@ def _user(
         f"entry:{sequence}",
         sequence,
         turn_id,
-        text,
+        (LLMTextPart(text),),
         input_origin=origin,
     )
 
@@ -894,7 +906,7 @@ def _tool_result(
         f"entry:{sequence}",
         sequence,
         turn_id,
-        body,
+        (LLMTextPart(body),),
         tool_call_id=f"call:{sequence}",
         tool_request_entry_id=f"entry:request:{sequence}",
         tool_result_context=ProviderToolResultContextMetadata(
@@ -1396,7 +1408,7 @@ def _approved_plan_compile_facts(
         "entry:draft",
         1,
         "turn:origin",
-        "",
+        (LLMTextPart(""),),
         tool_calls=(ProviderToolCall("call:exit", "exit_plan", arguments),),
     )
     continuation = FrozenProviderInputItem(
@@ -1404,7 +1416,7 @@ def _approved_plan_compile_facts(
         "entry:continuation",
         2,
         "turn:implementation",
-        json.dumps(
+        (LLMTextPart(json.dumps(
             {
                 "pulsara_plan_continuation": {
                     "status": "APPROVED",
@@ -1413,7 +1425,7 @@ def _approved_plan_compile_facts(
             },
             sort_keys=True,
             separators=(",", ":"),
-        ),
+        )),),
         input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
     )
     items = (
@@ -1556,7 +1568,7 @@ def test_round4_approved_plan_is_materialized_exactly_once(
         value
         for message in compiled.messages
         for value in (
-            *message.content,
+            *text_part_values(message.content),
             *(call.arguments for call in message.tool_calls),
         )
     )
@@ -1664,7 +1676,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
         for message in appended
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
     )
     handoffs = tuple(
         item
@@ -1684,8 +1696,8 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
             "entry:1",
             1,
             "turn:test",
-            '{"pulsara_plan_continuation":{"feedback":{"presence":"ABSENT"},'
-            '"status":"ACTIVE","transition":"REVISION_REQUESTED"}}',
+            (LLMTextPart('{"pulsara_plan_continuation":{"feedback":{"presence":"ABSENT"},'
+            '"status":"ACTIVE","transition":"REVISION_REQUESTED"}}'),),
             input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
         )
     )
@@ -1919,7 +1931,7 @@ def test_round3_system_placement_is_independent_of_input_order() -> None:
         _prepared_request(_snapshot(_user("hello")), _sources(*candidates))
     )
     assert compiled.system_prompt == "BASE"
-    assert compiled.messages[0].content == ("hello",)
+    assert compiled.messages[0].content == (LLMTextPart("hello"),)
     observations = tuple(
         decode_runtime_observation(message) for message in compiled.messages[1:]
     )
@@ -2003,7 +2015,7 @@ def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
         "entry:1",
         1,
         "turn:test",
-        "",
+        (LLMTextPart(""),),
         tool_calls=(call,),
     )
     lowered = lower_canonical_item(
@@ -2018,15 +2030,19 @@ def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
     mutable_arguments["nested"]["value"] = 2  # type: ignore[index]
     assert lowered.fixed_message.tool_calls[0].arguments == '{"nested":{"value":1}}'
 
-    mixed = replace(tool_only, text="semantic assistant text")
+    mixed = replace(tool_only, content=(LLMTextPart("semantic assistant text"),))
     mixed_lowered = lower_canonical_item(
         mixed,
         artifact_read_available=False,
         limits=StructuredModelInputLimits(),
     )
     assert mixed_lowered.fixed_message is not None
-    assert mixed_lowered.fixed_message.content == ("semantic assistant text",)
-    assert "draft_identity" not in mixed_lowered.fixed_message.content[0]
+    assert mixed_lowered.fixed_message.content == (
+        LLMTextPart("semantic assistant text"),
+    )
+    assert "draft_identity" not in join_text_content(
+        mixed_lowered.fixed_message.content
+    )
 
 
 def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
@@ -2061,7 +2077,7 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
         "entry:accepted-completion",
         2,
         "turn:root",
-        provider_text,
+        (LLMTextPart(provider_text),),
         input_origin=CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
     )
     lowered = lower_canonical_item(
@@ -2071,7 +2087,7 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
     )
     assert lowered.fixed_message is not None
     assert lowered.fixed_message.role is MessageRole.USER
-    assert lowered.fixed_message.content == (provider_text,)
+    assert lowered.fixed_message.content == (LLMTextPart(provider_text),)
     carrier = json.loads(provider_text)["pulsara_inter_agent_message"]
     assert carrier["message_type"] == "FINAL_ANSWER"
     assert carrier["content"]["result"]["summary"] == "exact delegated summary"
@@ -2083,7 +2099,7 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
         "entry:human",
         3,
         "turn:root",
-        "ordinary human text",
+        (LLMTextPart("ordinary human text"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
     lowered_human = lower_canonical_item(
@@ -2092,7 +2108,7 @@ def test_round3_subagent_completion_uses_typed_user_role_envelope() -> None:
         limits=StructuredModelInputLimits(),
     )
     assert lowered_human.fixed_message is not None
-    assert lowered_human.fixed_message.content == ("ordinary human text",)
+    assert lowered_human.fixed_message.content == (LLMTextPart("ordinary human text"),)
 
 
 def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> None:
@@ -2111,10 +2127,12 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
         compact.utf8_bytes
         <= StructuredModelInputLimits().maximum_tool_result_compact_bytes
     )
-    "".join(compact.message.content).encode("utf-8").decode("utf-8")
-    assert "omitted_utf8_bytes" in compact.message.content[0]
-    assert "omitted_characters" in compact.message.content[0]
-    assert "Use artifact_read" not in compact.message.content[0]
+    join_text_content(compact.message.content, separator="").encode("utf-8").decode(
+        "utf-8"
+    )
+    assert "omitted_utf8_bytes" in join_text_content(compact.message.content)
+    assert "omitted_characters" in join_text_content(compact.message.content)
+    assert "Use artifact_read" not in join_text_content(compact.message.content)
 
     with_read = lower_canonical_item(
         item,
@@ -2129,7 +2147,9 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
         for variant in with_read.tool_result_variants
         if variant.mode is ToolResultProviderRenderMode.COMPACT
     )
-    assert "If the omitted content is necessary" in with_read_compact.message.content[0]
+    assert "If the omitted content is necessary" in join_text_content(
+        with_read_compact.message.content
+    )
 
 
 def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
@@ -2138,13 +2158,13 @@ def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
         None,
         None,
         None,
-        canonical_json_bytes(
+        (LLMTextPart(canonical_json_bytes(
             {
                 "schema_version": "provider_tool_result_closure.v1",
                 "tool_call_id": "call:closed",
                 "disposition": "interrupted_before_dispatch",
             }
-        ).decode("utf-8"),
+        ).decode("utf-8")),),
         tool_call_id="call:closed",
         tool_request_entry_id="entry:request",
     )
@@ -2154,10 +2174,10 @@ def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
         limits=StructuredModelInputLimits(),
     )
     assert lowered.fixed_message is not None
-    assert json.loads(lowered.fixed_message.content[0]) == {
+    assert json.loads(join_text_content(lowered.fixed_message.content)) == {
         "disposition": "interrupted_before_dispatch"
     }
-    assert "schema_version" not in lowered.fixed_message.content[0]
+    assert "schema_version" not in join_text_content(lowered.fixed_message.content)
 
 
 def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
@@ -2166,7 +2186,7 @@ def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
     late = replace(
         ordinary,
         item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
-        text="storage carrier is not used for lowering",
+        content=(LLMTextPart("storage carrier is not used for lowering"),),
         tool_call_id="call:" + ("x" * 256),
     )
     lowered = lower_canonical_item(
@@ -2183,8 +2203,9 @@ def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
         by_mode[ToolResultProviderRenderMode.REF_ONLY].utf8_bytes
         <= StructuredModelInputLimits().maximum_tool_result_ref_only_bytes
     )
-    assert "forged" not in "".join(
-        by_mode[ToolResultProviderRenderMode.REF_ONLY].message.content
+    assert "forged" not in join_text_content(
+        by_mode[ToolResultProviderRenderMode.REF_ONLY].message.content,
+        separator="",
     )
 
 
@@ -2206,7 +2227,7 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
         "entry:retained",
         2,
         "turn:test",
-        "preview",
+        (LLMTextPart("preview"),),
         tool_call_id="call:retained",
         tool_request_entry_id="entry:request:retained",
         tool_result_context=metadata,
@@ -2222,7 +2243,7 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
         for variant in lowered.tool_result_variants
         if variant.mode is ToolResultProviderRenderMode.REF_ONLY
     )
-    assert "retained snapshot" in "".join(ref.message.content)
+    assert "retained snapshot" in join_text_content(ref.message.content, separator="")
 
     unavailable = replace(
         metadata,
@@ -2274,18 +2295,18 @@ def test_round3_prior_turn_tool_result_degrades_before_current_turn() -> None:
 
 
 def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> None:
-    snapshot = _snapshot(canonical_utf8_bytes=100)
+    snapshot = _snapshot(canonical_expanded_bytes=100)
     request = _prepared_request(snapshot, _sources())
     candidates = request.sources.candidates
     expected_working_bytes = (
-        snapshot.canonical_utf8_bytes
+        snapshot.canonical_expanded_bytes
         + sum(
             variant.utf8_bytes
             for candidate in candidates
             for variant in candidate.variants
         )
         + sum(
-            _message_logical_utf8_bytes(source_variant_message(candidate, variant.text))
+            _message_logical_bytes(source_variant_message(candidate, variant.text))
             - variant.utf8_bytes
             for candidate in candidates
             if candidate.channel is ContextChannel.RUNTIME_OBSERVATION
@@ -2321,7 +2342,7 @@ def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> No
         "entry:tool",
         1,
         "turn:test",
-        "",
+        (LLMTextPart(""),),
         tool_calls=(call,),
     )
     argument_bound = replace(
@@ -2330,13 +2351,47 @@ def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> No
     with pytest.raises(StructuredModelInputCompileError) as failure:
         StructuredModelInputCompiler(limits=argument_bound).compile(
             _prepared_request(
-                _snapshot(tool_request, canonical_utf8_bytes=0),
+                _snapshot(tool_request, canonical_expanded_bytes=0),
                 _sources(),
             )
         )
     assert (
         failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
     )
+
+
+def test_snapshot_display_expansion_participates_in_compiler_working_set() -> None:
+    limits = StructuredModelInputLimits(maximum_compile_working_set_bytes=60_000)
+
+    def request_for(summary: str) -> StructuredModelInputCompileRequest:
+        carrier = build_compaction_snapshot_carrier(
+            summary=freeze_compaction_summary_output(
+                summary, maximum_utf8_bytes=65_536
+            ),
+            recent_human_requests=(),
+            continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
+            active_request=None,
+        )
+        # Both canonical bodies fit. Reserved-tag escaping makes only the
+        # second snapshot's actual provider representation exceed this budget.
+        assert len(carrier.body) < limits.maximum_compile_working_set_bytes
+        snapshot = _snapshot(
+            FrozenProviderInputItem(
+                FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
+                None,
+                1,
+                None,
+                carrier,
+            ),
+            canonical_expanded_bytes=len(carrier.body),
+        )
+        return _prepared_request(snapshot, _sources())
+
+    compiler = StructuredModelInputCompiler(limits=limits)
+    compiler.compile(request_for("x" * 50_000))
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        compiler.compile(request_for("[PULSARA_RETAINED_CONTENT" * 2_000))
+    assert failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
 
 
 def test_round3_nonprogress_variant_is_bounded_and_then_omitted() -> None:
@@ -3638,7 +3693,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:298b4e4d10ad2513c51052549b20a776b219cb0fa67a42e97a3161e835185e0b"
+        "sha256:3544ba3f7dd52f3036a71986864ef1bc6399b7daf96f9b4790976505ef512b1a"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -3660,7 +3715,7 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
         "entry:2",
         2,
         "turn:test",
-        "answer",
+        (LLMTextPart("answer"),),
     )
     second_request = replace(
         _prepared_request(
@@ -3685,7 +3740,7 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
         for message in successor.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
     ]
     assert [
         item.body
@@ -3711,7 +3766,7 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
         "entry:2",
         2,
         "turn:test",
-        "answer",
+        (LLMTextPart("answer"),),
     )
     hook = _candidate(
         ContextSourceKind.HOOK_CONTEXT,
@@ -3737,7 +3792,7 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
         for message in successor.messages[len(installed.messages) :]
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
         and decode_runtime_observation(message).source_kind
         is ContextSourceKind.HOOK_CONTEXT
     ]
@@ -3768,7 +3823,7 @@ def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> No
             for message in third_view.messages
             if message.role is MessageRole.USER
             and message.content
-            and "pulsara_runtime_observation" in message.content[0]
+            and "pulsara_runtime_observation" in join_text_content(message.content)
         )
         == 1
     )
@@ -3815,7 +3870,7 @@ def test_memory_write_hint_is_the_only_final_wire_difference_before_anchor(
         for message in with_hint.compiled_input.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
         and decode_runtime_observation(message).source_kind
         is ContextSourceKind.MEMORY_WRITE_HINT
     )
@@ -3824,7 +3879,9 @@ def test_memory_write_hint_is_the_only_final_wire_difference_before_anchor(
     assert decoded.trust_class is ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE
     assert decoded.body == MEMORY_WRITE_HINT_BODY
     assert with_hint.compiled_input.messages[-2] is hint_messages[0]
-    assert with_hint.compiled_input.messages[-1].content == (snapshot.items[-1].text,)
+    assert with_hint.compiled_input.messages[-1].content == (
+        LLMTextPart(provider_input_item_text(snapshot.items[-1])),
+    )
     assert tuple(
         message
         for message in with_hint.compiled_input.messages
@@ -3888,7 +3945,7 @@ def test_memory_write_hint_call_append_does_not_repeat_on_tool_loop() -> None:
         "entry:2",
         2,
         "turn:test",
-        "continuing after a tool result",
+        (LLMTextPart("continuing after a tool result"),),
     )
     second_request = replace(
         _prepared_request(_snapshot(initial, assistant), _sources()),
@@ -3906,7 +3963,7 @@ def test_memory_write_hint_call_append_does_not_repeat_on_tool_loop() -> None:
         for message in second_view.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
         and decode_runtime_observation(message).source_kind
         is ContextSourceKind.MEMORY_WRITE_HINT
     )
@@ -4024,7 +4081,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
         "entry:2",
         2,
         "turn:test",
-        "answer",
+        (LLMTextPart("answer"),),
     )
     second_request = replace(
         _prepared_request(
@@ -4159,7 +4216,7 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
         "entry:2",
         2,
         "turn:test",
-        "answer",
+        (LLMTextPart("answer"),),
     )
     second_request = replace(
         _prepared_request(
@@ -4209,7 +4266,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
         "entry:2",
         2,
         "turn:test",
-        "tool loop result",
+        (LLMTextPart("tool loop result"),),
     )
     no_change_request = replace(
         _prepared_request(
@@ -4237,7 +4294,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
             for message in second_view.messages[len(first_view.messages) :]
             if message.role is MessageRole.USER
             and message.content
-            and "pulsara_runtime_observation" in message.content[0]
+            and "pulsara_runtime_observation" in join_text_content(message.content)
         )
     )
 
@@ -4268,7 +4325,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
             for message in third_view.messages
             if message.role is MessageRole.USER
             and message.content
-            and "pulsara_runtime_observation" in message.content[0]
+            and "pulsara_runtime_observation" in join_text_content(message.content)
         )
     )
     assert clear_count == 1
@@ -4278,7 +4335,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
         "entry:4",
         4,
         "turn:test",
-        "final",
+        (LLMTextPart("final"),),
     )
     repeated_clear_request = replace(
         _prepared_request(
@@ -4307,7 +4364,7 @@ def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
                 for message in fourth_view.messages
                 if message.role is MessageRole.USER
                 and message.content
-                and "pulsara_runtime_observation" in message.content[0]
+                and "pulsara_runtime_observation" in join_text_content(message.content)
             )
         )
         == 1
@@ -4376,7 +4433,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
         "entry:2",
         2,
         "turn:test",
-        "done",
+        (LLMTextPart("done"),),
     )
     followup = _user("follow up", sequence=3)
     second_request = replace(
@@ -4404,7 +4461,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
         "entry:4",
         4,
         "turn:test",
-        "done again",
+        (LLMTextPart("done again"),),
     )
     next_user = _user("one more", sequence=5)
     unavailable = _candidate(
@@ -4433,7 +4490,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
             for message in third_view.messages
             if message.role is MessageRole.USER
             and message.content
-            and "pulsara_runtime_observation" in message.content[0]
+            and "pulsara_runtime_observation" in join_text_content(message.content)
         )
         if observation.source_kind is ContextSourceKind.SKILL_CATALOG
     )
@@ -4448,7 +4505,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
         "entry:6",
         6,
         "turn:test",
-        "final",
+        (LLMTextPart("final"),),
     )
     final_user = _user("last", sequence=7)
     fourth_request = replace(
@@ -4482,7 +4539,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
                 for message in fourth_view.messages
                 if message.role is MessageRole.USER
                 and message.content
-                and "pulsara_runtime_observation" in message.content[0]
+                and "pulsara_runtime_observation" in join_text_content(message.content)
             )
         )
         == 1
@@ -4519,7 +4576,7 @@ def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> N
         "entry:2",
         2,
         "turn:test",
-        "completed successor",
+        (LLMTextPart("completed successor"),),
     )
     clear_request = replace(
         _prepared_request(_snapshot(initial, assistant), _sources()),
@@ -4537,7 +4594,7 @@ def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> N
         for message in second_view.messages[len(first_view.messages) :]
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
     )
     assert (
         sum(
@@ -4553,7 +4610,7 @@ def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> N
         "entry:3",
         3,
         "turn:test",
-        "another success",
+        (LLMTextPart("another success"),),
     )
     repeated_request = replace(
         _prepared_request(_snapshot(initial, assistant, final), _sources()),
@@ -4569,7 +4626,7 @@ def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> N
         for message in third_view.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
         and decode_runtime_observation(message).source_kind
         is ContextSourceKind.PREVIOUS_TURN_OUTCOME
     )
@@ -4619,7 +4676,7 @@ def test_round7_freshness_frontier_appends_without_reclassifying_old_messages() 
         for message in second_view.messages
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
         and decode_runtime_observation(message).source_kind
         is ContextSourceKind.TOOL_OBSERVATION_FRESHNESS
     )
@@ -4698,7 +4755,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
                 f"entry:{call_index}",
                 call_index,
                 "turn:test",
-                f"settle {previous_presence}",
+                (LLMTextPart(f"settle {previous_presence}"),),
             )
         )
         previous_request = replace(
@@ -4725,7 +4782,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
             f"entry:{call_index}",
             call_index,
             "turn:test",
-            "matrix transition",
+            (LLMTextPart("matrix transition"),),
         )
     )
     current_request = replace(
@@ -4746,7 +4803,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
         for message in after.messages[len(before.messages) :]
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
     )
     matching = tuple(item for item in observations if item.source_kind is kind)
     assert len(matching) == int(expected_append)
@@ -4796,7 +4853,7 @@ def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
         "entry:2",
         2,
         "turn:one",
-        "answer one",
+        (LLMTextPart("answer one"),),
     )
     second_user = _user("turn two", sequence=3, turn_id="turn:two")
     second_request = replace(
@@ -4854,7 +4911,7 @@ def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> 
         "entry:2",
         2,
         "turn:one",
-        "continue same run",
+        (LLMTextPart("continue same run"),),
     )
     same_turn_request = replace(
         _prepared_request(
@@ -4874,7 +4931,7 @@ def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> 
         for message in same_turn_view.messages[len(first_view.messages) :]
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
     )
     assert not any(
         item.source_kind is ContextSourceKind.RETAINED_SKILL_CONTEXT
@@ -4912,7 +4969,7 @@ def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> 
         for message in next_turn_view.messages[len(same_turn_view.messages) :]
         if message.role is MessageRole.USER
         and message.content
-        and "pulsara_runtime_observation" in message.content[0]
+        and "pulsara_runtime_observation" in join_text_content(message.content)
     )
     retained = tuple(
         item
@@ -5045,7 +5102,7 @@ def test_round3_1_append_quotes_canonical_item_and_snapshot_bounds_before_instal
     byte_limited = StructuredModelInputCompiler(
         limits=replace(
             StructuredModelInputLimits(),
-            maximum_canonical_input_bytes=request.canonical_input.canonical_utf8_bytes
+            maximum_canonical_input_bytes=request.canonical_input.canonical_expanded_bytes
             - 1,
         )
     )

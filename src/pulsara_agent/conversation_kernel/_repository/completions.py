@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Mapping
 
-from psycopg import Connection
+from psycopg import Connection, IsolationLevel
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from pulsara_agent.conversation_kernel.contracts import (
@@ -21,25 +22,221 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     SUBAGENT_COMPLETION_MEDIA_TYPE,
     SubagentTaskStatus,
     build_subagent_completion_storage_body,
+    project_subagent_completion_for_provider,
 )
 from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
     SubjectSlot,
 )
-from pulsara_agent.model_input.contracts import PreparedProviderInputCut
+from pulsara_agent.conversation_kernel.steer import (
+    PreparedActiveRootInputAdmission,
+    PreparedActiveRootInputCandidate,
+    PreparedRootProviderInputAdmission,
+    PreparedRootProviderInputCandidate,
+)
+from pulsara_agent.llm.input import LLMTextPart
+from pulsara_agent.llm.model_connections import model_call_binding_from_dict
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    ContextBindingBaseKind,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
+    PreparedProviderInputCut,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
+from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
     AcceptedEntry,
     AcceptedSubagentCompletion,
     ConversationKernelConflict,
+    PreparedAutomaticSubagentCompletion,
     SubagentCompletionDisposition,
     _stable_identity,
 )
 
 
 class _SubagentCompletionOperations:
+    def prepare_manual_subagent_completion_provider_input_candidate(
+        self,
+        guard: HostWriterGuard,
+        *,
+        turn_id: str,
+        task_id: str,
+        command_id: str,
+        deadline_monotonic: float,
+    ) -> PreparedActiveRootInputCandidate | AcceptedSubagentCompletion:
+        """Freeze one not-yet-published active ROOT completion command."""
+
+        if not turn_id or not task_id or not command_id:
+            raise ValueError("manual completion preparation identity is invalid")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            accepted = self._accepted_completion_row(
+                connection, session_id=guard.session_id, task_id=task_id
+            )
+            if accepted is not None:
+                return AcceptedSubagentCompletion(
+                    SubagentCompletionDisposition.ALREADY_DELIVERED,
+                    self._completion_accepted_entry(accepted),
+                )
+            task = self._completion_source_row(
+                connection,
+                session_id=guard.session_id,
+                task_id=task_id,
+                for_update=False,
+            )
+            if task is None:
+                return AcceptedSubagentCompletion(
+                    SubagentCompletionDisposition.TARGET_STALE
+                )
+            body = self._completion_storage_body(
+                connection,
+                session_id=guard.session_id,
+                task_id=task_id,
+                task=task,
+            )
+            return self._build_active_completion_provider_candidate(
+                connection,
+                guard,
+                task_id=task_id,
+                turn_id=turn_id,
+                entry_id=_stable_identity(
+                    "entry", guard.session_id, task_id, turn_id, "subagent-completion"
+                ),
+                source_workspace_id=str(task["workspace_id"]),
+                storage_body=body,
+                lock=False,
+            )
+
+    def prepare_manual_subagent_completion_root_provider_input_candidate(
+        self,
+        guard: HostWriterGuard,
+        *,
+        turn_id: str,
+        new_context_binding_revision_id: str,
+        requested_permission_mode: PermissionMode,
+        task_id: str,
+        command_id: str,
+        deadline_monotonic: float,
+    ) -> PreparedRootProviderInputCandidate | AcceptedSubagentCompletion:
+        """Freeze one manual completion that would create a new ROOT turn."""
+
+        if not all(
+            (turn_id, new_context_binding_revision_id, task_id, command_id)
+        ):
+            raise ValueError("manual completion preparation identity is invalid")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            accepted = self._accepted_completion_row(
+                connection, session_id=guard.session_id, task_id=task_id
+            )
+            if accepted is not None:
+                return AcceptedSubagentCompletion(
+                    SubagentCompletionDisposition.ALREADY_DELIVERED,
+                    self._completion_accepted_entry(accepted),
+                )
+            task = self._completion_source_row(
+                connection,
+                session_id=guard.session_id,
+                task_id=task_id,
+                for_update=False,
+            )
+            if task is None:
+                return AcceptedSubagentCompletion(
+                    SubagentCompletionDisposition.TARGET_STALE
+                )
+            body = self._completion_storage_body(
+                connection,
+                session_id=guard.session_id,
+                task_id=task_id,
+                task=task,
+            )
+            return self._build_new_completion_provider_candidate(
+                connection,
+                guard,
+                task_id=task_id,
+                turn_id=turn_id,
+                entry_id=_stable_identity(
+                    "entry", guard.session_id, task_id, turn_id, "subagent-completion"
+                ),
+                context_binding_revision_id=new_context_binding_revision_id,
+                source_workspace_id=str(task["workspace_id"]),
+                requested_permission_mode=requested_permission_mode,
+                storage_body=body,
+                lock=False,
+            )
+
+    def prepare_automatic_subagent_completion(
+        self,
+        guard: HostWriterGuard,
+        *,
+        expected_provider_input_cut: PreparedProviderInputCut,
+        task_id: str,
+        deadline_monotonic: float,
+    ) -> PreparedAutomaticSubagentCompletion | AcceptedSubagentCompletion:
+        """Freeze the exact completion body before its canonical writer runs."""
+
+        if expected_provider_input_cut.session_id != guard.session_id or not task_id:
+            raise ValueError("automatic completion preparation identity is invalid")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            accepted = self._accepted_completion_row(
+                connection, session_id=guard.session_id, task_id=task_id
+            )
+            if accepted is not None:
+                return AcceptedSubagentCompletion(
+                    SubagentCompletionDisposition.ALREADY_DELIVERED,
+                    self._completion_accepted_entry(accepted),
+                )
+            task = self._completion_source_row(
+                connection,
+                session_id=guard.session_id,
+                task_id=task_id,
+                for_update=False,
+            )
+            if task is None:
+                return AcceptedSubagentCompletion(
+                    SubagentCompletionDisposition.TARGET_STALE
+                )
+            body = self._completion_storage_body(
+                connection,
+                session_id=guard.session_id,
+                task_id=task_id,
+                task=task,
+            )
+            return PreparedAutomaticSubagentCompletion(
+                session_id=guard.session_id,
+                workspace_id=str(task["workspace_id"]),
+                task_id=task_id,
+                target_turn_id=expected_provider_input_cut.turn_id,
+                entry_id=_stable_identity(
+                    "entry",
+                    guard.session_id,
+                    task_id,
+                    expected_provider_input_cut.turn_id,
+                    "subagent-completion",
+                ),
+                expected_provider_input_cut=expected_provider_input_cut,
+                storage_body=body,
+            )
+
     def accept_subagent_completion_into_root(
         self,
         guard: HostWriterGuard,
@@ -49,7 +246,12 @@ class _SubagentCompletionOperations:
         new_context_binding_revision_id: str | None = None,
         requested_permission_mode: PermissionMode | None = None,
         command_id: str | None = None,
-        expected_provider_input_cut: PreparedProviderInputCut | None = None,
+        prepared_automatic: PreparedAutomaticSubagentCompletion | None = None,
+        provider_input_admission: (
+            PreparedActiveRootInputAdmission
+            | PreparedRootProviderInputAdmission
+            | None
+        ) = None,
         occurred_at: datetime,
         actor_id: str,
         deadline_monotonic: float,
@@ -66,205 +268,197 @@ class _SubagentCompletionOperations:
         automatic = command_id is None
         if automatic:
             if (
-                expected_provider_input_cut is None
+                prepared_automatic is None
                 or new_context_binding_revision_id is not None
                 or requested_permission_mode is not None
+                or prepared_automatic.task_id != task_id
+                or prepared_automatic.target_turn_id != turn_id
             ):
                 raise ValueError("automatic completion requires one exact active cut")
-        elif not command_id:
-            raise ValueError("manual completion command identity is empty")
+        elif not command_id or prepared_automatic is not None:
+            raise ValueError("manual completion command identity is invalid")
+        if automatic and provider_input_admission is not None:
+            raise ValueError("completion provider admission target is invalid")
+        if new_context_binding_revision_id is None and provider_input_admission is not None:
+            if not isinstance(provider_input_admission, PreparedActiveRootInputAdmission):
+                raise ValueError("active completion provider admission is invalid")
+        if new_context_binding_revision_id is not None and not isinstance(
+            provider_input_admission, PreparedRootProviderInputAdmission
+        ):
+            raise ValueError("new ROOT completion requires provider admission")
 
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            task = self._completion_source_row(
-                connection, session_id=guard.session_id, task_id=task_id
-            )
-            if task is None:
-                return AcceptedSubagentCompletion(
-                    SubagentCompletionDisposition.TARGET_STALE
-                )
-
-            semantic_digest: str | None = None
-            if command_id is not None:
-                semantic_digest = canonical_digest(
-                    "pulsara:accept-subagent-completion:v1",
-                    {
-                        "task_id": task_id,
-                        "turn_id": turn_id,
-                        "new_context_binding_revision_id": (
-                            new_context_binding_revision_id
-                        ),
-                        "requested_permission_mode": (
-                            None
-                            if requested_permission_mode is None
-                            else requested_permission_mode.value
-                        ),
-                    },
-                )
-                existing_command = connection.execute(
-                    """
-                    SELECT c.command_kind, c.request_schema_version,
-                           c.semantic_digest, c.target_entry_id,
-                           e.turn_id, e.entry_sequence,
-                           e.source_subagent_task_id,
-                           a.event_sequence, a.payload
-                    FROM pulsara_v3.session_commands AS c
-                    LEFT JOIN pulsara_v3.transcript_entries AS e
-                      ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = c.session_id
-                     AND e.id = c.target_entry_id
-                    LEFT JOIN pulsara_v3.agent_events AS a
-                      ON a.session_id = e.session_id
-                     AND a.subject_entry_id = e.id
-                     AND a.event_type = 'InterAgentMessageAccepted'
-                    WHERE c.session_id = %s AND c.command_id = %s
-                    """,
-                    (guard.session_id, command_id),
-                ).fetchone()
-                if existing_command is not None:
-                    if (
-                        str(existing_command["command_kind"])
-                        != "ACCEPT_SUBAGENT_COMPLETION"
-                        or str(existing_command["request_schema_version"])
-                        != "accept_subagent_completion.v1"
-                        or str(existing_command["semantic_digest"])
-                        != semantic_digest
-                        or str(existing_command["source_subagent_task_id"])
-                        != task_id
-                        or existing_command["event_sequence"] is None
-                    ):
-                        raise ConversationKernelConflict(
-                            "subagent completion command conflicts"
-                        )
-                    accepted = AcceptedEntry(
-                        str(existing_command["target_entry_id"]),
-                        str(existing_command["turn_id"]),
-                        int(existing_command["entry_sequence"]),
-                        int(existing_command["event_sequence"]),
-                    )
-                    payload = existing_command["payload"]
-                    created_by_command = isinstance(payload, Mapping) and (
-                        payload.get("manual_command_id") == command_id
-                    )
-                    return AcceptedSubagentCompletion(
-                        (
-                            SubagentCompletionDisposition.CREATED
-                            if created_by_command
-                            else SubagentCompletionDisposition.ALREADY_DELIVERED
-                        ),
-                        accepted,
-                    )
-
-            accepted = self._accepted_completion_row(
-                connection, session_id=guard.session_id, task_id=task_id
-            )
-            if accepted is not None:
-                accepted_entry = self._completion_accepted_entry(accepted)
-                if command_id is not None:
-                    assert semantic_digest is not None
-                    self._bind_completion_command(
-                        connection,
-                        session_id=guard.session_id,
-                        command_id=command_id,
-                        semantic_digest=semantic_digest,
-                        target_entry_id=accepted_entry.entry_id,
-                    )
-                return AcceptedSubagentCompletion(
-                    SubagentCompletionDisposition.ALREADY_DELIVERED,
-                    accepted_entry,
-                )
-
-            entry_id = _stable_identity(
-                "entry", guard.session_id, task_id, turn_id, "subagent-completion"
-            )
-            sequence = self._prepare_completion_target(
+            return self._accept_subagent_completion_in_transaction(
                 connection,
                 guard,
+                task_id=task_id,
                 turn_id=turn_id,
-                entry_id=entry_id,
                 new_context_binding_revision_id=new_context_binding_revision_id,
-                source_workspace_id=str(task["workspace_id"]),
                 requested_permission_mode=requested_permission_mode,
-                expected_provider_input_cut=expected_provider_input_cut,
-                automatic=automatic,
+                command_id=command_id,
+                prepared_automatic=prepared_automatic,
+                provider_input_admission=provider_input_admission,
+                occurred_at=occurred_at,
+                actor_id=actor_id,
+                deadline_monotonic=deadline_monotonic,
             )
-            if sequence is None:
+
+    def accept_automatic_subagent_completion_batch(
+        self,
+        guard: HostWriterGuard,
+        *,
+        candidates: tuple[PreparedAutomaticSubagentCompletion, ...],
+        occurred_at: datetime,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> tuple[AcceptedSubagentCompletion, ...]:
+        """Atomically publish one fully admitted FIFO completion suffix."""
+
+        if not candidates:
+            raise ValueError("automatic completion batch is empty")
+        expected_cut = candidates[0].expected_provider_input_cut
+        for candidate in candidates:
+            if candidate.expected_provider_input_cut != expected_cut:
+                raise ValueError("automatic completion batch is not contiguous")
+            expected_cut = PreparedProviderInputCut(
+                session_id=expected_cut.session_id,
+                turn_id=expected_cut.turn_id,
+                context_binding_revision_id=(expected_cut.context_binding_revision_id),
+                provider_input_through_sequence=candidate.entry_sequence,
+            )
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            accepted: list[AcceptedSubagentCompletion] = []
+            for candidate in candidates:
+                outcome = self._accept_subagent_completion_in_transaction(
+                    connection,
+                    guard,
+                    task_id=candidate.task_id,
+                    turn_id=candidate.target_turn_id,
+                    new_context_binding_revision_id=None,
+                    requested_permission_mode=None,
+                    command_id=None,
+                    prepared_automatic=candidate,
+                    provider_input_admission=None,
+                    occurred_at=occurred_at,
+                    actor_id=actor_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                if outcome.disposition is not SubagentCompletionDisposition.CREATED:
+                    raise ConversationKernelConflict(
+                        "prepared completion suffix changed before publication"
+                    )
+                accepted.append(outcome)
+            return tuple(accepted)
+
+    def _accept_subagent_completion_in_transaction(
+        self,
+        connection: Connection,
+        guard: HostWriterGuard,
+        *,
+        task_id: str,
+        turn_id: str,
+        new_context_binding_revision_id: str | None,
+        requested_permission_mode: PermissionMode | None,
+        command_id: str | None,
+        prepared_automatic: PreparedAutomaticSubagentCompletion | None,
+        provider_input_admission: (
+            PreparedActiveRootInputAdmission
+            | PreparedRootProviderInputAdmission
+            | None
+        ),
+        occurred_at: datetime,
+        actor_id: str,
+        deadline_monotonic: float,
+    ) -> AcceptedSubagentCompletion:
+        automatic = command_id is None
+        task = self._completion_source_row(
+            connection,
+            session_id=guard.session_id,
+            task_id=task_id,
+            for_update=True,
+        )
+        if task is None:
+            return AcceptedSubagentCompletion(
+                SubagentCompletionDisposition.TARGET_STALE
+            )
+
+        semantic_digest: str | None = None
+        if command_id is not None:
+            semantic_digest = canonical_digest(
+                "pulsara:accept-subagent-completion:v1",
+                {
+                    "task_id": task_id,
+                    "turn_id": turn_id,
+                    "new_context_binding_revision_id": (
+                        new_context_binding_revision_id
+                    ),
+                    "requested_permission_mode": (
+                        None
+                        if requested_permission_mode is None
+                        else requested_permission_mode.value
+                    ),
+                },
+            )
+            existing_command = connection.execute(
+                """
+                SELECT c.command_kind, c.request_schema_version,
+                       c.semantic_digest, c.target_entry_id,
+                       e.turn_id, e.entry_sequence,
+                       e.source_subagent_task_id,
+                       a.event_sequence, a.payload
+                FROM pulsara_v3.session_commands AS c
+                LEFT JOIN pulsara_v3.transcript_entries AS e
+                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = c.session_id
+                 AND e.id = c.target_entry_id
+                LEFT JOIN pulsara_v3.agent_events AS a
+                  ON a.session_id = e.session_id
+                 AND a.subject_entry_id = e.id
+                 AND a.event_type = 'InterAgentMessageAccepted'
+                WHERE c.session_id = %s AND c.command_id = %s
+                """,
+                (guard.session_id, command_id),
+            ).fetchone()
+            if existing_command is not None:
+                if (
+                    str(existing_command["command_kind"])
+                    != "ACCEPT_SUBAGENT_COMPLETION"
+                    or str(existing_command["request_schema_version"])
+                    != "accept_subagent_completion.v1"
+                    or str(existing_command["semantic_digest"]) != semantic_digest
+                    or str(existing_command["source_subagent_task_id"]) != task_id
+                    or existing_command["event_sequence"] is None
+                ):
+                    raise ConversationKernelConflict(
+                        "subagent completion command conflicts"
+                    )
+                accepted = AcceptedEntry(
+                    str(existing_command["target_entry_id"]),
+                    str(existing_command["turn_id"]),
+                    int(existing_command["entry_sequence"]),
+                    int(existing_command["event_sequence"]),
+                )
+                payload = existing_command["payload"]
+                created_by_command = isinstance(payload, Mapping) and (
+                    payload.get("manual_command_id") == command_id
+                )
                 return AcceptedSubagentCompletion(
-                    SubagentCompletionDisposition.TARGET_STALE
+                    (
+                        SubagentCompletionDisposition.CREATED
+                        if created_by_command
+                        else SubagentCompletionDisposition.ALREADY_DELIVERED
+                    ),
+                    accepted,
                 )
 
-            failed_dependency_task_ids = tuple(
-                str(row["dependency_task_id"])
-                for row in connection.execute(
-                    """
-                    SELECT edge.dependency_task_id
-                    FROM pulsara_v3.subagent_task_dependencies AS edge
-                    JOIN pulsara_v3.subagent_tasks AS dependency
-                      ON dependency.session_id = edge.session_id
-                     AND dependency.id = edge.dependency_task_id
-                    LEFT JOIN pulsara_v3.subagent_task_children AS result
-                      ON result.session_id = dependency.session_id
-                     AND result.task_id = dependency.id
-                     AND result.child_kind = 'RESULT'
-                    WHERE edge.session_id = %s AND edge.task_id = %s
-                      AND (dependency.status <> 'COMPLETED' OR result.id IS NULL)
-                    ORDER BY edge.dependency_ordinal
-                    """,
-                    (guard.session_id, task_id),
-                ).fetchall()
-            )
-            status = SubagentTaskStatus(str(task["status"]))
-            body = build_subagent_completion_storage_body(
-                task_id=task_id,
-                task_key=(None if task["task_key"] is None else str(task["task_key"])),
-                label=(None if task["label"] is None else str(task["label"])),
-                display_role=(
-                    None
-                    if task["display_role"] is None
-                    else str(task["display_role"])
-                ),
-                profile=str(task["profile_kind"]),
-                status=status,
-                terminal_reason=(
-                    None
-                    if task["terminal_reason"] is None
-                    else str(task["terminal_reason"])
-                ),
-                terminal_public_detail=(
-                    None
-                    if task["terminal_public_detail"] is None
-                    else str(task["terminal_public_detail"])
-                ),
-                failed_dependency_task_ids=failed_dependency_task_ids,
-                result_id=(None if task["result_id"] is None else str(task["result_id"])),
-                result_source=(
-                    None
-                    if task["result_source"] is None
-                    else str(task["result_source"])
-                ),
-                result_summary=(
-                    None
-                    if task["result_summary"] is None
-                    else str(task["result_summary"])
-                ),
-            )
-            self._insert_entry(
-                connection,
-                session_id=guard.session_id,
-                workspace_id=str(task["workspace_id"]),
-                turn_id=turn_id,
-                entry_id=entry_id,
-                entry_sequence=sequence,
-                entry_kind=EntryKind.INTER_AGENT_MESSAGE,
-                scope_kind=ConversationScopeKind.ROOT,
-                scope_task_id=None,
-                content=InlineContent.from_bytes(
-                    body,
-                    media_type=SUBAGENT_COMPLETION_MEDIA_TYPE,
-                    codec="utf-8",
-                ),
-                source_subagent_task_id=task_id,
-            )
+        accepted = self._accepted_completion_row(
+            connection, session_id=guard.session_id, task_id=task_id
+        )
+        if accepted is not None:
+            accepted_entry = self._completion_accepted_entry(accepted)
             if command_id is not None:
                 assert semantic_digest is not None
                 self._bind_completion_command(
@@ -272,48 +466,346 @@ class _SubagentCompletionOperations:
                     session_id=guard.session_id,
                     command_id=command_id,
                     semantic_digest=semantic_digest,
-                    target_entry_id=entry_id,
+                    target_entry_id=accepted_entry.entry_id,
                 )
-            event = self._append_events(
+            return AcceptedSubagentCompletion(
+                SubagentCompletionDisposition.ALREADY_DELIVERED,
+                accepted_entry,
+            )
+
+        entry_id = _stable_identity(
+            "entry", guard.session_id, task_id, turn_id, "subagent-completion"
+        )
+        body = self._completion_storage_body(
+            connection,
+            session_id=guard.session_id,
+            task_id=task_id,
+            task=task,
+        )
+        expected_provider_input_cut = (
+            None
+            if prepared_automatic is None
+            else prepared_automatic.expected_provider_input_cut
+        )
+        if prepared_automatic is not None and (
+            prepared_automatic.session_id != guard.session_id
+            or prepared_automatic.workspace_id != str(task["workspace_id"])
+            or prepared_automatic.entry_id != entry_id
+            or prepared_automatic.storage_body != body
+        ):
+            return AcceptedSubagentCompletion(
+                SubagentCompletionDisposition.TARGET_STALE
+            )
+        if not automatic and new_context_binding_revision_id is None:
+            if provider_input_admission is None:
+                raise ValueError("active manual completion requires provider admission")
+            prospective = self._build_active_completion_provider_candidate(
                 connection,
                 guard,
-                workspace_id=str(task["workspace_id"]),
-                drafts=(
-                    CommittedEventDraft(
-                        event_id=_stable_identity(
-                            "event", guard.session_id, task_id, turn_id,
-                            "InterAgentMessageAccepted",
-                        ),
-                        event_type=CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED,
-                        subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
-                        actor_kind=("runtime" if automatic else "user"),
-                        actor_id=actor_id,
-                        sensitivity_class="PUBLIC",
-                        projection_profile="DEFAULT",
-                        occurred_at=occurred_at,
-                        payload={
-                            "source_subagent_task_id": task_id,
-                            "status": status.value,
-                            **(
-                                {}
-                                if command_id is None
-                                else {"manual_command_id": command_id}
-                            ),
-                        },
-                    ),
-                ),
-            )[0]
-            return AcceptedSubagentCompletion(
-                SubagentCompletionDisposition.CREATED,
-                AcceptedEntry(entry_id, turn_id, sequence, event.event_sequence),
+                task_id=task_id,
+                turn_id=turn_id,
+                entry_id=entry_id,
+                source_workspace_id=str(task["workspace_id"]),
+                storage_body=body,
+                lock=True,
             )
+            if provider_input_admission.candidate != prospective:
+                return AcceptedSubagentCompletion(
+                    SubagentCompletionDisposition.TARGET_STALE
+                )
+        elif not automatic:
+            assert new_context_binding_revision_id is not None
+            assert requested_permission_mode is not None
+            assert isinstance(provider_input_admission, PreparedRootProviderInputAdmission)
+            prospective_root = self._build_new_completion_provider_candidate(
+                connection,
+                guard,
+                task_id=task_id,
+                turn_id=turn_id,
+                entry_id=entry_id,
+                context_binding_revision_id=new_context_binding_revision_id,
+                source_workspace_id=str(task["workspace_id"]),
+                requested_permission_mode=requested_permission_mode,
+                storage_body=body,
+                lock=True,
+            )
+            if provider_input_admission.candidate != prospective_root:
+                return AcceptedSubagentCompletion(
+                    SubagentCompletionDisposition.TARGET_STALE
+                )
+        sequence = self._prepare_completion_target(
+            connection,
+            guard,
+            turn_id=turn_id,
+            entry_id=entry_id,
+            new_context_binding_revision_id=new_context_binding_revision_id,
+            source_workspace_id=str(task["workspace_id"]),
+            requested_permission_mode=requested_permission_mode,
+            expected_provider_input_cut=expected_provider_input_cut,
+            automatic=automatic,
+        )
+        if sequence is None:
+            return AcceptedSubagentCompletion(
+                SubagentCompletionDisposition.TARGET_STALE
+            )
+
+        status = SubagentTaskStatus(str(task["status"]))
+        self._insert_entry(
+            connection,
+            session_id=guard.session_id,
+            workspace_id=str(task["workspace_id"]),
+            turn_id=turn_id,
+            entry_id=entry_id,
+            entry_sequence=sequence,
+            entry_kind=EntryKind.INTER_AGENT_MESSAGE,
+            scope_kind=ConversationScopeKind.ROOT,
+            scope_task_id=None,
+            content=InlineContent.from_bytes(
+                body,
+                media_type=SUBAGENT_COMPLETION_MEDIA_TYPE,
+                codec="utf-8",
+            ),
+            source_subagent_task_id=task_id,
+        )
+        if command_id is not None:
+            assert semantic_digest is not None
+            self._bind_completion_command(
+                connection,
+                session_id=guard.session_id,
+                command_id=command_id,
+                semantic_digest=semantic_digest,
+                target_entry_id=entry_id,
+            )
+        event = self._append_events(
+            connection,
+            guard,
+            workspace_id=str(task["workspace_id"]),
+            drafts=(
+                CommittedEventDraft(
+                    event_id=_stable_identity(
+                        "event",
+                        guard.session_id,
+                        task_id,
+                        turn_id,
+                        "InterAgentMessageAccepted",
+                    ),
+                    event_type=CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED,
+                    subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
+                    actor_kind=("runtime" if automatic else "user"),
+                    actor_id=actor_id,
+                    sensitivity_class="PUBLIC",
+                    projection_profile="DEFAULT",
+                    occurred_at=occurred_at,
+                    payload={
+                        "source_subagent_task_id": task_id,
+                        "status": status.value,
+                        **(
+                            {}
+                            if command_id is None
+                            else {"manual_command_id": command_id}
+                        ),
+                    },
+                ),
+            ),
+        )[0]
+        return AcceptedSubagentCompletion(
+            SubagentCompletionDisposition.CREATED,
+            AcceptedEntry(entry_id, turn_id, sequence, event.event_sequence),
+        )
+
+    def _build_active_completion_provider_candidate(
+        self,
+        connection: Connection,
+        guard: HostWriterGuard,
+        *,
+        task_id: str,
+        turn_id: str,
+        entry_id: str,
+        source_workspace_id: str,
+        storage_body: bytes,
+        lock: bool,
+    ) -> PreparedActiveRootInputCandidate:
+        turn = self._require_provider_safe_turn_in_transaction(
+            connection,
+            session_id=guard.session_id,
+            turn_id=turn_id,
+            lock=lock,
+        )
+        state = connection.execute(
+            """
+            SELECT s.workspace_id, s.latest_entry_sequence,
+                   count(e.id) FILTER (
+                       WHERE e.entry_owner_kind = 'EXECUTED_TURN'
+                         AND e.turn_id = t.id
+                         AND e.entry_kind IN (
+                             'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'
+                         )
+                   ) AS accepted_assistant_count,
+                   EXISTS (
+                       SELECT 1 FROM pulsara_v3.prompt_queue_items AS q
+                       WHERE q.session_id = t.session_id
+                         AND q.target_turn_id = t.id
+                         AND q.status = 'PENDING'
+                         AND q.delivery_mode = 'STEER_ACTIVE_TURN'
+                   ) AS has_pending_steer
+            FROM pulsara_v3.turns AS t
+            JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
+            LEFT JOIN pulsara_v3.transcript_entries AS e
+              ON e.session_id = t.session_id
+            WHERE t.session_id = %s AND t.id = %s
+            GROUP BY s.workspace_id, s.latest_entry_sequence, t.session_id, t.id
+            """,
+            (guard.session_id, turn_id),
+        ).fetchone()
+        if state is None:
+            raise ConversationKernelConflict("completion target is absent")
+        workspace_id = str(state["workspace_id"])
+        if (
+            workspace_id != source_workspace_id
+            or str(turn["workspace_id"]) != workspace_id
+            or str(turn["conversation_scope_kind"])
+            != ConversationScopeKind.ROOT.value
+        ):
+            raise ConversationKernelConflict("completion target drifted")
+        if bool(state["has_pending_steer"]):
+            raise ConversationKernelConflict("turn is not at a provider safe point")
+        projected = project_subagent_completion_for_provider(
+            storage_body,
+            source_task_id=task_id,
+        )
+        latest_sequence = int(state["latest_entry_sequence"])
+        return PreparedActiveRootInputCandidate(
+            workspace_id=workspace_id,
+            expected_provider_input_cut=PreparedProviderInputCut(
+                session_id=guard.session_id,
+                turn_id=turn_id,
+                context_binding_revision_id=str(
+                    turn["current_context_binding_revision_id"]
+                ),
+                provider_input_through_sequence=latest_sequence,
+            ),
+            next_model_call_index=int(state["accepted_assistant_count"]) + 1,
+            unpublished_items=(
+                FrozenProviderInputItem(
+                    item_kind=FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
+                    source_entry_id=entry_id,
+                    source_entry_sequence=latest_sequence + 1,
+                    source_turn_id=turn_id,
+                    content=(LLMTextPart(projected),),
+                    input_origin=CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
+                ),
+            ),
+            unpublished_item_canonical_expanded_bytes=(
+                len(projected.encode("utf-8")),
+            ),
+        )
+
+    def _build_new_completion_provider_candidate(
+        self,
+        connection: Connection,
+        guard: HostWriterGuard,
+        *,
+        task_id: str,
+        turn_id: str,
+        entry_id: str,
+        context_binding_revision_id: str,
+        source_workspace_id: str,
+        requested_permission_mode: PermissionMode,
+        storage_body: bytes,
+        lock: bool,
+    ) -> PreparedRootProviderInputCandidate:
+        session = self._require_writer(connection, guard, lock=lock)
+        workspace_id = str(session["workspace_id"])
+        if workspace_id != source_workspace_id:
+            raise ConversationKernelConflict("subagent completion workspace drifted")
+        self._require_root_admission_open(
+            connection, session_id=guard.session_id
+        )
+        existing = connection.execute(
+            """
+            SELECT 1 FROM pulsara_v3.turns
+            WHERE session_id = %s
+              AND (id = %s OR (conversation_scope_kind = 'ROOT' AND status = 'RUNNING'))
+            LIMIT 1
+            """,
+            (guard.session_id, turn_id),
+        ).fetchone()
+        if existing is not None:
+            raise ConversationKernelConflict("completion target is stale")
+        model_call_binding = model_call_binding_from_dict(
+            session["model_call_binding"]
+        )
+        if model_call_binding is None:
+            raise ConversationKernelConflict(
+                "session has no model binding for the new ROOT turn"
+            )
+        permission = self._freeze_root_permission_snapshot(
+            connection,
+            session_id=guard.session_id,
+            snapshot_id=_stable_identity("permission-snapshot", turn_id),
+            requested_mode=requested_permission_mode,
+            admission_source=(
+                RunPermissionAdmissionSource.SUBAGENT_COMPLETION_COMMAND
+            ),
+        )
+        latest_sequence = int(session["latest_entry_sequence"])
+        initial_sequence = latest_sequence + 1
+        base_kind, snapshot_id, source_through = (
+            self._initial_context_binding_values(
+                connection,
+                session_id=guard.session_id,
+                turn_id=turn_id,
+                initial_entry_sequence=initial_sequence,
+                scope_kind=ConversationScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            )
+        )
+        projected = project_subagent_completion_for_provider(
+            storage_body,
+            source_task_id=task_id,
+        )
+        return PreparedRootProviderInputCandidate(
+            session_id=guard.session_id,
+            workspace_id=workspace_id,
+            exact_turn_id=turn_id,
+            exact_initial_entry_id=entry_id,
+            exact_context_binding_revision_id=context_binding_revision_id,
+            unpublished_items=(
+                FrozenProviderInputItem(
+                    item_kind=FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
+                    source_entry_id=entry_id,
+                    source_entry_sequence=initial_sequence,
+                    source_turn_id=turn_id,
+                    content=(LLMTextPart(projected),),
+                    input_origin=CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
+                ),
+            ),
+            unpublished_item_canonical_expanded_bytes=(
+                len(projected.encode("utf-8")),
+            ),
+            permission_snapshot=permission,
+            model_call_binding=model_call_binding,
+            expected_latest_entry_sequence=latest_sequence,
+            context_base_kind=ContextBindingBaseKind(base_kind),
+            context_snapshot_id=snapshot_id,
+            source_through_sequence=source_through,
+            pending_plan_handoff_workflow_id=None,
+            pending_plan_handoff_interaction_id=None,
+            pending_plan_handoff_kind=None,
+            unpublished_plan_workflow_fact=None,
+            unpublished_plan_handoff_fact=None,
+            unpublished_approved_plan_fact=None,
+        )
 
     @staticmethod
     def _completion_source_row(
-        connection: Connection, *, session_id: str, task_id: str
+        connection: Connection,
+        *,
+        session_id: str,
+        task_id: str,
+        for_update: bool,
     ) -> Mapping[str, object] | None:
-        return connection.execute(
-            """
+        query = """
             SELECT t.workspace_id, t.task_key, t.label, t.display_role,
                    t.profile_kind, t.status, t.terminal_reason,
                    t.terminal_public_detail,
@@ -328,10 +820,70 @@ class _SubagentCompletionOperations:
                 'COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
                 'BLOCKED_DEPENDENCY_FAILED'
               )
-            FOR UPDATE OF t
-            """,
+            """
+        if for_update:
+            query += " FOR UPDATE OF t"
+        return connection.execute(
+            query,
             (session_id, task_id),
         ).fetchone()
+
+    @staticmethod
+    def _completion_storage_body(
+        connection: Connection,
+        *,
+        session_id: str,
+        task_id: str,
+        task: Mapping[str, object],
+    ) -> bytes:
+        failed_dependency_task_ids = tuple(
+            str(row["dependency_task_id"])
+            for row in connection.execute(
+                """
+                SELECT edge.dependency_task_id
+                FROM pulsara_v3.subagent_task_dependencies AS edge
+                JOIN pulsara_v3.subagent_tasks AS dependency
+                  ON dependency.session_id = edge.session_id
+                 AND dependency.id = edge.dependency_task_id
+                LEFT JOIN pulsara_v3.subagent_task_children AS result
+                  ON result.session_id = dependency.session_id
+                 AND result.task_id = dependency.id
+                 AND result.child_kind = 'RESULT'
+                WHERE edge.session_id = %s AND edge.task_id = %s
+                  AND (dependency.status <> 'COMPLETED' OR result.id IS NULL)
+                ORDER BY edge.dependency_ordinal
+                """,
+                (session_id, task_id),
+            ).fetchall()
+        )
+        return build_subagent_completion_storage_body(
+            task_id=task_id,
+            task_key=(None if task["task_key"] is None else str(task["task_key"])),
+            label=(None if task["label"] is None else str(task["label"])),
+            display_role=(
+                None if task["display_role"] is None else str(task["display_role"])
+            ),
+            profile=str(task["profile_kind"]),
+            status=SubagentTaskStatus(str(task["status"])),
+            terminal_reason=(
+                None
+                if task["terminal_reason"] is None
+                else str(task["terminal_reason"])
+            ),
+            terminal_public_detail=(
+                None
+                if task["terminal_public_detail"] is None
+                else str(task["terminal_public_detail"])
+            ),
+            failed_dependency_task_ids=failed_dependency_task_ids,
+            result_id=(None if task["result_id"] is None else str(task["result_id"])),
+            result_source=(
+                None if task["result_source"] is None else str(task["result_source"])
+            ),
+            result_summary=(
+                None if task["result_summary"] is None else str(task["result_summary"])
+            ),
+        )
 
     @staticmethod
     def _accepted_completion_row(

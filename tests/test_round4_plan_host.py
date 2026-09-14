@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import asyncio
 import json
 from pathlib import Path
@@ -26,6 +27,7 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.llm.input import text_part_values
 from pulsara_agent.model_input.continuity import ProcessLocalProviderInputInstallPermit
 from pulsara_agent.primitives.plan_workflow import (
     PlanDraftDecision,
@@ -216,7 +218,7 @@ class _PlanHostModel(_PreflightModel):
                     *(
                         part
                         for message in compiled.messages
-                        for part in message.content
+                        for part in text_part_values(message.content)
                     ),
                     *(
                         call.arguments
@@ -411,7 +413,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
         await session.update_model_call_binding(test_model_binding(model_runtime))
         running = asyncio.create_task(
             session.run_turn(
-                "Make a plan before editing.",
+                PromptContent.text("Make a plan before editing."),
                 command_id="command:round4-plan",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
@@ -531,7 +533,7 @@ def test_round4_queued_root_turn_runs_automatic_plan_successor(
         )
         accepted = await session.submit_prompt(
             command_id="command:queued-plan-chain",
-            text="Plan this queued request.",
+            content=PromptContent.text("Plan this queued request."),
         )
         assert accepted.status == "PENDING"
         await asyncio.wait_for(model.completed.wait(), timeout=5)
@@ -579,7 +581,7 @@ def test_round4_detached_waiter_cannot_strand_root_slot_before_plan_review(
         )
         running = asyncio.create_task(
             session.run_turn(
-                "Draft the plan.",
+                PromptContent.text("Draft the plan."),
                 command_id="command:detached-origin",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
@@ -667,7 +669,7 @@ def test_round4_force_exit_fences_full_automatic_continuation_before_bind(
         monkeypatch.setattr(session, "_inspect_plan_continuation", delayed_inspect)
         running = asyncio.create_task(
             session.run_turn(
-                "Enter Plan while force-exit races.",
+                PromptContent.text("Enter Plan while force-exit races."),
                 command_id="command:force-race-origin",
             )
         )
@@ -758,7 +760,7 @@ def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successo
         monkeypatch.setattr(session, "_finish_root_chain", hold_before_handoff)
         running = asyncio.create_task(
             session.run_turn(
-                "Enter Plan and wait at the ownership handoff.",
+                PromptContent.text("Enter Plan and wait at the ownership handoff."),
                 command_id="command:round7-pending-plan-stop",
             )
         )
@@ -843,7 +845,7 @@ def test_round4_stale_force_exit_does_not_cancel_valid_root_turn(
         )
         running = asyncio.create_task(
             session.run_turn(
-                "Keep this exact turn alive.",
+                PromptContent.text("Keep this exact turn alive."),
                 command_id="command:stale-force-origin",
             )
         )
@@ -892,7 +894,7 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
         )
         running = asyncio.create_task(
             session.run_turn(
-                "Draft a bounded plan.",
+                PromptContent.text("Draft a bounded plan."),
                 command_id="command:terminalize-origin",
             )
         )

@@ -7,6 +7,7 @@ environment values, provider thinking or private URLs.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import replace
@@ -176,7 +177,7 @@ async def _run(settings: PulsaraSettings, workspace: Path) -> dict[str, object]:
     try:
         first_task = asyncio.create_task(
             session.run_turn(
-                "Run the controlled first phase now.",
+                PromptContent.text("Run the controlled first phase now."),
                 command_id="command:round7-dogfood-first",
             )
         )
@@ -217,7 +218,7 @@ async def _run(settings: PulsaraSettings, workspace: Path) -> dict[str, object]:
         first_turn_id = str(turns[0]["id"])
 
         second = await session.run_turn(
-            "Continue using the typed runtime observations.",
+            PromptContent.text("Continue using the typed runtime observations."),
             command_id="command:round7-dogfood-second",
         )
         parsed = _parse_closed_final(second.final_text)

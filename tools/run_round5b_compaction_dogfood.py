@@ -8,6 +8,7 @@ exact PULSARA_API_KEY value is scrubbed before the report leaves the process.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from contextlib import contextmanager
@@ -34,7 +35,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
-from pulsara_agent.llm.input import MessageRole
+from pulsara_agent.llm.input import MessageRole, text_part_values
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.live_agent_event import (
     DataEndPayload,
@@ -95,7 +96,7 @@ def _scrub_exact(value: object, secret: str) -> object:
 def _message_trace(message) -> dict[str, object]:
     return {
         "role": message.role.value,
-        "content": tuple(message.content),
+        "content": text_part_values(message.content),
         "tool_calls": tuple(
             {
                 "id": item.id,
@@ -278,7 +279,7 @@ class _DogfoodTrace:
                     if message.role is MessageRole.USER
                     and any(
                         "CONTEXT CHECKPOINT COMPACTION" in item
-                        for item in message.content
+                        for item in text_part_values(message.content)
                     )
                 ),
                 len(context.messages) - 1,
@@ -671,7 +672,7 @@ async def _run_traced_turn(
 ):
     record = trace.begin_turn(command_id=command_id, prompt=prompt)
     try:
-        result = await session.run_turn(prompt, command_id=command_id)
+        result = await session.run_turn(PromptContent.text(prompt), command_id=command_id)
     except BaseException as exc:
         trace.fail_turn(record, exc)
         raise

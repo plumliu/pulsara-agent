@@ -7,6 +7,7 @@ environment values, provider thinking, credentials, or DSNs.
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import PromptContent
 import argparse
 import asyncio
 from dataclasses import replace
@@ -185,7 +186,7 @@ async def _main_flow(core: KernelHostCore, workspace: Path) -> dict[str, object]
     try:
         origin = asyncio.create_task(
             session.run_turn(
-                "Plan and then implement one harmless marker file.",
+                PromptContent.text("Plan and then implement one harmless marker file."),
                 command_id="command:round4-dogfood-main",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             )
@@ -326,7 +327,7 @@ async def _cancel_flow(core: KernelHostCore, workspace: Path) -> dict[str, objec
     try:
         draft = await asyncio.wait_for(
             session.run_turn(
-                "Create a small plan so I can cancel it.",
+                PromptContent.text("Create a small plan so I can cancel it."),
                 command_id="command:round4-dogfood-cancel-origin",
                 requested_permission_mode=PermissionMode.ACCEPT_EDITS,
             ),
@@ -349,7 +350,7 @@ async def _cancel_flow(core: KernelHostCore, workspace: Path) -> dict[str, objec
             raise RuntimeError("CANCEL created a blank continuation")
         first = await asyncio.wait_for(
             session.run_turn(
-                "Acknowledge the cancelled plan directly.",
+                PromptContent.text("Acknowledge the cancelled plan directly."),
                 command_id="command:round4-dogfood-after-cancel-1",
                 requested_permission_mode=PermissionMode.READ_ONLY,
             ),
@@ -371,7 +372,7 @@ async def _cancel_flow(core: KernelHostCore, workspace: Path) -> dict[str, objec
             raise RuntimeError("CANCEL handoff was not claimed exactly once")
         second = await asyncio.wait_for(
             session.run_turn(
-                "Reply directly once more.",
+                PromptContent.text("Reply directly once more."),
                 command_id="command:round4-dogfood-after-cancel-2",
                 requested_permission_mode=PermissionMode.READ_ONLY,
             ),

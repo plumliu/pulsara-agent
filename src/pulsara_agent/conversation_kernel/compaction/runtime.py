@@ -28,6 +28,20 @@ from pulsara_agent.model_input.contracts import ModelInputScopeKind
 _T = TypeVar("_T")
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class CompactionWriteReservation:
+    """Exact process-local owner of one canonical writer/compaction exclusion."""
+
+    scope_kind: ModelInputScopeKind
+    scope_subagent_task_id: str | None
+
+    def __post_init__(self) -> None:
+        if (self.scope_kind is ModelInputScopeKind.ROOT) != (
+            self.scope_subagent_task_id is None
+        ):
+            raise ValueError("compaction write reservation scope union is invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class ManualCompactionRequest:
     request_id: str
@@ -78,7 +92,13 @@ class HostCompactionRuntimeOwner:
         ] = {}
         self._closing = False
         self._host_install_fence: Callable[
-            [CompactionScope, CompactionTrigger, str, asyncio.Task[object]],
+            [
+                CompactionScope,
+                CompactionTrigger,
+                str,
+                asyncio.Task[object],
+                CompactionWriteReservation | None,
+            ],
             Awaitable[None],
         ] | None = None
         self._host_remove_fence: Callable[
@@ -89,7 +109,13 @@ class HostCompactionRuntimeOwner:
         self,
         *,
         install: Callable[
-            [CompactionScope, CompactionTrigger, str, asyncio.Task[object]],
+            [
+                CompactionScope,
+                CompactionTrigger,
+                str,
+                asyncio.Task[object],
+                CompactionWriteReservation | None,
+            ],
             Awaitable[None],
         ],
         remove: Callable[
@@ -325,6 +351,7 @@ class HostCompactionRuntimeOwner:
         scope: CompactionScope,
         trigger: CompactionTrigger,
         operation: Callable[[], Awaitable[_T]],
+        admitted_writer: CompactionWriteReservation | None = None,
     ) -> _T:
         """Run one exact scope after acquiring the Host-wide summary lane."""
 
@@ -346,7 +373,13 @@ class HostCompactionRuntimeOwner:
                         owner_task=current,
                     )
             else:
-                await install(scope, trigger, attempt_id, current)
+                await install(
+                    scope,
+                    trigger,
+                    attempt_id,
+                    current,
+                    admitted_writer,
+                )
             try:
                 return await operation()
             finally:
