@@ -1858,14 +1858,15 @@ def test_responses_terminal_may_elide_settled_operational_item_fields() -> None:
     ) == (streamed,)
 
 
-def test_responses_terminal_may_elide_closed_final_answer_phase() -> None:
+@pytest.mark.parametrize("phase", ("commentary", "final_answer"))
+def test_responses_terminal_may_elide_closed_message_phase(phase: str) -> None:
     accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
     streamed = {
         "type": "message",
         "id": "message:bob",
         "status": "completed",
         "role": "assistant",
-        "phase": "final_answer",
+        "phase": phase,
         "content": [
             {
                 "type": "output_text",
@@ -2553,6 +2554,117 @@ def test_responses_late_reasoning_format_still_matches_terminal_snapshot() -> No
         )
 
 
+@pytest.mark.parametrize("initial_phase", (None, "final_answer", "commentary"))
+@pytest.mark.parametrize("terminal_has_output", (False, True))
+def test_responses_settled_commentary_before_tool_call_replays_exactly(
+    initial_phase: str | None, terminal_has_output: bool
+) -> None:
+    # A preamble can start as final_answer, then settle as commentary once the
+    # response emits a tool call. The final phase belongs to the exact replay.
+    message = {
+        "type": "message",
+        "id": "message:preamble",
+        "role": "assistant",
+        "status": "completed",
+        "phase": "commentary",
+        "content": [{"type": "output_text", "text": "I will read the file."}],
+    }
+    tool = {
+        "type": "function_call",
+        "id": "function:read",
+        "status": "completed",
+        "call_id": "call:read",
+        "name": "read_file",
+        "arguments": '{"path": "ledger-01.txt"}',
+    }
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    events = [
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                **message,
+                "phase": initial_phase,
+                "status": "in_progress",
+                "content": [],
+            },
+        },
+        {
+            "type": "response.output_text.delta",
+            "output_index": 0,
+            "delta": "I will read the file.",
+        },
+        {
+            "type": "response.output_text.done",
+            "output_index": 0,
+            "text": "I will read the file.",
+        },
+        {"type": "response.output_item.done", "output_index": 0, "item": message},
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {**tool, "status": "in_progress", "arguments": ""},
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": tool["id"],
+            "output_index": 1,
+            "delta": tool["arguments"],
+        },
+        {"type": "response.output_item.done", "output_index": 1, "item": tool},
+        {
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "output": [message, tool] if terminal_has_output else [],
+            },
+        },
+    ]
+    emitted = [item for event in events for item in accumulator.apply(event)]
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+    assert terminal.completed_replay_payload is not None
+    assert tuple(
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ) == (message, tool)
+    assert [item.delta for item in emitted if isinstance(item, TextDeltaPayload)] == [
+        "I will read the file."
+    ]
+    assert len([item for item in emitted if isinstance(item, ToolCallEndPayload)]) == 1
+
+
+@pytest.mark.parametrize("changed_field,value", (("id", "other"), ("role", "user")))
+def test_responses_phase_change_does_not_hide_message_identity_drift(
+    changed_field: str, value: str
+) -> None:
+    initial = {
+        "type": "message",
+        "id": "message:preamble",
+        "role": "assistant",
+        "phase": "final_answer",
+        "status": "in_progress",
+        "content": [],
+    }
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    accumulator.apply(
+        {"type": "response.output_item.added", "output_index": 0, "item": initial}
+    )
+    with pytest.raises(LLMTransportContractError, match="identity changed"):
+        accumulator.apply(
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    **initial,
+                    changed_field: value,
+                    "phase": "commentary",
+                    "status": "completed",
+                },
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "item",
     (
@@ -2564,7 +2676,7 @@ def test_responses_late_reasoning_format_still_matches_terminal_snapshot() -> No
         {
             "type": "message",
             "role": "assistant",
-            "phase": "commentary",
+            "phase": "future-phase",
             "content": [{"type": "output_text", "text": "not-final"}],
         },
     ),

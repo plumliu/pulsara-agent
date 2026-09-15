@@ -42,7 +42,7 @@ RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS = frozenset(
     {"annotations", "logprobs"}
 )
 RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT = (
-    "terminal-output-or-contiguous-settled-item-done-with-operational-elision:v4"
+    "terminal-output-or-contiguous-settled-item-done-with-operational-elision:v5"
 )
 
 PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION = (

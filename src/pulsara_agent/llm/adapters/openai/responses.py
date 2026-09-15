@@ -1063,7 +1063,7 @@ def _response_output_item_identity_fingerprint(item: dict[str, Any]) -> str:
     item_type = item.get("type")
     identity: dict[str, Any] = {"type": item_type, "id": item.get("id")}
     if item_type == "message":
-        identity.update({"role": item.get("role"), "phase": item.get("phase")})
+        identity["role"] = item.get("role")
     elif item_type == "function_call":
         identity.update(
             {
@@ -1071,10 +1071,11 @@ def _response_output_item_identity_fingerprint(item: dict[str, Any]) -> str:
                 "name": item.get("name"),
             }
         )
-    # ``reasoning.format`` is a settled carrier field, not stream identity.
-    # Responses-compatible endpoints may populate it only on item.done.  The
-    # final value remains closed and byte-exact through the existing
-    # item.done-to-response.completed comparison and replay validation.
+    # ``reasoning.format`` and ``message.phase`` are settled carrier fields,
+    # not stream identity. Endpoints may populate format late or change an
+    # in-progress message from final_answer to commentary before a tool call.
+    # item.done-to-response.completed comparison and replay retain exact final
+    # values; an unfinished phase never controls Pulsara's turn settlement.
     return context_fingerprint("pulsara.responses-output-item-identity:v1", identity)
 
 
@@ -1262,7 +1263,7 @@ def _project_completed_response(
                     reason_code="transport_responses_output_invalid",
                 )
             phase = item.get("phase")
-            if phase is not None and phase != "final_answer":
+            if phase is not None and phase not in ("commentary", "final_answer"):
                 raise LLMTransportContractError(
                     "Responses message phase is unsupported",
                     reason_code="transport_responses_output_invalid",

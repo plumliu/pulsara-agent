@@ -2078,6 +2078,15 @@ tests/test_retrieval_credentials.py
 - final context-bearing materializer继续与 ordinary send共享；
 - Chat accumulator改为 §8 tracker，删除 dense/origin path；
 - Responses保留 existing exact item state machine；
+- Responses message 的 `phase` 接纳标准值 `commentary` / `final_answer`（也可缺省），由
+  已完成 output item 确定并按原值 native replay；`output_item.added` 是进行中快照，其
+  `phase` 可在 `item.done` 改变，不参与 type/id/role 的身份比较。`item.done` 与 terminal
+  output 若都给出 phase 仍必须相等，沿用既有 terminal 字段省略规则。SDK 负责 SSE 解码；
+  通用 adapter 负责上述完成值核对，不按 provider 名称分支。phase 仅是 provider 输出标注，
+  不新增 Pulsara turn 状态或自动继续路径；仍由既有 terminal/tool-call settlement 决定后续。
+  单条可选 message 位于 function calls 之前的 canonical 顺序限制保持不变，completed-output
+  source contract 升至 v5。2026-09-15 DeepSeek 实测可在工具调用前从 `final_answer` 变为
+  `commentary`，此前将 phase 视为身份及只允许 final_answer 的限制在此删除；
 - terminal/retry/usage/replay行为不变。
 
 ### 13.7 Kernel、auxiliary、CLI 与 Web 的 per-session single-connection wiring
