@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -340,6 +342,90 @@ class _Bridge:
         return {"background_process_log": {"output": "exact output"}}
 
 
+def test_u2_http_prompt_body_enforces_actual_eight_mib_transport_boundary(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_exercise_http_prompt_body_boundary(tmp_path))
+
+
+async def _exercise_http_prompt_body_boundary(tmp_path: Path) -> None:
+    static_root = tmp_path / "static"
+    static_root.mkdir()
+    (static_root / "index.html").write_text("Pulsara", encoding="utf-8")
+    bridge = _Bridge()
+    server = LocalHttpServer(
+        sessions=cast(LocalSessionController, _Sessions()),
+        bridge=cast(LocalBrowserBridge, bridge),
+        static_root=static_root,
+        requested_port=0,
+        is_ready=lambda: True,
+        is_draining=lambda: False,
+        database_state=lambda: "ready",
+        **{
+            key: value
+            for key, value in _model_server_dependencies().items()
+            if key != "database_state"
+        },
+    )
+    await server.start()
+    image_bytes = b"\x00\xff\\\"" * 1_000_000
+    encoded_image = base64.b64encode(image_bytes).decode("ascii")
+    command = {
+        "command_id": "command:http-boundary",
+        "command_kind": "SUBMIT_PROMPT",
+        "client_submission_id": "command:http-boundary",
+        "requested_permission_mode": "PERMISSION_MODE_READ_ONLY",
+        "prompt_content": {
+            "parts": [
+                {"type": "text", "text": "escaping \\\" 中文\n"},
+                {
+                    "type": "image",
+                    "content_base64": encoded_image,
+                    "declared_media_type": "image/png",
+                },
+            ]
+        },
+    }
+    base = json.dumps(
+        command, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    maximum_http_bytes = 8 << 20
+    assert len(base) < maximum_http_bytes
+    exact = base + b" " * (maximum_http_bytes - len(base))
+    headers = {
+        "Content-Type": "application/json",
+        "Origin": server.origin,
+        "Sec-Fetch-Site": "same-origin",
+    }
+    try:
+        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+            async with client.post(
+                f"{server.origin}/api/connections/connection-1/command",
+                data=exact,
+                headers=headers,
+            ) as response:
+                assert response.status == 200
+                assert (await response.json())["command_outcome"]["status"] == (
+                    "PENDING"
+                )
+            [(operation, connection_id, received)] = bridge.operation_calls
+            assert operation == "command"
+            assert connection_id == "connection-1"
+            received_parts = received["prompt_content"]["parts"]
+            assert received_parts[0]["text"] == "escaping \\\" 中文\n"
+            assert base64.b64decode(received_parts[1]["content_base64"]) == image_bytes
+
+            async with client.post(
+                f"{server.origin}/api/connections/connection-1/command",
+                data=exact + b" ",
+                headers=headers,
+            ) as response:
+                assert response.status == 413
+            assert len(bridge.operation_calls) == 1
+    finally:
+        await server.aclose()
+
+
 def test_zero_config_settings_and_database_surface_stays_usable(
     tmp_path: Path,
 ) -> None:
@@ -350,7 +436,9 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
     static_root = tmp_path / "static"
     static_root.mkdir()
     (static_root / "index.html").write_text("Pulsara settings", encoding="utf-8")
-    base = test_model_runtime()
+    base = test_model_runtime(
+        input_modalities=("text", "image", "audio"), output_modalities=("text",),
+    )
     settings = LocalSettingsStore(tmp_path / "pulsara" / "local-settings.yaml")
     runtime = ModelRuntime(
         settings=settings,
@@ -411,6 +499,8 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 assert catalog["routes"][0]["route_id"] == "test"
                 model = catalog["routes"][0]["models"][0]
                 assert model["model_id"] == "test-model"
+                assert model["input_modalities"] == ["text", "image", "audio"]
+                assert model["output_modalities"] == ["text"]
                 executable = [item for item in model["wire_apis"] if item["executable"]]
                 assert [item["wire_api"] for item in executable] == ["openai_responses"]
 
@@ -430,6 +520,10 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 rendered = str(payload)
                 assert secret not in rendered
                 assert payload["model_configuration"]["credential_configured"] is True
+                assert payload["model_configuration"]["input_modalities"] == [
+                    "text", "image", "audio",
+                ]
+                assert payload["model_configuration"]["output_modalities"] == ["text"]
                 connection_id = payload["model_configuration"]["id"]
 
             stored = settings.read()
@@ -443,6 +537,7 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 json={
                     "source": "user_declared",
                     "configuration_name": "Local No Auth",
+                    "input_modalities": ["text", "image"],
                     "base_url": "http://127.0.0.1:11434/v1",
                     "model_id": "local-model",
                     "wire_api": "openai_responses",
@@ -461,10 +556,14 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 assert custom["route_name"] == "Local No Auth"
                 assert custom["credential_configured"] is False
                 assert custom["authentication"] == "none"
+                assert custom["input_modalities"] == ["text", "image"]
 
             stored = settings.read()
             assert len(stored.model_connections) == 2
             assert stored.model_connections[1].user_declared is not None
+            assert stored.model_connections[1].user_declared.input_modalities == (
+                "text", "image",
+            )
 
             async with client.delete(
                 f"{server.origin}/api/model-configurations/{connection_id}",
@@ -571,6 +670,7 @@ async def _exercise_model_connection_test(
                 json={
                     "source": "user_declared",
                     "configuration_name": "Private Gateway",
+                    "input_modalities": ["text"],
                     "base_url": "https://models.example.test/v1",
                     "model_id": "private-model",
                     "wire_api": "openai_responses",
@@ -589,6 +689,7 @@ async def _exercise_model_connection_test(
         assert settings.read().model_api_keys == ()
         resolved = observed["resolved"]
         assert resolved.config.user_declared.configuration_name == "Private Gateway"
+        assert resolved.config.user_declared.input_modalities == ("text",)
         assert observed["api_key"] == "transient-secret"
     finally:
         await server.aclose()

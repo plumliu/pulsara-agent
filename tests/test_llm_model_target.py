@@ -775,7 +775,10 @@ def test_no_selector_targets_omit_reasoning_request_fields(
     assert "extra_body" not in payload
 
 
-def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat() -> None:
+@pytest.mark.parametrize("input_modalities", (None, ("text",), ("text", "image")))
+def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
+    input_modalities: tuple[str, ...] | None,
+) -> None:
     route_wires = production_route_wire_registry()
     resolved = create_user_declared_model_connection(
         model_id="local-model",
@@ -783,6 +786,7 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat() -
         base_url="http://127.0.0.1:9000/v1/",
         declaration=UserDeclaredModelTarget(
             configuration_name="Local Gateway",
+            input_modalities=input_modalities,
             total_context_tokens=300_000,
             max_output_tokens=12_000,
             tool_call=True,
@@ -823,12 +827,27 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat() -
 
     assert target.contract.target_facts.route_name == "Local Gateway"
     assert target.contract.target_facts.limits.total_context_tokens == 300_000
-    assert target.contract.target_facts.input_modalities is None
-    assert target.fact.input_modalities is None
+    assert target.contract.target_facts.input_modalities == input_modalities
+    assert target.fact.input_modalities == input_modalities
     assert target.contract.canonical_endpoint_base_url == "http://127.0.0.1:9000/v1"
     assert build_chat_completions_payload(call=call, context=context)[
         "reasoning_effort"
     ] == "high"
+
+    image_context = replace(
+        context,
+        messages=(LLMMessage.user_content(FrozenPromptContent((
+            LLMImagePart(
+                media_type="image/png", immutable_bytes=b"validated-image-value",
+                width=31, height=31,
+            ),
+        ))),),
+    )
+    if input_modalities == ("text",):
+        with pytest.raises(ModelTargetCapabilityMismatch, match="image input"):
+            validate_model_context_shape_for_call(call=call, context=image_context)
+    else:
+        validate_model_context_shape_for_call(call=call, context=image_context)
 
 
 def test_user_declared_reasoning_control_cannot_be_silently_dropped() -> None:

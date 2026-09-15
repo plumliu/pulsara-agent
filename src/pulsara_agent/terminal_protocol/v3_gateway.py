@@ -94,6 +94,7 @@ from pulsara_agent.primitives.plan_workflow import (
 from pulsara_agent.llm.input import (
     LLMTextPart,
     PromptContent,
+    PromptImagePart,
     prompt_text_utf8_bytes,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
@@ -104,7 +105,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:101ab6be8ce1d90eda3d3ddee94712d8662bc2a80d5003a0e67082f161d868d3"
+    "sha256:aaecce829bdaa9b5c957f740caad5fbb4ad1e2a72729a3f5d44e24d349dae7db"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -653,7 +654,8 @@ class TerminalKernelProtocolServer:
             wire.CANCEL_QUEUED_PROMPT, wire.STEER_QUEUED_PROMPT,
         )
         if queue_action:
-            if (not request.target_queue_item_id or request.text
+            if (not request.target_queue_item_id or request.plan_reason
+                or request.HasField("prompt_content")
                 or bool(request.target_turn_id) != (request.command_kind == wire.STEER_QUEUED_PROMPT)):
                 return _error(request.request_id, "QUEUE_ACTION_INVALID")
         elif request.target_queue_item_id:
@@ -693,7 +695,8 @@ class TerminalKernelProtocolServer:
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
                 or request.force
-                or request.text
+                or request.plan_reason
+                or request.HasField("prompt_content")
             ):
                 return _error(request.request_id, "CONTROL_REQUEST_INVALID")
         elif (
@@ -703,13 +706,21 @@ class TerminalKernelProtocolServer:
         ):
             return _error(request.request_id, "CONTROL_FIELDS_NOT_ALLOWED")
         if request.command_kind == wire.SUBMIT_PROMPT:
-            if not _valid_prompt(request.text) or request.target_turn_id:
+            if (
+                request.plan_reason
+                or not request.HasField("prompt_content")
+                or request.target_turn_id
+            ):
                 return _error(request.request_id, "PROMPT_INVALID")
             if requested_permission is None:
                 return _error(request.request_id, "PERMISSION_MODE_REQUIRED")
+            try:
+                content = _prompt_content_from_wire(request.prompt_content)
+            except (TypeError, ValueError):
+                return _error(request.request_id, "PROMPT_INVALID")
             outcome = await state.host_session.submit_prompt(
                 command_id=request.command_id,
-                content=PromptContent.text(request.text),
+                content=content,
                 requested_permission_mode=requested_permission,
             )
         elif request.command_kind == wire.CANCEL_QUEUED_PROMPT:
@@ -765,7 +776,8 @@ class TerminalKernelProtocolServer:
         elif request.command_kind == wire.ACCEPT_SUBAGENT_COMPLETION:
             new_root = not request.target_turn_id
             if (
-                request.text
+                request.plan_reason
+                or request.HasField("prompt_content")
                 or not request.subagent_task_id
                 or (new_root and requested_permission is None)
                 or (not new_root and requested_permission is not None)
@@ -781,7 +793,8 @@ class TerminalKernelProtocolServer:
         elif request.command_kind == wire.ENTER_PLAN:
             if (
                 requested_permission is None
-                or not _valid_prompt(request.text)
+                or not _valid_prompt(request.plan_reason)
+                or request.HasField("prompt_content")
                 or request.target_turn_id
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
@@ -790,14 +803,15 @@ class TerminalKernelProtocolServer:
             try:
                 outcome = await state.host_session.enter_plan(
                     command_id=request.command_id,
-                    entry_reason=request.text,
+                    entry_reason=request.plan_reason,
                     resume_permission_mode=requested_permission,
                 )
             except (ConversationKernelConflict, ValueError):
                 return _error(request.request_id, "PLAN_ENTER_CONFLICT")
         elif request.command_kind in (wire.CANCEL_PLAN, wire.FORCE_EXIT_PLAN):
             if (
-                request.text
+                request.plan_reason
+                or request.HasField("prompt_content")
                 or request.target_turn_id
                 or not request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision < 1
@@ -820,7 +834,8 @@ class TerminalKernelProtocolServer:
                 return _error(request.request_id, "PLAN_EXIT_CONFLICT")
         elif request.command_kind == wire.COMPACT_CONTEXT:
             if (
-                request.text
+                request.plan_reason
+                or request.HasField("prompt_content")
                 or request.subagent_task_id
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
@@ -847,7 +862,11 @@ class TerminalKernelProtocolServer:
                 public_message=value.public_code,
             )
         elif request.command_kind == wire.DETACH:
-            if request.text or request.target_turn_id:
+            if (
+                request.plan_reason
+                or request.HasField("prompt_content")
+                or request.target_turn_id
+            ):
                 return _error(request.request_id, "DETACH_REQUEST_INVALID")
             from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
 
@@ -856,7 +875,11 @@ class TerminalKernelProtocolServer:
                 request.command_id, "SUCCEEDED", "", "DETACHED", "Client detached."
             )
         elif request.command_kind == wire.CLOSE_SESSION:
-            if request.text or request.target_turn_id:
+            if (
+                request.plan_reason
+                or request.HasField("prompt_content")
+                or request.target_turn_id
+            ):
                 return _error(request.request_id, "CLOSE_REQUEST_INVALID")
             from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
 
@@ -1136,7 +1159,9 @@ class TerminalKernelProtocolServer:
         if not 1 <= request.limit_bytes <= 1 << 20:
             return _error(request.request_id, "CONTENT_RANGE_INVALID")
         target = request.WhichOneof("target")
-        if target is None or (target == "queue_item_id" and request.block_id):
+        if target is None or (target == "queue_item_id" and request.block_id) or (
+            request.HasField("image_ref_ordinal") and request.block_id
+        ):
             return _error(request.request_id, "CONTENT_TARGET_INVALID")
         try:
             reference = await asyncio.to_thread(
@@ -1147,6 +1172,11 @@ class TerminalKernelProtocolServer:
                     request.queue_item_id if target == "queue_item_id" else None
                 ),
                 block_id=request.block_id or None,
+                image_ref_ordinal=(
+                    request.image_ref_ordinal
+                    if request.HasField("image_ref_ordinal")
+                    else None
+                ),
                 deadline_monotonic=monotonic() + 10.0,
             )
         except CanonicalQueueContentNotPending:
@@ -1154,6 +1184,8 @@ class TerminalKernelProtocolServer:
         except KeyError:
             return _error(request.request_id, "CONTENT_REFERENCE_MISSING")
         except ConversationKernelConflict:
+            return _error(request.request_id, "CONTENT_REFERENCE_CORRUPT")
+        except ValueError:
             return _error(request.request_id, "CONTENT_REFERENCE_CORRUPT")
         inline = reference["inline_content"]
         if inline is not None:
@@ -2109,6 +2141,24 @@ def _valid_prompt(value: str) -> bool:
     except (UnicodeEncodeError, ValueError):
         return False
     return True
+
+
+def _prompt_content_from_wire(value: wire.PromptContent) -> PromptContent:
+    parts: list[LLMTextPart | PromptImagePart] = []
+    for item in value.parts:
+        kind = item.WhichOneof("value")
+        if kind == "text":
+            parts.append(LLMTextPart(item.text))
+        elif kind == "image":
+            parts.append(
+                PromptImagePart(
+                    original_bytes=bytes(item.image.content),
+                    declared_mime=item.image.declared_media_type,
+                )
+            )
+        else:
+            raise ValueError("prompt content part has no value")
+    return PromptContent(tuple(parts))
 
 
 def _permission_from_wire(value: int) -> PermissionMode | None:

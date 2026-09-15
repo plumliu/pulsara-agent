@@ -152,9 +152,10 @@ svg { flex: 0 0 auto; }
   transition: border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease;
 }
 .primary-action { min-height: 36px; padding: 0 14px; background: var(--ink); color: var(--paper-solid); font-size: var(--type-control); font-weight: 700; box-shadow: var(--shadow-sm); }
-.primary-action:hover { transform: translateY(-1px); }
+.primary-action:hover:not(:disabled) { transform: translateY(-1px); }
+.primary-action:disabled, .secondary-action:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
 .secondary-action, .ghost-button, .filter-button { min-height: 34px; padding: 0 12px; border: 1px solid var(--line); background: color-mix(in srgb, var(--paper-solid) 76%, transparent); font-size: var(--type-control); font-weight: 600; }
-.secondary-action:hover, .ghost-button:hover, .filter-button:hover { border-color: var(--line-strong); background: var(--paper-solid); }
+.secondary-action:hover:not(:disabled), .ghost-button:hover, .filter-button:hover { border-color: var(--line-strong); background: var(--paper-solid); }
 .icon-button { width: 32px; height: 32px; border: 1px solid var(--line); background: color-mix(in srgb, var(--paper-solid) 72%, transparent); color: var(--muted); }
 .icon-button:hover, .icon-button.is-active { color: var(--ink); background: var(--paper-solid); }
 .small-action { min-height: 26px; padding: 0 9px; border: 1px solid var(--line); background: var(--paper-raised); font-size: var(--type-small); }
@@ -203,7 +204,7 @@ svg { flex: 0 0 auto; }
 .empty-state p { margin: 0; font-size: var(--type-control); }
 
 .verified { color: var(--green) !important; }
-.verified i, .healthy-value i { display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 13%, transparent); }
+.verified i { display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 13%, transparent); }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }

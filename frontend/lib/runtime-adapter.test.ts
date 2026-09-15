@@ -37,6 +37,10 @@ function inlinePrompt(...texts: string[]) {
   return { ...inlineContent(promptBody(...texts)), media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8' };
 }
 
+function textPromptContent(text: string) {
+  return { parts: [{ type: 'text', text }] };
+}
+
 function blobPrompt(text: string) {
   return { ...blobContent(promptBody(text)), media_type: 'application/vnd.pulsara.prompt+json' };
 }
@@ -293,10 +297,89 @@ it('preserves pending safe-point adoption from a user capability mutation', asyn
 });
 
 describe('exact prompt projection', () => {
+  it('sends one ordered typed prompt body without a text or attachment side channel', async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      connectPayload(),
+      { command_outcome: {
+        command_id: 'command:typed', status: 'PENDING', public_code: 'PROMPT_QUEUED',
+        prompt_delivery: {
+          queue_item_id: 'queue:typed', queue_status: 'PENDING', delivery_mode: 'NEW_TURN',
+        },
+      } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    await connection.submitPrompt('command:typed', { parts: [
+      { type: 'text', text: 'before\\n' },
+      { type: 'image', source: 'local', bytes: Uint8Array.from([0, 255]), declaredMediaType: 'image/png' },
+      { type: 'text', text: 'after' },
+    ] }, 'read-only');
+
+    expect(requests.at(-1)).toEqual({
+      command_id: 'command:typed',
+      command_kind: 'SUBMIT_PROMPT',
+      client_submission_id: 'command:typed',
+      prompt_content: { parts: [
+        { type: 'text', text: 'before\\n' },
+        { type: 'image', content_base64: 'AP8=', declared_media_type: 'image/png' },
+        { type: 'text', text: 'after' },
+      ] },
+      requested_permission_mode: 'PERMISSION_MODE_READ_ONLY',
+    });
+    expect(requests.at(-1)).not.toHaveProperty('text');
+    expect(requests.at(-1)).not.toHaveProperty('attachments');
+  });
+
+  it('reads one image by exact canonical owner and occurrence and verifies its bytes', async () => {
+    const bytes = Uint8Array.from([0xff, 0x00, 0x89, 0x50, 0x4e, 0x47]);
+    const digest = sha256Digest(bytes);
+    const body = {
+      ...inlineContent(JSON.stringify({ schema: 'pulsara.prompt/v1', parts: [{
+        type: 'image', digest, encoded_bytes: bytes.length,
+        media_type: 'image/png', width: 3, height: 2,
+      }] })),
+      media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8',
+    };
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      connectPayload([{
+        entry_id: 'entry:image', turn_id: 'turn:image', entry_sequence: '1',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: body,
+      }]),
+      contentBytes(bytes),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/read-content')) {
+        requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      }
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const image = connection.current().messages[0]?.promptContent?.parts[0];
+    if (!image || image.type !== 'image') throw new Error('image projection missing');
+
+    expect([...await connection.readPromptImage(image)]).toEqual([...bytes]);
+    expect(requests).toEqual([{
+      entry_id: 'entry:image', image_ref_ordinal: 0,
+      offset_bytes: 0, limit_bytes: 1 << 20,
+    }]);
+  });
+
   it('preserves canonical ROOT order through inventory merges when an observation-only ROOT has no message', async () => {
     const entry = (id: string, turn: string, sequence: number, kind: string) => ({
       entry_id: id, turn_id: turn, entry_sequence: String(sequence), entry_kind: kind,
-      scope_kind: 'ROOT', content: inlineContent('text'),
+      scope_kind: 'ROOT', content: kind === 'USER_MESSAGE'
+        ? inlinePrompt('text')
+        : inlineContent('text'),
     });
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
@@ -370,10 +453,10 @@ describe('exact prompt projection', () => {
           session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
           entries: [{
             entry_id: 'prompt-1', turn_id: 'turn-1', entry_sequence: '1',
-            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: content('完成这项工作'),
+            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: inlinePrompt('完成这项工作'),
           }, {
             entry_id: 'steer-1', turn_id: 'turn-1', entry_sequence: '2',
-            entry_kind: 'USER_STEER', scope_kind: 'ROOT', content: content('先检查真实页面'),
+            entry_kind: 'USER_STEER', scope_kind: 'ROOT', content: inlinePrompt('先检查真实页面'),
           }, {
             entry_id: 'accepted-result-1', turn_id: 'turn-2', entry_sequence: '3',
             entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'ROOT',
@@ -413,7 +496,7 @@ describe('exact prompt projection', () => {
       turn_id: `turn-${sequence}`,
       entry_sequence: String(sequence),
       entry_kind: 'USER_MESSAGE',
-      content: { kind: 'INLINE_UTF8', inline_content: btoa(body) },
+      content: inlinePrompt(body),
     });
     const responses = [
       {
@@ -518,10 +601,6 @@ describe('exact prompt projection', () => {
   });
 
   it('projects an adopted context boundary from canonical control after observation', async () => {
-    const content = (value: string) => ({
-      kind: 'INLINE',
-      inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))),
-    });
     const responses = [{
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
@@ -531,7 +610,7 @@ describe('exact prompt projection', () => {
           session_id: 'session-1', writer_generation: '1', event_sequence_cut: '2',
           entries: [{
             entry_id: 'entry-1', turn_id: 'turn-1', entry_sequence: '1',
-            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: content('压缩前'),
+            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: inlinePrompt('压缩前'),
           }],
           control: {},
         },
@@ -1013,7 +1092,7 @@ describe('exact prompt projection', () => {
         sessionId: 'session-1', connectionGeneration: 1,
         queueItemId: 'queue-terminal-race', commandId: 'command-terminal-race',
         deliveryMode: 'steer', targetTurnId: 'turn-target', permission: 'read-only',
-        body: '', bodyUnavailable: true, status: expectedStatus,
+        content: undefined, contentUnavailable: true, status: expectedStatus,
         outcomeCode: publicCode, detail,
       })]);
       expect(operations.slice(1)).toEqual(['read-content', 'snapshot', 'query-command']);
@@ -1617,11 +1696,11 @@ describe('exact prompt projection', () => {
     expect((await new LocalHttpRuntimeAdapter().connect('session-1')).current().queuedPrompts)
       .toEqual([
         expect.objectContaining({
-          queueItemId: 'queue-1', commandId: 'command-1', body: '相同正文',
+          queueItemId: 'queue-1', commandId: 'command-1', content: textPromptContent('相同正文'),
           deliveryMode: 'steer', targetTurnId: 'turn-1',
         }),
         expect.objectContaining({
-          queueItemId: 'queue-2', commandId: 'command-2', body: '相同正文',
+          queueItemId: 'queue-2', commandId: 'command-2', content: textPromptContent('相同正文'),
           deliveryMode: 'new-turn',
         }),
       ]);
@@ -1940,7 +2019,7 @@ describe('source text fidelity hard cut', () => {
     expect(projection.messages[0].body).toBe(texts.join('\n'));
   });
 
-  it.each(['history', 'queue'])('never exposes %s image descriptors as editable text', async (location) => {
+  it.each(['history', 'queue'])('projects %s images as typed owner-scoped content', async (location) => {
     const content = {
       ...inlineContent(JSON.stringify({
         schema: 'pulsara.prompt/v1',
@@ -1963,8 +2042,20 @@ describe('source text fidelity hard cut', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), {
       status: 200, headers: { 'Content-Type': 'application/json' },
     })));
-    await expect((async () => (await new LocalHttpRuntimeAdapter().connect('session-1')).current())())
-      .rejects.toMatchObject({ code: 'IMAGE_CONTENT_PREVIEW_UNAVAILABLE' });
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    const projected = location === 'history'
+      ? projection.messages[0]?.promptContent
+      : projection.queuedPrompts[0]?.content;
+    expect(projected).toEqual({ parts: [{ type: 'text', text: '看图' }, {
+      type: 'image', source: 'canonical',
+      digest: `sha256:${'a'.repeat(64)}`, encodedBytes: 4,
+      mediaType: 'image/png', width: 7, height: 5, refOrdinal: 0,
+      owner: location === 'history'
+        ? { kind: 'entry', entryId: 'image' }
+        : { kind: 'queue', queueItemId: 'queue-image' },
+    }] });
+    expect(location === 'history' ? projection.messages[0]?.body : undefined)
+      .toBe(location === 'history' ? '看图' : undefined);
   });
 
   it('preserves accepted user prompts and steers byte-for-byte before rendering', async () => {

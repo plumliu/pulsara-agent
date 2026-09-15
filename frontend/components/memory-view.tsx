@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Brain, Check, ChevronDown, ChevronRight, CircleAlert, FileText, FolderOpen, Globe2, History, Layers3, MessageSquare, Search, SlidersHorizontal, Trash2, UserRound, X } from 'lucide-react';
 import type { DatabaseDataPlaneState } from '../lib/runtime-adapter';
+import type { RuntimeStatus } from '../lib/pulsara-types';
 import { MemoryApiError, type LocalMemoryApi, type MemoryDetail, type MemoryFact, type MemoryKind, type MemoryProject, type MemoryRecord, type MemorySelection } from '../lib/memory-api';
 import { DatabaseSetupGuide } from './database-setup-guide';
 
@@ -18,12 +19,22 @@ function errorText(error: unknown) { return error instanceof Error ? error.messa
 
 interface Props {
   api: LocalMemoryApi; databaseState: DatabaseDataPlaneState | undefined;
+  runtimeStatus: RuntimeStatus; onReconnect: () => void;
   onOpenSettings: () => void; onOpenSource: (source: NonNullable<MemoryDetail['source']>) => void;
 }
 
 export function MemoryView(props: Props) {
+  const connecting = props.runtimeStatus === 'starting' || props.runtimeStatus === 'reconnecting';
+  const connectionLabel = props.runtimeStatus === 'failed' ? '本地服务连接失败' : props.runtimeStatus === 'offline' ? '本地服务连接已中断' : props.runtimeStatus === 'reconnecting' ? '正在重新连接本地服务…' : '正在连接本地服务…';
   return <section className="memory-view"><header className="page-header"><div><span className="page-kicker">个人记忆</span><h1>记忆</h1><p>查看留下的背景与偏好，整理不再需要的内容。</p></div></header>
-    {props.databaseState === 'ready' ? <MemoryContent {...props} /> : props.databaseState ? <DatabaseSetupGuide state={props.databaseState} variant="overview" onOpenSettings={props.onOpenSettings} /> : <p role="status">正在连接本地服务…</p>}
+    {props.databaseState && props.databaseState !== 'ready' ? <DatabaseSetupGuide state={props.databaseState} variant="overview" onOpenSettings={props.onOpenSettings} /> : props.databaseState === 'ready' && props.runtimeStatus === 'online' ? <MemoryContent {...props} /> : (
+      <div className="memory-layout"><div className="memory-main memory-collection memory-empty" role="status">
+        <span className="memory-empty-icon">{connecting ? <Brain size={25} aria-hidden="true" /> : <CircleAlert size={25} aria-hidden="true" />}</span>
+        <h2>{connectionLabel}</h2>
+        <p>{connecting ? '连接后即可查看和管理记忆。' : '暂时无法读取记忆，请重新连接本地服务。'}</p>
+        {!connecting && <button className="secondary-action memory-reconnect" onClick={props.onReconnect}>重新连接</button>}
+      </div></div>
+    )}
   </section>;
 }
 

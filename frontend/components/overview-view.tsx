@@ -39,6 +39,7 @@ interface OverviewViewProps {
   onNavigate: (view: AppView) => void;
   onOpenSession: (id: string) => void;
   onNewSession: () => void;
+  canCreateSession: boolean;
 }
 
 const connectionLabels: Record<RuntimeStatus, string> = {
@@ -60,6 +61,7 @@ export function OverviewView({
   onNavigate,
   onOpenSession,
   onNewSession,
+  canCreateSession,
 }: OverviewViewProps) {
   const runningTasks = agentTasks.filter((task) => task.status === 'running').length;
   const connected = runtimeStatus === 'online';
@@ -89,7 +91,7 @@ export function OverviewView({
                 <button className="primary-action" onClick={() => onNavigate('settings')}><Database size={15} /> 配置 PostgreSQL</button>
               ) : (
                 <>
-                  <button className="primary-action" onClick={onNewSession}><Plus size={15} /> 开始新任务</button>
+                  <button className="primary-action" disabled={!canCreateSession} onClick={onNewSession}><Plus size={15} /> 开始新任务</button>
                   <button className="secondary-action" onClick={() => onNavigate('workbench')}><MessageCircle size={14} /> 打开工作台</button>
                 </>
               )}

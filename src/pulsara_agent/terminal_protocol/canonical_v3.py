@@ -457,19 +457,27 @@ class CanonicalProtocolReader:
         entry_id: str | None = None,
         queue_item_id: str | None = None,
         block_id: str | None = None,
+        image_ref_ordinal: int | None = None,
     ) -> Mapping[str, object]:
         """Re-authorize an exact entry/block content edge before blob hydration."""
         if (entry_id is None) == (queue_item_id is None):
             raise ValueError("exactly one content target is required")
+        if image_ref_ordinal is not None and (
+            isinstance(image_ref_ordinal, bool) or image_ref_ordinal < 0
+        ):
+            raise ValueError("prompt image ordinal is invalid")
         if queue_item_id is not None and block_id is not None:
             raise ValueError("queue content has no block target")
+        if image_ref_ordinal is not None and block_id is not None:
+            raise ValueError("prompt image content has no block target")
         with self._connection(deadline_monotonic) as connection:
             self._session(connection, session_id)
             if queue_item_id is not None:
                 row = connection.execute(
                     """
-                    SELECT inline_content, blob_id, content_digest, content_size,
-                           content_media_type, content_codec, status,
+                    SELECT session_id, workspace_id, inline_content, blob_id,
+                           content_digest, content_size, content_media_type,
+                           content_codec, status,
                            consumed_entry_id
                     FROM pulsara_v3.prompt_queue_items
                     WHERE session_id = %s AND id = %s
@@ -499,7 +507,8 @@ class CanonicalProtocolReader:
             else:
                 row = connection.execute(
                     """
-                    SELECT inline_content, blob_id, content_digest, content_size,
+                    SELECT session_id, workspace_id, entry_kind, inline_content,
+                           blob_id, content_digest, content_size,
                            content_media_type, content_codec
                     FROM pulsara_v3.transcript_entries
                     WHERE session_id = %s AND id = %s
@@ -517,6 +526,23 @@ class CanonicalProtocolReader:
                     if derived is not None:
                         return derived
                 raise KeyError(entry_id if not block_id else block_id)
+            if image_ref_ordinal is not None:
+                if (
+                    queue_item_id is None
+                    and str(row["entry_kind"]) not in {"USER_MESSAGE", "USER_STEER"}
+                ):
+                    raise ValueError("only user prompt entries have image occurrences")
+                from pulsara_agent.conversation_kernel.prompt_storage import (
+                    resolve_canonical_prompt_image_reference,
+                )
+
+                return resolve_canonical_prompt_image_reference(
+                    connection,
+                    row=row,
+                    ref_ordinal=image_ref_ordinal,
+                    queue_item_id=queue_item_id,
+                    transcript_entry_id=entry_id,
+                )
             return dict(row)
 
     def resolve_tool_artifact_reference(

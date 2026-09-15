@@ -34,7 +34,7 @@ def catalog_fixture() -> dict[str, object]:
                         {"type": "effort", "values": ["low", "high", "max"]}
                     ],
                     "tool_call": True,
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "limit": {"context": 1_000_000, "output": 131_072},
                 },
                 "glm-small": {
@@ -42,7 +42,7 @@ def catalog_fixture() -> dict[str, object]:
                     "name": "Small",
                     "reasoning": False,
                     "tool_call": True,
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "limit": {"context": 255_999, "output": 8_192},
                 },
             },
@@ -63,7 +63,7 @@ def catalog_fixture() -> dict[str, object]:
                         {"type": "budget_tokens", "min": 1024, "max": 4096},
                     ],
                     "tool_call": True,
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "provider": {"shape": "responses"},
                     "limit": {
                         "context": 1_048_576,
@@ -74,17 +74,17 @@ def catalog_fixture() -> dict[str, object]:
                 "anthropic/claude-sonnet": {
                     "reasoning": True,
                     "reasoning_options": [],
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 },
                 "google/gemini-pro": {
                     "reasoning": True,
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 },
                 "~~claude-kept": {
                     "reasoning": True,
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 },
                 "broken-options": {
@@ -94,7 +94,7 @@ def catalog_fixture() -> dict[str, object]:
                         {"type": "effort", "values": ["low", "low"]},
                     ],
                     "tool_call": "yes",
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 },
             },
@@ -107,7 +107,7 @@ def catalog_fixture() -> dict[str, object]:
                 "ordinary-model": {
                     "name": "Gemini display label is not a filter",
                     "reasoning": False,
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "limit": {"context": 256_000, "output": 8_192},
                 }
             },
@@ -125,7 +125,7 @@ def catalog_fixture() -> dict[str, object]:
                         {"type": "effort", "values": ["low", "high", "max"]},
                     ],
                     "tool_call": True,
-                    "modalities": {"input": ["text"]},
+                    "modalities": {"input": ["text"], "output": ["text"]},
                     "limit": {"context": 1_000_000, "output": 384_000},
                 }
             },
@@ -371,3 +371,20 @@ def test_attachment_does_not_grant_or_remove_image_input_authority() -> None:
 
 
 catalog_fixture.__test__ = False
+
+
+@pytest.mark.parametrize("output", (["text", "image", "audio", "future-output"], None, "image", ["text", 7]))
+def test_output_modalities_are_display_facts_independent_of_input(output: object) -> None:
+    fixture = catalog_fixture()
+    model = fixture["zhipuai"]["models"]["glm-5.3"]
+    model["modalities"] = {"input": ["text"]}
+    if output is not None:
+        model["modalities"]["output"] = output
+    entry = parse_models_dev_catalog(fixture).entries[
+        ModelCatalogEntryKey("zhipuai", "glm-5.3")
+    ]
+    assert entry.input_modalities == ("text",)
+    assert entry.output_modalities == (
+        ("text", "image", "audio", "future-output")
+        if output == ["text", "image", "audio", "future-output"] else None
+    )

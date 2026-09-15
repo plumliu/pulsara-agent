@@ -2,6 +2,15 @@
 
 状态：Active（2026-08-30）
 
+2026-09-15 连接状态同步：仅本地连接为 online 且数据库为 ready 时开放新建会话；侧栏、空会话页、总览、命令面板、快捷键及已打开弹窗的提交均消费同一可用条件。启动、断连、重连或启动失败期间入口置灰，恢复后启用；PostgreSQL 配置引导保留。设置页、侧栏和记忆页完整展示连接中／失败状态，失败不得显示绿色连接点或无样式文本；尚无活动会话时“重新连接”重新加载页面以重试启动。
+
+2026-09-15 图片输入同步：U1/U2 已按
+`PULSARA_KERNEL_IMAGE_INPUT_AND_OPENAI_WIRE_ADAPTER_DESIGN.zh.md` 第 14 节完成 typed browser
+hard cut、Tiptap 图文草稿、队列/历史 Figure 展示与两套正式浏览器 provider 验收。最终 composer
+只通过 paste 或文件拖入接收图片，不显示添加图片、撤销或重做按钮；撤销/重做使用编辑器标准快捷键。
+
+2026-09-15 模型配置模态同步：目录配置在选中 provider/model 后立即显示 models.dev 的输入、输出模态，已保存配置卡片同步显示；未知写“未声明”，未识别名称保留原文。目录能力展示不扩大 Pulsara 当前文字/图片输入和文字回复范围。自定义配置提供默认不勾选的“支持图像输入”复选框；测试与保存分别传递同一完整候选的 `input_modalities`（勾选为 text+image，否则为 text）。该声明沿既有 LocalSettingsStore → frozen target → 图片 preflight 生效，不增加能力覆盖表，也不改写已保存但未声明模态的配置。
+
 2026-09-08 Conversation Fork 同步：最终回复的复制按钮旁增加“从此处分叉”，只消费
 terminal v3 的 `fork_eligible` / `entry_owner_kind`，不从展示样式推断执行终态。
 `initial_context_base` 展示继承摘要分隔线，不伪造 compaction event。创建使用预定 child ID
@@ -136,10 +145,15 @@ command receipt 的 `PENDING` 不是成功。前端使用 `QueryCommandRequest` 
   提供现有本地绝对目录。两种会话都必须可在应用重启后恢复；
 - 创建会话不接收目标文本、Plan 开关或 permission mode。创建成功并建立连接后，用户才在
   composer 中提交第一轮输入；
-- active turn 时 Enter 创建 future prompt queue item；Cmd/Ctrl+Enter 才 steer 当前 turn；
+- active turn 时 Enter 创建 future prompt queue item；修饰键不把 composer 普通发送改成直接 steer，
+  steer 继续使用既有排队项上的显式引导动作；
 - composer 正处于输入法组合输入时，Enter 完全交给输入法处理：不得发送、排队或 steer，
   也不得 `preventDefault` 阻止输入法确认候选或保留原始拼音；组合输入结束后的普通 Enter
   才恢复上述发送语义，并兼容浏览器以 `isComposing` 或 `keyCode=229` 暴露组合状态；
+- composer 使用单一 Tiptap/ProseMirror 图文文档，图片只从实际文件拖入或 paste 事件中的
+  image File/Blob 进入当前光标或拖放位置。界面不显示添加图片、撤销或重做按钮，也不保留
+  隐藏文件选择器；撤销/重做使用编辑器标准快捷键。外部 HTML/Markdown 图片 URL 仍作为
+  文本处理，不自动抓取；
 - pending queue 在 current turn 完成前保持可见，不混入 active assistant draft；
 - 普通用户输入以右侧独立说话者块呈现，使用用户图标与“你”标识；运行中的显式引导则以
   紧凑的“你 · 引导”事件嵌入当前执行流，不伪装成一轮新的普通对话；

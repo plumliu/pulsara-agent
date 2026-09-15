@@ -445,6 +445,19 @@ def _runner(
     deadline_factory: KernelExecutionDeadlineFactory | None = None,
     subagent_runtime: Round10TestSubagentRuntime | None = None,
 ):
+    # These fixtures run a bare Runner, without KernelHostSession's renewal
+    # task. Keep the real lease alive at each model boundary so machine load
+    # cannot turn it into an accidental total-turn time cap. Renewal still
+    # checks the exact guard and cannot revive an expired or replaced writer.
+    preflight = model.preflight_execution
+
+    def renew_before_preflight(request, **kwargs):
+        repository.renew_host_writer(
+            lease.guard, lease_seconds=30, deadline_monotonic=monotonic() + 30
+        )
+        return preflight(request, **kwargs)
+
+    model.preflight_execution = renew_before_preflight
     return ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
@@ -525,18 +538,6 @@ def test_round5_sixty_four_model_calls_finalize_without_a_turn_cap(
     model = ScriptedKernelModel(streams)
     tool = _KnownReadOnlyTool()
 
-    # This fixture runs a bare Runner, without KernelHostSession's lease-renewal
-    # task. Renew at each physical model boundary so machine load cannot turn
-    # the 30-second writer lease into an accidental total-turn time cap.
-    preflight = model.preflight_execution
-
-    def renew_before_preflight(request, **kwargs):
-        repository.renew_host_writer(
-            lease.guard, lease_seconds=30, deadline_monotonic=monotonic() + 30
-        )
-        return preflight(request, **kwargs)
-
-    model.preflight_execution = renew_before_preflight
     result = asyncio.run(_runner(repository, lease, model, tool).run_turn(frozen_test_prompt("start")))
 
     assert result.model_call_count == 64

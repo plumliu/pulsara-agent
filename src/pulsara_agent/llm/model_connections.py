@@ -54,6 +54,7 @@ class UserDeclaredModelTarget:
     tool_call: bool
     reasoning: ReasoningControlContract
     authentication: ModelConnectionAuthentication
+    input_modalities: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -70,6 +71,14 @@ class UserDeclaredModelTarget:
         )
         if not isinstance(self.tool_call, bool):
             raise TypeError("custom model tool-call support must be boolean")
+        if self.input_modalities is not None and (
+            not isinstance(self.input_modalities, tuple)
+            or any(
+                not isinstance(value, str) or not value or value != value.strip()
+                for value in self.input_modalities
+            )
+        ):
+            raise ValueError("custom model input modalities must be canonical text values")
         if not isinstance(self.authentication, ModelConnectionAuthentication):
             raise TypeError("custom model authentication must be typed")
         if isinstance(self.reasoning, ReasoningProviderDefault):
@@ -207,6 +216,11 @@ def _user_declared_model_target_to_dict(
         "tool_call": value.tool_call,
         "reasoning": _user_declared_reasoning_to_dict(value.reasoning),
         "authentication": value.authentication.value,
+        **(
+            {"input_modalities": list(value.input_modalities)}
+            if value.input_modalities is not None
+            else {}
+        ),
     }
 
 
@@ -219,13 +233,14 @@ def _user_declared_model_target_from_dict(value: object) -> UserDeclaredModelTar
         "reasoning",
         "authentication",
     }
-    if not isinstance(value, dict) or set(value) != expected:
+    if not isinstance(value, dict) or set(value) - {"input_modalities"} != expected:
         raise ValueError("custom model target has an invalid closed shape")
     name = value["configuration_name"]
     total = value["total_context_tokens"]
     output = value["max_output_tokens"]
     tool_call = value["tool_call"]
     authentication = value["authentication"]
+    input_modalities = value.get("input_modalities")
     if (
         not isinstance(name, str)
         or isinstance(total, bool)
@@ -234,6 +249,7 @@ def _user_declared_model_target_from_dict(value: object) -> UserDeclaredModelTar
         or not isinstance(output, int)
         or not isinstance(tool_call, bool)
         or not isinstance(authentication, str)
+        or (input_modalities is not None and not isinstance(input_modalities, list))
     ):
         raise ValueError("custom model target fields are invalid")
     return UserDeclaredModelTarget(
@@ -243,6 +259,7 @@ def _user_declared_model_target_from_dict(value: object) -> UserDeclaredModelTar
         tool_call=tool_call,
         reasoning=_user_declared_reasoning_from_dict(value["reasoning"]),
         authentication=ModelConnectionAuthentication(authentication),
+        input_modalities=None if input_modalities is None else tuple(input_modalities),
     )
 
 

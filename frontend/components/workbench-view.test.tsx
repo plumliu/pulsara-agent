@@ -1,23 +1,47 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../lib/runtime-adapter';
+import { PromptDraftStore } from '../lib/prompt-draft';
+import { promptContentTextProjection } from '../lib/prompt-content';
 import { WorkbenchView } from './workbench-view';
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-  cleanup();
+let promptDraftStore: PromptDraftStore;
+beforeEach(() => {
+  promptDraftStore = new PromptDraftStore();
 });
+afterEach(() => {
+  cleanup();
+  promptDraftStore.destroy();
+  vi.unstubAllGlobals();
+});
+
+function textPrompt(text: string) {
+  return { parts: [{ type: 'text' as const, text }] };
+}
+
+function stubClipboard(writeText: (value: string) => Promise<void>) {
+  const current = navigator;
+  vi.stubGlobal('navigator', new Proxy(current, {
+    get(target, property) {
+      if (property === 'clipboard') return { writeText };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }));
+}
 
 describe('PR04 composer queue hard cut', () => {
   const item: QueuedPrompt = {
     queueItemId: 'source', commandId: 'submission', sequence: 1, status: 'pending',
-    deliveryMode: 'new-turn', body: '  original\n原文  ', permission: 'read-only',
+    deliveryMode: 'new-turn', content: textPrompt('  original\n原文  '), permission: 'read-only',
     requestedPermission: 'ask-permissions',
   };
   const acceptedAction = (kind: QueuedPromptAction['kind']): QueuedPromptAction => ({
     sessionId: 'session-one', connectionGeneration: 1, commandId: 'action', kind,
-    source: item, targetTurnId: kind === 'send' ? 'turn-one' : undefined,
+    source: item,
+    restoredContent: kind === 'edit' ? textPrompt(promptContentTextProjection(item.content)) : undefined,
+    targetTurnId: kind === 'send' ? 'turn-one' : undefined,
     submittedAt: '2026-09-12T05:00:00Z', status: 'accepted', receipt: {
       commandId: 'action', status: kind === 'send' ? 'pending' : 'succeeded',
       promptDelivery: { queueItemId: kind === 'send' ? 'replacement' : 'source',
@@ -30,14 +54,18 @@ describe('PR04 composer queue hard cut', () => {
     const view = render(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [{ ...action, status: 'submitting' }] })} />);
     expect(screen.queryByRole('article', { name: '引导' })).toBeNull();
     const queue = screen.getByRole('region', { name: '等待处理的输入' });
-    expect(within(queue).getAllByRole('button').every(button => (button as HTMLButtonElement).disabled)).toBe(true);
+    for (const name of ['发送', '编辑', '删除']) {
+      expect((within(queue).getByRole('button', { name }) as HTMLButtonElement).disabled)
+        .toBe(true);
+    }
     view.rerender(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [action] })} />);
     expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
     expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
-    expect(view.container.querySelector('.user-steer p')?.textContent).toBe(item.body);
+    expect(view.container.querySelector('.user-steer .prompt-content-body')?.textContent)
+      .toBe(promptContentTextProjection(item.content));
     expect(screen.queryByText(/模型已收到|模型已读/)).toBeNull();
     view.rerender(<WorkbenchView {...props({ queueActions: [action], messages: [{
-      id: 'entry', turnId: 'turn-one', role: 'user', userKind: 'steer', body: item.body,
+      id: 'entry', turnId: 'turn-one', role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content),
       time: '13:00', status: 'completed', inputSource: { commandId: 'action', queueItemId: 'replacement', deliveryMode: 'steer' },
     }] })} />);
     expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
@@ -46,7 +74,7 @@ describe('PR04 composer queue hard cut', () => {
 
   it('does not deduplicate another command with identical text', () => {
     render(<WorkbenchView {...props({ queueActions: [acceptedAction('send')], messages: [{
-      id: 'other-entry', turnId: 'turn-one', role: 'user', userKind: 'steer', body: item.body,
+      id: 'other-entry', turnId: 'turn-one', role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content),
       time: '12:59', status: 'completed', inputSource: { commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'steer' },
     }] })} />);
     expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(2);
@@ -55,11 +83,13 @@ describe('PR04 composer queue hard cut', () => {
   it('refuses edit with any draft and preserves both texts without sending cancellation', () => {
     const onQueueAction = vi.fn(async () => undefined);
     render(<WorkbenchView {...props({ queuedPrompts: [item], onQueueAction })} />);
-    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), { target: { value: 'existing draft' } });
+    act(() => promptDraftStore.insertText('session-one', 'existing draft'));
     fireEvent.click(screen.getByRole('button', { name: '编辑' }));
     expect(onQueueAction).not.toHaveBeenCalled();
-    expect((screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement).value).toBe('existing draft');
-    expect(screen.getByRole('region', { name: '等待处理的输入' }).querySelector('p')?.textContent).toBe(item.body);
+    expect(promptDraftStore.summary('session-one').text).toBe('existing draft');
+    expect(screen.getByRole('region', { name: '等待处理的输入' })
+      .querySelector('.prompt-content-body')?.textContent)
+      .toBe(promptContentTextProjection(item.content));
   });
 
   it('restores the complete original and requested permission only after exact edit cancellation', async () => {
@@ -67,15 +97,19 @@ describe('PR04 composer queue hard cut', () => {
     const action = acceptedAction('edit');
     const onQueueActionHandled = () => view.rerender(<WorkbenchView {...props({ queueActions: [{ ...action, handled: true }], onPermissionChange, onQueueActionHandled })} />);
     const view = render(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [{ ...action, status: 'submitting' }], onPermissionChange })} />);
-    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
-    expect(input.value).toBe('');
-    expect(input.disabled).toBe(true);
+    const input = screen.getByLabelText('发送给 Pulsara');
+    expect(promptDraftStore.summary('session-one').text).toBe('');
+    expect(input.getAttribute('contenteditable')).toBe('false');
     view.rerender(<WorkbenchView {...props({ queueActions: [action], onPermissionChange, onQueueActionHandled })} />);
-    await waitFor(() => expect(input.value).toBe(item.body));
+    await waitFor(() => expect(promptDraftStore.summary('session-one').text)
+      .toBe(promptContentTextProjection(item.content)));
     expect(onPermissionChange).toHaveBeenCalledWith('ask-permissions');
-    await waitFor(() => expect(document.activeElement).toBe(input));
-    expect(input.selectionStart).toBe(item.body.length);
-    expect(input.selectionEnd).toBe(item.body.length);
+    await waitFor(() => expect(document.activeElement)
+      .toBe(screen.getByLabelText('发送给 Pulsara')));
+    const restoredEditor = promptDraftStore.getEditor('session-one');
+    expect(restoredEditor.state.selection.from).toBe(
+      restoredEditor.state.doc.content.size - 1,
+    );
   });
 
   it('keeps a rejected delete in place and moves successful delete focus to the next row', async () => {
@@ -90,40 +124,47 @@ describe('PR04 composer queue hard cut', () => {
 
   it('does not reuse a pending edit from another session', () => {
     render(<WorkbenchView {...props({ queueActions: [{ ...acceptedAction('edit'), sessionId: 'another-session' }] })} />);
-    expect((screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement).value).toBe('');
+    expect(promptDraftStore.summary('session-one').text).toBe('');
   });
 
   it('keeps an unexpected draft editable while retaining an accepted edit for later restoration', async () => {
     const view = render(<WorkbenchView {...props()} />);
-    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
-    fireEvent.change(input, { target: { value: 'another draft' } });
+    const input = screen.getByLabelText('发送给 Pulsara');
+    act(() => promptDraftStore.insertText('session-one', 'another draft'));
     // A restored connection can reveal an accepted edit after a local draft exists.
     const action = acceptedAction('edit');
     const onQueueActionHandled = vi.fn();
     view.rerender(<WorkbenchView {...props({ queueActions: [action], onQueueActionHandled })} />);
-    expect(input.disabled).toBe(false);
-    expect(input.value).toBe('another draft');
-    expect(screen.getByRole('region', { name: '等待处理的输入' }).querySelector('p')?.textContent).toBe(item.body);
+    expect(input.getAttribute('contenteditable')).toBe('true');
+    expect(promptDraftStore.summary('session-one').text).toBe('another draft');
+    expect(screen.getByRole('region', { name: '等待处理的输入' })
+      .querySelector('.prompt-content-body')?.textContent)
+      .toBe(promptContentTextProjection(item.content));
     expect(screen.getByRole('status').textContent).toContain('请先处理当前草稿');
     expect(onQueueActionHandled).not.toHaveBeenCalled();
-    fireEvent.change(input, { target: { value: '' } });
-    await waitFor(() => expect(input.value).toBe(item.body));
+    const current = await promptDraftStore.capture('session-one');
+    act(() => { promptDraftStore.clearIfSnapshot('session-one', current); });
+    await waitFor(() => expect(promptDraftStore.summary('session-one').text)
+      .toBe(promptContentTextProjection(item.content)));
     expect(onQueueActionHandled).toHaveBeenCalledWith(action.commandId);
   });
-  it.each([{}, { metaKey: true }, { ctrlKey: true }])('always queues Enter, including modifiers %j', async (modifiers) => {
+  it.each([{}, { metaKey: true }, { ctrlKey: true }])(
+    'keeps modified Enter on the existing new-turn submit path %j',
+    async (modifiers) => {
     const onSend = vi.fn(async () => true);
     render(<WorkbenchView {...props({ onSend })} />);
-    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), { target: { value: '  exact\ninput  ' } });
+    act(() => promptDraftStore.insertText('session-one', '  exact\ninput  '));
     fireEvent.keyDown(screen.getByLabelText('发送给 Pulsara'), { key: 'Enter', ...modifiers });
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith('  exact\ninput  ', 'read-only', false));
-    expect(screen.queryByText(/⌘ Enter/)).toBeNull();
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith(
+      textPrompt('  exact\ninput  '), 'read-only', false,
+    ));
   });
 
   it('places exact duplicate inputs in composer with three accessible flat actions', () => {
     const queuedPrompts = ['one', 'two'].map((id, index) => ({
       queueItemId: id, commandId: `command-${id}`, sequence: index + 1,
       status: 'pending' as const, deliveryMode: 'new-turn' as const,
-      body: 'same\n原文', permission: 'read-only' as const,
+      content: textPrompt('same\n原文'), permission: 'read-only' as const,
     }));
     const view = render(<WorkbenchView {...props({ queuedPrompts, queuedCount: 2 })} />);
     const queue = screen.getByRole('region', { name: '等待处理的输入' });
@@ -170,6 +211,7 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onQueueAction: vi.fn(async () => undefined),
     onQueueActionHandled: vi.fn(),
     runtimeStatus: 'online',
+    canCreateSession: true,
     modelConfigurations: [model],
     modelCallBinding: { connection_id: model.id, reasoning: null },
     canControl: true,
@@ -193,6 +235,8 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onResolveInteraction: vi.fn(),
     artifactOwnerKey: 'session-one:host-one:entry-result',
     onReadToolArtifact: vi.fn(),
+    onReadPromptImage: vi.fn(async () => new Uint8Array()),
+    promptDraftStore,
     onNotify: vi.fn(),
     onPermissionChange: vi.fn(),
     ...overrides,
@@ -200,7 +244,7 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
 }
 
 describe('WorkbenchView PR03 control and raw-result contract', () => {
-  it('grows the composer to a bounded height and keeps TODO and latest controls anchored above it', async () => {
+  it('keeps the bounded editor, TODO, and latest controls in one composer frame', async () => {
     let composerTop = 650;
     const rect = (top: number, height: number): DOMRect => ({
       x: 0, y: top, top, bottom: top + height, left: 0, right: 800,
@@ -221,12 +265,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
           items: [{ id: 'todo-one:0', label: '验证输入框高度', status: 'in-progress' }],
         },
       })} />);
-      const composer = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
-      let contentHeight = 56;
-      Object.defineProperty(composer, 'scrollHeight', {
-        configurable: true,
-        get: () => contentHeight,
-      });
+      const composer = screen.getByLabelText('发送给 Pulsara');
       const thread = view.container.querySelector('.thread-scroll') as HTMLDivElement;
       Object.defineProperties(thread, {
         scrollHeight: { configurable: true, value: 1200 },
@@ -235,25 +274,15 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       });
       fireEvent.scroll(thread);
 
-      fireEvent.change(composer, { target: { value: '第一行\n第二行' } });
-      await waitFor(() => expect(composer.style.height).toBe('56px'));
-      expect(composer.style.overflowY).toBe('hidden');
+      act(() => promptDraftStore.insertText('session-one', '第一行\n第二行'));
+      expect(composer.classList.contains('composer-prosemirror')).toBe(true);
       const todo = screen.getByRole('button', { name: '收起TODO清单' });
       expect(todo.closest('.composer-frame')).toBe(composer.closest('.composer-frame'));
       const latest = await screen.findByRole('button', { name: '回到最新' });
       await waitFor(() => expect(latest.style.bottom).toBe('342px'));
 
-      contentHeight = 280;
       composerTop = 530;
-      fireEvent.change(composer, { target: { value: Array.from({ length: 20 }, (_, index) => `第 ${index + 1} 行`).join('\n') } });
-      await waitFor(() => expect(composer.style.height).toBe('250px'));
-      expect(composer.style.overflowY).toBe('auto');
-      await waitFor(() => expect(latest.style.bottom).toBe('462px'));
-
-      contentHeight = 34;
-      fireEvent.change(composer, { target: { value: '缩短' } });
-      await waitFor(() => expect(composer.style.height).toBe('34px'));
-      expect(composer.style.overflowY).toBe('hidden');
+      expect(composer.closest('.prompt-composer')).toBeTruthy();
     } finally {
       geometry.mockRestore();
     }
@@ -297,9 +326,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
   it('keeps exact raw text/copy, exact edit diff, and paginates the retained artifact', async () => {
     const raw = '{"diff":"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new","literal":"N| 不清洗"}';
     const writeText = vi.fn(async () => undefined);
-    vi.stubGlobal('navigator', Object.create(navigator, {
-      clipboard: { value: { writeText }, configurable: true },
-    }));
+    stubClipboard(writeText);
     const pages: ToolArtifactPage[] = [{
       resultEntryId: 'entry-result', text: 'artifact-page-one', offsetChars: 0,
       returnedChars: 17, totalChars: 34, nextOffsetChars: 17, hasMore: true,

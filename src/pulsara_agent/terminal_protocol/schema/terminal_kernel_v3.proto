@@ -740,7 +740,7 @@ message CommandRequest {
   string command_id = 4;
   CommandKind command_kind = 5;
   string client_submission_id = 6;
-  string text = 7;
+  string plan_reason = 7;
   string target_turn_id = 8;
   string subagent_task_id = 9;
   reserved 10;
@@ -752,6 +752,23 @@ message CommandRequest {
   string expected_host_session_id = 16;
   string target_process_id = 17;
   string target_queue_item_id = 18;
+  PromptContent prompt_content = 19;
+}
+
+message PromptImagePart {
+  bytes content = 1;
+  string declared_media_type = 2;
+}
+
+message PromptContentPart {
+  oneof value {
+    string text = 1;
+    PromptImagePart image = 2;
+  }
+}
+
+message PromptContent {
+  repeated PromptContentPart parts = 1;
 }
 
 enum CommandStatus {
@@ -1019,6 +1036,7 @@ message ReadContentRequest {
   string block_id = 5;
   uint64 offset_bytes = 6;
   uint32 limit_bytes = 7;
+  optional uint32 image_ref_ordinal = 9;
 }
 
 message ReadToolArtifactRequest {

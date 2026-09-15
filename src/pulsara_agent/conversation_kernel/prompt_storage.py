@@ -242,6 +242,40 @@ def validate_canonical_prompt_owner_metadata(
     return decoded
 
 
+def resolve_canonical_prompt_image_reference(
+    connection: Connection,
+    *,
+    row: Mapping[str, object],
+    ref_ordinal: int,
+    queue_item_id: str | None = None,
+    transcript_entry_id: str | None = None,
+) -> Mapping[str, object]:
+    """Resolve one exact owner-local image occurrence without its payload."""
+
+    if isinstance(ref_ordinal, bool) or not isinstance(ref_ordinal, int) or ref_ordinal < 0:
+        raise ValueError("canonical prompt image ordinal is invalid")
+    _, decoded, refs = _read_canonical_prompt_metadata(
+        connection,
+        row=row,
+        queue_item_id=queue_item_id,
+        transcript_entry_id=transcript_entry_id,
+        context_snapshot_id=None,
+    )
+    descriptors = _image_descriptors(decoded)
+    if ref_ordinal >= len(descriptors):
+        raise KeyError(ref_ordinal)
+    descriptor = descriptors[ref_ordinal]
+    reference = refs[ref_ordinal]
+    return {
+        "inline_content": None,
+        "blob_id": reference["blob_id"],
+        "content_digest": descriptor.digest,
+        "content_size": descriptor.encoded_bytes,
+        "content_media_type": descriptor.media_type,
+        "content_codec": PROMPT_IMAGE_BLOB_CODEC,
+    }
+
+
 def hydrate_canonical_prompt_owner(
     connection: Connection,
     *,
@@ -544,6 +578,7 @@ __all__ = [
     "insert_canonical_prompt_refs",
     "materialize_canonical_prompt",
     "materialize_compaction_snapshot",
+    "resolve_canonical_prompt_image_reference",
     "canonical_snapshot_owner_is_exact",
     "validate_canonical_prompt_owner_metadata",
 ]

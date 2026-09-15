@@ -25,6 +25,7 @@ interface CommandPaletteProps {
   onClose: () => void;
   onNavigate: (view: AppView) => void;
   onNewSession: () => void;
+  canCreateSession: boolean;
   onThemeChange: (theme: 'light' | 'dark') => void;
 }
 
@@ -36,7 +37,7 @@ const commandItems = [
   { id: 'settings', label: '打开设置', detail: '外观、模型与本地服务', icon: Settings, view: 'settings' as AppView },
 ];
 
-export function CommandPalette({ open, theme, onClose, onNavigate, onNewSession, onThemeChange }: CommandPaletteProps) {
+export function CommandPalette({ open, theme, onClose, onNavigate, onNewSession, canCreateSession, onThemeChange }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const filtered = useMemo(() => commandItems.filter((item) => `${item.label} ${item.detail}`.toLowerCase().includes(query.toLowerCase())), [query]);
   if (!open) return null;
@@ -48,7 +49,7 @@ export function CommandPalette({ open, theme, onClose, onNavigate, onNewSession,
         <label><Search size={17} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入命令或搜索…" /><kbd>ESC</kbd></label>
         <div className="command-results">
           <span className="menu-label">建议</span>
-          <button onClick={() => { onNewSession(); onClose(); }}><span className="command-icon"><Plus size={14} /></span><span><strong>新建会话</strong><small>选择快速开始或指定目录</small></span><kbd>⌘ N</kbd></button>
+          <button disabled={!canCreateSession} onClick={() => { onNewSession(); onClose(); }}><span className="command-icon"><Plus size={14} /></span><span><strong>新建会话</strong><small>选择快速开始或指定目录</small></span><kbd>⌘ N</kbd></button>
           {filtered.map(({ id, label, detail, icon: Icon, view }) => <button key={id} onClick={() => { onNavigate(view); onClose(); }}><span className="command-icon"><Icon size={14} /></span><span><strong>{label}</strong><small>{detail}</small></span></button>)}
         </div>
         <footer><span><Command size={11} /> Pulsara 快捷操作</span><button onClick={() => onThemeChange(theme === 'light' ? 'dark' : 'light')}>{theme === 'light' ? <Moon size={11} /> : <Sun size={11} />}{theme === 'light' ? '深色模式' : '浅色模式'}</button></footer>
@@ -59,12 +60,13 @@ export function CommandPalette({ open, theme, onClose, onNavigate, onNewSession,
 
 interface NewSessionDialogProps {
   open: boolean;
+  canCreateSession: boolean;
   defaultWorkspacePath: string;
   onClose: () => void;
   onCreate: (selection: SessionWorkspaceSelection) => Promise<boolean>;
 }
 
-export function NewSessionDialog({ open, defaultWorkspacePath, onClose, onCreate }: NewSessionDialogProps) {
+export function NewSessionDialog({ open, canCreateSession, defaultWorkspacePath, onClose, onCreate }: NewSessionDialogProps) {
   const [workspaceKind, setWorkspaceKind] = useState<'quick' | 'project'>('quick');
   const [workspacePath, setWorkspacePath] = useState(defaultWorkspacePath);
   const [submitting, setSubmitting] = useState(false);
@@ -72,7 +74,7 @@ export function NewSessionDialog({ open, defaultWorkspacePath, onClose, onCreate
   if (!open) return null;
 
   const submit = async () => {
-    if (submitting || (workspaceKind === 'project' && !workspacePath.trim())) return;
+    if (!canCreateSession || submitting || (workspaceKind === 'project' && !workspacePath.trim())) return;
     setSubmitting(true);
     const created = await onCreate(
       workspaceKind === 'quick'
@@ -111,7 +113,7 @@ export function NewSessionDialog({ open, defaultWorkspacePath, onClose, onCreate
             <small>请输入已存在的绝对路径</small>
           </label>
         )}
-        <footer><p>创建后，在会话输入框中描述要完成的工作。</p><button className="primary-action" type="submit" disabled={submitting || (workspaceKind === 'project' && !workspacePath.trim())}>{submitting ? '正在创建…' : '创建会话'} <span>↗</span></button></footer>
+        <footer><p>{canCreateSession ? '创建后，在会话输入框中描述要完成的工作。' : '本地服务尚未就绪，连接恢复后可创建会话。'}</p><button className="primary-action" type="submit" disabled={!canCreateSession || submitting || (workspaceKind === 'project' && !workspacePath.trim())}>{submitting ? '正在创建…' : '创建会话'} <span>↗</span></button></footer>
       </form>
     </div>
   );

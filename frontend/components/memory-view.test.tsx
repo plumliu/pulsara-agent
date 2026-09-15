@@ -18,12 +18,26 @@ function setup() {
 }
 
 describe('MemoryView', () => {
+  it.each(['starting', 'reconnecting', 'offline', 'failed'] as const)('shows a connection state instead of reading memories while %s', status => {
+    const api = setup();
+    const reconnect = vi.fn();
+    render(<MemoryView api={api} databaseState={status === 'starting' ? undefined : 'ready'} runtimeStatus={status} onReconnect={reconnect} onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    expect(screen.getByRole('status').textContent).toContain('本地服务');
+    if (status === 'offline' || status === 'failed') {
+      fireEvent.click(screen.getByRole('button', { name: '重新连接' }));
+      expect(reconnect).toHaveBeenCalledOnce();
+    } else {
+      expect(screen.queryByRole('button', { name: '重新连接' })).toBeNull();
+    }
+    expect(api.catalog).not.toHaveBeenCalled();
+    expect(api.projects).not.toHaveBeenCalled();
+  });
   it.each(['before', 'after'] as const)('retains project errors arriving %s the catalog debounce', async timing => {
     vi.useFakeTimers();
     const api = setup();
     let rejectProjects!: (error: Error) => void;
     vi.mocked(api.projects).mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectProjects = reject; }));
-    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     if (timing === 'after') await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     await act(async () => { rejectProjects(new Error('项目列表读取失败')); });
     expect(screen.queryByRole('alert')?.textContent).toBe('项目列表读取失败');
@@ -35,7 +49,7 @@ describe('MemoryView', () => {
   it('clears the previous query immediately and ignores its pending detail response', async () => {
     vi.useFakeTimers();
     const api = setup();
-    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     let resolveDetail!: (value: MemoryDetail) => void;
     vi.mocked(api.detail).mockImplementationOnce(() => new Promise(resolve => { resolveDetail = resolve; }));
@@ -60,7 +74,7 @@ describe('MemoryView', () => {
     const api = setup();
     let resolveOld!: (value: { items: MemoryFact[]; next_cursor: null }) => void;
     vi.mocked(api.catalog).mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
-    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     fireEvent.change(screen.getByRole('textbox', { name: '搜索记忆' }), { target: { value: '新查询' } });
     vi.mocked(api.catalog).mockRejectedValueOnce(new Error('当前查询失败'));
@@ -77,7 +91,7 @@ describe('MemoryView', () => {
     vi.mocked(api.catalog)
       .mockResolvedValueOnce({ items: [fact], next_cursor: 'next-page' })
       .mockResolvedValueOnce({ items: [companion], next_cursor: null });
-    render(<StrictMode><MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} /></StrictMode>);
+    render(<StrictMode><MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} /></StrictMode>);
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
     expect(api.catalog).toHaveBeenCalledTimes(1);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '加载更多记忆' })); });
@@ -97,7 +111,7 @@ describe('MemoryView', () => {
     const previousScroll = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
     try {
-      render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+      render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
       const row = await screen.findByRole('button', { name: /用户喜欢散步/ });
       fireEvent.click(row);
       const panel = await screen.findByRole('complementary', { name: '记忆详情' });
@@ -132,7 +146,7 @@ describe('MemoryView', () => {
     const api = setup();
     const companion = { ...fact, fact_id: 'memory:b', statement: '另一条记忆' };
     vi.mocked(api.catalog).mockResolvedValue({ items: [fact, companion], next_cursor: null });
-    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const panel = await screen.findByRole('complementary', { name: '记忆详情' });
     await within(panel).findByText(fact.statement);
@@ -157,7 +171,7 @@ describe('MemoryView', () => {
     vi.mocked(api.detail)
       .mockImplementationOnce(() => new Promise(done => { first = done; }))
       .mockImplementationOnce(() => new Promise(done => { second = done; }));
-    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     fireEvent.click(screen.getByRole('button', { name: /另一条记忆/ }));
     const panel = screen.getByRole('complementary', { name: '记忆详情' });
@@ -172,7 +186,7 @@ describe('MemoryView', () => {
   it('distinguishes an empty library, search results, and project selection', async () => {
     const api = setup();
     vi.mocked(api.catalog).mockResolvedValue({ items: [], next_cursor: null });
-    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     expect(await screen.findByRole('heading', { name: '还没有跨对话记忆' })).toBeTruthy();
     fireEvent.change(screen.getByRole('textbox', { name: '搜索记忆' }), { target: { value: '散步' } });
     expect(await screen.findByRole('heading', { name: '没有找到匹配的记忆' })).toBeTruthy();
@@ -182,13 +196,13 @@ describe('MemoryView', () => {
   });
   it.each(['database_not_configured', 'database_configured_unverified', 'database_unavailable', 'database_schema_action_required'] as const)('gates %s without reading memories', async databaseState => {
     const api = setup();
-    render(<MemoryView api={api} databaseState={databaseState} onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState={databaseState} onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     expect(screen.getByRole('button', { name: /前往本地服务设置/ })).toBeTruthy();
     expect(api.catalog).not.toHaveBeenCalled(); expect(api.projects).not.toHaveBeenCalled();
   });
   it('keeps details inside the page, confirms full effects, deletes exactly once', async () => {
     const api = setup();
-    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     const detail = await screen.findByRole('complementary', { name: '记忆详情' });
     expect(within(detail).queryByRole('button', { name: '在对话中查看' })).toBeNull();
@@ -205,7 +219,7 @@ describe('MemoryView', () => {
     const api = setup();
     const fresh: MemoryRecord[] = [{ type: 'HEADER', root: fact.fact_id, view: 'global', workspace_id: null, disposition: 'NEEDS_RESOLUTION' }, { type: 'FACT_RESTORE', fact, planned_lifecycle: 'ACTIVE' }, { type: 'END', counts: { HEADER: 1, FACT_RESTORE: 1 } }];
     vi.mocked(api.delete).mockRejectedValue(new MemoryApiError('记忆发生变化', 409, fresh));
-    render(<MemoryView api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     fireEvent.click(await screen.findByRole('button', { name: /删除记忆/ }));
     fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
@@ -214,7 +228,7 @@ describe('MemoryView', () => {
     expect(screen.getByRole('alert').textContent).toContain('记忆发生变化');
   });
   it('clears loaded memories on database readiness loss', async () => {
-    const api = setup(); const props = { api, onOpenSettings: vi.fn(), onOpenSource: vi.fn() };
+    const api = setup(); const props = { api, runtimeStatus: 'online' as const, onReconnect: vi.fn(), onOpenSettings: vi.fn(), onOpenSource: vi.fn() };
     const view = render(<MemoryView {...props} databaseState="ready" />);
     await screen.findByRole('button', { name: /用户喜欢散步/ });
     view.rerender(<MemoryView {...props} databaseState="database_unavailable" />);

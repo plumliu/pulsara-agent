@@ -112,6 +112,7 @@ def test_model_runtime(
     tool_call: bool | None = True,
     reasoning: ReasoningControlContract | None = None,
     input_modalities: tuple[str, ...] | None = None,
+    output_modalities: tuple[str, ...] | None = None,
 ) -> TestModelRuntime:
     """Build one exact catalog-backed connection with one typed credential."""
 
@@ -139,6 +140,7 @@ def test_model_runtime(
             else "responses"
         ),
         input_modalities=input_modalities,
+        output_modalities=output_modalities,
     )
     snapshot = ModelCatalogSnapshot(
         entries={key: entry},

@@ -11,6 +11,7 @@ import { OverviewView } from '../components/overview-view';
 import { SessionSidebar } from '../components/session-sidebar';
 import { SettingsView } from '../components/settings-view';
 import { WorkbenchView } from '../components/workbench-view';
+import { PromptDraftStore } from '../lib/prompt-draft';
 import {
   LocalHttpRuntimeAdapter,
   createUserControlCommandRef,
@@ -27,7 +28,10 @@ import {
   type QueuedPrompt,
   type QueuedPromptAction,
   type CommandReceipt,
+  type EditablePromptContent,
+  type CanonicalPromptImagePart,
 } from '../lib/runtime-adapter';
+import { promptContentTextProjection } from '../lib/prompt-content';
 import type {
   PluginImportOptions,
   AgentTask,
@@ -167,6 +171,7 @@ type ToolDecisionIntent = {
 };
 
 export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps) {
+  const [promptDraftStore] = useState(() => new PromptDraftStore());
   const [activeView, setActiveView] = useState<AppView>('workbench');
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
   const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
@@ -224,11 +229,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  useEffect(() => () => promptDraftStore.destroy(), [promptDraftStore]);
   const [theme, setTheme] = useState<'light' | 'dark'>(readSavedTheme);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [turnPermission, setTurnPermission] = useState<PermissionMode>('bypass-permissions');
   const databaseState = bootstrap?.database_state;
   const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
+  const canCreateSession = runtimeStatus === 'online' && databaseState === 'ready';
 
   const ownsConnection = useCallback((expected: RuntimeConnection): boolean => (
     connectionRef.current === expected
@@ -313,7 +320,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           return [{
             ...item,
             ...transition,
-            body: transition.bodyUnavailable && item.body ? item.body : transition.body,
+            content: transition.contentUnavailable && item.content
+              ? item.content
+              : transition.content,
           }];
         }
         if (
@@ -342,7 +351,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           connectionGeneration: owner.generation,
           commandId: queued.commandId,
           queueItemId: queued.queueItemId,
-          body: queued.body,
+          content: queued.content,
           deliveryMode: queued.deliveryMode,
           targetTurnId: queued.targetTurnId,
           permission: queued.permission,
@@ -595,8 +604,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         const boot = await adapter.bootstrap();
         if (disposed) return;
         setBootstrap(boot);
-        setRuntimeStatus('online');
         if (boot.database_state !== 'ready') {
+          setRuntimeStatus('online');
           return;
         }
         const sessions = await adapter.listSessions();
@@ -848,10 +857,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
         event.preventDefault();
-        if (databaseBlocked) {
-          setActiveView('settings');
-          setSidebarOpen(false);
-        } else {
+        if (canCreateSession) {
           setNewSessionOpen(true);
         }
       }
@@ -863,7 +869,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [databaseBlocked]);
+  }, [canCreateSession]);
 
   const workspace = bootstrap?.workspace ?? emptyWorkspace;
   const activeSession = useMemo(
@@ -896,11 +902,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   };
 
   const openNewSession = () => {
-    if (databaseBlocked) {
-      navigate('settings');
-      return;
-    }
+    if (!canCreateSession) return;
     setNewSessionOpen(true);
+  };
+
+  const reconnect = () => {
+    if (activeSessionId) void openRuntimeSession(activeSessionId, true);
+    else window.location.reload();
   };
 
   const openSession = (id: string) => {
@@ -910,6 +918,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   };
 
   const createSession = async (selection: SessionWorkspaceSelection): Promise<boolean> => {
+    if (!canCreateSession) return false;
     try {
       const created = await adapter.createSession(selection);
       setSessionList((current) => [created, ...current.filter((item) => item.id !== created.id)]);
@@ -1022,9 +1031,31 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const key = `${active.sessionId}:${source.queueItemId}`;
     if (queueActionsInFlight.current.has(key)) return;
     queueActionsInFlight.current.add(key);
+    let restoredContent: EditablePromptContent | undefined;
+    if (kind === 'edit') {
+      try {
+        restoredContent = await active.readPromptForEdit(source.content);
+      } catch (error) {
+        queueActionsInFlight.current.delete(key);
+        if (ownsConnection(active)) notify(
+          '暂时无法编辑这条输入',
+          productMessage(
+            error instanceof Error ? error.message : undefined,
+            '原排队输入仍会保留，请稍后重试。',
+          ),
+          'warning',
+        );
+        return;
+      }
+      if (!ownsConnection(active)) {
+        queueActionsInFlight.current.delete(key);
+        return;
+      }
+    }
     const action: QueuedPromptAction = {
       sessionId: active.sessionId, connectionGeneration: active.generation,
       commandId: `command:web:${crypto.randomUUID()}`, source, kind,
+      restoredContent,
       targetTurnId: kind === 'send' ? targetTurnId : undefined,
       submittedAt: new Date().toISOString(), status: 'submitting',
     };
@@ -1135,7 +1166,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [connection, notify, ownsConnection, projection, queueActions, settleQueueAction]);
 
   const sendPrompt = async (
-    text: string,
+    content: EditablePromptContent,
     permission: PermissionMode,
     requestPlan: boolean,
   ): Promise<boolean> => {
@@ -1156,7 +1187,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         return false;
       }
       if (requestPlan && !projection.planMode) {
-        const plan = await active.enterPlan(text, permission);
+        const text = promptContentTextProjection(content);
+        const plan = await active.enterPlan(
+          text || '用户提交了一条图片输入。',
+          permission,
+        );
         if (!ownsConnection(active)) return false;
         if (plan.status === 'rejected') {
           notify('无法为本轮启用规划', productMessage(plan.publicMessage, '请稍后重试。'), 'warning');
@@ -1167,12 +1202,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         sessionId: active.sessionId,
         connectionGeneration: active.generation,
         commandId,
-        body: text,
+        content,
         deliveryMode,
         permission,
         status: 'sending',
       }]);
-      const receipt = await active.submitPrompt(commandId, text, permission);
+      const receipt = await active.submitPrompt(commandId, content, permission);
       if (!ownsConnection(active)) return false;
       setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
         ? submissionFromReceipt(item, receipt)
@@ -1185,6 +1220,28 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       return promptWasAccepted(receipt);
     } catch (error) {
       if (!ownsConnection(active)) return false;
+      if (error instanceof RuntimeApiError && (
+        error.code === 'HTTP_413'
+        || error.code === 'PROTOCOL_FRAME_OUT_OF_BOUNDS'
+      )) {
+        setLocalSubmissions((current) => current.map((item) => item.commandId === commandId
+          ? {
+            ...item,
+            status: 'rejected',
+            outcomeCode: error.code,
+            detail: error.message,
+          }
+          : item));
+        notify(
+          '输入超过上传容量',
+          productMessage(
+            error.message,
+            '图片和文字编码后的完整请求超过当前 8 MiB 上传容量。',
+          ),
+          'warning',
+        );
+        return false;
+      }
       const recoveredConnection = await recoverConnectionAfterOperation(error, active);
       if (!recoveredConnection || !ownsConnection(recoveredConnection)) return false;
       try {
@@ -1879,6 +1936,26 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return page;
   }, [ownsConnection]);
 
+  const readPromptImage = useCallback(async (image: CanonicalPromptImagePart) => {
+    const active = connectionRef.current;
+    if (!active) {
+      throw new RuntimeApiError(
+        'LOCAL_CONNECTION_UNAVAILABLE',
+        '本地服务未连接。',
+        true,
+      );
+    }
+    const bytes = await active.readPromptImage(image);
+    if (!ownsConnection(active)) {
+      throw new RuntimeApiError(
+        'PROMPT_IMAGE_OWNER_CHANGED',
+        '图片所属的会话已经改变。',
+        true,
+      );
+    }
+    return bytes;
+  }, [ownsConnection]);
+
   return (
     <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} onOpenCommand={() => setCommandOpen(true)} />
@@ -1894,6 +1971,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onClose={() => setSidebarOpen(false)}
           onSelectSession={openSession}
           onNewSession={openNewSession}
+          canCreateSession={canCreateSession}
           onOpenCommand={() => setCommandOpen(true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
         />
@@ -1911,6 +1989,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onNavigate={navigate}
           onOpenSession={openSession}
           onNewSession={openNewSession}
+          canCreateSession={canCreateSession}
         />
       )}
       {activeView === 'workbench' && !databaseBlocked && (
@@ -1955,10 +2034,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           focusMemoryEntry={focusMemoryEntry}
           focusTaskRevision={0}
           focusTaskHighlighted={false}
-          onReconnect={() => activeSessionId && void openRuntimeSession(activeSessionId, true)}
+          onReconnect={reconnect}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
           onOpenSidebar={() => setSidebarOpen(true)}
           onNewSession={openNewSession}
+          canCreateSession={canCreateSession}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
           onOpenModelSettings={() => setActiveView('settings')}
           onModelCallBindingChange={updateModelCallBinding}
@@ -1969,6 +2049,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onResolveInteraction={resolveInteraction}
           artifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
           onReadToolArtifact={readToolArtifact}
+          onReadPromptImage={readPromptImage}
+          promptDraftStore={promptDraftStore}
           onNotify={notify}
           permission={turnPermission}
           onPermissionChange={setTurnPermission}
@@ -2135,7 +2217,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         />
       )}
 
-      {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusMemoryEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
+      {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={runtimeStatus} onReconnect={reconnect} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusMemoryEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
 
       <CommandPalette
         open={commandOpen}
@@ -2143,10 +2225,12 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         onClose={() => setCommandOpen(false)}
         onNavigate={navigate}
         onNewSession={openNewSession}
+        canCreateSession={canCreateSession}
         onThemeChange={setTheme}
       />
       <NewSessionDialog
         open={newSessionOpen}
+        canCreateSession={canCreateSession}
         defaultWorkspacePath={workspace.path === '正在连接…' ? '' : workspace.path}
         onClose={() => setNewSessionOpen(false)}
         onCreate={createSession}

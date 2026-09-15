@@ -1,3 +1,5 @@
+import type { CanonicalPromptContent } from './prompt-content';
+
 export type AppView =
   | 'overview'
   | 'workbench'
@@ -394,6 +396,7 @@ export interface Message {
   sourceSubagentRelation?: 'current' | 'previous' | 'earlier';
   time: string;
   body: string;
+  promptContent?: CanonicalPromptContent;
   reasoning?: ReasoningBlock[];
   model?: string;
   status?: SessionStatus;

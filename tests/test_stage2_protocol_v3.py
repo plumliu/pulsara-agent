@@ -47,7 +47,11 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
     build_run_permission_snapshot,
 )
-from pulsara_agent.llm.input import MAXIMUM_PROMPT_TEXT_UTF8_BYTES
+from pulsara_agent.llm.input import (
+    LLMTextPart,
+    MAXIMUM_PROMPT_TEXT_UTF8_BYTES,
+    PromptImagePart,
+)
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import (
     TerminalKernelProtocolServer,
@@ -64,13 +68,17 @@ from pulsara_agent.terminal_process.output import (
 )
 
 
+def _wire_text_prompt(text: str) -> wire.PromptContent:
+    return wire.PromptContent(parts=[wire.PromptContentPart(text=text)])
+
+
 class _CommandHost:
     session_id = "session:test"
     host_session_id = "host:test"
 
     def __init__(self) -> None:
         self.controller_id = "attachment:test"
-        self.submitted: list[tuple[str, str]] = []
+        self.submitted: list[tuple[str, object]] = []
         self.steered: list[tuple[str, str, str]] = []
         self.resolved: list[dict[str, object]] = []
         self.accepted_subagent_completions: list[dict[str, object]] = []
@@ -88,10 +96,8 @@ class _CommandHost:
         if self.controller_id == attachment_id:
             self.controller_id = None
 
-    async def submit_prompt(
-        self, *, command_id: str, text: str
-    ) -> KernelCommandOutcome:
-        self.submitted.append((command_id, text))
+    async def submit_prompt(self, *, command_id: str, content, **_kwargs) -> KernelCommandOutcome:
+        self.submitted.append((command_id, content))
         return KernelCommandOutcome(
             command_id, "PENDING", "queue:item", "PROMPT_QUEUED", "Queued."
         )
@@ -404,7 +410,8 @@ def test_stage2_observer_cannot_mutate_but_can_detach() -> None:
                 command_id="command:submit",
                 client_submission_id="command:submit",
                 command_kind=wire.SUBMIT_PROMPT,
-                text="hello",
+                prompt_content=_wire_text_prompt("hello"),
+                requested_permission_mode=wire.PERMISSION_MODE_READ_ONLY,
             ),
         )
     )
@@ -622,11 +629,79 @@ def test_stage2_controller_prompt_bounds_are_authoritative() -> None:
                     command_id="command:submit",
                     client_submission_id="command:submit",
                     command_kind=wire.SUBMIT_PROMPT,
-                    text=text,
+                    prompt_content=_wire_text_prompt(text),
+                    requested_permission_mode=wire.PERMISSION_MODE_READ_ONLY,
                 ),
             )
         )
         assert result.error.stable_code == "PROMPT_INVALID"
+    assert controller.host_session.submitted == []
+
+
+def test_u2_controller_submits_one_ordered_typed_prompt_without_figure_projection() -> None:
+    server = _server()
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    image = b"same-immutable-image"
+    prompt = wire.PromptContent(
+        parts=[
+            wire.PromptContentPart(text="before\n[Figure 1]"),
+            wire.PromptContentPart(
+                image=wire.PromptImagePart(
+                    content=image,
+                    declared_media_type="image/png",
+                )
+            ),
+            wire.PromptContentPart(text="after"),
+            wire.PromptContentPart(
+                image=wire.PromptImagePart(
+                    content=image,
+                    declared_media_type="image/png",
+                )
+            ),
+        ]
+    )
+    result = asyncio.run(
+        server._command(
+            controller,
+            wire.CommandRequest(
+                request_id="request:typed",
+                command_id="command:typed",
+                client_submission_id="command:typed",
+                command_kind=wire.SUBMIT_PROMPT,
+                prompt_content=prompt,
+                requested_permission_mode=wire.PERMISSION_MODE_READ_ONLY,
+            ),
+        )
+    )
+    assert result.command_outcome.status == wire.PENDING
+    [(command_id, content)] = controller.host_session.submitted
+    assert command_id == "command:typed"
+    assert content.parts == (
+        LLMTextPart("before\n[Figure 1]"),
+        PromptImagePart(original_bytes=image, declared_mime="image/png"),
+        LLMTextPart("after"),
+        PromptImagePart(original_bytes=image, declared_mime="image/png"),
+    )
+
+
+def test_u2_submit_prompt_cannot_be_reinterpreted_as_direct_active_steer() -> None:
+    server = _server()
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    result = asyncio.run(
+        server._command(
+            controller,
+            wire.CommandRequest(
+                request_id="request:no-active-steer",
+                command_id="command:no-active-steer",
+                client_submission_id="command:no-active-steer",
+                command_kind=wire.SUBMIT_PROMPT,
+                target_turn_id="turn:active",
+                prompt_content=_wire_text_prompt("must stay a new turn"),
+                requested_permission_mode=wire.PERMISSION_MODE_READ_ONLY,
+            ),
+        )
+    )
+    assert result.error.stable_code == "PROMPT_INVALID"
     assert controller.host_session.submitted == []
 
 
@@ -966,11 +1041,12 @@ def test_pr04_cancel_queue_command_and_closed_field_matrix():
     assert accepted.command_outcome.public_code == 'PROMPT_CANCELLED'
     assert asyncio.run(server._command(observer, wire.CommandRequest(**valid))).error.stable_code == 'CONTROLLER_REQUIRED'
     for changed, code in [
-        ({'text': 'must not resend body'}, 'QUEUE_ACTION_INVALID'),
+        ({'plan_reason': 'must not resend body'}, 'QUEUE_ACTION_INVALID'),
         ({'target_turn_id': 'turn:wrong'}, 'QUEUE_ACTION_INVALID'),
         ({'target_queue_item_id': ''}, 'QUEUE_ACTION_INVALID'),
         ({'requested_permission_mode': wire.PERMISSION_MODE_READ_ONLY}, 'PERMISSION_FIELD_NOT_ALLOWED'),
-        ({'command_kind': wire.SUBMIT_PROMPT, 'text': 'hello'}, 'QUEUE_TARGET_FIELD_NOT_ALLOWED'),
+        ({'command_kind': wire.SUBMIT_PROMPT,
+          'prompt_content': _wire_text_prompt('hello')}, 'QUEUE_TARGET_FIELD_NOT_ALLOWED'),
         ({'command_kind': wire.STEER_QUEUED_PROMPT}, 'QUEUE_ACTION_INVALID'),
         ({'expected_session_id': 'another-session'}, 'CONTROL_FIELDS_NOT_ALLOWED'),
     ]:

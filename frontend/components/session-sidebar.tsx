@@ -26,6 +26,7 @@ interface SessionSidebarProps {
   onClose: () => void;
   onSelectSession: (id: string) => void;
   onNewSession: () => void;
+  canCreateSession: boolean;
   onOpenCommand: () => void;
   onTakeControl: () => void;
 }
@@ -118,6 +119,7 @@ export function SessionSidebar({
   onClose,
   onSelectSession,
   onNewSession,
+  canCreateSession,
   onOpenCommand,
   onTakeControl,
 }: SessionSidebarProps) {
@@ -163,7 +165,7 @@ export function SessionSidebar({
           <kbd>⌘ K</kbd>
         </button>
 
-        <button className="new-session" onClick={onNewSession}>
+        <button className="new-session" disabled={!canCreateSession} onClick={onNewSession}>
           <Plus size={14} />
           <span>新建会话</span>
           <kbd>⌘ N</kbd>
@@ -246,7 +248,7 @@ export function SessionSidebar({
 
         <div className="sidebar-footer">
           <div className="connection-line">
-            <span className="status-pulse" />
+            <span className={`runtime-dot runtime-dot--${runtimeStatus}`} />
             <span>{runtimeStatus === 'online' && connectionRole === 'observer' ? '已连接 · 旁观中' : connectionLabels[runtimeStatus]}</span>
             <code>本机</code>
           </div>

@@ -173,6 +173,7 @@ class ModelCatalogEntry:
     tool_call: bool | None
     wire_shape_hint: Literal["responses", "completions"] | None
     input_modalities: tuple[str, ...] | None = None
+    output_modalities: tuple[str, ...] | None = None
     diagnostics: tuple[ModelCatalogDiagnostic, ...] = ()
 
 
@@ -382,9 +383,9 @@ def _parse_model_entry(
     tool_call = raw_tool_call if isinstance(raw_tool_call, bool) else None
     if raw_tool_call is not None and tool_call is None:
         diagnostic("catalog_tool_call_invalid")
-    input_modalities = _parse_input_modalities(
-        raw_model.get("modalities", _MISSING), diagnostic
-    )
+    modalities = raw_model.get("modalities", _MISSING)
+    input_modalities = _parse_modalities(modalities, "input", diagnostic)
+    output_modalities = _parse_modalities(modalities, "output", diagnostic)
     return ModelCatalogEntry(
         key=ModelCatalogEntryKey(route_id, model_id),
         route_name=route_name,
@@ -397,6 +398,7 @@ def _parse_model_entry(
         tool_call=tool_call,
         wire_shape_hint=wire_shape_hint,
         input_modalities=input_modalities,
+        output_modalities=output_modalities,
         diagnostics=tuple(diagnostics),
     )
 
@@ -404,28 +406,29 @@ def _parse_model_entry(
 _MISSING = object()
 
 
-def _parse_input_modalities(
+def _parse_modalities(
     raw_modalities: object,
+    direction: Literal["input", "output"],
     diagnostic: Callable[[str, str], None],
 ) -> tuple[str, ...] | None:
     if raw_modalities is _MISSING:
-        diagnostic("catalog_input_modalities_missing")
+        diagnostic(f"catalog_{direction}_modalities_missing")
         return None
     if not isinstance(raw_modalities, Mapping):
-        diagnostic("catalog_input_modalities_invalid", "modalities_not_an_object")
+        diagnostic(f"catalog_{direction}_modalities_invalid", "modalities_not_an_object")
         return None
-    if "input" not in raw_modalities:
-        diagnostic("catalog_input_modalities_missing")
+    if direction not in raw_modalities:
+        diagnostic(f"catalog_{direction}_modalities_missing")
         return None
-    raw_input = raw_modalities["input"]
+    raw_input = raw_modalities[direction]
     if not isinstance(raw_input, list):
-        diagnostic("catalog_input_modalities_invalid", "input_not_an_array")
+        diagnostic(f"catalog_{direction}_modalities_invalid", f"{direction}_not_an_array")
         return None
     if any(
         not isinstance(value, str) or not value or value != value.strip()
         for value in raw_input
     ):
-        diagnostic("catalog_input_modalities_invalid", "input_member_invalid")
+        diagnostic(f"catalog_{direction}_modalities_invalid", f"{direction}_member_invalid")
         return None
     return tuple(raw_input)
 

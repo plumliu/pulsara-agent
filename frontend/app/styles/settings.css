@@ -36,8 +36,11 @@
 .provider-check i { grid-row: 1/3; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb,var(--green) 12%,transparent); }
 .provider-check strong { font-size: var(--type-label); }
 .provider-check small { color: var(--muted); font-family: var(--mono); font-size: var(--type-micro); }
-.healthy-value { color: var(--green); font-family: var(--mono); font-size: var(--type-caption); }
-.healthy-value i { display: inline-block; width: 6px; height: 6px; margin-right: 4px; border-radius: 50%; background: var(--green); }
+.connection-value { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--type-caption); white-space: nowrap; }
+.connection-value i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.connection-value--online { color: var(--green); }
+.connection-value--starting, .connection-value--reconnecting { color: var(--amber); }
+.connection-value--offline, .connection-value--failed { color: var(--red); }
 .storage-value { color: var(--muted); font-family: var(--mono); font-size: var(--type-caption); }
 .settings-group > header > div { min-width: 0; flex: 1; }
 .settings-header-action, .credential-actions button, .form-actions button, .settings-alert button, .model-config-card__actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); font-size: var(--type-caption); white-space: nowrap; }
@@ -78,8 +81,8 @@
 .settings-form-grid label > span, .database-form label > span { color: var(--muted); font-size: var(--type-caption); font-weight: 700; }
 .settings-form-grid input, .settings-form-grid select, .credential-actions input, .database-form input { min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; outline: none; background: var(--paper); color: var(--ink); font: inherit; font-size: var(--type-small); }
 .settings-form-grid input:focus, .settings-form-grid select:focus, .credential-actions input:focus, .database-form input:focus { border-color: color-mix(in srgb,var(--blue) 55%,var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb,var(--blue) 10%,transparent); }
-.settings-form-grid .model-tool-call-field { grid-column: 1 / -1; display: flex; flex-direction: row; align-items: center; gap: 8px; min-height: 36px; color: var(--muted); font-size: var(--type-caption); font-weight: 700; }
-.settings-form-grid .model-tool-call-field input { width: 15px; height: 15px; padding: 0; accent-color: var(--blue); }
+.settings-form-grid .model-boolean-field { grid-column: 1 / -1; display: flex; flex-direction: row; align-items: center; gap: 8px; min-height: 36px; color: var(--muted); font-size: var(--type-caption); font-weight: 700; }
+.settings-form-grid .model-boolean-field input { width: 15px; height: 15px; padding: 0; accent-color: var(--blue); }
 .model-confirmation { display: grid; gap: 11px; margin: 0 15px 15px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-deep); }
 .model-confirmation > strong { font-size: var(--type-small); }
 .model-confirmation dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px 15px; margin: 0; }

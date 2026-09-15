@@ -208,7 +208,10 @@ def test_store_serializes_model_add_and_postgres_save(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_store_publishes_no_auth_connection_without_a_key(tmp_path: Path) -> None:
+@pytest.mark.parametrize("input_modalities", (None, ("text",), ("text", "image")))
+def test_store_publishes_no_auth_connection_without_a_key(
+    tmp_path: Path, input_modalities: tuple[str, ...] | None,
+) -> None:
     async def scenario() -> None:
         store = LocalSettingsStore(tmp_path / "local-settings.yaml")
         connection = ModelConnectionConfig(
@@ -222,6 +225,7 @@ def test_store_publishes_no_auth_connection_without_a_key(tmp_path: Path) -> Non
                 True,
                 ReasoningProviderDefault(),
                 ModelConnectionAuthentication.NONE,
+                input_modalities=input_modalities,
             ),
         )
 
@@ -232,6 +236,7 @@ def test_store_publishes_no_auth_connection_without_a_key(tmp_path: Path) -> Non
 
         assert observed.model_connections == (connection,)
         assert observed.model_api_keys == ()
+        assert store.read().model_connections == (connection,)
 
     asyncio.run(scenario())
 

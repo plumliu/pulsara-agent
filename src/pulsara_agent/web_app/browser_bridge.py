@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from collections.abc import Iterable
 
 from google.protobuf.json_format import MessageToDict
@@ -260,6 +262,25 @@ class LocalBrowserBridge:
     async def command(
         self, connection_id: str, body: dict[str, object]
     ) -> dict[str, object]:
+        allowed_fields = {
+            "command_id",
+            "command_kind",
+            "client_submission_id",
+            "plan_reason",
+            "target_turn_id",
+            "target_queue_item_id",
+            "subagent_task_id",
+            "requested_permission_mode",
+            "target_plan_workflow_id",
+            "expected_plan_workflow_revision",
+            "force",
+            "expected_session_id",
+            "expected_host_session_id",
+            "target_process_id",
+            "prompt_content",
+        }
+        if set(body) - allowed_fields:
+            raise ValueError("command contains an unexpected field")
         connection = await self._connection(connection_id)
         command_id = _required_string(body, "command_id")
         kind_name = _required_string(body, "command_kind")
@@ -310,7 +331,7 @@ class LocalBrowserBridge:
                     else command_id,
                 )
             ),
-            text=str(body.get("text", "")),
+            plan_reason=str(body.get("plan_reason", "")),
             target_turn_id=str(body.get("target_turn_id", "")),
             target_queue_item_id=str(body.get("target_queue_item_id", "")),
             subagent_task_id=str(body.get("subagent_task_id", "")),
@@ -327,6 +348,10 @@ class LocalBrowserBridge:
             ),
             target_process_id=str(body.get("target_process_id", "")),
         )
+        if "prompt_content" in body:
+            request.prompt_content.CopyFrom(
+                _prompt_content_from_json(body["prompt_content"])
+            )
         return protobuf_json(await connection.controller.request("command", request))
 
     async def query_command(
@@ -391,6 +416,10 @@ class LocalBrowserBridge:
                 maximum=1 << 20,
             ),
         )
+        if "image_ref_ordinal" in body:
+            request.image_ref_ordinal = _uint(
+                body["image_ref_ordinal"], "image_ref_ordinal"
+            )
         if isinstance(entry_id, str) and entry_id:
             request.entry_id = entry_id
         else:
@@ -680,6 +709,43 @@ class LocalBrowserBridge:
                 "live_control_snapshot"
             ],
         }
+
+
+def _prompt_content_from_json(value: object) -> wire.PromptContent:
+    if not isinstance(value, dict) or set(value) != {"parts"}:
+        raise ValueError("prompt_content must contain only ordered parts")
+    raw_parts = value["parts"]
+    if not isinstance(raw_parts, list):
+        raise ValueError("prompt_content.parts must be an array")
+    result = wire.PromptContent()
+    for raw_part in raw_parts:
+        if not isinstance(raw_part, dict):
+            raise ValueError("prompt content part must be an object")
+        kind = raw_part.get("type")
+        item = result.parts.add()
+        if kind == "text" and set(raw_part) == {"type", "text"}:
+            text = raw_part["text"]
+            if not isinstance(text, str):
+                raise ValueError("prompt text part must contain text")
+            item.text = text
+        elif kind == "image" and set(raw_part) == {
+            "type",
+            "content_base64",
+            "declared_media_type",
+        }:
+            content = raw_part["content_base64"]
+            media_type = raw_part["declared_media_type"]
+            if not isinstance(content, str) or not isinstance(media_type, str):
+                raise ValueError("prompt image part is invalid")
+            try:
+                decoded = base64.b64decode(content, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError("prompt image content is not valid base64") from exc
+            item.image.content = decoded
+            item.image.declared_media_type = media_type
+        else:
+            raise ValueError("prompt content part has an invalid shape")
+    return result
 
 
 def _required_string(body: dict[str, object], field: str) -> str:

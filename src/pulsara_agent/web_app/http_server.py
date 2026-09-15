@@ -180,6 +180,8 @@ def _catalog_entry_payload(
         if entry.limits is None
         else entry.limits.max_output_tokens,
         "tool_call": entry.tool_call,
+        "input_modalities": entry.input_modalities,
+        "output_modalities": entry.output_modalities,
         "wire_shape_hint": entry.wire_shape_hint,
         "wire_apis": wires,
     }
@@ -916,6 +918,7 @@ class LocalHttpServer:
             "context_tokens",
             "max_output_tokens",
             "tool_call",
+            "input_modalities",
             "reasoning",
         }
         if set(body) != expected:
@@ -928,6 +931,7 @@ class LocalHttpServer:
         context_tokens = body["context_tokens"]
         max_output_tokens = body["max_output_tokens"]
         tool_call = body["tool_call"]
+        input_modalities = body["input_modalities"]
         if (
             not isinstance(name, str)
             or not isinstance(base_url, str)
@@ -939,6 +943,7 @@ class LocalHttpServer:
             or isinstance(max_output_tokens, bool)
             or not isinstance(max_output_tokens, int)
             or not isinstance(tool_call, bool)
+            or not isinstance(input_modalities, list)
         ):
             raise ValueError("custom model configuration fields are invalid")
         authentication = ModelConnectionAuthentication(raw_authentication)
@@ -953,6 +958,7 @@ class LocalHttpServer:
             total_context_tokens=context_tokens,
             max_output_tokens=max_output_tokens,
             tool_call=tool_call,
+            input_modalities=tuple(input_modalities),
             reasoning=_user_declared_reasoning(body["reasoning"]),
             authentication=authentication,
         )
@@ -1119,8 +1125,9 @@ class LocalHttpServer:
             }
         )
         try:
+            catalog = self.catalog.selectable()
             contract = resolve_model_target_contract(
-                catalog=self.catalog.selectable(),
+                catalog=catalog,
                 connection=connection,
                 route_wires=self.model_runtime.route_wires,
             )
@@ -1133,6 +1140,10 @@ class LocalHttpServer:
                 }
             )
             return payload
+        catalog_entry = (
+            catalog.entries.get(connection.target.catalog_key)
+            if catalog is not None and connection.user_declared is None else None
+        )
         payload.update(
             {
                 "status": "ready",
@@ -1142,6 +1153,10 @@ class LocalHttpServer:
                 "context_tokens": contract.target_facts.limits.total_context_tokens,
                 "max_output_tokens": contract.target_facts.limits.max_output_tokens,
                 "tool_call": contract.target_facts.tool_call,
+                "input_modalities": contract.target_facts.input_modalities,
+                "output_modalities": (
+                    catalog_entry.output_modalities if catalog_entry is not None else None
+                ),
                 "reasoning": _reasoning_payload(contract.reasoning),
                 "default_reasoning": reasoning_selection_to_dict(
                     default_reasoning_selection(contract.reasoning)
@@ -1819,6 +1834,8 @@ class LocalHttpServer:
             return {}
         try:
             value = await request.json()
+        except web.HTTPException:
+            raise
         except Exception as exc:
             raise ValueError("request body must be a JSON object") from exc
         if not isinstance(value, dict):

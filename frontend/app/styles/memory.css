@@ -2,6 +2,7 @@
 .memory-view { min-height: 0; overflow: auto; overflow-anchor: none; padding-bottom: 36px; }
 .memory-layout { display: flex; align-items: flex-start; gap: 22px; max-width: 1100px; padding: 0 32px; margin: 24px auto; }
 .memory-layout.has-detail { max-width: 1320px; }
+.memory-reconnect { margin-top: 20px; }
 .memory-main { flex: 1; min-width: 0; }
 .memory-view button, .memory-view input, .memory-view select { font-size: 14px; }
 .memory-view button { transition: background .15s ease, border-color .15s ease, color .15s ease; }

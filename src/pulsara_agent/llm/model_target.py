@@ -308,7 +308,7 @@ def _entry_for_connection(
             reasoning=declared.reasoning,
             tool_call=declared.tool_call,
             wire_shape_hint=None,
-            input_modalities=None,
+            input_modalities=declared.input_modalities,
         )
     if catalog is None:
         raise ModelTargetNotExecutable("model catalog snapshot is unavailable")

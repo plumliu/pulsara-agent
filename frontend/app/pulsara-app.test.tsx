@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LocalMemoryApi } from '../lib/memory-api';
+import { promptContentTextProjection } from '../lib/prompt-content';
 import { RuntimeApiError } from '../lib/runtime-adapter';
 import type {
   CommandReceipt,
@@ -16,6 +18,9 @@ import type {
   RuntimeInteractionSummary,
   RuntimeProjection,
   UserControlQueryResult,
+  CanonicalPromptContent,
+  CanonicalPromptImagePart,
+  EditablePromptContent,
 } from '../lib/runtime-adapter';
 import type {
   AgentTask,
@@ -35,6 +40,32 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+function textPrompt(text: string) {
+  return { parts: [{ type: 'text' as const, text }] };
+}
+
+function stubClipboard(writeText: (value: string) => Promise<void>) {
+  const current = navigator;
+  vi.stubGlobal('navigator', new Proxy(current, {
+    get(target, property) {
+      if (property === 'clipboard') return { writeText };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }));
+}
+
+async function typeComposer(value: string): Promise<HTMLElement> {
+  const composer = screen.getByLabelText('发送给 Pulsara') as HTMLElement;
+  await userEvent.click(composer);
+  await userEvent.type(composer, value, { skipClick: true });
+  return composer;
+}
+
+function composerIsDisabled(composer: HTMLElement): boolean {
+  return composer.getAttribute('contenteditable') === 'false';
 }
 
 afterEach(cleanup);
@@ -351,6 +382,26 @@ class FakeConnection implements RuntimeConnection {
     throw new Error('No canonical task activity fixture');
   }
 
+  async readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array> {
+    void image;
+    throw new Error('No prompt image fixture');
+  }
+
+  async readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent> {
+    const parts: EditablePromptContent['parts'][number][] = [];
+    for (const part of content.parts) {
+      parts.push(part.type === 'text'
+        ? { type: 'text', text: part.text }
+        : {
+          type: 'image',
+          source: 'local',
+          bytes: await this.readPromptImage(part),
+          declaredMediaType: part.mediaType,
+        });
+    }
+    return { parts };
+  }
+
   async compactContext(): Promise<CommandReceipt> {
     return { commandId: 'command-4', status: 'succeeded' };
   }
@@ -460,6 +511,8 @@ class FakeAdapter implements RuntimeAdapter {
           input_tokens: 256000,
           output_tokens: 8192,
           tool_call: true,
+          input_modalities: ['text', 'image', 'audio', 'video', 'pdf'],
+          output_modalities: ['text', 'future-output'],
           wire_shape_hint: 'responses' as const,
           wire_apis: [{
             wire_api: 'openai_responses' as const,
@@ -746,7 +799,7 @@ describe('PulsaraApp', () => {
     const skillButton = await screen.findByRole('button', { name: '选择技能' });
     fireEvent.click(skillButton);
     fireEvent.click(screen.getByRole('button', { name: /\$pdf/ }));
-    expect((screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement).value).toBe('$pdf ');
+    expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe('$pdf ');
 
     fireEvent.click(screen.getByRole('button', { name: '能力' }));
     expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
@@ -1830,9 +1883,7 @@ describe('PulsaraApp', () => {
 
   it('copies the exact source Markdown instead of rendered or normalized text', async () => {
     const writeText = vi.fn(async () => undefined);
-    vi.stubGlobal('navigator', Object.create(navigator, {
-      clipboard: { value: { writeText }, configurable: true },
-    }));
+    stubClipboard(writeText);
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''),
@@ -1853,9 +1904,7 @@ describe('PulsaraApp', () => {
 
   it('copies one formula as LaTeX and reports through the shared toast stack', async () => {
     const writeText = vi.fn(async () => undefined);
-    vi.stubGlobal('navigator', Object.create(navigator, {
-      clipboard: { value: { writeText }, configurable: true },
-    }));
+    stubClipboard(writeText);
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''),
@@ -1907,9 +1956,7 @@ describe('PulsaraApp', () => {
 
   it('keeps the existing copy failure feedback when clipboard permission is denied', async () => {
     const writeText = vi.fn(async () => { throw new Error('denied'); });
-    vi.stubGlobal('navigator', Object.create(navigator, {
-      clipboard: { value: { writeText }, configurable: true },
-    }));
+    stubClipboard(writeText);
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''),
@@ -1979,17 +2026,19 @@ describe('PulsaraApp', () => {
     ] };
     render(<PulsaraApp adapter={adapter} />);
     const textbox = await screen.findByRole('textbox', { name: '发送给 Pulsara' });
-    fireEvent.change(textbox, { target: { value: '父会话未发送草稿' } });
+    await userEvent.click(textbox);
+    await userEvent.type(textbox, '父会话未发送草稿', { skipClick: true });
     fireEvent.click(screen.getByRole('button', { name: '先规划' }));
     fireEvent.click(screen.getByRole('button', { name: '从此处分叉' }));
     await screen.findByText('分叉已打开');
-    expect((screen.getByRole('textbox', { name: '发送给 Pulsara' }) as HTMLTextAreaElement).value).toBe('');
+    expect(screen.getByRole('textbox', { name: '发送给 Pulsara' }).textContent).toBe('');
     expect(screen.getByRole('button', { name: '先规划' }).getAttribute('aria-pressed')).toBe('false');
     const source = screen.getAllByRole('button').find(button => button.textContent?.includes(initialSession.title) && button.textContent?.includes('已载入'));
     expect(source).toBeTruthy();
     fireEvent.click(source!);
     await waitFor(() => expect(adapter.connectCalls.at(-1)?.sessionId).toBe(initialSession.id));
-    expect((screen.getByRole('textbox', { name: '发送给 Pulsara' }) as HTMLTextAreaElement).value).toBe('父会话未发送草稿');
+    expect(screen.getByRole('textbox', { name: '发送给 Pulsara' }).textContent)
+      .toBe('父会话未发送草稿');
     expect(screen.getByRole('button', { name: '本轮先规划' }).getAttribute('aria-pressed')).toBe('true');
   });
 
@@ -2115,6 +2164,72 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('heading', { name: '新建会话' })).toBeTruthy();
   });
 
+  it.each([false, true])('disables all creation entries after a bootstrap failure (retryable=%s)', async (retryable) => {
+    const adapter = new FakeAdapter();
+    vi.spyOn(adapter, 'bootstrap').mockRejectedValue(new RuntimeApiError('START_FAILED', '本地服务启动失败', retryable));
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByText('本地服务启动失败');
+    expect((screen.getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
+    for (const modifier of ['ctrlKey', 'metaKey']) {
+      fireEvent.keyDown(window, { key: 'n', [modifier]: true });
+      expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
+    }
+    fireEvent.keyDown(window, { key: 'k', metaKey: true });
+    const palette = screen.getByRole('dialog', { name: '命令面板' });
+    expect((within(palette).getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(screen.getByRole('button', { name: '总览' }));
+    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '记忆' }));
+    expect(screen.getByRole('heading', { name: retryable ? '本地服务连接已中断' : '本地服务连接失败' })).toBeTruthy();
+    expect(adapter.createSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps creation disabled until bootstrap and the initial session list are ready', async () => {
+    const adapter = new FakeAdapter();
+    let finishBootstrap!: (value: RuntimeBootstrap) => void;
+    let finishList!: (value: SessionSummary[]) => void;
+    vi.spyOn(adapter, 'bootstrap').mockImplementation(() => new Promise(resolve => { finishBootstrap = resolve; }));
+    vi.spyOn(adapter, 'listSessions').mockImplementation(() => new Promise(resolve => { finishList = resolve; }));
+    render(<PulsaraApp adapter={adapter} />);
+    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => finishBootstrap(bootstrap));
+    expect((screen.getByRole('button', { name: '创建会话' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => finishList([]));
+    expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    expect(screen.getByRole('dialog', { name: '新建会话' })).toBeTruthy();
+  });
+
+  it('blocks an already open creation dialog while reconnecting, then enables it after recovery', async () => {
+    const adapter = new FakeAdapter();
+    const connect = adapter.connect.bind(adapter);
+    let disconnect!: (error: Error) => void;
+    let recover!: () => void;
+    vi.spyOn(adapter, 'connect')
+      .mockImplementationOnce(async (...args) => {
+        const connection = await connect(...args);
+        vi.spyOn(connection, 'observe').mockImplementation(() => new Promise((_resolve, reject) => { disconnect = reject; }));
+        return connection;
+      })
+      .mockImplementationOnce(async (...args) => {
+        await new Promise<void>(resolve => { recover = resolve; });
+        return connect(...args);
+      });
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
+    const dialog = screen.getByRole('dialog', { name: '新建会话' });
+    await act(async () => disconnect(new Error('connection lost')));
+    expect((within(dialog).getByRole('button', { name: /^创建会话/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.submit(dialog.querySelector('form')!);
+    expect(adapter.createSession).not.toHaveBeenCalled();
+    await waitFor(() => expect(recover).toBeTypeOf('function'));
+    await act(async () => recover());
+    expect((within(dialog).getByRole('button', { name: /^创建会话/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('blocks the workbench and guides setup without touching session data in zero configuration', async () => {
     class ZeroConfigAdapter extends FakeAdapter {
       override listSessions = vi.fn(async (): Promise<SessionSummary[]> => {
@@ -2159,6 +2274,12 @@ describe('PulsaraApp', () => {
     expect(screen.queryByRole('button', { name: /新建会话/ })).toBeNull();
     expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
     expect(adapter.listSessions).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
+    fireEvent.keyDown(window, { key: 'k', metaKey: true });
+    expect((within(screen.getByRole('dialog', { name: '命令面板' })).getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(window, { key: 'Escape' });
 
     fireEvent.click(screen.getByRole('button', { name: /前往本地服务设置/ }));
     expect(await screen.findByRole('heading', { name: 'PostgreSQL' })).toBeTruthy();
@@ -2206,6 +2327,9 @@ describe('PulsaraApp', () => {
     fireEvent.change(screen.getByLabelText('提供方'), { target: { value: 'test' } });
     await screen.findByRole('option', { name: /test-model · test-model/ });
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'test-model' } });
+    expect(screen.getByText('文字、图片、音频、视频、PDF')).toBeTruthy();
+    expect(screen.getByText('文字、future-output')).toBeTruthy();
+    expect(screen.getByText(/Pulsara 当前支持文字、图片输入和文字回复/)).toBeTruthy();
     await screen.findByRole('option', { name: 'Responses · models.dev 建议' });
     fireEvent.change(screen.getByLabelText('API 协议'), { target: { value: 'openai_responses' } });
     const secret = 'front-end-secret-sentinel';
@@ -2276,10 +2400,14 @@ describe('PulsaraApp', () => {
     const secret = 'custom-front-end-secret';
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: secret } });
 
+    const imageInput = screen.getByLabelText('支持图像输入') as HTMLInputElement;
+    expect(imageInput.checked).toBe(false);
+    fireEvent.click(imageInput);
     fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     await waitFor(() => expect(test).toHaveBeenCalledWith(expect.objectContaining({
       source: 'user_declared',
       configuration_name: 'Local Gateway',
+      input_modalities: ['text', 'image'],
       base_url: 'http://127.0.0.1:9000/v1',
       model_id: 'local-model',
       wire_api: 'openai_chat_completions',
@@ -2295,6 +2423,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(add).toHaveBeenCalledWith(expect.objectContaining({
       source: 'user_declared',
+      input_modalities: ['text', 'image'],
       api_key: secret,
     })));
   });
@@ -2318,6 +2447,7 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
     await waitFor(() => expect(add).toHaveBeenCalledWith(expect.objectContaining({
       source: 'user_declared',
+      input_modalities: ['text'],
       authentication: 'none',
       api_key: null,
       reasoning: { kind: 'provider_default' },
@@ -2415,6 +2545,8 @@ describe('PulsaraApp', () => {
             input_tokens: 256000,
             output_tokens: 8192,
             tool_call: null,
+            input_modalities: null,
+            output_modalities: null,
             wire_shape_hint: null,
             wire_apis: [
               {
@@ -2746,14 +2878,13 @@ describe('PulsaraApp', () => {
       container.querySelector('.permission-option--danger .permission-warning-icon'),
     ).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /只读/ }));
-    const composer = screen.getByLabelText('发送给 Pulsara');
-    fireEvent.change(composer, { target: { value: '验证新的前端任务' } });
+    await typeComposer('验证新的前端任务');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     expect(await screen.findByText('验证新的前端任务')).toBeTruthy();
     expect(adapter.lastConnection?.enterPlan).toHaveBeenCalledWith('验证新的前端任务', 'read-only');
     expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith(
-      expect.stringMatching(/^command:web:/), '验证新的前端任务', 'read-only',
+      expect.stringMatching(/^command:web:/), textPrompt('验证新的前端任务'), 'read-only',
     );
     expect(screen.getByRole('button', { name: /完全访问/ })).toBeTruthy();
   });
@@ -2762,17 +2893,18 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     render(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
-    const composer = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
+    const composer = screen.getByLabelText('发送给 Pulsara');
 
+    await userEvent.click(composer);
     fireEvent.compositionStart(composer);
-    fireEvent.change(composer, { target: { value: 'biruzhey' } });
+    await userEvent.type(composer, 'biruzhey', { skipClick: true });
     expect(fireEvent.keyDown(
       composer,
       { key: 'Enter', code: 'Enter', isComposing: true },
     )).toBe(true);
 
     expect(adapter.lastConnection?.submitPrompt).not.toHaveBeenCalled();
-    expect(composer.value).toBe('biruzhey');
+    expect(composer.textContent).toBe('biruzhey');
 
     fireEvent.compositionEnd(composer);
     expect(fireEvent.keyDown(
@@ -2780,11 +2912,11 @@ describe('PulsaraApp', () => {
       { key: 'Enter', code: 'Enter', keyCode: 229 },
     )).toBe(true);
     expect(adapter.lastConnection?.submitPrompt).not.toHaveBeenCalled();
-    expect(composer.value).toBe('biruzhey');
+    expect(composer.textContent).toBe('biruzhey');
 
     expect(fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })).toBe(false);
     await waitFor(() => expect(adapter.lastConnection?.submitPrompt).toHaveBeenCalledWith(
-      expect.stringMatching(/^command:web:/), 'biruzhey',
+      expect.stringMatching(/^command:web:/), textPrompt('biruzhey'),
       'bypass-permissions',
     ));
   });
@@ -2877,16 +3009,16 @@ describe('PulsaraApp', () => {
       ...projection(''), messages: [], isRunning: true, queuedCount: 2,
       queuedPrompts: [{
         queueItemId: 'queue-1', commandId: 'command-1', sequence: 1, status: 'pending',
-        deliveryMode: 'steer', targetTurnId: 'turn-1', body: '相同\n正文', permission: 'read-only',
+        deliveryMode: 'steer', targetTurnId: 'turn-1', content: textPrompt('相同\n正文'), permission: 'read-only',
       }, {
         queueItemId: 'queue-2', commandId: 'command-2', sequence: 2, status: 'pending',
-        deliveryMode: 'new-turn', body: '相同\n正文',
+        deliveryMode: 'new-turn', content: textPrompt('相同\n正文'),
       }],
     };
     const { container } = render(<PulsaraApp adapter={adapter} />);
 
     const queue = await screen.findByRole('region', { name: '等待处理的输入' });
-    expect([...queue.querySelectorAll('p')].map((item) => item.textContent))
+    expect([...queue.querySelectorAll('.prompt-content-body')].map((item) => item.textContent))
       .toEqual(['相同\n正文']);
     const steer = screen.getByRole('article', { name: '引导' });
     expect(within(steer).getByText('相同 正文')).toBeTruthy();
@@ -2894,7 +3026,10 @@ describe('PulsaraApp', () => {
     expect([...queue.querySelectorAll('article')].map((item) => item.dataset.queueItemId))
       .toEqual(['queue-2']);
     expect(queue.closest('.composer-wrap')).toBeTruthy();
-    expect(within(queue).queryByRole('button')).toBeNull();
+    for (const name of ['发送', '编辑', '删除']) {
+      expect(within(queue).queryByRole('button', { name })).toBeNull();
+    }
+    expect(within(queue).getByRole('button', { name: '展开' })).toBeTruthy();
     expect(container.querySelectorAll('.user-turn')).toHaveLength(0);
   });
 
@@ -2914,7 +3049,7 @@ describe('PulsaraApp', () => {
       queuedPrompts: [{
         queueItemId: 'queue-observed', commandId: 'command-observed', sequence: 1,
         status: 'pending', deliveryMode: 'steer', targetTurnId: 'turn-observed',
-        body: '观察者看到的队列正文', permission: 'ask-permissions',
+        content: textPrompt('观察者看到的队列正文'), permission: 'ask-permissions',
       }],
     };
     render(<PulsaraApp adapter={adapter} />);
@@ -2945,7 +3080,7 @@ describe('PulsaraApp', () => {
     const transition: LocalPromptSubmission = {
       sessionId: 'session-1', connectionGeneration: 1,
       commandId: `command-${status}`, queueItemId: `queue-${status}`,
-      body: '', bodyUnavailable: true,
+      contentUnavailable: true,
       deliveryMode: 'steer', targetTurnId: 'turn-race', permission: 'read-only',
       status, detail: `Queue ${status} before hydration completed.`,
     };
@@ -2981,9 +3116,7 @@ describe('PulsaraApp', () => {
       },
     });
 
-    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
-      target: { value: '已经被消费的输入' },
-    });
+    await typeComposer('已经被消费的输入');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     expect(await screen.findByText('输入已接收，执行已中断')).toBeTruthy();
@@ -3015,10 +3148,9 @@ describe('PulsaraApp', () => {
       },
     });
 
-    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
-      target: { value: '随后被取消的输入' },
-    });
+    await typeComposer('随后被取消的输入');
     fireEvent.click(screen.getByRole('button', { name: '排队发送' }));
+    await waitFor(() => expect(active.submitPrompt).toHaveBeenCalledTimes(1));
     const commandId = active.submitPrompt.mock.calls[0]?.[0] as string;
 
     active.emit({
@@ -3026,10 +3158,12 @@ describe('PulsaraApp', () => {
       queuedCount: 1,
       queuedPrompts: [{
         queueItemId: 'queue-terminal', commandId, sequence: 1, status: 'pending',
-        deliveryMode: 'new-turn', body: '随后被取消的输入', permission: 'accept-edits',
+        deliveryMode: 'new-turn', content: textPrompt('随后被取消的输入'), permission: 'accept-edits',
       }],
     });
-    await waitFor(() => expect(document.querySelector('[data-queue-item-id="queue-terminal"] p')?.textContent).toBe('随后被取消的输入'));
+    await waitFor(() => expect(document.querySelector(
+      '[data-queue-item-id="queue-terminal"] .prompt-content-body',
+    )?.textContent).toBe('随后被取消的输入'));
 
     active.emit({
       ...projection(''), messages: [], isRunning: true, eventSequence: 3,
@@ -3060,10 +3194,9 @@ describe('PulsaraApp', () => {
       new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', '连接断开。', true),
     );
 
-    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
-      target: { value: '网络未知输入' },
-    });
+    await typeComposer('网络未知输入');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    await waitFor(() => expect(original.submitPrompt).toHaveBeenCalledTimes(1));
     const commandId = original.submitPrompt.mock.calls[0]?.[0] as string;
 
     await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
@@ -3071,6 +3204,40 @@ describe('PulsaraApp', () => {
     expect(original.queryCommand).not.toHaveBeenCalled();
     expect(adapter.lastConnection?.submitPrompt).not.toHaveBeenCalled();
     expect(await screen.findByText('输入已接收，执行已中断')).toBeTruthy();
+  });
+
+  it.each([
+    ['HTTP_413', false, 'HTTP 请求正文超过 8 MiB。'],
+    ['PROTOCOL_FRAME_OUT_OF_BOUNDS', true, '这次请求包含的数据过多。'],
+  ] as const)('keeps the exact draft after definite upload rejection %s', async (
+    code,
+    retryable,
+    reason,
+  ) => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
+    };
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const active = adapter.lastConnection!;
+    active.submitPrompt.mockRejectedValueOnce(new RuntimeApiError(code, reason, retryable));
+
+    await typeComposer('保留\\"草稿');
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    expect(await screen.findByText('输入超过上传容量')).toBeTruthy();
+    expect(screen.getAllByText(reason).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe('保留\\"草稿');
+    expect(active.submitPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      textPrompt('保留\\"草稿'),
+      'bypass-permissions',
+    );
+    expect(active.queryCommand).not.toHaveBeenCalled();
+    expect(adapter.connectCalls).toHaveLength(1);
+    expect(screen.queryByText('提交状态未知')).toBeNull();
+    expect(screen.getByText('队列已拒绝')).toBeTruthy();
   });
 
   it('does not publish a late prompt receipt from an old session onto the new session', async () => {
@@ -3085,9 +3252,7 @@ describe('PulsaraApp', () => {
     const first = adapter.lastConnection!;
     first.submitPrompt.mockImplementationOnce(() => receipt.promise);
 
-    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
-      target: { value: '会话 A 的延迟输入' },
-    });
+    await typeComposer('会话 A 的延迟输入');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(first.submitPrompt).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
@@ -3118,9 +3283,7 @@ describe('PulsaraApp', () => {
     const first = adapter.lastConnection!;
     first.submitPrompt.mockImplementationOnce(() => receipt.promise);
 
-    fireEvent.change(screen.getByLabelText('发送给 Pulsara'), {
-      target: { value: '会话 A 的失败输入' },
-    });
+    await typeComposer('会话 A 的失败输入');
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(first.submitPrompt).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
@@ -3279,7 +3442,7 @@ describe('PulsaraApp', () => {
 describe('PR04 atomic queue action ownership', () => {
   const source = {
     queueItemId: 'queue-source', commandId: 'source-command', sequence: 1, status: 'pending' as const,
-    deliveryMode: 'new-turn' as const, body: '  keep\n原文  ', permission: 'read-only' as const,
+    deliveryMode: 'new-turn' as const, content: textPrompt('  keep\n原文  '), permission: 'read-only' as const,
     requestedPermission: 'ask-permissions' as const,
   };
   async function setup() {
@@ -3313,10 +3476,12 @@ describe('PR04 atomic queue action ownership', () => {
     pending.resolve(accepted(commandId));
     await screen.findByRole('article', { name: '引导' });
     expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
-    expect(container.querySelector('.user-steer p')?.textContent).toBe(source.body);
+    expect(container.querySelector('.user-steer .prompt-content-body')?.textContent).toBe(
+      promptContentTextProjection(source.content),
+    );
     active.emit({ ...projection(''), queuedCount: 0, queuedPrompts: [], eventSequence: 3,
       messages: [{ id: 'canonical-steer', role: 'user', userKind: 'steer', turnId: 'turn-1',
-        time: 'now', body: source.body, status: 'completed',
+        time: 'now', body: promptContentTextProjection(source.content), status: 'completed',
         inputSource: { commandId, queueItemId: 'replacement', deliveryMode: 'steer' } }],
     });
     await waitFor(() => expect(container.querySelector('[data-action-command-id]')).toBeNull());
@@ -3366,7 +3531,11 @@ describe('PR04 atomic queue action ownership', () => {
     }));
     fireEvent.click(within(screen.getByRole('region', { name: '等待处理的输入' })).getByRole('button', { name: '发送' }));
     await screen.findByText('当前任务已结束；输入仍按队列顺序处理。');
-    expect(container.querySelector('[data-queue-item-id="queue-source"] p')?.textContent).toBe(source.body);
+    expect(container.querySelector(
+      '[data-queue-item-id="queue-source"] .prompt-content-body',
+    )?.textContent).toBe(
+      promptContentTextProjection(source.content),
+    );
     expect(screen.queryByRole('article', { name: '引导' })).toBeNull();
     expect(active.submitPrompt).not.toHaveBeenCalled();
   });
@@ -3376,15 +3545,127 @@ describe('PR04 atomic queue action ownership', () => {
     const cancellation = deferred<CommandReceipt>();
     const cancel = vi.spyOn(active, 'cancelQueuedPrompt').mockReturnValue(cancellation.promise);
     fireEvent.click(screen.getByRole('button', { name: '编辑' }));
-    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
-    expect(input.value).toBe('');
+    const input = screen.getByLabelText('发送给 Pulsara');
+    expect(input.textContent).toBe('');
     expect(screen.getByRole('region', { name: '等待处理的输入' })).toBeTruthy();
+    await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
     cancellation.resolve({ commandId: cancel.mock.calls[0][0], status: 'succeeded', publicCode: 'PROMPT_CANCELLED',
       promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CANCELLED', deliveryMode: 'new-turn' } });
-    await waitFor(() => expect(input.value).toBe(source.body));
+    await waitFor(() => expect(composerIsDisabled(screen.getByLabelText('发送给 Pulsara')))
+      .toBe(false));
+    const restored = screen.getByLabelText('发送给 Pulsara');
+    expect(restored.innerHTML).toContain('<br');
+    expect(restored.textContent).toContain('keep');
+    expect(restored.textContent).toContain('原文');
     expect(screen.getByRole('button', { name: /每次询问/ })).toBeTruthy();
-    await waitFor(() => expect(document.activeElement).toBe(input));
+    await waitFor(() => expect(document.activeElement)
+      .toBe(screen.getByLabelText('发送给 Pulsara')));
     expect(active.submitPrompt).not.toHaveBeenCalled();
+    fireEvent.keyDown(restored, { key: 'Enter' });
+    await waitFor(() => expect(active.submitPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      source.content,
+      'ask-permissions',
+    ));
+  });
+
+  it('hydrates every queued image before cancellation and restores exact typed nodes', async () => {
+    const digest = `sha256:${'1'.repeat(64)}`;
+    const imageSource = {
+      ...source,
+      queueItemId: 'queue-images',
+      commandId: 'source-images',
+      content: {
+        parts: [
+          { type: 'text' as const, text: 'before' },
+          {
+            type: 'image' as const,
+            source: 'canonical' as const,
+            digest,
+            encodedBytes: 3,
+            mediaType: 'image/png',
+            width: 2,
+            height: 1,
+            refOrdinal: 0,
+            owner: { kind: 'queue' as const, queueItemId: 'queue-images' },
+          },
+          { type: 'text' as const, text: '\nafter' },
+          {
+            type: 'image' as const,
+            source: 'canonical' as const,
+            digest,
+            encodedBytes: 3,
+            mediaType: 'image/png',
+            width: 2,
+            height: 1,
+            refOrdinal: 1,
+            owner: { kind: 'queue' as const, queueItemId: 'queue-images' },
+          },
+        ],
+      },
+    };
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {
+      ...projection(''),
+      messages: [],
+      queuedCount: 1,
+      queuedPrompts: [imageSource],
+      control: {
+        active_turns: [{ turn_id: 'turn-1', scope_kind: 'ROOT', status: 'RUNNING' }],
+      },
+    };
+    render(<PulsaraApp adapter={adapter} />);
+    const queue = await screen.findByRole('region', { name: '等待处理的输入' });
+    expect(within(queue).getAllByRole('button', { name: /^\[Figure [12]\]$/ }))
+      .toHaveLength(2);
+    const active = adapter.lastConnection!;
+    const secondRead = deferred<Uint8Array>();
+    const read = vi.spyOn(active, 'readPromptImage').mockImplementation(async (image) => {
+      if (image.refOrdinal === 0) return new Uint8Array([1, 2, 3]);
+      return secondRead.promise;
+    });
+    const cancel = vi.spyOn(active, 'cancelQueuedPrompt');
+
+    fireEvent.click(within(queue).getByRole('button', { name: '编辑' }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    expect(read.mock.calls.map(([image]) => [image.owner, image.refOrdinal])).toEqual([
+      [{ kind: 'queue', queueItemId: 'queue-images' }, 0],
+      [{ kind: 'queue', queueItemId: 'queue-images' }, 1],
+    ]);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(screen.getByRole('region', { name: '等待处理的输入' })).toBeTruthy();
+    expect(composerIsDisabled(screen.getByLabelText('发送给 Pulsara'))).toBe(true);
+
+    secondRead.resolve(new Uint8Array([4, 5, 6]));
+    await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(composerIsDisabled(
+      screen.getByLabelText('发送给 Pulsara'),
+    )).toBe(false));
+    const composer = screen.getByLabelText('发送给 Pulsara');
+    expect(composer.querySelectorAll('img[data-prompt-asset-id]')).toHaveLength(2);
+    expect(composer.textContent).toContain('before');
+    expect(composer.textContent).toContain('after');
+    await waitFor(() => expect(document.activeElement).toBe(composer));
+
+    fireEvent.keyDown(composer, { key: 'Enter' });
+    await waitFor(() => expect(active.submitPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      {
+        parts: [
+          { type: 'text', text: 'before' },
+          {
+            type: 'image', source: 'local',
+            bytes: new Uint8Array([1, 2, 3]), declaredMediaType: 'image/png',
+          },
+          { type: 'text', text: '\nafter' },
+          {
+            type: 'image', source: 'local',
+            bytes: new Uint8Array([4, 5, 6]), declaredMediaType: 'image/png',
+          },
+        ],
+      },
+      'ask-permissions',
+    ));
   });
 
   it('releases an unknown edit when its exact source has been canonically consumed', async () => {
@@ -3397,22 +3678,24 @@ describe('PR04 atomic queue action ownership', () => {
     await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
     const next = adapter.lastConnection!;
     await waitFor(() => expect(next.queryCommand).toHaveBeenCalledWith(cancel.mock.calls[0][0]));
-    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
-    expect(input.disabled).toBe(true);
+    const input = screen.getByLabelText('发送给 Pulsara');
+    expect(composerIsDisabled(input)).toBe(true);
     // Identical text from a different submission is not evidence about source.
     next.emit({ ...next.current(), eventSequence: 10, messages: [{
-      id: 'other', role: 'user', userKind: 'prompt', time: 'now', body: source.body,
+      id: 'other', role: 'user', userKind: 'prompt', time: 'now',
+      body: promptContentTextProjection(source.content),
       inputSource: { commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'new-turn' },
     }] });
     await waitFor(() => expect(next.queryCommand.mock.calls.length).toBeGreaterThan(1));
-    expect(input.disabled).toBe(true);
+    expect(composerIsDisabled(input)).toBe(true);
     next.emit({ ...next.current(), eventSequence: 20, queuedPrompts: [], queuedCount: 0, messages: [{
       id: 'consumed-source', turnId: 'turn-next', entrySequence: 20,
-      role: 'user', userKind: 'prompt', time: 'now', body: source.body,
+      role: 'user', userKind: 'prompt', time: 'now',
+      body: promptContentTextProjection(source.content),
       inputSource: { commandId: source.commandId, queueItemId: source.queueItemId, deliveryMode: 'new-turn' },
     }] });
-    await waitFor(() => expect(input.disabled).toBe(false));
-    expect(input.value).toBe('');
+    await waitFor(() => expect(composerIsDisabled(input)).toBe(false));
+    expect(input.textContent).toBe('');
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(next.submitPrompt).not.toHaveBeenCalled();
   });
@@ -3427,11 +3710,19 @@ describe('PR04 atomic queue action ownership', () => {
     fireEvent.click(screen.getByRole('button', { name: '编辑' }));
     // Even an already-open menu must not bypass the composer reservation.
     fireEvent.click(skill);
+    await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
     pending.resolve({ commandId: cancel.mock.calls[0][0], status: 'succeeded', publicCode: 'PROMPT_CANCELLED',
       promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CANCELLED', deliveryMode: 'new-turn' } });
-    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
-    await waitFor(() => expect(input.disabled).toBe(false));
-    expect(input.value).toBe(source.body);
+    await waitFor(() => expect(composerIsDisabled(screen.getByLabelText('发送给 Pulsara')))
+      .toBe(false));
+    const restored = screen.getByLabelText('发送给 Pulsara');
+    expect(restored.innerHTML).toContain('<br');
+    fireEvent.keyDown(restored, { key: 'Enter' });
+    await waitFor(() => expect(active.submitPrompt).toHaveBeenCalledWith(
+      expect.any(String),
+      source.content,
+      'ask-permissions',
+    ));
   });
 
   it('queries a rejected steer even if no pending snapshot ever contained the replacement', async () => {
@@ -3469,10 +3760,10 @@ describe('PR04 atomic queue action ownership', () => {
       promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CONSUMED', deliveryMode: 'new-turn' },
     } : undefined);
     next.emit({ ...next.current(), eventSequence: 20, messages: [], queuedPrompts: [], queuedCount: 0 });
-    const input = screen.getByLabelText('发送给 Pulsara') as HTMLTextAreaElement;
-    await waitFor(() => expect(input.disabled).toBe(false));
+    const input = screen.getByLabelText('发送给 Pulsara');
+    await waitFor(() => expect(composerIsDisabled(input)).toBe(false));
     expect(next.queryCommand).toHaveBeenCalledWith(source.commandId);
-    expect(input.value).toBe('');
+    expect(input.textContent).toBe('');
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(next.submitPrompt).not.toHaveBeenCalled();
   });
@@ -3565,10 +3856,9 @@ it('PR05 late tool decision stays with A while B retains its draft and buttons',
   if (submitted.kind !== 'tool') throw new Error('expected tool');
   fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
   await screen.findByRole('heading', { name: '另一个会话' });
-  const composer = screen.getByLabelText('发送给 Pulsara');
-  fireEvent.change(composer, { target: { value: 'B private draft' } });
+  const composer = await typeComposer('B private draft');
   await act(async () => pending.resolve({ commandId: submitted.commandId, status: 'succeeded', publicCode: 'INTERACTION_ALLOW' }));
-  expect((composer as HTMLTextAreaElement).value).toBe('B private draft');
+  expect(composer.textContent).toBe('B private draft');
   expect(screen.queryByText('已允许本次操作')).toBeNull();
   expect(adapter.connectCalls).toHaveLength(2);
 });

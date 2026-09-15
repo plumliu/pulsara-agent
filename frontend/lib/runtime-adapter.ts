@@ -34,6 +34,21 @@ import type {
   Workspace,
 } from './pulsara-types';
 import { protocolPermissionModes } from './pulsara-types';
+import {
+  decodeCanonicalPromptContent,
+  editablePromptToTransport,
+  promptContentTextProjection,
+  PROMPT_BODY_MEDIA_TYPE,
+  type CanonicalPromptContent,
+  type CanonicalPromptImagePart,
+  type EditablePromptContent,
+} from './prompt-content';
+
+export type {
+  CanonicalPromptContent,
+  CanonicalPromptImagePart,
+  EditablePromptContent,
+} from './prompt-content';
 
 export interface RuntimeBootstrap {
   application: { name: string; version: string; transport: string };
@@ -89,6 +104,8 @@ export interface ModelConfigurationSummary {
   context_tokens?: number;
   max_output_tokens?: number;
   tool_call?: boolean | null;
+  input_modalities?: string[] | null;
+  output_modalities?: string[] | null;
   reasoning: ReasoningControlSummary;
   default_reasoning?: ReasoningSelectionPayload | null;
 }
@@ -112,6 +129,7 @@ export type ModelConfigurationInput =
     context_tokens: number;
     max_output_tokens: number;
     tool_call: boolean;
+    input_modalities: string[];
     reasoning:
       | { kind: 'provider_default' }
       | { kind: 'toggle' }
@@ -135,6 +153,8 @@ export interface ModelCatalogModel {
   input_tokens: number | null;
   output_tokens: number | null;
   tool_call: boolean | null;
+  input_modalities: string[] | null;
+  output_modalities: string[] | null;
   wire_shape_hint: 'responses' | 'completions' | null;
   wire_apis: ModelCatalogWireApi[];
 }
@@ -199,7 +219,7 @@ export interface QueuedPrompt {
   status: 'pending';
   deliveryMode: 'new-turn' | 'steer';
   targetTurnId?: string;
-  body: string;
+  content: CanonicalPromptContent;
   permission?: PermissionMode;
   submittedAt?: string;
   requestedPermission?: PermissionMode;
@@ -211,6 +231,7 @@ export interface QueuedPromptAction {
   commandId: string;
   kind: 'send' | 'edit' | 'delete';
   source: QueuedPrompt;
+  restoredContent?: EditablePromptContent;
   targetTurnId?: string;
   submittedAt: string;
   status: 'submitting' | 'unknown' | 'accepted' | 'rejected';
@@ -336,8 +357,8 @@ export interface LocalPromptSubmission {
   sessionId: string;
   connectionGeneration: number;
   commandId: string;
-  body: string;
-  bodyUnavailable?: boolean;
+  content?: EditablePromptContent | CanonicalPromptContent;
+  contentUnavailable?: boolean;
   handledByQueueAction?: boolean;
   deliveryMode: 'new-turn' | 'steer';
   targetTurnId?: string;
@@ -755,7 +776,11 @@ export interface RuntimeConnection {
   current(): RuntimeProjection;
   snapshot(): Promise<RuntimeProjection>;
   observe(signal?: AbortSignal): Promise<RuntimeProjection>;
-  submitPrompt(commandId: string, text: string, permission: PermissionMode): Promise<CommandReceipt>;
+  submitPrompt(
+    commandId: string,
+    content: EditablePromptContent,
+    permission: PermissionMode,
+  ): Promise<CommandReceipt>;
   cancelQueuedPrompt(commandId: string, queueItemId: string): Promise<CommandReceipt>;
   steerQueuedPrompt(commandId: string, queueItemId: string, targetTurnId: string): Promise<CommandReceipt>;
   stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt>;
@@ -765,6 +790,8 @@ export interface RuntimeConnection {
   listBackgroundProcesses(cursor?: string): Promise<BackgroundProcessPage>;
   readBackgroundProcessLog(processId: string, outputCursor?: string): Promise<BackgroundProcessLog>;
   readCanonicalEntryContent(entryId: string, digest: string, size: number): Promise<string>;
+  readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
+  readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent>;
   compactContext(targetTurnId?: string): Promise<CommandReceipt>;
   acceptSubagentCompletion(taskId: string, permission: PermissionMode): Promise<CommandReceipt>;
   enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt>;
@@ -1873,8 +1900,15 @@ class LocalRuntimeConnection implements RuntimeConnection {
     return this.project();
   }
 
-  submitPrompt(commandId: string, text: string, permission: PermissionMode): Promise<CommandReceipt> {
-    return this.command('SUBMIT_PROMPT', { text, requested_permission_mode: protocolPermissionModes[permission] }, commandId);
+  submitPrompt(
+    commandId: string,
+    content: EditablePromptContent,
+    permission: PermissionMode,
+  ): Promise<CommandReceipt> {
+    return this.command('SUBMIT_PROMPT', {
+      prompt_content: editablePromptToTransport(content),
+      requested_permission_mode: protocolPermissionModes[permission],
+    }, commandId);
   }
 
   cancelQueuedPrompt(commandId: string, queueItemId: string): Promise<CommandReceipt> {
@@ -2046,7 +2080,40 @@ class LocalRuntimeConnection implements RuntimeConnection {
       '这条任务活动暂时无法完整读取。',
     );
     if (reference.inline_content === undefined) return '';
-    return decodeContent(reference);
+    return decodeContent(reference, { kind: 'entry', entryId });
+  }
+
+  async readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array> {
+    const target = image.owner.kind === 'entry'
+      ? { entry_id: image.owner.entryId }
+      : { queue_item_id: image.owner.queueItemId };
+    return this.readExactContentBytes(
+      {
+        ...target,
+        image_ref_ordinal: image.refOrdinal,
+      },
+      image.digest,
+      image.encodedBytes,
+      '这张图片暂时无法完整读取。',
+      false,
+    );
+  }
+
+  async readPromptForEdit(
+    content: CanonicalPromptContent,
+  ): Promise<EditablePromptContent> {
+    const parts: Array<EditablePromptContent['parts'][number]> = [];
+    for (const part of content.parts) {
+      parts.push(part.type === 'text'
+        ? { type: 'text' as const, text: part.text }
+        : {
+          type: 'image' as const,
+          source: 'local' as const,
+          bytes: await this.readPromptImage(part),
+          declaredMediaType: part.mediaType,
+        });
+    }
+    return { parts };
   }
 
   compactContext(targetTurnId?: string): Promise<CommandReceipt> {
@@ -2064,7 +2131,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
   }
 
   enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt> {
-    return this.command('ENTER_PLAN', { text: reason, requested_permission_mode: protocolPermissionModes[permission] });
+    return this.command('ENTER_PLAN', { plan_reason: reason, requested_permission_mode: protocolPermissionModes[permission] });
   }
 
   async readInteraction(
@@ -2573,14 +2640,17 @@ class LocalRuntimeConnection implements RuntimeConnection {
     consumedEntryId?: string,
   ): LocalPromptSubmission {
     const hasInlineBody = item.content?.inline_content !== undefined;
+    const queueItemId = item.queue_item_id!;
     return {
       sessionId: this.sessionId,
       connectionGeneration: this.generation,
       commandId: item.command_id!,
-      queueItemId: item.queue_item_id!,
+      queueItemId,
       consumedEntryId,
-      body: hasInlineBody ? decodeContent(item.content) : '',
-      bodyUnavailable: !hasInlineBody,
+      content: hasInlineBody
+        ? decodePromptContent(item.content, { kind: 'queue', queueItemId })
+        : undefined,
+      contentUnavailable: !hasInlineBody,
       deliveryMode: deliveryMode(item.delivery_mode),
       targetTurnId: item.target_turn_id || undefined,
       permission: protocolPermission(item.permission?.effective_mode),
@@ -2599,6 +2669,26 @@ class LocalRuntimeConnection implements RuntimeConnection {
     if (!reference || reference.inline_content !== undefined || numeric(reference.size) === 0) return;
     const expectedSize = numeric(reference.size);
     const expectedDigest = reference.digest ?? '';
+    const complete = await this.readExactContentBytes(
+      target,
+      expectedDigest,
+      expectedSize,
+      publicMessage,
+      true,
+    );
+    reference.inline_content = encodeBase64Bytes(complete);
+  }
+
+  private async readExactContentBytes(
+    target: (
+      | { entry_id: string; block_id?: string }
+      | { queue_item_id: string }
+    ) & { image_ref_ordinal?: number },
+    expectedDigest: string,
+    expectedSize: number,
+    publicMessage: string,
+    requireUtf8: boolean,
+  ): Promise<Uint8Array> {
     const chunks: Uint8Array[] = [];
     let offset = 0;
     while (true) {
@@ -2639,8 +2729,8 @@ class LocalRuntimeConnection implements RuntimeConnection {
       complete.set(chunk, cursor);
       cursor += chunk.length;
     }
-    await verifyContentIntegrity(complete, expectedDigest, publicMessage);
-    reference.inline_content = encodeBase64Bytes(complete);
+    await verifyContentIntegrity(complete, expectedDigest, publicMessage, requireUtf8);
+    return complete;
   }
 
   private applyLive(events: ProtocolLiveEvent[], settlements: ProtocolSettlement[]) {
@@ -3544,6 +3634,9 @@ function projectEntries(
         : entry.entry_kind === 'PLAN_CONTINUATION'
           ? 'plan-continuation'
           : 'prompt';
+      const promptContent = entry.entry_kind === 'PLAN_CONTINUATION'
+        ? undefined
+        : decodePromptContent(entry.content, { kind: 'entry', entryId: entry.entry_id });
       messages.push({
         id: entry.entry_id,
         turnId: entry.turn_id,
@@ -3553,7 +3646,8 @@ function projectEntries(
         time: formatTime(entry.accepted_at_utc),
         body: entry.entry_kind === 'PLAN_CONTINUATION'
           ? projectPlanContinuation(decodeContent(entry.content))
-          : decodeContent(entry.content),
+          : promptContentTextProjection(promptContent!),
+        promptContent,
         inputSource: entry.input_source?.queue_item_id && entry.input_source.command_id
           ? {
             queueItemId: entry.input_source.queue_item_id,
@@ -3723,7 +3817,9 @@ function projectSubagentRuns(
     if (entry.scope_kind !== 'SUBAGENT_TASK' || !entry.scope_subagent_task_id) continue;
     const taskId = entry.scope_subagent_task_id;
     const run = ensureRun(taskId, numeric(entry.entry_sequence));
-    const content = decodeContent(entry.content);
+    const content = entry.entry_kind === 'USER_MESSAGE'
+      ? decodeContent(entry.content, { kind: 'entry', entryId: entry.entry_id })
+      : decodeContent(entry.content);
     if (entry.entry_kind === 'USER_MESSAGE') {
       if (!run.objective) run.objective = content;
       continue;
@@ -3991,18 +4087,21 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
   return [...(control.prompt_queue ?? [])]
     .filter((item) => item.queue_item_id && item.command_id && item.status === 'PENDING')
     .sort((left, right) => numeric(left.queue_sequence) - numeric(right.queue_sequence))
-    .map((item) => ({
-      queueItemId: item.queue_item_id!,
-      commandId: item.command_id!,
-      sequence: numeric(item.queue_sequence),
-      status: 'pending' as const,
-      deliveryMode: deliveryMode(item.delivery_mode),
-      targetTurnId: item.target_turn_id || undefined,
-      body: decodeContent(item.content),
-      permission: protocolPermission(item.permission?.effective_mode),
-      submittedAt: item.accepted_at_utc || undefined,
-      requestedPermission: protocolPermission(item.permission?.requested_mode),
-    }));
+    .map((item) => {
+      const queueItemId = item.queue_item_id!;
+      return {
+        queueItemId,
+        commandId: item.command_id!,
+        sequence: numeric(item.queue_sequence),
+        status: 'pending' as const,
+        deliveryMode: deliveryMode(item.delivery_mode),
+        targetTurnId: item.target_turn_id || undefined,
+        content: decodePromptContent(item.content, { kind: 'queue', queueItemId }),
+        permission: protocolPermission(item.permission?.effective_mode),
+        submittedAt: item.accepted_at_utc || undefined,
+        requestedPermission: protocolPermission(item.permission?.requested_mode),
+      };
+    });
 }
 
 function protocolPermission(value?: string): PermissionMode | undefined {
@@ -4548,35 +4647,40 @@ function projectBackgroundProcess(value: ProtocolBackgroundProcess): BackgroundP
   };
 }
 
-function decodeContent(content?: ProtocolContent): string {
+function decodeContent(
+  content?: ProtocolContent,
+  promptOwner?: { kind: 'entry'; entryId: string } | { kind: 'queue'; queueItemId: string },
+): string {
   if (!content?.inline_content) return '';
   const decoded = decodeBase64(content.inline_content);
-  if (content.media_type !== 'application/vnd.pulsara.prompt+json') return decoded;
-  let prompt: Record<string, unknown>;
+  if (content.media_type !== PROMPT_BODY_MEDIA_TYPE) return decoded;
+  if (!promptOwner) {
+    throw new RuntimeApiError(
+      'CONTENT_INTEGRITY_INVALID',
+      '输入正文缺少可读取的 owner。',
+      true,
+    );
+  }
   try {
-    prompt = asRecord(JSON.parse(decoded));
+    return promptContentTextProjection(decodeCanonicalPromptContent(decoded, promptOwner));
+  } catch (error) {
+    if (error instanceof RuntimeApiError) throw error;
+    throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
+  }
+}
+
+function decodePromptContent(
+  content: ProtocolContent | undefined,
+  owner: { kind: 'entry'; entryId: string } | { kind: 'queue'; queueItemId: string },
+): CanonicalPromptContent {
+  if (!content?.inline_content || content.media_type !== PROMPT_BODY_MEDIA_TYPE) {
+    throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
+  }
+  try {
+    return decodeCanonicalPromptContent(decodeBase64(content.inline_content), owner);
   } catch {
     throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
   }
-  if (prompt.schema !== 'pulsara.prompt/v1' || !Array.isArray(prompt.parts)) {
-    throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
-  }
-  return prompt.parts.map((value: unknown) => {
-    const part = asRecord(value);
-    if (part.type === 'image') {
-      // K2 changes canonical storage; the current editor still submits strings.
-      // Do not turn an image descriptor or placeholder into an editable prompt.
-      throw new RuntimeApiError(
-        'IMAGE_CONTENT_PREVIEW_UNAVAILABLE',
-        '当前界面尚不支持完整展示图片输入。',
-        false,
-      );
-    }
-    if (part.type !== 'text' || typeof part.text !== 'string') {
-      throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
-    }
-    return part.text;
-  }).join('\n');
 }
 
 function decodeBase64(value: string): string {
@@ -4596,6 +4700,7 @@ async function verifyContentIntegrity(
   bytes: Uint8Array,
   expectedDigest: string,
   publicMessage: string,
+  requireUtf8: boolean,
 ): Promise<void> {
   try {
     const digest = await globalThis.crypto.subtle.digest(
@@ -4605,7 +4710,7 @@ async function verifyContentIntegrity(
       .map((value) => value.toString(16).padStart(2, '0'))
       .join('')}`;
     if (actualDigest !== expectedDigest) throw new Error('digest mismatch');
-    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    if (requireUtf8) new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   } catch {
     throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', publicMessage, true);
   }

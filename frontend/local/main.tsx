@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import PulsaraApp from '../app/pulsara-app';
 import 'katex/dist/katex.min.css';
+import 'yet-another-react-lightbox/styles.css';
 import '../app/globals.css';
 import '../app/styles/base.css';
 import '../app/styles/shell.css';

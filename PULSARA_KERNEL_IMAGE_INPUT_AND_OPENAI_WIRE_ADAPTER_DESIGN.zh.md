@@ -1,6 +1,6 @@
 # Pulsara Kernel 图片输入与 OpenAI 通用 Wire Adapter 修订设计
 
-> 状态：**D1–D4 设计已冻结；K1–K3 已实施，K4 于 2026-09-15 验收通过；U1/U2 浏览器图片产品尚未完成**
+> 状态：**D1–D4 设计已冻结；K1–K3 已实施，K4 于 2026-09-15 验收通过；U1/U2 于 2026-09-15 实施并完成浏览器验收**
 >
 > 修订：2026-09-12，补齐 pre-adoption 内容校验、ROOT 父上下文、typed ingress / Hook 与 multipart headroom 边界；纳入本地 Codex 源码对照。
 >
@@ -18,7 +18,9 @@
 >
 > 设计精简：2026-09-14，按用户确认统一新 snapshot/projection 的展示结构；提交 FULL 确认只核对完整正文、引用及 blob 身份/元数据，图片 payload 完整性在发布与读取时验证；将图片省略的禁止范围限定到普通调用、adapter 与透明重试。D1/D2 算法、参数与接纳规则不变。
 >
-> 实施进度：K1 已落地 input modality 事实与 exact target 冻结、单一 typed content、共享 shape/target 校验、完整内容身份、D1 视觉公式、D2 headroom 常量以及 `pulsara.prompt/v1` codec/occurrence/metadata quote。K2 已将同一内容接入 Host direct/queued/steer、Hook/Skill 文本投影、Pillow 隔离验证、caller-owned transaction publication、`canonical_image_refs` clean-v0/GC、FULL exact-confirm、hydration、typed snapshot/fork、compiler/lowering 与 ROOT parent-context。K3 已接通 Chat/Responses 两套正式图片 wire、单次 final materialization、`pulsara_heuristic/v2`、PRE_FULL/POST_FULL、输入 G 与效果前输出 R/U_W/U_T 检查、ordinary recent 收缩，以及纯文本图片交接的 Tier 1/2/3、P 与 cold 入口。K4 已完成 I01–I44 核验、1979 项完整 non-live 回归（含 PostgreSQL）及修复后 isolated wheel 的 Chat/Responses 18 次真实调用，详见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)。U1/U2 浏览器链路尚未完成。
+> UI 显示冻结：2026-09-15，用户确认紧凑缩略图输入框、排队项的原位置 `[Figure x]` 蓝色链接，以及“上方缩略图带＋正文 Figure 链接”的已发送气泡。Figure 编号按每条消息的图片 occurrence 顺序在前端生成，不额外持久化、不进入模型输入；第 14 节替换旧的历史图片必须嵌在正文原位置的要求。随后用户删除添加图片、撤销和重做三个可见按钮，图片只从粘贴或文件拖入进入，撤销/重做保留编辑器标准快捷键。U1/U2 已按该最终界面实施，D1–D4 不变。
+>
+> 实施进度：K1 已落地 input modality 事实与 exact target 冻结、单一 typed content、共享 shape/target 校验、完整内容身份、D1 视觉公式、D2 headroom 常量以及 `pulsara.prompt/v1` codec/occurrence/metadata quote。K2 已将同一内容接入 Host direct/queued/steer、Hook/Skill 文本投影、Pillow 隔离验证、caller-owned transaction publication、`canonical_image_refs` clean-v0/GC、FULL exact-confirm、hydration、typed snapshot/fork、compiler/lowering 与 ROOT parent-context。K3 已接通 Chat/Responses 两套正式图片 wire、单次 final materialization、`pulsara_heuristic/v2`、PRE_FULL/POST_FULL、输入 G 与效果前输出 R/U_W/U_T 检查、ordinary recent 收缩，以及纯文本图片交接的 Tier 1/2/3、P 与 cold 入口。K4 已完成 I01–I44 核验、1979 项完整 non-live 回归（含 PostgreSQL）及修复后 isolated wheel 的 Chat/Responses 18 次真实调用，详见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)。U1/U2 已完成 Tiptap 草稿、typed browser/Protocol-v3 hard cut、队列与历史图片读取、Figure 展示和两套真实浏览器 provider 链路；验收范围与限制见 [U1/U2 验收记录](PULSARA_KERNEL_IMAGE_INPUT_U1_U2_ACCEPTANCE.zh.md)。
 >
 > 范围：kernel 的模型输入、模型事实、wire lowering、预算与连续性，以及第 14 节的首版图文输入和展示。相机、图片加工、分享下载等扩展行为仍另议。
 >
@@ -28,7 +30,7 @@
 
 Pulsara 继续只实现 OpenAI-compatible 的两套通用 adapter：**Chat Completions** 与 **Responses**。图片是这两套协议中的输入内容，不构成第三套 adapter，也不按 provider 名称分叉。
 
-本轮明确 kernel 如何接纳、确认、表达、验证、冻结、计量并发送图片。**typed kernel 提交接口及其 Hook/Skill 投影属于本设计范围**；用户随后确认的图片选择、光标位置插入和完整发送见第 14 节。图片只来自用户显式选择、拖入或粘贴的内容；不会自动读取屏幕、目录或剪贴板，也不自动发送尚未提交的草稿。
+本轮明确 kernel 如何接纳、确认、表达、验证、冻结、计量并发送图片。**typed kernel 提交接口及其 Hook/Skill 投影属于本设计范围**；用户随后确认的图片粘贴、拖入、光标位置插入和完整发送见第 14 节。图片只来自用户显式拖入或粘贴的内容；不会自动读取屏幕、目录或剪贴板，也不自动发送尚未提交的草稿。
 
 以下既有约束继续生效：
 
@@ -69,7 +71,7 @@ Pulsara 继续只实现 OpenAI-compatible 的两套通用 adapter：**Chat Compl
 
 | 当前 owner | 已有行为 | 本次需要修订的边界 |
 | --- | --- | --- |
-| [model_catalog.py](src/pulsara_agent/llm/model_catalog.py) 的 `ModelCatalogEntry` / `_parse_model_entry()` | 读取 limits、reasoning、tool_call、shape hint；丢弃 modalities / attachment | 保留有实际消费者的 input modalities；暂不加入 output modalities |
+| [model_catalog.py](src/pulsara_agent/llm/model_catalog.py) 的 `ModelCatalogEntry` / `_parse_model_entry()` | 读取 limits、reasoning、tool_call、shape hint；丢弃 modalities / attachment | 保留 input modalities；output modalities 仅供配置页展示，不进入 frozen target |
 | [model_target.py](src/pulsara_agent/llm/model_target.py) 的 `ModelTargetFacts` / `RouteWireRegistry` | 按 `(wire_dialect, wire_api)` 选择 adapter，并冻结 exact target | 将模态事实沿原解析路径冻结；不改 adapter 选择原则 |
 | [host.py](src/pulsara_agent/conversation_kernel/host.py) 的 `submit_prompt()` / `run_turn()` / `_IngressHookReservationKey` | 接收、校验和在途比较都使用文本；Hook 收到解码后的文本 | 统一 typed ingress、完整内容命令身份、独立文本投影；纯图合法 |
 | [steer.py](src/pulsara_agent/conversation_kernel/steer.py) / [prompts.py](src/pulsara_agent/conversation_kernel/_repository/prompts.py) | prompt candidate 从文本字节构建；exact-confirm 硬编码 `text/plain` / `utf-8` | 全内容身份、真实内容编码及只读 exact-confirm；保留 NEW_TURN / STEER 的独立语义 |
@@ -114,9 +116,9 @@ input_modalities: tuple[str, ...] | None
 3. 已知 input 列表不含 `image`：实际请求或待接纳 successor 含图片时必须拒绝；普通调用在 continuity install / provider open 前拒绝，successor 在 canonical adoption 前拒绝。纯文本调用继续执行，不隐藏模型或禁用整条 connection。
 4. input 未知：保持 unknown。若内容、wire shape 与预算均有效，可按已有非预算事实的规则发送正常请求并保留诊断；不把 unknown 写成 supported，也不发送额外 probe。
 5. `attachment` 不参与图片 admission；当前没有独立消费者时，无需为它新增 production 字段。
-6. `output_modalities` 当前没有独立消费者，本轮不加入 catalog DTO、production target facts 或 Web 投影，也不为该字段新增缓存或持久化。原始外部响应中的 output 仅是调查事实；未来图片输出设计再引入实际所需字段。外部 output 声明不授权扩展当前 response parser。
+6. 2026-09-15 配置页模态展示修订：`output_modalities` 由 models.dev 的原 `modalities.output` 进入现有 catalog DTO 与 Web 展示；缺失/非法仍为 unknown，合法未知名称保留。它只说明所选 provider/model 的输出声明，不进入 production target facts、输入 admission、fingerprint 或 response parser，不新增缓存/持久化。配置页分别显示输入和输出模态，并说明 Pulsara 当前支持文字、图片输入及文字回复。
 
-不改变现有 catalog 产品过滤规则。既有 `user_declared` target 没有模态声明时，投影为 unknown；本轮不为此新增设置页选项或独立覆盖表。若后续需要用户显式声明，应修订既有 closed `UserDeclaredModelTarget`，不能建立另一份配置 authority。
+不改变现有 catalog 产品过滤规则。2026-09-15 用户确认：自定义配置新增默认不勾选的“支持图像输入”复选框。新 Web 提交显式携带 `input_modalities`：勾选为 `("text", "image")`，不勾选为 `("text",)`；测试连接与保存使用同一候选。该值由既有 closed `UserDeclaredModelTarget` 和 LocalSettingsStore 持有，直接进入原 frozen target 与 preflight，不持久化冗余布尔值或覆盖表。未声明的本地自定义 target 仍可用 `None` 表示 unknown，不推断其能力，不改写用户已保存配置。目录配置按 provider/model 原记录显示全部模态；模型一经选中即可查看，已保存卡片也展示输入/输出声明（自定义仅展示所声明的输入）。
 
 仍由现有 process-local catalog owner 在原生命周期内刷新。请求期间不联网刷新 catalog，不用新快照改写已经冻结的 target、预算绑定或已安装前缀。
 
@@ -365,7 +367,7 @@ reader 缺失或损坏按既有 `CanonicalProviderContinuityError` / repository 
 
 新增 attach 与 orphan DELETE 的最终并发仲裁由真实 FK/数据库事务承担：attach 先成功提交则 GC 不得提交删除；DELETE 先成功则旧 blob attach 必须失败并使所在写入事务不提交。原始 ingress 可在其正常 publication 内发布完整 bytes；不能用忽略 FK、悬空 ref、额外 lease 或在确认路径重发 writer 绕过竞争。数据库并发/完整性异常按原事务失败分类处理，不声称任何顺序都保证一次成功。
 
-实施验收必须以真实 PostgreSQL 双连接覆盖两种提交顺序、复用旧 blob、事务回滚与父/子分别删除。K2 已在 disposable PostgreSQL 上以重叠事务覆盖 attach 先提交与 DELETE 先提交、重复 blob 复用、整事务回滚、独立 owner 依次删除及 FK 最终仲裁；K4 已将这些真实事务与并发回归纳入最终完整验收；浏览器链路仍由 U1/U2 完成。
+实施验收必须以真实 PostgreSQL 双连接覆盖两种提交顺序、复用旧 blob、事务回滚与父/子分别删除。K2 已在 disposable PostgreSQL 上以重叠事务覆盖 attach 先提交与 DELETE 先提交、重复 blob 复用、整事务回滚、独立 owner 依次删除及 FK 最终仲裁；K4 已将这些真实事务与并发回归纳入最终完整验收；U1/U2 随后完成浏览器链路。
 
 ## 7. 两套 adapter 的唯一编码路径
 
@@ -925,24 +927,24 @@ successor 的 retained content、root/runtime/source reinjection 按各自实际
 
 ## 11. 后续实施顺序
 
-按第 13 节冻结决定和下列顺序实施完整 hard cut；K1–K3 已完成，K4 已验收；U1/U2 继续沿同一单一路径实施。
+按第 13 节冻结决定和下列顺序实施完整 hard cut；K1–K3 已完成，K4 已验收，U1/U2 已沿同一单一路径完成。
 
-K2 的调用者迁移也包括既有 Web 纯文本展示、排队正文读取和草稿回填：按新 MIME 解码 `pulsara.prompt/v1`，全 Text 内容按固定 `\n` 投影，保持原话。U1 完成前，旧字符串界面遇到 Image 正文明示无法完整展示，不把 descriptor 或图片占位文字变成可编辑、可重新提交的正文；缩略图、富文本及图片上传仍由 U1 实施。
+K2 的调用者迁移也包括既有 Web 纯文本展示、排队正文读取和草稿回填：按新 MIME 解码 `pulsara.prompt/v1`，全 Text 内容按固定 `\n` 投影，保持原话。U1/U2 已将 Web 消费者 hard cut 到同一 typed 内容：Image 不再经过旧字符串不可展示分支，descriptor、Figure 标签或图片占位文字也不会变成可编辑、可重新提交的正文。
 
 | 阶段 | 工作 | 出口 |
 | --- | --- | --- |
 | K1：事实与契约（已实施） | 仅 input 模态事实、target 冻结、共享内容校验；实现已冻结的 typed ingress、identity、预算、headroom 和 canonical 引用契约 | 单一类型与 owner；不依赖 provider 名单；D1–D4 覆盖全部 kernel 边界 |
 | K2：提交、来源与编译（已实施） | Host direct/queued/steer、完整命令身份与 exact-confirm、Hook/Skill 投影、canonical schema/GC、hydration、compiler/lowering、ROOT parent-context 全部消费者 | 纯图经真实提交入口进入既有 compiler；无 child ROOT 也正常；没有第二条生产输入路径 |
 | K3：Wire、采用与资源（已实施） | 两套 semantic wire group、materialization、estimator、PRE_FULL/POST_FULL、multipart headroom，以及纯文本图片交接的 recent 窗口检查/P 和冷入口 | quote 与实际输入一致；原三级与原事务完成交接，无专用许可或省略状态 |
-| K4：Kernel 验证（已验收） | 下节测试、真实 PostgreSQL、生产配置的真实 provider、完整回归与 isolated wheel | 有本轮 kernel 验收证据；不声称浏览器图片产品已完成 |
-| U1：图文编辑器 | 第 14 节的 Tiptap 接入、图片节点、顺序序列化、会话草稿和编辑行为 | 可先独立开发组件；纯文本逐字一致，混合内容顺序、撤销与资源释放正确 |
-| U2：浏览器完整链路 | typed browser command / bridge / Protocol-v3、图片字节读取、队列恢复、历史展示和模型选择，接通 K2/K3 | 依赖 K4 与第 14.8 节浏览器验收；不以组件显示图片冒充正式链路完成 |
+| K4：Kernel 验证（已验收） | 下节测试、真实 PostgreSQL、生产配置的真实 provider、完整回归与 isolated wheel | Kernel 验收证据独立于后续浏览器验收 |
+| U1：图文编辑器（已实施） | 第 14 节的 Tiptap 接入、图片节点、顺序序列化、会话草稿和编辑行为 | 纯文本逐字一致，混合内容顺序、快捷键撤销/重做与资源释放正确 |
+| U2：浏览器完整链路（已验收） | typed browser command / bridge / Protocol-v3、图片字节读取、队列恢复、历史展示和模型选择，接通 K2/K3 | 浏览器经 Host 的 Chat/Responses 正式图片请求均完成，实际请求与 frozen wire 核对一致 |
 
-U1 可与 kernel 开发并行，U2 沿既有控制与来源接入。图片启用时完成同次 hard cut，不留下旧/新入口或临时降级路径；第 8.6/8.9 节是模型选择的正式三级交接行为，不能由前端或 adapter 自行替换。
+U1/U2 已沿既有控制与来源完成同次 hard cut，没有留下旧/新入口或临时降级路径；第 8.6/8.9 节仍是模型选择的正式三级交接行为，前端与 adapter 不自行替换。
 
 ## 12. Kernel 验收矩阵与证据要求
 
-以下是完整 Kernel 验收要求。K1 已执行对应的纯契约单元；K2 已执行 Host/validator、typed source/compiler、ROOT/fork 与真实 PostgreSQL owner/GC/confirmation/hydration 测试及既有回归。K3 已执行两套图片 wire/final materialization、v2 estimator、输入 headroom、效果前输出 gate、PRE_FULL/POST_FULL、ordinary recent 与 Tier 1/2/3/P/cold 的聚焦单元和 PostgreSQL 生产入口测试。K4 于 2026-09-15 完成下面 I01–I44 的核验及完整 non-live 回归（1979 passed，含 PostgreSQL，正常退出 0）。修复后的独立 wheel 分别通过 Chat 与 DeepSeek Responses 的正式 Host 图片链路，各九次调用；逐项测试、失败与复验记录见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)。这不代表 U1/U2 浏览器验收已完成。
+以下是完整 Kernel 验收要求。K1 已执行对应的纯契约单元；K2 已执行 Host/validator、typed source/compiler、ROOT/fork 与真实 PostgreSQL owner/GC/confirmation/hydration 测试及既有回归。K3 已执行两套图片 wire/final materialization、v2 estimator、输入 headroom、效果前输出 gate、PRE_FULL/POST_FULL、ordinary recent 与 Tier 1/2/3/P/cold 的聚焦单元和 PostgreSQL 生产入口测试。K4 于 2026-09-15 完成下面 I01–I44 的核验及完整 non-live 回归（1979 passed，含 PostgreSQL，正常退出 0）。修复后的独立 wheel 分别通过 Chat 与 DeepSeek Responses 的正式 Host 图片链路，各九次调用；逐项测试、失败与复验记录见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)。U1/U2 后续另行完成浏览器产品验收，不能反向代替这里的 Kernel 证据。
 
 | 编号 | 必须证明的行为 |
 | --- | --- |
@@ -1010,17 +1012,27 @@ K1 阶段只将本轮新增或更新的事实、内容、identity、计量、hea
 | D3 | 第 6.1、6.5–6.9 节 | 单一 typed ingress；确定性正文与内容身份；一张三类真实 owner 的 FK 引用关系；原事务发布、完整只读确认、有界 hydration、GC 与 child-local refs |
 | D4 | 第 8.1–8.9 节 | exact active/typed history；ordinary recent；纯文本图片交接的 Tier 2 所选窗口检查、Tier 3 recent=0 和普通 Text 替换；实际 coverage、原子采用、fork 与 ROOT advisory |
 
-K1–K3 已实现事实、纯契约、提交、canonical 来源、hydration、typed compiler、图片 wire、资源接纳与模型交接边界，K4 已完成完整 Kernel 验收，U1/U2 UI 尚未实现。后续编码按第 11 节 hard cut；被本设计明确修订的 model-switch/recent 与 final-wire 规范已同步实施状态。旧规范中相应文本字段、字节含义与 carrier 形状由本文替代；未明确修改的权限、safe boundary、tier 失败集合和执行身份规则继续生效。
+K1–K3 已实现事实、纯契约、提交、canonical 来源、hydration、typed compiler、图片 wire、资源接纳与模型交接边界，K4 已完成完整 Kernel 验收，U1/U2 已完成浏览器产品 hard cut 和验收。被本设计明确修订的 model-switch/recent、final-wire、browser command 与内容展示规范已同步实施状态。旧规范中相应文本字段、字节含义与 carrier 形状由本文替代；未明确修改的权限、safe boundary、tier 失败集合和执行身份规则继续生效。
 
 第 14 节为随后确认的 UI 产品契约，不构成新的 kernel 决策或另一条 provider 输入路径。实施时同步更新 [前端应用规范](PULSARA_FRONTEND_APPLICATION_SPEC.zh.md)中 composer、草稿、完整内容读取与展示的相关条款；保留原权限、command outcome 和排队动作语义。
 
-第 12 节的 Kernel 生产路径证据已由 K4 完成，包括 D2 U_W/U_T、两套真实 adapter/HTTP payload、模型交接、isolated wheel、SQL/事务/取消组合与全量回归。浏览器图片产品仍须完成第 14.8 节 U1/U2 验收；设计冻结或 Kernel 通过不能代替浏览器证据。
+第 12 节的 Kernel 生产路径证据已由 K4 完成，包括 D2 U_W/U_T、两套真实 adapter/HTTP payload、模型交接、isolated wheel、SQL/事务/取消组合与全量回归。第 14.8 节 U1/U2 另以真实浏览器经 bridge/Host 发起的 Chat 与 Responses 图片请求完成验收；两类证据仍各自成立，未互相替代。
 
 ## 14. 首版图文混排输入框与展示
 
 ### 14.1 产品选择与证据范围
 
 首版使用**可在文字中插入图片的统一编辑区**。用户可以输入说明、插图、再写说明；图片不用全部归到输入框上方的独立附件栏。编辑顺序就是提交顺序，不按 provider 名称或模型识别结果自动分组。
+
+2026-09-15 用户确认以下三处显示方式，以连续阅读文字为主。输入框保留图片节点；排队项与已发送正文在图片原位置显示完整、可点击的蓝色 `[Figure x]`，关联规则见第 14.6 节。
+
+| 位置 | 冻结的显示方式 |
+| --- | --- |
+| 输入框 | 约 48 × 36 CSS px 的紧凑缩略图作为完整 inline 节点，跟随文字排列；连续图片自然并排，空间不足自动折行 |
+| 排队项 | 正文仅显示原文字与原位置的 Figure 链接，不显示缩略图；默认最多两行，显示图片总数并可展开完整正文 |
+| 已发送用户消息 | 缩略图带右对齐放在气泡上方；下方正文保留原文字与原位置的 Figure 链接，图片不再撑高正文行。缩略图图片区域约 72 × 72 CSS px，下方标示对应 Figure 编号；默认只占一行，放不下的图片通过 `+N 张` 打开预览 |
+
+上述尺寸是默认视觉基准，可随主题、窄屏与触控命中区域调整，不构成图片像素、字节或总数量限制。缩略图保持完整比例、允许留白、不裁切；纯图消息也显示对应 Figure 链接。多图折叠只影响展示，完整消息与每张图仍可访问。
 
 这里的“富文本”首先指图文混排。文本继续按现有原始文字/Markdown 源输入处理；首版不自动把 Markdown 转成加粗、列表、代码块等编辑节点，不引入字体、颜色、表格或 HTML 正文。未来增加格式化编辑时，须另定义其进入 Text 的序列化规则。
 
@@ -1031,6 +1043,8 @@ K1–K3 已实现事实、纯契约、提交、canonical 来源、hydration、ty
 采用 **Tiptap 的 React 编辑器与现有 ProseMirror 机制**，复用选择、光标、图片节点、拖动与撤销/重做。首版按需要启用 Document、Paragraph、Text、HardBreak、Image 与历史管理，不直接打开整套富文本格式化规则。版本在实施时经现有前端构建验证后锁入 package-lock，不引入独立协作文档服务或云端草稿存储。
 
 [官方 Image API](https://tiptap.dev/docs/editor/extensions/nodes/image)及[已检查的扩展源码](https://github.com/ueberdosis/tiptap/blob/main/packages/extension-image/src/image.ts)支持 inline、draggable 图片与插入命令；图片扩展只负责编辑和显示，不实现上传。其默认 HTML/Markdown 图片解析会接收 src，不能原样等同于 Pulsara 的受控图片输入。
+
+排队项与消息气泡使用普通 React 渲染上述只读投影，不为每条历史消息创建编辑器。图片弹窗采用 [Yet Another React Lightbox](https://yet-another-react-lightbox.com/documentation) 与 [Zoom 插件](https://yet-another-react-lightbox.com/plugins/zoom)，复用显示、缩放、前后切图和关闭机制；Pulsara 提供本条内容中有权读取的图片、点击位置及加载结果。预览加载范围服从第 14.6 节，不使用远程图片抓取、上传服务或图库作为第二内容来源。依赖版本在实施时经构建验证后锁定。
 
 | Owner | 职责 |
 | --- | --- |
@@ -1043,13 +1057,13 @@ K1–K3 已实现事实、纯契约、提交、canonical 来源、hydration、ty
 
 ### 14.3 图片插入与文字编辑
 
-- 图片选择器和文件拖入接受用户实际交付的图片文件；粘贴接受该次 paste 事件中的实际 image File/Blob。首版范围仍为 D2 的静态 PNG/JPEG/WebP，最终合法性由 Host 判定，不能只信扩展名、浏览器 MIME 或 naturalWidth。
-- 选择或粘贴在当前光标/选区位置插入，文件拖入使用实际落点；有选区时替换该选区。一次多图按事件提供的文件顺序形成一个编辑操作；异步读取只能填充预先保留的节点位置，不能按完成先后倒序插入，也不能在用户删除节点或切换会话后插回当前草稿。
-- 图片作为可选中的完整节点；支持在其前后输入、键盘删除、拖动移动及撤销/重做。移动不增加 occurrence；显式复制或再次插入同一图片可以产生新的 occurrence，不按相同 bytes 去重。
-- 缩略图保持比例，点击可查看大图；显示尺寸、浏览器渲染和 object URL 不修改原始编码字节，不执行 resize、转码、方向修正或 OCR 后再发送。
+- 文件拖入接受用户实际交付的图片文件；粘贴接受该次 paste 事件中的实际 image File/Blob。首版范围仍为 D2 的静态 PNG/JPEG/WebP，最终合法性由 Host 判定，不能只信扩展名、浏览器 MIME 或 naturalWidth。composer 不提供添加图片按钮或隐藏文件选择器。
+- 粘贴在当前光标/选区位置插入，文件拖入使用实际落点；有选区时替换该选区。一次多图按事件提供的文件顺序形成一个编辑操作；异步读取只能填充预先保留的节点位置，不能按完成先后倒序插入，也不能在用户删除节点或切换会话后插回当前草稿。
+- 图片作为可选中的完整节点；支持在其前后输入、键盘删除、拖动移动及编辑器标准撤销/重做快捷键。composer 不显示撤销、重做按钮，也不增加图片打开快捷键。移动不增加 occurrence；显式复制或再次插入同一图片可以产生新的 occurrence，不按相同 bytes 去重。
+- 缩略图按第 14.1 节的紧凑尺寸与文字同排，点击可打开图片弹窗；显示尺寸、浏览器渲染和 object URL 不修改原始编码字节，不执行 resize、转码、方向修正或 OCR 后再发送。
 - 外部文本粘贴优先使用 text/plain，保持文本及换行，不自动导入网页 HTML 样式或抓取其中的远程 img URL。输入 Markdown 图片语法也只是 Text；关闭编辑器默认的 URL→Image 自动转换。用户通过图片粘贴明确提供字节时才形成 Image。
 - 保留中文输入法组合输入处理、普通 Enter 发送/运行中排队、Shift+Enter 换行，以及原显式引导动作。IME 的 Enter 只用于确认候选，不发送或吞掉输入；不借编辑器替换重新定义快捷键。
-- 图片读取中或某个节点失败时显示该节点的状态与原因；发送必须等待完整内容可提交。用户可删除或重新选择失败图片；不能悄悄只发其余文字和图片。纯图草稿合法，纯空白且无图不能发送。
+- 图片读取中或某个节点失败时显示该节点的状态与原因；发送必须等待完整内容可提交。用户可删除失败图片，或重新粘贴/拖入图片；不能悄悄只发其余文字和图片。纯图草稿合法，纯空白且无图不能发送。
 
 ### 14.4 从编辑文档到完整提交
 
@@ -1061,6 +1075,8 @@ K1–K3 已实现事实、纯契约、提交、canonical 来源、hydration、ty
 ```
 
 serializer 不 trim 文本，不在图片两侧增加换行、标签、文件名或 Markdown 图片链接。纯文本产生一个 Text，值与原 textarea 的逻辑文字相同。编辑器 text node 的相邻碎片可以在**新提交冻结前**合成该连续段；D3 接收到的 Text 边界此后保持，不在重试、存储或编译时重新合并。
+
+第 14.6 节自动生成的 Figure 链接、缩略图编号与上方图片带都只属于显示投影，不序列化为 Text，不添加 provider 标签，也不改变 Text/Image 的顺序、边界与重复次数。用户自己键入的 `[Figure 1]` 则属于原始 Text，按原值提交。
 
 点击发送时，按当前会话、权限、模型绑定及原 delivery 语义冻结这一份完整候选。读取、转换与响应都绑定到该次候选；后续键入、图片移动、文件选择或会话切换不能修改已发命令。传给 Host 的是第 6.1 节的完整 PromptContent；不把 editor.getHTML()、editor.getText()、blob URL 或单独附件清单充当模型输入。
 
@@ -1077,41 +1093,57 @@ serializer 不 trim 文本，不在图片两侧增加换行、标签、文件名
 - 每个会话独立保存 process-local 文档、文件关联和编辑状态；切到 child 不带入父草稿，返回父会话仍保留。页面刷新/进程退出不承诺恢复未提交草稿，不增加 localStorage/IndexedDB 或服务端草稿持久化。
 - 提交期间保留该候选及实际图片字节。收到原语义的明确接纳结果后，仅当当前草稿仍是这次提交的那一版才清空；用户后来输入的新内容不能被迟到响应清掉。明确拒绝保留可编辑草稿与具体原因。
 - command outcome 不确定时沿已有 query/reconciliation 查询同一命令，不因超时新建命令重发，也不从后来改变的 editor 状态重新构造“重试”。当前草稿、发送中项、待确认项以原 UI owner 管理；原 queue 已接纳但等待执行不应被误判为提交失败。
+- 排队项的 Figure 链接与“展开完整正文”只执行查看，不发送、取消或编辑队列项；展开后仍以文字和 Figure 链接呈现。发送中、待确认和被拒绝项按对应冻结候选生成同一预览，图片不能因尚未执行而从显示中消失；原状态与错误说明保留。
 - 排队编辑保留既有“先确认取消原项，再恢复到空 composer”流程，不直接修改已接纳正文。取消前先完整取得该项的 Text/Image，读取失败则保留原项；取消 outcome 不明时不提前恢复。恢复目标已有草稿则保留两份内容并等待用户处理，不能覆盖。修改后作为新命令提交，原 queue refs 按 D3 保持。
 - 暂存文件/预览的生命周期覆盖草稿、撤销/重做、正在提交的候选与待恢复的队列内容；仅在这些 owner 都不再需要时释放相关 File/Blob 引用、撤销预览 object URL。删除一个节点不能让另一个重复图片或可撤销操作失去原图，也不能把关闭会话前的迟到读取附到别的会话。
 
-### 14.6 历史展示与内容读取
+### 14.6 Figure 编号、历史展示与内容读取
 
-已接纳消息按 canonical Text/Image 原顺序展示。文本沿现有显示规则渲染，图片在原位置显示缩略图并可打开大图；历史中不把交错输入重排成“所有图片＋所有文字”。pending/发送中项也使用对应完整候选，不能只显示文字让用户误以为图片未提交。
+**Figure 编号由前端按当前一条完整消息的图片出现顺序生成，不额外持久化。** 从左到右遍历 Text/Image，只有 Image 使编号递增，第一张为 1；不是所有 part 的序号，也不是 blob 的全局编号。已有 canonical 正文、refs 与 occurrence 顺序足够，不新增 Figure 字段、编号表、映射注册表或 fingerprint。
 
-图片读取复用现有 attachment、session 和 canonical content owner 的权限边界。entry/queue/snapshot 的正文及对应 ref 决定可读取哪个 occurrence；原只读内容查询扩展为 typed 正文及按 owner/occurrence 读取原始字节，不接受任意本地路径、外部 URL 或仅凭猜到 blob digest 的全局读取。历史浏览使用原分页范围，图片按可见项/用户打开动作有界加载；observer 的显示权限不授予发送权限。
+- 每条消息独立从 1 开始；同一图片出现多次，分别编号。草稿重排、增删图片后重新计算；已接纳消息顺序固定，刷新、排队转为正式消息或切换显示方式后自然得到相同编号。
+- 编号依据整条消息中的 occurrence，不依据当前可见、已经加载或尚未折叠的缩略图数量。分页、懒加载及图片失败不改变编号，不因漏读前面的图片而从 1 重新计数。
+- `[Figure x]` 是完整的蓝色链接式控件，整体换行、可键盘激活，点击打开本条消息对应图片的弹窗；弹窗标题与缩略图标示相同编号。链接关联既有 owner/occurrence 或本次冻结候选的实际图片引用，不能仅凭 `x` 找图。关闭或 Escape 返回原查看位置；弹窗不触发提交或队列动作。
+- 只有真实 Image 产生此控件。用户手打的 `[Figure 1]` 保持普通文字，不解析为图片引用、不自动变成链接。自动 Figure 标签不进入 canonical、Hook/Skill 文本投影或 provider 输入，也不属于第 8.9 节的图片省略文字。
 
-仅有界面缩略图缺失或加载失败时，原位置显示可识别的失败状态并允许重读，不把展示失败当作 canonical 丢图，更不修改已安装 provider 输入。刷新后根据已持久化的 D3 内容重新读取；fork 的图片使用 child 自己的 owner/ref，不依赖父页面的 object URL。UI 缓存与预览只是派生数据；不增加图片表、缓存权威、全历史预加载或另一套 GC。
+```text
+实际内容：Image(A) → Text("这是一条测试信息") → Image(B) → Text("测试") → Image(A)
+排队正文：[Figure 1]这是一条测试信息[Figure 2]测试[Figure 3]
+已发送：  上方缩略图带 A / B / A，分别标示 Figure 1 / Figure 2 / Figure 3
+          下方气泡正文与上述排队正文的文字和链接顺序相同
+```
+
+上述气泡布局允许把缩略图集中到上方，但正文仍在每个 Image 的原位置保留链接，文字沿现有原始文字与换行显示规则呈现。缩略图带与正文从同一份有序内容派生，不维护可独立排序的附件真相；气泡正文与实际 provider 输入也不从上方图片带反向重建。纯文字消息沿原样显示，纯图消息的正文为按序 Figure 链接。
+
+图片读取复用现有 attachment、session 和 canonical content owner 的权限边界。entry/queue/snapshot 的正文及对应 ref 决定可读取哪个 occurrence；原只读内容查询扩展为 typed 正文及按 owner/occurrence 读取原始字节，不接受任意本地路径、外部 URL 或仅凭猜到 blob digest 的全局读取。排队项仅为生成 Figure 链接不读取图片 payload；点击预览再按对应引用读取，编辑恢复仍按第 14.5 节先取得完整图片。历史浏览使用原分页范围，图片按可见缩略图/用户打开动作有界加载；显示尺寸小不代表原图下载、解码成本小，不能全历史预加载。observer 的显示权限不授予发送权限。
+
+缩略图或弹窗加载失败时保留对应 Figure 链接与编号，在相应位置显示失败状态并允许重读；不删除或重新编号图片，不把展示失败当作 canonical 丢图，更不修改已安装 provider 输入。刷新后根据已持久化的 D3 内容重新读取；fork 的图片使用 child 自己的 owner/ref，不依赖父页面的 object URL。UI 缓存与预览只是派生数据；不增加图片表、缓存权威或另一套 GC。
 
 ### 14.7 切换纯文本模型
 
 只保留原模型选择操作，不增加“常规/允许省略”双模式、checkbox、逐图确认或提交许可参数。选择纯文本模型即接受第 8.6 节后果：有效历史有图时优先由原模型总结，按现有规则选中的最近最多三条原话无图则保留、有图则整体置空；无法形成合法交接时由新模型读取普通省略文字再总结，该档图片交接仍不保留 recent。界面可在模型旁说明“此模型不接收图片，历史图片将通过摘要或省略文字交接”，这是说明，不是批准步骤。
 
-模型选择仍只影响下一 NEW_TURN；运行中的旧 turn 不热切。原消息继续显示原图，不能把有效上下文的省略文字覆盖回历史；本次新附件遇到纯文本目标仍明确拒绝并保留草稿。切回视觉模型不自动重发旧图，用户可重新选择/粘贴/拖入。
+模型选择仍只影响下一 NEW_TURN；运行中的旧 turn 不热切。原消息继续显示原图，不能把有效上下文的省略文字覆盖回历史；本次新附件遇到纯文本目标仍明确拒绝并保留草稿。切回视觉模型不自动重发旧图，用户可重新粘贴/拖入。
 
 选择偏好、命令接纳、交接成功仍使用现有各自的结果，不保存永久省略状态。交接失败显示原具体原因；关闭 compaction 总开关时按原规则说明无法完成所需交接，不偷偷绕过设置。
 
 ### 14.8 浏览器验收与后续范围
 
-以下是 U1/U2 的实施验收，**当前未执行、未通过**。真实浏览器图片发送依赖第 12 节 kernel 验收；两者不能相互代替。
+以下 U1/U2 验收已于 2026-09-15 完成。真实浏览器图片发送依赖第 12 节 Kernel 能力；本轮另从浏览器实际编辑、提交、队列/历史展示到两套正式 provider 请求核对完整链路，没有用第 12 节证据替代浏览器证据。逐项自动化、浏览器记录与明确未重跑的组合见 [U1/U2 验收记录](PULSARA_KERNEL_IMAGE_INPUT_U1_U2_ACCEPTANCE.zh.md)。
 
 | 编号 | 必须证明的行为 |
 | --- | --- |
-| U01 | 纯文本、空白、换行、Markdown 源与 IME 输入保持；图片前后光标、键盘删除、选区替换、撤销/重做正确，Enter 不误触发送 |
-| U02 | 选择/粘贴/拖入的多图保留位置和顺序；乱序完成、读取失败、删除后完成、会话切换后完成不丢图、不插错位置；外部 HTML/Markdown URL 不隐式取图 |
-| U03 | 单图、纯图、Text/Image 交错及重复图片在编辑器→serializer→Host→canonical→实际 provider wire 顺序与 bytes 一致；移动不复制，显示缩放不修改原图 |
+| U01 | 纯文本、空白、换行、Markdown 源与 IME 输入保持；紧凑缩略图与文字同排，图片前后光标、键盘删除、选区替换、撤销/重做正确，Enter 不误触发送 |
+| U02 | 粘贴/拖入的多图保留位置和顺序；乱序完成、读取失败、删除后完成、会话切换后完成不丢图、不插错位置；外部 HTML/Markdown URL 不隐式取图 |
+| U03 | 单图、纯图、Text/Image 交错及重复图片在编辑器→serializer→Host→canonical→实际 provider wire 顺序与 bytes 一致；移动不复制，显示缩放不修改原图，自动 Figure 标签不进入提交或模型输入 |
 | U04 | 发送中继续编辑、切换会话、迟到接纳、明确拒绝和 query outcome 不确定时，完整候选不变且不丢草稿、不重复提交；Plan/权限/排队和原显式引导动作保持 |
-| U05 | 排队项图片完整读取后才取消恢复；读取失败/取消未知/恢复冲突保留内容；新编辑生成新命令，旧 owner refs 不被 UI 删除 |
+| U05 | 排队项以文字和 Figure 链接折叠/展开，显示图片总数；查看链接不发送或取消，生成链接不读取图片 payload。编辑前图片完整读取后才取消恢复，恢复实际图片节点而非标签文字；读取失败/取消未知/恢复冲突保留内容，新编辑生成新命令，旧 owner refs 不被 UI 删除 |
 | U06 | 当前 HTTP/Protocol-v3 实际 8 MiB 边界两侧，覆盖 base64 与文字 escaping；超界整条拒绝且草稿可恢复；D2 验证失败不得部分提交或绕过单槽/资源边界 |
-| U07 | 历史分页、刷新、observer 和 fork 均通过各自合法 owner 读取原图，保持显示顺序；缺图状态可见；跨 session 错绑和仅凭 digest 读取被拒绝 |
+| U07 | 已发送消息为上方单行缩略图带与下方原位置 Figure 链接；窄屏及 `+N 张` 不遮盖正文或丢失可访问图片。历史分页、刷新、observer 和 fork 均通过各自合法 owner 读取原图；缺图状态可见，跨 session 错绑和仅凭 digest 读取被拒绝 |
 | U08 | 预览、重复图片、undo、正在提交候选和队列恢复的 File/Blob/object URL 生命周期正确；离开/取消后无错误回填，不提前释放仍可使用的原图 |
 | U09 | 真实浏览器输入至少一组必须观察图片才能回答的交错内容，并核对正式 Chat/Responses 路径的实际请求和回复；独立 probe、静态截图和仅返回 HTTP 成功均不能代替 |
 | U10 | 直接使用原模型选择触发固定三级行为，无模式/许可/二次确认；纯文本模型的新附件拒绝且草稿保留。原历史图仍显示，执行失败不冒充交接完成；核对 Tier 2 所选窗口无图时保留、有图时整体置空，以及 Tier 3 recent=0 和实际 B 的标记文本 |
+| U11 | Figure 按每条完整消息的图片 occurrence 从 1 编号；重复图片分别编号，草稿重排后更新，刷新/排队转正式消息/懒加载/失败时不漂移。手打相同标签仍为普通 Text；自动链接与缩略图打开同一图片，弹窗标题/前后切图编号一致，键盘打开及关闭恢复查看位置；无新增持久化编号 |
 
 相机采集、后台屏幕读取、工具/MCP 图片输出、网页图片自动抓取、跨应用富文本 HTML 导入、图片裁剪/转码/画质选项、OCR、自动图片摘要、分享下载，以及 PDF/音频/视频仍不在首版范围。读取文件或截图的工具入口怎样获得授权与进入模型上下文，继续另行定义。
 

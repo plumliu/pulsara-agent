@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import 'katex/dist/katex.min.css';
+import 'yet-another-react-lightbox/styles.css';
 import './globals.css';
 import './styles/base.css';
 import './styles/shell.css';
