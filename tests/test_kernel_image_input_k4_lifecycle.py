@@ -202,7 +202,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
                 text_runtime,
                 ["old answer " + "x" * 20_000],
                 [
-                    "Historical user said before and between; [图片已省略]; [图片已省略]."
+                    "Historical user said before and between; [Image omitted]; [Image omitted]."
                 ],
             )
             await first.run_turn(frozen_test_prompt("continue with text"))
@@ -210,7 +210,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
             assert len(first_model.summary_transport.contexts) == 1
             assert (
                 sum(
-                    join_text_content(message.content).count("[图片已省略]")
+                    join_text_content(message.content).count("[Image omitted]")
                     for message in first_model.summary_transport.contexts[0].messages
                 )
                 == 2
@@ -231,7 +231,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
                     "The images remain omitted; no image data is available.",
                 ],
             )
-            literal = "User literal marker [图片已省略] is ordinary text."
+            literal = "User literal marker [Image omitted] is ordinary text."
             await cold.run_turn(frozen_test_prompt(literal))
             assert any(
                 message.content == (LLMTextPart(literal),)

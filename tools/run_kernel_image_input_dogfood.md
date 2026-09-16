@@ -1,15 +1,15 @@
-# K4 Kernel 图片真实验收
+# Kernel 图片与已知引用重读真实验收
 
 此脚本调用正式 `KernelHostCore`，图片经 Host 验证、canonical publication / hydration、compiler、final materialization 和正式 adapter 发出。模型调用、工具执行、压缩、恢复与 fork 均由生产 owner 执行。
 
 ```sh
 .venv/bin/python -m tools.run_kernel_image_input_dogfood \
   --model openai/gpt-5.6-luna \
-  --output scratch/k4-acceptance/luna-new-run
+  --output output/image-reference-reread/chat-new-run
 
 .venv/bin/python -m tools.run_kernel_image_input_dogfood \
-  --model gpt-5.5 \
-  --output scratch/k4-acceptance/responses-new-run
+  --model deepseek-flash \
+  --output output/image-reference-reread/responses-new-run
 ```
 
 `--model` 必须精确匹配已保存的模型。若同一模型保存了多组 API 配置，额外传入 `--connection-id` 选择唯一连接；其模型 ID 必须与 `--model` 一致。输出目录必须是新目录，避免覆盖失败证据。默认 900 秒仅是本次有限验收运行的 deadline，不修改产品生命周期、重试或预算配置。模型名和连接 ID 只用于选择实验连接。
@@ -19,11 +19,13 @@
 每组包含以下行为：
 
 1. 纯文本历史，为随后真实压缩提供可回收内容。
-2. 单条纯图提交，模型读取图片内数字。
-3. Text/Image 交错、交换图片次序并重复同一图片，核对三个标签与数字的关联；文字 prompt 不包含答案。
-4. 实际调用 `read_file`，核对文件结果、图片内容与多次请求的 SYSTEM/tools/messages 前缀连续性。
-5. 手动压缩，确认 summary 请求包含原图，successor 仍保留规定窗口中的图片。
-6. 关闭并重新打开 Host session，从数据库冷恢复图片；fork 后关闭父会话，子会话继续读取独立保留的原图。
+2. 单条纯图提交，模型读取图片内数字，并核对图片前唯一、完整的 `image_ref` 标签。
+3. 模型用刚获得的已知 `image_ref` 调用同一 `view_image`，核对实际参数、canonical `TOOL_RESULT`、同批 carrier 与原字节 digest。
+4. path/ref 混合批次包含两个成功和一个失败调用；按 call ordinal 合并成功图片，并在删除原 path 文件后继续从 canonical 重放。
+5. Text/Image 交错、交换图片次序并重复同一图片，核对三个标签与数字的关联；文字 prompt 不包含答案。
+6. 实际调用 `read_file`，核对文件结果、图片内容与多次请求的 SYSTEM/tools/messages 前缀连续性。
+7. 手动压缩，先断言目标图片已退出 successor，再由新用户文字显式提供先前引用并让模型重读；这不测试自动发现。
+8. 关闭并重新打开 Host session，从数据库冷恢复图片；fork 后关闭父会话，子会话继续读取独立保留的原图。
 
 脚本观察一次真实 adapter payload 构造的返回值，并在 `httpx.AsyncClient.send` 观察 SDK 生成的实际 JSON body；两处都原样委托生产函数。最终逐次核对 HTTP 的 context-bearing 字段与 frozen materialization 相等。图片 data URL 解码后的 bytes、MIME 和 occurrence 次数必须与完整 typed input 一致；最终 JSON 字节数与 quote 相等。不会修改请求或为 provider 加专用编码路径。
 

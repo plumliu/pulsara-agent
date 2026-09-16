@@ -34,6 +34,9 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     PROMPT_BODY_MEDIA_TYPE,
 )
 from pulsara_agent.conversation_kernel.prompt_storage import (
+    CanonicalImageReferenceResourceExceeded,
+    CanonicalImageReferenceUnavailable,
+    PostgresCanonicalImageReferenceReadPort,
     insert_canonical_prompt_refs,
 )
 from pulsara_agent.conversation_kernel.provider_dispatch import canonical_frontier
@@ -64,7 +67,10 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     StructuredModelInputLimits,
 )
-from pulsara_agent.model_input.lowering import lower_canonical_item
+from pulsara_agent.model_input.lowering import (
+    image_referenced_content,
+    lower_canonical_item,
+)
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
@@ -221,7 +227,7 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
         limits=StructuredModelInputLimits(),
     )
     assert lowered.fixed_message is not None
-    assert lowered.fixed_message.content == content.parts
+    assert lowered.fixed_message.content == image_referenced_content(content.parts)
     assert accepted.accepted.entry_id == intent.entry_id
 
     changed = replace(
@@ -260,6 +266,95 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
             intent=changed,
             provider_input_admission=changed_admission,
             model_resolution_snapshot=runtime.freeze_resolution_snapshot(),
+            deadline_monotonic=monotonic() + 30,
+        )
+
+
+def test_known_image_reference_requires_one_committed_owner_in_the_bound_session(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    workspace_id = _id("workspace")
+    lease, runtime, _binding = _bound_session(repository, workspace_id=workspace_id)
+    image = _image()
+    _direct_intent(
+        repository,
+        lease,
+        runtime,
+        FrozenPromptContent((LLMTextPart("remember"), image)),
+    )
+    reader = PostgresCanonicalImageReferenceReadPort(
+        repository.connection_provider,
+        session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+    )
+    reread = reader.read_image(
+        session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+        image_ref=image.content_digest,
+        maximum_encoded_bytes=1 << 20,
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert reread == image
+    exact_reads = 0
+
+    def unexpected_payload_read(*_args, **_kwargs):
+        nonlocal exact_reads
+        exact_reads += 1
+        raise AssertionError("resource failure must precede target payload read")
+
+    monkeypatch.setattr(
+        PostgresCanonicalBlobStore,
+        "read_exact_in_connection",
+        staticmethod(unexpected_payload_read),
+    )
+    with pytest.raises(CanonicalImageReferenceResourceExceeded):
+        reader.read_image(
+            session_id=lease.guard.session_id,
+            workspace_id=workspace_id,
+            image_ref=image.content_digest,
+            maximum_encoded_bytes=len(image.immutable_bytes) - 1,
+            deadline_monotonic=monotonic() + 30,
+        )
+    assert exact_reads == 0
+
+    other_lease, _other_runtime, _other_binding = _bound_session(
+        repository, workspace_id=workspace_id
+    )
+    other_reader = PostgresCanonicalImageReferenceReadPort(
+        repository.connection_provider,
+        session_id=other_lease.guard.session_id,
+        workspace_id=workspace_id,
+    )
+    with pytest.raises(CanonicalImageReferenceUnavailable):
+        other_reader.read_image(
+            session_id=other_lease.guard.session_id,
+            workspace_id=workspace_id,
+            image_ref=image.content_digest,
+            maximum_encoded_bytes=1 << 20,
+            deadline_monotonic=monotonic() + 30,
+        )
+
+    orphan = _image(_png(size=(8, 6)))
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.ARTIFACT,
+        row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        PostgresCanonicalBlobStore.publish_in_connection(
+            connection,
+            workspace_id=workspace_id,
+            content=orphan.immutable_bytes,
+            media_type=orphan.media_type,
+            codec="binary",
+        )
+    with pytest.raises(CanonicalImageReferenceUnavailable):
+        reader.read_image(
+            session_id=lease.guard.session_id,
+            workspace_id=workspace_id,
+            image_ref=orphan.content_digest,
+            maximum_encoded_bytes=1 << 20,
             deadline_monotonic=monotonic() + 30,
         )
 
@@ -481,6 +576,46 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
             deadline_monotonic=monotonic() + 30,
         )
 
+    reference_reader = PostgresCanonicalImageReferenceReadPort(
+        repository.connection_provider,
+        session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+    )
+    assert reference_reader.read_image(
+        session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+        image_ref=shared_image.content_digest,
+        maximum_encoded_bytes=1 << 20,
+        deadline_monotonic=monotonic() + 30,
+    ) == shared_image
+    selected_owner_id = min(item.result_entry_id for item in accepted_candidates)
+    with psycopg.connect(
+        stage2_migrated_postgres_database.admin_dsn,
+        autocommit=True,
+        row_factory=dict_row,
+    ) as connection:
+        connection.execute("SET session_replication_role = replica")
+        row = connection.execute(
+            "SELECT content_size FROM pulsara_v3.transcript_entries WHERE id=%s",
+            (selected_owner_id,),
+        ).fetchone()
+        assert row is not None
+        try:
+            connection.execute(
+                "UPDATE pulsara_v3.transcript_entries SET inline_content=%s WHERE id=%s",
+                (b"x" * int(row["content_size"]), selected_owner_id),
+            )
+        finally:
+            connection.execute("SET session_replication_role = origin")
+    with pytest.raises(ConversationKernelConflict):
+        reference_reader.read_image(
+            session_id=lease.guard.session_id,
+            workspace_id=workspace_id,
+            image_ref=shared_image.content_digest,
+            maximum_encoded_bytes=1 << 20,
+            deadline_monotonic=monotonic() + 30,
+        )
+
 
 def test_compaction_headroom_counts_one_snapshot_with_repeated_image_refs_once(
     stage2_migrated_postgres_database,
@@ -655,6 +790,13 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease, runtime, binding = _bound_session(repository)
+    workspace_id = str(
+        _rows(
+            repository,
+            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
+            (lease.guard.session_id,),
+        )[0]["workspace_id"]
+    )
     image = _image()
     initial_content = FrozenPromptContent((image,))
     permission_id = _id("permission")
@@ -691,6 +833,19 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
         ).kind
         is PromptIngressConfirmationKind.FULL_COMPATIBLE
     )
+    reference_reader = PostgresCanonicalImageReferenceReadPort(
+        repository.connection_provider,
+        session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+    )
+    with pytest.raises(CanonicalImageReferenceUnavailable):
+        reference_reader.read_image(
+            session_id=lease.guard.session_id,
+            workspace_id=workspace_id,
+            image_ref=image.content_digest,
+            maximum_encoded_bytes=1 << 20,
+            deadline_monotonic=monotonic() + 30,
+        )
     queued = repository.prepare_prompt_head_consumption(
         session_id=lease.guard.session_id,
         occurred_at=datetime.now(timezone.utc),
@@ -709,6 +864,13 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
     )
     assert consumed is not None
     assert consumed.kind is QueuedRootTurnAdmissionConfirmationKind.FULL
+    assert reference_reader.read_image(
+        session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+        image_ref=image.content_digest,
+        maximum_encoded_bytes=1 << 20,
+        deadline_monotonic=monotonic() + 30,
+    ) == image
     assert (
         repository.confirm_prompt_ingress(
             candidate=initial,

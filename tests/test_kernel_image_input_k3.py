@@ -965,9 +965,9 @@ def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() 
 
     assert projected.parts == (
         LLMTextPart("before"),
-        LLMTextPart("[图片已省略]"),
+        LLMTextPart("[Image omitted]"),
         LLMTextPart("between"),
-        LLMTextPart("[图片已省略]"),
+        LLMTextPart("[Image omitted]"),
     )
     assert project_prompt_content_for_text_only_handover(projected) == projected
 

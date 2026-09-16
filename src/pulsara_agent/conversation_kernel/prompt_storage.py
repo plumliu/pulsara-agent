@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Mapping
+from typing import Mapping, Protocol
 
-from psycopg import Connection
+from psycopg import Connection, IsolationLevel
+from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
@@ -41,12 +42,236 @@ from pulsara_agent.conversation_kernel.repository_errors import (
 from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
 )
+from pulsara_agent.llm.input import LLMImagePart
+from pulsara_agent.storage.postgres_connection_provider import (
+    PostgresConnectionLane,
+    VerifiedPostgresConnectionProviderProtocol,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class CanonicalPromptPublication:
     body: CanonicalContent
     image_blob_ids: tuple[str, ...] = field(repr=False)
+
+
+class CanonicalImageReferenceUnavailable(LookupError):
+    pass
+
+
+class CanonicalImageReferenceResourceExceeded(ValueError):
+    pass
+
+
+class CanonicalImageReferenceReadPort(Protocol):
+    def read_image(
+        self,
+        *,
+        session_id: str,
+        workspace_id: str,
+        image_ref: str,
+        maximum_encoded_bytes: int,
+        deadline_monotonic: float,
+    ) -> LLMImagePart: ...
+
+
+class PostgresCanonicalImageReferenceReadPort:
+    """Exact, session/workspace-scoped read owner for one known image digest."""
+
+    def __init__(
+        self,
+        connection_provider: VerifiedPostgresConnectionProviderProtocol,
+        *,
+        session_id: str,
+        workspace_id: str,
+    ) -> None:
+        if not session_id or not workspace_id:
+            raise ValueError("canonical image reference scope is invalid")
+        self._provider = connection_provider
+        self._session_id = session_id
+        self._workspace_id = workspace_id
+
+    def read_image(
+        self,
+        *,
+        session_id: str,
+        workspace_id: str,
+        image_ref: str,
+        maximum_encoded_bytes: int,
+        deadline_monotonic: float,
+    ) -> LLMImagePart:
+        if session_id != self._session_id or workspace_id != self._workspace_id:
+            raise RuntimeError("canonical image reference scope does not exact-join")
+        if maximum_encoded_bytes < 1:
+            raise CanonicalImageReferenceResourceExceeded(
+                "canonical image reference exceeds its encoded-byte allowance"
+            )
+        blob_id = _blob_id(workspace_id, image_ref)
+        with self._provider.connection(
+            lane=PostgresConnectionLane.ARTIFACT,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            candidate = connection.execute(
+                """
+                WITH candidates AS (
+                    SELECT 0 AS owner_kind_rank,
+                           e.id AS owner_id,
+                           r.ref_ordinal,
+                           e.content_size
+                    FROM pulsara_v3.canonical_image_refs AS r
+                    JOIN pulsara_v3.transcript_entries AS e
+                      ON e.session_id = r.session_id
+                     AND e.workspace_id = r.workspace_id
+                     AND e.id = r.transcript_entry_id
+                    WHERE r.session_id = %s
+                      AND r.workspace_id = %s
+                      AND r.blob_id = %s
+                      AND e.entry_kind IN (
+                          'USER_MESSAGE', 'USER_STEER', 'TOOL_RESULT'
+                      )
+                    UNION ALL
+                    SELECT 1 AS owner_kind_rank,
+                           s.id AS owner_id,
+                           r.ref_ordinal,
+                           s.content_size
+                    FROM pulsara_v3.canonical_image_refs AS r
+                    JOIN pulsara_v3.context_snapshots AS s
+                      ON s.session_id = r.session_id
+                     AND s.workspace_id = r.workspace_id
+                     AND s.id = r.context_snapshot_id
+                    WHERE r.session_id = %s
+                      AND r.workspace_id = %s
+                      AND r.blob_id = %s
+                )
+                SELECT owner_kind_rank, owner_id, ref_ordinal, content_size
+                FROM candidates
+                ORDER BY content_size ASC,
+                         owner_kind_rank ASC,
+                         owner_id COLLATE "C" ASC,
+                         ref_ordinal ASC
+                LIMIT 1
+                """,
+                (
+                    session_id,
+                    workspace_id,
+                    blob_id,
+                    session_id,
+                    workspace_id,
+                    blob_id,
+                ),
+            ).fetchone()
+            if candidate is None:
+                raise CanonicalImageReferenceUnavailable(image_ref)
+            content_size = int(candidate["content_size"])
+            if not 0 <= content_size <= MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
+                raise ConversationKernelConflict(
+                    "canonical image owner body size is out of bounds"
+                )
+            owner_kind_rank = int(candidate["owner_kind_rank"])
+            owner_id = str(candidate["owner_id"])
+            ref_ordinal = int(candidate["ref_ordinal"])
+            if owner_kind_rank == 0:
+                row = connection.execute(
+                    """SELECT session_id, workspace_id, inline_content, blob_id,
+                                      content_digest, content_size,
+                                      content_media_type, content_codec
+                         FROM pulsara_v3.transcript_entries
+                        WHERE session_id = %s AND workspace_id = %s AND id = %s
+                          AND entry_kind IN (
+                              'USER_MESSAGE', 'USER_STEER', 'TOOL_RESULT'
+                          )""",
+                    (session_id, workspace_id, owner_id),
+                ).fetchone()
+                if row is None:
+                    raise ConversationKernelConflict(
+                        "canonical image reference owner disappeared"
+                    )
+                body, decoded, refs = _read_canonical_prompt_metadata(
+                    connection,
+                    row=row,
+                    queue_item_id=None,
+                    transcript_entry_id=owner_id,
+                    context_snapshot_id=None,
+                )
+                descriptors = _image_descriptors(decoded)
+            elif owner_kind_rank == 1:
+                row = connection.execute(
+                    """SELECT session_id, workspace_id, inline_content, blob_id,
+                                      content_digest, content_size,
+                                      content_media_type, content_codec
+                         FROM pulsara_v3.context_snapshots
+                        WHERE session_id = %s AND workspace_id = %s AND id = %s""",
+                    (session_id, workspace_id, owner_id),
+                ).fetchone()
+                if row is None:
+                    raise ConversationKernelConflict(
+                        "canonical image reference owner disappeared"
+                    )
+                body = _read_body(
+                    connection,
+                    row=row,
+                    workspace_id=workspace_id,
+                    expected_media_type=CONTEXT_SNAPSHOT_MEDIA_TYPE,
+                    expected_codec=CONTEXT_SNAPSHOT_CODEC,
+                )
+                compaction_snapshot_canonical_expanded_bytes(body)
+                descriptors = compaction_snapshot_image_descriptors(body)
+                refs = _read_ref_metadata(
+                    connection,
+                    session_id=session_id,
+                    expected_count=len(descriptors),
+                    queue_item_id=None,
+                    transcript_entry_id=None,
+                    context_snapshot_id=owner_id,
+                )
+                if not _refs_match_descriptors(
+                    refs, descriptors=descriptors, workspace_id=workspace_id
+                ):
+                    raise ConversationKernelConflict(
+                        "canonical snapshot refs do not exact-join"
+                    )
+            else:  # pragma: no cover - closed SQL union
+                raise ConversationKernelConflict(
+                    "canonical image reference owner kind is invalid"
+                )
+            if ref_ordinal < 0 or ref_ordinal >= len(descriptors):
+                raise ConversationKernelConflict(
+                    "canonical image reference ordinal is invalid"
+                )
+            descriptor = descriptors[ref_ordinal]
+            reference = refs[ref_ordinal]
+            if (
+                descriptor.digest != image_ref
+                or str(reference["blob_id"]) != blob_id
+            ):
+                raise ConversationKernelConflict(
+                    "canonical image reference does not exact-join its owner"
+                )
+            if (
+                descriptor.encoded_bytes > maximum_encoded_bytes
+                or len(body) + descriptor.encoded_bytes
+                > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
+            ):
+                raise CanonicalImageReferenceResourceExceeded(
+                    "canonical image reference exceeds its read allowance"
+                )
+            payload = PostgresCanonicalBlobStore.read_exact_in_connection(
+                connection,
+                blob_id=blob_id,
+                expected_digest=descriptor.digest,
+                expected_size=descriptor.encoded_bytes,
+                expected_workspace_id=workspace_id,
+                expected_media_type=descriptor.media_type,
+                expected_codec=PROMPT_IMAGE_BLOB_CODEC,
+            )
+            return LLMImagePart(
+                media_type=descriptor.media_type,
+                immutable_bytes=payload,
+                width=descriptor.width,
+                height=descriptor.height,
+            )
 
 
 def materialize_canonical_prompt(
@@ -570,7 +795,11 @@ def _refs_match_descriptors(
 
 
 __all__ = [
+    "CanonicalImageReferenceReadPort",
+    "CanonicalImageReferenceResourceExceeded",
+    "CanonicalImageReferenceUnavailable",
     "CanonicalPromptPublication",
+    "PostgresCanonicalImageReferenceReadPort",
     "canonical_prompt_owner_is_exact",
     "copy_canonical_prompt_refs",
     "hydrate_canonical_prompt_owner",

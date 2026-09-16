@@ -75,6 +75,7 @@ from pulsara_agent.model_input.continuity import (
 )
 from pulsara_agent.model_input.lowering import (
     LoweredCanonicalItem,
+    image_reference_part,
     lower_canonical_item,
     source_variant_message,
 )
@@ -90,10 +91,14 @@ from pulsara_agent.primitives.tool_result_projection import (
     ToolResultDeliveryRequirement,
     provider_neutral_message_logical_bytes as _message_logical_bytes,
 )
+from pulsara_agent.tools.builtins.filesystem import (
+    ViewImageSource,
+    parse_view_image_source,
+)
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v12-provider-schema-subtraction"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v14-tool-guidance"
 )
 
 
@@ -482,31 +487,27 @@ class _ExpandedTranscriptMessage:
 
 
 def _tool_attachment_message(source: ToolAttachmentSource) -> LLMMessage:
-    images: list[tuple[str, str, LLMImagePart]] = []
+    images: list[tuple[str, ViewImageSource, LLMImagePart]] = []
     for member in source.members:
         arguments = member.source.tool_call_arguments
         if arguments is None:
             raise ValueError("tool attachment source lacks frozen arguments")
         thawed_arguments = thaw_json(arguments)
-        path = (
-            thawed_arguments.get("path")
-            if isinstance(thawed_arguments, dict)
-            else None
-        )
-        if not isinstance(path, str):
-            raise ValueError("tool attachment source path is invalid")
+        if not isinstance(thawed_arguments, dict):
+            raise ValueError("tool attachment source arguments are invalid")
+        image_source = parse_view_image_source(thawed_arguments)
         assert isinstance(member.source.content, tuple)
         source_images = tuple(
             part for part in member.source.content if isinstance(part, LLMImagePart)
         )
         if len(source_images) != 1 or member.source.tool_call_id is None:
             raise ValueError("tool attachment member image is invalid")
-        images.append((member.source.tool_call_id, path, source_images[0]))
+        images.append((member.source.tool_call_id, image_source, source_images[0]))
     return tool_image_attachment_message(tuple(images))
 
 
 def tool_image_attachment_message(
-    members: tuple[tuple[str, str, LLMImagePart], ...],
+    members: tuple[tuple[str, ViewImageSource, LLMImagePart], ...],
 ) -> LLMMessage:
     """Build the common compiler/provider projection for ToolResult images."""
 
@@ -515,8 +516,12 @@ def tool_image_attachment_message(
     parts: list[LLMTextPart | LLMImagePart] = [
         LLMTextPart("The following images were read by tools.")
     ]
-    for tool_call_id, requested_path, image in members:
-        if not tool_call_id or not requested_path or not isinstance(image, LLMImagePart):
+    for tool_call_id, source, image in members:
+        if (
+            not tool_call_id
+            or not isinstance(source, ViewImageSource)
+            or not isinstance(image, LLMImagePart)
+        ):
             raise ValueError("tool image attachment member is invalid")
         parts.append(
             LLMTextPart(
@@ -524,12 +529,13 @@ def tool_image_attachment_message(
                     {
                         "tool_image_source": {
                             "tool_call_id": tool_call_id,
-                            "requested_path": requested_path,
+                            **source.provider_value(),
                         }
                     }
                 ).decode("utf-8")
             )
         )
+        parts.append(image_reference_part(image))
         parts.append(image)
     return LLMMessage(role=MessageRole.USER, content=tuple(parts))
 

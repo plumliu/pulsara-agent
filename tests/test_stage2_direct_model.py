@@ -746,12 +746,21 @@ def test_k3_typed_image_compiles_once_into_the_exact_final_payload(
     ]
     assert len(image_wire_items) == 1
     content = image_wire_items[0]["content"]
+    text_type = "text" if api == "openai_chat_completions" else "input_text"
     assert [part["type"] for part in content] == [
-        "text" if api == "openai_chat_completions" else "input_text",
+        text_type,
+        text_type,
         image_type,
-        "text" if api == "openai_chat_completions" else "input_text",
+        text_type,
+        text_type,
         image_type,
     ]
+    expected_reference = canonical_json_bytes(
+        {"pulsara_image": {"image_ref": image.content_digest}}
+    ).decode("utf-8")
+    assert [
+        part["text"] for part in content if part["type"] == text_type
+    ] == ["before", expected_reference, "after", expected_reference]
     expected_url = "data:image/png;base64," + base64.b64encode(
         image.immutable_bytes
     ).decode("ascii")

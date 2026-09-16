@@ -4,6 +4,7 @@ from tests.support.model_config import frozen_test_prompt
 from pulsara_agent.llm.input import FrozenPromptContent
 
 import asyncio
+import json
 from collections.abc import Callable
 from datetime import datetime, timezone
 from threading import Event
@@ -283,6 +284,8 @@ class _PhysicalFailureTool(_KnownReadOnlyTool):
 
     async def invoke(self, **_kwargs: object) -> KernelToolResult:
         self.invocations += 1
+        if self.effect_class == "admission":
+            raise OSError("injected private admission failure")
         raise KernelToolPhysicalInvocationError(
             effect_class=self.effect_class,
             error=OSError("injected physical failure"),
@@ -1135,6 +1138,7 @@ def test_round5_cancelled_subagent_admission_none_never_reissues(
     (
         ("read_only", "read_file", "{}"),
         ("TERMINAL_OBSERVATION", "terminal_process", '{"action":"poll"}'),
+        ("admission", "read_file", "{}"),
     ),
 )
 def test_round5_observation_physical_exception_becomes_one_known_failure_result(
@@ -1166,6 +1170,18 @@ def test_round5_observation_physical_exception_becomes_one_known_failure_result(
 
     assert result.final_text == "recovered"
     assert tool.invocations == 1
+    bodies = [
+        json.loads(part.text)["pulsara_tool_result"]["body"]
+        for message in model.requests[-1].compiled_input.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for part in message.content
+        if isinstance(part, LLMTextPart)
+    ]
+    assert len(bodies) == 1
+    assert "reliable result" in bodies[0]
+    assert "OSError" not in bodies[0]
+    assert "injected" not in bodies[0]
+    assert "not started" not in bodies[0]
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,

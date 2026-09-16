@@ -1167,17 +1167,17 @@ def test_no_v1_builder_provider_token_counter_or_provider_business_branch_exists
         (
             FrozenProviderInputItemKind.USER,
             CanonicalInputOriginKind.PLAN_CONTINUATION,
-            "计划运行时续接",
+            "Planning continuation",
         ),
         (
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
             CanonicalInputOriginKind.PLAN_CONTINUATION,
-            "计划运行时续接",
+            "Planning continuation",
         ),
         (
             FrozenProviderInputItemKind.USER,
             CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
-            "子任务目标",
+            "Delegated task objective",
         ),
     ),
 )
@@ -1197,7 +1197,7 @@ def test_canonical_plan_and_runtime_user_shapes_never_become_human_evidence(
     projected = _causal_source_item(item)
     assert projected is not None
     assert projected.evidence_role is (MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT)
-    assert "用户原话" not in projected.source_product_label
+    assert "User input" not in projected.source_product_label
     assert projected.public_kind == public_kind
 
 

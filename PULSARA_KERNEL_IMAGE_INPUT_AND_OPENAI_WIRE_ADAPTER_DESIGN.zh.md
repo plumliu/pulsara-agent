@@ -1,6 +1,6 @@
 # Pulsara Kernel 图片输入与 OpenAI 通用 Wire Adapter 修订设计
 
-> 后续扩展（2026-09-16，设计待实施）：本地 `view_image` 的 typed 工具结果、并行执行、跨协议统一附件投影及左侧展示，见 [本地图片工具实施规范](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md)。本篇已经验收的用户图片输入行为保持不变；工具图片新增范围以该实施规范为准，D1/D2 的冻结参数继续适用。
+> 后续扩展（2026-09-16，已实施）：本地 `view_image` 的 typed 工具结果、并行执行、跨协议统一附件投影及左侧展示见 [本地图片工具实施规范](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md)；同一工具的已知 canonical 图片引用重读见 [已知图片引用重读规格](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md)。本篇已经验收的用户图片输入行为保持不变，D1/D2 的冻结参数继续适用。
 
 > 状态：**D1–D4 设计已冻结；K1–K3 已实施，K4 于 2026-09-15 验收通过；U1/U2 于 2026-09-15 实施并完成浏览器验收**
 >
@@ -16,7 +16,7 @@
 >
 > UI 补充：2026-09-13，用户确认首版采用图文混排输入框。第 14 节确定编辑、完整提交、草稿、排队编辑与历史展示契约，消费已冻结的 D1–D4；本次没有修改 kernel 算法或实施生产功能。
 >
-> 模型切换简化：2026-09-14，用户明确采用原三级 compact：纯文本目标遇到有效历史图片时进入 Tier 2，由原模型总结；按现有规则选出的最近最多三条原话没有图片就保留，含图片才将 recent 置空。原模型不可用或 Tier 2 未形成合法 successor 时沿原 Tier 3，由新模型读取 Image → Text("[图片已省略]") 的历史投影，该档纯文本图片交接仍为 recent=0。模型选择隐含接受该后果，不设双模式、独立许可、专用省略 part 或永久通知状态。本次取代 2026-09-13 critic 版本的相关扩展；D1/D2 不变。
+> 模型切换简化：2026-09-14，用户明确采用原三级 compact：纯文本目标遇到有效历史图片时进入 Tier 2，由原模型总结；按现有规则选出的最近最多三条原话没有图片就保留，含图片才将 recent 置空。原模型不可用或 Tier 2 未形成合法 successor 时沿原 Tier 3，由新模型读取 Image → Text("[Image omitted]") 的历史投影，该档纯文本图片交接仍为 recent=0。模型选择隐含接受该后果，不设双模式、独立许可、专用省略 part 或永久通知状态。本次取代 2026-09-13 critic 版本的相关扩展；D1/D2 不变。
 >
 > 设计精简：2026-09-14，按用户确认统一新 snapshot/projection 的展示结构；提交 FULL 确认只核对完整正文、引用及 blob 身份/元数据，图片 payload 完整性在发布与读取时验证；将图片省略的禁止范围限定到普通调用、adapter 与透明重试。D1/D2 算法、参数与接纳规则不变。
 >
@@ -154,7 +154,7 @@ width/height 随同一份经 D2 验证的完整 Image 值从 ingress/canonical h
 
 本版以**已冻结字节的 inline 图片输入**作为 wire 基线。外部 URL、provider file ID、Files API 上传以及 provider 管理的媒体生命周期，不纳入本版。`data:` URL 是 adapter 的确定性编码结果，不作为 kernel 的第二份内容真相。
 
-本篇已实施的第一版 role 范围限定为 USER 中的图片输入；SYSTEM、assistant thinking、tool call arguments 和现有文本 ToolResult 保持原角色及内容语义。后续本地工具图片的输出与来源契约由 [本地图片工具实施规范](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md) 明确：canonical 归属 TOOL_RESULT，两种协议均在公共编译层派生 user role 图片附件；不创建 canonical 用户提交，UI 仍展示为左侧工具结果。该扩展尚待实施，不能用本篇已有验收记录作为其通过证据。
+本篇已实施的第一版 role 范围限定为 USER 中的图片输入；SYSTEM、assistant thinking、tool call arguments 和现有文本 ToolResult 保持原角色及内容语义。后续本地工具图片的输出与来源契约已由 [本地图片工具实施规范](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md) 实施：canonical 归属 TOOL_RESULT，两种协议均在公共编译层派生 user role 图片附件；不创建 canonical 用户提交，UI 仍展示为左侧工具结果。该扩展及其已知引用重读的独立验收分别记录在原规格与 [引用重读规格 §14](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md#14-实施与验收记录2026-09-16)，不能用本篇更早的 USER 图片验收记录代替。
 
 具体约束：
 
@@ -466,7 +466,7 @@ SYSTEM 与 provider tools 仍须 byte-identical。图片支持不是重建 root�
 | 普通 successor | 新 summary、必须保留的 active/historical、完整 canonical suffix/tool groups、可选 recent | 第 8.4 节顺序；同一实际候选通过 D2 与原 PRE_FULL/reclaim/soft target |
 | 冷 epoch / Tier 1 B | 当前有效 canonical base+suffix 的完整 typed 内容；不另做 recent 搜索 | B 实际输入的内容/模态、D1/D2 与原 trigger；失败不安装 |
 | Tier 2 B successor | A 的原前缀 summary + 必须内容 + recent；先按原规则选 recent，纯文本 B 且所选窗口有图才整体置空，否则原样保留 | 不裁 A summary source 的原图；唯一候选，未形成合法 B successor 才沿原分类进入 Tier 3 |
-| Tier 3 B summary | 当前 source + 历史 projection USER + exact active USER + summary USER；纯文本 B 所选历史中的 Image 原位变为 Text("[图片已省略]") | 原连续 dialogue suffix/evidence 选择；临时 projection 不安装、不落库 |
+| Tier 3 B summary | 当前 source + 历史 projection USER + exact active USER + summary USER；纯文本 B 所选历史中的 Image 原位变为 Text("[Image omitted]") | 原连续 dialogue suffix/evidence 选择；临时 projection 不安装、不落库 |
 | Tier 3 successor | B summary + exact active + 必须历史 + 按规则选定的 recent；纯文本图片交接 recent=0，必须历史使用同一文本替换 | 唯一实际 successor；先校验后采用，不重新注入旧图 |
 | fork | anchor 当时有效的完整 canonical 内容；source active 转 historical | child-local owner refs，共享同 workspace bytes；不复制执行身份 |
 | ROOT；有 child / 无 child | 主调用正常发送原图；独立父上下文按原顺序输出缺图文本标记 | 第 8.1 节 install 前投影；不新增 media refs |
@@ -514,7 +514,7 @@ snapshot 顶层固定为 `continuation`、`earlier_context_summary`、`recent_hu
 
 Tier 3 保持原约定：纯文本 B 且执行 P、截短 projection 前的冻结有效历史含 Image 时，recent 固定为空；不能因替换后或较短 projection 中已无 Image 而恢复窗口。其他场景按步骤 2–3 一次选定 recent。以上均是本次 attempt 的确定规则，不改全局 ordinary policy，也不新增用户配置项。每档只组装其唯一 successor，失败沿第 8.6 节处理。recent=0 不删除当前 active、未被摘要覆盖的 mandatory historical 或不可跨越的 canonical suffix。
 
-Tier 2 的图片检查只针对按原规则实际选中的请求，在任何文本投影前判定真实 Image part；不是扫描 UI 上最后三条消息，也不因图片出现在窗口外而清空窗口。窗口原本为空就保持为空，不足三条按实际条数处理；普通 Text("[图片已省略]") 仍是文字。
+Tier 2 的图片检查只针对按原规则实际选中的请求，在任何文本投影前判定真实 Image part；不是扫描 UI 上最后三条消息，也不因图片出现在窗口外而清空窗口。窗口原本为空就保持为空，不足三条按实际条数处理；普通 Text("[Image omitted]") 仍是文字。
 
 ### 8.5 Snapshot 与 projection 如何真正发送图片
 
@@ -528,7 +528,7 @@ Tier 2 的图片检查只针对按原规则实际选中的请求，在任何文�
 - **内容与来源：** 每个 Text 原值用 `display_json(text)` 作为 JSON 字符串展示，Image 保留真实 part 和原始 bytes，原 part 顺序不变。其他合法来源先复用原 kind-specific lowering/wrapper，再对其 Text 使用相同引用规则，保留 PLAN/terminal 等语义。projection 的 assistant public text 与工具证据同样引用；空文本展示为 JSON 空字符串。notice 明确这些是引用内容，分段 role 描述原发言角色，不把历史 assistant、工具证据或非 HUMAN 请求提升为新用户指令。
 - **统一位置指引：** `SNAPSHOT_EXACT` 一律指向 section=active 的内容；`CANONICAL_SUFFIX` 继续指向 snapshot 后的原 canonical 请求；AWAIT_NEXT_USER、RESUME 和较新请求优先的语义保持。同步更新 lowering 的 snapshot notice、handoff instruction 和 summary request 中的旧展示字段指引，历史请求指向相应 section，不再引用 active_request.text 或已退出展示的字段；不因有无图片切换。内部 exact attribution 与唯一 placement 校验不依赖模型读取标签或数据库 ID。
 
-第 8.9 节在渲染前将图片变为普通 Text("[图片已省略]")，随后使用同一 renderer，不切回旧 JSON 展示。最终全部为 Text 时仍按第 5 节 adapter 规则连接成字符串，含 Image 时使用标准 parts 数组；这是相同展示结构的协议 lowering。C 按实际 canonical body 与图片展开计量，实际展示文字、标签及图片按 D2 的 L/W 和 D1 计量，不额外附一份完整 carrier JSON。
+第 8.9 节在渲染前将图片变为普通 Text("[Image omitted]")，随后使用同一 renderer，不切回旧 JSON 展示。最终全部为 Text 时仍按第 5 节 adapter 规则连接成字符串，含 Image 时使用标准 parts 数组；这是相同展示结构的协议 lowering。C 按实际 canonical body 与图片展开计量，实际展示文字、标签及图片按 D2 的 L/W 和 D1 计量，不额外附一份完整 carrier JSON。
 
 引用/转义只改变本节的展示，不修改 canonical Text、命令身份、Hook/Skill 投影、普通消息或 P 的输入输出；typed exact proof 比较原内容，wire 校验消费同一 renderer 的实际输出。只有 renderer 自己生成的裸开闭标记构成分段，原文中的同名标签和 JSON key 仍是数据。
 
@@ -544,7 +544,7 @@ Tier 2 的图片检查只针对按原规则实际选中的请求，在任何文�
 | --- | --- |
 | Tier 1：直接切换 | B 能接纳当前完整输入时直接冷构建。若 B 是纯文本且有效历史有图片，即使 token/bytes 足够，也进入 Tier 2；不在 Tier 1 就地删图 |
 | Tier 2：原模型总结 | A 沿原已安装前缀总结，source 中的图片照常给 A。先按现有规则选最近最多三条原话；纯文本 B 且所选窗口含 Image 时，将整个 recent 置空，否则保留原窗口。较早的历史图片不影响纯文字窗口的保留。A summary 后构造唯一 B successor，完整可执行就采用 |
-| Tier 3：新模型总结 | A 不可用，或 Tier 2 按原允许分类未能形成合法 B successor 时，由 B 读取当前有效历史的 destination projection 并总结。B 为纯文本时，所选历史中每个 Image 原位变成普通 Text("[图片已省略]")；该档纯文本图片交接 recent 仍固定为 0。B summary 后构造唯一 successor，检查通过才采用 |
+| Tier 3：新模型总结 | A 不可用，或 Tier 2 按原允许分类未能形成合法 B successor 时，由 B 读取当前有效历史的 destination projection 并总结。B 为纯文本时，所选历史中每个 Image 原位变成普通 Text("[Image omitted]")；该档纯文本图片交接 recent 仍固定为 0。B summary 后构造唯一 successor，检查通过才采用 |
 
 **recent=0 只关闭旧用户原话窗口，不删本次请求，也不把尚未总结的必要历史假装已经总结。** Tier 2 的 tool-group ceiling 仍为 0；safe cut、A summary source 和 mandatory suffix 继续沿原 planner。A 实际覆盖 predecessor base 后可按原规则清空已覆盖 historical；若未覆盖的 historical/suffix 仍带图，唯一 B successor 仍不能通过模态校验，此时进入 Tier 3，不偷偷删除它们，也不循环试不同 recent 数量。
 
@@ -580,7 +580,7 @@ Fork 是历史复制，不为适配 child 模型或 G 余量预先压缩/删图�
 
 ```text
 P(Text(t))    = Text(t)
-P(Image(...)) = Text("[图片已省略]")
+P(Image(...)) = Text("[Image omitted]")
 P(parts)      = 按原顺序逐项应用，不合并或去重
 ```
 
@@ -1199,4 +1199,4 @@ Pulsara 的 immutable canonical 内容、只读 exact-confirm、source-bound com
 
 普通 compact 中，已经被 summary 覆盖的旧工具图片可以按第 8.2 节退出 successor；这不是丢图。protected tail 中保留的完整工具组仍须连同所有图片保留。真实 provider 验收证明 summary 输入看到了工具图片，cold/fork 在 compact 前从 canonical 工具结果恢复图片；protected-tail 不可拆分与保留行为由相邻 compact 合同测试证明，不把“所有已摘要图片永久再注入 successor”作为通过条件。
 
-后续待实施的 [已知图片引用重读规格](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 允许模型拿已知引用调用同一 `view_image` 读取 canonical 图片；不增加历史图片查询、自动发现或全量引用保留。该扩展尚未实施，不属于上述验收结论，也不改变本文 D1/D2 公式与参数。
+[已知图片引用重读规格](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 已完成实施与独立验收：模型可拿实际 provider 图片旁的已知引用调用同一 `view_image` 读取本 session 的 canonical 图片；没有增加历史图片查询、自动发现或全量引用保留。该规格 §14 记录新的 PostgreSQL、Chat、Responses 与浏览器证据；上述本地 path 工具旧验收不替代引用重读验收，本文 D1/D2 公式与参数未改变。

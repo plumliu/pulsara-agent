@@ -542,13 +542,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_capability": _descriptor(
         name="manage_capability",
         description=(
-            "Manage owned local MCP connections and Plugin instances in USER or the "
-            "current WORKSPACE scope. Submit a public native candidate or omit missing "
-            "configuration to let the user complete the shared editor. Never request "
+            "Manage local MCP connections and Plugins in USER or the current WORKSPACE "
+            "scope. Supply non-secret configuration fields, or leave missing values "
+            "for the user to complete in the editor. Never request "
             "or include API keys, secret values or tokens. Expected guards may be "
             "omitted for fresh inspection, but must not be guessed. Plugin install "
-            "always starts disabled; enable always requires user review. ROOT only, "
-            "available in every permission mode. Await settlement; after RELOADED, "
+            "always starts disabled; enable always requires user review. Main agent only, "
+            "available in every permission mode. Wait for the result; after RELOADED, "
             "verify with list/inspect without routinely calling reload_capabilities. "
             "APPLIED reports the completed change, not whether a user form appeared: "
             "the runtime may have collected user confirmation while this call was pending."
@@ -562,10 +562,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "reload_capabilities": _descriptor(
         name="reload_capabilities",
         description=(
-            "Reload this running Host's enabled local capability sources for future "
+            "Refresh enabled local capability sources for future "
             "Skill, MCP, and Hook use. This does not install, enable, trust, or "
-            "remove a package or configuration and does not rewrite the same-epoch "
-            "SYSTEM, tool definitions, or prior messages. It is ROOT-only while "
+            "remove a package or configuration, or replace the current instructions, "
+            "tool list, or earlier messages. Only the main agent may call it while "
             "bypass-permissions mode is active."
         ),
         input_schema=object_schema(properties={}, required=[]),
@@ -577,11 +577,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "reload_hooks": _descriptor(
         name="reload_hooks",
         description=(
-            "Reload this running Host's USER and exact-workspace Hook definitions "
-            "and trust dispositions for future lifecycle events. This does not edit "
+            "Refresh USER and current-workspace Hook definitions and their trust "
+            "settings for future events. This does not edit "
             "or trust configuration, does not rerun prior Hooks, and does not change "
-            "the installed SYSTEM, tool definitions, or earlier messages. It is "
-            "available only in the ROOT conversation while bypass-permissions mode "
+            "the current instructions, tool list, or earlier messages. It is "
+            "available only to the main agent while bypass-permissions mode "
             "is active."
         ),
         input_schema=object_schema(properties={}, required=[]),
@@ -985,10 +985,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "view_image": _descriptor(
         name="view_image",
         description=(
-            "Read one local PNG, JPEG, or static WebP image and make its exact "
-            "contents visible to the model. Relative paths start in the current "
-            "workspace. Use multiple view_image calls for multiple images. URLs, "
-            "directories, PDFs, animated images, and multi-frame images are unsupported."
+            "Read one PNG, JPEG, or static WebP image and make its exact contents "
+            "visible to the model. Use path for a local file; relative paths start in "
+            "the current workspace. Use image_ref only to reread an exact reference "
+            "already shown beside an image in this session; copy it unchanged and do "
+            "not guess or enumerate references. Provide exactly one source. Use multiple "
+            "view_image calls for multiple images. URLs, directories, PDFs, animated "
+            "images, multi-frame images, resize, and detail are unsupported."
         ),
         input_schema=object_schema(
             properties={
@@ -996,9 +999,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "string",
                     "minLength": 1,
                     "description": "Local image path to read.",
-                }
+                },
+                "image_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Exact sha256: image reference previously shown in this session."
+                    ),
+                },
             },
-            required=["path"],
+            required=[],
         ),
         is_read_only=True,
         is_concurrency_safe=True,

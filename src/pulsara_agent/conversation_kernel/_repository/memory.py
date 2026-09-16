@@ -546,7 +546,7 @@ class _MemoryOperations(_MemoryManagementOperations):
                 item = FrozenMemoryGovernanceSourceItem(
                     source_entry_id=str(row["id"]),
                     chronology=MemoryGovernanceChronology.PRODUCER_OUTPUT,
-                    source_product_label="助手回复上下文（正文已缩减）",
+                    source_product_label="Assistant response context (text shortened)",
                     evidence_role=MemoryGovernanceEvidenceRole.ASSISTANT_CONTEXT,
                     public_kind=_memory_governance_entry_product_kind(kind),
                     blocks=(
@@ -2750,32 +2750,32 @@ def _memory_governance_source_role_and_label(
         if chronology is MemoryGovernanceChronology.AFTER_PROPOSAL:
             return (
                 MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN,
-                "候选提出后的用户原话",
+                "User input after the proposal",
             )
-        return MemoryGovernanceEvidenceRole.HUMAN_ASSERTION, "用户原话"
+        return MemoryGovernanceEvidenceRole.HUMAN_ASSERTION, "User input"
     if kind in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
-        return MemoryGovernanceEvidenceRole.ASSISTANT_CONTEXT, "助手回复上下文"
+        return MemoryGovernanceEvidenceRole.ASSISTANT_CONTEXT, "Assistant response context"
     if kind == "TOOL_RESULT":
-        return MemoryGovernanceEvidenceRole.TOOL_CONTEXT_ONLY, "普通工具结果上下文"
+        return MemoryGovernanceEvidenceRole.TOOL_CONTEXT_ONLY, "Tool result context"
     if kind == "PLAN_CONTINUATION":
-        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "计划运行时上下文"
+        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "Planning context"
     if kind == "INTER_AGENT_MESSAGE":
-        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "代理协作上下文"
+        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "Agent collaboration context"
     if kind == "TERMINAL_OBSERVATION":
-        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "运行时终止观察"
-    return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "非用户运行时上下文"
+        return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "Terminal process observation"
+    return MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT, "Non-user runtime context"
 
 
 def _memory_governance_entry_product_kind(kind: str) -> str:
     return {
-        "USER_MESSAGE": "用户消息",
-        "USER_STEER": "用户补充",
-        "ASSISTANT_MESSAGE": "助手回复",
-        "ASSISTANT_TOOL_REQUEST": "助手工具请求回复",
-        "TOOL_RESULT": "工具结果",
-        "TERMINAL_OBSERVATION": "终止观察",
-        "PLAN_CONTINUATION": "计划运行时续接",
-        "INTER_AGENT_MESSAGE": "代理协作消息",
+        "USER_MESSAGE": "User message",
+        "USER_STEER": "User follow-up",
+        "ASSISTANT_MESSAGE": "Assistant response",
+        "ASSISTANT_TOOL_REQUEST": "Assistant tool request",
+        "TOOL_RESULT": "Tool result",
+        "TERMINAL_OBSERVATION": "Terminal process observation",
+        "PLAN_CONTINUATION": "Planning continuation",
+        "INTER_AGENT_MESSAGE": "Agent collaboration message",
     }[kind]
 
 
@@ -2789,9 +2789,9 @@ def _memory_governance_incomplete_human_marker(
         source_entry_id=str(row["id"]),
         chronology=chronology,
         source_product_label=(
-            "候选提出后的用户原话（来源不完整）"
+            "User input after the proposal (incomplete source)"
             if after
-            else "用户原话（来源不完整）"
+            else "User input (incomplete source)"
         ),
         evidence_role=(
             MemoryGovernanceEvidenceRole.POST_PROPOSAL_HUMAN

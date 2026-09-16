@@ -43,7 +43,10 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
     content_has_image,
 )
-from pulsara_agent.model_input.lowering import lower_retained_request_content
+from pulsara_agent.model_input.lowering import (
+    image_reference_part,
+    lower_retained_request_content,
+)
 from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
@@ -97,7 +100,7 @@ _DESTINATION_PROJECTION_NOTICE = (
     "not live replay."
 )
 
-TEXT_ONLY_IMAGE_OMISSION_TEXT = "[图片已省略]"
+TEXT_ONLY_IMAGE_OMISSION_TEXT = "[Image omitted]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -722,12 +725,11 @@ def _render_destination_projection(
                 "\n[PULSARA_RETAINED_CONTENT " + display_json(value) + "]\n"
             )
         )
-        rendered_parts.extend(
-            LLMTextPart(display_json(part.text))
-            if isinstance(part, LLMTextPart)
-            else part
-            for part in content
-        )
+        for part in content:
+            if isinstance(part, LLMTextPart):
+                rendered_parts.append(LLMTextPart(display_json(part.text)))
+            else:
+                rendered_parts.extend((image_reference_part(part), part))
         rendered_parts.append(LLMTextPart("\n[/PULSARA_RETAINED_CONTENT]\n"))
 
     if prior_handoff is not None:

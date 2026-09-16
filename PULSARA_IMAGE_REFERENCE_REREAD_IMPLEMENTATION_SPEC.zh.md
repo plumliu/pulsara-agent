@@ -1,6 +1,6 @@
 # Pulsara 已知图片引用重读实施规范
 
-状态：待实施。日期：2026-09-16。本次交付仅为实施规格，不表示下述扩展已经编码或验收。
+状态：已实施并完成 R1–R4 验收。日期：2026-09-16。实际代码、验证范围与证据入口见 §14。
 
 ## 1. 产品目标与范围
 
@@ -14,7 +14,7 @@
 
 用户明确约定 → [AGENTS.md](AGENTS.md) → 本规格中明确扩展的部分 → [本地图片工具实施规范](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md) → [图片输入设计](PULSARA_KERNEL_IMAGE_INPUT_AND_OPENAI_WIRE_ADAPTER_DESIGN.zh.md) 中仍适用的 D1–D4 与前端规则。
 
-代码用于确定已有 owner 和修改落点。本规格尚未实施，旧文档的“已经通过”不能当作本扩展的验收证据。
+代码用于确定已有 owner 和修改落点。§14 只采用本扩展实施后的新证据；旧图片链路的既有验收不替代本扩展验收。
 
 ### 1.2 本次保留与扩展
 
@@ -241,7 +241,7 @@ path/ref 混合的连续 view_image 段复用同一个 executor 有限窗口；�
 
 Tier 3 选择支持图片的 destination 模型时，`_render_destination_projection` 对所选用户内容与工具证据中的实际 Image 按 §5.1 加引用标签，再形成原 summary 输入；unknown 模态仍遵守原判定，不擅自执行 P。普通 lowering、工具 carrier 和 destination renderer 共用 formatter，不能让交接路径成为无标签图片的例外。
 
-沿冻结 Tier 1/2/3 和 Image → Text("[图片已省略]") 行为处理实际内容。工具读取能力不能绕过目标模态：切到已知纯文本模型时，view_image 的两种来源都拒绝返回图片。
+沿冻结 Tier 1/2/3 和 Image → Text("[Image omitted]") 行为处理实际内容。工具读取能力不能绕过目标模态：切到已知纯文本模型时，view_image 的两种来源都拒绝返回图片。
 
 summary 自然语言中仍然存在的引用文本不必强行删除，它只是文本；也不因此自动取图。目的投影 P 移除 Image 后，不单独为它生成新的图片标签。后来切回支持图片的模型，若引用仍已知且 owner 仍存在，可显式重读。
 
@@ -333,6 +333,20 @@ summary 自然语言中仍然存在的引用文本不必强行删除，它只是
 完成时必须同时成立：图片拥有可复制的已知引用；模型通过同一 view_image 可以重读本 session 的已保存图片；两种 API 走同一内容与接纳路径；引用/标签全部计费；prefix、权限、GC、取消与模型切换合同保持；没有历史图片发现能力或附带的长期存储机制。
 
 实现后更新本稿状态、原图片设计实施状态与本地图片工具规格中被本稿扩展的 path-only 表述；仅修改明确变更的范围，D1/D2 公式与参数不动。报告区分真实 provider、PostgreSQL、确定性测试和仅代码检查的证据，未实跑项明确列出。写完规格、单个 helper 可运行或旧验收通过，都不等于本功能完成。
+
+## 14. 实施与验收记录（2026-09-16）
+
+追加浏览器验收：`output/browser-image-e2e-20260916-prompts/report.zh.md` 记录了当前提示词下的 DeepSeek Responses / Chat 三格式本地读取、原路径移走后的引用重读、已采用压缩后从零图片上下文重读、刷新/大图/放大展示与跨会话拒绝。此次发现 `KernelSessionIO.run_tool_invocation` 的按时异常在等待阶段提前抛出，绕过已有结果分类，使引用不可用被泛化为系统错误；现已让异常进入原有精确结果分类，由原工具 owner 返回 `IMAGE_REFERENCE_UNAVAILABLE` 或 `IMAGE_RESOURCE_EXCEEDED`。未增加协议或存储路径。两项工具错误回归及一项物理异常回归补齐，50 项相邻测试通过；修复后新进程的两种 API 正向链路与跨会话负向链路均重新通过。具体浏览器范围与未覆盖项以该报告为准。
+
+R1–R4 已沿单一路径完成。`view_image` 的公共参数解析现在产生 path/ref 闭合来源；引用读取由 session/workspace 绑定的 canonical 只读端口在同一只读事务中选定 owner、校验正文/descriptor/ref 并 exact read 原 blob。runtime 继续复用原 Hook、权限、attempt、模态、逐调用额度、deadline、physical drain、typed `TOOL_RESULT` 接纳与 settlement。普通 USER、snapshot、工具 carrier 和 Tier 3 destination projection 共用图片引用 formatter；本稿 §9 指定的三个契约版本已经 hard cut，canonical `pulsara.prompt/v1` 与 snapshot body 契约未改变。clean-v0 schema、durable event/relation/job/registry 数量均未增加。
+
+确定性与 PostgreSQL 证据：本轮主相邻 Python 测试 319 项通过，覆盖 path/ref 参数、同段并发与屏障、known/unknown/纯文本模态、ordinary/late carrier、引用标签与正式报价、queue/orphan/跨 session 拒绝、稳定 owner 选择后损坏不 fallback、fork/cut/父 snapshot 删除、ordinary/Tier 3 compaction 以及 Chat/Responses 最终 materialization；规格点名的输入、生命周期、前缀连续性、公开工具投影和 artifact 相邻回归另有 122 项通过；架构与 fingerprint subtraction 检查 23 项通过。frontend 的相邻 adapter/component 回归 84 项通过，继续证明 canonical 标签不进入页面；新的真实浏览器证据见下文。
+
+真实 provider 使用 `LocalSettingsStore` 与 `require_pulsara_home()` 只读取得保存配置，并使用一次性本地 PostgreSQL。Chat 记录位于 `output/image-reference-reread/chat-20260916-r2/report.json`，Responses 使用保存的官方 DeepSeek 配置，记录位于 `output/image-reference-reread/responses-deepseek-20260916-r1/report.json`。两次均经正式 Host/compiler/adapter/HTTP 路径各完成 18 次真实调用，报告中的 10 项检查全部为真；覆盖 provider 标签、path 后按引用重读、path/ref 混合批次、删除原文件后重放、cold/fork、真实普通 compact 后图片退出 successor 再按显式引用重读，以及 actual HTTP 与 frozen materialization 一致。首次 Chat 运行只因模型把可见数字返回为 JSON number 而非 string 未通过 harness 的表示断言，修正 harness 比较后复验通过；没有为 provider 增加分支或重试语义。
+
+新的浏览器回归位于 `output/playwright/image-reference-reread-20260916/report.json`。真实 Chat 会话先调用 path 来源，再只用模型刚获得的 `image_ref` 调用同一工具，两个 canonical `TOOL_RESULT` 的 digest 相同，模型正确回答测试图数字。刷新后第二个工具卡仍可展开原大图；页面没有显示派生 `pulsara_image` 标签、digest、Figure 或成功正文。报告 8 项检查全部为真，配套 AX snapshot 与截图保存在同目录；一次性数据库在服务退出后删除。
+
+真实 provider 没有逐项实跑所有故障注入：跨 session/orphan/pending 拒绝、选定 owner 损坏或联合读取超界不 fallback、取消/Host close、纯文本目标、Tier 3 模型交接和 fork cut 由定向自动化测试证明。该证据边界不改变产品限制：没有引用时仍无历史图片查询、搜索、分页、附件目录或自动发现能力。
 
 ## 附录：开源调研依据与本轮取舍
 

@@ -58,30 +58,59 @@ TEMPORAL HANDOFF RULES:
   cancellation, or replacement supersedes conflicting earlier work; do not turn
   superseded work back into a next step.
 
-你正在执行一次CONTEXT CHECKPOINT COMPACTION。请为稍后继续同一任务的Agent生成一份忠实、紧凑但信息充分的语义交接，使它不必重新猜测已经完成的工作、用户意图或当前诊断。
+You are performing CONTEXT CHECKPOINT COMPACTION. Produce a faithful, compact but
+sufficiently informative semantic handoff for the agent that will continue this same
+task, so it does not have to guess what has been completed, what the user intends, or
+what the current diagnosis is.
 
-请在适用时覆盖以下内容；这些是内容指导，不是固定标题或输出模板：
-- 用户当前的主要目标、最新纠正、明确约束、scope边界、偏好和不可违反的决定；
-- 已完成的工作、关键技术或架构决定、采用这些决定的原因，以及确实通过的验证；
-- 对继续工作真正必要的文件路径、symbol、命令、配置、数据、示例或opaque handle；
-- 遇到的错误、失败方案、已确认根因、已经尝试或完成的修复，以及仍在评估的假设；
-- 尚未完成的任务、正在进行的工作、当前精确诊断和最直接的下一步。
+Cover the following where applicable. These are content guidelines, not required
+headings or an output template:
+- The user's current main goal, latest corrections, explicit constraints, scope
+  boundaries, preferences, and decisions that must be respected.
+- Completed work, key technical or architectural decisions, the reasons for those
+  decisions, and verification that actually passed.
+- File paths, symbols, commands, configuration, data, examples, or opaque handles
+  genuinely needed to continue the work.
+- Errors encountered, failed approaches, confirmed root causes, fixes attempted or
+  completed, and hypotheses still being evaluated.
+- Unfinished tasks, work in progress, the precise current diagnosis, and the most
+  direct next step.
 
-准确性与继承规则：
-- 特别重视用户的后续纠正和反馈；当前canonical内容优先于更早的描述；
-- 若上下文中已有旧的compaction summary，请继承其中仍相关的语义，不要让重要信息在重复压缩中丢失；
-- retained_historical_requests 是已结算历史材料，按历史语义吸收到摘要，不将它恢复成当前任务；
-- 明确区分已完成、已验证、仅尝试、失败、待确认和待执行；不要把计划写成事实，也不要发明用户没有要求的工作；
-- 优先写能让后续Agent继续行动的精确信息。保持经济，避免大段逐字代码、重复消息和无关历史，但不要为了短而遗漏关键约束或当前状态。
+Accuracy and inheritance rules:
+- Pay particular attention to the user's later corrections and feedback. Current
+  canonical content takes precedence over earlier descriptions.
+- If earlier compaction summaries are present, carry forward their still-relevant
+  meaning so that important information is not lost through repeated compaction.
+- retained_historical_requests is settled historical material. Incorporate it as
+  history in the summary; do not reinstate it as the current task.
+- Clearly distinguish completed, verified, merely attempted, failed, awaiting
+  confirmation, and not-yet-executed work. Do not turn plans into facts or invent work
+  the user did not request.
+- Prioritize precise information that lets the next agent continue acting. Be
+  economical: avoid long verbatim code, repeated messages, and irrelevant history,
+  but do not omit key constraints or current status merely to be brief.
 
-Runtime会在交接后另外提供最近真实用户原话、受保护的最近tool group，以及当前工具、权限、Plan、MCP、Skill、memory和运行任务等动态事实。因此：
-- 不要逐条复述全部用户消息或复制最近原话；
-- 不要枚举或猜测动态目录、catalog或当前Runtime状态；
-- 不要复制Skill正文；
-- 只有继续明确pending工作确实需要时，才保留一个已经出现且可操作的精确引用或handle；
-- 不要声称某项运行时状态在交接后仍然current。
+After the handoff, selected recent user quotes and tool results may be supplied
+separately, along with available current information about tools, permissions, Plan,
+MCP, Skills, memory, and running tasks. Therefore:
+- Still preserve the user intent, constraints, conclusions, and tool outcomes needed
+  to continue. Do not assume quotes or tool results will be retained separately in full.
+- Extract the necessary information rather than repeating every user message or
+  copying whole stretches of history.
+- Do not enumerate or guess dynamic directories, catalogs, or current runtime state.
+- Do not copy Skill bodies.
+- Retain an exact previously seen, usable reference or handle only when continuing
+  explicitly pending work genuinely requires it.
+- Only when continuing the task requires viewing an image again, copy its previously
+  seen image_ref unchanged and briefly state its purpose. Do not compute, guess, or
+  enumerate all image references.
+- Do not claim that a runtime status will still be current after the handoff.
 
-先在内部组织和核对信息，不要输出analysis或思考过程。最终只输出语义交接正文；可以自然使用短段落、项目符号或小标题，但没有必需的标题、编号、XML标签或固定格式。不要问候，不要向用户作答，不要把本指令当成用户的新需求，也不要在正文后添加closing text。
+Organize and check the information internally first; do not output analysis or your
+reasoning process. Output only the semantic handoff body. You may naturally use short
+paragraphs, bullets, or headings, but no headings, numbering, XML tags, or fixed format
+are mandatory. Do not greet or answer the user, treat this instruction as a new user
+request, or append closing remarks after the handoff.
 """
 
 _SUMMARY_REQUEST_SUFFIX = """

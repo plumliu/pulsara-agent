@@ -75,6 +75,36 @@ def wire_images(projection, api):
     return result
 
 
+def wire_image_digests(record):
+    return tuple(
+        LLMImagePart(
+            url.split(";", 1)[0].removeprefix("data:"),
+            base64.b64decode(url.split(",", 1)[1], validate=True),
+            1,
+            1,
+        ).content_digest
+        for url in wire_images(record["projection"], record["wire_api"])
+    )
+
+
+def wire_image_references(record):
+    key = "messages" if record["wire_api"] == "openai_chat_completions" else "input"
+    references = []
+    for item in record["projection"].get(key, []):
+        content = item.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for index, part in enumerate(content):
+            if part.get("type") not in {"image_url", "input_image"}:
+                continue
+            assert index > 0
+            label = content[index - 1]
+            assert label.get("type") in {"text", "input_text"}
+            payload = json.loads(label["text"])
+            references.append(payload["pulsara_image"]["image_ref"])
+    return tuple(references)
+
+
 class ObservedTransport:
     def __init__(self, delegate, report):
         self.delegate = delegate
@@ -276,10 +306,13 @@ def tool_image_database_evidence(session):
         rows = connection.execute(
             """
             SELECT e.id, e.content_media_type, e.content_codec,
-                   count(r.ref_ordinal) AS ref_count
+                   count(r.ref_ordinal) AS ref_count,
+                   array_agg(b.logical_digest ORDER BY r.ref_ordinal) AS image_refs
             FROM pulsara_v3.transcript_entries AS e
             LEFT JOIN pulsara_v3.canonical_image_refs AS r
               ON r.session_id=e.session_id AND r.transcript_entry_id=e.id
+            LEFT JOIN pulsara_v3.blobs AS b
+              ON b.workspace_id=r.workspace_id AND b.id=r.blob_id
             WHERE e.session_id=%s AND e.entry_kind='TOOL_RESULT'
             GROUP BY e.id, e.entry_sequence, e.content_media_type, e.content_codec
             HAVING count(r.ref_ordinal) > 0
@@ -293,6 +326,7 @@ def tool_image_database_evidence(session):
             "media_type": row[1],
             "codec": row[2],
             "ref_count": row[3],
+            "image_refs": row[4],
         }
         for row in rows
     ]
@@ -379,6 +413,24 @@ async def run(args, report, saved):
             )
             assert first.strip() == fixtures[0]["number"], first
 
+            fixture_images = tuple(
+                LLMImagePart(
+                    "image/png", Path(item["path"]).read_bytes(), 640, 480
+                )
+                for item in fixtures
+            )
+            fixture_refs = tuple(image.content_digest for image in fixture_images)
+            pure_calls = [
+                item
+                for item in report["calls"]
+                if item["phase"] == "pure_image"
+                and item["purpose"] == "agent_model_loop"
+            ]
+            assert pure_calls
+            assert wire_image_references(pure_calls[0]) == (fixture_refs[0],)
+            assert wire_image_digests(pure_calls[0]) == (fixture_refs[0],)
+            report["checks"]["user_image_wire_has_exact_reference"] = True
+
             def image(i):
                 return PromptImagePart(
                     Path(fixtures[i]["path"]).read_bytes(), "image/png"
@@ -440,12 +492,47 @@ async def run(args, report, saved):
             assert image_rows[0]["media_type"] == "application/vnd.pulsara.prompt+json"
             report["checks"]["view_image_typed_result_and_single_wire_carrier"] = True
             report["tool_image_database_evidence"] = image_rows
+            reference_reply = await turn(
+                "view_image_reference",
+                PromptContent.text(
+                    "Call view_image exactly once with this exact image_ref: "
+                    f"{fixture_refs[0]}. After the tool result, reply with only "
+                    "the three-digit number printed in that image. Do not use other tools."
+                ),
+            )
+            assert reference_reply.strip() == fixtures[0]["number"], reference_reply
+            reference_calls = [
+                item
+                for item in report["calls"]
+                if item["phase"] == "view_image_reference"
+                and item["purpose"] == "agent_model_loop"
+            ]
+            assert len(reference_calls) >= 2
+            reference_tool_calls = [
+                block
+                for block in reference_calls[0]["normalized_blocks"]
+                if block.get("kind") == "tool_call"
+                and block.get("tool_name") == "view_image"
+            ]
+            assert len(reference_tool_calls) == 1
+            assert json.loads(reference_tool_calls[0]["arguments"]) == {
+                "image_ref": fixture_refs[0]
+            }
+            reference_carriers = tool_image_carriers(reference_calls[-1])
+            assert len(reference_carriers) == 2
+            assert wire_image_references(reference_calls[-1])[-1] == fixture_refs[0]
+            reference_rows = await asyncio.to_thread(
+                tool_image_database_evidence, session
+            )
+            assert len(reference_rows) == 2
+            assert reference_rows[-1]["image_refs"] == [fixture_refs[0]]
+            report["checks"]["known_reference_tool_reread"] = True
             multi_reply = await turn(
                 "view_image_parallel_mixed",
                 PromptContent.text(
                     "In one assistant tool-call batch, call view_image exactly once "
-                    f"for each of these three paths, in this order: {workspace_card}, "
-                    f"{missing_card}, {workspace_card_two}. After all three results, "
+                    f"for each of these three sources, in this order: path {workspace_card}, "
+                    f"path {missing_card}, image_ref {fixture_refs[1]}. After all three results, "
                     "reply with a compact JSON object containing the two three-digit "
                     "numbers under keys first and second, and the string failed under "
                     "key missing. Do not use other tools."
@@ -477,6 +564,11 @@ async def run(args, report, saved):
                 and block.get("tool_name") == "view_image"
             ]
             assert len(first_batch) == 3, first_batch
+            assert [json.loads(block["arguments"]) for block in first_batch] == [
+                {"path": str(workspace_card)},
+                {"path": str(missing_card)},
+                {"image_ref": fixture_refs[1]},
+            ]
             before_carriers = tool_image_carriers(multi_calls[0])
             carriers = tool_image_carriers(multi_calls[-1])
             assert len(carriers) == len(before_carriers) + 1, carriers
@@ -489,7 +581,7 @@ async def run(args, report, saved):
             multi_image_rows = await asyncio.to_thread(
                 tool_image_database_evidence, session
             )
-            assert len(multi_image_rows) == 3, multi_image_rows
+            assert len(multi_image_rows) == 4, multi_image_rows
             workspace_card.unlink()
             workspace_card_two.unlink()
             retained_reply = await turn(
@@ -507,7 +599,7 @@ async def run(args, report, saved):
                 .removesuffix("```")
                 .strip()
             )
-            assert retained_value == [
+            assert [str(value) for value in retained_value] == [
                 fixtures[0]["number"],
                 fixtures[1]["number"],
             ], retained_value
@@ -521,8 +613,9 @@ async def run(args, report, saved):
             cold_reply = await turn(
                 "cold_resume",
                 PromptContent.text(
-                    "Read the retained view_image result whose source ends in "
-                    "view-card-two.png and reply with only its three-digit number."
+                    "Without calling a tool, read the retained view_image result whose "
+                    f"source image_ref is {fixture_refs[1]} and reply with only its "
+                    "three-digit number."
                 ),
                 session,
             )
@@ -541,7 +634,7 @@ async def run(args, report, saved):
             child_image_rows = await asyncio.to_thread(
                 tool_image_database_evidence, child
             )
-            assert len(child_image_rows) == 3, child_image_rows
+            assert len(child_image_rows) == 4, child_image_rows
             fork_reply = await turn(
                 "fork_after_parent_close",
                 PromptContent.text(
@@ -594,9 +687,38 @@ async def run(args, report, saved):
                 and item["purpose"] == "agent_model_loop"
             ]
             assert after
+            assert fixture_refs[0] not in wire_image_digests(after[-1])
             report["checks"]["summary_saw_images_and_compacted_successor_completed"] = (
                 True
             )
+
+            reread_reply = await turn(
+                "reference_after_compaction",
+                PromptContent.text(
+                    "The earlier image is no longer present in the active provider "
+                    "context. Call view_image exactly once with this exact image_ref: "
+                    f"{fixture_refs[0]}. Reply only with the three-digit number shown."
+                ),
+                session,
+            )
+            assert reread_reply.strip() == fixtures[0]["number"], reread_reply
+            reread_calls = [
+                item
+                for item in report["calls"]
+                if item["phase"] == "reference_after_compaction"
+                and item["purpose"] == "agent_model_loop"
+            ]
+            assert len(reread_calls) >= 2
+            assert json.loads(
+                next(
+                    block["arguments"]
+                    for block in reread_calls[0]["normalized_blocks"]
+                    if block.get("kind") == "tool_call"
+                    and block.get("tool_name") == "view_image"
+                )
+            ) == {"image_ref": fixture_refs[0]}
+            assert fixture_refs[0] in wire_image_digests(reread_calls[-1])
+            report["checks"]["known_reference_after_image_left_successor"] = True
 
             tool_reply = await turn(
                 "tool_followup",
@@ -678,7 +800,7 @@ def main():
     saved = LocalSettingsStore().read()
     scrub = secret_scrubber(saved)
     report = {
-        "schema": "kernel-image-input-k4-dogfood.v1",
+        "schema": "kernel-image-reference-reread-r4-dogfood.v1",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "package_path": str(Path(pulsara_agent.__file__).resolve()),
         "saved_home": str(require_pulsara_home()),

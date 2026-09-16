@@ -1643,6 +1643,8 @@ Round 3.1的pre-consumption planning phase必须把新增facts/source candidates
 
 ## 11. Sensitive-data、trust 与 product wording
 
+2026-09-16 文案修订：Pulsara 自写的模型指令主体和来源说明使用英文，中文示例与用户/外部内容保持原文。已知工具输入错误在既有 owner 内返回具体公开原因；终端无效游标使用 `INVALID_CURSOR` 并说明复制同一进程的游标或省略 `since_cursor`。未知只读异常仅说明未得到可靠结果，不输出 Python 异常类/消息，不据此断言物理操作未开始，也不默认指导重试。终端 `GAP`/`RETAINED_SNAPSHOT` 表示保留内容不完整；响应截断与日志淘汰不同，末尾 `output_cursor` 只用于后续增量，不能恢复此前省略的正文。恢复保留正文沿原 `artifact_read` 入口。子代理完成提示称为 worker final result，避免与终端输出混淆。无新增持久化、事件或恢复路径。
+
 ### 11.1 Public payload allowlist
 
 Previous outcome只允许：

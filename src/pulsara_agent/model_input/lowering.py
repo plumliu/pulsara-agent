@@ -97,6 +97,44 @@ class ProjectedToolResultPublicValue:
     body: str = ""
 
 
+def image_reference_digest_part(image_ref: str) -> LLMTextPart:
+    """Render one provider-only label from the canonical image digest value."""
+
+    if (
+        not isinstance(image_ref, str)
+        or not image_ref.startswith("sha256:")
+        or len(image_ref) != 71
+        or any(character not in "0123456789abcdef" for character in image_ref[7:])
+    ):
+        raise ValueError("image reference digest is invalid")
+    return LLMTextPart(
+        canonical_json_bytes(
+            {"pulsara_image": {"image_ref": image_ref}}
+        ).decode("utf-8")
+    )
+
+
+def image_reference_part(image: LLMImagePart) -> LLMTextPart:
+    """Render the single provider-only reference label for an image occurrence."""
+
+    if not isinstance(image, LLMImagePart):
+        raise TypeError("image reference label requires a validated image")
+    return image_reference_digest_part(image.content_digest)
+
+
+def image_referenced_content(
+    parts: tuple[LLMContentPart, ...],
+) -> tuple[LLMContentPart, ...]:
+    """Insert one deterministic provider-only label before every actual image."""
+
+    rendered: list[LLMContentPart] = []
+    for part in parts:
+        if isinstance(part, LLMImagePart):
+            rendered.append(image_reference_part(part))
+        rendered.append(part)
+    return tuple(rendered)
+
+
 def project_tool_result_public_value(
     item: FrozenProviderInputItem,
     *,
@@ -148,7 +186,11 @@ def lower_canonical_item(
         if not isinstance(item.content, tuple):
             raise TypeError("USER item content must contain typed parts")
         return LoweredCanonicalItem(
-            item, LLMMessage(role=MessageRole.USER, content=item.content)
+            item,
+            LLMMessage(
+                role=MessageRole.USER,
+                content=image_referenced_content(item.content),
+            ),
         )
     if kind in {
         FrozenProviderInputItemKind.TOOL_RESULT,
@@ -309,11 +351,10 @@ def compaction_snapshot_provider_content(
         metadata = display_json({"role": "user", "section": section})
         rendered.append(LLMTextPart(f"\n[PULSARA_RETAINED_CONTENT {metadata}]\n"))
         for part in lower_retained_request_content(request):
-            rendered.append(
-                LLMTextPart(display_json(part.text))
-                if isinstance(part, LLMTextPart)
-                else part
-            )
+            if isinstance(part, LLMTextPart):
+                rendered.append(LLMTextPart(display_json(part.text)))
+            else:
+                rendered.extend((image_reference_part(part), part))
         rendered.append(LLMTextPart("\n[/PULSARA_RETAINED_CONTENT]\n"))
     return tuple(rendered)
 
@@ -654,8 +695,9 @@ def _compact_tool_result_body(
             "\nIf the omitted content is necessary for the current task, read "
             "the retained artifact with artifact_read using artifact_id="
             + json.dumps(metadata.artifact_id, ensure_ascii=False)
-            + " and paginate with offset/limit; otherwise continue from the "
-            "visible result without opening the artifact."
+            + ", starting at offset_chars=0. While has_more is true, pass "
+            "next_offset_chars as offset_chars to read the next page. If the "
+            "visible result is sufficient, continue without opening the artifact."
             if readable_artifact
             else ""
         )
@@ -737,8 +779,9 @@ def _artifact_reference_body(item: FrozenProviderInputItem) -> str:
         + " If the omitted content is necessary for the current task, read the "
         "retained artifact with artifact_read using artifact_id="
         + json.dumps(metadata.artifact_id, ensure_ascii=False)
-        + " and paginate with offset/limit; otherwise continue from the visible "
-        "result without opening the artifact.\n"
+        + ", starting at offset_chars=0. While has_more is true, pass "
+        "next_offset_chars as offset_chars to read the next page. If the visible "
+        "result is sufficient, continue without opening the artifact.\n"
         "[/PULSARA_TOOL_RESULT_REFERENCE]"
     )
 
@@ -781,6 +824,9 @@ def _utf8_suffix(value: bytes, maximum: int) -> bytes:
 
 __all__ = [
     "decode_tool_result_observation",
+    "image_reference_digest_part",
+    "image_reference_part",
+    "image_referenced_content",
     "LoweredCanonicalItem",
     "LoweredToolResultVariant",
     "lower_canonical_item",

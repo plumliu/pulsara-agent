@@ -425,6 +425,32 @@ def test_round5_tool_watchdog_preserves_late_exact_return() -> None:
     asyncio.run(scenario())
 
 
+def test_round5_tool_on_time_exception_preserves_exact_outcome() -> None:
+    error = OSError("physical read failed")
+
+    def physical(*, deadline_monotonic: float) -> str:
+        del deadline_monotonic
+        raise error
+
+    async def scenario() -> None:
+        owner = KernelSessionIO(maximum_concurrency=1)
+        try:
+            for _ in range(2):
+                outcome = await owner.run_tool_invocation(
+                    physical, deadline_monotonic=monotonic() + 2
+                )
+                assert outcome.disposition is PhysicalToolInvocationDisposition.RAISED
+                assert outcome.timing is PhysicalToolInvocationTiming.ON_TIME
+                assert outcome.error is error
+                assert outcome.value is None
+                assert not outcome.caller_cancelled
+                assert outcome.observation is not None
+        finally:
+            await owner.aclose(deadline_monotonic=monotonic() + 1)
+
+    asyncio.run(scenario())
+
+
 def test_round5_tool_cancellation_callback_releases_physical_owner() -> None:
     entered = Event()
     release = Event()

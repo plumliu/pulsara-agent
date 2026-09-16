@@ -54,7 +54,7 @@ pulsara skills list --workspace <workspace-root>
 pulsara skills doctor --workspace <workspace-root>
 ```
 
-6. Report the physical destination and explain that filesystem changes are discovered at the next legal provider safe point; they do not retroactively change an already-open model request.
+6. Report the installation directory. Updated Skills can be discovered when Pulsara next prepares a model request; an already-running request is unchanged.
 
 Read `references/directory-contract.md` when the user needs the filesystem and race semantics explained.
 

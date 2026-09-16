@@ -130,7 +130,10 @@ from pulsara_agent.model_input.continuity import (
     SourceObservationPresence,
     encode_runtime_observation,
 )
-from pulsara_agent.model_input.lowering import lower_canonical_item
+from pulsara_agent.model_input.lowering import (
+    compaction_snapshot_provider_content,
+    lower_canonical_item,
+)
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
     freeze_provider_replay_manifest_cut,
@@ -492,13 +495,15 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     first_result = 'first exact result: }], "requested_tools": []'
     second_result = "second exact result"
     terminal_marker = "runtime observation remains typed destination history"
+    user_image = LLMImagePart("image/png", b"user-image", 4, 3)
+    tool_image = LLMImagePart("image/png", b"tool-image", 3, 2)
     items = (
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
             "entry:user:history",
             1,
             "turn:history",
-            (LLMTextPart(exact_user),),
+            (LLMTextPart(exact_user), user_image),
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         ),
             FrozenProviderInputItem(
@@ -533,7 +538,7 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             call_id="call:secret:first",
             body=first_result,
             call_ordinal=0,
-            image=LLMImagePart("image/png", b"tool-image", 3, 2),
+            image=tool_image,
         ),
         result(
             entry_id="entry:result:second",
@@ -605,7 +610,9 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         "read_file",
         "read_file",
     ]
-    rendered = join_text_content(projection.content)
+    rendered = "\n".join(
+        part.text for part in projection.content if isinstance(part, LLMTextPart)
+    )
     assert display_json(exact_user) in rendered
     assert display_json(exact_assistant) in rendered
     assert terminal_marker in rendered
@@ -614,6 +621,14 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     assert "secret_argument" not in rendered
     assert first_result not in rendered
     assert second_result not in rendered
+    user_reference = canonical_json_bytes(
+        {"pulsara_image": {"image_ref": user_image.content_digest}}
+    ).decode("utf-8")
+    tool_reference = canonical_json_bytes(
+        {"pulsara_image": {"image_ref": tool_image.content_digest}}
+    ).decode("utf-8")
+    assert rendered.count(user_reference) == 1
+    assert tool_reference not in rendered
 
     retained = retain_destination_tool_evidence(
         projection,
@@ -624,6 +639,8 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     )
     assert display_json(first_result) in retained_rendered
     assert display_json(second_result) not in retained_rendered
+    assert retained_rendered.count(user_reference) == 1
+    assert retained_rendered.count(tool_reference) == 1
     assert retained.eligible_evidence == (projection.eligible_evidence[1],)
 
     first_evidence = plan.units[0].entries[2].requested_tools[0]
@@ -641,7 +658,9 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         isinstance(part, LLMImagePart) for part in tier3_retained.content
     )
     tier3_text = join_text_content(tier3_retained.content)
-    assert tier3_text.count("[图片已省略]") == 1
+    assert tier3_text.count("[Image omitted]") == 2
+    assert user_reference not in tier3_text
+    assert tool_reference not in tier3_text
     assert display_json(first_result) in tier3_text
     assert display_json(second_result) not in tier3_text
 
@@ -864,6 +883,61 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
         )
 
 
+def test_snapshot_lowering_labels_active_recent_and_historical_images_once() -> None:
+    active_image = LLMImagePart("image/png", b"active-image", 4, 3)
+    recent_image = LLMImagePart("image/png", b"recent-image", 5, 4)
+    historical_image = LLMImagePart("image/png", b"historical-image", 6, 5)
+    carrier = build_compaction_snapshot_carrier(
+        summary=freeze_compaction_summary_output(
+            "summary", maximum_utf8_bytes=100
+        ),
+        recent_human_requests=(
+            FrozenRetainedHistoricalRequest(
+                FrozenProviderInputItemKind.USER,
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                FrozenPromptContent((LLMTextPart("recent"), recent_image)),
+            ),
+        ),
+        continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
+        active_request=FrozenCompactionActiveRequest(
+            entry_id="entry:active-image",
+            entry_sequence=7,
+            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
+            item_kind=FrozenProviderInputItemKind.USER,
+            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+            content=FrozenPromptContent((LLMTextPart("active"), active_image)),
+        ),
+        retained_historical_requests=(
+            FrozenRetainedHistoricalRequest(
+                FrozenProviderInputItemKind.USER,
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                FrozenPromptContent(
+                    (LLMTextPart("historical"), historical_image)
+                ),
+            ),
+        ),
+    )
+
+    lowered = compaction_snapshot_provider_content(carrier)
+    images = tuple(part for part in lowered if isinstance(part, LLMImagePart))
+    assert images == (active_image, recent_image, historical_image)
+    for index, part in enumerate(lowered):
+        if not isinstance(part, LLMImagePart):
+            continue
+        expected = canonical_json_bytes(
+            {"pulsara_image": {"image_ref": part.content_digest}}
+        ).decode("utf-8")
+        assert index > 0
+        assert lowered[index - 1] == LLMTextPart(expected)
+    labels = tuple(
+        part.text
+        for part in lowered
+        if isinstance(part, LLMTextPart)
+        and part.text.startswith('{"pulsara_image"')
+    )
+    assert len(labels) == len(images) == 3
+
+
 def test_round5b_summary_prompt_keeps_lifecycle_out_of_compaction() -> None:
     request = compaction_summary_request()
 
@@ -874,6 +948,8 @@ def test_round5b_summary_prompt_keeps_lifecycle_out_of_compaction() -> None:
     assert "Do not infer either lifecycle" in request
     assert "ACTIVE-TURN HANDOFF" not in request
     assert "IDLE HANDOFF" not in request
+    assert "Do not assume quotes or tool results will be retained separately" in request
+    assert "user intent, constraints, conclusions, and tool outcomes" in request
 
 
 def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> None:

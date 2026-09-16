@@ -437,11 +437,11 @@ def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
     )
     assert (
         COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v12-provider-schema-subtraction"
+        == "pulsara.structured-model-input-compiler.prefix-continuity.v14-tool-guidance"
     )
     assert (
         PROVIDER_MESSAGE_LOWERING_CONTRACT
-        == "pulsara.provider-message-lowering.prefix-continuity.v9-provider-schema-subtraction"
+        == "pulsara.provider-message-lowering.prefix-continuity.v11-tool-guidance"
     )
 
     reader = (ROOT / "src/pulsara_agent/conversation_kernel/reader.py").read_text()

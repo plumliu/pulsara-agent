@@ -25,14 +25,14 @@ Do not use a checkout, private script, raw YAML editing or a second installer.
    Environment references remain an advanced option. OAuth uses AUTHORIZE_MCP
    with explicit user interaction; CLEAR_MCP_AUTHORIZATION clears local grants,
    not remote tokens. A background connection cannot start a browser login.
-5. Read both mutation and adoption outcomes. First-party management automatically
-   adopts through the existing safe point before the next model request; do not
+5. Read both the configuration status and the `adoption` result. Pulsara automatically
+   tries to load managed changes before the next model request; do not
    routinely call `reload_capabilities` a second time. Use explicit reload for
    out-of-band CLI/file changes or a reported partial adoption only.
 6. Use `list_mcp_servers` for the exact configured identity. When a tool is
    NEW_MCP_META_ONLY, call `inspect_new_mcp_tool` and then `use_new_mcp_tool`
-   with the returned reference. Never guess names or schemas; same-epoch
-   SYSTEM/tools are not rewritten.
+   with the returned reference. Never guess names or schemas; newly discovered tools
+   use this route without replacing the current tool list.
 7. If requested, perform one safe representative call. Saving, authorizing,
    discovering a catalog and executing a tool are distinct outcomes; report
    exactly what passed and what remains unavailable.

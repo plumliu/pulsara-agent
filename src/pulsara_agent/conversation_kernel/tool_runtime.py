@@ -92,7 +92,10 @@ from pulsara_agent.terminal_process import (
     TerminalResult,
     TerminalSessionManager,
 )
-from pulsara_agent.terminal_process.output import TerminalOutputSnapshot
+from pulsara_agent.terminal_process.output import (
+    InvalidTerminalOutputCursor,
+    TerminalOutputSnapshot,
+)
 from pulsara_agent.terminal_process.monitor import (
     PreparedTerminalMonitorRegistration,
     TerminalMonitorCoordinator,
@@ -104,8 +107,15 @@ from pulsara_agent.tools.builtins.filesystem import (
     LocalImageReadCandidate,
     ReadFileTool,
     SearchFilesTool,
+    ViewImageSourceKind,
     ViewImageTool,
     WriteFileTool,
+    parse_view_image_source,
+)
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    CanonicalImageReferenceReadPort,
+    CanonicalImageReferenceResourceExceeded,
+    CanonicalImageReferenceUnavailable,
 )
 from pulsara_agent.conversation_kernel.image_validation import (
     HostPromptImageValidator,
@@ -113,6 +123,7 @@ from pulsara_agent.conversation_kernel.image_validation import (
 )
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
+    LLMImagePart,
     LLMTextPart,
 )
 from pulsara_agent.tools.builtins.workspace import WritePathScope
@@ -653,6 +664,7 @@ class DirectKernelToolPort:
         session_id: str,
         live_bus: LiveAgentEventBus,
         artifact_read_port: ToolArtifactReadPort | None = None,
+        image_reference_read_port: CanonicalImageReferenceReadPort | None = None,
         terminal_monitor_wake_scheduler: Callable[[], None] | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
@@ -671,6 +683,7 @@ class DirectKernelToolPort:
         self._physical_io = KernelSessionIO()
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._image_validator = image_validator
+        self._image_reference_read_port = image_reference_read_port
         self._terminal = TerminalSessionManager(
             workspace_root=root,
             completion_subscriber=self._terminal_process_completed,
@@ -1719,6 +1732,15 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
+        if tool_name == "view_image":
+            try:
+                parse_view_image_source(arguments)
+            except ValueError as exc:
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                    f"descriptor:{entry.descriptor.id}",
+                    f"invalid tool arguments: {exc}",
+                )
         if tool_name in {"reload_hooks", "reload_capabilities"}:
             access = surface_borrow.prepared.access
             if (
@@ -3044,6 +3066,7 @@ class DirectKernelToolPort:
             arguments=dict(arguments),
         )
         if isinstance(tool, ViewImageTool):
+            source = parse_view_image_source(arguments)
             if (
                 invocation_context.input_modalities is not None
                 and "image" not in invocation_context.input_modalities
@@ -3065,8 +3088,16 @@ class DirectKernelToolPort:
                 != binding.executor_binding_fingerprint
             ):
                 raise RuntimeError("view_image resource allowance does not exact-join")
-            if self._image_validator is None:
+            if (
+                source.kind is ViewImageSourceKind.PATH
+                and self._image_validator is None
+            ):
                 raise RuntimeError("view_image validation owner is unavailable")
+            if (
+                source.kind is ViewImageSourceKind.IMAGE_REF
+                and self._image_reference_read_port is None
+            ):
+                raise RuntimeError("view_image reference read owner is unavailable")
             maximum_bytes = min(
                 allowance.canonical_bytes,
                 allowance.logical_bytes,
@@ -3075,15 +3106,65 @@ class DirectKernelToolPort:
             deadline = self._deadlines.deadline(
                 KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
             )
-            physical = await self._physical_io.run_tool_invocation(
-                _read_local_image_candidate,
-                tool,
-                call,
-                maximum_bytes,
-                deadline_monotonic=deadline,
-            )
+            if source.kind is ViewImageSourceKind.PATH:
+                physical = await self._physical_io.run_tool_invocation(
+                    _read_local_image_candidate,
+                    tool,
+                    call,
+                    maximum_bytes,
+                    deadline_monotonic=deadline,
+                )
+            else:
+                assert self._image_reference_read_port is not None
+                physical = await self._physical_io.run_tool_invocation(
+                    _read_canonical_image_reference,
+                    self._image_reference_read_port,
+                    invocation_context.session_id,
+                    invocation_context.workspace_id,
+                    source.value,
+                    maximum_bytes,
+                    deadline_monotonic=deadline,
+                )
             if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
                 assert physical.error is not None
+                if isinstance(
+                    physical.error,
+                    (CanonicalImageReferenceUnavailable,),
+                ):
+                    return KernelToolResult(
+                        state="APPLICATION_ERROR",
+                        content=b'{"error":"IMAGE_REFERENCE_UNAVAILABLE"}',
+                        effect_class="read_only",
+                        physical_timing=physical.timing.value,
+                        caller_cancelled_while_running=physical.caller_cancelled,
+                        physical_observation=(
+                            None
+                            if physical.observation is None
+                            else replace(
+                                physical.observation,
+                                observation_origin_kind=observation_origin,
+                            )
+                        ),
+                    )
+                if isinstance(
+                    physical.error,
+                    CanonicalImageReferenceResourceExceeded,
+                ):
+                    return KernelToolResult(
+                        state="APPLICATION_ERROR",
+                        content=b'{"error":"IMAGE_RESOURCE_EXCEEDED"}',
+                        effect_class="read_only",
+                        physical_timing=physical.timing.value,
+                        caller_cancelled_while_running=physical.caller_cancelled,
+                        physical_observation=(
+                            None
+                            if physical.observation is None
+                            else replace(
+                                physical.observation,
+                                observation_origin_kind=observation_origin,
+                            )
+                        ),
+                    )
                 raise KernelToolPhysicalInvocationError(
                     effect_class="read_only",
                     error=physical.error,
@@ -3119,53 +3200,61 @@ class DirectKernelToolPort:
                         )
                     ),
                 )
-            if not isinstance(candidate, LocalImageReadCandidate):
-                raise TypeError("view_image read returned an invalid candidate")
-            try:
-                image = await self._image_validator.freeze_local_image(
-                    candidate.payload,
-                    deadline_monotonic=deadline,
-                )
-            except TimeoutError:
-                return KernelToolResult(
-                    state="SYSTEM_ERROR",
-                    content=b'{"error":"IMAGE_VALIDATION_DEADLINE_EXPIRED"}',
-                    effect_class="read_only",
-                    physical_timing=(
-                        PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
-                    ),
-                    physical_observation=_freeze_physical_observation(
-                        invocation_started, observation_origin
-                    ),
-                )
-            except PromptImageValidationError as exc:
-                code = (
-                    "IMAGE_FORMAT_UNSUPPORTED"
-                    if "unsupported" in str(exc).lower()
-                    else "IMAGE_DECODE_FAILED"
-                )
-                return KernelToolResult(
-                    state="APPLICATION_ERROR",
-                    content=json.dumps(
-                        {"error": code, "path": candidate.requested_path},
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                        sort_keys=True,
-                    ).encode("utf-8"),
-                    effect_class="read_only",
-                    physical_timing=(
-                        PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
-                        if monotonic() >= deadline
-                        else physical.timing.value
-                    ),
-                    physical_observation=_freeze_physical_observation(
-                        invocation_started, observation_origin
-                    ),
-                )
+            if source.kind is ViewImageSourceKind.PATH:
+                if not isinstance(candidate, LocalImageReadCandidate):
+                    raise TypeError("view_image path read returned an invalid candidate")
+                assert self._image_validator is not None
+                try:
+                    image = await self._image_validator.freeze_local_image(
+                        candidate.payload,
+                        deadline_monotonic=deadline,
+                    )
+                except TimeoutError:
+                    return KernelToolResult(
+                        state="SYSTEM_ERROR",
+                        content=b'{"error":"IMAGE_VALIDATION_DEADLINE_EXPIRED"}',
+                        effect_class="read_only",
+                        physical_timing=(
+                            PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
+                        ),
+                        physical_observation=_freeze_physical_observation(
+                            invocation_started, observation_origin
+                        ),
+                    )
+                except PromptImageValidationError as exc:
+                    code = (
+                        "IMAGE_FORMAT_UNSUPPORTED"
+                        if "unsupported" in str(exc).lower()
+                        else "IMAGE_DECODE_FAILED"
+                    )
+                    return KernelToolResult(
+                        state="APPLICATION_ERROR",
+                        content=json.dumps(
+                            {"error": code, "path": candidate.requested_path},
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8"),
+                        effect_class="read_only",
+                        physical_timing=(
+                            PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG.value
+                            if monotonic() >= deadline
+                            else physical.timing.value
+                        ),
+                        physical_observation=_freeze_physical_observation(
+                            invocation_started, observation_origin
+                        ),
+                    )
+            else:
+                if not isinstance(candidate, LLMImagePart):
+                    raise TypeError(
+                        "view_image reference read returned an invalid candidate"
+                    )
+                image = candidate
             content = FrozenPromptContent((LLMTextPart("Image loaded."), image))
             increment = allowance.quote_owner.quote(
                 tool_call_id=tool_call_id,
-                requested_path=candidate.requested_path,
+                source=source,
                 content=content,
             )
             if (
@@ -3839,6 +3928,24 @@ def _read_local_image_candidate(
     return tool.read_bounded(call, maximum_bytes=maximum_bytes)
 
 
+def _read_canonical_image_reference(
+    port: CanonicalImageReferenceReadPort,
+    session_id: str,
+    workspace_id: str,
+    image_ref: str,
+    maximum_bytes: int,
+    *,
+    deadline_monotonic: float,
+) -> LLMImagePart:
+    return port.read_image(
+        session_id=session_id,
+        workspace_id=workspace_id,
+        image_ref=image_ref,
+        maximum_encoded_bytes=maximum_bytes,
+        deadline_monotonic=deadline_monotonic,
+    )
+
+
 def _physical_effect_class(tool_name: str, arguments: Mapping[str, object]) -> str:
     if tool_name == "terminal_process":
         action = arguments.get("action")
@@ -3870,7 +3977,24 @@ def _execute_terminal_tool_call(
             decision_deadline_monotonic=deadline_monotonic,
             effective_permission_mode=effective_permission_mode,
         )
-    return tool.execute(call, live_sink=live_sink)
+    try:
+        return tool.execute(call, live_sink=live_sink)
+    except InvalidTerminalOutputCursor:
+        return ToolExecutionResult(
+            call_id=call.id,
+            tool_name=call.name,
+            status=ToolResultState.ERROR,
+            output=json.dumps(
+                {
+                    "error": "INVALID_CURSOR",
+                    "message": (
+                        "This output cursor is invalid for this process. Copy an "
+                        "output_cursor from the same process, or omit since_cursor "
+                        "to read its currently retained output."
+                    ),
+                }
+            ),
+        )
 
 
 def _terminal_execution_result(

@@ -18,6 +18,7 @@ import tempfile
 import threading
 import stat
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from shutil import which
 from typing import Any, Mapping
@@ -43,6 +44,7 @@ MAX_SEARCH_LIMIT = 1_000
 UTF8_BOM = "\ufeff"
 UTF8_BOM_BYTES = b"\xef\xbb\xbf"
 CONTENT_REVISION_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+IMAGE_REFERENCE_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 CHANGED_WINDOW_CONTEXT_LINES = 3
 # Changed windows precede the diff in the result. Keeping their complete JSON
 # below this budget ensures the existing 8,000-character head/tail projection
@@ -197,6 +199,55 @@ class LocalImageReadCandidate:
     payload: bytes = field(repr=False)
     resolved_path: Path
     requested_path: str
+
+
+class ViewImageSourceKind(StrEnum):
+    PATH = "path"
+    IMAGE_REF = "image_ref"
+
+
+@dataclass(frozen=True, slots=True)
+class ViewImageSource:
+    """The closed, tool-specific source union for one view_image call."""
+
+    kind: ViewImageSourceKind
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ViewImageSourceKind) or not self.value:
+            raise ValueError("view_image source is invalid")
+        if (
+            self.kind is ViewImageSourceKind.IMAGE_REF
+            and IMAGE_REFERENCE_PATTERN.fullmatch(self.value) is None
+        ):
+            raise ValueError("view_image image_ref is invalid")
+
+    def provider_value(self) -> dict[str, str]:
+        return {self.kind.value: self.value}
+
+
+def parse_view_image_source(arguments: Mapping[str, object]) -> ViewImageSource:
+    """Parse path xor image_ref without adding a general media-source layer."""
+
+    if not isinstance(arguments, Mapping) or any(
+        key not in {"path", "image_ref"} for key in arguments
+    ):
+        raise ValueError("view_image requires exactly one supported source")
+    path = arguments.get("path")
+    image_ref = arguments.get("image_ref")
+    has_path = isinstance(path, str) and bool(path)
+    has_ref = isinstance(image_ref, str) and bool(image_ref)
+    if has_path == has_ref:
+        raise ValueError("view_image requires exactly one of path or image_ref")
+    if "path" in arguments and not has_path:
+        raise ValueError("view_image path is invalid")
+    if "image_ref" in arguments and not has_ref:
+        raise ValueError("view_image image_ref is invalid")
+    if has_path:
+        assert isinstance(path, str)
+        return ViewImageSource(ViewImageSourceKind.PATH, path)
+    assert isinstance(image_ref, str)
+    return ViewImageSource(ViewImageSourceKind.IMAGE_REF, image_ref)
 
 
 @dataclass(slots=True)
@@ -408,11 +459,22 @@ class SearchFilesTool(WorkspaceTool):
         if output_mode not in {"content", "files_only", "count"}:
             raise ValueError(f"unsupported output_mode: {output_mode}")
         if not path.exists():
-            raise FileNotFoundError(f"path not found: {path}")
+            return _application_error_result(
+                self, call, path,
+                _FileApplicationError(
+                    "FILE_NOT_FOUND",
+                    "The requested search path does not exist.",
+                    hint="Check the path and choose an existing file or directory.",
+                ),
+            )
         if _is_broad_search_root(path, self.workspace_root, user_home):
-            raise ValueError(
-                f"refusing broad recursive search root outside workspace: {path}. "
-                "Use a specific file or subdirectory."
+            return _application_error_result(
+                self, call, path,
+                _FileApplicationError(
+                    "SEARCH_ROOT_TOO_BROAD",
+                    "This search root outside the workspace is too broad.",
+                    hint="Choose a specific file or subdirectory.",
+                ),
             )
 
         state = _state_for_workspace(self.workspace_root)

@@ -43,7 +43,10 @@ from pulsara_agent.llm.input import (
     ToolSpec,
     llm_content_identity_value,
 )
-from pulsara_agent.model_input.lowering import lower_retained_request_content
+from pulsara_agent.model_input.lowering import (
+    image_referenced_content,
+    lower_retained_request_content,
+)
 from pulsara_agent.llm.estimator import TokenEstimate
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
@@ -711,7 +714,7 @@ def _active_request_message(
     )
     return LLMMessage(
         role=MessageRole.USER,
-        content=lower_retained_request_content(request),
+        content=image_referenced_content(lower_retained_request_content(request)),
     )
 
 

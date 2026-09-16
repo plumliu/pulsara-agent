@@ -79,8 +79,11 @@ from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMImagePart,
     LLMMessage,
+    LLMTextPart,
     LLMToolCall,
+    MessageRole,
 )
+from pulsara_agent.model_input.lowering import image_reference_digest_part
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
@@ -164,6 +167,11 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     project_subagent_completion_for_provider,
 )
 from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
+from pulsara_agent.tools.builtins.filesystem import (
+    ViewImageSource,
+    ViewImageSourceKind,
+    parse_view_image_source,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
     AcceptedSubagentCompletion,
@@ -403,7 +411,7 @@ class _ImageToolResourceQuoteOwner:
         self,
         *,
         tool_call_id: str,
-        requested_path: str,
+        source: ViewImageSource,
         content: FrozenPromptContent,
     ) -> FrozenImageToolResourceIncrement:
         images = tuple(
@@ -412,7 +420,7 @@ class _ImageToolResourceQuoteOwner:
         if len(images) != 1:
             raise ValueError("image Tool quote requires one validated image")
         carrier = tool_image_attachment_message(
-            ((tool_call_id, requested_path, images[0]),)
+            ((tool_call_id, source, images[0]),)
         )
         quoted = quote_provider_followup_wire_resources(
             request=self.request,
@@ -3154,21 +3162,35 @@ class ConversationKernelRunner:
             if not isinstance(binding.execution_policy, BuiltinExecutionPolicyRef):
                 continue
             arguments = thaw_json(call.arguments)
-            path = arguments.get("path") if isinstance(arguments, dict) else None
-            if not isinstance(path, str) or not path:
+            if not isinstance(arguments, dict):
+                continue
+            try:
+                image_source = parse_view_image_source(arguments)
+            except ValueError:
                 continue
             image_calls.append(
                 (call_ordinal, call, binding.executor_binding_fingerprint)
             )
-            image_source_upper = LLMMessage.user(
-                canonical_json_bytes(
-                    {
-                        "tool_image_source": {
-                            "tool_call_id": call.tool_call_id,
-                            "requested_path": path,
-                        }
-                    }
-                ).decode("utf-8")
+            reference_upper = (
+                image_source.value
+                if image_source.kind is ViewImageSourceKind.IMAGE_REF
+                else "sha256:" + ("0" * 64)
+            )
+            image_source_upper = LLMMessage(
+                role=MessageRole.USER,
+                content=(
+                    LLMTextPart(
+                        canonical_json_bytes(
+                            {
+                                "tool_image_source": {
+                                    "tool_call_id": call.tool_call_id,
+                                    **image_source.provider_value(),
+                                }
+                            }
+                        ).decode("utf-8")
+                    ),
+                    image_reference_digest_part(reference_upper),
+                ),
             )
             logical_followup += provider_neutral_message_logical_bytes(
                 image_source_upper

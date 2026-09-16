@@ -3196,7 +3196,7 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
     )
     assert (
         sum(
-            join_text_content(message.content).count("[图片已省略]")
+            join_text_content(message.content).count("[Image omitted]")
             for message in summary_context.messages
         )
         == 2
@@ -3334,7 +3334,7 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
     )
     assert (
         sum(
-            join_text_content(message.content).count("[图片已省略]")
+            join_text_content(message.content).count("[Image omitted]")
             for message in destination_summary.messages
         )
         == 2
@@ -3378,7 +3378,9 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
         connection_id=ModelConnectionId("model-connection:" + "2" * 32),
         limits=test_model_limits(
             total_context_tokens=256_000,
-            max_input_tokens=12_000,
+            # Keep room for the full English summary instructions and recent image;
+            # the 50,000-character old answer must still exceed this budget.
+            max_input_tokens=16_000,
             max_output_tokens=1_000,
             default_output_tokens=1_000,
             input_safety_margin_tokens=0,
@@ -3468,6 +3470,14 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
         "destination-vision-model",
     ]
     destination_summary = model.summary_transport.contexts[1]
+    source_quote = model.summary_transport.contexts[0].provider_wire_input_plan.quote
+    destination_quote = destination_summary.provider_wire_input_plan.quote
+    assert source_quote.final_wire_estimated_input_tokens > (
+        destination_quote.effective_input_budget_tokens
+    )
+    assert destination_quote.final_wire_estimated_input_tokens < int(
+        destination_quote.effective_input_budget_tokens * owner.policy.auto_trigger_ratio
+    )
     assert any(
         isinstance(part, LLMImagePart)
         for message in destination_summary.messages

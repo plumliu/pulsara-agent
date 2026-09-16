@@ -14,9 +14,14 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     FrozenImageToolResourceAllowance,
+    FrozenImageToolResourceIncrement,
     PreparedResolvedToolInvocation,
 )
 from pulsara_agent.conversation_kernel.image_validation import HostPromptImageValidator
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    CanonicalImageReferenceResourceExceeded,
+    CanonicalImageReferenceUnavailable,
+)
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.tool_policy import (
@@ -37,6 +42,11 @@ from pulsara_agent.hooks.contracts import (
     HookScopeKind,
 )
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
+from pulsara_agent.tools.builtins.filesystem import (
+    ViewImageSourceKind,
+    parse_view_image_source,
+)
 from tests.support.round3 import direct_tool_invocation_context
 
 
@@ -46,6 +56,15 @@ def _call(ordinal: int) -> CompletedToolCallBlock:
         f"call:{ordinal}",
         "view_image",
         freeze_json({"path": f"/tmp/{ordinal}.png"}),
+    )
+
+
+def _reference_call(ordinal: int) -> CompletedToolCallBlock:
+    return CompletedToolCallBlock(
+        f"block:{ordinal}",
+        f"call:{ordinal}",
+        "view_image",
+        freeze_json({"image_ref": "sha256:" + f"{ordinal:064x}"}),
     )
 
 
@@ -63,13 +82,13 @@ class _AuthorizationPort:
         self._events = events
 
     def prepare_resolved_invocation(self, *, tool_name, arguments, **_kwargs):
-        ordinal = int(arguments["path"].split("/")[-1].split(".")[0])
+        source = parse_view_image_source(arguments)
         return PreparedResolvedToolInvocation(
             tool_name,
             tool_name,
             tool_name,
             tool_name,
-            freeze_json({"path": f"/tmp/{ordinal}.png"}),
+            freeze_json(source.provider_value()),
         )
 
     async def authorize(self, *, tool_call_id, **_kwargs):
@@ -142,6 +161,33 @@ def test_present_nonmatching_hook_scope_keeps_contiguous_views_concurrent() -> N
             "authorize:call:0",
             "authorize:call:1",
             "concurrent:call:0,call:1",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_path_and_reference_calls_share_one_concurrent_view_segment() -> None:
+    async def scenario() -> None:
+        events: list[str] = []
+        calls = (_call(0), _reference_call(1), _call(2))
+        executor = _partition_executor(
+            {
+                call.tool_call_id: KernelToolAuthorizationKind.ALLOW
+                for call in calls
+            },
+            events,
+        )
+
+        result = await executor._execute_partitioned_batch(
+            **_partition_kwargs(calls)
+        )
+
+        assert result.tool_call_count == 3
+        assert events == [
+            "authorize:call:0",
+            "authorize:call:1",
+            "authorize:call:2",
+            "concurrent:call:0,call:1,call:2",
         ]
 
     asyncio.run(scenario())
@@ -356,6 +402,179 @@ def test_view_image_uses_the_frozen_target_modality_tristate_before_read(
             await validator.aclose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("read_error", "expected_error"),
+    (
+        (None, None),
+        (CanonicalImageReferenceUnavailable, "IMAGE_REFERENCE_UNAVAILABLE"),
+        (CanonicalImageReferenceResourceExceeded, "IMAGE_RESOURCE_EXCEEDED"),
+    ),
+)
+def test_view_image_reference_uses_the_canonical_port_without_local_validation(
+    tmp_path: Path,
+    read_error,
+    expected_error,
+) -> None:
+    image = LLMImagePart("image/png", b"canonical-image", 4, 3)
+
+    class ReferencePort:
+        def read_image(self, **kwargs):
+            assert kwargs["session_id"] == "session:image-reference"
+            assert kwargs["workspace_id"] == "workspace:test"
+            assert kwargs["image_ref"] == image.content_digest
+            assert kwargs["maximum_encoded_bytes"] > len(image.immutable_bytes)
+            if read_error is not None:
+                raise read_error("reference read rejected")
+            return image
+
+    class QuoteOwner:
+        def quote(self, *, source, content, **_kwargs):
+            assert source.kind is ViewImageSourceKind.IMAGE_REF
+            assert source.value == image.content_digest
+            assert content == FrozenPromptContent((LLMTextPart("Image loaded."), image))
+            return FrozenImageToolResourceIncrement(1, 1, 1, 1)
+
+    async def scenario() -> None:
+        port = DirectKernelToolPort(
+            workspace_root=tmp_path,
+            host_owner_id="host:image-reference",
+            session_id="session:image-reference",
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+            image_reference_read_port=ReferencePort(),
+        )
+        borrow, context = direct_tool_invocation_context(
+            port,
+            session_id="session:image-reference",
+            tool_name="view_image",
+            tool_call_id="call:image-reference",
+            attempt_id="attempt:image-reference",
+            turn_id="turn:image-reference",
+            assistant_entry_id="entry:assistant",
+        )
+        binding = borrow.execution_binding("view_image")
+        allowance = FrozenImageToolResourceAllowance(
+            call_ordinal=0,
+            tool_call_id="call:image-reference",
+            executor_binding_fingerprint=binding.executor_binding_fingerprint,
+            canonical_bytes=1 << 20,
+            logical_bytes=1 << 20,
+            wire_bytes=1 << 20,
+            input_tokens=1 << 20,
+            quote_owner=QuoteOwner(),
+        )
+        try:
+            result = await port.invoke(
+                tool_name="view_image",
+                arguments={"image_ref": image.content_digest},
+                tool_call_id="call:image-reference",
+                attempt_id="attempt:image-reference",
+                turn_id="turn:image-reference",
+                assistant_entry_id="entry:assistant",
+                invocation_context=replace(
+                    context,
+                    input_modalities=("text", "image"),
+                    image_resource_allowance=allowance,
+                ),
+            )
+            if expected_error is None:
+                assert result.state == "SUCCESS"
+                assert result.content == FrozenPromptContent(
+                    (LLMTextPart("Image loaded."), image)
+                )
+            else:
+                assert result.state == "APPLICATION_ERROR"
+                assert result.content == (
+                    '{"error":"' + expected_error + '"}'
+                ).encode("utf-8")
+                assert result.physical_observation is not None
+                assert result.physical_timing == "ON_TIME"
+        finally:
+            borrow.close()
+            await port.aclose(timeout_seconds=2)
+
+    asyncio.run(scenario())
+
+
+def test_view_image_reference_rejects_text_only_target_before_database_read(
+    tmp_path: Path,
+) -> None:
+    reads = 0
+
+    class ReferencePort:
+        def read_image(self, **_kwargs):
+            nonlocal reads
+            reads += 1
+            raise AssertionError("text-only target must not read the image")
+
+    async def scenario() -> None:
+        port = DirectKernelToolPort(
+            workspace_root=tmp_path,
+            host_owner_id="host:image-reference-text-only",
+            session_id="session:image-reference-text-only",
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+            image_reference_read_port=ReferencePort(),
+        )
+        borrow, context = direct_tool_invocation_context(
+            port,
+            session_id="session:image-reference-text-only",
+            tool_name="view_image",
+            tool_call_id="call:image-reference-text-only",
+            attempt_id="attempt:image-reference-text-only",
+            turn_id="turn:image-reference-text-only",
+            assistant_entry_id="entry:assistant",
+        )
+        binding = borrow.execution_binding("view_image")
+        allowance = FrozenImageToolResourceAllowance(
+            call_ordinal=0,
+            tool_call_id="call:image-reference-text-only",
+            executor_binding_fingerprint=binding.executor_binding_fingerprint,
+            canonical_bytes=1 << 20,
+            logical_bytes=1 << 20,
+            wire_bytes=1 << 20,
+            input_tokens=1 << 20,
+            quote_owner=SimpleNamespace(),
+        )
+        try:
+            result = await port.invoke(
+                tool_name="view_image",
+                arguments={"image_ref": "sha256:" + "1" * 64},
+                tool_call_id="call:image-reference-text-only",
+                attempt_id="attempt:image-reference-text-only",
+                turn_id="turn:image-reference-text-only",
+                assistant_entry_id="entry:assistant",
+                invocation_context=replace(
+                    context,
+                    input_modalities=("text",),
+                    image_resource_allowance=allowance,
+                ),
+            )
+            assert result.state == "APPLICATION_ERROR"
+            assert result.content == b'{"error":"MODEL_IMAGE_INPUT_UNSUPPORTED"}'
+            assert reads == 0
+        finally:
+            borrow.close()
+            await port.aclose(timeout_seconds=2)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        {},
+        {"path": "x.png", "image_ref": "sha256:" + "0" * 64},
+        {"path": None},
+        {"image_ref": "sha256:not-a-digest"},
+        {"path": "x.png", "unexpected": True},
+    ),
+)
+def test_view_image_source_parser_rejects_every_non_union_shape(arguments) -> None:
+    with pytest.raises(ValueError):
+        parse_view_image_source(arguments)
 
 
 def test_concurrent_view_window_queues_tail_until_physical_completion() -> None:

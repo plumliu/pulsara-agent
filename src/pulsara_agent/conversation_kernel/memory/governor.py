@@ -448,9 +448,9 @@ class AdvisoryMemoryGovernor:
             {
                 "source": f"cited-observation:{item.ordinal + 1}",
                 "source_product_label": (
-                    "候选明确引用的主要观察"
+                    "Primary observation explicitly cited by the proposal"
                     if item.evidence_kind.value == "PRIMARY_OBSERVATION"
-                    else "候选明确引用的记忆读取暴露"
+                    else "Memory-read exposure explicitly cited by the proposal"
                 ),
                 "evidence_role": item.evidence_kind.value,
                 "result_state": item.result_state,
@@ -821,29 +821,29 @@ def _causal_source_item(
     if not text and omitted_images == 0:
         return None
     role = MemoryGovernanceEvidenceRole.NON_HUMAN_CONTEXT
-    label = "主模型当时看到的非用户上下文"
+    label = "Non-user context visible to the main model at the time"
     if item.item_kind is FrozenProviderInputItemKind.USER:
         if item.input_origin in {
             CanonicalInputOriginKind.HUMAN_MESSAGE,
             CanonicalInputOriginKind.HUMAN_STEER,
         }:
             role = MemoryGovernanceEvidenceRole.HUMAN_ASSERTION
-            label = "主模型当时看到的用户原话"
+            label = "User input visible to the main model at the time"
         else:
-            label = "主模型当时看到的运行时输入"
+            label = "Runtime input visible to the main model at the time"
     elif item.item_kind in {
         FrozenProviderInputItemKind.ASSISTANT,
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
     }:
         role = MemoryGovernanceEvidenceRole.ASSISTANT_CONTEXT
-        label = "主模型当时看到的助手上下文"
+        label = "Assistant context visible to the main model at the time"
     elif item.item_kind in {
         FrozenProviderInputItemKind.TOOL_RESULT,
         FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE,
         FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
     }:
         role = MemoryGovernanceEvidenceRole.TOOL_CONTEXT_ONLY
-        label = "主模型当时看到的普通工具上下文"
+        label = "Tool context visible to the main model at the time"
     return FrozenMemoryGovernanceSourceItem(
         source_entry_id=item.source_entry_id,
         chronology=MemoryGovernanceChronology.BEFORE_PROPOSAL,
@@ -873,24 +873,24 @@ def _causal_source_item_turn(
 def _provider_item_product_kind(item: FrozenProviderInputItem) -> str:
     if item.input_origin is not None:
         return {
-            CanonicalInputOriginKind.HUMAN_MESSAGE: "用户消息",
-            CanonicalInputOriginKind.HUMAN_STEER: "用户补充",
-            CanonicalInputOriginKind.SUBAGENT_OBJECTIVE: "子任务目标",
-            CanonicalInputOriginKind.PLAN_CONTINUATION: "计划运行时续接",
-            CanonicalInputOriginKind.INTER_AGENT_MESSAGE: "代理协作消息",
-            CanonicalInputOriginKind.USER_CONTROL_FEEDBACK: "用户控制反馈",
+            CanonicalInputOriginKind.HUMAN_MESSAGE: "User message",
+            CanonicalInputOriginKind.HUMAN_STEER: "User follow-up",
+            CanonicalInputOriginKind.SUBAGENT_OBJECTIVE: "Delegated task objective",
+            CanonicalInputOriginKind.PLAN_CONTINUATION: "Planning continuation",
+            CanonicalInputOriginKind.INTER_AGENT_MESSAGE: "Agent collaboration message",
+            CanonicalInputOriginKind.USER_CONTROL_FEEDBACK: "User control feedback",
         }[item.input_origin]
     return {
-        FrozenProviderInputItemKind.CONTEXT_SNAPSHOT: "已采用的上下文摘要",
-        FrozenProviderInputItemKind.USER: "用户形态输入",
-        FrozenProviderInputItemKind.TERMINAL_OBSERVATION: "终止观察",
-        FrozenProviderInputItemKind.ASSISTANT: "助手回复",
-        FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST: "助手工具请求回复",
-        FrozenProviderInputItemKind.TOOL_RESULT: "工具结果",
-        FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE: "工具结果闭合说明",
-        FrozenProviderInputItemKind.LATE_TOOL_OUTCOME: "延迟工具结果",
-        FrozenProviderInputItemKind.PLAN_CONTINUATION: "计划运行时续接",
-        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE: "代理协作消息",
+        FrozenProviderInputItemKind.CONTEXT_SNAPSHOT: "Adopted context summary",
+        FrozenProviderInputItemKind.USER: "User-role input",
+        FrozenProviderInputItemKind.TERMINAL_OBSERVATION: "Terminal process observation",
+        FrozenProviderInputItemKind.ASSISTANT: "Assistant response",
+        FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST: "Assistant tool request",
+        FrozenProviderInputItemKind.TOOL_RESULT: "Tool result",
+        FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE: "Tool call interruption notice",
+        FrozenProviderInputItemKind.LATE_TOOL_OUTCOME: "Late tool result",
+        FrozenProviderInputItemKind.PLAN_CONTINUATION: "Planning continuation",
+        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE: "Agent collaboration message",
     }[item.item_kind]
 
 

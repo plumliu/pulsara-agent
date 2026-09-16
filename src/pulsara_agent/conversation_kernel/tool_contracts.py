@@ -78,6 +78,7 @@ from pulsara_agent.primitives.tool_observation import (
     TrustedToolObservationSupplement,
     freeze_tool_observation_timing_fact,
 )
+from pulsara_agent.tools.builtins.filesystem import ViewImageSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,7 +288,7 @@ class ImageToolResourceQuotePort(Protocol):
         self,
         *,
         tool_call_id: str,
-        requested_path: str,
+        source: ViewImageSource,
         content: FrozenPromptContent,
     ) -> FrozenImageToolResourceIncrement: ...
 

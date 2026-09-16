@@ -215,6 +215,10 @@ class KernelSessionIO:
                     caller_cancelled = True
                     if on_caller_cancelled is not None:
                         on_caller_cancelled()
+                except BaseException:
+                    # Collect the completed task's exact exception below, with
+                    # its timing and observation, so the tool owner can classify it.
+                    pass
             else:
                 timed_out = True
             if not task.done():

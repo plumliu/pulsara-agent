@@ -415,6 +415,8 @@ Canonical ToolResult可以先按既有事务可靠接受；这不等于模型已
 
 ### 6.1 Conditional guidance
 
+2026-09-16 参数文案修订：COMPACT 与 REF_ONLY 的指导必须使用实际 `artifact_read` 参数；从 `offset_chars=0` 开始，`has_more=true` 时将返回的 `next_offset_chars` 作为下一次 `offset_chars`，页大小参数为 `max_chars`。不得使用其他工具的 `offset/limit` 名称；下述按需读取语义保持不变。
+
 所有provider-visible guidance必须表达等价语义：
 
 > If the omitted content is necessary for the current task, read the retained artifact with artifact_read. Otherwise continue from the visible result without opening the artifact.

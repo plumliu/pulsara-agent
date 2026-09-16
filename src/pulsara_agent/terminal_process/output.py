@@ -48,6 +48,13 @@ class TerminalOutputSourceCoverage(StrEnum):
     UNAVAILABLE = "UNAVAILABLE"
 
 
+class InvalidTerminalOutputCursor(ValueError):
+    """The supplied cursor cannot select output from this process stream."""
+
+    def __init__(self) -> None:
+        super().__init__(TerminalOutputReadDisposition.INVALID_CURSOR.value)
+
+
 @dataclass(frozen=True, slots=True)
 class TerminalSanitizerPolicyV1:
     maximum_undecided_utf8_carry: int = TERMINAL_SANITIZER_CARRY_HARD_BYTES
@@ -681,7 +688,7 @@ class TerminalOutputOwner:
             or cursor.stream_id != self.stream_id
             or cursor.sanitized_utf8_offset > self._through
         ):
-            raise ValueError(TerminalOutputReadDisposition.INVALID_CURSOR.value)
+            raise InvalidTerminalOutputCursor()
         if cursor.sanitized_utf8_offset < self._retained_from:
             return TerminalOutputReadDisposition.GAP, True, raw
         relative = cursor.sanitized_utf8_offset - self._retained_from
@@ -793,7 +800,7 @@ def decode_terminal_output_cursor(value: str) -> TerminalOutputCursor:
             sanitized_utf8_offset=int(payload["sanitized_utf8_offset"]),
         )
     except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(TerminalOutputReadDisposition.INVALID_CURSOR.value) from exc
+        raise InvalidTerminalOutputCursor() from exc
 
 
 def _tail_by_chars(value: str, maximum_chars: int) -> tuple[str, bool]:
@@ -873,6 +880,7 @@ def _suffix_within(value: str, *, maximum_chars: int, maximum_bytes: int) -> str
 
 __all__ = [
     "IncrementalTerminalSanitizer",
+    "InvalidTerminalOutputCursor",
     "TERMINAL_HOST_RETAINED_HARD_BYTES",
     "TERMINAL_RETAINED_OUTPUT_HARD_BYTES",
     "TERMINAL_SANITIZER_CARRY_HARD_BYTES",

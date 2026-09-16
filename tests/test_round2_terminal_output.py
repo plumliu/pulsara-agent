@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from hashlib import sha256
@@ -16,6 +17,13 @@ from pulsara_agent.conversation_kernel.live import (
     LiveObservationKind,
 )
 from pulsara_agent.conversation_kernel.tool_execution import _ToolResultLiveSink
+from pulsara_agent.conversation_kernel.tool_runtime import (
+    _DirectTerminalProcessTool,
+    _execute_terminal_tool_call,
+)
+from pulsara_agent.message import ToolResultState
+from pulsara_agent.ports.tool_execution import ToolCall
+from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverageReason
 from pulsara_agent.terminal_process.manager import ProcessRegistry
 from pulsara_agent.terminal_process.manager import TerminalSessionManager
@@ -23,9 +31,11 @@ import pulsara_agent.terminal_process.manager as terminal_manager_module
 from pulsara_agent.terminal_process.models import (
     TerminalCwdScope,
     TerminalPhysicalState,
+    TerminalProcessOrigin,
 )
 from pulsara_agent.terminal_process.output import (
     IncrementalTerminalSanitizer,
+    InvalidTerminalOutputCursor,
     TerminalOutputOwner,
     TerminalOutputReadDisposition,
     TerminalOutputSourceCoverage,
@@ -92,9 +102,9 @@ def test_round2_output_cursor_exact_delta_invalid_and_delivery_head_tail() -> No
 
     other = TerminalOutputOwner(owner_epoch="host:2", process_id="process:1")
     foreign = other.snapshot(maximum_chars=512).output_cursor
-    with pytest.raises(ValueError, match="INVALID_CURSOR"):
+    with pytest.raises(InvalidTerminalOutputCursor, match="INVALID_CURSOR"):
         owner.snapshot(maximum_chars=512, since_cursor=foreign)
-    with pytest.raises(ValueError, match="INVALID_CURSOR"):
+    with pytest.raises(InvalidTerminalOutputCursor, match="INVALID_CURSOR"):
         owner.snapshot(maximum_chars=512, since_cursor="not-a-cursor")
 
     start = owner.snapshot(maximum_chars=512).output_cursor
@@ -137,6 +147,37 @@ def test_round2_cursor_snapshot_and_artifact_share_the_exact_selected_range() ->
     assert candidate.source_coverage.value == "COMPLETE"
 
 
+@pytest.mark.parametrize("foreign", (False, True))
+def test_terminal_cursor_rejection_returns_actionable_tool_error(foreign: bool) -> None:
+    owner = TerminalOutputOwner(owner_epoch="host:1", process_id="process:1")
+    other = TerminalOutputOwner(owner_epoch="host:2", process_id="process:1")
+    cursor = other.snapshot(maximum_chars=512).output_cursor if foreign else "bad-cursor-token"
+
+    class Manager:
+        def log_process(self, process_id, *, since_cursor, **kwargs):
+            assert process_id == "process:1"
+            return owner.snapshot(maximum_chars=512, since_cursor=since_cursor)
+
+    result = _execute_terminal_tool_call(
+        _DirectTerminalProcessTool(Manager(), "host:1"),
+        ToolCall("call:cursor", "terminal_process", {
+            "action": "log", "process_id": "process:1", "since_cursor": cursor,
+        }),
+        None,
+        TerminalProcessOrigin("turn:1", "ROOT"),
+        "attempt:1",
+        DEFAULT_PERMISSION_MODE,
+        deadline_monotonic=monotonic() + 10,
+    )
+    assert result.status is ToolResultState.ERROR
+    body = json.loads(result.output)
+    assert body["error"] == "INVALID_CURSOR"
+    assert "omit since_cursor" in body["message"]
+    assert cursor not in body["message"]
+    assert "ValueError" not in result.output
+    assert result.output_artifact_candidate is None
+
+
 def test_round2_sanitizer_failure_cannot_claim_complete_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -172,6 +213,10 @@ def test_round2_retention_gap_is_orthogonal_to_response_and_delivery_bounds() ->
     assert public.source_coverage is TerminalOutputSourceCoverage.RETAINED_SNAPSHOT
     assert public.gap_before_output is True
     assert public.truncated_by_response_bound is True
+    # The end cursor is for future output, not pagination of a truncated tail.
+    assert owner.snapshot(maximum_chars=8, since_cursor=public.output_cursor).text == ""
+    assert owner.artifact_candidate().text.endswith(public.text)
+    assert len(owner.artifact_candidate().text) > len(public.text)
 
     observed = owner.observation_slice(
         maximum_chars=80,

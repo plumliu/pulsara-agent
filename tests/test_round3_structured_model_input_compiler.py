@@ -2171,10 +2171,14 @@ def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> N
             tool_call_id=f"call:{call_ordinal}",
             tool_request_entry_id="entry:assistant-batch",
             tool_result_body_text=frozen_tool_result_public_text(content),
-            tool_call_ordinal=call_ordinal,
-            tool_call_arguments=freeze_json(
-                {"path": f'/tmp/image "{call_ordinal}".png'}
-            ),
+                tool_call_ordinal=call_ordinal,
+                tool_call_arguments=freeze_json(
+                    (
+                        {"path": f'/tmp/image "{call_ordinal}".png'}
+                        if call_ordinal == 0
+                        else {"image_ref": image.content_digest}
+                    )
+                ),
         )
 
     items = (
@@ -2207,15 +2211,28 @@ def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> N
         for part in carriers[0].content
         if isinstance(part, LLMImagePart)
     ) == (b"first", b"second")
-    sources = tuple(
-        json.loads(part.text)["tool_image_source"]
+    payloads = tuple(
+        json.loads(part.text)
         for part in carriers[0].content
         if isinstance(part, LLMTextPart)
         and part.text.startswith("{")
     )
+    sources = tuple(
+        payload["tool_image_source"]
+        for payload in payloads
+        if "tool_image_source" in payload
+    )
     assert sources == (
-        {"requested_path": '/tmp/image "0".png', "tool_call_id": "call:0"},
-        {"requested_path": '/tmp/image "1".png', "tool_call_id": "call:1"},
+        {"path": '/tmp/image "0".png', "tool_call_id": "call:0"},
+        {"image_ref": second_image.content_digest, "tool_call_id": "call:1"},
+    )
+    assert tuple(
+        payload["pulsara_image"]["image_ref"]
+        for payload in payloads
+        if "pulsara_image" in payload
+    ) == (
+        first_image.content_digest,
+        second_image.content_digest,
     )
     assert (
         sum(
@@ -2231,6 +2248,53 @@ def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> N
         if message.content == (LLMTextPart("continue"),)
     )
     assert carrier_index < continue_index
+
+
+def test_late_tool_image_reference_uses_the_same_labelled_carrier() -> None:
+    image = LLMImagePart("image/png", b"late-image", 4, 3)
+    content = FrozenPromptContent((LLMTextPart("Image loaded."), image))
+    late = replace(
+        _tool_result(
+            "placeholder", sequence=1, turn_id="turn:test", artifact=False
+        ),
+        item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        content=content.parts,
+        tool_result_body_text=frozen_tool_result_public_text(content),
+        tool_call_ordinal=0,
+        tool_call_arguments=freeze_json({"image_ref": image.content_digest}),
+    )
+    snapshot = _snapshot(
+        late,
+        canonical_expanded_bytes=provider_input_item_canonical_expanded_bytes(late),
+    )
+    compiled = StructuredModelInputCompiler().compile(
+        _prepared_request(
+            snapshot,
+            _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("BASE",))),
+        )
+    )
+
+    carriers = tuple(
+        message
+        for message in compiled.messages
+        if message.role is MessageRole.USER
+        and any(isinstance(part, LLMImagePart) for part in message.content)
+    )
+    assert len(carriers) == 1
+    carrier = carriers[0]
+    image_index = carrier.content.index(image)
+    assert carrier.content[image_index - 1] == LLMTextPart(
+        canonical_json_bytes(
+            {"pulsara_image": {"image_ref": image.content_digest}}
+        ).decode("utf-8")
+    )
+    assert any(
+        isinstance(part, LLMTextPart)
+        and json.loads(part.text).get("tool_image_source")
+        == {"tool_call_id": "call:1", "image_ref": image.content_digest}
+        for part in carrier.content
+        if isinstance(part, LLMTextPart) and part.text.startswith("{")
+    )
 
 
 def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
@@ -3774,7 +3838,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:3544ba3f7dd52f3036a71986864ef1bc6399b7daf96f9b4790976505ef512b1a"
+        "sha256:174c97f44a246a37ea70782a8ea2ada7aa842cdfff60b9b0fa647e1eab386863"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

@@ -648,7 +648,7 @@ class KernelInteractionCoordinator:
                             "capability-form:cancelled"
                             if cancelled
                             else "capability-form:user-submitted",
-                            "能力配置已取消。" if cancelled else "用户已提交能力配置。",
+                            "Capability configuration was cancelled." if cancelled else "The user submitted the capability configuration.",
                             capability_submission=(
                                 AcceptedCapabilityFormSubmission(values)
                                 if not cancelled and values is not None

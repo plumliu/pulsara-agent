@@ -243,7 +243,7 @@ class _RepositoryKernel:
                 SET status = 'INTERRUPTED',
                     terminal_reason = 'HOST_TAKEOVER',
                     terminal_public_detail =
-                        'Pulsara 运行环境发生切换，子任务已中断。',
+                        'The Pulsara runtime changed and the delegated task was interrupted.',
                     terminal_at = clock_timestamp()
                 WHERE session_id = %s
                   AND status IN (

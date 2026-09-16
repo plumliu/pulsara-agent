@@ -68,7 +68,7 @@ COMPACTION_SNAPSHOT_COMPILER_CONTRACT = (
     "pulsara.context-snapshot-carrier.v4-typed-content"
 )
 COMPACTION_SUMMARY_PROMPT_CONTRACT = (
-    "pulsara.context-compaction-summary.v4-temporal-handoff"
+    "pulsara.context-compaction-summary.v6-optional-retention"
 )
 COMPACTION_MODEL_CONTRACT = "pulsara.primary-model-compaction.v1"
 CONTEXT_SNAPSHOT_MEDIA_TYPE = "application/vnd.pulsara.context-snapshot+json"

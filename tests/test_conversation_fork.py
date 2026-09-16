@@ -18,6 +18,10 @@ from pulsara_agent.conversation_kernel.fork_history import read_fork_anchor
 from pulsara_agent.conversation_kernel.prompt_content import (
     hydrate_canonical_prompt_body,
 )
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    CanonicalImageReferenceUnavailable,
+    PostgresCanonicalImageReferenceReadPort,
+)
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
@@ -1078,6 +1082,25 @@ def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(rep
     ]
     assert [row["ref_ordinal"] for row in child_refs] == [0, 1]
 
+    workspace_id = str(
+        rows(
+            repo,
+            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
+            (child,),
+        )[0]["workspace_id"]
+    )
+    assert PostgresCanonicalImageReferenceReadPort(
+        repo.connection_provider,
+        session_id=child,
+        workspace_id=workspace_id,
+    ).read_image(
+        session_id=child,
+        workspace_id=workspace_id,
+        image_ref=image.content_digest,
+        maximum_encoded_bytes=1 << 20,
+        deadline_monotonic=monotonic() + 30,
+    ) == image
+
     guard = child_lease(repo, child).guard
     _, cut, _ = turn(repo, guard, "continue child", finish=False)
     snapshot = CanonicalProviderInputReader(
@@ -1085,6 +1108,55 @@ def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(rep
     ).read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
     assert snapshot.items[0].content == content.parts
     assert provider_input_item_text(snapshot.items[-1]) == "continue child"
+
+
+def test_fork_cannot_reread_image_outside_its_anchor_cut(repo):
+    lease = new_session(repo)
+    _, _, anchor = turn(repo, lease.guard, "before image")
+    assert anchor is not None
+    payload = BytesIO()
+    Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
+    image = LLMImagePart("image/png", payload.getvalue(), 7, 5)
+    turn_id = identity("turn")
+    start_test_root_turn(
+        repo,
+        lease.guard,
+        command_id=identity("command"),
+        turn_id=turn_id,
+        permission_snapshot_id=identity("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        entry_id=identity("entry"),
+        context_binding_revision_id=identity("revision"),
+        content=FrozenPromptContent((LLMTextPart("later"), image)),
+        occurred_at=datetime.now(timezone.utc),
+        deadline_monotonic=monotonic() + 30,
+        model_call_binding=model_binding(model_runtime()),
+    )
+    final(repo, lease.guard, turn_id)
+
+    created = fork(repo, lease.guard.session_id, anchor)
+    assert created.created, created.public_code
+    child = created.child_session_id
+    workspace_id = str(
+        rows(
+            repo,
+            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
+            (child,),
+        )[0]["workspace_id"]
+    )
+    child_reader = PostgresCanonicalImageReferenceReadPort(
+        repo.connection_provider,
+        session_id=child,
+        workspace_id=workspace_id,
+    )
+    with pytest.raises(CanonicalImageReferenceUnavailable):
+        child_reader.read_image(
+            session_id=child,
+            workspace_id=workspace_id,
+            image_ref=image.content_digest,
+            maximum_encoded_bytes=1 << 20,
+            deadline_monotonic=monotonic() + 30,
+        )
 
 
 def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_delete(
@@ -1202,6 +1274,24 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
            WHERE session_id=%s AND context_snapshot_id=%s ORDER BY ref_ordinal""",
         (child, child_snapshot),
     ) == child_refs
+    child_workspace_id = str(
+        rows(
+            repo,
+            "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s",
+            (child,),
+        )[0]["workspace_id"]
+    )
+    assert PostgresCanonicalImageReferenceReadPort(
+        repo.connection_provider,
+        session_id=child,
+        workspace_id=child_workspace_id,
+    ).read_image(
+        session_id=child,
+        workspace_id=child_workspace_id,
+        image_ref=image.content_digest,
+        maximum_encoded_bytes=1 << 20,
+        deadline_monotonic=monotonic() + 30,
+    ) == image
 
     guard = child_lease(repo, child).guard
     _, cut, _ = turn(repo, guard, "continue child", finish=False)

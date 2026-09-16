@@ -2,13 +2,13 @@
 
 状态：已实施并完成本轮验收。日期：2026-09-16。实际验收入口与边界见冻结 [图片输入设计 §17](PULSARA_KERNEL_IMAGE_INPUT_AND_OPENAI_WIRE_ADAPTER_DESIGN.zh.md#17-view_image-本地工具扩展实施状态2026-09-16)。
 
-后续待实施扩展：[已知图片引用重读规格](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 定义同一 `view_image` 的 path/ref 互斥来源，不实现历史图片查询。该稿尚未实施；本文现有验收不自动覆盖引用读取。
+后续扩展 [已知图片引用重读规格](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 已实施：同一 `view_image` 现在接受 path/ref 互斥来源，且不实现历史图片查询。引用读取的新增验收独立记录在该规格 §14；本文原 path 工具验收不反向替代它。
 
 本稿以实施前工作区生产代码为基线。2026-09-16 根据独立 critic 审阅补齐 unknown modalities、逐调用执行额度、组合来源 placement、Tier 3 工具证据、文本公共投影、验证窗口及历史读取权限，随后按本文完成 hard cut；正文中的“当前缺口”“拟新增”保留为实施落点说明，最终状态以上述 §17 验收记录为准。
 
 ## 1. 目标、权威与范围
 
-本任务允许模型调用 `view_image(path)` 查看本地静态图片，接通真实文件读取、工具结果落库、provider 输入、历史/压缩/fork 和浏览器左侧展示。
+本任务最初允许模型调用 `view_image(path)` 查看本地静态图片，接通真实文件读取、工具结果落库、provider 输入、历史/压缩/fork 和浏览器左侧展示；其后同一工具按已知图片引用重读规格扩展了互斥的 `image_ref` 来源。
 
 权威顺序：用户本轮确认的产品行为 → [AGENTS.md](AGENTS.md) → 本实施规范 → 已冻结的 [图片输入设计](PULSARA_KERNEL_IMAGE_INPUT_AND_OPENAI_WIRE_ADAPTER_DESIGN.zh.md) 中仍适用的 D1–D4、K1–K4、U1/U2 → 当前代码。代码用于识别现状与修改落点；本文明确要求改变的旧限制不能反过来阻止本次实施。没有明确改变的既有合同继续成立。
 
@@ -110,7 +110,7 @@ catalog：`is_read_only=True`、`is_concurrency_safe=True`、`permission_categor
 
 现有 `HostPromptImageValidator.freeze(PromptContent)` 强制接收声明 MIME，不能直接把扩展名推导的 MIME 填进去冒充声明。实施时在**同一 owner** 增加本地 bytes 验证入口：输入有界 immutable bytes 与绝对 deadline，复用同一个 slot、spawn/cleanup 和验证实现，返回实际 MIME/宽高及已验证 `LLMImagePart`。内部 worker 工作项明确区分“有声明 MIME，必须相等”和“本地无声明 MIME，由实际格式确定”；后者只用于本工具入口。现有上传 `freeze()` 继续要求声明，不对上传开放缺失 MIME 的回退。两入口共享 decoder，不复制 Pillow 检查流程，也不新增 validator service。
 
-参数非法用原 `INVALID_ARGUMENTS`；路径/格式/像素/本次额度不满足时用原 `APPLICATION_ERROR`，正文给出稳定的具体原因，例如 `IMAGE_FORMAT_UNSUPPORTED`、`IMAGE_DECODE_FAILED`、`IMAGE_RESOURCE_EXCEEDED`、`MODEL_IMAGE_INPUT_UNSUPPORTED`。这是工具正文错误码，不新增 committed event kind。错误不可伪装成 SUCCESS + “[图片已省略]”。普通失败不附图片；权限拒绝和取消沿原状态合同。
+参数非法用原 `INVALID_ARGUMENTS`；路径/格式/像素/本次额度不满足时用原 `APPLICATION_ERROR`，正文给出稳定的具体原因，例如 `IMAGE_FORMAT_UNSUPPORTED`、`IMAGE_DECODE_FAILED`、`IMAGE_RESOURCE_EXCEEDED`、`MODEL_IMAGE_INPUT_UNSUPPORTED`。这是工具正文错误码，不新增 committed event kind。错误不可伪装成 SUCCESS + “[Image omitted]”。普通失败不附图片；权限拒绝和取消沿原状态合同。
 
 ### 3.4 同步文件读取与异步验证的衔接
 
@@ -389,7 +389,7 @@ canonical 缺图、摘要不匹配、refs 多/少或归属错误，沿现有 int
 
 ### 8.3 模型切换
 
-冻结的三级规则扩展覆盖工具图片：Tier 1 检测有效输入任何来源的 Image；纯文本目标遇到工具图片也不能直接安装。Tier 2 使用原多模态模型总结完整 source；最近三条真实用户输入按原规则选择，工具图片本身不使 recent 用户原话计数变化。Tier 3 原模型不可用时，P 将 source 中的工具 Image 也替换为普通 Text("[图片已省略]")，再由新文本模型总结；保持原纯文本交接 recent=0 和覆盖证明。
+冻结的三级规则扩展覆盖工具图片：Tier 1 检测有效输入任何来源的 Image；纯文本目标遇到工具图片也不能直接安装。Tier 2 使用原多模态模型总结完整 source；最近三条真实用户输入按原规则选择，工具图片本身不使 recent 用户原话计数变化。Tier 3 原模型不可用时，P 将 source 中的工具 Image 也替换为普通 Text("[Image omitted]")，再由新文本模型总结；保持原纯文本交接 recent=0 和覆盖证明。
 
 P 只作用于明确的交接/summary 候选，不修改原 canonical 工具结果、历史 UI、已安装 epoch 或重试 payload。用于临时投影的 typed 值须明确允许“图片经 P 后为纯文本”的合法形状，不能重新恢复原图；这不是新持久化省略类型。
 
@@ -487,7 +487,7 @@ history/snapshot/活动记录只传 descriptor，图片按需通过原 chunked r
 
 | 编号 | 场景及断言 |
 |---|---|
-| L01 | catalog/schema 只有 path；read-only、concurrency、family、permission/recovery 分类一致；旧 epoch tools 不变 |
+| L01 | 原 catalog/schema 只有 path；已由后续已知引用重读规格 hard cut 为 path/image_ref 恰有一个；read-only、concurrency、family、permission/recovery 分类一致；旧 epoch tools 不变 |
 | L02 | 工作区相对路径、绝对路径、`~`、`${PULSARA_HOME}` 和相对逃逸行为与原 read owner 一致 |
 | L03 | 文件不存在、目录、FIFO/device、空文件、伪装成图片的非法内容、损坏、动画、多帧、像素/PNG metadata 超界，均无成功图片 publication |
 | L04 | 读取期间增长超过额度被 bounded read 拒绝；不通过先整文件读取再判超限实现 |

@@ -160,6 +160,9 @@ from pulsara_agent.conversation_kernel.prompt_content import (
     FrozenCanonicalPrompt,
     freeze_canonical_prompt,
 )
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    PostgresCanonicalImageReferenceReadPort,
+)
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelRunResult,
@@ -681,6 +684,11 @@ class KernelHostSession:
             live_bus=self.live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
             artifact_read_port=PostgresToolArtifactReadPort(
+                repository.connection_provider,
+                session_id=session_id,
+                workspace_id=workspace.workspace_key,
+            ),
+            image_reference_read_port=PostgresCanonicalImageReferenceReadPort(
                 repository.connection_provider,
                 session_id=session_id,
                 workspace_id=workspace.workspace_key,

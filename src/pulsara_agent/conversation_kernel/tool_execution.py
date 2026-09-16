@@ -143,6 +143,7 @@ from pulsara_agent.conversation_kernel.memory.dispatch import (
 )
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.tools.builtins.filesystem import parse_view_image_source
 
 
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
@@ -691,15 +692,13 @@ class ToolBatchExecutor:
             except KeyError:
                 continue
             arguments = thaw_json(call.arguments)
-            if (
-                not isinstance(binding, PreparedToolExecutionBinding)
-                or not isinstance(
-                    binding.execution_policy, BuiltinExecutionPolicyRef
-                )
-                or not isinstance(arguments, dict)
-                or not isinstance(arguments.get("path"), str)
-                or not arguments["path"]
-            ):
+            if not isinstance(binding, PreparedToolExecutionBinding) or not isinstance(
+                binding.execution_policy, BuiltinExecutionPolicyRef
+            ) or not isinstance(arguments, dict):
+                continue
+            try:
+                parse_view_image_source(arguments)
+            except ValueError:
                 continue
             expected.append(
                 (
@@ -1549,14 +1548,15 @@ class ToolBatchExecutor:
                         result = KernelToolResult(
                             state="SYSTEM_ERROR",
                             content=(
-                                "tool observation failed: "
-                                f"{type(exc.physical_error).__name__}"
+                                "The tool could not provide a reliable result. "
+                                "Do not treat this as successful observation or "
+                                "as evidence that the resource is absent."
                             ).encode("utf-8"),
                             physical_timing=exc.timing,
                             caller_cancelled_while_running=exc.caller_cancelled,
                             physical_observation=exc.physical_observation,
                         )
-                    except Exception as exc:
+                    except Exception:
                         severity = builtin_tool_catalog_entry(
                             call.tool_name
                         ).recovery_contract.severity
@@ -1567,7 +1567,9 @@ class ToolBatchExecutor:
                         result = KernelToolResult(
                             state="SYSTEM_ERROR",
                             content=(
-                                f"tool admission failed: {type(exc).__name__}"
+                                "The tool request did not produce a reliable result. "
+                                "Do not assume success or repeat the same request "
+                                "without new information."
                             ).encode("utf-8"),
                         )
 

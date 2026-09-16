@@ -193,6 +193,22 @@ def test_search_result_does_not_authorize_edit(tmp_path: Path) -> None:
     assert target.read_bytes() == raw
 
 
+@pytest.mark.parametrize(
+    ("path", "error", "hint"),
+    (("missing", "FILE_NOT_FOUND", "existing"),
+     ("/", "SEARCH_ROOT_TOO_BROAD", "specific")),
+)
+def test_search_rejection_explains_how_to_select_a_path(
+    tmp_path: Path, path: str, error: str, hint: str,
+) -> None:
+    result = _call(SearchFilesTool(tmp_path), {"path": path, "pattern": "needle"})
+    assert result.status is ToolResultState.ERROR
+    payload = _payload(result)
+    assert payload["error"] == error
+    assert hint in payload["_hint"]
+    assert "Error" not in payload["message"]
+
+
 def test_paginated_reads_union_seen_intervals_only_for_same_revision(
     tmp_path: Path,
 ) -> None:
