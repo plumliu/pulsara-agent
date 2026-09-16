@@ -333,6 +333,7 @@ export interface ToolTrace {
   duration?: string;
   argumentsJson?: string;
   resultText?: string;
+  resultContent?: CanonicalPromptContent;
   resultEntryId?: string;
   resultState?: string;
   resultSummary?: string;

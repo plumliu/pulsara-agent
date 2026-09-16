@@ -29,6 +29,10 @@ from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
 )
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
+from pulsara_agent.conversation_kernel.prompt_content import (
+    PROMPT_BODY_CODEC,
+    PROMPT_BODY_MEDIA_TYPE,
+)
 from pulsara_agent.conversation_kernel.prompt_storage import (
     insert_canonical_prompt_refs,
 )
@@ -36,8 +40,10 @@ from pulsara_agent.conversation_kernel.provider_dispatch import canonical_fronti
 from pulsara_agent.conversation_kernel.queued_prompt_actions import QueuedPromptAction
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.repository import (
+    AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
+    build_prepared_tool_result_acceptance,
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.conversation_kernel.steer import (
@@ -60,6 +66,13 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.model_input.lowering import lower_canonical_item
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.postgres import verified_postgres_provider
@@ -150,7 +163,10 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
     stage2_migrated_postgres_database,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
-    lease, runtime, _binding = _bound_session(repository)
+    workspace_id = _id("workspace")
+    lease, runtime, _binding = _bound_session(
+        repository, workspace_id=workspace_id
+    )
     image = _image()
     content = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("after"), image)
@@ -244,6 +260,224 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
             intent=changed,
             provider_input_admission=changed_admission,
             model_resolution_snapshot=runtime.freeze_resolution_snapshot(),
+            deadline_monotonic=monotonic() + 30,
+        )
+
+
+def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
+    stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    workspace_id = _id("workspace")
+    lease, runtime, _binding = _bound_session(
+        repository, workspace_id=workspace_id
+    )
+    intent, _accepted, _admission = _direct_intent(
+        repository,
+        lease,
+        runtime,
+        FrozenPromptContent.text("inspect local images"),
+    )
+    assistant_entry_id = _id("entry")
+    call_ids = tuple(_id("call") for _ in range(3))
+    cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=intent.turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    repository.commit_assistant_message(
+        lease.guard,
+        cut=cut,
+        entry_id=assistant_entry_id,
+        parent_content=InlineContent.from_bytes(b"inspect"),
+        blocks=tuple(
+            AssistantToolCallBlock(
+                block_id=_id("block"),
+                tool_call_id=call_id,
+                tool_name="view_image",
+                arguments=freeze_json({"path": f"/tmp/{ordinal}.png"}),
+            )
+            for ordinal, call_id in enumerate(call_ids)
+        ),
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="model:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    permission_fingerprint = str(
+        _rows(
+            repository,
+            "SELECT permission_snapshot_fingerprint FROM pulsara_v3.turns "
+            "WHERE session_id=%s AND id=%s",
+            (lease.guard.session_id, intent.turn_id),
+        )[0]["permission_snapshot_fingerprint"]
+    )
+
+    attempt_ids = tuple(_id("attempt") for _ in call_ids)
+    for call_id, attempt_id in zip(call_ids, attempt_ids, strict=True):
+        repository.accept_tool_attempt(
+            lease.guard,
+            attempt_id=attempt_id,
+            assistant_entry_id=assistant_entry_id,
+            tool_call_id=call_id,
+            authorization_kind="policy",
+            authorization_reference="allow",
+            actor_kind="runtime",
+            actor_id="view_image",
+            remote_idempotency_key=None,
+            retry_of_attempt_id=None,
+            permission_snapshot_fingerprint=permission_fingerprint,
+            occurred_at=datetime.now(timezone.utc),
+            deadline_monotonic=monotonic() + 30,
+        )
+
+    shared_image = _image()
+
+    def candidate(
+        *, ordinal: int, image: LLMImagePart, result_entry_id: str
+    ):
+        prompt = freeze_canonical_prompt(
+            FrozenPromptContent((LLMTextPart("Image loaded."), image))
+        )
+        return build_prepared_tool_result_acceptance(
+            guard=lease.guard,
+            workspace_id=workspace_id,
+            result_id=_id("result"),
+            result_entry_id=result_entry_id,
+            turn_id=intent.turn_id,
+            assistant_entry_id=assistant_entry_id,
+            tool_call_id=call_ids[ordinal],
+            attempt_id=attempt_ids[ordinal],
+            result_state="SUCCESS",
+            canonical_preview_content=InlineContent.from_bytes(
+                prompt.body,
+                media_type=PROMPT_BODY_MEDIA_TYPE,
+                codec=PROMPT_BODY_CODEC,
+            ),
+            canonical_prompt=prompt,
+            artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+            artifact_id=None,
+            artifact_blob_descriptor=None,
+            source_coverage=ToolOutputSourceCoverage.COMPLETE,
+            display_kind=ToolResultDisplayKind.COMPLETE,
+            source_coverage_reason=None,
+            artifact_unavailability_reason=None,
+            observed_at=datetime.now(timezone.utc),
+            observation_duration_microseconds=1,
+            observation_origin_kind=ToolObservationOrigin.BUILTIN,
+            trusted_tool_reported_duration_microseconds=None,
+            actor_id="view_image",
+        )
+
+    accepted_candidates = tuple(
+        candidate(
+            ordinal=ordinal,
+            image=shared_image,
+            result_entry_id=_id("entry"),
+        )
+        for ordinal in range(2)
+    )
+    for prepared in accepted_candidates:
+        repository.accept_tool_result(
+            lease.guard,
+            candidate=prepared,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert repository.confirm_tool_result_winner(
+            lease.guard,
+            candidate=prepared,
+            deadline_monotonic=monotonic() + 30,
+        ) is not None
+
+    refs = _rows(
+        repository,
+        "SELECT transcript_entry_id, blob_id FROM pulsara_v3.canonical_image_refs "
+        "WHERE session_id=%s AND transcript_entry_id = ANY(%s) "
+        "ORDER BY transcript_entry_id",
+        (
+            lease.guard.session_id,
+            [item.result_entry_id for item in accepted_candidates],
+        ),
+    )
+    assert len(refs) == 2
+    assert len({str(row["transcript_entry_id"]) for row in refs}) == 2
+    assert len({str(row["blob_id"]) for row in refs}) == 1
+
+    final_cut = repository.prepare_provider_input_cut(
+        lease.guard,
+        turn_id=intent.turn_id,
+        deadline_monotonic=monotonic() + 30,
+    )
+    snapshot = CanonicalProviderInputReader(
+        repository.connection_provider
+    ).read_frozen_snapshot(final_cut, deadline_monotonic=monotonic() + 30)
+    tool_results = tuple(
+        item
+        for item in snapshot.items
+        if item.item_kind.value == "TOOL_RESULT"
+    )
+    assert len(tool_results) == 2
+    assert tuple(item.tool_call_ordinal for item in tool_results) == (0, 1)
+    assert all(item.content[1] == shared_image for item in tool_results)
+
+    rollback_image = _image(_png(size=(8, 6)))
+    rollback_entry_id = _id("entry")
+    rollback_candidate = candidate(
+        ordinal=2,
+        image=rollback_image,
+        result_entry_id=rollback_entry_id,
+    )
+    original_publish = PostgresCanonicalBlobStore.publish_in_connection
+
+    def fail_after_image_publish(connection, **kwargs):
+        published = original_publish(connection, **kwargs)
+        if kwargs["content"] == rollback_image.immutable_bytes:
+            raise RuntimeError("injected image publication failure")
+        return published
+
+    monkeypatch.setattr(
+        PostgresCanonicalBlobStore,
+        "publish_in_connection",
+        staticmethod(fail_after_image_publish),
+    )
+    with pytest.raises(RuntimeError, match="injected image publication failure"):
+        repository.accept_tool_result(
+            lease.guard,
+            candidate=rollback_candidate,
+            deadline_monotonic=monotonic() + 30,
+        )
+    assert _rows(
+        repository,
+        "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
+        (lease.guard.session_id, rollback_entry_id),
+    ) == []
+    assert _rows(
+        repository,
+        "SELECT id FROM pulsara_v3.tool_results WHERE session_id=%s AND id=%s",
+        (lease.guard.session_id, rollback_candidate.result_id),
+    ) == []
+    assert _rows(
+        repository,
+        "SELECT id FROM pulsara_v3.blobs WHERE workspace_id=%s AND logical_digest=%s",
+        (workspace_id, rollback_image.content_digest),
+    ) == []
+
+    drifted_prompt = freeze_canonical_prompt(
+        FrozenPromptContent((LLMTextPart("Image loaded."), rollback_image))
+    )
+    drifted = replace(
+        accepted_candidates[0],
+        canonical_preview_content=InlineContent.from_bytes(
+            drifted_prompt.body,
+            media_type=PROMPT_BODY_MEDIA_TYPE,
+            codec=PROMPT_BODY_CODEC,
+        ),
+        canonical_prompt=drifted_prompt,
+    )
+    with pytest.raises(ConversationKernelConflict, match="different winner"):
+        repository.confirm_tool_result_winner(
+            lease.guard,
+            candidate=drifted,
             deadline_monotonic=monotonic() + 30,
         )
 

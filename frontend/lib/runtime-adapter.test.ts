@@ -439,6 +439,40 @@ describe('exact prompt projection', () => {
     expect(messages.find(m => m.id === 'detached')?.traces?.[0]).toMatchObject({ status: 'failed' });
   });
 
+  it('hydrates canonical view_image content into its exact tool trace owner', async () => {
+    const imageBody = JSON.stringify({
+      schema: 'pulsara.prompt/v1',
+      parts: [
+        { type: 'text', text: 'Image loaded.' },
+        {
+          type: 'image', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 3,
+          media_type: 'image/png', width: 2, height: 1,
+        },
+      ],
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload([
+      {
+        entry_id: 'request', turn_id: 'turn', entry_sequence: '1',
+        entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+        blocks: [{ block_id: 'block', block_kind: 'TOOL_CALL', tool_call_id: 'call', tool_name: 'view_image' }],
+      },
+      {
+        entry_id: 'result', turn_id: 'turn', entry_sequence: '2',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: { ...inlineContent(imageBody), media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8' },
+        tool_result: { assistant_entry_id: 'request', tool_call_id: 'call', result_state: 'SUCCESS' },
+      },
+    ])), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const trace = connection.current().messages.find((message) => message.id === 'request')?.traces?.[0];
+    expect(trace?.resultText).toBe('Image loaded.');
+    expect(trace?.resultContent?.parts[1]).toMatchObject({
+      type: 'image', source: 'canonical', refOrdinal: 0,
+      owner: { kind: 'entry', entryId: 'result' },
+    });
+  });
+
   it('keeps an in-flight user steer distinct from an ordinary user turn', async () => {
     const content = (value: string) => ({
       kind: 'INLINE',

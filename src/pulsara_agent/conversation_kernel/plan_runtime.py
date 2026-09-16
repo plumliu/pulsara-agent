@@ -415,12 +415,18 @@ class PlanToolBatchCoordinator:
             source_entry_id=settlement.result_entry_id,
             source_entry_sequence=settlement.accepted_entry_sequence,
             source_turn_id=settlement.turn_id,
-            content=(LLMTextPart(settlement.public_projection.canonical_body),),
+            content=(
+                settlement.canonical_content.parts
+                if settlement.canonical_content is not None
+                else (LLMTextPart(settlement.public_projection.canonical_body),)
+            ),
             tool_call_id=settlement.tool_call_id,
             tool_request_entry_id=settlement.assistant_entry_id,
             tool_result_context=settlement.public_projection.metadata,
             tool_result_body_text=settlement.public_projection.canonical_body,
             tool_result_delivery=settlement.public_projection.delivery,
+            tool_call_ordinal=settlement.call_ordinal,
+            tool_call_arguments=settlement.public_arguments,
         )
         projected = project_tool_result_public_value(
             item, artifact_read_available=True

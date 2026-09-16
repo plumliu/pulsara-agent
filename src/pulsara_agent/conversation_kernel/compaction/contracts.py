@@ -865,12 +865,22 @@ def provider_input_item_canonical_expanded_bytes(
     if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
         raise ValueError("snapshot C charge belongs to its typed carrier")
     if (
-        item.item_kind is FrozenProviderInputItemKind.USER
-        and item.input_origin
-        in {
-            CanonicalInputOriginKind.HUMAN_MESSAGE,
-            CanonicalInputOriginKind.HUMAN_STEER,
-        }
+        (
+            item.item_kind is FrozenProviderInputItemKind.USER
+            and item.input_origin
+            in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.HUMAN_STEER,
+            }
+        )
+        or (
+            item.item_kind
+            in {
+                FrozenProviderInputItemKind.TOOL_RESULT,
+                FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+            }
+            and any(isinstance(part, LLMImagePart) for part in item.content)
+        )
     ):
         content = FrozenPromptContent(item.content)
         return len(canonical_prompt_body_bytes(content)) + sum(

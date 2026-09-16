@@ -58,6 +58,7 @@ class ToolResultFullDeliveryReason(StrEnum):
     MCP_DIRECTORY_PAGE = "MCP_DIRECTORY_PAGE"
     MCP_INSPECT_SCHEMA = "MCP_INSPECT_SCHEMA"
     SKILL_ACTIVATION = "SKILL_ACTIVATION"
+    IMAGE_ATTACHMENT = "IMAGE_ATTACHMENT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +110,10 @@ def classify_tool_result_delivery(
 
     if result_state != "SUCCESS":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    if tool_name == "view_image":
+        return full_required_tool_result_delivery(
+            ToolResultFullDeliveryReason.IMAGE_ATTACHMENT
+        )
     if tool_name in {
         "list_mcp_prompts",
         "list_mcp_resource_templates",

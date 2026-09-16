@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from dataclasses import replace
 from datetime import datetime, timezone
 from io import BytesIO
 import json
@@ -88,9 +89,11 @@ from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMMessage,
     LLMTextPart,
+    frozen_tool_result_public_text,
     join_text_content,
     llm_content_logical_bytes,
 )
+from pulsara_agent.conversation_kernel.prompt_content import canonical_prompt_body_bytes
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
@@ -1105,6 +1108,43 @@ def test_post_response_charge_includes_assistant_arguments_and_result_uppers() -
             "transition": "ENTERED_PLAN",
         }
     }
+
+
+def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes() -> None:
+    from tests.test_round3_structured_model_input_compiler import _tool_result
+
+    image = _image(b"typed-image-bytes", width=12, height=8)
+    content = FrozenPromptContent((LLMTextPart("attached"), image))
+    item = replace(
+        _tool_result("plain", sequence=7, turn_id="turn:image", artifact=False),
+        content=content.parts,
+        tool_result_body_text=frozen_tool_result_public_text(content),
+        tool_call_ordinal=0,
+        tool_call_arguments=freeze_json({"path": "/tmp/image.png"}),
+    )
+
+    assert provider_input_item_canonical_expanded_bytes(item) == (
+        len(canonical_prompt_body_bytes(content)) + len(image.immutable_bytes)
+    )
+
+    late_content = FrozenPromptContent(
+        (
+            LLMTextPart(
+                '{"schema_version":"late_tool_outcome_observation.v1",'
+                '"tool_call_id":"call:7","result_state":"SUCCESS",'
+                '"result":"Image loaded."}'
+            ),
+            image,
+        )
+    )
+    late = replace(
+        item,
+        item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        content=late_content.parts,
+    )
+    assert provider_input_item_canonical_expanded_bytes(late) == (
+        len(canonical_prompt_body_bytes(late_content)) + len(image.immutable_bytes)
+    )
 
 
 @pytest.mark.parametrize(

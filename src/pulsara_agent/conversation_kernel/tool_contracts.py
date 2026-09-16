@@ -12,6 +12,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Mapping, Protocol, TYPE_CHECKING
 
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
+    LLMTextPart,
+    frozen_tool_result_public_text,
+)
+
 if TYPE_CHECKING:
     from .capability_management_execution import CapabilityManagementCall
 
@@ -76,7 +83,7 @@ from pulsara_agent.primitives.tool_observation import (
 @dataclass(frozen=True, slots=True)
 class KernelToolResult:
     state: str
-    content: bytes
+    content: bytes | FrozenPromptContent
     memory_candidate: PreparedMemoryCandidateAcceptance | None = None
     remote_identity: str | None = None
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
@@ -90,7 +97,20 @@ class KernelToolResult:
     model_visible_memory_fact_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        self.content.decode("utf-8")
+        if isinstance(self.content, bytes):
+            self.content.decode("utf-8")
+        elif isinstance(self.content, FrozenPromptContent):
+            images = tuple(
+                part for part in self.content.parts if isinstance(part, LLMImagePart)
+            )
+            if (
+                self.state != "SUCCESS"
+                or len(images) != 1
+                or not any(isinstance(part, LLMTextPart) for part in self.content.parts)
+            ):
+                raise ValueError("typed image content is invalid for this Tool result")
+        else:
+            raise TypeError("kernel Tool result content must be bytes or frozen content")
         if self.artifact_source_read and self.output_artifact_candidate is not None:
             raise ValueError("artifact_read cannot recursively own an artifact")
 
@@ -132,6 +152,8 @@ class KernelToolInvocationContext:
     effective_permission_mode: PermissionMode
     attempt_permission_snapshot_fingerprint: str
     surface_borrow: ProcessLocalToolSurfaceBorrow = field(repr=False, compare=False)
+    input_modalities: tuple[str, ...] | None = None
+    image_resource_allowance: "FrozenImageToolResourceAllowance | None" = None
     permission_confirmation_granted: bool = False
     capability_call: CapabilityManagementCall | None = field(default=None, repr=False, compare=False)
     subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
@@ -180,6 +202,11 @@ class KernelToolInvocationContext:
             )
         if not isinstance(self.effective_permission_mode, PermissionMode):
             raise TypeError("tool invocation permission mode must be closed")
+        if self.input_modalities is not None and (
+            not isinstance(self.input_modalities, tuple)
+            or any(not isinstance(value, str) for value in self.input_modalities)
+        ):
+            raise TypeError("tool invocation input modalities are invalid")
         access = self.surface_borrow.prepared.access
         if (
             access.conversation_scope_kind.value != self.conversation_scope_kind
@@ -206,6 +233,63 @@ class ProcessLocalEffectSettlementToken:
     def __post_init__(self) -> None:
         if not self.token_id:
             raise ValueError("process-local settlement token is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenImageToolResourceAllowance:
+    call_ordinal: int
+    tool_call_id: str
+    executor_binding_fingerprint: str
+    canonical_bytes: int
+    logical_bytes: int
+    wire_bytes: int
+    input_tokens: int
+    quote_owner: "ImageToolResourceQuotePort" = field(
+        repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.call_ordinal, bool)
+            or self.call_ordinal < 0
+            or not self.tool_call_id
+            or not self.executor_binding_fingerprint
+            or min(
+                self.canonical_bytes,
+                self.logical_bytes,
+                self.wire_bytes,
+                self.input_tokens,
+            )
+            < 0
+        ):
+            raise ValueError("image Tool resource allowance is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class FrozenImageToolResourceIncrement:
+    canonical_bytes: int
+    logical_bytes: int
+    wire_bytes: int
+    input_tokens: int
+
+    def __post_init__(self) -> None:
+        if min(
+            self.canonical_bytes,
+            self.logical_bytes,
+            self.wire_bytes,
+            self.input_tokens,
+        ) < 0:
+            raise ValueError("image Tool resource increment is invalid")
+
+
+class ImageToolResourceQuotePort(Protocol):
+    def quote(
+        self,
+        *,
+        tool_call_id: str,
+        requested_path: str,
+        content: FrozenPromptContent,
+    ) -> FrozenImageToolResourceIncrement: ...
 
 
 class ProcessLocalEffectSettlementDisposition(StrEnum):
@@ -397,6 +481,7 @@ class AcceptedCanonicalToolResultSettlement:
     result_state: str
     result_origin_kind: str
     public_projection: FrozenToolResultPublicProjectionInput
+    canonical_content: FrozenPromptContent | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -420,6 +505,14 @@ class AcceptedCanonicalToolResultSettlement:
             or not isinstance(self.public_arguments, FrozenJsonObjectFact)
         ):
             raise ValueError("accepted canonical ToolResult settlement is invalid")
+        if self.canonical_content is not None:
+            if not isinstance(self.canonical_content, FrozenPromptContent):
+                raise TypeError("canonical ToolResult content must be frozen")
+            if (
+                frozen_tool_result_public_text(self.canonical_content)
+                != self.public_projection.canonical_body
+            ):
+                raise ValueError("ToolResult public projection drifted from canonical content")
 
 
 def build_accepted_canonical_tool_result_settlement(
@@ -454,6 +547,7 @@ def build_accepted_canonical_tool_result_settlement(
         ToolOutputArtifactUnavailabilityReason | None
     ) = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
+    canonical_content: FrozenPromptContent | None = None,
 ) -> AcceptedCanonicalToolResultSettlement:
     """Freeze the one post-FULL, repository-neutral ToolResult carrier."""
 
@@ -499,6 +593,7 @@ def build_accepted_canonical_tool_result_settlement(
                 result_state=result_state,
             ),
         ),
+        canonical_content=canonical_content,
     )
 
 
@@ -632,6 +727,8 @@ class ToolInvocationPort(Protocol):
 __all__ = [
     "AcceptedCanonicalToolResultSettlement",
     "build_accepted_canonical_tool_result_settlement",
+    "FrozenImageToolResourceAllowance",
+    "FrozenImageToolResourceIncrement",
     "FrozenToolResultPublicProjectionInput",
     "KernelToolAuthorization",
     "KernelToolAuthorizationKind",
@@ -639,6 +736,7 @@ __all__ = [
     "KernelToolLiveSink",
     "KernelToolPhysicalInvocationError",
     "KernelToolResult",
+    "ImageToolResourceQuotePort",
     "ProcessLocalEffectSettlementDisposition",
     "ProcessLocalEffectSettlementOutcome",
     "ProcessLocalEffectSettlementResult",

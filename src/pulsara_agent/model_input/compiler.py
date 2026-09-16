@@ -20,6 +20,8 @@ from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMMessage,
     LLMTextPart,
+    MessageRole,
+    content_has_image,
     join_text_content,
     llm_content_identity_value,
     llm_content_logical_bytes,
@@ -50,6 +52,8 @@ from pulsara_agent.model_input.contracts import (
     StructuredModelInputLimits,
     STRUCTURED_MODEL_INPUT_LIMITS,
     ToolResultProviderRenderMode,
+    ToolAttachmentSource,
+    ToolAttachmentSourceMember,
     compiled_tool_result_source_fingerprint,
     frozen_compiled_model_input_fingerprint,
     provider_input_item_fingerprint,
@@ -74,7 +78,11 @@ from pulsara_agent.model_input.lowering import (
     lower_canonical_item,
     source_variant_message,
 )
-from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
+from pulsara_agent.primitives.context import (
+    canonical_json_bytes,
+    context_fingerprint,
+    thaw_json,
+)
 from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
 )
@@ -463,6 +471,138 @@ class _Layout:
     messages: tuple[LLMMessage, ...]
     message_placements: tuple[FrozenCompiledMessagePlacement, ...]
     estimate: TokenEstimate
+
+
+@dataclass(frozen=True, slots=True)
+class _ExpandedTranscriptMessage:
+    message: LLMMessage
+    origin_entry_id: str | None
+    origin_item_fingerprint: str | None
+    tool_attachment_source: ToolAttachmentSource | None = None
+
+
+def _tool_attachment_message(source: ToolAttachmentSource) -> LLMMessage:
+    images: list[tuple[str, str, LLMImagePart]] = []
+    for member in source.members:
+        arguments = member.source.tool_call_arguments
+        if arguments is None:
+            raise ValueError("tool attachment source lacks frozen arguments")
+        thawed_arguments = thaw_json(arguments)
+        path = (
+            thawed_arguments.get("path")
+            if isinstance(thawed_arguments, dict)
+            else None
+        )
+        if not isinstance(path, str):
+            raise ValueError("tool attachment source path is invalid")
+        assert isinstance(member.source.content, tuple)
+        source_images = tuple(
+            part for part in member.source.content if isinstance(part, LLMImagePart)
+        )
+        if len(source_images) != 1 or member.source.tool_call_id is None:
+            raise ValueError("tool attachment member image is invalid")
+        images.append((member.source.tool_call_id, path, source_images[0]))
+    return tool_image_attachment_message(tuple(images))
+
+
+def tool_image_attachment_message(
+    members: tuple[tuple[str, str, LLMImagePart], ...],
+) -> LLMMessage:
+    """Build the common compiler/provider projection for ToolResult images."""
+
+    if not members:
+        raise ValueError("tool image attachment requires at least one image")
+    parts: list[LLMTextPart | LLMImagePart] = [
+        LLMTextPart("The following images were read by tools.")
+    ]
+    for tool_call_id, requested_path, image in members:
+        if not tool_call_id or not requested_path or not isinstance(image, LLMImagePart):
+            raise ValueError("tool image attachment member is invalid")
+        parts.append(
+            LLMTextPart(
+                canonical_json_bytes(
+                    {
+                        "tool_image_source": {
+                            "tool_call_id": tool_call_id,
+                            "requested_path": requested_path,
+                        }
+                    }
+                ).decode("utf-8")
+            )
+        )
+        parts.append(image)
+    return LLMMessage(role=MessageRole.USER, content=tuple(parts))
+
+
+def _expand_lowered_transcript(
+    lowered: tuple[LoweredCanonicalItem, ...],
+    *,
+    selected_message_by_identity: dict[int, LLMMessage],
+) -> tuple[_ExpandedTranscriptMessage, ...]:
+    """Expand selected canonical items, merging image results by assistant batch."""
+
+    members_by_group: dict[tuple[str, bool], list[ToolAttachmentSourceMember]] = {}
+    last_index_by_group: dict[tuple[str, bool], int] = {}
+    for index, item in enumerate(lowered):
+        source = item.source
+        if source.tool_request_entry_id is not None:
+            key = (
+                source.tool_request_entry_id,
+                source.item_kind is FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+            )
+            last_index_by_group[key] = index
+        if (
+            source.item_kind
+            in {
+                FrozenProviderInputItemKind.TOOL_RESULT,
+                FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+            }
+            and isinstance(source.content, tuple)
+            and content_has_image(source.content)
+        ):
+            if source.tool_request_entry_id is None or source.tool_call_ordinal is None:
+                raise ValueError("image ToolResult source is incomplete")
+            key = (
+                source.tool_request_entry_id,
+                source.item_kind is FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+            )
+            members_by_group.setdefault(key, []).append(
+                ToolAttachmentSourceMember(source.tool_call_ordinal, source)
+            )
+
+    expanded: list[_ExpandedTranscriptMessage] = []
+    for index, item in enumerate(lowered):
+        message = (
+            item.fixed_message
+            if item.fixed_message is not None
+            else selected_message_by_identity[id(item)]
+        )
+        expanded.append(
+            _ExpandedTranscriptMessage(
+                message=message,
+                origin_entry_id=item.source.source_entry_id,
+                origin_item_fingerprint=provider_input_item_fingerprint(item.source),
+            )
+        )
+        groups = tuple(
+            key
+            for key, last_index in last_index_by_group.items()
+            if last_index == index and key in members_by_group
+        )
+        for key in sorted(groups):
+            members = tuple(
+                sorted(members_by_group[key], key=lambda member: member.call_ordinal)
+            )
+            attachment = ToolAttachmentSource(key[0], members)
+            expanded.append(
+                _ExpandedTranscriptMessage(
+                    message=_tool_attachment_message(attachment),
+                    origin_entry_id=None,
+                    origin_item_fingerprint=None,
+                    tool_attachment_source=attachment,
+                )
+            )
+    return tuple(expanded)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1053,10 +1193,21 @@ class StructuredModelInputCompiler:
             decision.source_entry_fingerprint: decision.selected_mode
             for decision in fresh.tool_result_decisions
         }
-        delta_messages = tuple(
+        selected_delta_messages = tuple(
             _selected_lowered_message(item, tool_modes=tool_modes)
             for item in lowered_delta
         )
+        expanded_delta = _expand_lowered_transcript(
+            lowered_delta,
+            selected_message_by_identity={
+                id(item): message
+                for item, message in zip(
+                    lowered_delta, selected_delta_messages, strict=True
+                )
+                if item.fixed_message is None
+            },
+        )
+        delta_messages = tuple(item.message for item in expanded_delta)
 
         previous_heads = {
             item.source_kind: item
@@ -1221,9 +1372,9 @@ class StructuredModelInputCompiler:
         if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
             indexes = tuple(
                 index
-                for index, item in enumerate(delta_items)
-                if item.source_entry_id == planning.dispatch_anchor.source_entry_id
-                and provider_input_item_fingerprint(item)
+                for index, item in enumerate(expanded_delta)
+                if item.origin_entry_id == planning.dispatch_anchor.source_entry_id
+                and item.origin_item_fingerprint
                 == planning.dispatch_anchor.provider_input_item_fingerprint
             )
             if len(indexes) != 1:
@@ -1241,11 +1392,12 @@ class StructuredModelInputCompiler:
         messages = (*prefix_messages, *suffix_messages)
         delta_placement_values = tuple(
             (
-                message,
-                item.source_entry_id,
-                provider_input_item_fingerprint(item),
+                item.message,
+                item.origin_entry_id,
+                item.origin_item_fingerprint,
+                item.tool_attachment_source,
             )
-            for item, message in zip(delta_items, delta_messages, strict=True)
+            for item in expanded_delta
         )
         observation_placement_values = tuple(
             (
@@ -1255,6 +1407,7 @@ class StructuredModelInputCompiler:
                     "pulsara.compiled-runtime-observation-origin:v1",
                     {"source_kind": item[1], "message": _llm_message_value(item[2])},
                 ),
+                None,
             )
             for item in sorted(observation_messages, key=lambda item: item[:2])
         )
@@ -2016,12 +2169,13 @@ class StructuredModelInputCompiler:
     ) -> _Layout:
         deadline.check()
         tool_by_identity = {id(state.lowered): state for state in tools}
-        delta_messages = tuple(
-            item.fixed_message
-            if item.fixed_message is not None
-            else tool_by_identity[id(item)].message()
-            for item in lowered_delta
+        expanded_delta = _expand_lowered_transcript(
+            lowered_delta,
+            selected_message_by_identity={
+                identity: state.message() for identity, state in tool_by_identity.items()
+            },
         )
+        delta_messages = tuple(item.message for item in expanded_delta)
         ordered_observations = tuple(
             message
             for _placement, _kind, message in sorted(
@@ -2044,10 +2198,9 @@ class StructuredModelInputCompiler:
         if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
             indexes = tuple(
                 index
-                for index, item in enumerate(lowered_delta)
-                if item.source.source_entry_id
-                == planning.dispatch_anchor.source_entry_id
-                and provider_input_item_fingerprint(item.source)
+                for index, item in enumerate(expanded_delta)
+                if item.origin_entry_id == planning.dispatch_anchor.source_entry_id
+                and item.origin_item_fingerprint
                 == planning.dispatch_anchor.provider_input_item_fingerprint
             )
             if len(indexes) != 1:
@@ -2098,14 +2251,17 @@ class StructuredModelInputCompiler:
             ),
         )
         messages = (*predecessor.messages, *suffix)
-        suffix_placement_values: list[tuple[LLMMessage, str | None, str]] = []
+        suffix_placement_values: list[
+            tuple[LLMMessage, str | None, str | None, ToolAttachmentSource | None]
+        ] = []
         delta_values = tuple(
             (
-                message,
-                item.source.source_entry_id,
-                provider_input_item_fingerprint(item.source),
+                item.message,
+                item.origin_entry_id,
+                item.origin_item_fingerprint,
+                item.tool_attachment_source,
             )
-            for item, message in zip(lowered_delta, delta_messages, strict=True)
+            for item in expanded_delta
         )
         observation_values = tuple(
             (
@@ -2116,6 +2272,7 @@ class StructuredModelInputCompiler:
                     semantic_fingerprint=semantic,
                     text=join_text_content(message.content),
                 ),
+                None,
             )
             for _placement, kind_value, message in sorted(
                 (
@@ -2618,22 +2775,25 @@ class StructuredModelInputCompiler:
             and not state.omitted
         )
         tool_by_identity = {id(state.lowered): state for state in tools}
+        expanded_transcript = _expand_lowered_transcript(
+            lowered,
+            selected_message_by_identity={
+                identity: state.message() for identity, state in tool_by_identity.items()
+            },
+        )
         transcript = tuple(
             (
-                (
-                    item.fixed_message
-                    if item.fixed_message is not None
-                    else tool_by_identity[id(item)].message()
-                ),
-                provider_input_item_fingerprint(item.source),
-                item.source.source_entry_id,
+                item.message,
+                item.origin_item_fingerprint,
+                item.origin_entry_id,
+                item.tool_attachment_source,
             )
-            for item in lowered
+            for item in expanded_transcript
         )
         if request.dispatch_anchor_entry_id is None:
             ordered = (
                 *transcript,
-                *((item[0], item[1], None) for item in observations),
+                *((item[0], item[1], None, None) for item in observations),
             )
         else:
             indexes = tuple(
@@ -2648,13 +2808,13 @@ class StructuredModelInputCompiler:
             index = indexes[0]
             ordered = (
                 *transcript[:index],
-                *((item[0], item[1], None) for item in observations),
+                *((item[0], item[1], None, None) for item in observations),
                 *transcript[index:],
             )
         messages = tuple(item[0] for item in ordered)
         placements = _compiled_message_placements(
             prefix=(),
-            values=tuple((item[0], item[2], item[1]) for item in ordered),
+            values=tuple((item[0], item[2], item[1], item[3]) for item in ordered),
         )
         estimate = self._estimate_frozen_input(
             request,
@@ -2934,15 +3094,21 @@ def _observation_origin_fingerprint(
 def _compiled_message_placements(
     *,
     prefix: tuple[FrozenCompiledMessagePlacement, ...],
-    values: tuple[tuple[LLMMessage, str | None, str], ...],
+    values: tuple[
+        tuple[LLMMessage, str | None, str | None, ToolAttachmentSource | None], ...
+    ],
 ) -> tuple[FrozenCompiledMessagePlacement, ...]:
     placements = list(prefix)
     previous_entry = prefix[-1].origin_entry_id if prefix else None
     previous_within = prefix[-1].within_origin_ordinal if prefix else -1
-    for message, origin_entry_id, origin_item_fingerprint in values:
+    if previous_within is None:
+        previous_within = -1
+    for message, origin_entry_id, origin_item_fingerprint, attachment in values:
         within = (
             previous_within + 1
-            if origin_entry_id is not None and origin_entry_id == previous_entry
+            if attachment is None
+            and origin_entry_id is not None
+            and origin_entry_id == previous_entry
             else 0
         )
         message_ordinal = len(placements)
@@ -2951,12 +3117,13 @@ def _compiled_message_placements(
                 message_ordinal=message_ordinal,
                 origin_entry_id=origin_entry_id,
                 origin_item_fingerprint=origin_item_fingerprint,
-                within_origin_ordinal=within,
+                within_origin_ordinal=None if attachment is not None else within,
                 role=message.role,
+                tool_attachment_source=attachment,
             )
         )
         previous_entry = origin_entry_id
-        previous_within = within
+        previous_within = -1 if attachment is not None else within
     return tuple(placements)
 
 

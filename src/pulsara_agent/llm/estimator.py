@@ -90,6 +90,13 @@ class TokenEstimator(Protocol):
 
     def estimate_wire_json_component(self, value: object) -> int: ...
 
+    def estimate_ordered_wire_json_components(
+        self,
+        *,
+        ordered_input_items: tuple[object, ...],
+        ordered_input_sources: tuple[LLMMessage | None, ...],
+    ) -> FinalWireTokenEstimate: ...
+
     def estimate_final_wire_json_components(
         self,
         *,
@@ -228,11 +235,27 @@ class PulsaraHeuristicTokenEstimatorV2:
         The additive seam makes durable replay replacement arithmetic exact.
         """
 
-        if len(ordered_input_items) != len(ordered_input_sources):
-            raise ValueError("final-wire items do not align with semantic sources")
-        text_and_framing = REQUEST_ENVELOPE_TOKENS + self.estimate_json(
-            fixed_context
+        ordered = self.estimate_ordered_wire_json_components(
+            ordered_input_items=ordered_input_items,
+            ordered_input_sources=ordered_input_sources,
         )
+        fixed = REQUEST_ENVELOPE_TOKENS + self.estimate_json(fixed_context)
+        return FinalWireTokenEstimate(
+            total_input_tokens=fixed + ordered.total_input_tokens,
+            visual_image_tokens=ordered.visual_image_tokens,
+        )
+
+    def estimate_ordered_wire_json_components(
+        self,
+        *,
+        ordered_input_items: tuple[object, ...],
+        ordered_input_sources: tuple[LLMMessage | None, ...],
+    ) -> FinalWireTokenEstimate:
+        """Estimate exact ordered wire items with their semantic image sources."""
+
+        if len(ordered_input_items) != len(ordered_input_sources):
+            raise ValueError("wire items do not align with semantic sources")
+        text_and_framing = 0
         visual = 0
         for item, source in zip(
             ordered_input_items, ordered_input_sources, strict=True

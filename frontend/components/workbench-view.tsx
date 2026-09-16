@@ -354,12 +354,14 @@ function TraceCard({
   mcpToolRefs,
   artifactOwnerKey,
   onReadToolArtifact,
+  onReadPromptImage,
 }: {
   trace: ToolTrace;
   skills: SkillCapability[];
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
 }) {
   const [expanded, setExpanded] = useState(false);
   const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
@@ -384,7 +386,9 @@ function TraceCard({
     trace.resultEntryId
     && (trace.artifact?.disposition === 'AVAILABLE' || trace.artifact?.disposition === 'INCOMPLETE'),
   );
-  const expandable = Boolean(trace.command || hasRawResult || mcpDetail || canReadArtifact);
+  const expandable = Boolean(
+    trace.command || hasRawResult || trace.resultContent || mcpDetail || canReadArtifact
+  );
   const artifactAtEnd = Boolean(artifactPage && !artifactPage.hasMore);
   const artifactIsSinglePage = Boolean(
     artifactAtEnd
@@ -462,7 +466,16 @@ function TraceCard({
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
         ) : <div className="trace-card__summary">{summary}</div>}
-        {expanded && (
+        {expanded && trace.resultContent && (
+          <section className="tool-result-images" aria-label="工具读取的图片">
+            <PromptContentView
+              content={trace.resultContent}
+              variant="tool"
+              onReadImage={onReadPromptImage}
+            />
+          </section>
+        )}
+        {expanded && !trace.resultContent && (
           <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
             {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
@@ -743,6 +756,7 @@ function SubagentRunCard({
   mcpToolRefs,
   artifactOwnerKey,
   onReadToolArtifact,
+  onReadPromptImage,
   onNotify,
 }: {
   run: SubagentRun;
@@ -751,6 +765,7 @@ function SubagentRunCard({
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
   onNotify: MarkdownNotify;
 }) {
   const [expanded, setExpanded] = useState(
@@ -791,7 +806,7 @@ function SubagentRunCard({
                   <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>
                 </div>
               ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>)}
-              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} />)}</div> : null}
+              {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
             </section>
           ))}
           {showSummary && run.summary && (
@@ -812,6 +827,7 @@ function SubagentGroup({
   mcpToolRefs,
   artifactOwnerKey,
   onReadToolArtifact,
+  onReadPromptImage,
   onNotify,
 }: {
   runs: SubagentRun[];
@@ -822,6 +838,7 @@ function SubagentGroup({
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
   onNotify: MarkdownNotify;
 }) {
   const settled = runs.filter((run) => !['pending', 'running', 'waiting'].includes(run.status)).length;
@@ -840,6 +857,7 @@ function SubagentGroup({
           mcpToolRefs={mcpToolRefs}
           artifactOwnerKey={artifactOwnerKey}
           onReadToolArtifact={onReadToolArtifact}
+          onReadPromptImage={onReadPromptImage}
           onNotify={onNotify}
         />
       ))}</div>
@@ -958,6 +976,7 @@ function AssistantMessage({
   onFork,
   artifactOwnerKey,
   onReadToolArtifact,
+  onReadPromptImage,
   assistantLabel,
 }: {
   message: Message;
@@ -973,6 +992,7 @@ function AssistantMessage({
   onFork: WorkbenchViewProps['onFork'];
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
   assistantLabel?: string;
 }) {
   const [forking, setForking] = useState(false);
@@ -1038,9 +1058,9 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
       {message.subagentRuns?.length ? (
-        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onNotify={onNotify} />
+        <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
       ) : null}
     </article>
   );
@@ -1141,6 +1161,7 @@ export function ConversationMessages({
             onFork={onFork}
             artifactOwnerKey={artifactOwnerKey}
             onReadToolArtifact={onReadToolArtifact}
+            onReadPromptImage={onReadPromptImage}
             assistantLabel={assistantLabel}
           />
         )}
@@ -1910,6 +1931,7 @@ export function WorkbenchView({
                     onFork={onFork}
                     artifactOwnerKey={artifactOwnerKey}
                     onReadToolArtifact={onReadToolArtifact}
+                    onReadPromptImage={onReadPromptImage}
                   />
                 )}
             </div>

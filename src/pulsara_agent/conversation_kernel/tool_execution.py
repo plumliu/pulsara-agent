@@ -13,7 +13,7 @@ from hashlib import sha256
 
 from threading import Lock
 
-from typing import Mapping
+from typing import Callable, Mapping
 
 from uuid import uuid4
 
@@ -23,7 +23,11 @@ from psycopg import InterfaceError, OperationalError
 from pulsara_agent.conversation_kernel.assembler import (
     CompletedToolCallBlock,
 )
-from pulsara_agent.llm.input import LLMTextPart
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMTextPart,
+    frozen_tool_result_public_text,
+)
 
 
 from pulsara_agent.conversation_kernel.blob import (
@@ -50,7 +54,13 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 
 from pulsara_agent.conversation_kernel.contracts import (
     CanonicalContent,
+    InlineContent,
     WriterLease,
+)
+from pulsara_agent.conversation_kernel.prompt_content import (
+    PROMPT_BODY_CODEC,
+    PROMPT_BODY_MEDIA_TYPE,
+    freeze_canonical_prompt,
 )
 
 from pulsara_agent.conversation_kernel.live import (
@@ -61,6 +71,7 @@ from pulsara_agent.conversation_kernel.live import (
 )
 
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
@@ -99,6 +110,7 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 
 from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
+    FrozenImageToolResourceAllowance,
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolInvocationContext,
@@ -134,6 +146,11 @@ from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 
 
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 
 
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
@@ -160,6 +177,8 @@ from pulsara_agent.primitives.context import (
 )
 
 from pulsara_agent.conversation_kernel.tool_surface import (
+    BuiltinExecutionPolicyRef,
+    PreparedToolExecutionBinding,
     ProcessLocalToolSurfaceBorrow,
     tool_observation_origin_for_binding,
 )
@@ -176,6 +195,7 @@ from pulsara_agent.hooks.context import HookContextOwner
 from pulsara_agent.hooks.contracts import (
     GateDecision,
     FrozenHookDefinitionView,
+    HookEventType,
     HookDispatchEnvelope,
     HookDispatchScopeRef,
     PermissionDecision,
@@ -188,7 +208,11 @@ from pulsara_agent.hooks.contracts import (
     external_permission_mode,
 )
 from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
-from pulsara_agent.hooks.matcher import event_matcher_subject, tool_matcher_subject
+from pulsara_agent.hooks.matcher import (
+    definition_matches,
+    event_matcher_subject,
+    tool_matcher_subject,
+)
 
 
 _RETRYABLE_EXPLICIT_RESULT_SETTLEMENT_ERRORS = (
@@ -629,6 +653,72 @@ class ToolBatchExecutor:
             continuity_scope=continuity_scope,
         )
 
+    @staticmethod
+    def _view_call_has_ordered_hook(
+        call: CompletedToolCallBlock,
+        view: FrozenHookDefinitionView | None,
+    ) -> bool:
+        if view is None:
+            return False
+        subject = event_matcher_subject(
+            HookEventType.PRE_TOOL_USE_EVENT,
+            tool=tool_matcher_subject(call.tool_name),
+        )
+        return any(
+            definition_matches(definition, subject)
+            for event_type in (
+                HookEventType.PRE_TOOL_USE_EVENT,
+                HookEventType.PERMISSION_REQUEST_EVENT,
+                HookEventType.POST_TOOL_USE_EVENT,
+            )
+            for _, definition in view.selected_definitions(event_type)
+        )
+
+    @staticmethod
+    def _validate_image_call_allowances(
+        *,
+        calls: tuple[CompletedToolCallBlock, ...],
+        call_ordinal_offset: int,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        allowances: tuple[FrozenImageToolResourceAllowance, ...],
+    ) -> None:
+        expected: list[tuple[int, str, str]] = []
+        for call_ordinal, call in enumerate(calls, start=call_ordinal_offset):
+            if call.tool_name != "view_image":
+                continue
+            try:
+                binding = surface_borrow.execution_binding(call.tool_name)
+            except KeyError:
+                continue
+            arguments = thaw_json(call.arguments)
+            if (
+                not isinstance(binding, PreparedToolExecutionBinding)
+                or not isinstance(
+                    binding.execution_policy, BuiltinExecutionPolicyRef
+                )
+                or not isinstance(arguments, dict)
+                or not isinstance(arguments.get("path"), str)
+                or not arguments["path"]
+            ):
+                continue
+            expected.append(
+                (
+                    call_ordinal,
+                    call.tool_call_id,
+                    binding.executor_binding_fingerprint,
+                )
+            )
+        actual = [
+            (
+                item.call_ordinal,
+                item.tool_call_id,
+                item.executor_binding_fingerprint,
+            )
+            for item in allowances
+        ]
+        if actual != expected:
+            raise RuntimeError("image Tool resource allowances do not exact-join calls")
+
     async def execute(
         self,
         *,
@@ -643,12 +733,31 @@ class ToolBatchExecutor:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         last_assistant_message: str | None,
         hook_scope: HookDispatchScopeRef | None = None,
+        image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (),
+        _partition_batch: bool = True,
+        _call_ordinal_offset: int = 0,
+        _close_surface_borrow: bool = True,
+        _settlement_gate: asyncio.Event | None = None,
+        _settlement_release: asyncio.Event | None = None,
+        _physical_complete: Callable[[], None] | None = None,
+        _preauthorization: tuple[
+            PreparedResolvedToolInvocation | PreparedToolPreparationRejection,
+            KernelToolAuthorization,
+        ]
+        | None = None,
     ) -> ToolBatchExecutionResult:
         tool_call_count = 0
         unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = None
         pending_hook_context_reservations = []
         pending_completion_permit: object | None = None
         try:
+            if _partition_batch:
+                self._validate_image_call_allowances(
+                    calls=calls,
+                    call_ordinal_offset=_call_ordinal_offset,
+                    surface_borrow=surface_borrow,
+                    allowances=image_call_allowances,
+                )
             report_call_count = sum(
                 call.tool_name == "report_agent_result" for call in calls
             )
@@ -657,7 +766,9 @@ class ToolBatchExecutor:
                 # sibling.  Reject the complete batch before authorization
                 # or attempt admission so no physical effect can escape.
                 workspace_id = await self._resolved_workspace_id()
-                for call_ordinal, call in enumerate(calls):
+                for call_ordinal, call in enumerate(
+                    calls, start=_call_ordinal_offset
+                ):
                     tool_call_count += 1
                     binding = surface_borrow.execution_binding(call.tool_name)
                     rejected_arguments = thaw_json(call.arguments)
@@ -735,7 +846,37 @@ class ToolBatchExecutor:
                 return ToolBatchExecutionResult(
                     tool_call_count=tool_call_count,
                 )
-            for call_ordinal, call in enumerate(calls):
+            hook_view = (
+                self._hooks.capture_view()
+                if self._hooks is not None and hook_scope is not None
+                else None
+            )
+            if _partition_batch and any(
+                first.tool_name == "view_image"
+                and second.tool_name == "view_image"
+                and not self._view_call_has_ordered_hook(first, hook_view)
+                and not self._view_call_has_ordered_hook(second, hook_view)
+                for first, second in zip(calls, calls[1:])
+            ):
+                return await self._execute_partitioned_batch(
+                    turn_id=turn_id,
+                    assistant_entry_id=assistant_entry_id,
+                    calls=calls,
+                    canonical_facts=canonical_facts,
+                    canonical_identity=canonical_identity,
+                    request=request,
+                    subagent_parent_context_subject=subagent_parent_context_subject,
+                    continuity_scope=continuity_scope,
+                    surface_borrow=surface_borrow,
+                    last_assistant_message=last_assistant_message,
+                    image_call_allowances=image_call_allowances,
+                    call_ordinal_offset=_call_ordinal_offset,
+                    hook_scope=hook_scope,
+                    hook_view=hook_view,
+                )
+            for call_ordinal, call in enumerate(
+                calls, start=_call_ordinal_offset
+            ):
                 tool_call_count += 1
                 observation_origin = ToolObservationOrigin.POLICY
                 invocation_arguments = thaw_json(call.arguments)
@@ -754,6 +895,9 @@ class ToolBatchExecutor:
                     else None
                 )
                 prepared_invocation = (
+                    _preauthorization[0]
+                    if _preauthorization is not None
+                    else
                     self._tools.prepare_resolved_invocation(
                         tool_name=call.tool_name,
                         arguments=invocation_arguments,
@@ -770,7 +914,34 @@ class ToolBatchExecutor:
                 )
                 pre_context_reservation = None
                 hook_blocked = False
-                if isinstance(
+                if _preauthorization is not None:
+                    authorization = _preauthorization[1]
+                    if (
+                        prepared_invocation.requested_tool_name != call.tool_name
+                        or (
+                            prepared_invocation.resolved_arguments
+                            if isinstance(
+                                prepared_invocation, PreparedResolvedToolInvocation
+                            )
+                            else prepared_invocation.post_arguments
+                        )
+                        != call.arguments
+                    ):
+                        raise RuntimeError("preauthorized Tool call identity drifted")
+                    post_invocation = (
+                        prepared_invocation
+                        if isinstance(
+                            prepared_invocation, PreparedResolvedToolInvocation
+                        )
+                        else PreparedResolvedToolInvocation(
+                            prepared_invocation.requested_tool_name,
+                            prepared_invocation.post_tool_name,
+                            prepared_invocation.post_external_tool_name,
+                            prepared_invocation.post_pulsara_tool_name,
+                            prepared_invocation.post_arguments,
+                        )
+                    )
+                elif isinstance(
                     prepared_invocation, PreparedToolPreparationRejection
                 ):
                     authorization = prepared_invocation.authorization
@@ -975,6 +1146,10 @@ class ToolBatchExecutor:
                             f"tool unavailable: {call.tool_name}",
                         )
                 if authorization.kind is not KernelToolAuthorizationKind.ALLOW:
+                    if _physical_complete is not None:
+                        _physical_complete()
+                    if _settlement_gate is not None:
+                        await _settlement_gate.wait()
                     if authorization.accepted_result_entry_id is not None:
                         # Human DENY atomically committed the decision and
                         # no-attempt result.  Consume the exact process-local
@@ -1236,6 +1411,17 @@ class ToolBatchExecutor:
                         else None
                     )
                     workspace_id = await self._resolved_workspace_id()
+                    image_allowance = next(
+                        (
+                            item
+                            for item in image_call_allowances
+                            if item.call_ordinal == call_ordinal
+                            and item.tool_call_id == call.tool_call_id
+                            and item.executor_binding_fingerprint
+                            == binding.executor_binding_fingerprint
+                        ),
+                        None,
+                    )
                     invocation_context = KernelToolInvocationContext(
                         session_id=request.session_id,
                         workspace_id=workspace_id,
@@ -1269,6 +1455,10 @@ class ToolBatchExecutor:
                         surface_borrow=surface_borrow,
                         capability_call=authorization.capability_call,
                         memory_context=request.memory_context,
+                        input_modalities=(
+                            request.prepared_call.call.target.fact.input_modalities
+                        ),
+                        image_resource_allowance=image_allowance,
                     )
                     try:
                         if call.tool_name == "report_agent_result":
@@ -1385,6 +1575,10 @@ class ToolBatchExecutor:
                 # process-local task owns every remaining settlement step.
                 # Cancelling the turn detaches only its waiter; it cannot
                 # erase the result or race a Terminal monitor token discard.
+                if _physical_complete is not None:
+                    _physical_complete()
+                if _settlement_gate is not None:
+                    await _settlement_gate.wait()
                 unsettled_process_local_effect = result.process_local_settlement
                 if (
                     result.physical_observation is not None
@@ -1565,6 +1759,8 @@ class ToolBatchExecutor:
             )
 
         finally:
+            if _settlement_release is not None:
+                _settlement_release.set()
             if pending_completion_permit is not None:
                 try:
                     await asyncio.shield(
@@ -1576,7 +1772,8 @@ class ToolBatchExecutor:
                     pass
             for reservation in pending_hook_context_reservations:
                 reservation.retire()
-            surface_borrow.close()
+            if _close_surface_borrow:
+                surface_borrow.close()
             if unsettled_process_local_effect is not None:
                 try:
                     await asyncio.shield(
@@ -1587,6 +1784,264 @@ class ToolBatchExecutor:
                     )
                 except BaseException:
                     pass
+
+    async def _execute_partitioned_batch(
+        self,
+        *,
+        turn_id: str,
+        assistant_entry_id: str,
+        calls: tuple[CompletedToolCallBlock, ...],
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        canonical_identity: CanonicalModelInputIdentity,
+        request: KernelModelExecutionRequest,
+        subagent_parent_context_subject: FrozenSubagentParentContextCallSubject
+        | None,
+        continuity_scope: ProviderInputContinuityScope,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        last_assistant_message: str | None,
+        image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...],
+        call_ordinal_offset: int,
+        hook_scope: HookDispatchScopeRef | None,
+        hook_view: FrozenHookDefinitionView | None,
+    ) -> ToolBatchExecutionResult:
+        total = 0
+        index = 0
+        while index < len(calls):
+            if (
+                calls[index].tool_name != "view_image"
+                or self._view_call_has_ordered_hook(calls[index], hook_view)
+            ):
+                result = await self.execute(
+                    turn_id=turn_id,
+                    assistant_entry_id=assistant_entry_id,
+                    calls=(calls[index],),
+                    canonical_facts=canonical_facts,
+                    canonical_identity=canonical_identity,
+                    request=request,
+                    subagent_parent_context_subject=subagent_parent_context_subject,
+                    continuity_scope=continuity_scope,
+                    surface_borrow=surface_borrow,
+                    last_assistant_message=last_assistant_message,
+                    hook_scope=hook_scope,
+                    image_call_allowances=image_call_allowances,
+                    _partition_batch=False,
+                    _call_ordinal_offset=call_ordinal_offset + index,
+                    _close_surface_borrow=False,
+                )
+                total += result.tool_call_count
+                if result.terminal is not None:
+                    return ToolBatchExecutionResult(total, result.terminal)
+                index += 1
+                continue
+            end = index + 1
+            while (
+                end < len(calls)
+                and calls[end].tool_name == "view_image"
+                and not self._view_call_has_ordered_hook(calls[end], hook_view)
+            ):
+                end += 1
+            segment = calls[index:end]
+            allowed_calls: list[CompletedToolCallBlock] = []
+            allowed_authorizations: list[
+                tuple[
+                    PreparedResolvedToolInvocation
+                    | PreparedToolPreparationRejection,
+                    KernelToolAuthorization,
+                ]
+            ] = []
+            allowed_offset = index
+
+            async def flush_allowed() -> ToolBatchExecutionResult | None:
+                nonlocal allowed_calls, allowed_authorizations, allowed_offset
+                if not allowed_calls:
+                    return None
+                result = await self._execute_concurrent_view_segment(
+                    turn_id=turn_id,
+                    assistant_entry_id=assistant_entry_id,
+                    calls=tuple(allowed_calls),
+                    preauthorizations=tuple(allowed_authorizations),
+                    canonical_facts=canonical_facts,
+                    canonical_identity=canonical_identity,
+                    request=request,
+                    subagent_parent_context_subject=subagent_parent_context_subject,
+                    continuity_scope=continuity_scope,
+                    surface_borrow=surface_borrow,
+                    last_assistant_message=last_assistant_message,
+                    image_call_allowances=image_call_allowances,
+                    call_ordinal_offset=call_ordinal_offset + allowed_offset,
+                )
+                allowed_calls = []
+                allowed_authorizations = []
+                return result
+
+            for relative, call in enumerate(segment):
+                invocation_arguments = thaw_json(call.arguments)
+                if not isinstance(invocation_arguments, dict):
+                    raise RuntimeError(
+                        "canonical tool-call arguments did not thaw as an object"
+                    )
+                prepared = self._tools.prepare_resolved_invocation(
+                    tool_name=call.tool_name,
+                    arguments=invocation_arguments,
+                    surface_borrow=surface_borrow,
+                )
+                authorization = (
+                    prepared.authorization
+                    if isinstance(prepared, PreparedToolPreparationRejection)
+                    else await self._tools.authorize(
+                        tool_name=call.tool_name,
+                        arguments=invocation_arguments,
+                        tool_call_id=call.tool_call_id,
+                        turn_id=turn_id,
+                        assistant_entry_id=assistant_entry_id,
+                        permission_snapshot=canonical_facts.run_permission_snapshot,
+                        surface_borrow=surface_borrow,
+                        memory_context=request.memory_context,
+                    )
+                )
+                if authorization.kind is KernelToolAuthorizationKind.ALLOW:
+                    if not allowed_calls:
+                        allowed_offset = index + relative
+                    allowed_calls.append(call)
+                    allowed_authorizations.append((prepared, authorization))
+                    continue
+                flushed = await flush_allowed()
+                if flushed is not None:
+                    total += flushed.tool_call_count
+                result = await self.execute(
+                    turn_id=turn_id,
+                    assistant_entry_id=assistant_entry_id,
+                    calls=(call,),
+                    canonical_facts=canonical_facts,
+                    canonical_identity=canonical_identity,
+                    request=request,
+                    subagent_parent_context_subject=subagent_parent_context_subject,
+                    continuity_scope=continuity_scope,
+                    surface_borrow=surface_borrow,
+                    last_assistant_message=last_assistant_message,
+                    hook_scope=None,
+                    image_call_allowances=image_call_allowances,
+                    _partition_batch=False,
+                    _call_ordinal_offset=call_ordinal_offset + index + relative,
+                    _close_surface_borrow=False,
+                    _preauthorization=(prepared, authorization),
+                )
+                total += result.tool_call_count
+            flushed = await flush_allowed()
+            if flushed is not None:
+                total += flushed.tool_call_count
+            index = end
+        return ToolBatchExecutionResult(tool_call_count=total)
+
+    async def _execute_concurrent_view_segment(
+        self,
+        *,
+        turn_id: str,
+        assistant_entry_id: str,
+        calls: tuple[CompletedToolCallBlock, ...],
+        preauthorizations: tuple[
+            tuple[
+                PreparedResolvedToolInvocation | PreparedToolPreparationRejection,
+                KernelToolAuthorization,
+            ],
+            ...,
+        ],
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        canonical_identity: CanonicalModelInputIdentity,
+        request: KernelModelExecutionRequest,
+        subagent_parent_context_subject: FrozenSubagentParentContextCallSubject
+        | None,
+        continuity_scope: ProviderInputContinuityScope,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        last_assistant_message: str | None,
+        image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...],
+        call_ordinal_offset: int,
+    ) -> ToolBatchExecutionResult:
+        if len(preauthorizations) != len(calls) or any(
+            authorization.kind is not KernelToolAuthorizationKind.ALLOW
+            for _, authorization in preauthorizations
+        ):
+            raise ValueError("concurrent view segment was not fully preauthorized")
+        settlement_gates = tuple(asyncio.Event() for _ in range(len(calls) + 1))
+        settlement_gates[0].set()
+        physical_completions: asyncio.Queue[int] = asyncio.Queue()
+        signalled: set[int] = set()
+        tasks: dict[int, asyncio.Task[ToolBatchExecutionResult]] = {}
+
+        def start(position: int) -> None:
+            def physical_complete() -> None:
+                if position in signalled:
+                    return
+                signalled.add(position)
+                physical_completions.put_nowait(position)
+
+            async def run() -> ToolBatchExecutionResult:
+                try:
+                    return await self.execute(
+                        turn_id=turn_id,
+                        assistant_entry_id=assistant_entry_id,
+                        calls=(calls[position],),
+                        canonical_facts=canonical_facts,
+                        canonical_identity=canonical_identity,
+                        request=request,
+                        subagent_parent_context_subject=(
+                            subagent_parent_context_subject
+                        ),
+                        continuity_scope=continuity_scope,
+                        surface_borrow=surface_borrow,
+                        last_assistant_message=last_assistant_message,
+                        hook_scope=None,
+                        image_call_allowances=image_call_allowances,
+                        _partition_batch=False,
+                        _call_ordinal_offset=(call_ordinal_offset + position),
+                        _close_surface_borrow=False,
+                        _settlement_gate=settlement_gates[position],
+                        _settlement_release=settlement_gates[position + 1],
+                        _physical_complete=physical_complete,
+                        _preauthorization=preauthorizations[position],
+                    )
+                finally:
+                    physical_complete()
+
+            tasks[position] = asyncio.create_task(
+                run(),
+                name=(
+                    "kernel-view-image-call:"
+                    f"{assistant_entry_id}:{call_ordinal_offset + position}"
+                ),
+            )
+
+        next_position = 0
+        initial = min(
+            len(calls), STAGE2_LIMITS.foreground_io_hard_concurrency
+        )
+        for _ in range(initial):
+            start(next_position)
+            next_position += 1
+        try:
+            while next_position < len(calls):
+                await physical_completions.get()
+                start(next_position)
+                next_position += 1
+            results = []
+            for position in range(len(calls)):
+                results.append(await tasks[position])
+        except BaseException:
+            for task in tasks.values():
+                if not task.done():
+                    task.cancel()
+            drain = asyncio.gather(*tasks.values(), return_exceptions=True)
+            while not drain.done():
+                try:
+                    await asyncio.shield(drain)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            raise
+        return ToolBatchExecutionResult(
+            tool_call_count=sum(item.tool_call_count for item in results)
+        )
 
     async def _settle_explicit_subagent_result(
         self,
@@ -1780,16 +2235,45 @@ class ToolBatchExecutor:
                 actor_id=tool_name,
             )
             await self._publish_tool_remote_identity_exact(remote_identity_candidate)
-        prepared_output = await self._io.run(
-            self._tool_output_processor.prepare,
-            workspace_id=workspace_id,
-            result_entry_id=result_entry_id,
-            public_output=result.content.decode("utf-8"),
-            candidate=result.output_artifact_candidate,
-            artifact_source_read=result.artifact_source_read,
-            deadline_monotonic=self._canonical_deadline(),
-        )
-        result_text = prepared_output.canonical_preview.canonical_bytes.decode("utf-8")
+        canonical_prompt = None
+        if isinstance(result.content, FrozenPromptContent):
+            if result.output_artifact_candidate is not None or result.artifact_source_read:
+                raise ValueError("image ToolResult cannot enter text artifact handling")
+            canonical_prompt = freeze_canonical_prompt(result.content)
+            canonical_preview = InlineContent.from_bytes(
+                canonical_prompt.body,
+                media_type=PROMPT_BODY_MEDIA_TYPE,
+                codec=PROMPT_BODY_CODEC,
+            )
+            artifact_disposition = ToolOutputArtifactDisposition.NOT_REQUIRED
+            artifact_id = None
+            artifact_blob = None
+            source_coverage = ToolOutputSourceCoverage.COMPLETE
+            display_kind = ToolResultDisplayKind.COMPLETE
+            source_coverage_reason = None
+            artifact_unavailability_reason = None
+            result_text = frozen_tool_result_public_text(result.content)
+        else:
+            prepared_output = await self._io.run(
+                self._tool_output_processor.prepare,
+                workspace_id=workspace_id,
+                result_entry_id=result_entry_id,
+                public_output=result.content.decode("utf-8"),
+                candidate=result.output_artifact_candidate,
+                artifact_source_read=result.artifact_source_read,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            canonical_preview = prepared_output.canonical_preview
+            artifact_disposition = prepared_output.artifact_disposition
+            artifact_id = prepared_output.artifact_id
+            artifact_blob = prepared_output.artifact_blob
+            source_coverage = prepared_output.source_coverage
+            display_kind = prepared_output.display_kind
+            source_coverage_reason = prepared_output.source_coverage_reason
+            artifact_unavailability_reason = (
+                prepared_output.artifact_unavailability_reason
+            )
+            result_text = canonical_preview.canonical_bytes.decode("utf-8")
         if attempt_id is not None:
             if tool_result_block_id is None or live_attribution is None:
                 raise RuntimeError("physical tool settlement lost live attribution")
@@ -1832,16 +2316,15 @@ class ToolBatchExecutor:
             tool_call_id=tool_call_id,
             attempt_id=attempt_id,
             result_state=result.state,
-            canonical_preview_content=prepared_output.canonical_preview,
-            artifact_disposition=prepared_output.artifact_disposition,
-            artifact_id=prepared_output.artifact_id,
-            artifact_blob_descriptor=prepared_output.artifact_blob,
-            source_coverage=prepared_output.source_coverage,
-            display_kind=prepared_output.display_kind,
-            source_coverage_reason=prepared_output.source_coverage_reason,
-            artifact_unavailability_reason=(
-                prepared_output.artifact_unavailability_reason
-            ),
+            canonical_preview_content=canonical_preview,
+            canonical_prompt=canonical_prompt,
+            artifact_disposition=artifact_disposition,
+            artifact_id=artifact_id,
+            artifact_blob_descriptor=artifact_blob,
+            source_coverage=source_coverage,
+            display_kind=display_kind,
+            source_coverage_reason=source_coverage_reason,
+            artifact_unavailability_reason=artifact_unavailability_reason,
             observed_at=observed_at,
             observation_duration_microseconds=(
                 None
@@ -1976,6 +2459,11 @@ class ToolBatchExecutor:
             ),
             model_visible_memory_fact_ids=(
                 prepared_acceptance.model_visible_memory_fact_ids
+            ),
+            canonical_content=(
+                result.content
+                if isinstance(result.content, FrozenPromptContent)
+                else None
             ),
         )
         return _KnownToolResultSettlementOutcome(

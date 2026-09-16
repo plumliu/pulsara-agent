@@ -87,6 +87,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     freeze_tail_and_prefix,
     project_compaction_read_for_text_only_handover,
     project_destination_dialogue_for_text_only_handover,
+    project_destination_dialogue_plan_for_text_only_handover,
     project_retained_request_for_text_only_handover,
     provider_dispatch_effective_history_has_image,
     recent_human_window_has_image,
@@ -2144,6 +2145,10 @@ class CompactionCoordinator:
             canonical_read=compaction_read,
             active_request=active_request,
         )
+        if project_images_for_text_only:
+            projection_plan = project_destination_dialogue_plan_for_text_only_handover(
+                projection_plan
+            )
         summary_call = self._model.resolve_compaction_summary_call(
             active_prepared_call=dispatch.prepared_call
         )

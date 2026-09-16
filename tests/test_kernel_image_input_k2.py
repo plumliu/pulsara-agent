@@ -121,6 +121,25 @@ def test_pillow_owner_rejects_corruption_mime_and_unsupported_format() -> None:
         _validated_image_facts(png[: len(png) // 2], "image/png")
 
 
+def test_local_image_validation_derives_mime_without_weakening_upload_checks() -> None:
+    png = _encoded_image("PNG")
+
+    assert _validated_image_facts(png, None) == ("image/png", 7, 5)
+    with pytest.raises(PromptImageValidationError, match="MIME"):
+        _validated_image_facts(png, "image/jpeg")
+
+    validator = HostPromptImageValidator()
+
+    async def run() -> None:
+        image = await validator.freeze_local_image(
+            png, deadline_monotonic=monotonic() + 10
+        )
+        assert image == _frozen_image(png, "image/png")
+        await validator.aclose()
+
+    asyncio.run(run())
+
+
 def test_pillow_owner_rejects_apng_and_multiframe_webp() -> None:
     apng_output = BytesIO()
     Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(

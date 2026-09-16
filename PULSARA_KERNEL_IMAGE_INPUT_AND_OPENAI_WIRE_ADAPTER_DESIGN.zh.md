@@ -1181,3 +1181,22 @@ Pulsara 的 immutable canonical 内容、只读 exact-confirm、source-bound com
 报告建议中的 exact active request、retained history 和引用生命周期，应落实到 Pulsara 已有 carrier/owner，见第 6.4、8.3 节；不能解释为新增 durable frozen-wire snapshot。报告没有替 D1 给出可直接采用的视觉算法，也没有替 D2 给出各资源 reserve 的数值。D3 最小 schema 和 D4 retention 已在第 6、8 节实例化；summary 不因外部工程只读文本就自动改为文本输入，ROOT 父上下文仍按已确定的文本 advisory 契约执行。
 
 此前补齐的 pre-adoption、ROOT 投影、typed ingress/Hook 与 headroom 边界继续生效。普通调用、adapter 与透明重试不自行省略图片，模型交接统一按第 8.6–8.9 节执行；不增加 provider 名称分支、非法 prefix 重建或执行恢复框架。外部对照不作为本设计已实施或验收的证据。
+
+## 17. `view_image` 本地工具扩展实施状态（2026-09-16）
+
+独立 builtin `view_image(path)` 已按 [本地图片工具实施规格](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md) 完成。该扩展复用本文 D1/D2/D3/D4：本地文件经共享静态图片 validator 取得不可变字节与实际 MIME，成功结果以 typed `TOOL_RESULT` 正文及原 canonical blob/ref owner 保存；Chat 与 Responses 都把工具结果降低为普通文本结果，并在同一 assistant tool-call 批次后追加一条派生 user 图片 carrier。该 carrier 不是 canonical 用户提交，不能改变 recent human、权限或消息归属。
+
+原第 14.8 节“工具/MCP 图片输出不在首版范围”的范围说明，自本节起仅被上述独立本地 builtin 覆盖；任意 MCP/远程工具图片输出仍不在本次范围。D1–D4 的算法、资源硬界、canonical owner 和 retention 规则没有因此改写。
+
+工具卡使用独立显示 variant：左侧卡片收起时只显示工具摘要，展开后直接显示一张按容器自适应的大图，点击沿用原 Lightbox；不显示 Figure 编号、图片链接、重复的成功文字或原始 JSON。第 14.6 节 Figure 规则继续适用于用户消息、composer 与队列，不适用于工具卡图片。
+
+本次实际验收入口如下：
+
+- Chat 正式链路：`output/local-image-acceptance/chat-20260916-r11/report.json`。使用保存的 Chat connection，14 次真实 HTTP 覆盖单图、同批三次调用中的成功/失败/成功、单一批次 carrier、源文件删除后的 canonical replay、cold resume、parent close 后 fork、图片可见的普通 summary、compacted successor、同 epoch prefix 连续性，以及实际 HTTP 与 frozen materialization 相等。
+- Responses 正式链路：`output/local-image-acceptance/responses-deepseek-20260916/report.json`。使用保存的 DeepSeek Responses connection，运行同一套 14 次真实 HTTP 验收并通过。第三方 GPT-5.5 Responses 线路曾在功能入口前返回 `response.failed` 或长时间无进展，其失败记录保留在 `output/local-image-acceptance/responses-20260916-r2`、`responses-20260916-r3`，不据此判断 adapter 失败。
+- 浏览器与 UI：`output/playwright/local-image-ui-large-20260916`。真实保存的 Chat connection 调用 `view_image` 后，收起卡片仅有摘要；展开显示 640×480 大图且无 Figure、成功文字或 JSON；Lightbox 无编号；刷新后重新展开仍从 canonical owner 完整加载。
+- PostgreSQL 与相邻回归：typed tool result 的正文/blob/ref/tool row 同事务、FULL exact-confirm、失败回滚、ordinary/late hydration 与计量、组合 placement、final-wire quote、并发窗口、Hook/确认屏障、compact/Tier 3、fork 与 Protocol-v3 均由实施规格第 13 节列出的相邻测试覆盖。最终集中运行结果为 474 passed、runner/protocol/replay/hooks 202 passed、架构检查 5 passed；前端相邻测试 24 passed，并通过 ESLint 与 `build:local`。
+
+普通 compact 中，已经被 summary 覆盖的旧工具图片可以按第 8.2 节退出 successor；这不是丢图。protected tail 中保留的完整工具组仍须连同所有图片保留。真实 provider 验收证明 summary 输入看到了工具图片，cold/fork 在 compact 前从 canonical 工具结果恢复图片；protected-tail 不可拆分与保留行为由相邻 compact 合同测试证明，不把“所有已摘要图片永久再注入 successor”作为通过条件。
+
+后续待实施的 [已知图片引用重读规格](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 允许模型拿已知引用调用同一 `view_image` 读取 canonical 图片；不增加历史图片查询、自动发现或全量引用保留。该扩展尚未实施，不属于上述验收结论，也不改变本文 D1/D2 公式与参数。

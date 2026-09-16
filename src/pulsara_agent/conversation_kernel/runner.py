@@ -34,7 +34,10 @@ from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
 )
 from pulsara_agent.capability.render import MAX_SKILL_CATALOG_UTF8_BYTES
-from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
+from pulsara_agent.conversation_kernel.prompt_content import (
+    FrozenCanonicalPrompt,
+    freeze_canonical_prompt,
+)
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
     CompactionOutcome,
@@ -72,7 +75,12 @@ from pulsara_agent.conversation_kernel.direct_model import (
     quote_provider_followup_wire_resources,
 )
 from pulsara_agent.capability.planner import KernelToolCapabilityPlanner
-from pulsara_agent.llm.input import LLMMessage, LLMToolCall
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
+    LLMMessage,
+    LLMToolCall,
+)
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
@@ -134,9 +142,12 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
     ToolOutputArtifactProcessor,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
+    FrozenImageToolResourceAllowance,
+    FrozenImageToolResourceIncrement,
     ToolInvocationPort,
     ToolSurfacePlanningPort,
 )
+from pulsara_agent.conversation_kernel.tool_surface import BuiltinExecutionPolicyRef
 from pulsara_agent.conversation_kernel.subagents.runtime_port import (
     PreparedInferredSubagentCompletion,
     SubagentRuntimePort,
@@ -215,6 +226,7 @@ from pulsara_agent.ports.user_control_feedback import (
 from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 from pulsara_agent.model_input.compiler import (
     StructuredModelInputCompiler,
+    tool_image_attachment_message,
 )
 from pulsara_agent.model_input.diagnostics import (
     project_model_input_compile_observation,
@@ -311,6 +323,9 @@ class FrozenPostResponseResourceQuote:
         default=None,
         repr=False,
     )
+    image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (
+        dataclass_field(default=(), repr=False)
+    )
 
     def __post_init__(self) -> None:
         values = (
@@ -338,6 +353,12 @@ class FrozenPostResponseResourceQuote:
             self.current_canonical_items + 1 + self.bounded_followup_items
         ):
             raise ValueError("post-response item quote is inconsistent")
+        if tuple(item.call_ordinal for item in self.image_call_allowances) != tuple(
+            sorted(item.call_ordinal for item in self.image_call_allowances)
+        ) or len({item.tool_call_id for item in self.image_call_allowances}) != len(
+            self.image_call_allowances
+        ):
+            raise ValueError("post-response image allowances are not ordered")
 
 
 class OutputResourceInterruption(RuntimeError):
@@ -366,6 +387,52 @@ class _CollectedModelResponse:
     provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
         default=None, repr=False
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _ImageToolResourceQuoteOwner:
+    request: KernelModelExecutionRequest = dataclass_field(repr=False)
+    assistant: LLMMessage = dataclass_field(repr=False)
+    provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
+        repr=False
+    )
+    base_suffix_messages: tuple[LLMMessage, ...] = dataclass_field(repr=False)
+    base_wire: ProviderFollowupWireResourceQuote = dataclass_field(repr=False)
+
+    def quote(
+        self,
+        *,
+        tool_call_id: str,
+        requested_path: str,
+        content: FrozenPromptContent,
+    ) -> FrozenImageToolResourceIncrement:
+        images = tuple(
+            part for part in content.parts if isinstance(part, LLMImagePart)
+        )
+        if len(images) != 1:
+            raise ValueError("image Tool quote requires one validated image")
+        carrier = tool_image_attachment_message(
+            ((tool_call_id, requested_path, images[0]),)
+        )
+        quoted = quote_provider_followup_wire_resources(
+            request=self.request,
+            actual_assistant_message=self.assistant,
+            provider_replay=self.provider_replay,
+            bounded_suffix_messages=(*self.base_suffix_messages, carrier),
+        )
+        return FrozenImageToolResourceIncrement(
+            canonical_bytes=freeze_canonical_prompt(
+                content
+            ).resource_quote.canonical_expanded_bytes,
+            logical_bytes=provider_neutral_message_logical_bytes(carrier),
+            wire_bytes=(
+                quoted.final_wire_utf8_bytes - self.base_wire.final_wire_utf8_bytes
+            ),
+            input_tokens=(
+                quoted.final_wire_estimated_input_tokens
+                - self.base_wire.final_wire_estimated_input_tokens
+            ),
+        )
 
 
 _PLAN_CONTROL_TOOL_NAMES = frozenset({"enter_plan", "ask_plan_question", "exit_plan"})
@@ -2434,6 +2501,7 @@ class ConversationKernelRunner:
                     surface_borrow=batch_borrow,
                     last_assistant_message=(completed.public_text or None),
                     hook_scope=self._hook_scope,
+                    image_call_allowances=output_quote.image_call_allowances,
                 )
                 tool_call_count += batch.tool_call_count
                 if batch.terminal is not None:
@@ -3075,6 +3143,38 @@ class ConversationKernelRunner:
             followup_items += quote[2]
             suffix_messages.extend(quote[3])
 
+        image_calls: list[tuple[int, CompletedToolCallBlock, str]] = []
+        for call_ordinal, call in enumerate(calls):
+            if call.tool_name != "view_image":
+                continue
+            try:
+                binding = request.prepared_call.tool_surface.binding(call.tool_name)
+            except KeyError:
+                continue
+            if not isinstance(binding.execution_policy, BuiltinExecutionPolicyRef):
+                continue
+            arguments = thaw_json(call.arguments)
+            path = arguments.get("path") if isinstance(arguments, dict) else None
+            if not isinstance(path, str) or not path:
+                continue
+            image_calls.append(
+                (call_ordinal, call, binding.executor_binding_fingerprint)
+            )
+            image_source_upper = LLMMessage.user(
+                canonical_json_bytes(
+                    {
+                        "tool_image_source": {
+                            "tool_call_id": call.tool_call_id,
+                            "requested_path": path,
+                        }
+                    }
+                ).decode("utf-8")
+            )
+            logical_followup += provider_neutral_message_logical_bytes(
+                image_source_upper
+            )
+            suffix_messages.append(image_source_upper)
+
         selected_plan_call = next(
             (call for call in calls if call.tool_name in _PLAN_CONTROL_TOOL_NAMES),
             None,
@@ -3191,6 +3291,53 @@ class ConversationKernelRunner:
             if needs_followup
             else None
         )
+        allowances: tuple[FrozenImageToolResourceAllowance, ...] = ()
+        if image_calls:
+            if wire is None:
+                raise ValueError("image response calls require a follow-up wire quote")
+            remaining = (
+                MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
+                - (
+                    canonical_input.canonical_expanded_bytes
+                    + assistant_canonical
+                    + canonical_followup
+                ),
+                MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES
+                - (epoch.logical_bytes + assistant_logical + logical_followup),
+                MAXIMUM_PROVIDER_WIRE_INPUT_BYTES - wire.final_wire_utf8_bytes,
+                request.wire_input_plan.quote.effective_input_budget_tokens
+                - wire.final_wire_estimated_input_tokens,
+            )
+            if min(remaining) < 0:
+                remaining = tuple(max(0, value) for value in remaining)
+            count = len(image_calls)
+            quote_owner = _ImageToolResourceQuoteOwner(
+                request=request,
+                assistant=assistant,
+                provider_replay=collected.provider_replay,
+                base_suffix_messages=tuple(suffix_messages),
+                base_wire=wire,
+            )
+
+            def share(total: int, index: int) -> int:
+                quotient, remainder = divmod(total, count)
+                return quotient + (1 if index < remainder else 0)
+
+            allowances = tuple(
+                FrozenImageToolResourceAllowance(
+                    call_ordinal=call_ordinal,
+                    tool_call_id=call.tool_call_id,
+                    executor_binding_fingerprint=binding_fingerprint,
+                    canonical_bytes=share(remaining[0], index),
+                    logical_bytes=share(remaining[1], index),
+                    wire_bytes=share(remaining[2], index),
+                    input_tokens=share(remaining[3], index),
+                    quote_owner=quote_owner,
+                )
+                for index, (call_ordinal, call, binding_fingerprint) in enumerate(
+                    image_calls
+                )
+            )
         return FrozenPostResponseResourceQuote(
             current_canonical_expanded_bytes=(canonical_input.canonical_expanded_bytes),
             actual_assistant_canonical_bytes=assistant_canonical,
@@ -3210,6 +3357,7 @@ class ConversationKernelRunner:
             bounded_followup_items=followup_items,
             item_upper_after=(len(canonical_input.items) + 1 + followup_items),
             followup_wire=wire,
+            image_call_allowances=allowances,
         )
 
     @staticmethod

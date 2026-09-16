@@ -1715,15 +1715,16 @@ def quote_provider_followup_wire_resources(
         raise ValueError("installed provider context cannot be rematerialized")
 
     appended_items: list[dict[str, object]] = []
+    appended_sources: list[LLMMessage | None] = []
     if provider_replay is None:
         if profile.wire_api == "openai_chat_completions":
-            appended_items.extend(chat_semantic_wire_group(actual_assistant_message))
+            group = chat_semantic_wire_group(actual_assistant_message)
         elif profile.wire_api == "openai_responses":
-            appended_items.extend(
-                responses_semantic_wire_group(actual_assistant_message)
-            )
+            group = responses_semantic_wire_group(actual_assistant_message)
         else:  # pragma: no cover - resolved transport registry is closed
             raise ValueError("provider wire API is unsupported")
+        appended_items.extend(group)
+        appended_sources.extend(actual_assistant_message for _ in group)
     else:
         target = DirectKernelModelPort.replay_target_for_resolved_call(call)
         if (
@@ -1737,14 +1738,17 @@ def quote_provider_followup_wire_resources(
             if not isinstance(item, dict):
                 raise TypeError("provider replay item is not an object")
             appended_items.append(item)
+            appended_sources.append(None)
 
     for message in bounded_suffix_messages:
         if profile.wire_api == "openai_chat_completions":
-            appended_items.extend(chat_semantic_wire_group(message))
+            group = chat_semantic_wire_group(message)
         elif profile.wire_api == "openai_responses":
-            appended_items.extend(responses_semantic_wire_group(message))
+            group = responses_semantic_wire_group(message)
         else:  # pragma: no cover - resolved transport registry is closed
             raise ValueError("provider wire API is unsupported")
+        appended_items.extend(group)
+        appended_sources.extend(message for _ in group)
 
     final_projection = _materialize_context_bearing_projection(
         call=call,
@@ -1753,14 +1757,15 @@ def quote_provider_followup_wire_resources(
         ordered_input_items=(*existing_items, *appended_items),  # type: ignore[arg-type]
         tool_choice=tool_choice,
     )
-    suffix_tokens = sum(
-        call.target.token_estimator.estimate_wire_json_component(item)
-        for item in appended_items
+    suffix_quote = call.target.token_estimator.estimate_ordered_wire_json_components(
+        ordered_input_items=tuple(appended_items),
+        ordered_input_sources=tuple(appended_sources),
     )
     return ProviderFollowupWireResourceQuote(
         final_wire_utf8_bytes=len(canonical_json_bytes(final_projection)),
         final_wire_estimated_input_tokens=(
-            plan.quote.final_wire_estimated_input_tokens + suffix_tokens
+            plan.quote.final_wire_estimated_input_tokens
+            + suffix_quote.total_input_tokens
         ),
         appended_wire_item_count=len(appended_items),
     )

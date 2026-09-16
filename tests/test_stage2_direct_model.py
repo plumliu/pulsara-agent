@@ -41,7 +41,13 @@ from pulsara_agent.llm.adapters.openai.responses import (
     responses_semantic_wire_group,
 )
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
-from pulsara_agent.llm.input import LLMImagePart, LLMMessage, LLMTextPart, LLMToolCall
+from pulsara_agent.llm.input import (
+    LLMImagePart,
+    LLMMessage,
+    LLMTextPart,
+    LLMToolCall,
+    MessageRole,
+)
 from pulsara_agent.llm.provider_replay import (
     build_prepared_durable_provider_assistant_replay,
 )
@@ -803,16 +809,69 @@ def test_k3_followup_quote_uses_the_exact_installed_wire_owner(api: str) -> None
     assert isinstance(existing, list)
     projection[key] = [*existing, *appended]
     assert quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
-    assert quote.final_wire_estimated_input_tokens == (
-        request.wire_input_plan.quote.final_wire_estimated_input_tokens
-        + sum(
-            request.prepared_call.call.target.token_estimator.estimate_wire_json_component(
-                item
-            )
-            for item in appended
+    suffix = (
+        request.prepared_call.call.target.token_estimator
+        .estimate_ordered_wire_json_components(
+            ordered_input_items=appended,
+            ordered_input_sources=tuple(
+                message
+                for message, group in (
+                    (assistant, appended[: len(appended) - 1]),
+                    (result, appended[len(appended) - 1 :]),
+                )
+                for _ in group
+            ),
         )
     )
+    assert quote.final_wire_estimated_input_tokens == (
+        request.wire_input_plan.quote.final_wire_estimated_input_tokens
+        + suffix.total_input_tokens
+    )
     assert quote.appended_wire_item_count == len(appended)
+    request.surface_borrow.close()
+
+
+@pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
+def test_k3_followup_quote_counts_image_dimensions_and_elides_payload_tokens(
+    api: str,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    assistant = LLMMessage.assistant_turn(
+        tool_calls=(
+            LLMToolCall(id="call:image", name="view_image", arguments='{"path":"x"}'),
+        ),
+    )
+    result = LLMMessage.tool_result(
+        '{"path":"x","status":"image_attached"}', tool_call_id="call:image"
+    )
+
+    def quoted(payload: bytes, *, width: int, height: int):
+        carrier = LLMMessage(
+            role=MessageRole.USER,
+            content=(
+                LLMTextPart("source"),
+                LLMImagePart("image/png", payload, width, height),
+            ),
+        )
+        return quote_provider_followup_wire_resources(
+            request=request,
+            actual_assistant_message=assistant,
+            provider_replay=None,
+            bounded_suffix_messages=(result, carrier),
+        )
+
+    low_small = quoted(b"x", width=1, height=1)
+    low_large_payload = quoted(b"x" * 500_000, width=1, height=1)
+    high_small_payload = quoted(b"x", width=4096, height=4096)
+
+    assert low_small.final_wire_estimated_input_tokens == (
+        low_large_payload.final_wire_estimated_input_tokens
+    )
+    assert low_large_payload.final_wire_utf8_bytes > low_small.final_wire_utf8_bytes
+    assert high_small_payload.final_wire_estimated_input_tokens > (
+        low_large_payload.final_wire_estimated_input_tokens
+    )
     request.surface_borrow.close()
 
 

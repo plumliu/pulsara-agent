@@ -150,6 +150,24 @@ def lower_canonical_item(
         return LoweredCanonicalItem(
             item, LLMMessage(role=MessageRole.USER, content=item.content)
         )
+    if kind in {
+        FrozenProviderInputItemKind.TOOL_RESULT,
+        FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+    }:
+        return LoweredCanonicalItem(
+            item,
+            None,
+            _tool_result_variants(
+                item,
+                artifact_read_available=artifact_read_available,
+                limits=limits,
+                citation_handle=(memory_citation_handles or {}).get(
+                    item.tool_result_context.result_id
+                    if item.tool_result_context is not None
+                    else ""
+                ),
+            ),
+        )
     text = provider_input_item_text(item)
     if kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION:
         return LoweredCanonicalItem(
@@ -196,24 +214,6 @@ def lower_canonical_item(
             LLMMessage.tool_result(
                 _project_tool_result_closure(text),
                 tool_call_id=item.tool_call_id,
-            ),
-        )
-    if kind in {
-        FrozenProviderInputItemKind.TOOL_RESULT,
-        FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
-    }:
-        return LoweredCanonicalItem(
-            item,
-            None,
-            _tool_result_variants(
-                item,
-                artifact_read_available=artifact_read_available,
-                limits=limits,
-                citation_handle=(memory_citation_handles or {}).get(
-                    item.tool_result_context.result_id
-                    if item.tool_result_context is not None
-                    else ""
-                ),
             ),
         )
     raise TypeError(kind)

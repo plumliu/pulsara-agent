@@ -23,6 +23,7 @@ from pulsara_agent.llm.input import (
     MessageRole,
     content_has_image,
     frozen_prompt_content_canonical_value,
+    frozen_tool_result_public_text,
     join_text_content,
     llm_content_identity_value,
 )
@@ -334,6 +335,13 @@ class ModelInputTokenEstimator(Protocol):
     def estimate_json(self, value: object) -> int: ...
 
     def estimate_wire_json_component(self, value: object) -> int: ...
+
+    def estimate_ordered_wire_json_components(
+        self,
+        *,
+        ordered_input_items: tuple[object, ...],
+        ordered_input_sources: tuple[LLMMessage | None, ...],
+    ) -> FinalWireTokenEstimate: ...
 
     def estimate_final_wire_json_components(
         self,
@@ -998,6 +1006,10 @@ class FrozenProviderInputItem:
     tool_result_delivery: FrozenToolResultDeliveryRequirement = (
         BEST_AVAILABLE_TOOL_RESULT_DELIVERY
     )
+    tool_call_ordinal: int | None = None
+    tool_call_arguments: FrozenJsonObjectFact | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         snapshot_kind = self.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
@@ -1051,7 +1063,7 @@ class FrozenProviderInputItem:
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
                 CanonicalInputOriginKind.HUMAN_STEER,
             }
-        )
+        ) or result_kind
         if (
             not snapshot_kind
             and content_has_image(self.content)
@@ -1081,11 +1093,33 @@ class FrozenProviderInputItem:
             raise ValueError("provider tool-result call identity union is invalid")
         if call_result_kind != (self.tool_request_entry_id is not None):
             raise ValueError("provider tool-result request identity union is invalid")
-        if (
-            self.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
-            and self.tool_result_body_text != join_text_content(self.content)
+        if self.tool_call_ordinal is not None and (
+            isinstance(self.tool_call_ordinal, bool) or self.tool_call_ordinal < 0
         ):
-            raise ValueError("ordinary tool result body differs from canonical text")
+            raise ValueError("provider tool-result call ordinal is invalid")
+        if self.tool_call_arguments is not None and not isinstance(
+            self.tool_call_arguments, FrozenJsonObjectFact
+        ):
+            raise TypeError("provider tool-result arguments must be frozen")
+        if (
+            not snapshot_kind
+            and isinstance(self.content, tuple)
+            and content_has_image(self.content)
+            and result_kind
+            and (self.tool_call_ordinal is None or self.tool_call_arguments is None)
+        ):
+            raise ValueError("image ToolResult lacks its frozen call source")
+        if self.item_kind is FrozenProviderInputItemKind.TOOL_RESULT:
+            assert isinstance(self.content, tuple)
+            expected_body = (
+                frozen_tool_result_public_text(FrozenPromptContent(self.content))
+                if content_has_image(self.content)
+                else join_text_content(self.content)
+            )
+            if self.tool_result_body_text != expected_body:
+                raise ValueError(
+                    "ordinary tool result body differs from its public projection"
+                )
 
 
 def provider_input_item_text(item: FrozenProviderInputItem) -> str:
@@ -1912,6 +1946,8 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
         ),
         "tool_call_id": item.tool_call_id,
         "tool_request_entry_id": item.tool_request_entry_id,
+        "tool_call_ordinal": item.tool_call_ordinal,
+        "tool_call_arguments": item.tool_call_arguments,
         "tool_result_context": (
             None
             if item.tool_result_context is None
@@ -2210,17 +2246,74 @@ class ContextCompileBudgetReport:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolAttachmentSourceMember:
+    call_ordinal: int
+    source: FrozenProviderInputItem = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.call_ordinal, bool) or self.call_ordinal < 0:
+            raise ValueError("tool attachment call ordinal is invalid")
+        if self.source.item_kind not in {
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        }:
+            raise ValueError("tool attachment member is not a ToolResult source")
+        if self.source.tool_call_ordinal != self.call_ordinal:
+            raise ValueError("tool attachment member ordinal drifted")
+        if not isinstance(self.source.content, tuple) or not content_has_image(
+            self.source.content
+        ):
+            raise ValueError("tool attachment member has no image")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolAttachmentSource:
+    assistant_entry_id: str
+    members: tuple[ToolAttachmentSourceMember, ...] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.assistant_entry_id or not self.members:
+            raise ValueError("tool attachment source is incomplete")
+        if tuple(member.call_ordinal for member in self.members) != tuple(
+            sorted(member.call_ordinal for member in self.members)
+        ) or len({member.call_ordinal for member in self.members}) != len(self.members):
+            raise ValueError("tool attachment members are not strictly ordered")
+        if any(
+            member.source.tool_request_entry_id != self.assistant_entry_id
+            for member in self.members
+        ):
+            raise ValueError("tool attachment members belong to another request")
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenCompiledMessagePlacement:
     message_ordinal: int
     origin_entry_id: str | None
-    origin_item_fingerprint: str
-    within_origin_ordinal: int
+    origin_item_fingerprint: str | None
+    within_origin_ordinal: int | None
     role: MessageRole
+    tool_attachment_source: ToolAttachmentSource | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
-        if self.message_ordinal < 0 or self.within_origin_ordinal < 0:
+        if self.message_ordinal < 0:
             raise ValueError("compiled message placement ordinal is invalid")
-        if not self.origin_item_fingerprint.startswith(SHA256_PREFIX):
+        combined = self.tool_attachment_source is not None
+        if combined:
+            if (
+                self.origin_entry_id is not None
+                or self.origin_item_fingerprint is not None
+                or self.within_origin_ordinal is not None
+                or self.role is not MessageRole.USER
+            ):
+                raise ValueError("tool attachment placement source union is invalid")
+        elif (
+            self.origin_item_fingerprint is None
+            or not self.origin_item_fingerprint.startswith(SHA256_PREFIX)
+            or self.within_origin_ordinal is None
+            or self.within_origin_ordinal < 0
+        ):
             raise ValueError("compiled message origin fingerprint is invalid")
 
 
@@ -2228,13 +2321,29 @@ def compiled_message_placement_identity_fingerprint(
     placement: FrozenCompiledMessagePlacement,
 ) -> str:
     return context_fingerprint(
-        "pulsara.compiled-message-placement:v1",
+        "pulsara.compiled-message-placement:v2-tool-attachments",
         {
             "ordinal": placement.message_ordinal,
             "entry": placement.origin_entry_id,
             "item": placement.origin_item_fingerprint,
             "within": placement.within_origin_ordinal,
             "role": placement.role.value,
+            "tool_attachment": (
+                None
+                if placement.tool_attachment_source is None
+                else {
+                    "assistant_entry_id": (
+                        placement.tool_attachment_source.assistant_entry_id
+                    ),
+                    "members": tuple(
+                        {
+                            "call_ordinal": member.call_ordinal,
+                            "source": provider_input_item_leaf(member.source),
+                        }
+                        for member in placement.tool_attachment_source.members
+                    ),
+                }
+            ),
         },
     )
 

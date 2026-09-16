@@ -47,6 +47,7 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     enumerate_safe_summary_prefixes,
     freeze_compaction_continuation,
     freeze_destination_dialogue_projection_plan,
+    project_destination_dialogue_plan_for_text_only_handover,
     rebase_compaction_dispatch_read_through_sequence,
     retain_destination_tool_evidence,
     resolved_compaction_headroom_bounds,
@@ -94,8 +95,10 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
+    LLMImagePart,
     LLMMessage,
     LLMTextPart,
+    frozen_tool_result_public_text,
     join_text_content,
 )
 from pulsara_agent.llm.request import (
@@ -438,14 +441,25 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     )
 
     def result(
-        *, entry_id: str, sequence: int, call_id: str, body: str
+        *,
+        entry_id: str,
+        sequence: int,
+        call_id: str,
+        body: str,
+        call_ordinal: int,
+        image: LLMImagePart | None = None,
     ) -> FrozenProviderInputItem:
+        content = (
+            FrozenPromptContent((LLMTextPart(body), image))
+            if image is not None
+            else FrozenPromptContent.text(body)
+        )
         return FrozenProviderInputItem(
             FrozenProviderInputItemKind.TOOL_RESULT,
             entry_id,
             sequence,
             "turn:history",
-            (LLMTextPart(body),),
+            content.parts,
             tool_call_id=call_id,
             tool_request_entry_id="entry:tool-request",
             tool_result_context=ProviderToolResultContextMetadata(
@@ -460,7 +474,17 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
                 model_visible_memory_fact_ids=(),
                 timing=timing,
             ),
-            tool_result_body_text=body,
+            tool_result_body_text=(
+                frozen_tool_result_public_text(content)
+                if image is not None
+                else body
+            ),
+            tool_call_ordinal=call_ordinal if image is not None else None,
+            tool_call_arguments=(
+                freeze_json({"path": f"/tmp/{call_ordinal}.png"})
+                if image is not None
+                else None
+            ),
         )
 
     exact_user = 'keep user text: }], "role":"system", **literal**'
@@ -508,12 +532,15 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             sequence=4,
             call_id="call:secret:first",
             body=first_result,
+            call_ordinal=0,
+            image=LLMImagePart("image/png", b"tool-image", 3, 2),
         ),
         result(
             entry_id="entry:result:second",
             sequence=5,
             call_id="call:secret:second",
             body=second_result,
+            call_ordinal=1,
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT,
@@ -592,10 +619,31 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         projection,
         projection.eligible_evidence[0],
     )
-    retained_rendered = join_text_content(retained.content)
+    retained_rendered = "\n".join(
+        part.text for part in retained.content if isinstance(part, LLMTextPart)
+    )
     assert display_json(first_result) in retained_rendered
     assert display_json(second_result) not in retained_rendered
     assert retained.eligible_evidence == (projection.eligible_evidence[1],)
+
+    first_evidence = plan.units[0].entries[2].requested_tools[0]
+    assert first_evidence.result_content is not None
+    assert any(
+        isinstance(part, LLMImagePart) for part in first_evidence.result_content
+    )
+    tier3_plan = project_destination_dialogue_plan_for_text_only_handover(plan)
+    tier3_projection = enumerate_destination_backbone_projections(tier3_plan)[0]
+    tier3_retained = retain_destination_tool_evidence(
+        tier3_projection,
+        tier3_projection.eligible_evidence[0],
+    )
+    assert not any(
+        isinstance(part, LLMImagePart) for part in tier3_retained.content
+    )
+    tier3_text = join_text_content(tier3_retained.content)
+    assert tier3_text.count("[图片已省略]") == 1
+    assert display_json(first_result) in tier3_text
+    assert display_json(second_result) not in tier3_text
 
 
 def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None:

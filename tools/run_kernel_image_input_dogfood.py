@@ -248,6 +248,56 @@ def check_prefix(records):
         assert current["items"][: len(previous["items"])] == previous["items"]
 
 
+def tool_image_carriers(record):
+    key = "messages" if record["wire_api"] == "openai_chat_completions" else "input"
+    result = []
+    for item in record["projection"].get(key, []):
+        if item.get("role") != "user" or not isinstance(item.get("content"), list):
+            continue
+        parts = item["content"]
+        labels = [
+            part.get("text", "")
+            for part in parts
+            if part.get("type") in {"text", "input_text"}
+        ]
+        images = [
+            part for part in parts if part.get("type") in {"image_url", "input_image"}
+        ]
+        if images and any('"tool_image_source"' in text for text in labels):
+            result.append(item)
+    return result
+
+
+def tool_image_database_evidence(session):
+    with session.repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        rows = connection.execute(
+            """
+            SELECT e.id, e.content_media_type, e.content_codec,
+                   count(r.ref_ordinal) AS ref_count
+            FROM pulsara_v3.transcript_entries AS e
+            LEFT JOIN pulsara_v3.canonical_image_refs AS r
+              ON r.session_id=e.session_id AND r.transcript_entry_id=e.id
+            WHERE e.session_id=%s AND e.entry_kind='TOOL_RESULT'
+            GROUP BY e.id, e.entry_sequence, e.content_media_type, e.content_codec
+            HAVING count(r.ref_ordinal) > 0
+            ORDER BY e.entry_sequence
+            """,
+            (session.session_id,),
+        ).fetchall()
+    return [
+        {
+            "entry_id": row[0],
+            "media_type": row[1],
+            "codec": row[2],
+            "ref_count": row[3],
+        }
+        for row in rows
+    ]
+
+
 async def run(args, report, saved):
     if args.connection_id is None:
         selected = _find_connection(saved, args.model)
@@ -268,6 +318,13 @@ async def run(args, report, saved):
             home.mkdir()
             workspace.mkdir()
             (workspace / "marker.txt").write_text("K4_TOOL_PINE\n", encoding="utf-8")
+            workspace_card = workspace / "view-card.png"
+            workspace_card.write_bytes(Path(report["fixtures"][0]["path"]).read_bytes())
+            workspace_card_two = workspace / "view-card-two.png"
+            workspace_card_two.write_bytes(
+                Path(report["fixtures"][1]["path"]).read_bytes()
+            )
+            missing_card = workspace / "missing-card.png"
             os.environ["PULSARA_HOME"] = str(home)
             settings = _ReadOnlySettingsStore(
                 replace(saved, postgres=LocalPostgresConfig(dsn, admin))
@@ -355,24 +412,155 @@ async def run(args, report, saved):
                 "bravo": fixtures[0]["number"],
                 "charlie": fixtures[1]["number"],
             }, parsed
-            tool_reply = await turn(
-                "tool_followup",
+            view_reply = await turn(
+                "view_image_tool",
                 PromptContent.text(
-                    "Call read_file on marker.txt with offset 1 and limit 10. Then return the file token and the number from the image labeled bravo. Do not use other tools."
+                    "Call view_image exactly once with this exact path: "
+                    f"{workspace_card}. After the tool result, reply with only "
+                    "the three-digit number printed in that image. Do not use other tools."
                 ),
             )
-            assert (
-                "K4_TOOL_PINE" in tool_reply and fixtures[0]["number"] in tool_reply
-            ), tool_reply
-            evidence = _database_evidence(session)
-            assert evidence["tool_result_count"] >= 1, evidence
-            warm = [
+            assert view_reply.strip() == fixtures[0]["number"], view_reply
+            view_calls = [
                 item
                 for item in report["calls"]
-                if item["purpose"] == "agent_model_loop"
+                if item["phase"] == "view_image_tool"
+                and item["purpose"] == "agent_model_loop"
             ]
-            check_prefix(warm)
-            report["checks"]["warm_prefix_and_tool_followup"] = True
+            assert len(view_calls) >= 2
+            assert any(
+                block.get("kind") == "tool_call"
+                and block.get("tool_name") == "view_image"
+                for item in view_calls
+                for block in item["normalized_blocks"]
+            )
+            assert len(tool_image_carriers(view_calls[-1])) == 1
+            image_rows = await asyncio.to_thread(tool_image_database_evidence, session)
+            assert len(image_rows) == 1 and image_rows[0]["ref_count"] == 1, image_rows
+            assert image_rows[0]["media_type"] == "application/vnd.pulsara.prompt+json"
+            report["checks"]["view_image_typed_result_and_single_wire_carrier"] = True
+            report["tool_image_database_evidence"] = image_rows
+            multi_reply = await turn(
+                "view_image_parallel_mixed",
+                PromptContent.text(
+                    "In one assistant tool-call batch, call view_image exactly once "
+                    f"for each of these three paths, in this order: {workspace_card}, "
+                    f"{missing_card}, {workspace_card_two}. After all three results, "
+                    "reply with a compact JSON object containing the two three-digit "
+                    "numbers under keys first and second, and the string failed under "
+                    "key missing. Do not use other tools."
+                ),
+            )
+            multi_value = json.loads(
+                multi_reply.strip()
+                .removeprefix("```json")
+                .removeprefix("```")
+                .removesuffix("```")
+                .strip()
+            )
+            assert multi_value == {
+                "first": fixtures[0]["number"],
+                "missing": "failed",
+                "second": fixtures[1]["number"],
+            }, multi_value
+            multi_calls = [
+                item
+                for item in report["calls"]
+                if item["phase"] == "view_image_parallel_mixed"
+                and item["purpose"] == "agent_model_loop"
+            ]
+            assert len(multi_calls) >= 2
+            first_batch = [
+                block
+                for block in multi_calls[0]["normalized_blocks"]
+                if block.get("kind") == "tool_call"
+                and block.get("tool_name") == "view_image"
+            ]
+            assert len(first_batch) == 3, first_batch
+            before_carriers = tool_image_carriers(multi_calls[0])
+            carriers = tool_image_carriers(multi_calls[-1])
+            assert len(carriers) == len(before_carriers) + 1, carriers
+            carrier = carriers[-1]
+            image_part_types = {"image_url", "input_image"}
+            assert (
+                sum(part.get("type") in image_part_types for part in carrier["content"])
+                == 2
+            )
+            multi_image_rows = await asyncio.to_thread(
+                tool_image_database_evidence, session
+            )
+            assert len(multi_image_rows) == 3, multi_image_rows
+            workspace_card.unlink()
+            workspace_card_two.unlink()
+            retained_reply = await turn(
+                "tool_images_after_source_delete",
+                PromptContent.text(
+                    "Without calling any tool, read the two successful images from "
+                    "the immediately preceding tool results and reply only with a "
+                    "JSON array of their three-digit numbers in tool-call order."
+                ),
+            )
+            retained_value = json.loads(
+                retained_reply.strip()
+                .removeprefix("```json")
+                .removeprefix("```")
+                .removesuffix("```")
+                .strip()
+            )
+            assert retained_value == [
+                fixtures[0]["number"],
+                fixtures[1]["number"],
+            ], retained_value
+            report["checks"]["parallel_mixed_and_deleted_source_replay"] = True
+
+            session_id = session.session_id
+            await core.close_session(session.host_session_id, close_conversation=False)
+            session = await core.resume_session(
+                session_id, workspace_input=workspace_input
+            )
+            cold_reply = await turn(
+                "cold_resume",
+                PromptContent.text(
+                    "Read the retained view_image result whose source ends in "
+                    "view-card-two.png and reply with only its three-digit number."
+                ),
+                session,
+            )
+            assert cold_reply.strip() == fixtures[1]["number"], cold_reply
+            fork_anchor = await asyncio.to_thread(anchor, session)
+            child_id = f"session:{uuid4().hex}"
+            creation = await core.fork_conversation(
+                source_session_id=session.session_id,
+                anchor_entry_id=fork_anchor,
+                child_session_id=child_id,
+                memory_domain_id="u_local",
+            )
+            assert creation.created, creation
+            await core.close_session(session.host_session_id, close_conversation=True)
+            child = await core.resume_session(child_id, workspace_input=workspace_input)
+            child_image_rows = await asyncio.to_thread(
+                tool_image_database_evidence, child
+            )
+            assert len(child_image_rows) == 3, child_image_rows
+            fork_reply = await turn(
+                "fork_after_parent_close",
+                PromptContent.text(
+                    "Read the retained view_image result whose source ends in "
+                    "view-card.png and reply with only its three-digit number."
+                ),
+                child,
+            )
+            assert fork_reply.strip() == fixtures[0]["number"], fork_reply
+            for phase in ("cold_resume", "fork_after_parent_close"):
+                calls = [
+                    item
+                    for item in report["calls"]
+                    if item["phase"] == phase and item["purpose"] == "agent_model_loop"
+                ]
+                assert calls and calls[-1]["image_occurrences"] > 0
+            report["checks"]["cold_resume_and_independent_fork_images"] = True
+            report["checks"]["fork_preserves_typed_tool_image"] = True
+            session = child
 
             report["phase"] = "manual_compaction"
             print(f"K4 {args.model}: manual_compaction", flush=True)
@@ -393,59 +581,43 @@ async def run(args, report, saved):
             reply = await turn(
                 "after_compaction",
                 PromptContent.text(
-                    "Read the retained original image labeled bravo again, and reply with only its printed three-digit number."
+                    "Based on the compacted conversation summary, reply only with "
+                    "the exact text COMPACT_OK. Do not call any tool."
                 ),
+                session,
             )
-            assert reply.strip() == fixtures[0]["number"], reply
+            assert reply.strip() == "COMPACT_OK", reply
             after = [
                 item
                 for item in report["calls"]
                 if item["phase"] == "after_compaction"
                 and item["purpose"] == "agent_model_loop"
             ]
-            assert after and after[-1]["image_occurrences"] >= 3
-            report["checks"]["summary_and_successor_contain_original_images"] = True
-
-            session_id = session.session_id
-            await core.close_session(session.host_session_id, close_conversation=False)
-            session = await core.resume_session(
-                session_id, workspace_input=workspace_input
+            assert after
+            report["checks"]["summary_saw_images_and_compacted_successor_completed"] = (
+                True
             )
-            cold_reply = await turn(
-                "cold_resume",
+
+            tool_reply = await turn(
+                "tool_followup",
                 PromptContent.text(
-                    "Read the retained image labeled alpha and reply with only the three-digit number."
+                    "Call read_file on marker.txt with offset 1 and limit 10, then "
+                    "reply with only the file token. Do not use other tools."
                 ),
                 session,
             )
-            assert cold_reply.strip() == fixtures[1]["number"], cold_reply
-            fork_anchor = await asyncio.to_thread(anchor, session)
-            child_id = f"session:{uuid4().hex}"
-            creation = await core.fork_conversation(
-                source_session_id=session.session_id,
-                anchor_entry_id=fork_anchor,
-                child_session_id=child_id,
-                memory_domain_id="u_local",
-            )
-            assert creation.created, creation
-            await core.close_session(session.host_session_id, close_conversation=True)
-            child = await core.resume_session(child_id, workspace_input=workspace_input)
-            fork_reply = await turn(
-                "fork_after_parent_close",
-                PromptContent.text(
-                    "Read the original retained image labeled bravo and reply with only its three-digit number."
-                ),
-                child,
-            )
-            assert fork_reply.strip() == fixtures[0]["number"], fork_reply
-            for phase in ("cold_resume", "fork_after_parent_close"):
-                calls = [
-                    item
-                    for item in report["calls"]
-                    if item["phase"] == phase and item["purpose"] == "agent_model_loop"
-                ]
-                assert calls and calls[-1]["image_occurrences"] > 0
-            report["checks"]["cold_resume_and_independent_fork_images"] = True
+            assert "K4_TOOL_PINE" in tool_reply, tool_reply
+            evidence = _database_evidence(session)
+            assert evidence["tool_result_count"] >= 1, evidence
+            successor_warm = [
+                item
+                for item in report["calls"]
+                if item["purpose"] == "agent_model_loop"
+                and item["phase"] in {"after_compaction", "tool_followup"}
+            ]
+            check_prefix(successor_warm)
+            report["checks"]["warm_prefix_and_tool_followup"] = True
+
             report["database_evidence"] = _database_evidence(child)
             await core.close_session(child.host_session_id, close_conversation=False)
 

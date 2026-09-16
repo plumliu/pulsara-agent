@@ -95,6 +95,7 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionContinuationMode,
+    provider_input_item_canonical_expanded_bytes,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.extensions import OperationalHookType
@@ -118,9 +119,12 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
     LLMMessage,
     LLMTextPart,
     MessageRole,
+    frozen_tool_result_public_text,
     join_text_content,
     text_part_values,
 )
@@ -2146,6 +2150,87 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
     assert "If the omitted content is necessary" in join_text_content(
         with_read_compact.message.content
     )
+
+
+def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> None:
+    first_image = LLMImagePart("image/png", b"first", 3, 2)
+    second_image = LLMImagePart("image/png", b"second", 4, 2)
+
+    def image_result(
+        *, sequence: int, call_ordinal: int, image: LLMImagePart
+    ) -> FrozenProviderInputItem:
+        content = FrozenPromptContent((LLMTextPart("Image loaded."), image))
+        return replace(
+            _tool_result(
+                "placeholder",
+                sequence=sequence,
+                turn_id="turn:test",
+                artifact=False,
+            ),
+            content=content.parts,
+            tool_call_id=f"call:{call_ordinal}",
+            tool_request_entry_id="entry:assistant-batch",
+            tool_result_body_text=frozen_tool_result_public_text(content),
+            tool_call_ordinal=call_ordinal,
+            tool_call_arguments=freeze_json(
+                {"path": f'/tmp/image "{call_ordinal}".png'}
+            ),
+        )
+
+    items = (
+        image_result(sequence=1, call_ordinal=1, image=second_image),
+        image_result(sequence=2, call_ordinal=0, image=first_image),
+        _user("continue", sequence=3),
+    )
+    snapshot = _snapshot(
+        *items,
+        canonical_expanded_bytes=sum(
+            provider_input_item_canonical_expanded_bytes(item) for item in items
+        ),
+    )
+    compiled = StructuredModelInputCompiler().compile(
+        _prepared_request(
+            snapshot,
+            _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("BASE",))),
+        )
+    )
+
+    carriers = tuple(
+        message
+        for message in compiled.messages
+        if message.role is MessageRole.USER
+        and any(isinstance(part, LLMImagePart) for part in message.content)
+    )
+    assert len(carriers) == 1
+    assert tuple(
+        part.immutable_bytes
+        for part in carriers[0].content
+        if isinstance(part, LLMImagePart)
+    ) == (b"first", b"second")
+    sources = tuple(
+        json.loads(part.text)["tool_image_source"]
+        for part in carriers[0].content
+        if isinstance(part, LLMTextPart)
+        and part.text.startswith("{")
+    )
+    assert sources == (
+        {"requested_path": '/tmp/image "0".png', "tool_call_id": "call:0"},
+        {"requested_path": '/tmp/image "1".png', "tool_call_id": "call:1"},
+    )
+    assert (
+        sum(
+            message.role is MessageRole.TOOL_RESULT
+            for message in compiled.messages
+        )
+        == 2
+    )
+    carrier_index = compiled.messages.index(carriers[0])
+    continue_index = next(
+        index
+        for index, message in enumerate(compiled.messages)
+        if message.content == (LLMTextPart("continue"),)
+    )
+    assert carrier_index < continue_index
 
 
 def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:

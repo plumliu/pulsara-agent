@@ -19,7 +19,7 @@ import { promptImageCount } from '../lib/prompt-content';
 
 interface PromptContentViewProps {
   content: DisplayPromptContent;
-  variant: 'message' | 'queue';
+  variant: 'message' | 'queue' | 'tool';
   onReadImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
 }
 
@@ -112,7 +112,14 @@ export function PromptContentView({
       {variant === 'message' && images.length > 0 && (
         <PromptThumbnailStrip images={images} states={states} load={load} open={open} />
       )}
-      {variant === 'queue' ? (
+      {variant === 'tool' ? (
+        <div className="tool-image-content">
+          {images.map((_, index) => (
+            <LazyImage key={index} index={index} state={states[index]}
+              load={load} open={open} variant="tool" />
+          ))}
+        </div>
+      ) : variant === 'queue' ? (
         <div className={`queued-prompt-content${expanded ? ' is-expanded' : ''}`}>
           {body}
           <div className="queued-prompt-content__meta">
@@ -129,7 +136,7 @@ export function PromptContentView({
         index={lightboxIndex ?? 0}
         slides={images.map((_, index) => ({
           src: states[index]?.kind === 'ready' ? states[index].url : transparentPixel,
-          alt: `Figure ${index + 1}`,
+          alt: variant === 'tool' ? '工具读取的图片' : `Figure ${index + 1}`,
           ...canonicalDimensions(images[index]),
           imageFit: 'contain' as const,
         }))}
@@ -149,7 +156,7 @@ export function PromptContentView({
             if (state?.kind === 'ready') return undefined;
             return (
               <div className="prompt-lightbox-state" role="status">
-                <strong>Figure {lightboxIndex + 1}</strong>
+                {variant !== 'tool' && <strong>Figure {lightboxIndex + 1}</strong>}
                 {state?.kind === 'failed' ? (
                   <>
                     <span>{state.reason}</span>
@@ -159,7 +166,7 @@ export function PromptContentView({
               </div>
             );
           },
-          slideFooter: ({ slide }) => (
+          slideFooter: ({ slide }) => variant === 'tool' ? null : (
             <div className="prompt-lightbox-caption">{slide.alt}</div>
           ),
         }}
@@ -199,7 +206,7 @@ function PromptThumbnailStrip({
   return (
     <div ref={strip} className="prompt-thumbnail-strip" aria-label={`${images.length} 张图片`}>
       {images.slice(0, visible).map((_, index) => (
-        <LazyThumbnail
+        <LazyImage
           key={index}
           index={index}
           state={states[index]}
@@ -218,16 +225,18 @@ function PromptThumbnailStrip({
   );
 }
 
-function LazyThumbnail({
+function LazyImage({
   index,
   state,
   load,
   open,
+  variant = 'thumbnail',
 }: {
   index: number;
   state?: LoadState;
   load: (index: number) => Promise<void>;
   open: (index: number, trigger: HTMLElement) => void;
+  variant?: 'thumbnail' | 'tool';
 }) {
   const button = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -250,18 +259,20 @@ function LazyThumbnail({
     <button
       ref={button}
       type="button"
-      className="prompt-thumbnail"
-      aria-label={`打开 Figure ${index + 1}`}
+      className={variant === 'tool' ? 'tool-image-preview' : 'prompt-thumbnail'}
+      aria-label={variant === 'tool' ? '放大图片' : `打开 Figure ${index + 1}`}
       onClick={(event) => open(index, event.currentTarget)}
     >
-      <span className={`prompt-thumbnail__image is-${state?.kind ?? 'loading'}`}>
+      <span className={`${variant === 'tool' ? 'tool-image-preview__image' : 'prompt-thumbnail__image'} is-${state?.kind ?? 'loading'}`}>
         {state?.kind === 'ready'
           // Exact owner-scoped Blob URLs cannot pass through Next image optimization.
           // eslint-disable-next-line @next/next/no-img-element
           ? <img src={state.url} alt="" />
-          : state?.kind === 'failed' ? '重试' : '…'}
+          : variant === 'tool'
+            ? state?.kind === 'failed' ? '图片读取失败，点击查看' : '正在读取图片…'
+            : state?.kind === 'failed' ? '重试' : '…'}
       </span>
-      <small>Figure {index + 1}</small>
+      {variant !== 'tool' && <small>Figure {index + 1}</small>}
     </button>
   );
 }

@@ -190,6 +190,21 @@ def prompt_text_projection(
     )
 
 
+def frozen_tool_result_public_text(content: FrozenPromptContent) -> str:
+    """Project image content to bounded text for Hooks and Tool-role output."""
+
+    if not isinstance(content, FrozenPromptContent):
+        raise TypeError("ToolResult public projection requires frozen content")
+    images = tuple(part for part in content.parts if isinstance(part, LLMImagePart))
+    if len(images) != 1:
+        raise ValueError("ToolResult public projection requires one image")
+    image = images[0]
+    return (
+        f"Image loaded ({image.media_type}, {image.width}x{image.height}, "
+        f"{len(image.immutable_bytes)} bytes)."
+    )
+
+
 def llm_content_identity_value(
     parts: tuple[LLMContentPart, ...],
 ) -> tuple[object, ...]:

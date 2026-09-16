@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, Protocol
 
+from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -149,7 +150,7 @@ class ToolExecutionResult:
     call_id: str
     tool_name: str
     status: ToolResultState
-    output: str
+    output: str | FrozenPromptContent
     metadata: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     artifact_source_read: bool = False
@@ -161,7 +162,21 @@ class ToolExecutionResult:
         # Reject surrogate-bearing or otherwise non-UTF-8-encodable public
         # results at the process-local boundary.  Artifact publication must
         # never replace raw truth with an implicit errors="replace" value.
-        self.output.encode("utf-8")
+        if isinstance(self.output, str):
+            self.output.encode("utf-8")
+        elif isinstance(self.output, FrozenPromptContent):
+            images = tuple(
+                part for part in self.output.parts if isinstance(part, LLMImagePart)
+            )
+            if (
+                self.tool_name != "view_image"
+                or self.status is not ToolResultState.SUCCESS
+                or len(images) != 1
+                or not any(isinstance(part, LLMTextPart) for part in self.output.parts)
+            ):
+                raise ValueError("typed image output is invalid for this Tool result")
+        else:
+            raise TypeError("tool output must be text or frozen prompt content")
         if self.artifact_source_read and self.output_artifact_candidate is not None:
             raise ValueError("artifact_read results cannot recursively own artifacts")
         if (

@@ -590,6 +590,7 @@ export interface AgentTaskActivityRecord {
   acceptedAt: string;
   objective: string;
   body?: string;
+  promptContent?: CanonicalPromptContent;
   contentKind: 'INLINE' | 'CANONICAL_BLOB';
   contentDigest: string;
   contentSize: number;
@@ -688,6 +689,7 @@ export function projectAgentTaskConversation(
         trace.status = toolResultStatus(resultRef?.resultState);
         trace.subtitle = trace.status === 'completed' ? '已完成' : toolFailureLabel(resultRef?.resultState);
         trace.resultText = body;
+        trace.resultContent = record.promptContent;
         trace.resultEntryId = record.entryId;
         trace.resultState = resultRef?.resultState;
         trace.resultSummary = summarizeToolResult(trace.toolName, body);
@@ -709,6 +711,7 @@ export function projectAgentTaskConversation(
             subtitle: '已记录',
             status: toolResultStatus(resultRef?.resultState),
             resultText: body,
+            resultContent: record.promptContent,
             resultEntryId: record.entryId,
             resultState: resultRef?.resultState,
             resultSummary: summarizeToolResult(undefined, body),
@@ -1408,23 +1411,33 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         entry_kind: string;
         accepted_at: string;
         objective: string;
-        content: { kind: 'INLINE' | 'CANONICAL_BLOB'; inline_content?: string; digest: string; size: string | number };
+        content: { kind: 'INLINE' | 'CANONICAL_BLOB'; inline_content?: string; digest: string; size: string | number; media_type?: string; codec?: string };
         blocks?: Array<{ block_id: string; ordinal: string | number; kind: string; tool_call_id?: string | null; tool_name?: string | null }>;
         tool_results?: Array<{ attempt_id?: string | null; assistant_entry_id: string; tool_call_id: string; result_entry_id: string; result_state: string }>;
       }>;
       next_cursor?: string | null;
     }>(`/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/activities?${query.toString()}`);
     return {
-      activities: (payload.activities ?? []).map((activity) => ({
+      activities: (payload.activities ?? []).map((activity) => {
+        const promptContent = activity.entry_kind === 'TOOL_RESULT'
+          && activity.content.media_type === PROMPT_BODY_MEDIA_TYPE
+          ? decodePromptContent(activity.content, {
+              kind: 'entry', entryId: activity.entry_id,
+            })
+          : undefined;
+        return {
         entryId: activity.entry_id,
         turnId: activity.turn_id,
         entrySequence: numeric(activity.entry_sequence),
         entryKind: activity.entry_kind,
         acceptedAt: activity.accepted_at,
         objective: activity.objective,
-        body: activity.content.inline_content
-          ? decodeBase64(activity.content.inline_content)
-          : undefined,
+        body: promptContent
+          ? promptContentTextProjection(promptContent)
+          : activity.content.inline_content
+            ? decodeBase64(activity.content.inline_content)
+            : undefined,
+        promptContent,
         contentKind: activity.content.kind,
         contentDigest: activity.content.digest,
         contentSize: numeric(activity.content.size),
@@ -1442,7 +1455,8 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
           resultEntryId: result.result_entry_id,
           resultState: result.result_state,
         })),
-      })),
+        };
+      }),
       nextCursor: payload.next_cursor || undefined,
     };
   }
@@ -3699,12 +3713,13 @@ function projectEntries(
     }
     if (entry.entry_kind === 'TOOL_RESULT') {
       const resultRef = entry.tool_result;
+      const projectedResult = decodeToolResultContent(entry);
       const target = resultRef
         ? messages.find((message) => message.id === resultRef.assistant_entry_id)
         : undefined;
       const pendingTrace = target?.traces?.find((item) => item.id === resultRef?.tool_call_id);
       if (pendingTrace) {
-        const result = decodeContent(entry.content);
+        const result = projectedResult.text;
         const resultState = resultRef?.result_state;
         const succeeded = resultState === 'SUCCESS';
         const cancelled = resultState === 'CANCELLED'
@@ -3712,6 +3727,7 @@ function projectEntries(
         pendingTrace.status = succeeded ? 'completed' : cancelled ? 'cancelled' : 'failed';
         pendingTrace.subtitle = succeeded ? '已完成' : toolFailureLabel(resultState);
         pendingTrace.resultText = result;
+        pendingTrace.resultContent = projectedResult.content;
         pendingTrace.resultEntryId = entry.entry_id;
         pendingTrace.resultState = resultState;
         pendingTrace.resultSummary = summarizeToolResult(pendingTrace.toolName, result);
@@ -3725,10 +3741,11 @@ function projectEntries(
         title: '操作结果',
         subtitle: '已记录',
         status: toolResultStatus(resultRef?.result_state),
-        resultText: decodeContent(entry.content),
+        resultText: projectedResult.text,
+        resultContent: projectedResult.content,
         resultEntryId: entry.entry_id,
         resultState: resultRef?.result_state,
-        resultSummary: summarizeToolResult(undefined, decodeContent(entry.content)),
+        resultSummary: summarizeToolResult(undefined, projectedResult.text),
         artifact: projectToolArtifact(resultRef),
         associationPending: true,
       };
@@ -3827,9 +3844,12 @@ function projectSubagentRuns(
     if (entry.scope_kind !== 'SUBAGENT_TASK' || !entry.scope_subagent_task_id) continue;
     const taskId = entry.scope_subagent_task_id;
     const run = ensureRun(taskId, numeric(entry.entry_sequence));
+    const projectedToolResult = entry.entry_kind === 'TOOL_RESULT'
+      ? decodeToolResultContent(entry)
+      : undefined;
     const content = entry.entry_kind === 'USER_MESSAGE'
       ? decodeContent(entry.content, { kind: 'entry', entryId: entry.entry_id })
-      : decodeContent(entry.content);
+      : projectedToolResult?.text ?? decodeContent(entry.content);
     if (entry.entry_kind === 'USER_MESSAGE') {
       if (!run.objective) run.objective = content;
       continue;
@@ -3885,6 +3905,7 @@ function projectSubagentRuns(
         pendingTrace.status = succeeded ? 'completed' : cancelled ? 'cancelled' : 'failed';
         pendingTrace.subtitle = succeeded ? '已完成' : toolFailureLabel(resultState);
         pendingTrace.resultText = content;
+        pendingTrace.resultContent = projectedToolResult?.content;
         pendingTrace.resultEntryId = entry.entry_id;
         pendingTrace.resultState = resultState;
         pendingTrace.resultSummary = summarizeToolResult(pendingTrace.toolName, content);
@@ -3898,7 +3919,8 @@ function projectSubagentRuns(
           traces: [{
             id: entry.entry_id, kind: 'artifact', title: '操作结果', subtitle: '已记录',
             status: toolResultStatus(resultRef?.result_state),
-            resultText: content, resultEntryId: entry.entry_id,
+            resultText: content, resultContent: projectedToolResult?.content,
+            resultEntryId: entry.entry_id,
             resultState: resultRef?.result_state,
             resultSummary: summarizeToolResult(undefined, content),
             artifact: projectToolArtifact(resultRef), associationPending: true,
@@ -4677,6 +4699,19 @@ function decodeContent(
     if (error instanceof RuntimeApiError) throw error;
     throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
   }
+}
+
+function decodeToolResultContent(entry: ProtocolEntry): {
+  text: string;
+  content?: CanonicalPromptContent;
+} {
+  if (entry.content?.media_type !== PROMPT_BODY_MEDIA_TYPE) {
+    return { text: decodeContent(entry.content) };
+  }
+  const content = decodePromptContent(entry.content, {
+    kind: 'entry', entryId: entry.entry_id,
+  });
+  return { text: promptContentTextProjection(content), content };
 }
 
 function decodePromptContent(

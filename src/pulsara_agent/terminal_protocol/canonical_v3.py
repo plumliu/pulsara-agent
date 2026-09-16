@@ -529,9 +529,10 @@ class CanonicalProtocolReader:
             if image_ref_ordinal is not None:
                 if (
                     queue_item_id is None
-                    and str(row["entry_kind"]) not in {"USER_MESSAGE", "USER_STEER"}
+                    and str(row["entry_kind"])
+                    not in {"USER_MESSAGE", "USER_STEER", "TOOL_RESULT"}
                 ):
-                    raise ValueError("only user prompt entries have image occurrences")
+                    raise ValueError("entry kind cannot own image occurrences")
                 from pulsara_agent.conversation_kernel.prompt_storage import (
                     resolve_canonical_prompt_image_reference,
                 )

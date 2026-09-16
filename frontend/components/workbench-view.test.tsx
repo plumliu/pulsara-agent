@@ -392,4 +392,34 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     await waitFor(() => expect(readArtifact).toHaveBeenCalledTimes(1));
     expect(screen.queryByText('late-artifact-page')).toBeNull();
   });
+
+  it('shows a large tool image only when expanded, without Figure links or raw details', () => {
+    const readImage = vi.fn(async () => new Uint8Array([1, 2, 3]));
+    render(<WorkbenchView {...props({
+      isRunning: false,
+      onReadPromptImage: readImage,
+      messages: [{
+        id: 'assistant-image', role: 'assistant', time: '现在', body: '', status: 'completed',
+        traces: [{
+          id: 'trace-image', kind: 'read', toolName: 'view_image', title: '读取图片',
+          subtitle: '已完成', status: 'completed', resultText: '{"status":"image_attached"}',
+          resultEntryId: 'entry-image', resultContent: { parts: [{
+            type: 'image', source: 'canonical', digest: `sha256:${'a'.repeat(64)}`,
+            encodedBytes: 3, mediaType: 'image/png', width: 12, height: 8,
+            refOrdinal: 0, owner: { kind: 'entry', entryId: 'entry-image' },
+          }] },
+        }],
+      }],
+    })} />);
+
+    expect(screen.queryByRole('region', { name: '工具读取的图片' })).toBeNull();
+    expect(readImage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：view_image' }));
+    expect(screen.getByRole('region', { name: '工具读取的图片' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '放大图片' }).className).toBe('tool-image-preview');
+    expect(screen.queryByText(/Figure/)).toBeNull();
+    expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '收起工具详情：view_image' }));
+    expect(screen.queryByRole('region', { name: '工具读取的图片' })).toBeNull();
+  });
 });

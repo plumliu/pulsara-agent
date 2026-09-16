@@ -511,6 +511,7 @@ class PreparedToolResultAcceptance:
     attempt_id: str | None
     result_state: str
     canonical_preview_content: InlineContent
+    canonical_prompt: FrozenCanonicalPrompt | None
     artifact_disposition: ToolOutputArtifactDisposition
     artifact_id: str | None
     artifact_blob_descriptor: BlobContent | None
@@ -545,6 +546,16 @@ class PreparedToolResultAcceptance:
             raise ValueError("prepared tool result identity is incomplete")
         if not isinstance(self.canonical_preview_content, InlineContent):
             raise TypeError("prepared tool result preview must be inline")
+        if self.canonical_prompt is not None:
+            if not isinstance(self.canonical_prompt, FrozenCanonicalPrompt):
+                raise TypeError("prepared ToolResult prompt must be canonical")
+            if (
+                self.canonical_preview_content.canonical_bytes
+                != self.canonical_prompt.body
+                or self.canonical_preview_content.media_type != PROMPT_BODY_MEDIA_TYPE
+                or self.canonical_preview_content.codec != PROMPT_BODY_CODEC
+            ):
+                raise ValueError("prepared ToolResult prompt body does not exact-join")
         attempted_states = {
             "SUCCESS",
             "INVALID_ARGUMENTS",
@@ -1555,6 +1566,24 @@ def _prepared_tool_result_manifest(
         "canonical_preview_content": _content_manifest(
             candidate.canonical_preview_content
         ),
+        "canonical_prompt": (
+            None
+            if candidate.canonical_prompt is None
+            else {
+                "images": tuple(
+                    {
+                        "ref_ordinal": occurrence.ref_ordinal,
+                        "part_index": occurrence.part_index,
+                        "digest": occurrence.image.content_digest,
+                        "encoded_bytes": len(occurrence.image.immutable_bytes),
+                        "media_type": occurrence.image.media_type,
+                        "width": occurrence.image.width,
+                        "height": occurrence.image.height,
+                    }
+                    for occurrence in candidate.canonical_prompt.image_occurrences
+                )
+            }
+        ),
         "artifact_disposition": candidate.artifact_disposition.value,
         "artifact_id": candidate.artifact_id,
         "artifact_blob_descriptor": None if blob is None else _content_manifest(blob),
@@ -1609,6 +1638,7 @@ def build_prepared_tool_result_acceptance(
     observation_origin_kind: ToolObservationOrigin,
     trusted_tool_reported_duration_microseconds: int | None,
     actor_id: str,
+    canonical_prompt: FrozenCanonicalPrompt | None = None,
     memory_candidate: PreparedMemoryCandidateAcceptance | None = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
 ) -> PreparedToolResultAcceptance:
@@ -1640,6 +1670,7 @@ def build_prepared_tool_result_acceptance(
         attempt_id=attempt_id,
         result_state=result_state,
         canonical_preview_content=canonical_preview_content,
+        canonical_prompt=canonical_prompt,
         artifact_disposition=artifact_disposition,
         artifact_id=artifact_id,
         artifact_blob_descriptor=artifact_blob_descriptor,

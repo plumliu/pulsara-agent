@@ -6,11 +6,18 @@ import json
 import os
 from pathlib import Path
 from threading import Barrier, Thread
+from io import BytesIO
 
 from jsonschema import Draft202012Validator
+from PIL import Image
 import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.capability.pulsara_home import (
+    PulsaraHomeDisposition,
+    PulsaraHomeResolution,
+    UserHomeResolution,
+)
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins import filesystem
@@ -18,6 +25,8 @@ from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
     ReadFileTool,
     SearchFilesTool,
+    LocalImageReadCandidate,
+    ViewImageTool,
     WriteFileTool,
 )
 
@@ -924,3 +933,132 @@ def test_filesystem_state_has_no_timestamp_or_revision_registry() -> None:
         "last_lookup_key",
         "consecutive_lookup_count",
     }
+
+
+def test_view_image_reads_a_regular_file_by_content_not_extension(
+    tmp_path: Path,
+) -> None:
+    output = BytesIO()
+    Image.new("RGB", (3, 2), (12, 34, 56)).save(output, "PNG")
+    payload = output.getvalue()
+    mismatched = tmp_path / "actual-png.jpg"
+    mismatched.write_bytes(payload)
+    tool = ViewImageTool(tmp_path)
+    call = ToolCall("call:image", "view_image", {"path": mismatched.name})
+
+    candidate = tool.read_bounded(call, maximum_bytes=len(payload))
+
+    assert isinstance(candidate, LocalImageReadCandidate)
+    assert candidate.payload == payload
+    assert candidate.requested_path == mismatched.name
+
+
+def test_view_image_applies_the_frozen_read_bound_before_validation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "image.png"
+    path.write_bytes(b"larger-than-allowance")
+    tool = ViewImageTool(tmp_path)
+    call = ToolCall("call:image", "view_image", {"path": path.name})
+
+    result = tool.read_bounded(call, maximum_bytes=3)
+
+    assert isinstance(result, ToolExecutionResult)
+    assert result.status is ToolResultState.ERROR
+    assert json.loads(result.output)["error"] == "IMAGE_RESOURCE_EXCEEDED"
+
+
+def test_view_image_reuses_the_frozen_read_path_owner(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    user_home = tmp_path / "user-home"
+    pulsara_home = tmp_path / "pulsara-home"
+    workspace.mkdir()
+    user_home.mkdir()
+    pulsara_home.mkdir()
+    output = BytesIO()
+    Image.new("RGB", (3, 2), (12, 34, 56)).save(output, "PNG")
+    payload = output.getvalue()
+    relative = workspace / "relative.png"
+    absolute = tmp_path / "absolute.png"
+    user = user_home / "user.png"
+    pulsara = pulsara_home / "state.png"
+    for path in (relative, absolute, user, pulsara):
+        path.write_bytes(payload)
+    tool = ViewImageTool(
+        workspace,
+        pulsara_home_resolution=PulsaraHomeResolution(
+            PulsaraHomeDisposition.RESOLVED,
+            path=pulsara_home.resolve(),
+        ),
+        user_home_resolution=UserHomeResolution(
+            PulsaraHomeDisposition.RESOLVED,
+            path=user_home.resolve(),
+        ),
+    )
+
+    requested = (
+        "relative.png",
+        str(absolute),
+        "~/user.png",
+        "${PULSARA_HOME}/state.png",
+    )
+    for index, path in enumerate(requested):
+        result = tool.read_bounded(
+            ToolCall(f"call:{index}", "view_image", {"path": path}),
+            maximum_bytes=len(payload),
+        )
+        assert isinstance(result, LocalImageReadCandidate)
+        assert result.payload == payload
+
+    with pytest.raises(ValueError, match="escapes workspace root"):
+        tool.read_bounded(
+            ToolCall("call:escape", "view_image", {"path": "../absolute.png"}),
+            maximum_bytes=len(payload),
+        )
+
+
+def test_view_image_rejects_non_regular_files_without_blocking(
+    tmp_path: Path,
+) -> None:
+    fifo = tmp_path / "image.fifo"
+    os.mkfifo(fifo)
+    tool = ViewImageTool(tmp_path)
+
+    for index, path in enumerate((tmp_path, fifo, Path("/dev/null"))):
+        if not path.exists():
+            continue
+        result = tool.read_bounded(
+            ToolCall(f"call:{index}", "view_image", {"path": str(path)}),
+            maximum_bytes=100,
+        )
+        assert isinstance(result, ToolExecutionResult)
+        assert json.loads(result.output)["error"] == "IMAGE_PATH_NOT_REGULAR"
+
+
+def test_view_image_detects_growth_while_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "growing.png"
+    path.write_bytes(b"abc")
+    tool = ViewImageTool(tmp_path)
+    original_read = os.read
+    first = True
+
+    def growing_read(descriptor: int, maximum: int) -> bytes:
+        nonlocal first
+        chunk = original_read(descriptor, maximum)
+        if first:
+            first = False
+            with path.open("ab") as stream:
+                stream.write(b"d")
+        return chunk
+
+    monkeypatch.setattr(os, "read", growing_read)
+    result = tool.read_bounded(
+        ToolCall("call:growing", "view_image", {"path": path.name}),
+        maximum_bytes=3,
+    )
+
+    assert isinstance(result, ToolExecutionResult)
+    assert json.loads(result.output)["error"] == "IMAGE_RESOURCE_EXCEEDED"

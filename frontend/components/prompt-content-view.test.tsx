@@ -41,6 +41,26 @@ afterEach(() => {
 });
 
 describe('PromptContentView', () => {
+  it('reuses image loading and lightbox for a tool preview without Figure captions or status text', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+    const read = vi.fn(async () => Uint8Array.from([1, 2, 3]));
+    const view = render(<PromptContentView
+      content={{ parts: [{ type: 'text', text: 'Image loaded.' }, canonicalImage(0, 'a')] }}
+      variant="tool" onReadImage={read}
+    />);
+    await waitFor(() => expect(view.container.querySelector('.tool-image-preview img')).toBeTruthy());
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('Image loaded.')).toBeNull();
+    expect(screen.queryByText(/Figure/)).toBeNull();
+    const trigger = screen.getByRole('button', { name: '放大图片' });
+    await userEvent.click(trigger);
+    expect(screen.getByRole('dialog', { name: 'Lightbox' })).toBeTruthy();
+    expect(document.querySelector('.prompt-lightbox-caption')).toBeNull();
+    expect(screen.queryByText(/Figure/)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
   it('derives queue Figure links from occurrences without reading image payloads', async () => {
     const first = canonicalImage(0, 'a', { kind: 'queue', queueItemId: 'queue-1' });
     const second = canonicalImage(1, 'a', { kind: 'queue', queueItemId: 'queue-1' });

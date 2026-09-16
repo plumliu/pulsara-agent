@@ -108,6 +108,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "inspect_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "use_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
+    "view_image": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "reload_hooks": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "reload_capabilities": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
@@ -974,6 +975,28 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                         f"{MAX_READ_LINES}. Use a smaller value for files with very long lines."
                     ),
                 },
+            },
+            required=["path"],
+        ),
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="filesystem_read",
+    ),
+    "view_image": _descriptor(
+        name="view_image",
+        description=(
+            "Read one local PNG, JPEG, or static WebP image and make its exact "
+            "contents visible to the model. Relative paths start in the current "
+            "workspace. Use multiple view_image calls for multiple images. URLs, "
+            "directories, PDFs, animated images, and multi-frame images are unsupported."
+        ),
+        input_schema=object_schema(
+            properties={
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Local image path to read.",
+                }
             },
             required=["path"],
         ),
@@ -2035,7 +2058,9 @@ class BuiltinToolCatalogEntry:
     entry_fingerprint: str
 
 
-_FILESYSTEM = frozenset({"edit_file", "read_file", "search_files", "write_file"})
+_FILESYSTEM = frozenset(
+    {"edit_file", "read_file", "search_files", "view_image", "write_file"}
+)
 _MEMORY_PROPOSAL = frozenset({"remember"})
 _MEMORY_QUERY = frozenset({"memory_explain", "memory_get"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
@@ -2387,6 +2412,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "list_mcp_servers",
         "inspect_new_mcp_tool",
         "read_file",
+        "view_image",
         "read_mcp_resource",
         "reload_hooks",
         "reload_capabilities",

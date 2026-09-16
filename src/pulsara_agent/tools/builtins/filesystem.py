@@ -16,6 +16,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
@@ -189,6 +190,71 @@ class _AtomicNoClobberUnavailable(OSError):
 
 _STATES: dict[Path, _WorkspaceFileState] = {}
 _STATES_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class LocalImageReadCandidate:
+    payload: bytes = field(repr=False)
+    resolved_path: Path
+    requested_path: str
+
+
+@dataclass(slots=True)
+class ViewImageTool(WorkspaceTool):
+    name: str = "view_image"
+
+    def read_bounded(
+        self, call: ToolCall, *, maximum_bytes: int
+    ) -> LocalImageReadCandidate | ToolExecutionResult:
+        requested_path = str_arg(call.arguments, "path")
+        path = self._resolve_read_path(requested_path)
+        if maximum_bytes < 1:
+            return self._error(call, "IMAGE_RESOURCE_EXCEEDED", requested_path)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            facts = os.fstat(descriptor)
+            if not stat.S_ISREG(facts.st_mode):
+                return self._error(call, "IMAGE_PATH_NOT_REGULAR", requested_path)
+            if facts.st_size < 1:
+                return self._error(call, "IMAGE_DECODE_FAILED", requested_path)
+            if facts.st_size > maximum_bytes:
+                return self._error(call, "IMAGE_RESOURCE_EXCEEDED", requested_path)
+            remaining = maximum_bytes + 1
+            chunks: list[bytes] = []
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            if not payload:
+                return self._error(call, "IMAGE_DECODE_FAILED", requested_path)
+            if len(payload) > maximum_bytes:
+                return self._error(call, "IMAGE_RESOURCE_EXCEEDED", requested_path)
+            return LocalImageReadCandidate(payload, path, requested_path)
+        except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+            return self._error(call, "IMAGE_READ_FAILED", requested_path)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def execute(self, call: ToolCall) -> ToolExecutionResult:
+        raise RuntimeError("view_image requires the Host image validation owner")
+
+    def _error(
+        self, call: ToolCall, code: str, requested_path: str
+    ) -> ToolExecutionResult:
+        return self._result(
+            call,
+            status=ToolResultState.ERROR,
+            output=json_text({"error": code, "path": requested_path}),
+            metadata={"requested_path": requested_path},
+        )
 
 
 def _state_for_workspace(workspace_root: Path) -> _WorkspaceFileState:

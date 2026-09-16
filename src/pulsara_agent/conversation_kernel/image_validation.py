@@ -111,7 +111,9 @@ class PromptImageValidationError(ValueError):
     """A submitted image does not satisfy the frozen local image contract."""
 
 
-def _validated_image_facts(payload: bytes, declared_mime: str) -> tuple[str, int, int]:
+def _validated_image_facts(
+    payload: bytes, declared_mime: str | None
+) -> tuple[str, int, int]:
     # Pillow owns decoding and its PNG text accounting.  These process globals
     # are set before the worker opens its first image and die with the worker.
     from PIL import Image, PngImagePlugin
@@ -123,7 +125,9 @@ def _validated_image_facts(payload: bytes, declared_mime: str) -> tuple[str, int
         with Image.open(BytesIO(payload), formats=("PNG", "JPEG", "WEBP")) as header:
             actual_format = str(header.format or "").upper()
             media_type = _FORMAT_TO_MEDIA_TYPE.get(actual_format)
-            if media_type is None or media_type != declared_mime:
+            if media_type is None:
+                raise PromptImageValidationError("decoded image format is unsupported")
+            if declared_mime is not None and media_type != declared_mime:
                 raise PromptImageValidationError(
                     "declared image MIME does not match the decoded format"
                 )
@@ -165,7 +169,7 @@ def _validated_image_facts(payload: bytes, declared_mime: str) -> tuple[str, int
 
 def _validation_worker(
     connection: Connection,
-    images: tuple[tuple[bytes, str], ...],
+    images: tuple[tuple[bytes, str | None], ...],
 ) -> None:
     try:
         facts = tuple(_validated_image_facts(payload, mime) for payload, mime in images)
@@ -223,6 +227,63 @@ class HostPromptImageValidator:
             freeze_canonical_prompt(frozen)
             return frozen
 
+        facts = await self._validate_images(
+            tuple((payload, mime) for payload, mime in images),
+            deadline_monotonic=deadline_monotonic,
+        )
+        fact_index = 0
+        parts: list[LLMTextPart | LLMImagePart] = []
+        for part in content.parts:
+            if isinstance(part, LLMTextPart):
+                parts.append(part)
+                continue
+            media_type, width, height = facts[fact_index]
+            fact_index += 1
+            parts.append(
+                LLMImagePart(
+                    media_type=media_type,
+                    immutable_bytes=part.original_bytes,
+                    width=width,
+                    height=height,
+                )
+            )
+        frozen = FrozenPromptContent(tuple(parts))
+        freeze_canonical_prompt(frozen)
+        return frozen
+
+    async def freeze_local_image(
+        self,
+        payload: bytes,
+        *,
+        deadline_monotonic: float,
+    ) -> LLMImagePart:
+        """Validate one bounded local-file payload without a declared MIME."""
+
+        if not isinstance(payload, bytes) or not payload:
+            raise PromptImageValidationError("local image payload is empty")
+        if len(payload) > MAXIMUM_PROMPT_MULTIPART_BYTES:
+            raise PromptImageValidationError("local image exceeds its input bound")
+        facts = await self._validate_images(
+            ((payload, None),), deadline_monotonic=deadline_monotonic
+        )
+        media_type, width, height = facts[0]
+        image = LLMImagePart(
+            media_type=media_type,
+            immutable_bytes=payload,
+            width=width,
+            height=height,
+        )
+        freeze_canonical_prompt(
+            FrozenPromptContent((LLMTextPart("Image loaded."), image))
+        )
+        return image
+
+    async def _validate_images(
+        self,
+        images: tuple[tuple[bytes, str | None], ...],
+        *,
+        deadline_monotonic: float,
+    ) -> tuple[tuple[str, int, int], ...]:
         remaining = deadline_monotonic - monotonic()
         if remaining <= 0:
             raise TimeoutError("prompt image validation deadline expired")
@@ -285,25 +346,7 @@ class HostPromptImageValidator:
             facts = result[1]
             if not isinstance(facts, tuple) or len(facts) != len(images):
                 raise PromptImageValidationError("image decoder returned an invalid result")
-            fact_index = 0
-            parts: list[LLMTextPart | LLMImagePart] = []
-            for part in content.parts:
-                if isinstance(part, LLMTextPart):
-                    parts.append(part)
-                    continue
-                media_type, width, height = facts[fact_index]
-                fact_index += 1
-                parts.append(
-                    LLMImagePart(
-                        media_type=media_type,
-                        immutable_bytes=part.original_bytes,
-                        width=width,
-                        height=height,
-                    )
-                )
-            frozen = FrozenPromptContent(tuple(parts))
-            freeze_canonical_prompt(frozen)
-            return frozen
+            return facts
         except BaseException:
             if process is not None and parent is not None:
                 with suppress(asyncio.CancelledError):

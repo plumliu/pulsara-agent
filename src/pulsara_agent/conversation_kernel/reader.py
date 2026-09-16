@@ -32,7 +32,10 @@ from pulsara_agent.ports.user_control_feedback import (
     USER_CONTROL_FEEDBACK_MEDIA_TYPE,
     project_user_control_feedback_for_provider,
 )
-from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
+from pulsara_agent.conversation_kernel.prompt_content import (
+    PROMPT_BODY_MEDIA_TYPE,
+    canonical_prompt_body_bytes,
+)
 from pulsara_agent.conversation_kernel.steer import (
     PreparedRootProviderInputCandidate,
 )
@@ -40,7 +43,12 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
     hydrate_canonical_prompt_owner,
     hydrate_canonical_snapshot_owner,
 )
-from pulsara_agent.llm.input import LLMTextPart
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
+    LLMTextPart,
+    frozen_tool_result_public_text,
+)
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
@@ -1283,7 +1291,7 @@ class CanonicalProviderInputReader:
                     # request/result pair never changes representation merely
                     # because its owning turn became terminal.
                     target_cut = cut.provider_input_through_sequence
-                for call in calls:
+                for call_ordinal, call in enumerate(calls):
                     state = tool_state.get((entry_id, call.tool_call_id), {})
                     result = state.get("result")
                     prospective_result = prospective_tool_results.get(
@@ -1299,39 +1307,58 @@ class CanonicalProviderInputReader:
                             )
                         if state.get("imported_closure_kind") is not None:
                             raise ConversationKernelConflict("imported call has both visible result and closure")
-                        result_content = self._read_content(
-                            _with_inline_payload(
-                                result,
-                                entry_payloads[str(result["result_entry_id"])],
-                            ),
-                            deadline_monotonic=deadline_monotonic,
-                            remaining_bytes=remaining_bytes,
+                        result_row = _with_inline_payload(
+                            result,
+                            entry_payloads[str(result["result_entry_id"])],
                         )
-                        canonical_bytes += len(result_content)
+                        typed_result = (
+                            str(result["content_media_type"])
+                            == PROMPT_BODY_MEDIA_TYPE
+                        )
+                        if typed_result:
+                            result_prompt = hydrate_canonical_prompt_owner(
+                                connection,
+                                row=result_row,
+                                transcript_entry_id=str(result["result_entry_id"]),
+                            )
+                            remaining_bytes.consume(
+                                result_prompt.resource_quote.canonical_expanded_bytes
+                            )
+                            canonical_bytes += (
+                                result_prompt.resource_quote.canonical_expanded_bytes
+                            )
+                            result_parts = result_prompt.content.parts
+                            result_body_text = frozen_tool_result_public_text(
+                                result_prompt.content
+                            )
+                        else:
+                            result_content = self._read_content(
+                                result_row,
+                                deadline_monotonic=deadline_monotonic,
+                                remaining_bytes=remaining_bytes,
+                            )
+                            canonical_bytes += len(result_content)
+                            result_body_text = _decode_provider_text(
+                                result_content, str(result["content_codec"])
+                            )
+                            result_parts = (LLMTextPart(result_body_text),)
                         items.append(
                             ProviderInputItem(
                                 item_kind=ProviderInputItemKind.TOOL_RESULT,
                                 source_entry_id=str(result["result_entry_id"]),
                                 source_entry_sequence=result_sequence,
                                 source_turn_id=str(result["result_turn_id"]),
-                                content=(
-                                    LLMTextPart(
-                                        _decode_provider_text(
-                                            result_content,
-                                            str(result["content_codec"]),
-                                        )
-                                    ),
-                                ),
+                                content=result_parts,
                                 tool_call_id=call.tool_call_id,
                                 tool_request_entry_id=entry_id,
                                 tool_result_context=_tool_result_metadata(result),
-                                tool_result_body_text=_decode_provider_text(
-                                    result_content, str(result["content_codec"])
-                                ),
+                                tool_result_body_text=result_body_text,
                                 tool_result_delivery=classify_tool_result_delivery(
                                     tool_name=call.tool_name,
                                     result_state=str(result["result_state"]),
                                 ),
+                                tool_call_ordinal=call_ordinal,
+                                tool_call_arguments=call.arguments,
                             )
                         )
                         continue
@@ -1386,25 +1413,63 @@ class CanonicalProviderInputReader:
                             result_state=str(result["result_state"]),
                         )
                         late.append(observation)
-                        result_content = self._read_content(
-                            _with_inline_payload(
-                                result,
-                                entry_payloads[str(result["result_entry_id"])],
-                            ),
-                            deadline_monotonic=deadline_monotonic,
-                            remaining_bytes=remaining_bytes,
+                        result_row = _with_inline_payload(
+                            result,
+                            entry_payloads[str(result["result_entry_id"])],
                         )
+                        typed_result = (
+                            str(result["content_media_type"])
+                            == PROMPT_BODY_MEDIA_TYPE
+                        )
+                        if typed_result:
+                            result_prompt = hydrate_canonical_prompt_owner(
+                                connection,
+                                row=result_row,
+                                transcript_entry_id=str(result["result_entry_id"]),
+                            )
+                            result_body_text = frozen_tool_result_public_text(
+                                result_prompt.content
+                            )
+                            result_images = tuple(
+                                part
+                                for part in result_prompt.content.parts
+                                if isinstance(part, LLMImagePart)
+                            )
+                        else:
+                            result_content = self._read_content(
+                                result_row,
+                                deadline_monotonic=deadline_monotonic,
+                                remaining_bytes=remaining_bytes,
+                            )
+                            result_body_text = _decode_provider_text(
+                                result_content, str(result["content_codec"])
+                            )
+                            result_images = ()
                         late_text = _canonical_json_text(
                             {
                                 "schema_version": "late_tool_outcome_observation.v1",
                                 "tool_call_id": call.tool_call_id,
                                 "result_state": result["result_state"],
-                                "result": _decode_provider_text(
-                                    result_content, str(result["content_codec"])
-                                ),
+                                "result": result_body_text,
                             }
                         )
-                        canonical_bytes += len(late_text.encode("utf-8"))
+                        late_content = (LLMTextPart(late_text), *result_images)
+                        late_expanded_bytes = (
+                            len(
+                                canonical_prompt_body_bytes(
+                                    FrozenPromptContent(late_content)
+                                )
+                            )
+                            + sum(
+                                len(image.immutable_bytes)
+                                for image in result_images
+                            )
+                            if typed_result
+                            else len(late_text.encode("utf-8"))
+                        )
+                        if typed_result:
+                            remaining_bytes.consume(late_expanded_bytes)
+                        canonical_bytes += late_expanded_bytes
                         late_items.append(
                             (
                                 result_sequence,
@@ -1413,20 +1478,19 @@ class CanonicalProviderInputReader:
                                     source_entry_id=str(result["result_entry_id"]),
                                     source_entry_sequence=result_sequence,
                                     source_turn_id=str(result["result_turn_id"]),
-                                    content=(LLMTextPart(late_text),),
+                                    content=late_content,
                                     tool_call_id=call.tool_call_id,
                                     tool_request_entry_id=entry_id,
                                     tool_result_context=_tool_result_metadata(result),
-                                    tool_result_body_text=_decode_provider_text(
-                                        result_content,
-                                        str(result["content_codec"]),
-                                    ),
+                                    tool_result_body_text=result_body_text,
                                     tool_result_delivery=(
                                         classify_tool_result_delivery(
                                             tool_name=call.tool_name,
                                             result_state=str(result["result_state"]),
                                         )
                                     ),
+                                    tool_call_ordinal=call_ordinal,
+                                    tool_call_arguments=call.arguments,
                                 ),
                             )
                         )
@@ -2770,7 +2834,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                        r.observation_origin_kind,
                        r.tool_reported_duration_microseconds,
                        r.model_visible_memory_fact_ids,
-                       e.entry_sequence, e.blob_id,
+                       e.entry_sequence, e.session_id, e.workspace_id, e.blob_id,
                        e.content_digest, e.content_size,
                        e.content_media_type, e.content_codec,
                        CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
@@ -2937,7 +3001,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         owner_entry_ids = tuple(
             str(row["id"])
             for row in entries
-            if row["entry_kind"] in ("USER_MESSAGE", "USER_STEER")
+            if row["entry_kind"] in ("USER_MESSAGE", "USER_STEER", "TOOL_RESULT")
         )
         snapshot_id = None if snapshot is None else str(snapshot["id"])
         image_quote = connection.execute(

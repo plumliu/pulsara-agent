@@ -689,6 +689,7 @@ class KernelHostSession:
             deadline_factory=self._deadlines,
             pulsara_home_resolution=pulsara_home_resolution,
             user_home_resolution=user_home_resolution,
+            image_validator=image_validator,
         )
         self._tools.bind_interaction_port(self._interactions)
         self._tools.bind_capability_reload_port(self)

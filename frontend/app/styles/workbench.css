@@ -259,6 +259,14 @@
 .trace-state--cancelled { color: var(--muted); }
 .trace-chevron { color: var(--faint); transition: transform .16s ease; }
 .trace-card.is-expanded .trace-chevron { transform: rotate(90deg); }
+.tool-result-images { padding: 12px; border-top: 1px solid var(--line); }
+.tool-image-content { display: grid; gap: 12px; }
+.tool-image-preview { display: block; width: 100%; min-width: 0; padding: 0; border: 0; border-radius: 6px; background: transparent; cursor: zoom-in; }
+.tool-image-preview:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.tool-image-preview__image { display: grid; place-items: center; overflow: hidden; border-radius: 6px; }
+.tool-image-preview__image img { display: block; width: 100%; height: auto; max-height: min(60vh, 560px); object-fit: contain; }
+.tool-image-preview__image.is-loading, .tool-image-preview__image.is-failed { min-height: 140px; background: var(--paper-deep); color: var(--ink-muted); font-size: var(--type-label); }
+.tool-image-preview__image.is-failed { color: var(--red); }
 .terminal-output { padding: 10px 12px 0; border-top: 1px solid var(--line); background: var(--paper-deep); color: var(--ink-soft); font-family: var(--mono); font-size: var(--type-label); line-height: 1.78; }
 .terminal-output > div { white-space: pre-wrap; overflow-wrap: anywhere; }
 .terminal-command { margin-bottom: 4px; color: var(--ink); }

@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
-from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, ConversationScopeKind, EntryKind, HostWriterGuard, canonical_digest
+from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, canonical_digest
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    canonical_prompt_owner_is_exact,
+    insert_canonical_prompt_refs,
+    materialize_canonical_prompt,
+)
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
@@ -496,6 +501,19 @@ class _ToolOperations:
                     workspace_id=candidate.workspace_id,
                     expected=candidate.artifact_blob_descriptor,
                 )
+            canonical_entry_content = candidate.canonical_preview_content
+            canonical_image_blob_ids: tuple[str, ...] = ()
+            if candidate.canonical_prompt is not None:
+                publication = materialize_canonical_prompt(
+                    connection,
+                    publisher=self._canonical_content_publisher,
+                    workspace_id=candidate.workspace_id,
+                    prompt=candidate.canonical_prompt,
+                )
+                if not isinstance(publication.body, InlineContent):
+                    raise ValueError("ToolResult canonical prompt body must be inline")
+                canonical_entry_content = publication.body
+                canonical_image_blob_ids = publication.image_blob_ids
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
                 connection,
@@ -507,7 +525,7 @@ class _ToolOperations:
                 entry_kind=EntryKind.TOOL_RESULT,
                 scope_kind=ConversationScopeKind(str(turn["conversation_scope_kind"])),
                 scope_task_id=turn["scope_subagent_task_id"],
-                content=candidate.canonical_preview_content,
+                content=canonical_entry_content,
             )
             connection.execute(
                 """
@@ -571,6 +589,14 @@ class _ToolOperations:
                     candidate.trusted_tool_reported_duration_microseconds,
                 ),
             )
+            if candidate.canonical_prompt is not None:
+                insert_canonical_prompt_refs(
+                    connection,
+                    session_id=guard.session_id,
+                    workspace_id=candidate.workspace_id,
+                    image_blob_ids=canonical_image_blob_ids,
+                    transcript_entry_id=candidate.result_entry_id,
+                )
             event_drafts = [candidate.tool_result_occurrence]
             side = candidate.side_branch
             if isinstance(side, PreparedMemoryProposalSideBranch):
@@ -680,6 +706,15 @@ class _ToolOperations:
             ):
                 raise ConversationKernelConflict(
                     "tool result identity names a different winner"
+                )
+            if candidate.canonical_prompt is not None and not canonical_prompt_owner_is_exact(
+                connection,
+                row=entry,
+                expected=candidate.canonical_prompt,
+                transcript_entry_id=candidate.result_entry_id,
+            ):
+                raise ConversationKernelConflict(
+                    "tool result image body or refs name a different winner"
                 )
             result_event = self._exact_event_for_confirmation(
                 connection,

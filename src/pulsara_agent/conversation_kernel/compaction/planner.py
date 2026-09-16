@@ -109,7 +109,7 @@ class DestinationToolEvidence:
     result_entry_id: str | None
     result_entry_sequence: int | None
     outcome_ordinal: int
-    result_body: str | None
+    result_content: tuple[LLMContentPart, ...] | None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -175,7 +175,7 @@ class DestinationDialogueProjection:
             for unit in self.units
             for entry in unit.entries
             for evidence in entry.requested_tools
-            if evidence.result_body is not None
+            if evidence.result_content is not None
             and evidence.key not in self.retained_result_keys
         )
 
@@ -266,6 +266,48 @@ def project_destination_dialogue_for_text_only_handover(
             if isinstance(part, LLMImagePart)
             else part
             for part in projection.content
+        ),
+    )
+
+
+def project_destination_dialogue_plan_for_text_only_handover(
+    plan: DestinationDialogueProjectionPlan,
+) -> DestinationDialogueProjectionPlan:
+    """Apply P to all candidate dialogue and ToolResult evidence before selection."""
+
+    def project_parts(parts: tuple[LLMContentPart, ...]) -> tuple[LLMContentPart, ...]:
+        return tuple(
+            LLMTextPart(TEXT_ONLY_IMAGE_OMISSION_TEXT)
+            if isinstance(part, LLMImagePart)
+            else part
+            for part in parts
+        )
+
+    return replace(
+        plan,
+        units=tuple(
+            replace(
+                unit,
+                entries=tuple(
+                    replace(
+                        entry,
+                        content=project_parts(entry.content),
+                        requested_tools=tuple(
+                            replace(
+                                evidence,
+                                result_content=(
+                                    None
+                                    if evidence.result_content is None
+                                    else project_parts(evidence.result_content)
+                                ),
+                            )
+                            for evidence in entry.requested_tools
+                        ),
+                    )
+                    for entry in unit.entries
+                ),
+            )
+            for unit in plan.units
         ),
     )
 
@@ -477,7 +519,9 @@ def freeze_destination_dialogue_projection_plan(
             result_entry_id=item.source_entry_id,
             result_entry_sequence=item.source_entry_sequence,
             outcome_ordinal=outcome_ordinal,
-            result_body=item.tool_result_body_text,
+            result_content=(
+                item.content if isinstance(item.content, tuple) else None
+            ),
         )
     for closure in canonical_read.safe_head_range.closures:
         key = (closure.assistant_entry_id, closure.tool_call_id)
@@ -492,7 +536,7 @@ def freeze_destination_dialogue_projection_plan(
             result_entry_id=None,
             result_entry_sequence=None,
             outcome_ordinal=outcome_ordinal,
-            result_body=None,
+            result_content=None,
         )
 
     grouped: dict[str, list[FrozenProviderInputItem]] = {}
@@ -558,7 +602,7 @@ def freeze_destination_dialogue_projection_plan(
                             result_entry_id=None,
                             result_entry_sequence=None,
                             outcome_ordinal=request_ordinal,
-                            result_body=None,
+                            result_content=None,
                         )
                     else:
                         outcome = replace(
@@ -644,7 +688,7 @@ def _render_destination_projection(
         for unit in units
         for entry in unit.entries
         for evidence in entry.requested_tools
-        if evidence.result_body is not None
+        if evidence.result_content is not None
     }
     if not retained_result_keys.issubset(available_keys):
         raise ValueError("retained evidence escaped its dialogue suffix")
@@ -708,8 +752,8 @@ def _render_destination_projection(
                     "result_status": evidence.result_status,
                 }
                 if evidence.key in retained_result_keys:
-                    assert evidence.result_body is not None
-                    tool["retained_result"] = evidence.result_body
+                    assert evidence.result_content is not None
+                    tool["retained_result"] = True
                 else:
                     tool["result_omitted"] = True
                 tools.append(tool)
@@ -731,6 +775,21 @@ def _render_destination_projection(
                     **({"requested_tools": tools} if tools else {}),
                 },
             )
+            for evidence in entry.requested_tools:
+                if evidence.key not in retained_result_keys:
+                    continue
+                assert evidence.result_content is not None
+                append_section(
+                    section="tool_evidence",
+                    role="tool",
+                    content=evidence.result_content,
+                    metadata={
+                        "turn_index": turn_index,
+                        "name": evidence.name,
+                        "tool_call_id": evidence.tool_call_id,
+                        "result_status": evidence.result_status,
+                    },
+                )
     return DestinationDialogueProjection(
         units=units,
         prior_handoff=prior_handoff,
@@ -1348,6 +1407,23 @@ def _safe_summary_boundaries(
         if item.source_entry_id is not None and item.source_entry_sequence is not None
     }
     placements = source_projection.message_placements
+
+    def placement_sequences(placement) -> tuple[int, ...]:
+        attachment = getattr(placement, "tool_attachment_source", None)
+        if attachment is not None:
+            values = tuple(
+                member.source.source_entry_sequence
+                for member in attachment.members
+            )
+            if any(value is None for value in values):
+                raise CompactionPlanningError(
+                    "tool attachment source lacks canonical sequence"
+                )
+            return tuple(int(value) for value in values)
+        if placement.origin_entry_id is None:
+            return ()
+        sequence = sequence_by_entry.get(placement.origin_entry_id)
+        return () if sequence is None else (sequence,)
     minimum_message_count = 1
     predecessor = source_view.predecessor_epoch_view
     if predecessor is not None:
@@ -1363,11 +1439,8 @@ def _safe_summary_boundaries(
     suffix_minimum: list[int | None] = [None] * (len(placements) + 1)
     for index in range(len(placements) - 1, -1, -1):
         placement = placements[index]
-        sequence = (
-            None
-            if placement.origin_entry_id is None
-            else sequence_by_entry.get(placement.origin_entry_id)
-        )
+        sequences = placement_sequences(placement)
+        sequence = None if not sequences else min(sequences)
         later = suffix_minimum[index + 1]
         suffix_minimum[index] = (
             later
@@ -1384,15 +1457,25 @@ def _safe_summary_boundaries(
             raise TimeoutError("compaction prefix planning deadline expired")
         placement = placements[count - 1]
         entry_id = placement.origin_entry_id
-        sequence = None if entry_id is None else sequence_by_entry.get(entry_id)
+        current_sequences = placement_sequences(placement)
+        sequence = None if not current_sequences else max(current_sequences)
         if sequence is None or messages[count - 1].tool_calls:
             continue
         if count < len(messages):
             next_message = messages[count]
             next_placement = placements[count]
+            next_attachment = getattr(next_placement, "tool_attachment_source", None)
             if (
                 next_message.tool_call_id is not None
                 or next_placement.origin_entry_id == entry_id
+                or (
+                    entry_id is not None
+                    and next_attachment is not None
+                    and any(
+                        member.source.source_entry_id == entry_id
+                        for member in next_attachment.members
+                    )
+                )
             ):
                 continue
         later_minimum = suffix_minimum[count]
