@@ -27,6 +27,10 @@ from pulsara_agent.capability.user_skill_config import (
 from tests.support.model_config import test_model_runtime
 
 
+async def _unexpected_reset(_postgres):
+    raise AssertionError("unexpected database reset")
+
+
 def _model_server_dependencies() -> dict[str, object]:
     runtime = test_model_runtime()
 
@@ -40,6 +44,7 @@ def _model_server_dependencies() -> dict[str, object]:
         "database_state": lambda: "ready",
         "refresh_database_state": refresh_database_state,
         "postgres_settings_saved": lambda: None,
+        "reset_postgres": _unexpected_reset,
     }
 
 
@@ -471,6 +476,7 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
         database_state=lambda: database_state,
         refresh_database_state=refresh_database_state,
         postgres_settings_saved=postgres_settings_saved,
+        reset_postgres=_unexpected_reset,
     )
     await server.start()
     mutation_headers = {
@@ -749,6 +755,7 @@ def _model_server_dependencies_for_runtime(runtime: ModelRuntime) -> dict[str, o
         "database_state": lambda: "ready",
         "refresh_database_state": refresh_database_state,
         "postgres_settings_saved": lambda: None,
+        "reset_postgres": _unexpected_reset,
     }
 
 

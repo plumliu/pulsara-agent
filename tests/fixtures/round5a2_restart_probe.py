@@ -15,11 +15,7 @@ import os
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
 from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
-from pulsara_agent.llm.provider import (
-    RouteWireProfile,
-    ThinkingProfile,
-    ThinkingReplayPolicy,
-)
+from pulsara_agent.llm.provider import RouteWireProfile
 from tests.support.model_config import (
     test_model_binding,
     test_model_resolution_snapshot,
@@ -39,14 +35,6 @@ def _model(api: str) -> _SequencedDirectKernelModel:
     profile = RouteWireProfile(
         id=f"test:{api}:fresh-process",
         wire_api=api,
-        thinking=(
-            ThinkingProfile(
-                message_field="reasoning_content",
-                replay_policy=ThinkingReplayPolicy.ALWAYS,
-            )
-            if api == "openai_chat_completions"
-            else ThinkingProfile()
-        ),
     )
     script = (
         _round5a1_chat_scripts()[1]

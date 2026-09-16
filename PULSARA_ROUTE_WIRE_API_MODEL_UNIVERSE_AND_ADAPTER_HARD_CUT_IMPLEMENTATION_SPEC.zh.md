@@ -291,6 +291,11 @@ OpenCode 为广覆盖和兼容性保留了大量务实 fallback，Pulsara 不照
 
 本轮不建立新的 Agent IR，也不把现有正确边界搬进 catalog。
 
+通用 `LLMMessage` 不承载 assistant thinking，也不把 canonical/public assistant 语义重新编码为
+`reasoning_content`。Chat 的 `reasoning_content`、`reasoning`、`reasoning_details` 与 Responses
+output items 只来自 adapter 对实际 provider 输出的 closed-shape 收集，并仅通过现有
+target-compatible durable native replay 回放；process-local thinking event 只负责实时展示。
+
 ### 3.2 当前 target 与 reasoning request 的错误抽象
 
 当前代码近似为：
@@ -303,8 +308,8 @@ LLMOptions.reasoning_effort: str | None
 
 Chat 将 raw string 写入 `reasoning_effort`，Responses 将其写入
 `reasoning={"effort": ..., "summary": "auto"}`，使显式启用 reasoning 的 turn 同时请求
-provider 可公开展示的推理摘要；未指定时不发送。与此同时，`ThinkingProfile.enabled`、
-`PULSARA_THINKING_*` 与 `request_extra_body.thinking` 又能成为第二个 request owner。
+provider 可公开展示的推理摘要；未指定时不发送。request owner 唯一来自 resolved target 的
+reasoning control；provider output thinking 不进入 generic request DTO。
 
 该结构无法证明：
 
@@ -1338,7 +1343,7 @@ class LocalPostgresConfig:
     admin_dsn: str | None
 ```
 
-`runtime_dsn` 是 conversation kernel 唯一运行连接；`admin_dsn` 只供用户显式点击“初始化/升级”或
+`runtime_dsn` 是 conversation kernel 唯一运行连接；`admin_dsn` 只供用户显式点击“初始化/升级”、确认“重置数据”或
 CLI `pulsara db migrate`，不得在普通 Host启动、schema verify或 user turn中使用。两者是本仓库
 允许直接检查的本机 DSN，不创建 DSN fingerprint、credential row、database identity cache或
 PostgreSQL settings table。
@@ -1350,8 +1355,12 @@ observation：
 
 ```text
 database_not_configured
+database_configured_unverified
 database_unavailable
 database_schema_action_required
+database_reset_required
+database_resetting
+database_restart_required
 ready
 ```
 
@@ -1365,6 +1374,22 @@ role target。若当前进程尚未发布 kernel data plane，验证成功后可
 kernel正在使用旧 DSN，保存不热换其 repository或中断健康工作，新值在下次 Pulsara进程启动时
 生效，UI明确显示“已保存，重启后连接”。这是一条真实 PostgreSQL owner-lifetime边界，不新增
 pending-config字段或 busy/no-pending gate。
+
+本地服务另提供显式“重置数据”：确认弹窗展示已保存的 runtime/admin DSN，说明会删除目标数据库
+中 `pulsara_v3` 与 Pulsara migration ledger（含会话、图片、任务、记忆），保留模型配置、密钥和
+工作目录。仅该确认动作允许删除；初始化/升级仍不得隐式 reset。后端核对弹窗携带的完整 DSN
+与当前配置相等，并由既有 migration runner 验证 admin/runtime 是同一实际数据库；删除与新
+baseline 安装放在同一事务和既有 migration lock 内，失败回滚。reset 的 commit ACK 不明确时
+不自动重试，也不能仅凭 baseline 相同宣称数据已清空。
+
+`database_reset_required` 精确表示旧 universe 需要重置；与普通初始化、权限和连通错误区分。
+重置期间 `database_resetting` 阻止数据面新请求。若已构造数据面，先通过既有 bridge/session/core
+close owner 停止运行，关闭失败不删除；重置后保持 `database_restart_required`，提示重启 Pulsara，
+不在存活进程内热换 repository。尚未构造数据面的设置壳可在重置初始化后直接完成首次发布。
+这些状态均为可丢弃的进程观察，不增加事件、表、job、receipt 或新的 provider prefix 边界。
+schema verification 的失败项在本次物理操作结束后移出缓存，现有等待者仍得到原失败；下次显式
+检查重新校验，不自动重试。成功的已发布数据面仍保持原 owner lifetime。
+HTTP 等待者取消不提前释放重置期间的互斥或恢复接纳，必须等物理事务结束；进程正常关闭也等待该操作结束。
 
 ### 9.3 设置页：模型配置卡片与“添加配置”
 
@@ -2475,7 +2500,7 @@ target fact source，但只有一条 resolved target / generic adapter执行路�
   operation取得新值/缺失状态；
   provider client不跨 operation持有旧 key，且没有 key generation/fingerprint/event；
 - PostgreSQL未配置、runtime不可达、schema需动作三种状态都不阻止设置 HTTP/UI；admin DSN缺失只
-  阻止显式 migrate，普通 runtime verify不使用 admin DSN；
+  阻止显式 migrate/reset，普通 runtime verify不使用 admin DSN；
 - local-settings损坏时 app仍发布可修复的设置壳；保存新 DSN不热换正在运行的 repository，且不
   建 pending row/event/job；无 data plane时验证后可一次性发布 kernel；
 - sessions、prompt_queue_items、turns各只增加一个 `model_call_binding` JSONB；binding只含
@@ -2721,7 +2746,7 @@ models.dev新增 model不要求 Pulsara为每条 row重跑 conformance；用户�
 33. `${PULSARA_HOME}/local-settings.yaml` 是 model-connection metadata + key、两枚DashScope key与
     本机PostgreSQL DSN的单一closed authority，不含fingerprint、revision、catalog副本或arbitrary KV；
 34. 设置页可配置多组主模型、两枚 fixed DashScope retrieval key与 runtime/optional admin DSN；
-    embedding/reranker没有伪 provider/model selector，admin DSN只用于显式 migration；
+    embedding/reranker没有伪 provider/model selector，admin DSN只用于显式 migration 或确认后的 reset；
 35. static HTTP/settings shell在 PostgreSQL未配置、不可达或 schema需动作时仍可启动；data plane
     状态真实可见，不伪造空 session；
 36. 缺少 embedding/reranker key只触发各自 advisory degradation，不阻止 app、turn、主模型或

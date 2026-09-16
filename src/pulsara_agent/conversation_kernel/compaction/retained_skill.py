@@ -657,7 +657,9 @@ def _installed_observation_fingerprint(message: LLMMessage) -> str:
             "message": {
                 "role": message.role.value,
                 "content": llm_content_identity_value(message.content),
-                "thinking": message.thinking,
+                # Preserve the established fingerprint value after removing
+                # the superseded semantic-thinking DTO slot.
+                "thinking": (),
                 "tool_calls": tuple(
                     (call.id, call.name, call.arguments)
                     for call in message.tool_calls

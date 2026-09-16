@@ -20,7 +20,6 @@ from pulsara_agent.llm.adapters.openai.chat_completions import (
     chat_semantic_wire_group,
 )
 from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
-from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
@@ -429,10 +428,7 @@ def test_round7_1_logical_quote_is_not_chat_or_responses_wire_bytes() -> None:
         model_visible_memory_ids=(),
     )
     chat = canonical_json_bytes(
-        chat_semantic_wire_group(
-            rendered.message,
-            route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
-        )
+        chat_semantic_wire_group(rendered.message)
     )
     responses = canonical_json_bytes(
         responses_semantic_wire_group(rendered.message)

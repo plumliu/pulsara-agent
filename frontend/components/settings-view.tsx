@@ -11,6 +11,7 @@ import type {
   ModelConfigurationInput, ModelConfigurationSummary, RuntimeAdapter, RuntimeBootstrap,
 } from '../lib/runtime-adapter';
 import type { RuntimeStatus } from '../lib/pulsara-types';
+import { RuntimeApiError } from '../lib/runtime-adapter';
 
 type SettingsSection = 'general' | 'models' | 'service';
 type CredentialKind = 'embedding' | 'rerank';
@@ -135,6 +136,22 @@ function DashScopeCredentialRow({ adapter, kind, state, onChanged, onNotify }: {
   </div>;
 }
 
+function DatabaseResetDialog({ target, busy, error, onClose, onConfirm }: {
+  target: NonNullable<LocalSettingsReadModel['local_settings']['postgres']>;
+  busy: boolean; error?: string; onClose: () => void; onConfirm: () => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { dialog.current?.showModal(); }, []);
+  return <dialog ref={dialog} className="database-reset-dialog" aria-labelledby="database-reset-title" onClose={onClose} onCancel={(event) => { if (busy) event.preventDefault(); }}>
+    <h2 id="database-reset-title">重置 Pulsara 数据？</h2>
+    <p>将永久删除目标数据库中的 Pulsara 会话、图片、任务和记忆，并重新初始化。此操作无法撤销。</p>
+    <dl><dt>Runtime DSN</dt><dd>{target.runtime_dsn}</dd><dt>Admin DSN</dt><dd>{target.admin_dsn}</dd></dl>
+    <p>模型配置、API key 和工作目录中的文件会保留。正在运行的数据服务将先关闭；若内核已经启动，完成后需要重启 Pulsara。</p>
+    {error && <p role="alert" className="database-reset-error">{error}</p>}
+    <footer><button autoFocus disabled={busy} onClick={onClose}>取消</button><button className="database-reset-confirm" disabled={busy} onClick={onConfirm}>{busy ? '正在重置…' : '确认清空并初始化'}</button></footer>
+  </dialog>;
+}
+
 export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify }: SettingsViewProps) {
   const [section, setSection] = useState<SettingsSection>(bootstrap?.database_state === 'ready' ? 'general' : 'service');
   const [settings, setSettings] = useState<LocalSettingsReadModel | undefined>(bootstrap);
@@ -164,8 +181,10 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
   const [deletingModelId, setDeletingModelId] = useState<string>();
   const [runtimeDsn, setRuntimeDsn] = useState(bootstrap?.local_settings?.postgres?.runtime_dsn ?? '');
   const [adminDsn, setAdminDsn] = useState(bootstrap?.local_settings?.postgres?.admin_dsn ?? '');
-  const [databaseBusy, setDatabaseBusy] = useState<'save' | 'check' | 'migrate'>();
+  const [databaseBusy, setDatabaseBusy] = useState<'save' | 'check' | 'migrate' | 'reset'>();
   const [databaseMessage, setDatabaseMessage] = useState<string>();
+  const [resetTarget, setResetTarget] = useState<NonNullable<LocalSettingsReadModel['local_settings']['postgres']>>();
+  const [resetError, setResetError] = useState<string>();
 
   const load = async () => {
     setLoading(true); setError(undefined);
@@ -345,8 +364,33 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
       const databaseName = typeof result.database_name === 'string' ? `数据库 ${result.database_name}` : '已保存的数据库';
       setDatabaseMessage(kind === 'check' ? `${databaseName} 连接与结构检查通过。` : `${databaseName} 已完成初始化或升级。`);
       setSettings(await adapter.localSettings()); await onConfigurationChanged();
-    } catch (actionError) { setDatabaseMessage(actionError instanceof Error ? actionError.message : '数据库操作没有完成。'); }
+    } catch (actionError) {
+      setDatabaseMessage(actionError instanceof Error ? actionError.message : '数据库操作没有完成。');
+      if (actionError instanceof RuntimeApiError && actionError.code === 'DATABASE_RESET_REQUIRED') {
+        setSettings((current) => current ? { ...current, database_state: 'database_reset_required' } : current);
+      }
+    }
     finally { setDatabaseBusy(undefined); }
+  };
+
+  const resetDatabase = async () => {
+    if (!resetTarget || databaseBusy || runtimeStatus !== 'online') return;
+    setDatabaseBusy('reset'); setResetError(undefined);
+    try {
+      const result = await adapter.resetPostgres(resetTarget);
+      setResetTarget(undefined);
+      setDatabaseMessage(result.restart_required
+        ? `数据库 ${result.database_name} 已重置。请重启 Pulsara 后继续使用。`
+        : `数据库 ${result.database_name} 已重置并完成初始化。`);
+      try {
+        setSettings(await adapter.localSettings());
+        await onConfigurationChanged();
+      } catch {
+        setDatabaseMessage(`数据库 ${result.database_name} 已重置，但页面状态未刷新。请重新打开页面检查；如果提示数据服务已关闭，请重启 Pulsara。`);
+      }
+    } catch (resetFailure) {
+      setResetError(resetFailure instanceof Error ? resetFailure.message : '重置没有完成。');
+    } finally { setDatabaseBusy(undefined); }
   };
 
   const databaseState = settings?.database_state ?? bootstrap?.database_state ?? 'database_not_configured';
@@ -354,6 +398,8 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
     ready: '数据服务已就绪', database_not_configured: '尚未配置 PostgreSQL',
     database_configured_unverified: '已保存，尚未检查 PostgreSQL',
     database_unavailable: '无法连接 PostgreSQL', database_schema_action_required: '需要初始化或升级数据库',
+    database_reset_required: '现有数据与当前版本不兼容，需要重置',
+    database_resetting: '正在重置数据', database_restart_required: '数据服务已关闭，请重启 Pulsara',
   }[databaseState];
   const selectedShapeWarning = Boolean(selectedModel?.wire_shape_hint && wireApi
     && ((selectedModel.wire_shape_hint === 'responses') !== (wireApi === 'openai_responses')));
@@ -371,6 +417,7 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
     : customDeclarationReady && (authentication === 'none' || keyPresent);
 
   return <section className="surface-view settings-view">
+    {resetTarget && <DatabaseResetDialog target={resetTarget} busy={databaseBusy === 'reset'} error={resetError} onClose={() => { if (!databaseBusy) setResetTarget(undefined); }} onConfirm={() => void resetDatabase()} />}
     <header className="page-header"><div><span className="page-kicker">本机设置</span><h1>设置</h1><p>配置模型、记忆检索与本机 PostgreSQL。访问密钥保存在权限受限的本机设置文件中。</p></div></header>
     <div className="settings-layout">
       <aside className="settings-nav">
@@ -424,7 +471,7 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
           <section className="settings-group"><header><Database size={16} /><div><h2>PostgreSQL</h2><p>会话数据平面使用本机 PostgreSQL；保存不会自动连接或迁移。</p></div></header>
             {settings?.local_settings.state === 'unavailable' && <div className="settings-alert settings-alert--inside"><CircleAlert size={15} /><span>本机设置文件无法读取。保存下面的完整 PostgreSQL 配置会覆盖并修复该文件。</span></div>}
             <div className="database-state-row"><span className={`database-state database-state--${databaseState}`}><i />{databaseStateCopy}</span><small>浏览器设置壳：{statusLabels[runtimeStatus]}</small></div>
-            <div className="database-form"><label><span>Runtime DSN</span><input value={runtimeDsn} onChange={(event) => setRuntimeDsn(event.target.value)} placeholder="postgresql://pulsara:…@localhost:5432/pulsara" /></label><label><span>Admin DSN（可选）</span><input value={adminDsn} onChange={(event) => setAdminDsn(event.target.value)} placeholder="只用于显式初始化或升级" /></label><p>初始化/升级将使用上方已保存的 Admin DSN 管理同一数据库，并按 Runtime DSN 验证运行角色。请先核对目标数据库与角色。</p>{databaseMessage && <div className="database-message">{databaseMessage}</div>}<div className="form-actions"><button className="primary-action" disabled={Boolean(databaseBusy) || !runtimeDsn.trim()} onClick={() => void saveDatabase()}>{databaseBusy === 'save' ? <LoaderCircle size={13} /> : <Check size={13} />}保存连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres} onClick={() => void databaseAction('check')}>{databaseBusy === 'check' ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}检查连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres?.admin_dsn} onClick={() => void databaseAction('migrate')}>{databaseBusy === 'migrate' ? <LoaderCircle size={13} /> : <Database size={13} />}初始化 / 升级</button></div></div>
+            <div className="database-form"><label><span>Runtime DSN</span><input value={runtimeDsn} onChange={(event) => setRuntimeDsn(event.target.value)} placeholder="postgresql://pulsara:…@localhost:5432/pulsara" /></label><label><span>Admin DSN（可选）</span><input value={adminDsn} onChange={(event) => setAdminDsn(event.target.value)} placeholder="只用于显式初始化、升级或重置" /></label><p>初始化/升级将使用上方已保存的 Admin DSN 管理同一数据库，并按 Runtime DSN 验证运行角色。请先核对目标数据库与角色。</p>{databaseMessage && <div className="database-message">{databaseMessage}</div>}<div className="form-actions"><button className="primary-action" disabled={Boolean(databaseBusy) || !runtimeDsn.trim()} onClick={() => void saveDatabase()}>{databaseBusy === 'save' ? <LoaderCircle size={13} /> : <Check size={13} />}保存连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres} onClick={() => void databaseAction('check')}>{databaseBusy === 'check' ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}检查连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres?.admin_dsn || databaseState === 'database_reset_required'} onClick={() => void databaseAction('migrate')}>{databaseBusy === 'migrate' ? <LoaderCircle size={13} /> : <Database size={13} />}初始化 / 升级</button><button className="subtle-danger" disabled={Boolean(databaseBusy) || runtimeStatus !== 'online' || !settings?.local_settings.postgres?.admin_dsn || databaseState === 'database_resetting'} onClick={() => { setResetError(undefined); setResetTarget(settings!.local_settings.postgres!); }}><Trash2 size={13} />重置数据…</button></div></div>
           </section>
           <section className="settings-group"><header><HardDrive size={16} /><div><h2>本地服务</h2><p>Pulsara 的设置与任务都由这台设备上的进程管理。</p></div></header><SettingRow icon={HardDrive} title="页面连接" detail="浏览器与本地设置服务"><span className={`connection-value connection-value--${runtimeStatus}`} role="status"><i aria-hidden="true" />{statusLabels[runtimeStatus]}</span></SettingRow><SettingRow icon={Laptop} title="数据位置" detail="配置与会话数据保存在本机"><span className="storage-value">本地</span></SettingRow><SettingRow icon={ShieldCheck} title="登录方式" detail="仅允许本机同源页面访问"><span className="storage-value">无需账号</span></SettingRow></section>
         </>}

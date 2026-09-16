@@ -114,3 +114,16 @@
   .credential-actions { grid-column: 1; justify-content: flex-start; flex-wrap: wrap; }
   .database-state-row { display: grid; }
 }
+
+.database-reset-dialog { margin: auto; width: min(520px,calc(100% - 40px)); padding: 24px; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--paper-solid); color: var(--ink); box-shadow: var(--shadow-lg); }
+.database-reset-dialog::backdrop { background: #0006; }
+.database-reset-dialog h2 { margin: 0 0 14px; font-family: var(--serif); font-size: var(--type-display-dialog); }
+.database-reset-dialog p { color: var(--muted); font-size: var(--type-label); line-height: 1.65; }
+.database-reset-dialog dl { padding: 12px; border-radius: 9px; background: var(--paper-deep); }
+.database-reset-dialog dt { color: var(--faint); font-size: var(--type-caption); }
+.database-reset-dialog dd { margin: 4px 0 10px; overflow-wrap: anywhere; font: var(--type-caption)/1.6 var(--mono); }
+.database-reset-dialog dd:last-child { margin-bottom: 0; }
+.database-reset-dialog footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.database-reset-dialog footer button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-deep); }
+.database-reset-dialog .database-reset-confirm { background: var(--red); border-color: var(--red); color: white; }
+.database-reset-dialog .database-reset-error, .database-form .subtle-danger { color: var(--red); }

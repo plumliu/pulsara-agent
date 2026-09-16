@@ -4,7 +4,7 @@ from tests.support.model_config import frozen_test_prompt
 from pulsara_agent.llm.input import FrozenPromptContent
 
 import asyncio
-from dataclasses import fields, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from io import BytesIO
 import json
@@ -127,11 +127,7 @@ from pulsara_agent.llm.input import (
     text_part_values,
 )
 from pulsara_agent.primitives.context import context_fingerprint, freeze_json, thaw_json
-from pulsara_agent.llm.provider import (
-    RouteWireProfile,
-    ThinkingProfile,
-    ThinkingReplayPolicy,
-)
+from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.provider_sanitization import sanitize_provider_failure
 from pulsara_agent.llm.model_catalog import (
@@ -3995,14 +3991,6 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     profile = RouteWireProfile(
         id=f"test:{api}:compaction-prefix-wire-search",
         wire_api=api,
-        thinking=(
-            ThinkingProfile(
-                message_field="reasoning_content",
-                replay_policy=ThinkingReplayPolicy.ALWAYS,
-            )
-            if api == "openai_chat_completions"
-            else ThinkingProfile()
-        ),
     )
     model = _CompactionSequencedDirectKernelModel(
         model_runtime=test_model_runtime(
@@ -4136,14 +4124,6 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
     profile = RouteWireProfile(
         id=f"test:{api}:large-image-compaction-tail",
         wire_api=api,
-        thinking=(
-            ThinkingProfile(
-                message_field="reasoning_content",
-                replay_policy=ThinkingReplayPolicy.ALWAYS,
-            )
-            if api == "openai_chat_completions"
-            else ThinkingProfile()
-        ),
     )
     final_script = (
         _round5a1_chat_scripts()[1]
@@ -4336,10 +4316,6 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     profile = RouteWireProfile(
         id="test:chat:compaction-semantic-overbudget-wire-fit",
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            message_field="reasoning_content",
-            replay_policy=ThinkingReplayPolicy.ALWAYS,
-        ),
     )
     model = _CompactionSequencedDirectKernelModel(
         model_runtime=test_model_runtime(
@@ -4454,50 +4430,6 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     )
     assert selected_plan.quote.replaced_generic_wire_estimated_tokens > 0
     assert selected_plan.quote.replay_wire_estimated_tokens > 0
-
-    ordinary = model.requests[1].compiled_input
-    ordinary_messages = list(ordinary.messages)
-    ordinary_index = next(
-        index
-        for index, message in enumerate(ordinary_messages)
-        if message.role is MessageRole.ASSISTANT
-        and message.content
-        and text_part_values(message.content)[0].startswith("native replay answer 1:")
-    )
-    ordinary_messages[ordinary_index] = replace(
-        ordinary_messages[ordinary_index],
-        thinking=("semantic-only diagnostic thinking:" + "s" * 200_000,),
-    )
-    ordinary_estimate = model.requests[
-        1
-    ].prepared_call.compile_binding.estimator.estimate_frozen_input(
-        system_prompt=ordinary.system_prompt,
-        messages=tuple(ordinary_messages),
-        tools=ordinary.tools,
-    )
-    assert ordinary_estimate.total_input_tokens > (
-        ordinary.budget_report.effective_input_budget_tokens
-    )
-    report = ordinary.budget_report
-    overbudget_report = object.__new__(type(report))
-    for item in fields(report):
-        object.__setattr__(overbudget_report, item.name, getattr(report, item.name))
-    for name, value in (
-        ("system_tokens", ordinary_estimate.system_tokens),
-        ("message_tokens", ordinary_estimate.message_tokens),
-        ("tool_tokens", ordinary_estimate.tool_tokens),
-        ("envelope_tokens", ordinary_estimate.envelope_tokens),
-        ("total_input_tokens", ordinary_estimate.total_input_tokens),
-    ):
-        object.__setattr__(overbudget_report, name, value)
-    with pytest.raises(ValueError, match="compiled model input exceeds"):
-        replace(
-            ordinary,
-            messages=tuple(ordinary_messages),
-            final_estimate=ordinary_estimate,
-            budget_report=overbudget_report,
-        )
-
 
 @pytest.mark.parametrize("trigger", ("manual", "automatic"))
 def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compact(
@@ -8729,10 +8661,6 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
     profile = RouteWireProfile(
         id="test:chat-replay",
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            message_field="reasoning_content",
-            replay_policy=ThinkingReplayPolicy.ALWAYS,
-        ),
     )
     model = DirectKernelModelPort(
         model_runtime=test_model_runtime(
@@ -8833,14 +8761,6 @@ def test_round5a1_complete_tool_loop_replays_exact_reasoning_on_second_call(
     profile = RouteWireProfile(
         id=f"test:{api}:tool-loop",
         wire_api=api,
-        thinking=(
-            ThinkingProfile(
-                message_field="reasoning_content",
-                replay_policy=ThinkingReplayPolicy.ALWAYS,
-            )
-            if api == "openai_chat_completions"
-            else ThinkingProfile()
-        ),
     )
     model = _SequencedDirectKernelModel(
         model_runtime=test_model_runtime(
@@ -8953,14 +8873,6 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
     profile = RouteWireProfile(
         id=f"test:{api}:durable-restart",
         wire_api=api,
-        thinking=(
-            ThinkingProfile(
-                message_field="reasoning_content",
-                replay_policy=ThinkingReplayPolicy.ALWAYS,
-            )
-            if api == "openai_chat_completions"
-            else ThinkingProfile()
-        ),
     )
 
     def model() -> _SequencedDirectKernelModel:
@@ -9054,10 +8966,6 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
     profile = RouteWireProfile(
         id="test:chat:durable-corruption",
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            message_field="reasoning_content",
-            replay_policy=ThinkingReplayPolicy.ALWAYS,
-        ),
     )
 
     def model(*, base_url: str) -> _SequencedDirectKernelModel:
@@ -9224,10 +9132,6 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
     profile = RouteWireProfile(
         id="test:chat:one-planning-deadline",
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            message_field="reasoning_content",
-            replay_policy=ThinkingReplayPolicy.ALWAYS,
-        ),
     )
 
     def model() -> _SequencedDirectKernelModel:
@@ -9335,10 +9239,6 @@ def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(
     profile = RouteWireProfile(
         id="test:chat:near-bound",
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            message_field="reasoning_content",
-            replay_policy=ThinkingReplayPolicy.ALWAYS,
-        ),
     )
     model = _SequencedDirectKernelModel(
         model_runtime=test_model_runtime(
@@ -9550,14 +9450,6 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
     profile = RouteWireProfile(
         id=f"test:{api}:round10-child",
         wire_api=api,
-        thinking=(
-            ThinkingProfile(
-                message_field="reasoning_content",
-                replay_policy=ThinkingReplayPolicy.ALWAYS,
-            )
-            if api == "openai_chat_completions"
-            else ThinkingProfile()
-        ),
     )
     model = _SequencedDirectKernelModel(
         model_runtime=test_model_runtime(

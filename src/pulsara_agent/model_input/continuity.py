@@ -315,7 +315,9 @@ def _message_value(message: LLMMessage) -> object:
     return {
         "role": message.role.value,
         "content": llm_content_identity_value(message.content),
-        "thinking": message.thinking,
+        # Preserve the established fingerprint value after removing the
+        # superseded semantic-thinking DTO slot.
+        "thinking": (),
         "tool_calls": tuple(
             (item.id, item.name, item.arguments) for item in message.tool_calls
         ),
@@ -352,7 +354,6 @@ def provider_input_logical_bytes(
     content_bytes = 0
     for message in messages:
         content_bytes += llm_content_logical_bytes(message.content)
-        values.extend(message.thinking)
         for call in message.tool_calls:
             values.extend((call.id, call.name, call.arguments))
         values.extend(

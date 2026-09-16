@@ -15,20 +15,6 @@ from pulsara_agent.llm.provider_replay import (
 from pulsara_agent.primitives.context import context_fingerprint
 
 
-class ThinkingReplayPolicy(StrEnum):
-    """How a chat provider expects previous assistant thinking to be replayed."""
-
-    NEVER = "never"
-    WHEN_TOOL_CALLS = "when_tool_calls"
-    ALWAYS = "always"
-
-
-class ProviderReasoningReplayScope(StrEnum):
-    NEVER = "NEVER"
-    TOOL_RESPONSES = "TOOL_RESPONSES"
-    ALL_COMPLETED_RESPONSES = "ALL_COMPLETED_RESPONSES"
-
-
 class ProviderChatFieldAccumulationMode(StrEnum):
     TEXT_CONCAT = "TEXT_CONCAT"
     ORDERED_ARRAY_APPEND = "ORDERED_ARRAY_APPEND"
@@ -62,7 +48,6 @@ CHAT_CLOSED_REASONING_FIELD_CONTRACTS = (
         ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND,
     ),
 )
-_CHAT_TEXT_REASONING_FIELD_NAMES = frozenset({"reasoning_content", "reasoning"})
 _CHAT_CLOSED_REASONING_FIELD_BY_NAME = MappingProxyType(
     {item.field_name: item for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS}
 )
@@ -76,26 +61,6 @@ class ModelIdentityPolicy(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class ThinkingProfile:
-    """Chat output-carrier and replay behavior; never request-side support."""
-
-    delta_fields: tuple[str, ...] = ("reasoning_content", "reasoning")
-    message_field: str | None = "reasoning_content"
-    replay_policy: ThinkingReplayPolicy = ThinkingReplayPolicy.NEVER
-
-    def __post_init__(self) -> None:
-        if len(self.delta_fields) != len(set(self.delta_fields)) or any(
-            field_name not in _CHAT_TEXT_REASONING_FIELD_NAMES
-            for field_name in self.delta_fields
-        ):
-            raise ValueError("live Chat thinking fields are outside the closed registry")
-        if self.message_field is not None and (
-            self.message_field not in _CHAT_TEXT_REASONING_FIELD_NAMES
-        ):
-            raise ValueError("legacy Chat thinking message field must be textual")
-
-
-@dataclass(frozen=True, slots=True)
 class RouteWireProfile:
     """Frozen fields consumed by materialization and replay for one adapter."""
 
@@ -104,7 +69,6 @@ class RouteWireProfile:
     request_defaults: Mapping[str, Any] = field(default_factory=dict)
     request_extra_body: Mapping[str, Any] = field(default_factory=dict)
     model_identity_policy: ModelIdentityPolicy = ModelIdentityPolicy.ACCEPT_REPORTED
-    thinking: ThinkingProfile = field(default_factory=ThinkingProfile)
     configured_chat_replay_fields: tuple[
         ProviderChatReplayFieldContract, ...
     ] = field(default_factory=tuple)
@@ -152,20 +116,6 @@ class RouteWireProfile:
                 item.field_name for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
             ):
                 raise ValueError("closed Chat replay registry is invalid")
-
-    @property
-    def reasoning_replay_scope(self) -> ProviderReasoningReplayScope:
-        if self.wire_api == "openai_responses":
-            return ProviderReasoningReplayScope.ALL_COMPLETED_RESPONSES
-        return {
-            ThinkingReplayPolicy.NEVER: ProviderReasoningReplayScope.NEVER,
-            ThinkingReplayPolicy.WHEN_TOOL_CALLS: (
-                ProviderReasoningReplayScope.TOOL_RESPONSES
-            ),
-            ThinkingReplayPolicy.ALWAYS: (
-                ProviderReasoningReplayScope.ALL_COMPLETED_RESPONSES
-            ),
-        }[self.thinking.replay_policy]
 
     @property
     def assistant_replay_codec_kind(self) -> ProviderAssistantReplayCodecKind:

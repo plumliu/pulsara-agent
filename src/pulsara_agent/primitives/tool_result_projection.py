@@ -268,7 +268,7 @@ def provider_neutral_message_logical_bytes(message: LLMMessage) -> int:
     """Count provider-neutral scalars/image bytes, never adapter JSON framing."""
 
     content_bytes = llm_content_logical_bytes(message.content)
-    values = [*message.thinking]
+    values: list[str] = []
     for call in message.tool_calls:
         values.extend((call.id, call.name, call.arguments))
     values.extend(

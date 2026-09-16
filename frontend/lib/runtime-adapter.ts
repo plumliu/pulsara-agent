@@ -65,6 +65,9 @@ export type DatabaseDataPlaneState =
   | 'database_configured_unverified'
   | 'database_unavailable'
   | 'database_schema_action_required'
+  | 'database_reset_required'
+  | 'database_resetting'
+  | 'database_restart_required'
   | 'ready';
 
 export type ReasoningSelectionPayload =
@@ -459,6 +462,7 @@ export interface RuntimeAdapter {
   savePostgres(runtimeDsn: string, adminDsn: string | null): Promise<LocalSettingsReadModel & { restart_required: boolean }>;
   checkPostgres(): Promise<Record<string, unknown>>;
   migratePostgres(): Promise<Record<string, unknown>>;
+  resetPostgres(target: NonNullable<LocalSettingsSummary['postgres']>): Promise<{ database_name: string; restart_required: boolean }>;
   putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<boolean>;
   deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<boolean>;
   updateModelCallBinding(sessionId: string, binding: ModelCallBindingPayload): Promise<ModelCallBindingUpdate>;
@@ -1292,6 +1296,12 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
 
   async migratePostgres(): Promise<Record<string, unknown>> {
     return apiRequest<Record<string, unknown>>('/api/local-settings/postgres/migrate', { method: 'POST' });
+  }
+
+  async resetPostgres(target: NonNullable<LocalSettingsSummary['postgres']>): Promise<{ database_name: string; restart_required: boolean }> {
+    return apiRequest('/api/local-settings/postgres/reset', {
+      method: 'POST', body: JSON.stringify({ ...target, confirmed: true }),
+    });
   }
 
   async putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<boolean> {

@@ -557,6 +557,7 @@ class FakeAdapter implements RuntimeAdapter {
 
   async checkPostgres() { return { database_name: 'pulsara' }; }
   async migratePostgres() { return { database_name: 'pulsara' }; }
+  async resetPostgres() { return { database_name: 'pulsara', restart_required: false }; }
   async putDashScopeCredential() { return true; }
   async deleteDashScopeCredential() { return false; }
 

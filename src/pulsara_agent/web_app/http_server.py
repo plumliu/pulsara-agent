@@ -294,6 +294,7 @@ class LocalHttpServer:
         database_state: Callable[[], str],
         refresh_database_state: Callable[[], Awaitable[object]],
         postgres_settings_saved: Callable[[], object],
+        reset_postgres: Callable[[LocalPostgresConfig], Awaitable[dict[str, object]]],
     ) -> None:
         self.sessions = sessions
         self.bridge = bridge
@@ -307,6 +308,8 @@ class LocalHttpServer:
         self._database_state = database_state
         self._refresh_database_state = refresh_database_state
         self._postgres_settings_saved = postgres_settings_saved
+        self._reset_postgres_data = reset_postgres
+        self._postgres_operation_lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._port: int | None = None
@@ -405,6 +408,9 @@ class LocalHttpServer:
         )
         self._app.router.add_post(
             "/api/local-settings/postgres/migrate", self._migrate_postgres
+        )
+        self._app.router.add_post(
+            "/api/local-settings/postgres/reset", self._reset_postgres
         )
         self._app.router.add_put(
             "/api/local-settings/dashscope-credentials/{kind}",
@@ -658,6 +664,20 @@ class LocalHttpServer:
                 retryable=True,
             )
         except PostgresSchemaError as exc:
+            if exc.code is PostgresSchemaFailureCode.MIGRATION_CONFIRMATION_UNRESOLVED:
+                return self._error_response(
+                    "DATABASE_OPERATION_UNCONFIRMED",
+                    "无法确认数据库操作是否已提交。请先检查数据库现状，不要直接再次重置。",
+                    status=409,
+                    retryable=False,
+                )
+            if exc.code is PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED:
+                return self._error_response(
+                    "DATABASE_RESET_REQUIRED",
+                    "现有数据结构与当前版本不兼容。请在本地服务设置中确认重置数据；初始化 / 升级不会清空旧数据。",
+                    status=409,
+                    retryable=False,
+                )
             if exc.code in {
                 PostgresSchemaFailureCode.CONNECTION_FAILED,
                 PostgresSchemaFailureCode.DEADLINE_EXCEEDED,
@@ -669,7 +689,6 @@ class LocalHttpServer:
                     retryable=exc.retryable,
                 )
             if exc.code in {
-                PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED,
                 PostgresSchemaFailureCode.UNMANAGED_DATABASE,
                 PostgresSchemaFailureCode.CATALOG_DRIFT,
                 PostgresSchemaFailureCode.EXTENSION_MISSING,
@@ -773,6 +792,9 @@ class LocalHttpServer:
                         status=503,
                         retryable=True,
                     )
+        if request.path.startswith("/api/local-settings/postgres"):
+            async with self._postgres_operation_lock:
+                return await handler(request)
         return await handler(request)
 
     async def _health(self, _request: web.Request) -> web.Response:
@@ -1040,6 +1062,34 @@ class LocalHttpServer:
         )
         await self._refresh_database_state()
         return web.json_response(report.to_dict())
+
+    async def _reset_postgres(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if (
+            set(body) != {"runtime_dsn", "admin_dsn", "confirmed"}
+            or body["confirmed"] is not True
+        ):
+            raise HttpPublicError(
+                "DATABASE_RESET_CONFIRMATION_REQUIRED",
+                "请先确认目标数据库和删除范围。",
+                status=409,
+            )
+        postgres = self.settings.read().postgres
+        if postgres is None or postgres.admin_dsn is None:
+            raise HttpPublicError(
+                "DATABASE_ADMIN_DSN_REQUIRED",
+                "重置数据需要已保存的管理员 DSN。",
+                status=409,
+            )
+        if (body["runtime_dsn"], body["admin_dsn"]) != (
+            postgres.runtime_dsn, postgres.admin_dsn
+        ):
+            raise HttpPublicError(
+                "DATABASE_RESET_TARGET_CHANGED",
+                "数据库连接已变更，请刷新设置并重新确认。",
+                status=409,
+            )
+        return web.json_response(await self._reset_postgres_data(postgres))
 
     async def _put_dashscope_credential(self, request: web.Request) -> web.Response:
         kind = _dashscope_credential_kind(request.match_info["kind"])

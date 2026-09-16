@@ -439,7 +439,6 @@ def _message_public(message: LLMMessage) -> dict[str, object]:
     return {
         "role": message.role.value,
         "content": list(text_part_values(message.content)),
-        "thinking": list(message.thinking),
         "tool_calls": [
             {"id": call.id, "name": call.name, "arguments": call.arguments}
             for call in message.tool_calls

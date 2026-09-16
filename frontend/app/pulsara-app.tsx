@@ -588,6 +588,16 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const boot = await adapter.bootstrap();
     setBootstrap(boot);
     if (boot.database_state !== 'ready') {
+      if (boot.database_state === 'database_restart_required') {
+        const previous = connectionRef.current;
+        connectionAttempt.current += 1;
+        connectionRef.current = undefined;
+        activeSessionIdRef.current = '';
+        setConnection(undefined);
+        setRuntimeStatus('online');
+        setRuntimeError(undefined);
+        if (previous) await previous.close();
+      }
       if (!connectionRef.current) {
         setSessionList([]);
         setActiveSessionId('');

@@ -52,8 +52,6 @@ from pulsara_agent.llm.provider import (
     ProviderChatFieldAccumulationMode,
     ProviderChatReplayFieldContract,
     RouteWireProfile,
-    ThinkingProfile,
-    ThinkingReplayPolicy,
 )
 from pulsara_agent.llm.provider_replay import (
     ProviderReplayDisposition,
@@ -107,17 +105,11 @@ from tests.support.model_config import test_model_binding, test_model_runtime
 
 def _chat_profile(
     *,
-    message_field: str = "reasoning_content",
     fields: tuple[ProviderChatReplayFieldContract, ...] = (),
-    replay_policy: ThinkingReplayPolicy = ThinkingReplayPolicy.ALWAYS,
 ) -> RouteWireProfile:
     return RouteWireProfile(
-        id=f"test:{message_field}",
+        id="test:chat",
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            message_field=message_field,
-            replay_policy=replay_policy,
-        ),
         configured_chat_replay_fields=fields,
     )
 
@@ -357,15 +349,10 @@ def test_chat_null_reasoning_deltas_do_not_erase_or_forge_a_replay_carrier() -> 
     assert replay["reasoning_content"] == "exact"
 
 
-def test_chat_observed_known_reasoning_is_retained_despite_legacy_policy() -> None:
+def test_chat_observed_known_reasoning_is_retained_for_native_replay() -> None:
     profile = RouteWireProfile(
         id="test:live-thinking-only",
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            delta_fields=("reasoning_content",),
-            message_field="reasoning_content",
-            replay_policy=ThinkingReplayPolicy.NEVER,
-        ),
     )
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), route_wire_profile=profile
@@ -401,10 +388,6 @@ def test_chat_reasoning_registry_is_closed_and_provider_neutral() -> None:
                 ),
             )
         )
-    with pytest.raises(ValueError, match="message field must be textual"):
-        ThinkingProfile(message_field="reasoning_details")
-
-
 def test_chat_closed_field_accumulation_and_final_reconciliation() -> None:
     profile = _chat_profile()
     accumulator = ChatCompletionAccumulator(
@@ -634,9 +617,6 @@ def test_chat_conflicting_array_final_and_incomplete_never_complete() -> None:
 def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
     profile = RouteWireProfile(
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
-        ),
     )
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), route_wire_profile=profile
@@ -686,9 +666,6 @@ def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
 def test_chat_structured_reasoning_tool_response_and_terminal_echo_round_trip() -> None:
     profile = RouteWireProfile(
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
-        ),
     )
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), route_wire_profile=profile
@@ -763,9 +740,6 @@ def test_chat_unknown_empty_carriers_are_ignorable() -> None:
 def test_chat_unknown_nonempty_final_carrier_is_not_replayed() -> None:
     profile = RouteWireProfile(
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
-        ),
     )
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), route_wire_profile=profile
@@ -788,9 +762,6 @@ def test_chat_unknown_nonempty_final_carrier_is_not_replayed() -> None:
 def test_chat_unknown_nonempty_tool_carrier_fails_before_terminal() -> None:
     profile = RouteWireProfile(
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            replay_policy=ThinkingReplayPolicy.WHEN_TOOL_CALLS,
-        ),
     )
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), route_wire_profile=profile
@@ -1450,9 +1421,8 @@ def test_chat_replay_field_absence_empty_and_final_contract_are_distinct() -> No
         )
 
 
-def test_chat_final_value_required_is_independent_of_legacy_replay_policy() -> None:
+def test_chat_final_value_required_is_enforced_by_native_replay_contract() -> None:
     profile = _chat_profile(
-        replay_policy=ThinkingReplayPolicy.NEVER,
         fields=(
             ProviderChatReplayFieldContract(
                 "reasoning_content",
@@ -3078,9 +3048,6 @@ async def _consume_provider_shaped_sse(*, api: str, base_url: str) -> list[objec
     profile = RouteWireProfile(
         id="test:provider-shaped-sse",
         wire_api=api,
-        thinking=ThinkingProfile(
-            replay_policy=ThinkingReplayPolicy.NEVER,
-        ),
     )
     runtime = test_model_runtime(
         api_key="sk-fixture-secret",

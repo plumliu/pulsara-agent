@@ -20,8 +20,6 @@ from pulsara_agent.llm.model_target import (
 from pulsara_agent.llm.provider import (
     ModelIdentityPolicy,
     RouteWireProfile,
-    ThinkingProfile,
-    ThinkingReplayPolicy,
 )
 from pulsara_agent.llm.provider_replay import (
     ProviderAssistantReplayCodecKind,
@@ -78,13 +76,6 @@ def _contract(
         id=f"route-wire:{wire_api.value}",
         wire_api=wire_api.value,
         model_identity_policy=model_identity_policy,
-        thinking=ThinkingProfile(
-            replay_policy=(
-                ThinkingReplayPolicy.WHEN_TOOL_CALLS
-                if wire_api is WireApi.OPENAI_CHAT_COMPLETIONS
-                else ThinkingReplayPolicy.NEVER
-            )
-        ),
     )
     return RouteWireContract(
         transport_binding_id=(

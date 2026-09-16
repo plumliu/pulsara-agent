@@ -27,6 +27,18 @@ const setupCopy: Record<Exclude<DatabaseDataPlaneState, 'ready'>, {
     title: '完成 PostgreSQL 初始化',
     detail: '数据库连接已经可用，但数据结构尚未就绪。运行“初始化 / 升级”后即可继续。',
   },
+  database_reset_required: {
+    title: '现有数据需要重置',
+    detail: '现有数据结构与当前版本不兼容。请在本地服务设置中查看重置影响并确认；初始化 / 升级不会清空旧数据。',
+  },
+  database_resetting: {
+    title: '正在重置本地数据',
+    detail: '正在停止数据服务并重新初始化，请等待操作完成。',
+  },
+  database_restart_required: {
+    title: '请重启 Pulsara',
+    detail: '数据服务已关闭。重启 Pulsara 后将重新检查数据库；刷新网页不会重新启动内核。',
+  },
 };
 
 export function DatabaseSetupGuide({
@@ -47,7 +59,7 @@ export function DatabaseSetupGuide({
         <h2>{copy.title}</h2>
         <p>{copy.detail}</p>
       </div>
-      {variant === 'overview' && (
+      {variant === 'overview' && state !== 'database_reset_required' && state !== 'database_resetting' && state !== 'database_restart_required' && (
         <ol className="database-setup-guide__steps" aria-label="配置步骤">
           <li><span>1</span><div><strong>保存连接</strong><small>填写 Runtime DSN；需要初始化时再填写 Admin DSN。</small></div></li>
           <li><span>2</span><div><strong>检查 PostgreSQL</strong><small>确认数据库、账号和权限可以正常使用。</small></div></li>

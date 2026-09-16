@@ -114,11 +114,24 @@ class PostgresMigrationRunner:
             allow_none_retry=True,
         )
 
+    def reset(self, *, deadline_monotonic: float) -> PostgresMigrationReport:
+        """Explicitly clear Pulsara data and install the baseline atomically.
+
+        The caller owns user confirmation and stopping live database consumers.
+        Normal migration never enables this destructive operation.
+        """
+        return self._migrate(
+            deadline_monotonic=deadline_monotonic,
+            allow_none_retry=False,
+            reset=True,
+        )
+
     def _migrate(
         self,
         *,
         deadline_monotonic: float,
         allow_none_retry: bool,
+        reset: bool = False,
     ) -> PostgresMigrationReport:
         self._registry.verify_resources()
         definition = self._registry.definition(0)
@@ -132,6 +145,11 @@ class PostgresMigrationRunner:
                 connection.execute(
                     "SELECT pg_catalog.pg_advisory_xact_lock(%s)", (_LOCK_KEY,)
                 )
+                if reset:
+                    connection.execute("DROP SCHEMA IF EXISTS pulsara_v3 CASCADE")
+                    connection.execute(
+                        "DROP TABLE IF EXISTS public.pulsara_schema_migrations"
+                    )
                 rows = read_migration_ledger(connection)
                 if rows is not None:
                     _validate_clean_ledger(rows, definition)
@@ -196,6 +214,13 @@ class PostgresMigrationRunner:
                 except BaseException as exc:
                     raise _BaselineCommitOutcomeUnknown from exc
         except _BaselineCommitOutcomeUnknown as exc:
+            if reset:
+                # An unchanged baseline also describes a rolled-back reset.
+                # Repeating deletion could erase work accepted after commit.
+                raise PostgresSchemaError(
+                    PostgresSchemaFailureCode.MIGRATION_CONFIRMATION_UNRESOLVED,
+                    "reset commit outcome is unknown; inspect before retrying",
+                ) from exc
             confirmation = self.confirm_baseline(
                 deadline_monotonic=deadline_monotonic
             )

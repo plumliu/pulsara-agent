@@ -379,7 +379,7 @@ def _materialize_auxiliary_final_wire(
     profile = call.target.model_profile.route_wire_profile
     if profile.wire_api == "openai_chat_completions":
         groups = tuple(
-            chat_semantic_wire_group(message, route_wire_profile=profile)
+            chat_semantic_wire_group(message)
             for message in context.messages
         )
         ordered = tuple(item for group in groups for item in group)

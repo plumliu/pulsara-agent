@@ -281,7 +281,6 @@ class LLMMessage:
 
     role: MessageRole
     content: tuple[LLMContentPart, ...] = field(default_factory=tuple)
-    thinking: tuple[str, ...] = field(default_factory=tuple)
     tool_calls: tuple[LLMToolCall, ...] = field(default_factory=tuple)
     tool_call_id: str | None = None
     name: str | None = None
@@ -294,10 +293,6 @@ class LLMMessage:
             not isinstance(part, (LLMTextPart, LLMImagePart)) for part in self.content
         ):
             raise TypeError("model message content must be typed immutable parts")
-        if not isinstance(self.thinking, tuple) or any(
-            not isinstance(part, str) for part in self.thinking
-        ):
-            raise TypeError("model message thinking parts must be strings")
         if self.role is not MessageRole.USER and content_has_image(self.content):
             raise ValueError("image content is only valid in USER messages")
         if self.role in {MessageRole.SYSTEM, MessageRole.USER} and (
@@ -336,17 +331,12 @@ class LLMMessage:
         cls,
         *,
         text: str | None = None,
-        thinking: str | tuple[str, ...] = (),
         tool_calls: tuple[LLMToolCall, ...] = (),
     ) -> "LLMMessage":
         content = (LLMTextPart(text),) if text else ()
-        thinking_parts = (
-            (thinking,) if isinstance(thinking, str) and thinking else tuple(thinking)
-        )
         return cls(
             role=MessageRole.ASSISTANT,
             content=content,
-            thinking=thinking_parts,
             tool_calls=tool_calls,
         )
 

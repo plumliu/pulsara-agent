@@ -278,6 +278,10 @@ class PostgresSchemaVerificationService:
             except BaseException as exc:
                 attempt.failure = exc
                 attempt.lifecycle = PostgresVerificationLifecycle.FAILED
+                # A failed observation is not an installed data plane. The
+                # next explicit acquire must see repairs made by migrate/reset
+                # instead of replaying a process-lifetime stale exception.
+                self._attempts.pop(key)
             else:
                 attempt.lifecycle = PostgresVerificationLifecycle.VERIFIED
 

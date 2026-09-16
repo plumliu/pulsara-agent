@@ -92,7 +92,6 @@ from pulsara_agent.llm.input import (
     llm_content_logical_bytes,
 )
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
-from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItem,
@@ -146,10 +145,7 @@ def _assert_source_variant_wire_upper(candidate, upper, *, wire_api: str) -> Non
 
     def wire(message):
         if wire_api == "chat":
-            return chat_semantic_wire_group(
-                message,
-                route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
-            )[0]
+            return chat_semantic_wire_group(message)[0]
         return responses_semantic_wire_group(message)[0]
 
     estimator = PulsaraHeuristicTokenEstimatorV2()
@@ -605,10 +601,7 @@ def test_chat_and_responses_mixed_image_wire_goldens_preserve_occurrences() -> N
     encoded = base64.b64encode(image.immutable_bytes).decode("ascii")
     data_url = f"data:image/png;base64,{encoded}"
 
-    assert chat_semantic_wire_group(
-        message,
-        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
-    ) == (
+    assert chat_semantic_wire_group(message) == (
         {
             "role": "user",
             "content": [
@@ -648,10 +641,7 @@ def test_chat_and_responses_mixed_image_wire_goldens_preserve_occurrences() -> N
 
 def test_pure_image_is_one_formal_user_wire_item_and_pure_text_is_unchanged() -> None:
     pure_image = _message(_image())
-    chat_image = chat_semantic_wire_group(
-        pure_image,
-        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
-    )
+    chat_image = chat_semantic_wire_group(pure_image)
     responses_image = responses_semantic_wire_group(pure_image)
     assert chat_image[0]["role"] == "user"
     assert [part["type"] for part in chat_image[0]["content"]] == ["image_url"]
@@ -659,10 +649,7 @@ def test_pure_image_is_one_formal_user_wire_item_and_pure_text_is_unchanged() ->
     assert [part["type"] for part in responses_image[0]["content"]] == ["input_image"]
 
     text = _message(LLMTextPart("one"), LLMTextPart("two"))
-    assert chat_semantic_wire_group(
-        text,
-        route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
-    ) == ({"role": "user", "content": "one\ntwo"},)
+    assert chat_semantic_wire_group(text) == ({"role": "user", "content": "one\ntwo"},)
     assert responses_semantic_wire_group(text) == (
         {"role": "user", "content": "one\ntwo"},
     )
@@ -705,10 +692,7 @@ def test_v2_final_wire_quote_elides_only_formal_payload_and_adds_d1(
     image = _image()
     source = _message(LLMTextPart("caption"), image)
     if wire_kind == "chat":
-        item = chat_semantic_wire_group(
-            source,
-            route_wire_profile=RouteWireProfile(wire_api="openai_chat_completions"),
-        )[0]
+        item = chat_semantic_wire_group(source)[0]
     else:
         item = responses_semantic_wire_group(source)[0]
     fixed = {"model": "model", "input": []}
@@ -1173,15 +1157,8 @@ def test_tool_result_full_upper_bounds_escaping_body_wire_and_d1(
     )
 
     if wire_api == "chat":
-        profile = RouteWireProfile(wire_api="openai_chat_completions")
-        actual_item = chat_semantic_wire_group(
-            actual.message,
-            route_wire_profile=profile,
-        )[0]
-        upper_item = chat_semantic_wire_group(
-            upper.message,
-            route_wire_profile=profile,
-        )[0]
+        actual_item = chat_semantic_wire_group(actual.message)[0]
+        upper_item = chat_semantic_wire_group(upper.message)[0]
     else:
         actual_item = responses_semantic_wire_group(actual.message)[0]
         upper_item = responses_semantic_wire_group(upper.message)[0]
@@ -1245,10 +1222,7 @@ def test_root_completion_batch_upper_bounds_every_closed_projection(
     )
     estimator = PulsaraHeuristicTokenEstimatorV2()
     if wire_api == "chat":
-        profile = RouteWireProfile(wire_api="openai_chat_completions")
-        upper_wire = chat_semantic_wire_group(
-            upper_message, route_wire_profile=profile
-        )[0]
+        upper_wire = chat_semantic_wire_group(upper_message)[0]
     else:
         upper_wire = responses_semantic_wire_group(upper_message)[0]
     for body in bodies:
@@ -1257,9 +1231,7 @@ def test_root_completion_batch_upper_bounds_every_closed_projection(
         )
         actual_message = LLMMessage.user(actual_text)
         if wire_api == "chat":
-            actual_wire = chat_semantic_wire_group(
-                actual_message, route_wire_profile=profile
-            )[0]
+            actual_wire = chat_semantic_wire_group(actual_message)[0]
         else:
             actual_wire = responses_semantic_wire_group(actual_message)[0]
         assert len(actual_text.encode("utf-8")) * upper_items <= upper_canonical

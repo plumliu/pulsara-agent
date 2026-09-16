@@ -1,5 +1,7 @@
 # Pulsara Kernel 图片输入与 OpenAI 通用 Wire Adapter 修订设计
 
+> 后续扩展（2026-09-16，设计待实施）：本地 `view_image` 的 typed 工具结果、并行执行、跨协议统一附件投影及左侧展示，见 [本地图片工具实施规范](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md)。本篇已经验收的用户图片输入行为保持不变；工具图片新增范围以该实施规范为准，D1/D2 的冻结参数继续适用。
+
 > 状态：**D1–D4 设计已冻结；K1–K3 已实施，K4 于 2026-09-15 验收通过；U1/U2 于 2026-09-15 实施并完成浏览器验收**
 >
 > 修订：2026-09-12，补齐 pre-adoption 内容校验、ROOT 父上下文、typed ingress / Hook 与 multipart headroom 边界；纳入本地 Codex 源码对照。
@@ -152,7 +154,7 @@ width/height 随同一份经 D2 验证的完整 Image 值从 ingress/canonical h
 
 本版以**已冻结字节的 inline 图片输入**作为 wire 基线。外部 URL、provider file ID、Files API 上传以及 provider 管理的媒体生命周期，不纳入本版。`data:` URL 是 adapter 的确定性编码结果，不作为 kernel 的第二份内容真相。
 
-第一版 role 范围限定为 USER 中的图片输入；SYSTEM、assistant thinking、tool call arguments 和现有文本 ToolResult 保持原角色及内容语义。工具产生的图片如何进入模型上下文，需要后续明确工具输出与来源契约；不能为适配方便把 tool result 伪造成用户发言。
+本篇已实施的第一版 role 范围限定为 USER 中的图片输入；SYSTEM、assistant thinking、tool call arguments 和现有文本 ToolResult 保持原角色及内容语义。后续本地工具图片的输出与来源契约由 [本地图片工具实施规范](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md) 明确：canonical 归属 TOOL_RESULT，两种协议均在公共编译层派生 user role 图片附件；不创建 canonical 用户提交，UI 仍展示为左侧工具结果。该扩展尚待实施，不能用本篇已有验收记录作为其通过证据。
 
 具体约束：
 

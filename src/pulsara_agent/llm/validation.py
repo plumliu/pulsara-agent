@@ -134,7 +134,6 @@ def validate_model_message_content_for_call(
             or message.name is not None
             or message.arguments is not None
             or message.tool_calls
-            or message.thinking
         ):
             raise ModelContextIdentityMismatch(
                 "user provider message has an invalid closed shape"

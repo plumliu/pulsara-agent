@@ -7086,6 +7086,11 @@ class KernelHostCore:
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
+    @property
+    def has_database_resources(self) -> bool:
+        """Whether database maintenance must close this core before deletion."""
+        return self._access is not None or self._repository is not None
+
     def _plugin_management(self) -> PluginManagementService:
         return PluginManagementService(credential_boundary=self._credential_boundary)
 

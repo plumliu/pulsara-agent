@@ -158,6 +158,8 @@ class PulsaraHeuristicTokenEstimatorV2:
             "canonical_json": "sort_keys,compact,utf8,finite",
             "message_fields": [
                 "content",
+                # Retain the established estimator identity after removing
+                # the superseded semantic-thinking DTO slot.
                 "thinking",
                 "tool_calls.id",
                 "tool_calls.name",
@@ -269,7 +271,6 @@ class PulsaraHeuristicTokenEstimatorV2:
                 raise TypeError("model message contains an invalid content part")
             else:
                 total += self.estimate_text(part.text)
-        total += sum(self.estimate_text(part) for part in message.thinking)
         for call in message.tool_calls:
             total += TOOL_CALL_FRAMING_TOKENS
             total += self.estimate_text(call.id)

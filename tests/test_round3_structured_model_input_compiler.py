@@ -136,11 +136,7 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
     freeze_openai_native_tool_eligibility,
     materialize_openai_native_tool_projection_set,
 )
-from pulsara_agent.llm.provider import (
-    RouteWireProfile,
-    ThinkingProfile,
-    ThinkingReplayPolicy,
-)
+from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.provider_replay import (
     ProviderAssistantReplayFragment,
     provider_replay_id,
@@ -4018,10 +4014,6 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
     profile = RouteWireProfile(
         id="test:chat-replay",
         wire_api="openai_chat_completions",
-        thinking=ThinkingProfile(
-            message_field="reasoning_content",
-            replay_policy=ThinkingReplayPolicy.ALWAYS,
-        ),
     )
     compiler = StructuredModelInputCompiler()
     owner = HostProviderInputContinuityOwner(session_id="session:test")

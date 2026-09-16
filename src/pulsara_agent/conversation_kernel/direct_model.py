@@ -1204,7 +1204,7 @@ def _semantic_wire_groups(
     profile = call.target.model_profile.route_wire_profile
     if profile.wire_api == "openai_chat_completions":
         groups = tuple(
-            tuple(chat_semantic_wire_group(item, route_wire_profile=profile))
+            tuple(chat_semantic_wire_group(item))
             for item in semantic_input.messages
         )
     elif profile.wire_api == "openai_responses":
@@ -1717,12 +1717,7 @@ def quote_provider_followup_wire_resources(
     appended_items: list[dict[str, object]] = []
     if provider_replay is None:
         if profile.wire_api == "openai_chat_completions":
-            appended_items.extend(
-                chat_semantic_wire_group(
-                    actual_assistant_message,
-                    route_wire_profile=profile,
-                )
-            )
+            appended_items.extend(chat_semantic_wire_group(actual_assistant_message))
         elif profile.wire_api == "openai_responses":
             appended_items.extend(
                 responses_semantic_wire_group(actual_assistant_message)
@@ -1745,9 +1740,7 @@ def quote_provider_followup_wire_resources(
 
     for message in bounded_suffix_messages:
         if profile.wire_api == "openai_chat_completions":
-            appended_items.extend(
-                chat_semantic_wire_group(message, route_wire_profile=profile)
-            )
+            appended_items.extend(chat_semantic_wire_group(message))
         elif profile.wire_api == "openai_responses":
             appended_items.extend(responses_semantic_wire_group(message))
         else:  # pragma: no cover - resolved transport registry is closed

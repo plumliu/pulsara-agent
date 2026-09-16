@@ -2906,7 +2906,9 @@ def _llm_message_value(message: LLMMessage) -> object:
     return {
         "role": message.role.value,
         "content": llm_content_identity_value(message.content),
-        "thinking": message.thinking,
+        # Preserve the established fingerprint value after removing the
+        # superseded semantic-thinking DTO slot.
+        "thinking": (),
         "tool_calls": tuple(
             (item.id, item.name, item.arguments) for item in message.tool_calls
         ),

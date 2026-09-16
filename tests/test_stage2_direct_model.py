@@ -784,14 +784,13 @@ def test_k3_followup_quote_uses_the_exact_installed_wire_owner(api: str) -> None
         bounded_suffix_messages=(result,),
     )
 
-    profile = request.prepared_call.call.target.model_profile.route_wire_profile
     appended = (
-        (*chat_semantic_wire_group(assistant, route_wire_profile=profile),)
+        (*chat_semantic_wire_group(assistant),)
         if api == "openai_chat_completions"
         else (*responses_semantic_wire_group(assistant),)
     )
     appended += (
-        (*chat_semantic_wire_group(result, route_wire_profile=profile),)
+        (*chat_semantic_wire_group(result),)
         if api == "openai_chat_completions"
         else (*responses_semantic_wire_group(result),)
     )

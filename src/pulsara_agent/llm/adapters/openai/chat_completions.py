@@ -49,7 +49,6 @@ from pulsara_agent.llm.provider import (
     CHAT_CLOSED_REASONING_FIELD_CONTRACTS,
     ProviderChatFieldAccumulationMode,
     RouteWireProfile,
-    ThinkingReplayPolicy,
     mutable_provider_value,
 )
 from pulsara_agent.llm.request import LLMContext
@@ -85,6 +84,13 @@ from pulsara_agent.llm.retry import (
     compute_retry_delay,
 )
 from pulsara_agent.settings import LocalSettingsStore
+
+
+_CHAT_LIVE_THINKING_FIELDS = frozenset(
+    item.field_name
+    for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
+    if item.accumulation_mode is ProviderChatFieldAccumulationMode.TEXT_CONCAT
+)
 
 
 @dataclass(slots=True)
@@ -323,7 +329,6 @@ def build_chat_completions_payload(
             ordered_input_items=tuple(
                 _messages_to_chat_messages(
                     context.messages,
-                    route_wire_profile=route_wire_profile,
                 )
             ),
             tool_items=tuple(_tool_to_chat_tool(tool) for tool in context.tools),
@@ -440,13 +445,11 @@ def project_chat_context_bearing_payload_fields(
 
 def chat_semantic_wire_group(
     message: LLMMessage,
-    *,
-    route_wire_profile: RouteWireProfile,
 ) -> tuple[dict[str, Any], ...]:
     """Return the exact generic wire group for one compiled message."""
 
     return tuple(
-        _messages_to_chat_messages((message,), route_wire_profile=route_wire_profile)
+        _messages_to_chat_messages((message,))
     )
 
 
@@ -468,12 +471,7 @@ def _thaw_wire_objects(
 
 def _messages_to_chat_messages(
     messages: tuple[LLMMessage, ...],
-    *,
-    route_wire_profile: RouteWireProfile | None = None,
 ) -> list[dict[str, Any]]:
-    route_wire_profile = route_wire_profile or RouteWireProfile(
-        wire_api=OPENAI_CHAT_COMPLETIONS_API
-    )
     chat_messages: list[dict[str, Any]] = []
     pending_tool_calls: list[dict[str, Any]] = []
     for message in messages:
@@ -490,10 +488,7 @@ def _messages_to_chat_messages(
             )
             pending_tool_calls = []
         chat_messages.append(
-            _message_to_chat_message(
-                message,
-                route_wire_profile=route_wire_profile,
-            )
+            _message_to_chat_message(message)
         )
     if pending_tool_calls:
         chat_messages.append(
@@ -582,9 +577,7 @@ class ChatCompletionAccumulator:
             known_contracts = {
                 item.field_name: item for item in CHAT_CLOSED_REASONING_FIELD_CONTRACTS
             }
-            live_thinking_fields = frozenset(
-                self.route_wire_profile.thinking.delta_fields
-            )
+            live_thinking_fields = _CHAT_LIVE_THINKING_FIELDS
             allowed = {
                 "role",
                 "content",
@@ -1334,8 +1327,6 @@ class ChatToolCallAccumulator:
 
 def _message_to_chat_message(
     message: LLMMessage,
-    *,
-    route_wire_profile: RouteWireProfile,
 ) -> dict[str, Any]:
     if message.role is MessageRole.TOOL_CALL:
         return {
@@ -1356,10 +1347,6 @@ def _message_to_chat_message(
             "role": "assistant",
             "content": join_text_content(message.content),
         }
-        if _should_replay_thinking(message, route_wire_profile=route_wire_profile):
-            message_field = route_wire_profile.thinking.message_field
-            if message_field:
-                payload[message_field] = "\n".join(message.thinking)
         if message.tool_calls:
             payload["tool_calls"] = [
                 _tool_call_to_chat_tool_call(call) for call in message.tool_calls
@@ -1426,21 +1413,6 @@ def _tool_call_to_chat_tool_call(tool_call: LLMToolCall) -> dict[str, Any]:
             "arguments": tool_call.arguments or "{}",
         },
     }
-
-
-def _should_replay_thinking(
-    message: LLMMessage, *, route_wire_profile: RouteWireProfile
-) -> bool:
-    if not message.thinking:
-        return False
-    policy = route_wire_profile.thinking.replay_policy
-    if policy is ThinkingReplayPolicy.NEVER:
-        return False
-    if policy is ThinkingReplayPolicy.ALWAYS:
-        return True
-    if policy is ThinkingReplayPolicy.WHEN_TOOL_CALLS:
-        return bool(message.tool_calls)
-    return False
 
 
 def _tool_to_chat_tool(tool: ToolSpec) -> dict[str, Any]:

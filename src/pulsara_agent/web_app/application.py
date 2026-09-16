@@ -19,7 +19,11 @@ from pulsara_agent.llm.model_catalog import (
     ModelsDevCatalogClient,
 )
 from pulsara_agent.llm.runtime import ModelRuntime
-from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
+from pulsara_agent.settings import (
+    LocalPostgresConfig,
+    LocalSettingsStore,
+    LocalSettingsUnavailable,
+)
 from pulsara_agent.storage.migrations.errors import (
     PostgresSchemaError,
     PostgresSchemaFailureCode,
@@ -46,6 +50,9 @@ class DatabaseDataPlaneState(StrEnum):
     CONFIGURED_UNVERIFIED = "database_configured_unverified"
     UNAVAILABLE = "database_unavailable"
     SCHEMA_ACTION_REQUIRED = "database_schema_action_required"
+    RESET_REQUIRED = "database_reset_required"
+    RESETTING = "database_resetting"
+    RESTART_REQUIRED = "database_restart_required"
     READY = "ready"
 
 
@@ -96,6 +103,7 @@ class LocalWebApplication:
         self.database_state = DatabaseDataPlaneState.NOT_CONFIGURED
         self._runtime_directory: Path | None = None
         self._start_lock = asyncio.Lock()
+        self._database_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
 
     @property
@@ -153,6 +161,7 @@ class LocalWebApplication:
                     database_state=lambda: self.database_state.value,
                     refresh_database_state=self.refresh_database_state,
                     postgres_settings_saved=self.postgres_settings_saved,
+                    reset_postgres=self.reset_postgres,
                 )
                 await http.start()
                 self.http = http
@@ -168,6 +177,12 @@ class LocalWebApplication:
                 raise
 
     async def refresh_database_state(self) -> DatabaseDataPlaneState:
+        async with self._database_lock:
+            return await self._refresh_database_state()
+
+    async def _refresh_database_state(self) -> DatabaseDataPlaneState:
+        if self.database_state is DatabaseDataPlaneState.RESTART_REQUIRED:
+            return self.database_state
         try:
             configured = self.settings.read().postgres
         except LocalSettingsUnavailable:
@@ -179,8 +194,10 @@ class LocalWebApplication:
         try:
             await self.sessions.prepare()
         except PostgresSchemaError as exc:
+            if exc.code is PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED:
+                self.database_state = DatabaseDataPlaneState.RESET_REQUIRED
+                return self.database_state
             action_codes = {
-                PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED,
                 PostgresSchemaFailureCode.UNMANAGED_DATABASE,
                 PostgresSchemaFailureCode.CATALOG_DRIFT,
                 PostgresSchemaFailureCode.EXTENSION_MISSING,
@@ -201,9 +218,65 @@ class LocalWebApplication:
     def postgres_settings_saved(self) -> DatabaseDataPlaneState:
         """Observe a new DSN without connecting or replacing a live data plane."""
 
-        if self.database_state is not DatabaseDataPlaneState.READY:
+        if self.database_state not in {
+            DatabaseDataPlaneState.READY,
+            DatabaseDataPlaneState.RESETTING,
+            DatabaseDataPlaneState.RESTART_REQUIRED,
+        }:
             self.database_state = DatabaseDataPlaneState.CONFIGURED_UNVERIFIED
         return self.database_state
+
+    async def reset_postgres(self, postgres: LocalPostgresConfig) -> dict[str, object]:
+        """Keep the settings shell alive while resetting the confirmed database."""
+        from time import monotonic
+        from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
+
+        runner = PostgresMigrationRunner(
+            admin_dsn=postgres.admin_dsn or "", runtime_dsn=postgres.runtime_dsn
+        )
+        async with self._database_lock:
+            restart_required = (
+                self.core.has_database_resources
+                or self.database_state is DatabaseDataPlaneState.RESTART_REQUIRED
+            )
+            self.database_state = DatabaseDataPlaneState.RESETTING
+            try:
+                if restart_required:
+                    # Existing close owners settle live effects before any SQL
+                    # deletion. A failure leaves the database untouched.
+                    if self.bridge is not None:
+                        await self.bridge.aclose()
+                    if self.protocol_server is not None:
+                        await self.protocol_server.close()
+                    await self.sessions.aclose()
+                    await self.core.shutdown()
+                work = asyncio.create_task(
+                    asyncio.to_thread(
+                        runner.reset, deadline_monotonic=monotonic() + 300.0
+                    )
+                )
+                # A disconnected HTTP waiter cannot release the maintenance
+                # lock while its physical deletion/installation is still running.
+                cancelled: asyncio.CancelledError | None = None
+                while not work.done():
+                    try:
+                        await asyncio.shield(work)
+                    except asyncio.CancelledError as exc:
+                        cancelled = cancelled or exc
+                    except BaseException:
+                        break
+                report = work.result()
+                if cancelled is not None:
+                    raise cancelled
+                return {**report.to_dict(), "restart_required": restart_required}
+            finally:
+                self.database_state = (
+                    DatabaseDataPlaneState.RESTART_REQUIRED
+                    if restart_required
+                    else DatabaseDataPlaneState.CONFIGURED_UNVERIFIED
+                )
+                if not restart_required:
+                    await self._refresh_database_state()
 
     async def aclose(self) -> None:
         task = self._close_task
@@ -243,14 +316,15 @@ class LocalWebApplication:
                 close_error = close_error or exc
 
         # HTTP stays bound but its admission middleware now sees DRAINING.
-        if self.bridge is not None:
-            await close(self.bridge.aclose)
-            self.bridge = None
-        if self.protocol_server is not None:
-            await close(self.protocol_server.close)
-            self.protocol_server = None
-        await close(self.sessions.aclose)
-        await close(self.core.shutdown)
+        async with self._database_lock:
+            if self.bridge is not None:
+                await close(self.bridge.aclose)
+                self.bridge = None
+            if self.protocol_server is not None:
+                await close(self.protocol_server.close)
+                self.protocol_server = None
+            await close(self.sessions.aclose)
+            await close(self.core.shutdown)
         if self.http is not None:
             await close(self.http.aclose)
             self.http = None
