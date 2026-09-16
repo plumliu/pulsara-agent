@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -1977,6 +1978,33 @@ def test_round5b_resource_headroom_exact_boundaries() -> None:
         selected_canonical_expanded_bytes=14 << 20,
         continuity_epoch_logical_bytes=0,
     )
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_round5b_empty_session_manual_compaction_never_starts_summary(force: bool) -> None:
+    host = object.__new__(KernelHostSession)
+    host._lock = asyncio.Lock()
+    host._closing = False
+    host._active_task = None
+    host._active_turn_id = None
+    host._query_command_row = AsyncMock(return_value=None)
+    host._canonical_deadline = lambda: 123.0
+    host._lease = SimpleNamespace(guard=object())
+    read_terminal = Mock(return_value=None)
+    host.repository = SimpleNamespace(read_latest_terminal_scope_turn_id=read_terminal)
+    host._io = SimpleNamespace(run=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs)))
+    host._settle_manual_compaction_command = AsyncMock()
+    host._runner = SimpleNamespace(compact_idle_turn=AsyncMock())
+    host._compaction = SimpleNamespace(request_manual=AsyncMock())
+
+    outcome = asyncio.run(host.compact_context(command_id="command:empty", force=force))
+
+    assert outcome.disposition is CompactionDisposition.NOT_NEEDED
+    assert outcome.public_code == "NO_TERMINAL_TURN"
+    read_terminal.assert_called_once()
+    host._settle_manual_compaction_command.assert_not_awaited()
+    host._runner.compact_idle_turn.assert_not_awaited()
+    host._compaction.request_manual.assert_not_awaited()
 
 
 def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:

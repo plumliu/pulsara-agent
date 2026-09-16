@@ -315,6 +315,25 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
 }
 
 describe('empty session welcome composer', () => {
+  it('disables compaction for an empty session even with an unsent draft, but allows existing context', () => {
+    const input = props({ isRunning: false });
+    const view = render(<WorkbenchView {...input} />);
+    const compact = () => screen.getByRole('button', { name: '压缩上下文' }) as HTMLButtonElement;
+    expect(compact().disabled).toBe(true);
+    act(() => promptDraftStore.insertText('session-one', '尚未发送'));
+    expect(compact().disabled).toBe(true);
+    fireEvent.click(compact());
+    expect(input.onCompact).not.toHaveBeenCalled();
+    view.rerender(<WorkbenchView {...input} messages={[{ id: 'user-one', role: 'user', body: '已发送', time: '现在' }]} />);
+    expect(compact().disabled).toBe(false);
+    view.rerender(<WorkbenchView {...input} initialContextBase={{ base_kind: 'SNAPSHOT', display_after_entry_sequence: 0 }} />);
+    expect(compact().disabled).toBe(false);
+    view.rerender(<WorkbenchView {...input} isRunning />);
+    expect(compact().disabled).toBe(false);
+    view.rerender(<WorkbenchView {...input} isRunning runtimeStatus="offline" />);
+    expect(compact().disabled).toBe(true);
+  });
+
   it('keeps the same focused editor when the first send opens the drawer, and retains a rejected draft', async () => {
     let settle!: (accepted: boolean) => void;
     const onSend = vi.fn(() => new Promise<boolean>(resolve => { settle = resolve; }));
@@ -671,13 +690,16 @@ describe('completed reply process disclosure', () => {
     expect(hiddenProgress()).toBe(false);
   });
 
-  it('loads history collapsed, folds the final reasoning too, and leaves standalone answers alone', () => {
+  it.each(['full', 'summary'] as const)('loads history collapsed, preserves %s reasoning when expanded, and leaves standalone answers alone', (kind) => {
     const view = render(<WorkbenchView {...props({ isRunning: false, messages: [progress, {
-      ...final, reasoning: [{ id: 'reason', kind: 'full', body: '核对完成。' }],
+      ...final, reasoning: [{ id: 'reason', kind, body: '核对完成。' }],
     }] })} />);
     expect(hiddenProgress()).toBe(true);
     expect(screen.queryByRole('button', { name: /展开思考/ })).toBeNull();
     expect(view.container.querySelectorAll('[data-memory-entry="final"]')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(screen.getByRole('button', { name: kind === 'summary' ? '展开思考摘要' : '展开思考', exact: true }));
+    expect(screen.getByText('核对完成。').closest('.reasoning-row__body')).toBeTruthy();
     view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [final] })} />);
     expect(screen.queryByRole('button', { name: /中间过程/ })).toBeNull();
     expect(screen.getByText(final.body)).toBeTruthy();

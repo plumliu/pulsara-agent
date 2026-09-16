@@ -367,6 +367,106 @@ def test_chat_observed_known_reasoning_is_retained_for_native_replay() -> None:
     assert terminal.completed_replay_payload is not None
 
 
+@pytest.mark.parametrize(
+    "detail_type,text_field,kind",
+    [
+        ("reasoning.summary", "summary", ReasoningPresentationKind.SUMMARY),
+        ("reasoning.text", "text", ReasoningPresentationKind.FULL),
+    ],
+)
+@pytest.mark.parametrize("mirror", ["none", "same_chunk", "late_text", "late_details"])
+def test_chat_detail_reasoning_streams_without_duplicate_mirrors(
+    detail_type, text_field, kind, mirror
+) -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    details = [
+        {"type": detail_type, text_field: "first ", "index": 0, "id": "rs:one"},
+        {"type": detail_type, text_field: "second", "index": 0},
+    ]
+    events = []
+    if mirror == "late_details":
+        events.extend(accumulator.apply(_chat_chunk({"reasoning": "first second"})))
+    for detail in details:
+        delta = {"reasoning_details": [detail]}
+        if mirror == "same_chunk":
+            delta["reasoning"] = detail[text_field]
+        events.extend(accumulator.apply(_chat_chunk(delta)))
+    if mirror == "late_text":
+        events.extend(accumulator.apply(_chat_chunk({"reasoning": "first second"})))
+    events.extend(accumulator.apply(_chat_chunk({"content": "answer"}, "stop")))
+    starts = [event for event in events if isinstance(event, ThinkingStartPayload)]
+    assert len(starts) == 1
+    assert starts[0].presentation_kind is (
+        ReasoningPresentationKind.FULL if mirror == "late_details" else kind
+    )
+    assert (
+        "".join(
+            event.delta for event in events if isinstance(event, ThinkingDeltaPayload)
+        )
+        == "first second"
+    )
+    assert (
+        len([event for event in events if isinstance(event, ThinkingEndPayload)]) == 1
+    )
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    # Display projection never rewrites the native replay carrier.
+    assert (
+        thaw_json(terminal.completed_replay_payload.ordered_items[0])[
+            "reasoning_details"
+        ]
+        == details
+    )
+
+
+def test_chat_final_only_details_and_distinct_blocks_are_visible() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    events = accumulator.apply(
+        _chat_chunk(
+            {"content": "answer"},
+            "stop",
+            message={
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_details": [
+                    {
+                        "type": "reasoning.encrypted",
+                        "data": "opaque",
+                        "text": "not public",
+                    },
+                    {"type": "unknown", "text": "not public"},
+                    {"type": "reasoning.summary", "summary": "", "index": 0},
+                    {"type": "reasoning.summary", "summary": "summary one", "index": 1},
+                    {"type": "reasoning.summary", "summary": "summary two", "index": 2},
+                    {"type": "reasoning.text", "text": "public thinking", "index": 3},
+                ],
+            },
+        )
+    )
+    assert [
+        event.presentation_kind
+        for event in events
+        if isinstance(event, ThinkingStartPayload)
+    ] == [
+        ReasoningPresentationKind.SUMMARY,
+        ReasoningPresentationKind.SUMMARY,
+        ReasoningPresentationKind.FULL,
+    ]
+    assert [
+        event.final_text for event in events if isinstance(event, ThinkingEndPayload)
+    ] == [
+        "summary one",
+        "summary two",
+        "public thinking",
+    ]
+    assert isinstance(accumulator.finish(), ProviderAdapterTerminal)
+
+
 def test_chat_reasoning_registry_is_closed_and_provider_neutral() -> None:
     profile = _chat_profile()
     assert tuple(
@@ -388,6 +488,8 @@ def test_chat_reasoning_registry_is_closed_and_provider_neutral() -> None:
                 ),
             )
         )
+
+
 def test_chat_closed_field_accumulation_and_final_reconciliation() -> None:
     profile = _chat_profile()
     accumulator = ChatCompletionAccumulator(

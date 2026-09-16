@@ -36,6 +36,7 @@ from pulsara_agent.llm.adapters.openai.retrying import (
     sdk_max_retries_for_transport,
 )
 from pulsara_agent.llm.errors import LLMTransportContractError
+from pulsara_agent.llm.provider_replay import chat_reasoning_detail_parts
 from pulsara_agent.llm.input import (
     LLMImagePart,
     LLMMessage,
@@ -355,9 +356,7 @@ def build_chat_completions_payload(
     payload["max_completion_tokens"] = (
         call.target.context_budget.effective_output_tokens
     )
-    reasoning = reasoning_wire_fields(
-        call.target.contract, call.selected_reasoning
-    )
+    reasoning = reasoning_wire_fields(call.target.contract, call.selected_reasoning)
     for key, value in reasoning.root.items():
         if key in payload:
             raise ValueError("Chat reasoning root field has another owner")
@@ -448,9 +447,7 @@ def chat_semantic_wire_group(
 ) -> tuple[dict[str, Any], ...]:
     """Return the exact generic wire group for one compiled message."""
 
-    return tuple(
-        _messages_to_chat_messages((message,))
-    )
+    return tuple(_messages_to_chat_messages((message,)))
 
 
 def chat_tool_wire_items(tools: tuple[ToolSpec, ...]) -> tuple[dict[str, Any], ...]:
@@ -487,9 +484,7 @@ def _messages_to_chat_messages(
                 }
             )
             pending_tool_calls = []
-        chat_messages.append(
-            _message_to_chat_message(message)
-        )
+        chat_messages.append(_message_to_chat_message(message))
     if pending_tool_calls:
         chat_messages.append(
             {
@@ -522,6 +517,8 @@ class ChatCompletionAccumulator:
     _replay_aggregate_bytes: int = 2
     _replay_item_count: int = 0
     _unknown_nonempty_field_seen: bool = False
+    _live_reasoning_source: str | None = None
+    _live_reasoning_detail_key: tuple[object, ...] | None = None
 
     def __post_init__(self) -> None:
         self.tool_calls = ChatToolCallAccumulator(builder=self.builder)
@@ -631,7 +628,7 @@ class ChatCompletionAccumulator:
                             "chat live thinking delta is not text",
                             reason_code="transport_chat_replay_field_invalid",
                         )
-                    events.extend(self.builder.thinking_delta(value))
+            events.extend(self._project_live_reasoning(delta))
             raw_tool_calls = delta.get("tool_calls")
             if raw_tool_calls is not None:
                 if not isinstance(raw_tool_calls, list):
@@ -674,6 +671,10 @@ class ChatCompletionAccumulator:
         events.extend(self.tool_calls.close_active_tool_calls())
         self._reconcile_final_message(choice.get("message"))
         self._validate_unknown_fields_for_terminal()
+        if self._live_reasoning_source is None and isinstance(
+            choice.get("message"), dict
+        ):
+            events.extend(self._project_live_reasoning(choice["message"]))
         events.extend(self.builder.close_active_blocks())
         try:
             replay = self._freeze_completed_replay()
@@ -684,6 +685,40 @@ class ChatCompletionAccumulator:
             ProviderAdapterTerminalKind.COMPLETED,
             completed_replay_payload=replay,
         )
+        return events
+
+    def _project_live_reasoning(
+        self, value: dict[str, Any]
+    ) -> list[ProviderStreamPayload]:
+        details = tuple(chat_reasoning_detail_parts(value.get("reasoning_details")))
+        text = tuple(
+            value.get(name)
+            for name in ("reasoning_content", "reasoning")
+            if isinstance(value.get(name), str) and value[name]
+        )
+        # Keep one live carrier for the response so delayed mirror fields do
+        # not repeat already displayed text. Canonical projection later derives
+        # all distinct public blocks from the complete, unchanged replay body.
+        if self._live_reasoning_source is None:
+            if details:
+                self._live_reasoning_source = "details"
+            elif text:
+                self._live_reasoning_source = "text"
+        events: list[ProviderStreamPayload] = []
+        if self._live_reasoning_source == "details":
+            for key, block in details:
+                if key != self._live_reasoning_detail_key:
+                    events.extend(self.builder.thinking_end())
+                    self._live_reasoning_detail_key = key
+                events.extend(
+                    self.builder.thinking_delta(
+                        block.text,
+                        presentation_kind=block.presentation_kind,
+                    )
+                )
+        elif self._live_reasoning_source == "text":
+            for part in text:
+                events.extend(self.builder.thinking_delta(part))
         return events
 
     def _is_exact_empty_terminal_echo(self, choice: dict[str, Any]) -> bool:
@@ -1075,9 +1110,7 @@ class ChatToolCallAccumulator:
     builder: ProviderLiveItemBuilder
     _ordered_states: list[_ChatToolCallState] = field(default_factory=list)
     _states_by_id: dict[str, _ChatToolCallState] = field(default_factory=dict)
-    _states_by_index: dict[int, list[_ChatToolCallState]] = field(
-        default_factory=dict
-    )
+    _states_by_index: dict[int, list[_ChatToolCallState]] = field(default_factory=dict)
     completed_calls: tuple[dict[str, object], ...] = ()
 
     def apply_tool_call_delta(
@@ -1239,9 +1272,7 @@ class ChatToolCallAccumulator:
             self._bind_call_id(state, tool_call_id)
         return state
 
-    def _bind_call_id(
-        self, state: _ChatToolCallState, tool_call_id: str
-    ) -> None:
+    def _bind_call_id(self, state: _ChatToolCallState, tool_call_id: str) -> None:
         existing = self._states_by_id.get(tool_call_id)
         if existing is not None and existing is not state:
             raise LLMTransportContractError(

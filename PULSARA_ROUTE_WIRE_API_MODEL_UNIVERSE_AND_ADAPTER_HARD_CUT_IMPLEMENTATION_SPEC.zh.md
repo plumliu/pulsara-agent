@@ -296,6 +296,15 @@ OpenCode 为广覆盖和兼容性保留了大量务实 fallback，Pulsara 不照
 output items 只来自 adapter 对实际 provider 输出的 closed-shape 收集，并仅通过现有
 target-compatible durable native replay 回放；process-local thinking event 只负责实时展示。
 
+Chat 的公开思考展示按内容形状识别 `reasoning_details`：`reasoning.summary.summary` 为摘要，
+`reasoning.text.text` 为普通思考；仅投影非空字符串，encrypted、签名和未知形状保持 opaque。
+既有 index 优先、否则 ID 标识同类型块的分片；二者均缺省时按类型合并，保留首次出现顺序。
+历史投影优先结构化块，仅当顶层 reasoning 文本与一个结构化块或全部结构化文本的拼接完全相等
+时省略该镜像，其他顶层文本保留。实时展示固定使用首次出现的可读载体（同一 chunk 同时出现时
+优先 details），防止延迟到达的镜像重复展示；结束后由 canonical 投影提供完整的独立公开块。
+只在最终 message 中出现的公开思考也必须产生展示事件。此规则不改变原始回放载体、摘要请求参数、
+provider input prefix 或加密内容，不按 provider/model 名称分支。
+
 ### 3.2 当前 target 与 reasoning request 的错误抽象
 
 当前代码近似为：

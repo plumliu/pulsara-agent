@@ -223,6 +223,49 @@ def test_provider_visible_chat_reasoning_is_derived_from_exact_replay_text() -> 
     ]
 
 
+@pytest.mark.parametrize(
+    "mirror", [None, "summary one", "summary onepublic thinking", "different text"]
+)
+def test_provider_visible_chat_details_preserve_fragments_kinds_and_exact_mirror_dedup(
+    mirror,
+) -> None:
+    message = {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_details": [
+            {
+                "type": "reasoning.summary",
+                "summary": "summary ",
+                "index": 0,
+                "id": "rs:one",
+            },
+            {"type": "reasoning.summary", "summary": "one", "index": 0},
+            {"type": "reasoning.text", "text": "public thinking", "index": 1},
+            {"type": "reasoning.encrypted", "data": "opaque", "text": "not public"},
+            {"type": "unknown", "summary": "not public"},
+            {"type": "reasoning.text", "text": None},
+        ],
+    }
+    if mirror is not None:
+        message["reasoning"] = mirror
+    candidate = _candidate(_frozen_object(message))
+    projected = project_provider_visible_reasoning(
+        codec_kind=candidate.codec_kind,
+        payload_bytes=candidate.payload_bytes,
+        expected_payload_digest=candidate.payload_digest,
+        expected_payload_size=candidate.payload_size,
+        expected_item_count=candidate.item_count,
+    )
+    expected = [
+        (ReasoningPresentationKind.SUMMARY, "summary one"),
+        (ReasoningPresentationKind.FULL, "public thinking"),
+    ]
+    if mirror == "different text":
+        expected.append((ReasoningPresentationKind.FULL, mirror))
+    assert [(block.presentation_kind, block.text) for block in projected] == expected
+    assert json.loads(candidate.payload_bytes) == [message]
+
+
 def test_provider_visible_responses_reasoning_preserves_each_summary_and_content_part() -> (
     None
 ):

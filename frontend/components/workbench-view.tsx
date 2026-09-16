@@ -1690,6 +1690,8 @@ export function WorkbenchView({
     && !(welcomeState.sessionId === session.id && welcomeState.started));
   const composerOptionsVisible = !welcome || welcomeState.options
     || modelOpen || reasoningOpen || skillOpen || permissionOpen;
+  const hasCompactionContext = messages.length > 0 || isRunning
+    || initialContextBase?.base_kind === 'SNAPSHOT' || Boolean(contextCompaction);
   useLayoutEffect(() => {
     const departure = welcomeDeparture.current;
     if (welcome || !departure) return;
@@ -1987,7 +1989,8 @@ export function WorkbenchView({
           {canControl && (
             <button
               className={`ghost-button${compacting ? ' is-compacting' : ''}`}
-              disabled={compacting}
+              disabled={compacting || !hasCompactionContext || runtimeStatus !== 'online'}
+              title={!hasCompactionContext ? '开始对话后即可压缩上下文' : undefined}
               onClick={() => {
                 setCompacting(true);
                 void onCompact().finally(() => setCompacting(false));

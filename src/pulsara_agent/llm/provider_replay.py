@@ -8,6 +8,7 @@ intentionally excluded from ``repr``.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from hashlib import sha256
@@ -237,6 +238,42 @@ class ProviderVisibleReasoningBlock:
             raise ValueError("provider-visible reasoning text is empty")
 
 
+def chat_reasoning_detail_parts(
+    value: object,
+) -> Iterator[
+    tuple[
+        tuple[ReasoningPresentationKind, int | None, str | None],
+        ProviderVisibleReasoningBlock,
+    ]
+]:
+    """Project only recognized public text; encrypted/unknown details stay opaque.
+
+    Array entries are stream fragments. Provider index/ID identifies a logical
+    block; absent identity means one block per presentation kind.
+    """
+    if not isinstance(value, list):
+        return
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "reasoning.summary":
+            kind, text = ReasoningPresentationKind.SUMMARY, item.get("summary")
+        elif item.get("type") == "reasoning.text":
+            kind, text = ReasoningPresentationKind.FULL, item.get("text")
+        else:
+            continue
+        if not isinstance(text, str) or not text:
+            continue
+        index = item.get("index")
+        identity = item.get("id")
+        key = (
+            kind,
+            index if type(index) is int else None,
+            identity if type(index) is not int and isinstance(identity, str) else None,
+        )
+        yield key, ProviderVisibleReasoningBlock(kind, text)
+
+
 def project_provider_visible_reasoning(
     *,
     codec_kind: ProviderAssistantReplayCodecKind,
@@ -271,13 +308,24 @@ def project_provider_visible_reasoning(
     if codec_kind is ProviderAssistantReplayCodecKind.CHAT_CLOSED_REASONING_FIELDS:
         message = decoded[0]
         assert isinstance(message, dict)
+        fragments: dict[
+            tuple[ReasoningPresentationKind, int | None, str | None], list[str]
+        ] = {}
+        for key, block in chat_reasoning_detail_parts(message.get("reasoning_details")):
+            fragments.setdefault(key, []).append(block.text)
+        for key, parts in fragments.items():
+            projected.append(ProviderVisibleReasoningBlock(key[0], "".join(parts)))
+        # Top-level reasoning commonly mirrors the structured detail stream.
+        # Suppress only exact aliases; distinct public text remains visible.
+        detail_texts = {block.text for block in projected}
+        detail_texts.add("".join(block.text for block in projected))
         for field_name in ("reasoning_content", "reasoning"):
             if field_name not in message:
                 continue
             value = message[field_name]
             if not isinstance(value, str):
                 raise ValueError("Chat provider-visible reasoning is not text")
-            if value:
+            if value and value not in detail_texts:
                 projected.append(
                     ProviderVisibleReasoningBlock(
                         ReasoningPresentationKind.FULL,
@@ -578,8 +626,12 @@ def _validate_fragment_fields(
 
 
 def rebind_durable_provider_assistant_replay(
-    *, fragment: ProviderAssistantReplayFragment, session_id: str,
-    workspace_id: str, assistant_entry_id: str, wire_api: str,
+    *,
+    fragment: ProviderAssistantReplayFragment,
+    session_id: str,
+    workspace_id: str,
+    assistant_entry_id: str,
+    wire_api: str,
 ) -> PreparedDurableProviderAssistantReplay:
     """Copy validated history with a local identity and its original wire target.
 
@@ -600,15 +652,25 @@ def rebind_durable_provider_assistant_replay(
         },
     )
     return PreparedDurableProviderAssistantReplay(
-        replay_id=provider_replay_id(session_id=session_id, assistant_entry_id=assistant_entry_id, wire_api=wire_api),
-        session_id=session_id, workspace_id=workspace_id, assistant_entry_id=assistant_entry_id,
-        wire_api=wire_api, codec_kind=fragment.codec_kind,
+        replay_id=provider_replay_id(
+            session_id=session_id,
+            assistant_entry_id=assistant_entry_id,
+            wire_api=wire_api,
+        ),
+        session_id=session_id,
+        workspace_id=workspace_id,
+        assistant_entry_id=assistant_entry_id,
+        wire_api=wire_api,
+        codec_kind=fragment.codec_kind,
         provider_replay_contract_fingerprint=fragment.provider_replay_contract_fingerprint,
         replay_target_fingerprint=fragment.replay_target_fingerprint,
         public_projection_fingerprint=fragment.public_projection_fingerprint,
-        ordered_items=fragment.ordered_items, payload_bytes=fragment.payload_bytes,
-        payload_digest=fragment.payload_digest, payload_size=fragment.payload_size,
-        item_count=fragment.item_count, fragment_fingerprint=fingerprint,
+        ordered_items=fragment.ordered_items,
+        payload_bytes=fragment.payload_bytes,
+        payload_digest=fragment.payload_digest,
+        payload_size=fragment.payload_size,
+        item_count=fragment.item_count,
+        fragment_fingerprint=fingerprint,
     )
 
 
@@ -688,6 +750,7 @@ __all__ = [
     "ProviderReplayTargetCompatibilityFact",
     "build_prepared_durable_provider_assistant_replay",
     "build_provider_replay_target_compatibility",
+    "chat_reasoning_detail_parts",
     "provider_replay_codec_for_wire_api",
     "provider_replay_contract_fingerprint",
     "provider_replay_id",
