@@ -1,7 +1,17 @@
+import { ToolResultDisplayContext } from '../lib/tool-result-display';
+import type { ReactElement, PropsWithChildren } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentTask } from '../lib/pulsara-types';
 import { TaskWorkspace } from './task-workspace';
+
+function renderWithRawResults(ui: ReactElement) {
+  return render(ui, { wrapper: ({ children }: PropsWithChildren) => (
+    <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults: true, onChange: () => {} }}>
+      {children}
+    </ToolResultDisplayContext.Provider>
+  ) });
+}
 
 afterEach(() => { vi.unstubAllGlobals(); cleanup(); });
 
@@ -85,7 +95,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
         },
       ],
     }));
-    render(<TaskWorkspace
+    renderWithRawResults(<TaskWorkspace
       tasks={[task()]}
       loading={false}
       canControl
@@ -230,7 +240,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
         }],
         nextCursor: 'activity:next',
       });
-    render(<TaskWorkspace
+    renderWithRawResults(<TaskWorkspace
       tasks={[
         task({ id: 'task-a', label: '前置节点', status: 'completed' }),
         task({

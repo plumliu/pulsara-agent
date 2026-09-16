@@ -11,6 +11,7 @@ import { OverviewView } from '../components/overview-view';
 import { SessionSidebar } from '../components/session-sidebar';
 import { SettingsView } from '../components/settings-view';
 import { WorkbenchView } from '../components/workbench-view';
+import { ToolResultDisplayContext, readSavedToolResultDisplay } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import {
   LocalHttpRuntimeAdapter,
@@ -231,6 +232,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   useEffect(() => () => promptDraftStore.destroy(), [promptDraftStore]);
   const [theme, setTheme] = useState<'light' | 'dark'>(readSavedTheme);
+  const [showBuiltinToolResults, setShowBuiltinToolResults] = useState(readSavedToolResultDisplay);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [turnPermission, setTurnPermission] = useState<PermissionMode>('bypass-permissions');
   const databaseState = bootstrap?.database_state;
@@ -860,6 +862,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [theme]);
 
   useEffect(() => {
+    try {
+      window.localStorage?.setItem('pulsara-show-builtin-tool-results', String(showBuiltinToolResults));
+    } catch {
+      // Browser preference storage may be unavailable in private contexts.
+    }
+  }, [showBuiltinToolResults]);
+
+  useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
@@ -1216,6 +1226,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         deliveryMode,
         permission,
         status: 'sending',
+        displayAsMessage: !projection.isRunning && projection.queuedCount === 0
+          && !localSubmissions.some(item => item.sessionId === active.sessionId
+            && ['sending', 'synchronizing', 'queued', 'unknown'].includes(item.status)),
       }]);
       const receipt = await active.submitPrompt(commandId, content, permission);
       if (!ownsConnection(active)) return false;
@@ -1967,6 +1980,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [ownsConnection]);
 
   return (
+    <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} onOpenCommand={() => setCommandOpen(true)} />
 
@@ -2024,7 +2038,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
             && !item.handledByQueueAction
             && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
             && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
-            && !projection.queuedPrompts.some((queued) => queued.commandId === item.commandId)
+            && (item.displayAsMessage || !projection.queuedPrompts.some((queued) => queued.commandId === item.commandId))
             && !projection.messages.some((message) => message.inputSource?.commandId === item.commandId)
           ))}
           runtimeStatus={runtimeStatus}
@@ -2250,5 +2264,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}
       />
     </main>
+    </ToolResultDisplayContext.Provider>
   );
 }

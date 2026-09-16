@@ -382,6 +382,10 @@ function TaskGraphDialog({
                   <div className="task-conversation">
                     <ConversationMessages
                       messages={conversationMessages}
+                      isRunning={active(selected.status)}
+                      taskFinalAnswerId={selected.result ? conversationMessages.find(message => (
+                        message.role === 'assistant' && message.body === resultBody
+                      ))?.id : undefined}
                       skills={skills}
                       artifactOwnerKey={`${artifactOwnerKey}:${selected.id}`}
                       onReadToolArtifact={onReadToolArtifact}

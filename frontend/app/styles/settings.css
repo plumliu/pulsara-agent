@@ -127,3 +127,10 @@
 .database-reset-dialog footer button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-deep); }
 .database-reset-dialog .database-reset-confirm { background: var(--red); border-color: var(--red); color: white; }
 .database-reset-dialog .database-reset-error, .database-form .subtle-danger { color: var(--red); }
+
+.settings-switch { position: relative; width: 36px; height: 21px; flex-shrink: 0; padding: 2px; border: 1px solid var(--line-strong); border-radius: 20px; background: var(--paper-deep); cursor: pointer; transition: background 160ms, border-color 160ms; }
+.settings-switch > span { display: block; width: 15px; height: 15px; border-radius: 50%; background: var(--muted); transition: transform 160ms, background 160ms; }
+.settings-switch[aria-checked="true"] { background: var(--blue); border-color: var(--blue); }
+.settings-switch[aria-checked="true"] > span { transform: translateX(15px); background: white; }
+.settings-switch:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .settings-switch, .settings-switch > span { transition: none; } }

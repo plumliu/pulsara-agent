@@ -357,6 +357,8 @@ export interface UserControlQueryResult {
 }
 
 export interface LocalPromptSubmission {
+  // Browser-only placement chosen at submission; never changes delivery mode.
+  displayAsMessage?: boolean;
   sessionId: string;
   connectionGeneration: number;
   commandId: string;

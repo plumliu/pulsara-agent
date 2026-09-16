@@ -5,13 +5,15 @@ import {
   Laptop, LoaderCircle, Moon, Palette, Plus, RefreshCw, ShieldCheck,
   SlidersHorizontal, Sun, Trash2,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   LocalSettingsReadModel, ModelCatalogReadModel,
   ModelConfigurationInput, ModelConfigurationSummary, RuntimeAdapter, RuntimeBootstrap,
 } from '../lib/runtime-adapter';
 import type { RuntimeStatus } from '../lib/pulsara-types';
 import { RuntimeApiError } from '../lib/runtime-adapter';
+
+import { ToolResultDisplayContext } from '../lib/tool-result-display';
 
 type SettingsSection = 'general' | 'models' | 'service';
 type CredentialKind = 'embedding' | 'rerank';
@@ -153,6 +155,7 @@ function DatabaseResetDialog({ target, busy, error, onClose, onConfirm }: {
 }
 
 export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify }: SettingsViewProps) {
+  const { showBuiltinToolResults, onChange: onToolResultDisplayChange } = useContext(ToolResultDisplayContext);
   const [section, setSection] = useState<SettingsSection>(bootstrap?.database_state === 'ready' ? 'general' : 'service');
   const [settings, setSettings] = useState<LocalSettingsReadModel | undefined>(bootstrap);
   const [catalog, setCatalog] = useState<ModelCatalogReadModel>();
@@ -430,6 +433,9 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
         {loading && <div className="settings-loading"><LoaderCircle size={15} />正在读取本机设置…</div>}
         {section === 'general' && <section className="settings-group"><header><Palette size={16} /><div><h2>外观</h2><p>控制 Pulsara 在本机的呈现方式。</p></div></header>
           <SettingRow icon={theme === 'light' ? Sun : Moon} title="主题" detail="切换明暗外观"><div className="theme-picker"><button className={theme === 'light' ? 'is-active' : ''} onClick={() => onThemeChange('light')}><Sun size={12} /> 浅色</button><button className={theme === 'dark' ? 'is-active' : ''} onClick={() => onThemeChange('dark')}><Moon size={12} /> 深色</button></div></SettingRow>
+          <SettingRow icon={SlidersHorizontal} title="显示内置工具原始结果" detail="显示原始文本、长结果预览和分页读取入口。仅影响界面，保存在当前浏览器。">
+            <button type="button" role="switch" className="settings-switch" aria-label="显示内置工具原始结果" aria-checked={showBuiltinToolResults} onClick={() => onToolResultDisplayChange(!showBuiltinToolResults)}><span /></button>
+          </SettingRow>
         </section>}
         {section === 'models' && <>
           <section className="settings-group model-settings-group"><header><Bot size={16} /><div><h2>模型配置</h2><p>每张卡片是一条可在会话中选择的独立连接。</p></div><button className="settings-header-action" onClick={() => setAdding((value) => !value)}><Plus size={13} />添加配置</button></header>

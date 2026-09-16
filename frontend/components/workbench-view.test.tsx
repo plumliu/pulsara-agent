@@ -1,10 +1,20 @@
+import { ToolResultDisplayContext } from '../lib/tool-result-display';
+import type { ReactElement, PropsWithChildren } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../lib/runtime-adapter';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { promptContentTextProjection } from '../lib/prompt-content';
-import { WorkbenchView } from './workbench-view';
+import { ConversationMessages, WorkbenchView } from './workbench-view';
+
+function renderWithRawResults(ui: ReactElement) {
+  return render(ui, { wrapper: ({ children }: PropsWithChildren) => (
+    <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults: true, onChange: () => {} }}>
+      {children}
+    </ToolResultDisplayContext.Provider>
+  ) });
+}
 
 let promptDraftStore: PromptDraftStore;
 beforeEach(() => {
@@ -47,6 +57,24 @@ describe('PR04 composer queue hard cut', () => {
       promptDelivery: { queueItemId: kind === 'send' ? 'replacement' : 'source',
         queueStatus: kind === 'send' ? 'PENDING' : 'CANCELLED', deliveryMode: kind === 'send' ? 'steer' : 'new-turn' },
     },
+  });
+
+  it('keeps the same compact card when a local submission is accepted into the queue', () => {
+    const view = render(<WorkbenchView {...props({ localSubmissions: [{
+      sessionId: 'session-one', connectionGeneration: 1, commandId: item.commandId,
+      content: item.content, deliveryMode: 'new-turn', status: 'sending',
+      targetTurnId: 'internal-turn-id', permission: 'read-only', detail: '正在核对投递状态',
+    }] })} />);
+    const queue = screen.getByRole('region', { name: '等待处理的输入' });
+    const card = queue.querySelector('article');
+    const content = queue.querySelector('.queued-prompt-content');
+    expect(queue.textContent).not.toMatch(/适用权限|目标轮次|internal-turn-id|正在核对投递状态|正在加入/);
+    expect((within(queue).getByRole('button', { name: '编辑' }) as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [item] })} />);
+    expect(queue.querySelector('article')).toBe(card);
+    expect(queue.querySelector('.queued-prompt-content')).toBe(content);
+    expect((within(queue).getByRole('button', { name: '编辑' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(queue.querySelector('.prompt-content-body')?.textContent).toBe(promptContentTextProjection(item.content));
   });
 
   it('keeps the source busy until accepted then shows one exact steer, replaced by its canonical entry', () => {
@@ -160,6 +188,49 @@ describe('PR04 composer queue hard cut', () => {
     ));
   });
 
+  it.each([true, false])('animates editor shrink only after an accepted submission: %s', async (accepted) => {
+    let settle!: (accepted: boolean) => void;
+    const onSend = vi.fn(() => new Promise<boolean>(resolve => { settle = resolve; }));
+    const view = render(<WorkbenchView {...props({ onSend })} />);
+    act(() => promptDraftStore.insertText('session-one', '第一行\n第二行\n第三行'));
+    const editor = view.container.querySelector('.composer-editor') as HTMLElement;
+    editor.getBoundingClientRect = () => new DOMRect(0, 0, 720,
+      promptDraftStore.summary('session-one').hasContent ? 140 : 52);
+    const animate = vi.fn(() => ({ cancel: vi.fn() }) as unknown as Animation);
+    editor.animate = animate;
+    fireEvent.keyDown(screen.getByLabelText('发送给 Pulsara'), { key: 'Enter' });
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    expect(animate).not.toHaveBeenCalled();
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(true);
+    await act(async () => settle(accepted));
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(!accepted);
+    if (accepted) {
+      expect(animate).toHaveBeenCalledExactlyOnceWith([
+        { height: '140px', overflow: 'hidden' },
+        { height: '52px', overflow: 'hidden' },
+      ], { duration: 240, easing: 'cubic-bezier(.2, .7, .2, 1)' });
+    } else expect(animate).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('restores Enter focus without stealing a later focus choice: %s', async (movedFocus) => {
+    let accept!: (accepted: boolean) => void;
+    const onSend = vi.fn(() => new Promise<boolean>(resolve => { accept = resolve; }));
+    render(<WorkbenchView {...props({ onSend })} />);
+    // Restored drafts can have revision zero, just like the replacement editor.
+    act(() => promptDraftStore.restoreIfEmpty('session-one', textPrompt('继续测试焦点')));
+    const oldEditor = screen.getByLabelText('发送给 Pulsara');
+    act(() => oldEditor.focus());
+    fireEvent.keyDown(oldEditor, { key: 'Enter' });
+    await waitFor(() => expect(onSend).toHaveBeenCalledTimes(1));
+    const otherControl = screen.getByRole('button', { name: '切换检查器' });
+    if (movedFocus) act(() => otherControl.focus());
+    await act(async () => accept(true));
+    const newEditor = screen.getByLabelText('发送给 Pulsara');
+    expect(newEditor).not.toBe(oldEditor);
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(false);
+    await waitFor(() => expect(document.activeElement).toBe(movedFocus ? otherControl : newEditor));
+  });
+
   it('places exact duplicate inputs in composer with three accessible flat actions', () => {
     const queuedPrompts = ['one', 'two'].map((id, index) => ({
       queueItemId: id, commandId: `command-${id}`, sequence: index + 1,
@@ -243,6 +314,92 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
   };
 }
 
+describe('empty session welcome composer', () => {
+  it('keeps the same focused editor when the first send opens the drawer, and retains a rejected draft', async () => {
+    let settle!: (accepted: boolean) => void;
+    const onSend = vi.fn(() => new Promise<boolean>(resolve => { settle = resolve; }));
+    const view = render(<WorkbenchView {...props({ isRunning: false, onSend,
+      initialContextBase: { base_kind: 'FULL_HISTORY', display_after_entry_sequence: 0 },
+    })} />);
+    expect(screen.getByRole('heading', { name: '有什么想做的？' })).toBeTruthy();
+    const drawer = view.container.querySelector('.composer-drawer')!;
+    expect(drawer.hasAttribute('inert')).toBe(true);
+    const wrap = view.container.querySelector('.composer-wrap') as HTMLElement;
+    wrap.getBoundingClientRect = () => new DOMRect(0,
+      view.container.querySelector('.is-welcome') ? 280 : 650, 720, 70);
+    const animate = vi.fn(() => ({ cancel: vi.fn() }) as unknown as Animation);
+    wrap.animate = animate;
+    act(() => promptDraftStore.insertText('session-one', '从这里开始'));
+    const editor = screen.getByLabelText('发送给 Pulsara');
+    act(() => editor.focus());
+    expect(document.activeElement).toBe(editor);
+    fireEvent.keyDown(editor, { key: 'Enter' });
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    expect(screen.getByLabelText('发送给 Pulsara')).toBe(editor);
+    expect(editor.contains(document.activeElement)).toBe(true);
+    expect(view.container.querySelector('.is-welcome')).toBeNull();
+    expect(drawer.hasAttribute('inert')).toBe(false);
+    expect(screen.queryByRole('heading', { name: '有什么想做的？' })).toBeNull();
+    expect(animate).toHaveBeenCalledWith([
+      { transform: 'translateY(-370px)' }, { transform: 'translateY(0)' },
+    ], expect.objectContaining({ duration: 560 }));
+    await act(async () => settle(false));
+    expect(promptDraftStore.summary('session-one').text).toBe('从这里开始');
+  });
+
+  it('keeps options collapsed and gently guides missing model selection in two steps', () => {
+    const view = render(<WorkbenchView {...props({ isRunning: false })} />);
+    expect(screen.getByRole('button', { name: '输入选项' }).classList.contains('needs-selection')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: '输入选项' }));
+    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: '输入选项' }));
+    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(true);
+    view.rerender(<WorkbenchView {...props({ isRunning: false, modelCallBinding: null })} />);
+    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(true);
+    const options = screen.getByRole('button', { name: '输入选项' });
+    expect(options.classList.contains('needs-selection')).toBe(true);
+    expect(view.container.querySelector('.welcome-heading__brand')).toBeNull();
+    expect(view.container.querySelector('.composer-note')).toBeNull();
+    fireEvent.click(options);
+    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(false);
+    expect(options.classList.contains('needs-selection')).toBe(false);
+    const model = screen.getByRole('button', { name: /选择模型/ });
+    expect(model.classList.contains('needs-selection')).toBe(true);
+    fireEvent.click(model);
+    expect(model.classList.contains('needs-selection')).toBe(false);
+    expect(model.getAttribute('aria-expanded')).toBe('true');
+    view.rerender(<WorkbenchView {...props({ isRunning: false })} />);
+    expect(view.container.querySelector('.needs-selection')).toBeNull();
+  });
+
+  it.each(['click', 'enter'])('opens options and model selection instead of submitting an unconfigured draft via %s', async (method) => {
+    const input = props({ isRunning: false, modelCallBinding: null });
+    const view = render(<WorkbenchView {...input} />);
+    act(() => promptDraftStore.insertText('session-one', '先选择模型'));
+    const send = screen.getByRole('button', { name: '发送' }) as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
+    if (method === 'click') fireEvent.click(send);
+    else fireEvent.keyDown(screen.getByLabelText('发送给 Pulsara'), { key: 'Enter' });
+    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(false);
+    expect(screen.getByRole('button', { name: /选择模型/ }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('heading', { name: '有什么想做的？' })).toBeTruthy();
+    expect(promptDraftStore.summary('session-one').text).toBe('先选择模型');
+    expect(input.onSend).not.toHaveBeenCalled();
+    expect(input.onNotify).not.toHaveBeenCalled();
+  });
+
+  it('uses welcome only for empty sessions, not running or inherited conversations', () => {
+    const view = render(<WorkbenchView {...props({ isRunning: false })} />);
+    expect(view.container.querySelector('.is-welcome')).toBeTruthy();
+    view.rerender(<WorkbenchView {...props()} />);
+    expect(view.container.querySelector('.is-welcome')).toBeNull();
+    view.rerender(<WorkbenchView {...props({ isRunning: false,
+      initialContextBase: { base_kind: 'SNAPSHOT', display_after_entry_sequence: 0 },
+    })} />);
+    expect(view.container.querySelector('.is-welcome')).toBeNull();
+  });
+});
+
 describe('WorkbenchView PR03 control and raw-result contract', () => {
   it('keeps the bounded editor, TODO, and latest controls in one composer frame', async () => {
     let composerTop = 650;
@@ -323,6 +480,48 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.queryByText(/主任务会结合|用于当前处理|模型已收到/)).toBeNull();
   });
 
+  it('hides builtin raw previews and artifact pages by default, retaining diffs and commands', async () => {
+    const readArtifact = vi.fn(async () => ({ resultEntryId: 'result', text: 'retained output',
+      offsetChars: 0, returnedChars: 15, totalChars: 15, hasMore: false }));
+    const viewProps = props({ isRunning: true, onReadToolArtifact: readArtifact, messages: [{
+      id: 'assistant', role: 'assistant', time: '现在', body: '', status: 'running', traces: [{
+        id: 'edit', kind: 'edit', toolName: 'edit_file', title: '更新文件', subtitle: 'file',
+        status: 'completed', resultText: JSON.stringify({ diff: '-old\n+new', secret: 'raw body' }),
+        resultSummary: 'raw body', resultEntryId: 'result',
+        artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'HEAD_TAIL' },
+      }, {
+        id: 'terminal', kind: 'terminal', toolName: 'terminal', title: '运行命令', subtitle: 'pwd',
+        status: 'completed', command: 'pwd', resultText: 'raw stdout', resultSummary: 'raw stdout',
+      }, {
+        id: 'read', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: 'file',
+        status: 'completed', resultText: 'raw file', resultSummary: 'raw file',
+      }],
+    }] });
+    const display = (show: boolean) => <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults: show, onChange: () => {} }}><WorkbenchView {...viewProps} /></ToolResultDisplayContext.Provider>;
+    const view = render(display(false));
+    const titles = [...view.container.querySelectorAll('.trace-summary-title strong')].map(node => node.textContent);
+    expect(titles).toEqual(['修改文件', '运行命令', '读取文件']);
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：edit_file' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：terminal' }));
+    expect(screen.getByLabelText('文件差异').textContent).toBe('-old\n+new');
+    expect(view.container.querySelector('.terminal-command')?.textContent).toContain('pwd');
+    expect(screen.queryByRole('button', { name: '展开工具详情：read_file' })).toBeNull();
+    expect(screen.queryByText('raw stdout')).toBeNull();
+    expect(screen.queryByText('raw body')).toBeNull();
+    expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '查看完整输出' })).toBeNull();
+    expect(readArtifact).not.toHaveBeenCalled();
+
+    view.rerender(display(true));
+    expect(screen.getAllByRole('region', { name: '工具原始结果' })).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
+    expect(await screen.findByText('retained output')).toBeTruthy();
+    view.rerender(display(false));
+    expect(screen.queryByText('retained output')).toBeNull();
+    expect(screen.queryByRole('region', { name: '完整工具输出' })).toBeNull();
+    expect(screen.getByLabelText('文件差异')).toBeTruthy();
+  });
+
   it('keeps exact raw text/copy, exact edit diff, and paginates the retained artifact', async () => {
     const raw = '{"diff":"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new","literal":"N| 不清洗"}';
     const writeText = vi.fn(async () => undefined);
@@ -335,7 +534,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       returnedChars: 17, totalChars: 34, hasMore: false,
     }];
     const readArtifact = vi.fn(async (_entryId: string, offset: number) => pages[offset === 0 ? 0 : 1]!);
-    render(<WorkbenchView {...props({
+    renderWithRawResults(<WorkbenchView {...props({
       isRunning: false,
       messages: [{
         id: 'assistant-one', role: 'assistant', time: '现在', body: '文件已处理。', status: 'completed',
@@ -348,6 +547,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       onReadToolArtifact: readArtifact,
     })} />);
 
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：edit_file' }));
     const rawRegion = screen.getByRole('region', { name: '工具原始结果' });
     expect(within(rawRegion).getByText(raw).textContent).toBe(raw);
@@ -373,22 +573,23 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       messages: [{
         id: 'assistant-one', role: 'assistant', time: '现在', body: '完成。', status: 'completed',
         traces: [{
-          id: 'trace-tool', kind: 'mcp', toolName: 'mcp_unknown', title: '未知工具', subtitle: '已完成',
+          id: 'trace-tool', kind: 'mcp', toolName: 'mcp__example__unknown', title: '未知工具', subtitle: '已完成',
           status: 'completed', resultText: '{"value":true}', resultEntryId: 'entry-result',
           artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'HEAD_TAIL' },
         }],
       }],
       onReadToolArtifact: readArtifact,
     })} />);
-    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp_unknown' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp__example__unknown' }));
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
-    fireEvent.click(screen.getByRole('button', { name: '收起工具详情：mcp_unknown' }));
+    fireEvent.click(screen.getByRole('button', { name: '收起工具详情：mcp__example__unknown' }));
     resolve({
       resultEntryId: 'entry-result', text: 'late-artifact-page', offsetChars: 0,
       returnedChars: 18, totalChars: 18, hasMore: false,
     });
     await Promise.resolve();
-    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp_unknown' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp__example__unknown' }));
     await waitFor(() => expect(readArtifact).toHaveBeenCalledTimes(1));
     expect(screen.queryByText('late-artifact-page')).toBeNull();
   });
@@ -414,6 +615,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
 
     expect(screen.queryByRole('region', { name: '工具读取的图片' })).toBeNull();
     expect(readImage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：view_image' }));
     expect(screen.getByRole('region', { name: '工具读取的图片' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '放大图片' }).className).toBe('tool-image-preview');
@@ -422,4 +624,96 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     fireEvent.click(screen.getByRole('button', { name: '收起工具详情：view_image' }));
     expect(screen.queryByRole('region', { name: '工具读取的图片' })).toBeNull();
   });
+});
+
+describe('completed reply process disclosure', () => {
+  const progress = {
+    id: 'progress', turnId: 'turn-one', entrySequence: 2, role: 'assistant' as const,
+    assistantKind: 'tool-request' as const, time: '13:01', body: '先检查原始资料。',
+    forkEligible: false, status: 'completed' as const,
+    traces: [{ id: 'read-one', kind: 'terminal' as const, title: '读取文件', toolName: 'read_file', status: 'completed' as const, subtitle: '已读取', resultText: '文件内容'  }],
+  };
+  const steer = {
+    id: 'steer', turnId: 'turn-one', entrySequence: 3, role: 'user' as const,
+    userKind: 'steer' as const, time: '13:02', body: '请保留原来的配色。',
+  };
+  const final = {
+    id: 'final', turnId: 'turn-one', entrySequence: 4, role: 'assistant' as const,
+    assistantKind: 'terminal' as const, time: '13:03', body: '已完成，并保留原来的配色。',
+    forkEligible: true, status: 'completed' as const,
+  };
+  const hiddenProgress = () => screen.getByText(progress.body).closest('.conversation-run__step')?.getAttribute('aria-hidden') === 'true';
+
+  it('keeps streaming and steer in order, closes only on a confirmed final, and preserves manual expansion', () => {
+    const view = renderWithRawResults(<WorkbenchView {...props({ messages: [progress, steer] })} />);
+    expect(hiddenProgress()).toBe(false);
+    const draft = { ...final, id: 'live-final', assistantKind: 'live' as const, status: 'running' as const, forkEligible: false };
+    view.rerender(<WorkbenchView {...props({ messages: [progress, steer, draft] })} />);
+    expect(hiddenProgress()).toBe(false);
+    // A committed assistant text without terminal-final eligibility is not enough.
+    view.rerender(<WorkbenchView {...props({ messages: [progress, steer, { ...final, forkEligible: false }] })} />);
+    expect(hiddenProgress()).toBe(false);
+    view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [progress, steer, final] })} />);
+    expect(hiddenProgress()).toBe(true);
+    expect(screen.getByText(steer.body).closest('.conversation-run__step')?.getAttribute('aria-hidden')).toBe('false');
+    expect(screen.getByText(progress.body).closest('[inert]')).toBeTruthy();
+    expect(screen.getByText(steer.body).closest('[inert]')).toBeNull();
+    expect(screen.getByText(final.body).closest('.conversation-run__step')).toBeNull();
+    expect(screen.getByRole('button', { name: '复制回复' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '展开工具详情：read_file' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(hiddenProgress()).toBe(false);
+    expect(screen.getByRole('button', { name: '展开工具详情：read_file' })).toBeTruthy();
+    const body = view.container.textContent!;
+    expect(body.indexOf(progress.body)).toBeLessThan(body.indexOf(steer.body));
+    expect(body.indexOf(steer.body)).toBeLessThan(body.indexOf(final.body));
+    view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [{ ...progress }, { ...steer }, { ...final }] })} />);
+    expect(hiddenProgress()).toBe(false);
+  });
+
+  it('loads history collapsed, folds the final reasoning too, and leaves standalone answers alone', () => {
+    const view = render(<WorkbenchView {...props({ isRunning: false, messages: [progress, {
+      ...final, reasoning: [{ id: 'reason', kind: 'full', body: '核对完成。' }],
+    }] })} />);
+    expect(hiddenProgress()).toBe(true);
+    expect(screen.queryByRole('button', { name: /展开思考/ })).toBeNull();
+    expect(view.container.querySelectorAll('[data-memory-entry="final"]')).toHaveLength(1);
+    view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [final] })} />);
+    expect(screen.queryByRole('button', { name: /中间过程/ })).toBeNull();
+    expect(screen.getByText(final.body)).toBeTruthy();
+  });
+
+  it('does not fold the next running turn with a previous completed one', () => {
+    render(<WorkbenchView {...props({ messages: [progress, final,
+      { id: 'next-user', turnId: 'turn-two', role: 'user', userKind: 'prompt', time: '13:04', body: '接着做' },
+      { ...progress, id: 'next-progress', turnId: 'turn-two', body: '正在处理第二轮。' },
+    ] })} />);
+    expect(hiddenProgress()).toBe(true);
+    expect(screen.getByText('正在处理第二轮。').closest('.conversation-run__step')?.getAttribute('aria-hidden')).toBe('false');
+  });
+
+  it('keeps interrupted history available without presenting an answer or a successful completion', () => {
+    render(<WorkbenchView {...props({ isRunning: false, messages: [progress, steer] })} />);
+    expect(hiddenProgress()).toBe(true);
+    expect(screen.queryByText('处理过程')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(hiddenProgress()).toBe(false);
+    expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
+  });
+
+  it('keeps compaction visible and opens a collapsed process for an explicit history location', () => {
+    const common = {
+      messages: [progress, steer, final], artifactOwnerKey: 'session-one',
+      onReadToolArtifact: vi.fn(), onNotify: vi.fn(), contextCompactionIndex: 2,
+    };
+    const view = renderWithRawResults(<ConversationMessages {...common} />);
+    expect(hiddenProgress()).toBe(true);
+    expect(screen.getByRole('separator', { name: '上下文已压缩' })).toBeTruthy();
+    expect(screen.getByText(final.body).closest('[hidden]')).toBeNull();
+    view.rerender(<ConversationMessages {...common}
+      focusMemoryEntry={{ sessionId: 'session-one', entryId: progress.id }} />);
+    expect(hiddenProgress()).toBe(false);
+    expect(screen.getByRole('button', { name: '展开工具详情：read_file' })).toBeTruthy();
+  });
+
 });

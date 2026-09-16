@@ -41,9 +41,12 @@ import {
   Zap,
 } from 'lucide-react';
 import {
+  type ReactNode,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -69,6 +72,8 @@ import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
+import { builtinToolSummary } from '../lib/builtin-tool-summary';
+import { ToolResultDisplayContext } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { promptContentTextProjection } from '../lib/prompt-content';
 
@@ -363,6 +368,7 @@ function TraceCard({
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
 }) {
+  const { showBuiltinToolResults } = useContext(ToolResultDisplayContext);
   const [expanded, setExpanded] = useState(false);
   const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
   const [artifactBusy, setArtifactBusy] = useState(false);
@@ -377,17 +383,23 @@ function TraceCard({
   const Icon = traceIcons[trace.kind];
   const skill = traceSkill(trace, skills);
   const mcpDetail = mcpTraceDetail(trace, mcpToolRefs);
-  const purpose = skill ? `正在使用 ${skill.name} Skill` : trace.title;
-  const subtitle = mcpDetail?.subtitle ?? trace.subtitle;
-  const hasRawResult = Object.prototype.hasOwnProperty.call(trace, 'resultText');
+  const builtinSummary = builtinToolSummary(trace);
+  const purpose = skill ? `使用 ${skill.name} 技能` : builtinSummary?.title ?? trace.title;
+  const subtitle = mcpDetail?.subtitle ?? builtinSummary?.subtitle ?? trace.subtitle;
+  // MCP provider names follow the kernel naming contract; the late-tool bridge
+  // also returns an external tool's output. UI icon categories are not origins.
+  const showRawResult = showBuiltinToolResults
+    || trace.toolName?.startsWith('mcp__')
+    || trace.toolName === 'use_new_mcp_tool';
+  const hasRawResult = showRawResult && Object.prototype.hasOwnProperty.call(trace, 'resultText');
   const parsedResult = parseJsonObject(trace.resultText);
   const diffText = trace.toolName === 'edit_file' ? stringValue(parsedResult?.diff) : '';
   const canReadArtifact = Boolean(
-    trace.resultEntryId
+    showRawResult && trace.resultEntryId
     && (trace.artifact?.disposition === 'AVAILABLE' || trace.artifact?.disposition === 'INCOMPLETE'),
   );
   const expandable = Boolean(
-    trace.command || hasRawResult || trace.resultContent || mcpDetail || canReadArtifact
+    trace.command || diffText || hasRawResult || trace.resultContent || mcpDetail || canReadArtifact
   );
   const artifactAtEnd = Boolean(artifactPage && !artifactPage.hasMore);
   const artifactIsSinglePage = Boolean(
@@ -437,15 +449,15 @@ function TraceCard({
       <span className={`trace-icon trace-icon--${trace.kind}`}><Icon size={14} /></span>
       <span className="trace-summary-copy">
         <span className="trace-summary-title">
-          <strong>{trace.toolName ?? trace.title}</strong>
-          {trace.toolName && purpose !== trace.toolName
+          <strong>{builtinSummary ? purpose : trace.toolName ?? trace.title}</strong>
+          {!builtinSummary && trace.toolName && purpose !== trace.toolName
             ? <span className="trace-purpose">{purpose}</span>
             : null}
         </span>
         <small>{subtitle}</small>
       </span>
       <span className={`trace-state trace-state--${trace.status}`}>
-        {trace.status === 'running' ? `进行中 · ${trace.duration ?? ''}` : trace.duration ?? trace.meta}
+        {trace.status === 'running' ? `进行中 · ${trace.duration ?? ''}` : trace.duration ?? (builtinSummary ? undefined : trace.meta)}
       </span>
       {expandable && <ChevronRight className="trace-chevron" size={13} />}
     </>
@@ -475,13 +487,13 @@ function TraceCard({
             />
           </section>
         )}
-        {expanded && !trace.resultContent && (
+        {expanded && expandable && !trace.resultContent && (
           <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
             {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
             {diffText
               ? <pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre>
-              : trace.resultSummary && <div className="tool-result-summary">{trace.resultSummary}</div>}
+              : showRawResult && trace.resultSummary && <div className="tool-result-summary">{trace.resultSummary}</div>}
             {hasRawResult && (
               <section className="tool-result-raw" aria-label="工具原始结果">
                 <header>
@@ -872,12 +884,17 @@ const unavailablePromptImage = async (): Promise<Uint8Array> => {
 function UserMessage({
   message,
   label = '你',
+  pendingContent,
+  deliveryStatus,
   onReadPromptImage = unavailablePromptImage,
 }: {
   message: Message;
   label?: string;
+  pendingContent?: LocalPromptSubmission['content'];
+  deliveryStatus?: string;
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
 }) {
+  const content = pendingContent ?? message.promptContent;
   const sourceTextStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const;
   if (message.userKind === 'subagent-completion') {
     const helpId = `${message.id}-subagent-completion-help`;
@@ -915,9 +932,9 @@ function UserMessage({
         <span className="user-steer__icon"><CornerDownRight size={13} /></span>
         <div className="user-steer__content">
           <header><strong>引导</strong><time>{message.time}</time></header>
-          {message.promptContent
+          {content
             ? <PromptContentView
-                content={message.promptContent}
+                content={content}
                 variant="message"
                 onReadImage={onReadPromptImage}
               />
@@ -934,14 +951,14 @@ function UserMessage({
         <span className="user-avatar"><UserRound size={14} /></span>
       </header>
       <div className="user-message">
-        {message.promptContent
+        {content
           ? <PromptContentView
-              content={message.promptContent}
+              content={content}
               variant="message"
               onReadImage={onReadPromptImage}
             />
           : <p style={sourceTextStyle}>{message.body}</p>}
-        <div className="message-foot"><time>{message.time}</time></div>
+        <div className="message-foot">{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
       </div>
     </article>
   );
@@ -1066,32 +1083,57 @@ function AssistantMessage({
   );
 }
 
-function findAssistantRunStarts(
-  messages: Message[],
-  contextCompactionIndex = -1,
-): ReadonlySet<string> {
-  const starts = new Set<string>();
-  const seenTurnIds = new Set<string>();
-  let unkeyedRunOpen = false;
-  for (const [index, message] of messages.entries()) {
-    if (index === contextCompactionIndex) unkeyedRunOpen = false;
-    if (message.role === 'user') {
-      if (message.userKind !== 'steer' && message.userKind !== 'subagent-completion') {
-        unkeyedRunOpen = false;
-      }
-      continue;
-    }
-    if (message.turnId) {
-      if (!seenTurnIds.has(message.turnId)) {
-        starts.add(message.id);
-        seenTurnIds.add(message.turnId);
-      }
-    } else if (!unkeyedRunOpen) {
-      starts.add(message.id);
-    }
-    unkeyedRunOpen = true;
+function isCompleteAnswer(message: Message, taskFinalAnswerId?: string): boolean {
+  // ROOT history already carries authoritative terminal-final eligibility.
+  // Task conversations instead identify the message from their accepted result.
+  return message.role === 'assistant' && message.assistantKind === 'terminal'
+    && message.status !== 'running'
+    && (message.forkEligible === true || message.id === taskFinalAnswerId);
+}
+
+function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId }: {
+  messages: Message[];
+  renderMessage: (message: Message, startsRun: boolean) => ReactNode;
+  focusRequest?: object | number;
+  taskFinalAnswerId?: string;
+  completed: boolean;
+  active: boolean;
+  assistantLabel: string;
+}) {
+  const answer = messages.find(message => isCompleteAnswer(message, taskFinalAnswerId));
+  const complete = completed || Boolean(answer);
+  const [disclosure, setDisclosure] = useState({
+    complete, active, focusRequest, expanded: Boolean(focusRequest) || (active && !complete),
+  });
+  // A completed answer closes the live process once. Later rerenders preserve
+  // the reader's choice; explicit navigation reveals its target again.
+  if (disclosure.complete !== complete || disclosure.active !== active || disclosure.focusRequest !== focusRequest) {
+    setDisclosure({ complete, active, focusRequest, expanded: disclosure.focusRequest !== focusRequest && Boolean(focusRequest)
+      ? true : active && !complete });
   }
-  return starts;
+  const process = messages.flatMap((message) => {
+    if (message !== answer) return [message];
+    return message.reasoning?.length || message.traces?.length || message.subagentRuns?.length
+      ? [{ ...message, id: `${message.id}:process`, body: '', forkEligible: false }] : [];
+  });
+  const hasProcess = process.some((message) => message.role === 'assistant');
+  if (!hasProcess) return renderMessage(answer!, true);
+  return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
+    <AssistantHeading message={messages[0]} response={Boolean(messages[0].body.trim())} label={assistantLabel} />
+    <button type="button" className="conversation-run__toggle"
+      aria-expanded={disclosure.expanded}
+      aria-label={disclosure.expanded ? '收起中间过程' : '展开中间过程'}
+      onClick={() => setDisclosure({ ...disclosure, expanded: !disclosure.expanded })}>
+      <span>{complete ? '处理过程' : '中间过程'}</span><ChevronRight size={13} />
+    </button>
+    {process.map((message) => <div key={message.id}
+      className="conversation-run__step"
+      aria-hidden={message.role === 'assistant' && !disclosure.expanded}
+      inert={message.role === 'assistant' && !disclosure.expanded}>
+      <div className="conversation-run__step-content">{renderMessage(message, false)}</div>
+    </div>)}
+    {answer && renderMessage({ ...answer, reasoning: undefined, traces: undefined, subagentRuns: undefined }, false)}
+  </section>;
 }
 
 function findToolChainConnections(messages: Message[], contextCompactionIndex = -1): {
@@ -1129,6 +1171,13 @@ export function ConversationMessages({
   onReadPromptImage = unavailablePromptImage,
   userLabel = '你',
   assistantLabel = 'Pulsara',
+  taskFinalAnswerId,
+  contextCompactionIndex = -1,
+  isRunning = false,
+  focusTaskId,
+  focusTaskRevision = 0,
+  focusTaskHighlighted = false,
+  focusMemoryEntry,
 }: {
   messages: Message[];
   skills?: SkillCapability[];
@@ -1139,34 +1188,62 @@ export function ConversationMessages({
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
   userLabel?: string;
   assistantLabel?: string;
+  taskFinalAnswerId?: string;
+  contextCompactionIndex?: number;
+  isRunning?: boolean;
+  focusTaskId?: string;
+  focusTaskRevision?: number;
+  focusTaskHighlighted?: boolean;
+  focusMemoryEntry?: WorkbenchViewProps['focusMemoryEntry'];
 }) {
-  const assistantRunStarts = useMemo(() => findAssistantRunStarts(messages), [messages]);
-  const toolChainConnections = useMemo(() => findToolChainConnections(messages), [messages]);
+  const toolChainConnections = useMemo(
+    () => findToolChainConnections(messages, contextCompactionIndex), [messages, contextCompactionIndex],
+  );
   const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
-  return messages.map((message) => (
+  const renderMessage = (message: Message, startsRun: boolean) => (
     <div key={message.id} data-memory-entry={message.id} style={{ display: 'contents' }}>
       {message.role === 'user'
         ? <UserMessage message={message} label={userLabel} onReadPromptImage={onReadPromptImage} />
-        : (
-          <AssistantMessage
-            message={message}
-            startsAssistantRun={assistantRunStarts.has(message.id)}
+        : <AssistantMessage message={message} startsAssistantRun={startsRun}
             joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
             joinsNextToolChain={toolChainConnections.after.has(message.id)}
-            focusTaskRevision={0}
-            focusTaskHighlighted={false}
-            skills={skills}
-            mcpToolRefs={mcpToolRefs}
-            onNotify={onNotify}
-            onFork={onFork}
-            artifactOwnerKey={artifactOwnerKey}
-            onReadToolArtifact={onReadToolArtifact}
-            onReadPromptImage={onReadPromptImage}
-            assistantLabel={assistantLabel}
-          />
-        )}
+            focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
+            focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs}
+            onNotify={onNotify} onFork={onFork} artifactOwnerKey={artifactOwnerKey}
+            onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
+            assistantLabel={assistantLabel} />}
     </div>
-  ));
+  );
+  const completedTurns = new Set(messages.filter(message => isCompleteAnswer(message, taskFinalAnswerId)).map(message => message.turnId).filter(Boolean));
+  const content: ReactNode[] = [];
+  let run: Message[] = [];
+  const flush = () => {
+    if (!run.length) return;
+    const focused = focusMemoryEntry && run.some(message => message.id === focusMemoryEntry.entryId)
+      ? focusMemoryEntry
+      : focusTaskHighlighted && run.some(message => message.subagentRuns?.some(task => task.id === focusTaskId))
+        ? focusTaskRevision : undefined;
+    content.push(<ConversationRun key={`${artifactOwnerKey}:${run[0].id}`} messages={run}
+      renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel} taskFinalAnswerId={taskFinalAnswerId}
+      completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
+      active={isRunning && run[0].turnId === messages.at(-1)?.turnId} />);
+    run = [];
+  };
+  messages.forEach((message, index) => {
+    if (index === contextCompactionIndex) {
+      flush();
+      content.push(<ContextCompactionDivider key="compaction" />);
+    }
+    const newInput = message.role === 'user'
+      && message.userKind !== 'steer' && message.userKind !== 'subagent-completion';
+    if (newInput || (run.length && message.turnId && run[0].turnId !== message.turnId)) flush();
+    if (message.role === 'user' && !run.length) content.push(renderMessage(message, false));
+    else run.push(message);
+    if (isCompleteAnswer(message, taskFinalAnswerId)) flush();
+  });
+  flush();
+  if (contextCompactionIndex === messages.length) content.push(<ContextCompactionDivider key="compaction" />);
+  return content;
 }
 
 function permissionPrompt(prompt: string): string {
@@ -1375,6 +1452,10 @@ function reasoningSelectionLabel(
   return '无推理选项';
 }
 
+function AnimatedQueueItem({ children }: { children: ReactNode }) {
+  return <div className="composer-queue__item"><div className="composer-queue__item-content">{children}</div></div>;
+}
+
 export function WorkbenchView({
   focusMemoryEntry,
   workspace,
@@ -1434,6 +1515,11 @@ export function WorkbenchView({
     setPlanRequests(current => ({ ...current, [session.id]: typeof value === 'function' ? value(current[session.id] ?? false) : value }));
   }, [session.id]);
   const [submitting, setSubmitting] = useState(false);
+  const [welcomeState, setWelcomeState] = useState({ sessionId: session.id, started: false, options: false });
+  if (welcomeState.sessionId !== session.id) {
+    setWelcomeState({ sessionId: session.id, started: false, options: false });
+  }
+  const welcomeDeparture = useRef<{ sessionId: string; top: number } | null>(null);
   const [compacting, setCompacting] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
@@ -1449,6 +1535,8 @@ export function WorkbenchView({
   const workbenchRef = useRef<HTMLElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
+  const composerEditorRef = useRef<HTMLDivElement>(null);
+  const acceptedDraftLayout = useRef<{ sessionId: string; height: number; restoreFocus: boolean } | null>(null);
   const optionsTriggerRef = useRef<HTMLButtonElement>(null);
   const budgetInputRef = useRef<HTMLInputElement>(null);
   const handledQueueActions = useRef(new Set<string>());
@@ -1463,7 +1551,12 @@ export function WorkbenchView({
     ['submitting', 'unknown'].includes(item.status)
     || (item.status === 'accepted' && !item.handled && !draft.hasContent)
     ));
+  const conversationSubmissions = localSubmissions.filter(item => item.displayAsMessage
+    && item.deliveryMode === 'new-turn' && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER');
+  const conversationCommandIds = new Set(conversationSubmissions.map(item => item.commandId));
+  const queuedDisplayCount = queuedCount - queuedPrompts.filter(item => conversationCommandIds.has(item.commandId)).length;
   const visibleQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
+    && !conversationCommandIds.has(item.commandId)
     && !activeQueueActions.some(action => action.status === 'accepted' && action.source.queueItemId === item.queueItemId));
   const pendingSteers = queuedPrompts.filter(item => item.deliveryMode === 'steer'
     && !messages.some(message => message.userKind === 'steer'
@@ -1534,9 +1627,16 @@ export function WorkbenchView({
       }
     }
   };
-  const composerQueue = (visibleQueue.length > 0 || localSubmissions.length > 0 || editRestoreConflict) && (
+  // Keep one presentation and React identity while a local submission becomes
+  // an accepted queue item; only the existing action availability changes.
+  const queueCards = [
+    ...visibleQueue.map(queued => ({ queued, local: undefined })),
+    ...localSubmissions.filter(item => !conversationCommandIds.has(item.commandId) && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER')
+      .map(local => ({ queued: undefined, local })),
+  ];
+  const composerQueue = (queueCards.length > 0 || editRestoreConflict) && (
     <section className="composer-queue" aria-label="等待处理的输入">
-      {editRestoreConflict && <article key="edit-restore-conflict" data-command-id={pendingEditRestoration.commandId} className="is-local">
+      {editRestoreConflict && <AnimatedQueueItem key="edit-restore-conflict"><article data-command-id={pendingEditRestoration.commandId} className="is-local">
         <Pencil size={13} aria-hidden="true" />
         <PromptContentView
           content={pendingEditRestoration.restoredContent ?? pendingEditRestoration.source.content}
@@ -1544,49 +1644,35 @@ export function WorkbenchView({
           onReadImage={onReadPromptImage}
         />
         <small role="status">已取消排队，原文等待恢复；请先处理当前草稿。</small>
-      </article>}
-      {visibleQueue.map(item => {
-        const action = activeQueueActions.find(action => action.source.queueItemId === item.queueItemId
+      </article></AnimatedQueueItem>}
+      {queueCards.map(({ queued, local }) => {
+        const item = queued ?? local!;
+        const action = queued && activeQueueActions.find(action => action.source.queueItemId === queued.queueItemId
           && ['submitting', 'unknown'].includes(action.status));
-        const busy = Boolean(action);
-        return <article key={item.queueItemId} data-queue-item-id={item.queueItemId} aria-busy={busy}>
+        const busy = Boolean(action) || Boolean(local && ['sending', 'synchronizing'].includes(local.status));
+        const notice = action?.status === 'unknown' ? '正在核对操作状态'
+          : local?.status === 'unknown' ? '提交状态未知'
+            : local?.status === 'rejected' ? '队列已拒绝'
+              : local?.status === 'cancelled' ? '队列已取消'
+                : local?.status === 'consumed' && local.outcomeCode === 'TURN_INTERRUPTED' ? '已接收 · 执行已中断'
+                  : undefined;
+        return <AnimatedQueueItem key={item.commandId}><article
+          data-queue-item-id={queued?.queueItemId} data-command-id={item.commandId} aria-busy={busy}>
           <CornerDownRight size={13} aria-hidden="true" />
-          <PromptContentView
-            content={item.content}
-            variant="queue"
-            onReadImage={onReadPromptImage}
-          />
-          {!isObserver && <div className="composer-queue__actions">
-            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={busy || editingQueue || !canControl || !isRunning}
-              onClick={() => void queueAction(item, 'send')}><CornerDownRight size={13} />发送</button>
-            <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={busy || editingQueue || !canControl}
-              onClick={() => void queueAction(item, 'edit')}><Pencil size={13} />编辑</button>
-            <button type="button" aria-label="删除" title="取消这条排队输入" disabled={busy || editingQueue || !canControl}
-              data-delete-queue={item.queueItemId} onClick={() => void queueAction(item, 'delete')}><Trash2 size={13} />删除</button>
-          </div>}
-          {action?.status === 'unknown' && <small role="status">正在核对操作状态</small>}
-        </article>;
-      })}
-      {localSubmissions.filter(item => item.outcomeCode !== 'USER_REDIRECTED_TO_STEER').map(item => (
-        <article key={item.commandId} data-command-id={item.commandId} className="is-local">
-          <LoaderCircle size={13} aria-hidden="true" />
-          {item.contentUnavailable || !item.content
+          {local?.contentUnavailable || !item.content
             ? <p>正文未能在队列终止前完成读取。</p>
-            : <PromptContentView
-                content={item.content}
-                variant="queue"
-                onReadImage={onReadPromptImage}
-              />}
-          <small>{item.status === 'sending' ? '正在加入' : item.status === 'cancelled' ? '队列已取消'
-            : item.status === 'rejected' ? '队列已拒绝' : item.status === 'consumed' ? item.outcomeCode === 'TURN_INTERRUPTED' ? '已接收 · 执行已中断' : '输入已接收'
-              : item.status === 'unknown' ? '提交状态未知' : '正在核对投递状态'}</small>
-          <div className="composer-queue__detail">
-            {item.targetTurnId && <span>目标轮次：{item.targetTurnId}</span>}
-            <span>适用权限：{item.permission ? permissionLabels[item.permission] : item.deliveryMode === 'steer' ? '继承当前轮次' : '未知'}</span>
-            {item.detail && <span>{item.detail}</span>}
-          </div>
-        </article>
-      ))}
+            : <PromptContentView content={item.content} variant="queue" onReadImage={onReadPromptImage} />}
+          {!isObserver && <div className="composer-queue__actions">
+            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || busy || editingQueue || !canControl || !isRunning}
+              onClick={() => { if (queued) void queueAction(queued, 'send'); }}><CornerDownRight size={13} />发送</button>
+            <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={!queued || busy || editingQueue || !canControl}
+              onClick={() => { if (queued) void queueAction(queued, 'edit'); }}><Pencil size={13} />编辑</button>
+            <button type="button" aria-label="删除" title="取消这条排队输入" disabled={!queued || busy || editingQueue || !canControl}
+              data-delete-queue={queued?.queueItemId} onClick={() => { if (queued) void queueAction(queued, 'delete'); }}><Trash2 size={13} />删除</button>
+          </div>}
+          {notice && <small className="composer-queue__notice" role="status"><span>{notice}</span>{local?.detail && <>：<span>{local.detail}</span></>}</small>}
+        </article></AnimatedQueueItem>;
+      })}
     </section>
   );
   const wordCount = draft.text.trim().length;
@@ -1597,6 +1683,26 @@ export function WorkbenchView({
     && selectedModel?.status === 'ready'
     && (selectedModel.authentication === 'none' || selectedModel.credential_configured),
   );
+  const welcome = Boolean(session.id && !isObserver && messages.length === 0
+    && !isRunning && localSubmissions.length === 0 && queuedPrompts.length === 0
+    && !interaction && initialContextBase?.base_kind !== 'SNAPSHOT' && !contextCompaction
+    && session.status !== 'interrupted' && runtimeStatus === 'online'
+    && !(welcomeState.sessionId === session.id && welcomeState.started));
+  const composerOptionsVisible = !welcome || welcomeState.options
+    || modelOpen || reasoningOpen || skillOpen || permissionOpen;
+  useLayoutEffect(() => {
+    const departure = welcomeDeparture.current;
+    if (welcome || !departure) return;
+    welcomeDeparture.current = null;
+    const composer = composerWrapRef.current;
+    if (!composer || departure.sessionId !== session.id
+      || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    const offset = departure.top - composer.getBoundingClientRect().top;
+    const animation = composer.animate?.([
+      { transform: `translateY(${offset}px)` }, { transform: 'translateY(0)' },
+    ], { duration: 560, easing: 'cubic-bezier(.22, 1, .36, 1)' });
+    return () => animation?.cancel();
+  }, [welcome, session.id]);
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
   useEffect(() => {
     if (!optionsOpen && !modelOpen && !reasoningOpen && !skillOpen && !permissionOpen) return;
@@ -1632,15 +1738,6 @@ export function WorkbenchView({
     });
     return lastCanonical + 1;
   }, [contextCompaction, messages]);
-  const assistantRunStarts = useMemo(
-    () => findAssistantRunStarts(messages, contextCompactionIndex),
-    [contextCompactionIndex, messages],
-  );
-  const toolChainConnections = useMemo(
-    () => findToolChainConnections(messages, contextCompactionIndex),
-    [contextCompactionIndex, messages],
-  );
-  const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
 
   const locatedMemoryRequest = useRef<typeof focusMemoryEntry>(undefined);
   useEffect(() => {
@@ -1690,6 +1787,23 @@ export function WorkbenchView({
     return () => observer.disconnect();
   }, [updateJumpPosition]);
 
+  useLayoutEffect(() => {
+    const previous = acceptedDraftLayout.current;
+    acceptedDraftLayout.current = null;
+    const editor = composerEditorRef.current;
+    if (!previous || previous.sessionId !== session.id || !editor) return;
+    if (previous.restoreFocus) draftStore.focus(session.id);
+    const height = editor.getBoundingClientRect().height;
+    if (previous.height === height || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    // The accepted submission clears the editor below the queue. Animate that
+    // layout change too, otherwise a stable queue card still jumps vertically.
+    const animation = editor.animate?.([
+      { height: `${previous.height}px`, overflow: 'hidden' },
+      { height: `${height}px`, overflow: 'hidden' },
+    ], { duration: 240, easing: 'cubic-bezier(.2, .7, .2, 1)' });
+    return () => animation?.cancel();
+  }, [draft.hasContent, draft.revision, draftStore, session.id]);
+
   const composerHint = useMemo(() => {
     if (!isRunning) return 'Enter 发送 · Shift Enter 换行';
     return 'Enter 排队下一轮 · Shift Enter 换行';
@@ -1698,7 +1812,9 @@ export function WorkbenchView({
   const submit = useCallback(async () => {
     if (!draft.hasContent || submitting || editingQueue) return;
     if (!modelReady) {
-      onNotify(
+      if (welcome) {
+        setWelcomeState(current => ({ ...current, options: true }));
+      } else onNotify(
         modelBindingMissing ? '原模型配置已删除' : '请先选择模型配置',
         modelBindingMissing
           ? '请为这个会话显式选择另一条模型配置。'
@@ -1719,6 +1835,10 @@ export function WorkbenchView({
       );
       return;
     }
+    if (welcome && composerWrapRef.current) {
+      welcomeDeparture.current = { sessionId: session.id, top: composerWrapRef.current.getBoundingClientRect().top };
+      setWelcomeState({ sessionId: session.id, started: true, options: false });
+    }
     let accepted = false;
     try {
       accepted = await onSend(
@@ -1730,12 +1850,18 @@ export function WorkbenchView({
       setSubmitting(false);
     }
     if (!accepted) return;
-    draftStore.clearIfSnapshot(session.id, snapshot);
+    const editorHeight = composerEditorRef.current?.getBoundingClientRect().height;
+    acceptedDraftLayout.current = editorHeight === undefined ? null : {
+      sessionId: session.id,
+      height: editorHeight,
+      restoreFocus: composerEditorRef.current?.contains(document.activeElement) === true,
+    };
+    if (!draftStore.clearIfSnapshot(session.id, snapshot)) acceptedDraftLayout.current = null;
     setRequestPlan(false);
     onPermissionChange('bypass-permissions');
   }, [activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
     modelBindingMissing, modelReady, onNotify, onPermissionChange, onSend,
-    permission, requestPlan, session.id, setRequestPlan, submitting]);
+    permission, requestPlan, session.id, setRequestPlan, submitting, welcome]);
 
   const changeBinding = async (binding: ModelCallBindingPayload) => {
     if (modelBindingBusy) return;
@@ -1758,7 +1884,7 @@ export function WorkbenchView({
       if (thread) thread.scrollTop = thread.scrollHeight;
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [atBottom, interaction?.id, lastMessageLength, messages.length]);
+  }, [atBottom, conversationSubmissions.length, interaction?.id, lastMessageLength, messages.length]);
 
   useEffect(() => {
     const workbench = workbenchRef.current;
@@ -1848,7 +1974,7 @@ export function WorkbenchView({
   }, [focusTaskHighlighted, focusTaskId, focusTaskRevision]);
 
   return (
-    <section className="workbench" aria-label="会话工作台" ref={workbenchRef}>
+    <section className={`workbench${welcome ? ' is-welcome' : ''}`} aria-label="会话工作台" ref={workbenchRef}>
       <header className="topbar">
         <div className="session-title">
           <button className="mobile-menu-button" onClick={onOpenSidebar} aria-label="打开会话侧栏"><Menu size={17} /></button>
@@ -1856,7 +1982,7 @@ export function WorkbenchView({
           <div><h2>{session.title}</h2><p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p></div>
         </div>
         <div className="topbar-actions">
-          {queuedCount > 0 && <span className="queue-badge">{queuedCount} 条等待处理</span>}
+          {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}
           {isObserver && <span className="observer-badge"><Eye size={11} /> 旁观中</span>}
           {canControl && (
             <button
@@ -1901,7 +2027,7 @@ export function WorkbenchView({
               {(runtimeStatus === 'offline' || runtimeStatus === 'failed') && <button onClick={onReconnect}>重新连接</button>}
             </div>
           )}
-          {messages.length === 0 && runtimeStatus === 'online' && (
+          {!welcome && !session.id && messages.length === 0 && conversationSubmissions.length === 0 && runtimeStatus === 'online' && (
             <div className="conversation-empty">
               <Sparkles size={20} />
               <strong>{session.id ? '这个会话还没有消息' : '准备开始一次真实运行'}</strong>
@@ -1909,36 +2035,25 @@ export function WorkbenchView({
             </div>
           )}
           {initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
-          {messages.map((message, index) => (
-            <div key={message.id} data-memory-entry={message.id} style={{ display: 'contents' }}>
-              {contextCompactionIndex === index && contextCompaction && (
-                <ContextCompactionDivider />
-              )}
-              {message.role === 'user'
-                ? <UserMessage message={message} onReadPromptImage={onReadPromptImage} />
-                : (
-                  <AssistantMessage
-                    message={message}
-                    startsAssistantRun={assistantRunStarts.has(message.id)}
-                    joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
-                    joinsNextToolChain={toolChainConnections.after.has(message.id)}
-                    focusTaskId={focusTaskId}
-                    focusTaskRevision={focusTaskRevision}
-                    focusTaskHighlighted={focusTaskHighlighted}
-                    skills={skills}
-                    mcpToolRefs={mcpToolRefs}
-                    onNotify={onNotify}
-                    onFork={onFork}
-                    artifactOwnerKey={artifactOwnerKey}
-                    onReadToolArtifact={onReadToolArtifact}
-                    onReadPromptImage={onReadPromptImage}
-                  />
-                )}
+          <ConversationMessages messages={messages} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
+            onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
+            onNotify={onNotify} onFork={onFork} contextCompactionIndex={contextCompactionIndex}
+            focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
+            focusTaskHighlighted={focusTaskHighlighted} focusMemoryEntry={focusMemoryEntry} />
+          {conversationSubmissions.map(item => (
+            <div key={item.commandId} data-pending-message={item.commandId}
+              aria-busy={item.status === 'sending' || item.status === 'synchronizing'}>
+              <UserMessage message={{ id: item.commandId, role: 'user', userKind: 'prompt', time: '',
+                body: item.content ? promptContentTextProjection(item.content) : '消息内容暂时无法读取。' }}
+                pendingContent={item.content} onReadPromptImage={onReadPromptImage}
+                deliveryStatus={item.status === 'sending' ? '正在发送…'
+                  : item.status === 'rejected' ? `发送失败${item.detail ? `：${item.detail}` : ''}`
+                    : item.status === 'cancelled' ? '发送已取消'
+                      : item.status === 'unknown' ? '发送状态待确认'
+                        : item.status === 'consumed' ? item.outcomeCode === 'TURN_INTERRUPTED' ? '已接收 · 执行已中断' : '已接收'
+                          : '正在开始…'} />
             </div>
           ))}
-          {contextCompactionIndex === messages.length && contextCompaction && (
-            <ContextCompactionDivider />
-          )}
           {pendingSteers.map(item => (
             <div key={item.queueItemId} data-queue-item-id={item.queueItemId} data-action-command-id={item.commandId}
               aria-description="引导已提交，等待当前任务接收">
@@ -1992,6 +2107,9 @@ export function WorkbenchView({
       ) : !isObserver ? <div className="composer-wrap" ref={composerWrapRef}>
         {composerQueue}
         <div className="composer-frame">
+          <div className="welcome-heading" aria-hidden={!welcome}>
+            <h1>有什么想做的？</h1>
+          </div>
           <TodoDock
             key={todo?.id ?? 'no-todo'}
             todo={todo}
@@ -1999,7 +2117,7 @@ export function WorkbenchView({
             onLayoutChange={updateJumpPosition}
           />
           <div className={`composer${draft.hasContent ? ' has-content' : ''}`}>
-          <div className="composer-editor">
+          <div className="composer-editor" ref={composerEditorRef}>
             <Sparkles size={14} />
             <PromptComposer
               key={session.id}
@@ -2011,11 +2129,31 @@ export function WorkbenchView({
               onNotify={onNotify}
             />
             {wordCount > 0 && <span className="draft-count">{wordCount}</span>}
+            {welcome && <button type="button" className={`welcome-options-trigger${!modelReady && !composerOptionsVisible ? ' needs-selection' : ''}`} aria-label="输入选项"
+              aria-expanded={composerOptionsVisible} onClick={() => setWelcomeState(current => ({ ...current, options: !composerOptionsVisible }))}>
+              <SlidersHorizontal size={15} />
+            </button>}
+            <div className="composer-submit">
+              {isRunning && !draft.hasContent ? (
+                <button
+                  className="send-button is-stop"
+                  onClick={onStop}
+                  aria-label="停止本轮运行"
+                  title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，子任务、排队输入和后台命令不会自动取消。"
+                ><CircleStop size={15} /></button>
+              ) : (
+                <button className="send-button" onClick={() => void submit()} disabled={!draft.hasContent || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning ? '排队发送' : '发送'}>
+                  {isRunning ? <Play size={14} fill="currentColor" /> : <Send size={14} />}
+                </button>
+              )}
+            </div>
           </div>
+          <div className={`composer-drawer${composerOptionsVisible ? ' is-open' : ''}`} inert={!composerOptionsVisible} aria-hidden={!composerOptionsVisible}>
+          <div className="composer-drawer__content">
           <div className="composer-actions">
             <div className="composer-controls">
               <div className="popover-anchor model-picker">
-                <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setOptionsOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
+                <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}${welcome && !modelReady && composerOptionsVisible && !modelOpen ? ' needs-selection' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setOptionsOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
                   <Bot size={12} /><span className="model-chip__label">{modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)}</span><ChevronDown size={10} />
                 </button>
                 {modelOpen && <div className="menu-popover model-menu">
@@ -2105,24 +2243,13 @@ export function WorkbenchView({
               </div>
               </div>
             </div>
-            <div>
-              {isRunning && !draft.hasContent ? (
-                <button
-                  className="send-button is-stop"
-                  onClick={onStop}
-                  aria-label="停止本轮运行"
-                  title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，子任务、排队输入和后台命令不会自动取消。"
-                ><CircleStop size={15} /></button>
-              ) : (
-                <button className="send-button" onClick={() => void submit()} disabled={!draft.hasContent || submitting || runtimeStatus !== 'online' || !session.id || !modelReady} aria-label={isRunning ? '排队发送' : '发送'}>
-                  {isRunning ? <Play size={14} fill="currentColor" /> : <Send size={14} />}
-                </button>
-              )}
-            </div>
+
+          </div>
+          </div>
           </div>
           </div>
         </div>
-        <p className={`composer-note${!modelReady ? ' composer-note--attention' : ''}`}>{!modelReady ? (modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置') : composerHint} · 规划与权限只作用于本轮</p>
+        {!welcome && <p className={`composer-note${!modelReady ? ' composer-note--attention' : ''}`}>{!modelReady ? (modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置') : composerHint} · 规划与权限只作用于本轮</p>}
       </div> : (
         <div className="observer-wrap composer-wrap">
           {composerQueue}
