@@ -2019,11 +2019,6 @@ export function WorkbenchView({
         }}
       >
         <div className="thread-column">
-          {session.status === 'interrupted' && runtimeStatus === 'online' && (
-            <div className="runtime-banner" role="status">
-              本轮执行已中断，未正常完成。你可以发送新消息继续。
-            </div>
-          )}
           {runtimeStatus !== 'online' && (
             <div className={`runtime-banner runtime-banner--${runtimeStatus}`}>
               <span>{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在重新连接…' : runtimeError ?? '本地服务未连接。'}</span>
@@ -2043,6 +2038,9 @@ export function WorkbenchView({
             onNotify={onNotify} onFork={onFork} contextCompactionIndex={contextCompactionIndex}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
             focusTaskHighlighted={focusTaskHighlighted} focusMemoryEntry={focusMemoryEntry} />
+          {session.status === 'interrupted' && !isRunning && (
+            <p className="conversation-interruption" role="status">本轮回复已中断。</p>
+          )}
           {conversationSubmissions.map(item => (
             <div key={item.commandId} data-pending-message={item.commandId}
               aria-busy={item.status === 'sending' || item.status === 'synchronizing'}>

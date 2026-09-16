@@ -770,7 +770,9 @@ describe('PulsaraApp', () => {
       } },
     };
     render(<PulsaraApp adapter={adapter} />);
-    expect(await screen.findByText('本轮执行已中断，未正常完成。你可以发送新消息继续。')).toBeTruthy();
+    const notice = await screen.findByText('本轮回复已中断。');
+    expect(notice.classList.contains('conversation-interruption')).toBe(true);
+    expect(notice.closest('.runtime-banner')).toBeNull();
     const workbench = screen.getByRole('region', { name: '会话工作台' });
     expect(within(workbench).getByText('已中断')).toBeTruthy();
     expect(within(workbench).queryByText('FOREGROUND_EXECUTION_INTERRUPTED')).toBeNull();

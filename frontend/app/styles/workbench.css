@@ -18,6 +18,7 @@
 .live-badge { flex: none; padding: 3px 5px; border-radius: 4px; background: var(--green-soft); color: var(--green); font-family: var(--mono); font-size: var(--type-micro); font-weight: 800; letter-spacing: .12em; white-space: nowrap; }
 .live-badge--completed { color: var(--green); background: var(--green-soft); }
 .live-badge--interrupted { color: var(--red); background: var(--red-soft); }
+.conversation-interruption { margin: 12px 0 20px 40px; color: var(--muted); font-size: var(--type-small); font-style: italic; line-height: 1.6; }
 .live-badge--waiting { color: var(--violet); background: var(--violet-soft); }
 .topbar-actions { display: flex; align-items: center; gap: 6px; }
 .topbar .ghost-button { min-height: 31px; padding: 0 9px; font-size: var(--type-label); }

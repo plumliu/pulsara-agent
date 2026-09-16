@@ -698,7 +698,7 @@ describe('completed reply process disclosure', () => {
     expect(screen.queryByRole('button', { name: /展开思考/ })).toBeNull();
     expect(view.container.querySelectorAll('[data-memory-entry="final"]')).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
-    fireEvent.click(screen.getByRole('button', { name: kind === 'summary' ? '展开思考摘要' : '展开思考', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: kind === 'summary' ? '展开思考摘要' : '展开思考' }));
     expect(screen.getByText('核对完成。').closest('.reasoning-row__body')).toBeTruthy();
     view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [final] })} />);
     expect(screen.queryByRole('button', { name: /中间过程/ })).toBeNull();

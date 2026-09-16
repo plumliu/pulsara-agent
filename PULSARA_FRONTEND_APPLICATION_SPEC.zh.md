@@ -284,6 +284,9 @@ projection、Kernel、HostSession、provider prefix 或其他实现术语。状�
   非空行作为折叠预览；展开后显示供应商返回的完整纯文本；
 - 已完成内容从 assistant entry 已关联的 durable provider replay 派生，只增加 read projection，
   不新增数据库表、事件、canonical assistant block 或 provider input 内容；刷新与重连后仍可恢复；
+- 中断且未接纳的模型响应不在前端另行保留思考或正文。没有活动轮次且当前会话状态为中断时，
+  在对话末尾用灰色斜体显示“本轮回复已中断。”，替代顶部的中断横幅；该提示从已有状态派生，
+  不伪造 assistant 消息，不新增历史记录或浏览器缓存。此前已提交的过程仍按既有规则展示；
 - 大于既有 inline 边界的思考沿用 `ReadContentRequest` 分块读取，不另设前端总长度上限；
 - 没有供应商可见文本时不渲染任何“思考不可用”占位；子任务 scope 使用同一投影并在其原位
   活动中展示。
