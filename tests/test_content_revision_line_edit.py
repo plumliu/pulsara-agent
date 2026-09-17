@@ -209,6 +209,43 @@ def test_search_rejection_explains_how_to_select_a_path(
     assert "Error" not in payload["message"]
 
 
+def test_read_only_file_tools_accept_relative_paths_outside_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    external = tmp_path / "external"
+    workspace.mkdir()
+    external.mkdir()
+    target = external / "note.txt"
+    target.write_text("needle\n", encoding="utf-8")
+    relative = "../external/note.txt"
+
+    read = _call(ReadFileTool(workspace), {"path": relative})
+    assert read.status is ToolResultState.SUCCESS
+    assert _payload(read)["content"] == "1|needle"
+
+    search = _call(
+        SearchFilesTool(workspace),
+        {"path": relative, "pattern": "needle", "target": "content"},
+    )
+    assert search.status is ToolResultState.SUCCESS
+    assert "needle" in str(_payload(search)["matches"])
+
+    with pytest.raises(ValueError, match="escapes workspace root"):
+        _call(WriteFileTool(workspace), {"path": "../external/new.txt", "content": "x"})
+
+
+@pytest.mark.parametrize("tool_name", ("read_file", "search_files", "view_image"))
+def test_read_only_file_tool_catalog_allows_relative_paths_outside_workspace(
+    tool_name: str,
+) -> None:
+    descriptor = builtin_tool_catalog_entry(tool_name).descriptor
+    path_description = descriptor.input_schema["properties"]["path"]["description"]
+
+    assert "may traverse outside it with ../" in descriptor.description
+    assert "may traverse outside it with ../" in path_description
+
+
 def test_paginated_reads_union_seen_intervals_only_for_same_revision(
     tmp_path: Path,
 ) -> None:
@@ -1014,6 +1051,7 @@ def test_view_image_reuses_the_frozen_read_path_owner(tmp_path: Path) -> None:
 
     requested = (
         "relative.png",
+        "../absolute.png",
         str(absolute),
         "~/user.png",
         "${PULSARA_HOME}/state.png",
@@ -1025,12 +1063,6 @@ def test_view_image_reuses_the_frozen_read_path_owner(tmp_path: Path) -> None:
         )
         assert isinstance(result, LocalImageReadCandidate)
         assert result.payload == payload
-
-    with pytest.raises(ValueError, match="escapes workspace root"):
-        tool.read_bounded(
-            ToolCall("call:escape", "view_image", {"path": "../absolute.png"}),
-            maximum_bytes=len(payload),
-        )
 
 
 def test_view_image_rejects_non_regular_files_without_blocking(

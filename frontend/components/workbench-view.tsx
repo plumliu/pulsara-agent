@@ -72,6 +72,7 @@ import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
+import { WelcomeTypewriter } from './welcome-typewriter';
 import { builtinToolSummary } from '../lib/builtin-tool-summary';
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
@@ -181,6 +182,20 @@ function parseJsonObject(value?: string): JsonObject | undefined {
   } catch {
     return undefined;
   }
+}
+
+function terminalOutputText(value: string | undefined, running: boolean): string | undefined {
+  if (running) return value ?? '';
+  if (value === undefined) return undefined;
+  const result = parseJsonObject(value);
+  if (
+    typeof result?.output === 'string'
+    && (
+      typeof result.terminal_process_action === 'string'
+      || typeof result.exit_code === 'number'
+    )
+  ) return result.output;
+  return value;
 }
 
 function objectField(value: JsonObject | undefined, key: string): JsonObject | undefined {
@@ -376,6 +391,8 @@ function TraceCard({
   const artifactRequestRevision = useRef(0);
   const artifactOwnerKeyRef = useRef(artifactOwnerKey);
   const artifactResultEntryIdRef = useRef(trace.resultEntryId);
+  const terminalOutputRef = useRef<HTMLPreElement>(null);
+  const terminalFollowTailRef = useRef(true);
   useEffect(() => {
     artifactRequestRevision.current += 1;
     return () => { artifactRequestRevision.current += 1; };
@@ -386,20 +403,36 @@ function TraceCard({
   const builtinSummary = builtinToolSummary(trace);
   const purpose = skill ? `使用 ${skill.name} 技能` : builtinSummary?.title ?? trace.title;
   const subtitle = mcpDetail?.subtitle ?? builtinSummary?.subtitle ?? trace.subtitle;
+  const parsedResult = parseJsonObject(trace.resultText);
+  const terminalOutput = trace.toolName === 'terminal'
+    ? terminalOutputText(trace.resultText, trace.status === 'running')
+    : undefined;
+  const hasTerminalOutput = terminalOutput !== undefined;
+  const terminalYieldedToBackground = Boolean(
+    trace.toolName === 'terminal'
+    && trace.status === 'completed'
+    && parsedResult?.status === 'running'
+    && parsedResult.yielded_to_background === true,
+  );
+  useLayoutEffect(() => {
+    if (!expanded || trace.status !== 'running' || !terminalFollowTailRef.current) return;
+    const output = terminalOutputRef.current;
+    if (output) output.scrollTop = output.scrollHeight;
+  }, [expanded, terminalOutput, trace.status]);
   // MCP provider names follow the kernel naming contract; the late-tool bridge
   // also returns an external tool's output. UI icon categories are not origins.
   const showRawResult = showBuiltinToolResults
     || trace.toolName?.startsWith('mcp__')
     || trace.toolName === 'use_new_mcp_tool';
   const hasRawResult = showRawResult && Object.prototype.hasOwnProperty.call(trace, 'resultText');
-  const parsedResult = parseJsonObject(trace.resultText);
   const diffText = trace.toolName === 'edit_file' ? stringValue(parsedResult?.diff) : '';
   const canReadArtifact = Boolean(
     showRawResult && trace.resultEntryId
     && (trace.artifact?.disposition === 'AVAILABLE' || trace.artifact?.disposition === 'INCOMPLETE'),
   );
   const expandable = Boolean(
-    trace.command || diffText || hasRawResult || trace.resultContent || mcpDetail || canReadArtifact
+    trace.command || diffText || hasTerminalOutput || hasRawResult
+    || trace.resultContent || mcpDetail || canReadArtifact
   );
   const artifactAtEnd = Boolean(artifactPage && !artifactPage.hasMore);
   const artifactIsSinglePage = Boolean(
@@ -472,6 +505,7 @@ function TraceCard({
             className="trace-card__summary"
             onClick={() => {
               if (expanded) closeArtifactPage();
+              else terminalFollowTailRef.current = true;
               setExpanded((value) => !value);
             }}
             aria-expanded={expanded}
@@ -491,9 +525,33 @@ function TraceCard({
           <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
             {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
+            {hasTerminalOutput && (
+              <section className="terminal-stream" aria-label="命令输出">
+                <header>
+                  <strong>输出</strong>
+                  <button type="button" aria-label="复制命令输出" onClick={() => void navigator.clipboard.writeText(terminalOutput)}><Copy size={12} /></button>
+                </header>
+                <pre
+                  ref={terminalOutputRef}
+                  className="tool-output-scroll"
+                  onScroll={(event) => {
+                    const output = event.currentTarget;
+                    terminalFollowTailRef.current = output.scrollHeight
+                      - output.scrollTop - output.clientHeight <= 8;
+                  }}
+                >
+                  {terminalOutput === '' ? <span className="empty-result">（暂无输出）</span> : terminalOutput}
+                  {trace.status === 'running' && <span className="terminal-cursor" aria-label="命令仍在执行" />}
+                </pre>
+                {terminalYieldedToBackground && (
+                  <p className="terminal-stream__backgrounded"><em>已转到后台运行</em></p>
+                )}
+              </section>
+            )}
             {diffText
               ? <pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre>
-              : showRawResult && trace.resultSummary && <div className="tool-result-summary">{trace.resultSummary}</div>}
+              : showRawResult && trace.toolName !== 'terminal' && trace.resultSummary
+                && <div className="tool-result-summary">{trace.resultSummary}</div>}
             {hasRawResult && (
               <section className="tool-result-raw" aria-label="工具原始结果">
                 <header>
@@ -2109,7 +2167,7 @@ export function WorkbenchView({
         {composerQueue}
         <div className="composer-frame">
           <div className="welcome-heading" aria-hidden={!welcome}>
-            <h1>有什么想做的？</h1>
+            <WelcomeTypewriter key={session.id} active={welcome} cycling={!draft.hasContent} />
           </div>
           <TodoDock
             key={todo?.id ?? 'no-todo'}

@@ -939,8 +939,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             '"lines":["预算=400"]}. The leading 2| is a display locator, not '
             "replacement text. Do not copy the display prefix unless those characters "
             "are intended file content. A literal first line 2|预算=360 is displayed "
-            "as 1|2|预算=360. Relative paths start in the current "
-            "workspace. Absolute paths, paths beginning with ~, and ${PULSARA_HOME}/... "
+            "as 1|2|预算=360. Relative paths start in the current workspace and may "
+            "traverse outside it with ../. Absolute paths, paths beginning with ~, and "
+            "${PULSARA_HOME}/... "
             "locations copied from the Skill catalog are also accepted for read-only "
             "text access. This tool does not read directories, blocked device paths, or "
             "binary/invalid-UTF-8 files. If truncated is true, continue from the offset "
@@ -952,7 +953,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Text file to read. Relative paths start in the current workspace; "
+                        "Text file to read. Relative paths start in the current workspace "
+                        "and may traverse outside it with ../; "
                         "absolute paths and ~ are allowed for other local files. Copy a "
                         "${PULSARA_HOME}/... Skill location exactly when using one."
                     ),
@@ -987,7 +989,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "Read one PNG, JPEG, or static WebP image and make its exact contents "
             "visible to the model. Use path for a local file; relative paths start in "
-            "the current workspace. Use image_ref only to reread an exact reference "
+            "the current workspace and may traverse outside it with ../; absolute paths "
+            "and ~ are also accepted. Use image_ref only to reread an exact reference "
             "already shown beside an image in this session; copy it unchanged and do "
             "not guess or enumerate references. Provide exactly one source. Use multiple "
             "view_image calls for multiple images. URLs, directories, PDFs, animated "
@@ -998,7 +1001,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Local image path to read.",
+                    "description": (
+                        "Local image path to read. Relative paths start in the current "
+                        "workspace and may traverse outside it with ../; absolute paths "
+                        "and ~ are also accepted."
+                    ),
                 },
                 "image_ref": {
                     "type": "string",
@@ -1020,7 +1027,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "Search file contents or find files by name within one file or directory. "
             "With target=content, pattern is a regular expression; with target=files, "
             "pattern is a file-name fragment or glob. Relative paths start in the current "
-            "workspace. Outside it, search only a specific file or subdirectory because "
+            "workspace and may traverse outside it with ../. Outside it, search only a "
+            "specific file or subdirectory because "
             "broad local roots are rejected. Use offset to continue a truncated result "
             "instead of repeating the same page."
         ),
@@ -1050,7 +1058,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "default": ".",
                     "description": (
                         "File or directory to search. Relative paths start in the current "
-                        "workspace. Absolute paths and ~ are accepted only for a specific "
+                        "workspace and may traverse outside it with ../. Absolute paths "
+                        "and ~ are accepted only for a specific "
                         "file or subdirectory, not broad roots such as ~, /, /Users, or /tmp."
                     ),
                 },

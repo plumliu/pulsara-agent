@@ -18,7 +18,7 @@ describe('builtin tool summaries', () => {
     ['edit_file', { path: 'main.py', diff: 'RAW DIFF' }, {}, '修改文件', '已修改文件'],
     ['write_file', { bytes_written: 123, path: 'new.txt' }, {}, '写入文件', '已写入 123 字节'],
     ['artifact_read', { returned_chars: 300, has_more: true, source_coverage: 'RETAINED_SNAPSHOT', text: 'RAW OUTPUT' }, {}, '读取完整输出', '已读取 300 个字符，还有后续内容 · 仅保留了部分原始输出'],
-    ['terminal', { status: 'running', exit_code: null, output: 'RAW STDOUT' }, {}, '运行命令', '已执行命令'],
+    ['terminal', { status: 'running', exit_code: -1, yielded_to_background: true, output: 'RAW STDOUT' }, {}, '运行命令', '命令仍在后台运行'],
     ['terminal_process', { process: { status: 'success', exit_code: 0 }, output: 'RAW LOG' }, { action: 'log' }, '读取命令输出', '已读取输出'],
     ['terminal_monitor', { status: 'REGISTERED' }, { action: 'register' }, '关注命令进展', '已开启进展通知'],
     ['todo', { status: 'UPDATED', counts: { total: 5, completed: 2 } }, {}, '更新工作清单', '2/5 项已完成'],
@@ -48,8 +48,10 @@ describe('builtin tool summaries', () => {
 
   it.each([
     ['terminal', { status: 'error', exit_code: 2 }, '命令未成功，退出码 2'],
+    ['terminal', { status: 'error', exit_code: -1 }, '命令执行失败'],
     ['terminal', { status: 'timeout', timed_out: true }, '命令已超时'],
     ['terminal_process', { status: 'killed' }, '命令已停止'],
+    ['terminal_process', { status: 'blocked', exit_code: -1 }, '命令未获准执行'],
     ['view_image', { error: 'MODEL_IMAGE_INPUT_UNSUPPORTED' }, '当前模型不支持查看图片'],
     ['edit_file', { error: 'CONTENT_REVISION_MISMATCH' }, '文件已变化，本次修改未应用'],
     ['report_agent_result', { status: 'not_accepted' }, '子任务结果未被接收'],
@@ -58,10 +60,20 @@ describe('builtin tool summaries', () => {
     expect(builtinToolSummary(trace(name as string, result, {}, { status: 'failed', resultState: 'APPLICATION_ERROR' }))?.subtitle).toBe(expected);
   });
 
+  it('does not expose the terminal pending-exit placeholder as a failed exit code', () => {
+    expect(builtinToolSummary(trace('terminal', {
+      status: 'running', exit_code: -1, yielded_to_background: true,
+    }))?.subtitle).toBe('命令仍在后台运行');
+    expect(builtinToolSummary(trace('terminal', {
+      status: 'unknown', exit_code: -1,
+    }))?.subtitle).toBe('命令退出状态尚未确定');
+  });
+
   it.each([
-    ['log', 'running', null, '已读取输出'],
-    ['poll', 'running', null, '已查看命令状态'],
-    ['wait', 'running', null, '已等待命令'],
+    ['log', 'running', null, '已读取输出 · 命令仍在运行'],
+    ['poll', 'running', -1, '命令仍在运行'],
+    ['wait', 'running', -1, '等待结束，命令仍在运行'],
+    ['write', 'running', -1, '已发送输入 · 命令仍在运行'],
     ['wait', 'success', 0, '命令执行完成'],
   ])('describes the completed %s action for a %s process', (action, status, exitCode, expected) => {
     expect(builtinToolSummary(trace('terminal_process', {

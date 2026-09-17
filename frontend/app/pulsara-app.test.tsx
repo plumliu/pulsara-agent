@@ -30,7 +30,10 @@ import type {
   SessionWorkspaceSelection,
   UserCapabilitySnapshot,
 } from '../lib/pulsara-types';
+import { WELCOME_TYPEWRITER_PHRASES } from '../components/welcome-typewriter';
 import PulsaraApp from './pulsara-app';
+
+const isWelcomeHeading = (name: string) => (WELCOME_TYPEWRITER_PHRASES as readonly string[]).includes(name);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -2895,7 +2898,7 @@ describe('PulsaraApp', () => {
     expect(screen.queryByText('想完成什么？')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
     await waitFor(() => expect(adapter.createSession).toHaveBeenCalledWith({ kind: 'quick' }));
-    expect(await screen.findByRole('heading', { name: '有什么想做的？' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: isWelcomeHeading })).toBeTruthy();
   });
 
   it('binds plan and permission choices to the next composer submission', async () => {
@@ -2904,7 +2907,7 @@ describe('PulsaraApp', () => {
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
-    await screen.findByRole('heading', { name: '有什么想做的？' });
+    await screen.findByRole('heading', { name: isWelcomeHeading });
 
     fireEvent.click(screen.getByRole('button', { name: '输入选项' }));
     fireEvent.click(screen.getByRole('button', { name: /选择模型/ }));

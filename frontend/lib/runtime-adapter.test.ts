@@ -2468,6 +2468,33 @@ describe('source text fidelity hard cut', () => {
     expect(json).not.toHaveProperty('output');
   });
 
+  it('does not project terminal_process pending-exit placeholders as real exit codes', async () => {
+    const entries = [{
+      entry_id: 'process-request', turn_id: 'turn-process', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'process-block', block_kind: 'TOOL_CALL', tool_call_id: 'process-call',
+        tool_name: 'terminal_process',
+        tool_arguments_preview: btoa(JSON.stringify({ action: 'poll', process_id: 'process-a' })),
+      }],
+    }, {
+      entry_id: 'process-result', turn_id: 'turn-process', entry_sequence: '2',
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+      content: inlineContent(JSON.stringify({ status: 'running', output: '', exit_code: -1 })),
+      tool_result: {
+        assistant_entry_id: 'process-request', tool_call_id: 'process-call', result_state: 'SUCCESS',
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
+    const summary = messages.find((message) => message.id === 'process-request')?.traces?.[0].resultSummary;
+    expect(summary).toBe('命令仍在运行。');
+    expect(summary).not.toContain('-1');
+  });
+
   it('applies filesystem result summaries only to exact builtin tool names', async () => {
     const request = (id: string, sequence: number, call: string, toolName: string) => ({
       entry_id: id, turn_id: 'turn-tools', entry_sequence: String(sequence),

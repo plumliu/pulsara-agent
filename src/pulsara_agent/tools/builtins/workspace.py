@@ -120,7 +120,9 @@ class WorkspaceTool:
         path = Path(raw)
         if path.is_absolute():
             return path.expanduser().resolve()
-        return self._resolve_workspace_path(raw)
+        # Read-only tools accept the same host-local target regardless of whether
+        # callers spell it as an absolute path or relative to the workspace.
+        return (self.workspace_root / path).resolve()
 
     def _result(
         self,

@@ -40,7 +40,7 @@
 |---|---|---|
 | [builtin_catalog.py](src/pulsara_agent/capability/builtin_catalog.py)：`_BUILTIN_DESCRIPTORS`、`_FILESYSTEM`、`_recovery_contract` | `read_file` 是只读、并发安全、`filesystem_read`；catalog 同时驱动权限、工具族和 recovery | 加入 `view_image` 的完整 catalog 事实，不能只加 JSON schema |
 | [filesystem.py](src/pulsara_agent/tools/builtins/filesystem.py)：`ReadFileTool.execute` | 只读文本；追踪行窗口和文件 revision | 新增图片执行实现，复用路径规则，不混入文本 revision 状态 |
-| [workspace.py](src/pulsara_agent/tools/builtins/workspace.py)：`_resolve_read_path` | 工作区相对路径、本机绝对路径、`~`、`${PULSARA_HOME}`；相对路径不得逃逸工作区 | 直接复用，不照搬其他产品的 external-directory 审批体系 |
+| [workspace.py](src/pulsara_agent/tools/builtins/workspace.py)：`_resolve_read_path` | 工作区相对路径、本机绝对路径、`~`、`${PULSARA_HOME}`；只读相对路径以工作区为起点且允许通过 `../` 访问外部目标 | 直接复用，不照搬其他产品的 external-directory 审批体系 |
 | [tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py)：`DirectKernelToolPort`、`_physical_io` | 构造 builtin、执行权限和物理调用；普通结果经 `result.output.encode('utf-8')` 转成 kernel 结果 | 注入既有图片验证 owner，增加明确的 typed 图片结果分支 |
 | [tool_execution.py](src/pulsara_agent/conversation_kernel/tool_execution.py)：`ToolBatchExecutor.execute` | 主循环是 `for call_ordinal, call in enumerate(calls)`，实际逐个执行 | 在该 owner 内支持连续读图调用的并发窗口；没有现成的通用并行批次可以直接宣称复用 |
 | [io.py](src/pulsara_agent/conversation_kernel/io.py)：`KernelSessionIO` | 物理 I/O semaphore、取消后 drain、Host 关闭 drain | 继续使用；当前 [limits.py](src/pulsara_agent/conversation_kernel/limits.py) 的 I/O 硬并发是 8，不另设图片线程池 |
@@ -84,7 +84,7 @@
 }
 ```
 
-描述应明确：读取一个本地 PNG/JPEG/静态 WebP 并让模型看到内容；相对路径以当前 workspace 为基准；多张图片使用多个调用；不处理 URL、目录、PDF 或动画。不提供 `detail`、resize、任意 MIME、页码等未闭合参数。
+描述应明确：读取一个本地 PNG/JPEG/静态 WebP 并让模型看到内容；相对路径以当前 workspace 为基准且可用 `../` 访问外部目标，绝对路径与 `~` 也可用；多张图片使用多个调用；不处理 URL、目录、PDF 或动画。不提供 `detail`、resize、任意 MIME、页码等未闭合参数。
 
 catalog：`is_read_only=True`、`is_concurrency_safe=True`、`permission_category='filesystem_read'`，纳入 filesystem family、read-only recovery 和 evidence acquisition 分类。工具集合、schema、描述只随正常冷 epoch 或已采用 successor 安装；不能在现存 epoch 临时增删工具。纯文本目标若调用已安装的工具，返回明确的不支持图片错误，不热改 tools。
 
@@ -96,7 +96,7 @@ catalog：`is_read_only=True`、`is_concurrency_safe=True`、`permission_categor
 
 ### 3.2 文件取得
 
-1. 复用 `_resolve_read_path`；路径字符串作为工具参数/来源标签，不作为后续发送的可变数据源。
+1. 复用 `_resolve_read_path`；相对路径以工作区为起点，只读调用允许 `../` 访问工作区外部，与已允许的绝对路径、`~`及 `${PULSARA_HOME}` 语义一致；路径字符串作为工具参数/来源标签，不作为后续发送的可变数据源。
 2. 权限通过后打开普通文件。拒绝目录、设备、FIFO、socket 等不具备有限文件读取语义的对象。使用维护中的 Python 文件系统 API，检查实际打开句柄的 `fstat`，不能仅依赖打开前 `stat`；避免 FIFO 在检查前阻塞。
 3. 读取前检查当前调用的字节额度；读取时最多取得该额度加 1 byte，用额外一字节检测增长/超限。禁止无界 `read_bytes()` 后才判定太大。
 4. 对本次取得的 immutable bytes 使用 Pillow 的实际格式识别。扩展名、调用方标签、4KB sniff 均不能替代完整验证。复用验证 worker，允许它为该入口从实际内容得出 MIME；原用户上传路径仍必须核对其声明 MIME。
@@ -488,7 +488,7 @@ history/snapshot/活动记录只传 descriptor，图片按需通过原 chunked r
 | 编号 | 场景及断言 |
 |---|---|
 | L01 | 原 catalog/schema 只有 path；已由后续已知引用重读规格 hard cut 为 path/image_ref 恰有一个；read-only、concurrency、family、permission/recovery 分类一致；旧 epoch tools 不变 |
-| L02 | 工作区相对路径、绝对路径、`~`、`${PULSARA_HOME}` 和相对逃逸行为与原 read owner 一致 |
+| L02 | 工作区相对路径、允许 `../` 的外部只读目标、绝对路径、`~`、`${PULSARA_HOME}` 行为与原 read owner 一致 |
 | L03 | 文件不存在、目录、FIFO/device、空文件、伪装成图片的非法内容、损坏、动画、多帧、像素/PNG metadata 超界，均无成功图片 publication |
 | L04 | 读取期间增长超过额度被 bounded read 拒绝；不通过先整文件读取再判超限实现 |
 | L05 | 成功图片 bytes/digest/MIME/尺寸从文件验证贯穿 canonical 与实际 wire；原图字节无 resize/EXIF 修改 |

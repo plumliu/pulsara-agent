@@ -66,6 +66,19 @@ const monitorActions: Record<string, string> = {
   register: '关注命令进展', list: '查看进展通知', cancel: '取消进展通知',
 };
 
+function runningProcessDetail(name: string, action: string): string {
+  if (name === 'terminal') return '命令仍在后台运行';
+  return ({
+    log: '已读取输出 · 命令仍在运行',
+    poll: '命令仍在运行',
+    wait: '等待结束，命令仍在运行',
+    write: '已发送输入 · 命令仍在运行',
+    submit: '已发送输入 · 命令仍在运行',
+    close_stdin: '已结束输入 · 命令仍在运行',
+    kill: '已请求停止，命令仍在运行',
+  } as Record<string, string>)[action] ?? '命令仍在运行';
+}
+
 function failure(trace: ToolTrace, result: Record<string, unknown>): string {
   const errors: Record<string, string> = {
     FILE_NOT_FOUND: '未找到文件',
@@ -94,10 +107,14 @@ function failure(trace: ToolTrace, result: Record<string, unknown>): string {
   };
   if (trace.toolName === 'terminal' || trace.toolName === 'terminal_process') {
     const process = Object.keys(object(result.process)).length ? object(result.process) : result;
+    const status = text(process.status).toLowerCase();
     if (process.timed_out === true || process.status === 'timeout') return '命令已超时';
-    if (process.status === 'killed') return '命令已停止';
-    if (process.status === 'blocked') return '命令未获准执行';
-    if (number(process.exit_code) !== undefined) return `命令未成功，退出码 ${process.exit_code}`;
+    if (status === 'killed') return '命令已停止';
+    if (status === 'blocked') return '命令未获准执行';
+    if (status === 'running') return runningProcessDetail(trace.toolName, text(parse(trace.argumentsJson).action));
+    const exitCode = number(process.exit_code);
+    if (exitCode === -1) return status === 'error' ? '命令执行失败' : '命令退出状态尚未确定';
+    if (exitCode !== undefined) return `命令未成功，退出码 ${exitCode}`;
   }
   if (trace.toolName === 'manage_capability') {
     if (result.status === 'CONFLICT') return '配置已变化，本次变更未应用';
@@ -158,7 +175,7 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
       case 'terminal_process': {
         const process = Object.keys(object(result.process)).length ? object(result.process) : result;
         const exitCode = number(process.exit_code);
-        // A completed tool card records the action, not a live process status.
+        // The tool invocation can complete while the managed process keeps running.
         if (name === 'terminal_process') {
           detail = ({ log: '已读取输出', poll: '已查看命令状态', wait: '已等待命令',
             write: '已发送输入', submit: '已发送输入', close_stdin: '已结束输入',
@@ -167,6 +184,12 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
         if (Array.isArray(result.processes)) detail = `本次列出 ${result.processes.length} 个命令进程`;
         else if (process.timed_out === true || process.status === 'timeout') detail = '命令已超时';
         else if (process.status === 'killed') detail = '命令已停止';
+        else if (process.status === 'blocked') detail = '命令未获准执行';
+        else if (process.status === 'running' || process.yielded_to_background === true) {
+          detail = runningProcessDetail(name, action);
+        }
+        else if (process.status === 'success' && (name === 'terminal' || action === 'poll' || action === 'wait')) detail = '命令执行完成';
+        else if (exitCode === -1) detail = process.status === 'error' ? '命令执行失败' : '命令退出状态尚未确定';
         else if (exitCode !== undefined && exitCode !== 0) detail = `命令未成功，退出码 ${exitCode}`;
         else if (exitCode === 0 && (name === 'terminal' || action === 'poll' || action === 'wait')) detail = '命令执行完成';
         break;

@@ -7,6 +7,9 @@ import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../lib/
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { promptContentTextProjection } from '../lib/prompt-content';
 import { ConversationMessages, WorkbenchView } from './workbench-view';
+import { WELCOME_TYPEWRITER_PHRASES } from './welcome-typewriter';
+
+const isWelcomeHeading = (name: string) => (WELCOME_TYPEWRITER_PHRASES as readonly string[]).includes(name);
 
 function renderWithRawResults(ui: ReactElement) {
   return render(ui, { wrapper: ({ children }: PropsWithChildren) => (
@@ -340,7 +343,7 @@ describe('empty session welcome composer', () => {
     const view = render(<WorkbenchView {...props({ isRunning: false, onSend,
       initialContextBase: { base_kind: 'FULL_HISTORY', display_after_entry_sequence: 0 },
     })} />);
-    expect(screen.getByRole('heading', { name: '有什么想做的？' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: isWelcomeHeading })).toBeTruthy();
     const drawer = view.container.querySelector('.composer-drawer')!;
     expect(drawer.hasAttribute('inert')).toBe(true);
     const wrap = view.container.querySelector('.composer-wrap') as HTMLElement;
@@ -358,7 +361,7 @@ describe('empty session welcome composer', () => {
     expect(editor.contains(document.activeElement)).toBe(true);
     expect(view.container.querySelector('.is-welcome')).toBeNull();
     expect(drawer.hasAttribute('inert')).toBe(false);
-    expect(screen.queryByRole('heading', { name: '有什么想做的？' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: isWelcomeHeading })).toBeNull();
     expect(animate).toHaveBeenCalledWith([
       { transform: 'translateY(-370px)' }, { transform: 'translateY(0)' },
     ], expect.objectContaining({ duration: 560 }));
@@ -401,7 +404,7 @@ describe('empty session welcome composer', () => {
     else fireEvent.keyDown(screen.getByLabelText('发送给 Pulsara'), { key: 'Enter' });
     expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(false);
     expect(screen.getByRole('button', { name: /选择模型/ }).getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getByRole('heading', { name: '有什么想做的？' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: isWelcomeHeading })).toBeTruthy();
     expect(promptDraftStore.summary('session-one').text).toBe('先选择模型');
     expect(input.onSend).not.toHaveBeenCalled();
     expect(input.onNotify).not.toHaveBeenCalled();
@@ -499,7 +502,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.queryByText(/主任务会结合|用于当前处理|模型已收到/)).toBeNull();
   });
 
-  it('hides builtin raw previews and artifact pages by default, retaining diffs and commands', async () => {
+  it('hides builtin raw previews and artifact pages by default, retaining diffs, commands, and terminal output', async () => {
     const readArtifact = vi.fn(async () => ({ resultEntryId: 'result', text: 'retained output',
       offsetChars: 0, returnedChars: 15, totalChars: 15, hasMore: false }));
     const viewProps = props({ isRunning: true, onReadToolArtifact: readArtifact, messages: [{
@@ -524,8 +527,8 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：terminal' }));
     expect(screen.getByLabelText('文件差异').textContent).toBe('-old\n+new');
     expect(view.container.querySelector('.terminal-command')?.textContent).toContain('pwd');
+    expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('raw stdout');
     expect(screen.queryByRole('button', { name: '展开工具详情：read_file' })).toBeNull();
-    expect(screen.queryByText('raw stdout')).toBeNull();
     expect(screen.queryByText('raw body')).toBeNull();
     expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
     expect(screen.queryByRole('button', { name: '查看完整输出' })).toBeNull();
@@ -539,6 +542,71 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.queryByText('retained output')).toBeNull();
     expect(screen.queryByRole('region', { name: '完整工具输出' })).toBeNull();
     expect(screen.getByLabelText('文件差异')).toBeTruthy();
+  });
+
+  it('streams terminal output in an expanded card and unwraps only the final terminal envelope', () => {
+    const terminalTrace = (resultText: string, status: 'running' | 'completed', resultState?: string) => ({
+      id: 'terminal-stream', kind: 'terminal' as const, toolName: 'terminal', title: '运行命令',
+      subtitle: 'printf', status, command: 'printf output', resultText, resultState,
+    });
+    const viewProps = (trace: ReturnType<typeof terminalTrace>) => props({
+      isRunning: true,
+      messages: [{
+        id: 'assistant-terminal-stream', role: 'assistant' as const, time: '现在', body: '',
+        status: 'running' as const, traces: [trace],
+      }],
+    });
+    const display = (trace: ReturnType<typeof terminalTrace>) => (
+      <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults: false, onChange: () => {} }}>
+        <WorkbenchView {...viewProps(trace)} />
+      </ToolResultDisplayContext.Provider>
+    );
+
+    const view = render(display(terminalTrace('first', 'running')));
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：terminal' }));
+    expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('first');
+    expect(screen.getByLabelText('命令仍在执行')).toBeTruthy();
+
+    view.rerender(display(terminalTrace('first\nsecond', 'running')));
+    const stream = screen.getByRole('region', { name: '命令输出' });
+    expect(stream.textContent).toContain('first\nsecond');
+    const scrollingOutput = stream.querySelector('pre')!;
+    Object.defineProperties(scrollingOutput, {
+      scrollHeight: { configurable: true, value: 1_000 },
+      clientHeight: { configurable: true, value: 100 },
+    });
+    scrollingOutput.scrollTop = 0;
+    view.rerender(display(terminalTrace('first\nsecond\nthird', 'running')));
+    expect(scrollingOutput.scrollTop).toBe(1_000);
+
+    scrollingOutput.scrollTop = 0;
+    fireEvent.scroll(scrollingOutput);
+    view.rerender(display(terminalTrace('first\nsecond\nthird\nfourth', 'running')));
+    expect(scrollingOutput.scrollTop).toBe(0);
+
+    const jsonPrintedByCommand = '{"exit_code":0,"output":"this is command output"}';
+    view.rerender(display(terminalTrace(jsonPrintedByCommand, 'running')));
+    expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain(jsonPrintedByCommand);
+
+    const finalEnvelope = JSON.stringify({
+      status: 'success', terminal_process_action: 'start', output: 'first\nsecond', exit_code: 0,
+    });
+    view.rerender(display(terminalTrace(finalEnvelope, 'completed', 'SUCCESS')));
+    const output = screen.getByRole('region', { name: '命令输出' });
+    expect(output.textContent).toContain('first\nsecond');
+    expect(output.textContent).not.toContain('terminal_process_action');
+    expect(screen.queryByLabelText('命令仍在执行')).toBeNull();
+    expect(screen.queryByText('已转到后台运行')).toBeNull();
+    expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
+
+    const backgroundEnvelope = JSON.stringify({
+      status: 'running', terminal_process_action: 'start', output: 'first\nsecond',
+      exit_code: -1, yielded_to_background: true,
+    });
+    view.rerender(display(terminalTrace(backgroundEnvelope, 'completed', 'SUCCESS')));
+    const backgroundNotice = screen.getByText('已转到后台运行');
+    expect(backgroundNotice.tagName).toBe('EM');
+    expect(backgroundNotice.closest('[aria-label="命令输出"]')).toBeTruthy();
   });
 
   it('keeps exact raw text/copy, exact edit diff, and paginates the retained artifact', async () => {

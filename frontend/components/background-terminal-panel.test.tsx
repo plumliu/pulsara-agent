@@ -18,6 +18,26 @@ const process: BackgroundProcess = {
 };
 
 describe('BackgroundTerminalPanel PR03 controls', () => {
+  it('does not present the unknown-exit placeholder as a real exit code', async () => {
+    const unknownExit: BackgroundProcess = {
+      ...process, processId: 'process-unknown', command: 'unknown exit',
+      status: 'error', physicalState: 'PHYSICALLY_JOINED', exitCode: -1,
+    };
+    render(<BackgroundTerminalPanel
+      ownerKey="session-a:1:host-a"
+      sessionId="session-a"
+      hostSessionId="host-a"
+      controlAdmissionDeadlineMs={42_000}
+      canControl={false}
+      loadProcesses={vi.fn(async () => ({ processes: [unknownExit] }))}
+      readLog={vi.fn()}
+      terminateProcess={vi.fn()}
+      queryControl={vi.fn()}
+    />);
+    expect(await screen.findByText('已结束 · 执行失败')).toBeTruthy();
+    expect(screen.queryByText(/exit -1/)).toBeNull();
+  });
+
   it('freezes one exact reference, shows retained output, and keeps partial failure visible', async () => {
     vi.stubGlobal('crypto', { randomUUID: () => 'control-uuid' });
     const terminate = vi.fn(async (reference: UserControlCommandRef): Promise<CommandReceipt> => ({
@@ -48,6 +68,8 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
     />);
     fireEvent.click((await screen.findByText('printf long-output')).closest('button')!);
     expect(await screen.findByText(/line-1/)).toBeTruthy();
+    expect(screen.getByRole('region', { name: '命令原文' }).textContent).toContain('$ printf long-output');
+    expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('line-1\nline-2');
     fireEvent.click(screen.getByRole('button', { name: '终止 printf long-output' }));
     await waitFor(() => expect(terminate).toHaveBeenCalledWith(expect.objectContaining({
       commandId: 'command:control:42000:control-uuid',

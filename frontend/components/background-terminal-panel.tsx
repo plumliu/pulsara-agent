@@ -34,6 +34,16 @@ interface ProcessView {
 
 const terminal = (status: string) => status !== 'running';
 
+const processStatusText = (process: BackgroundProcess): string => {
+  if (process.status === 'running') return '运行中';
+  if (process.status === 'timeout' || process.timedOut) return '已结束 · 命令超时';
+  if (process.status === 'killed') return '已结束 · 已停止';
+  if (process.exitCode === -1) {
+    return process.status === 'error' ? '已结束 · 执行失败' : '已结束 · 退出状态未知';
+  }
+  return `已结束${process.exitCode === undefined ? '' : ` · exit ${process.exitCode}`}`;
+};
+
 const controlNeedsPolling = (receipt?: CommandReceipt): boolean => Boolean(
   receipt
   && (
@@ -309,14 +319,21 @@ export function BackgroundTerminalPanel({
             reading: item.expanded ? false : value.reading,
           }));
           if (!item.expanded && !item.output) void read(item.process.processId);
-        }}><ChevronDown size={13} /><span><strong>{item.process.command}</strong><small>{item.control?.status === 'pending' ? '正在终止' : item.process.status === 'running' ? '运行中' : `已结束${item.process.exitCode === undefined ? '' : ` · exit ${item.process.exitCode}`}`}</small></span></button>
+        }}><ChevronDown size={13} /><span><strong>{item.process.command}</strong><small>{item.control?.status === 'pending' ? '正在终止' : processStatusText(item.process)}</small></span></button>
         <button type="button" className="background-process__info" aria-label="查看命令详情" aria-pressed={item.details} onClick={() => update(item.process.processId, (value) => ({ ...value, details: !value.details }))}><Info size={13} /></button>
         {controlReady && !terminal(item.process.status) && <button type="button" className="background-process__stop" aria-label={`终止 ${item.process.command}`} disabled={item.control?.status === 'pending'} onClick={() => void stop(item.process)}>{item.control?.status === 'pending' ? <LoaderCircle className="is-spinning" size={13} /> : <CircleStop size={13} />}</button>}
       </header>
       {item.details && <dl><div><dt>来源</dt><dd>{item.process.originSubagentTaskId ? `子任务 ${item.process.originSubagentTaskId}` : `主任务 ${item.process.originTurnId}`}</dd></div><div><dt>目录</dt><dd>{item.process.cwd}</dd></div><div><dt>物理状态</dt><dd>{item.process.physicalState}</dd></div></dl>}
       {(item.error || item.control?.status === 'failed' || item.control?.status === 'rejected') && <p className="background-process__attention"><AlertTriangle size={12} /> {item.error || item.control?.publicMessage || '终止操作只完成了一部分。'}</p>}
       {item.control?.userControl?.feedback && <p className="background-process__feedback">反馈：{item.control.userControl.feedback.canonicalStatus === 'ACCEPTED' ? '已记录' : item.control.userControl.feedback.canonicalStatus === 'NOT_REQUIRED' ? '本次无需记录' : '记录状态待确认'} · {item.control.userControl.feedback.inclusionStatus === 'INCLUDED' ? '已编入原轮次模型请求' : item.control.userControl.feedback.inclusionStatus === 'TARGET_ENDED_BEFORE_INCLUSION' ? '原轮次在纳入前结束' : item.control.userControl.feedback.inclusionStatus === 'NOT_APPLICABLE' ? '不适用模型请求' : '请求纳入状态待确认'}{item.control.userControl.feedback.transportInvocationAttempted ? ` · 本地请求${item.control.userControl.feedback.transportInvocationSucceeded === false ? '发起失败' : '已发起'}` : ''}</p>}
-      {item.expanded && <div className="background-process__output" aria-label="后台命令输出"><pre>{item.output || (item.reading ? '正在读取…' : '暂无输出')}</pre>{item.reading && <LoaderCircle className="is-spinning" size={12} />}</div>}
+      {item.expanded && <div className="background-process__output" aria-label="后台命令输出">
+        <div className="background-process__command" role="region" aria-label="命令原文"><span aria-hidden="true">$</span> {item.process.command}</div>
+        <section className="background-process__result" aria-label="命令输出">
+          <strong>输出</strong>
+          <pre>{item.output || (item.reading ? '正在读取…' : '暂无输出')}</pre>
+          {item.reading && <LoaderCircle className="is-spinning" size={12} />}
+        </section>
+      </div>}
     </article>)}
   </div>;
 }

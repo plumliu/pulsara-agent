@@ -4078,8 +4078,19 @@ function summarizeToolResult(toolName: string | undefined, content: string): str
       const field = value[key];
       if (typeof field === 'string' && field) return field;
     }
-    if ((toolName === 'terminal' || toolName === 'terminal_process') && typeof value.exit_code === 'number') {
-      return `命令已结束，退出码 ${value.exit_code}。`;
+    if (toolName === 'terminal' || toolName === 'terminal_process') {
+      const nestedProcess = asRecord(value.process);
+      const process = Object.keys(nestedProcess).length ? nestedProcess : value;
+      const status = String(process.status ?? '').toLowerCase();
+      const exitCode = typeof process.exit_code === 'number' ? process.exit_code : undefined;
+      if (status === 'running') {
+        return toolName === 'terminal' ? '命令仍在后台运行。' : '命令仍在运行。';
+      }
+      if (status === 'blocked') return '命令未获准执行。';
+      if (status === 'killed') return '命令已停止。';
+      if (status === 'timeout' || process.timed_out === true) return '命令已超时。';
+      if (exitCode === -1) return status === 'error' ? '命令执行失败。' : '命令退出状态尚未确定。';
+      if (exitCode !== undefined) return `命令已结束，退出码 ${exitCode}。`;
     }
     return undefined;
   } catch {
