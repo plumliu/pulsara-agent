@@ -690,7 +690,7 @@ def test_session_created_during_a_project_change_still_marks_lazy_refresh(
         controller.active_skill_names = frozenset()
         controller._by_session = {}
         controller._by_host = {}
-        controller._resumes = {}
+        controller._operations = {}
         controller._lock = asyncio.Lock()
         controller._capability_mutation_lock = asyncio.Lock()
         controller._closing = False
@@ -751,7 +751,7 @@ def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
         controller.active_skill_names = frozenset()
         controller._by_session = {}
         controller._by_host = {}
-        controller._resumes = {}
+        controller._operations = {}
         controller._lock = asyncio.Lock()
         controller._capability_mutation_lock = asyncio.Lock()
         controller._closing = False

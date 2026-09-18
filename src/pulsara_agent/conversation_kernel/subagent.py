@@ -531,6 +531,14 @@ class KernelSubagentManager:
     def tool_names(self) -> frozenset[str]:
         return SUBAGENT_TOOL_NAMES
 
+    def has_active_work(self) -> bool:
+        """Return the same-loop live child fact used by Host quiescence."""
+
+        return any(
+            item.status == "ACTIVE" or (item.task is not None and not item.task.done())
+            for item in self._tasks.values()
+        )
+
     def validate_arguments(
         self,
         *,

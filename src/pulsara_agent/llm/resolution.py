@@ -28,7 +28,6 @@ from pulsara_agent.llm.normalized_transport import (
     NormalizedLLMTransport,
     NormalizedLLMTransportRegistry,
 )
-from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ModelContextLimits,
@@ -36,7 +35,6 @@ from pulsara_agent.primitives.model_call import (
     ResolvedModelCallFact,
     ResolvedModelContextBudgetFact,
     ResolvedModelTargetFact,
-    resolved_model_target_fingerprint,
 )
 
 
@@ -112,9 +110,6 @@ def resolve_model_target(
     )
     estimator = PulsaraHeuristicTokenEstimatorV2()
     canonical_endpoint = contract.canonical_endpoint_base_url
-    endpoint_fingerprint = context_fingerprint(
-        "pulsara.model-endpoint:v2", canonical_endpoint
-    )
     target_payload = {
         "route_id": contract.key.route_id,
         "wire_api": contract.key.wire_api.value,
@@ -124,11 +119,10 @@ def resolve_model_target(
         "transport_contract_version": adapter.transport_contract_version,
         "model_identity_policy": adapter.model_identity_policy.value,
         "input_modalities": contract.target_facts.input_modalities,
+        "tool_call_capability": contract.target_facts.tool_call is not False,
         "limits": limits.model_dump(mode="json"),
     }
     fact = ResolvedModelTargetFact(
-        target_fingerprint=resolved_model_target_fingerprint(target_payload),
-        endpoint_fingerprint=endpoint_fingerprint,
         context_budget=budget,
         token_estimator=estimator.fact,
         **target_payload,
@@ -219,7 +213,7 @@ def rebind_model_target(
         route_wires=route_wires,
         registry=registry,
     )
-    if target.fact.target_fingerprint != fact.target_fingerprint:
+    if target.fact != fact:
         raise ModelTargetBindingMismatch(
             "current runtime cannot reproduce the persisted model target"
         )

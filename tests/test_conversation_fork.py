@@ -48,6 +48,7 @@ from tests.support.model_config import (
     start_test_root_turn,
     test_model_binding as model_binding,
     test_model_runtime as model_runtime,
+    build_test_provider_replay_target,
 )
 from tests.support.postgres import verified_postgres_provider
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -669,8 +670,6 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
 ):
     from pulsara_agent.llm.provider_replay import (
         build_prepared_durable_provider_assistant_replay,
-        build_provider_replay_target_compatibility,
-        ProviderReplayDisposition,
     )
     from pulsara_agent.llm.request import (
         provider_assistant_public_projection_fingerprint,
@@ -680,10 +679,9 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
     lease = new_session(repo)
     turn_id, cut, _ = turn(repo, lease.guard, "question", finish=False)
     entry = identity("entry")
-    target = build_provider_replay_target_compatibility(
+    target = build_test_provider_replay_target(
         wire_api=wire_api,
-        endpoint_identity_fingerprint="sha256:" + "1" * 64,
-        normalized_model_identifier="model",
+        model_id="model",
         transport_binding_id="test-wire",
     )
     payload = (
@@ -734,8 +732,6 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
             AssistantTextBlock(identity("block"), InlineContent.from_bytes(b"answer")),
         ),
         complete_turn=True,
-        provider_wire_api=wire_api,
-        provider_replay_disposition=ProviderReplayDisposition.NATIVE_REPLAY,
         provider_replay=replay,
         occurred_at=datetime.now(timezone.utc),
         actor_id="model:test",

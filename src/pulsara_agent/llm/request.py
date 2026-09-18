@@ -14,6 +14,7 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.llm.model_connections import ReasoningSelection
 from pulsara_agent.llm.user_carrier import compose_provider_root_policy
+from pulsara_agent.primitives.model_call import ResolvedModelTargetFact
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     FrozenJsonValue,
@@ -163,7 +164,6 @@ class FrozenProviderWireInputPlan:
     message_placements_fingerprint: str
     wire_api: str
     route_wire_profile_fingerprint: str
-    resolved_target_semantic_fingerprint: str
     materialization: FrozenProviderWireMaterialization = field(repr=False)
     replacements: tuple[FrozenProviderWireReplacementIdentity, ...]
     provider_replay_hydration_fingerprint: str | None
@@ -193,7 +193,6 @@ class FrozenProviderWireInputPlan:
             self.compiled_semantic_fingerprint,
             self.message_placements_fingerprint,
             self.route_wire_profile_fingerprint,
-            self.resolved_target_semantic_fingerprint,
             self.wire_system_fingerprint,
             self.wire_tools_fingerprint,
             self.wire_input_prefix_fingerprint,
@@ -262,8 +261,25 @@ def provider_wire_materialization_identity_fingerprint(
 
 def provider_wire_input_plan_identity_fingerprint(
     plan: FrozenProviderWireInputPlan,
+    *,
+    target_fact: ResolvedModelTargetFact,
 ) -> str:
     """Derive the historical stable plan identity at its actual consumers."""
+
+    legacy_target_component = context_fingerprint(
+        "resolved-model-target-compatibility:v6",
+        {
+            "route_id": target_fact.route_id,
+            "wire_api": target_fact.wire_api,
+            "model_id": target_fact.model_id,
+            "canonical_endpoint_base_url": target_fact.canonical_endpoint_base_url,
+            "transport_binding_id": target_fact.transport_binding_id,
+            "transport_contract_version": target_fact.transport_contract_version,
+            "model_identity_policy": target_fact.model_identity_policy,
+            "input_modalities": target_fact.input_modalities,
+            "limits": target_fact.limits.model_dump(mode="json"),
+        },
+    )
 
     return context_fingerprint(
         "pulsara.provider-wire-input-plan:v2-durable-replay",
@@ -273,7 +289,7 @@ def provider_wire_input_plan_identity_fingerprint(
             "placements": plan.message_placements_fingerprint,
             "api": plan.wire_api,
             "profile": plan.route_wire_profile_fingerprint,
-            "target": plan.resolved_target_semantic_fingerprint,
+            "target": legacy_target_component,
             "materialization": provider_wire_materialization_identity_fingerprint(
                 plan.materialization
             ),
@@ -326,7 +342,6 @@ class LLMContext:
     messages: tuple[LLMMessage, ...]
     context_id: str
     resolved_model_call_id: str
-    target_fingerprint: str
     model_call_index: int | None
     tools: tuple[ToolSpec, ...] = field(default_factory=tuple)
     system_prompt: str | None = None

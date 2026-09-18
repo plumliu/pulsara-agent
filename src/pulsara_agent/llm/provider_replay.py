@@ -20,6 +20,7 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.bounded_json import bounded_json_loads
+from pulsara_agent.primitives.model_call import ResolvedModelTargetFact
 from pulsara_agent.ports.live_agent_event import ReasoningPresentationKind
 
 
@@ -49,11 +50,6 @@ RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT = (
 PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION = (
     "pulsara.provider-replay-target-compatibility.v1"
 )
-
-
-class ProviderReplayDisposition(StrEnum):
-    PUBLIC_SEMANTIC_ONLY = "PUBLIC_SEMANTIC_ONLY"
-    NATIVE_REPLAY = "NATIVE_REPLAY"
 
 
 class ProviderAssistantReplayCodecKind(StrEnum):
@@ -160,32 +156,33 @@ class ProviderReplayTargetCompatibilityFact:
 
 def build_provider_replay_target_compatibility(
     *,
-    wire_api: str,
-    endpoint_identity_fingerprint: str,
-    normalized_model_identifier: str,
-    transport_binding_id: str,
+    target_fact: ResolvedModelTargetFact,
 ) -> ProviderReplayTargetCompatibilityFact:
-    if not normalized_model_identifier:
+    if not target_fact.model_id:
         raise ValueError("provider replay model identity is empty")
-    codec = provider_replay_codec_for_wire_api(wire_api)
+    endpoint_identity_fingerprint = context_fingerprint(
+        "pulsara.model-endpoint:v2",
+        target_fact.canonical_endpoint_base_url,
+    )
+    codec = provider_replay_codec_for_wire_api(target_fact.wire_api)
     model_fingerprint = context_fingerprint(
         "pulsara.provider-replay-normalized-model-identity:v1",
-        normalized_model_identifier,
+        target_fact.model_id,
     )
     contract_fingerprint = provider_replay_contract_fingerprint(codec)
     target_fingerprint = _replay_target_fingerprint(
-        wire_api=wire_api,
+        wire_api=target_fact.wire_api,
         endpoint_identity_fingerprint=endpoint_identity_fingerprint,
         normalized_model_identity_fingerprint=model_fingerprint,
-        transport_binding_id=transport_binding_id,
+        transport_binding_id=target_fact.transport_binding_id,
         codec_kind=codec,
         provider_replay_contract_fingerprint=contract_fingerprint,
     )
     return ProviderReplayTargetCompatibilityFact(
-        wire_api=wire_api,
+        wire_api=target_fact.wire_api,
         endpoint_identity_fingerprint=endpoint_identity_fingerprint,
         normalized_model_identity_fingerprint=model_fingerprint,
-        transport_binding_id=transport_binding_id,
+        transport_binding_id=target_fact.transport_binding_id,
         codec_kind=codec,
         provider_replay_contract_fingerprint=contract_fingerprint,
         compatibility_contract_version=(PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION),
@@ -746,7 +743,6 @@ __all__ = [
     "ProviderAssistantReplayFragment",
     "ProviderAssistantReplayCodecKind",
     "ProviderVisibleReasoningBlock",
-    "ProviderReplayDisposition",
     "ProviderReplayTargetCompatibilityFact",
     "build_prepared_durable_provider_assistant_replay",
     "build_provider_replay_target_compatibility",

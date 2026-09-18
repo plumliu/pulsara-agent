@@ -200,6 +200,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const promptReconciliationInFlight = useRef(new Set<string>());
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>('starting');
   const [runtimeError, setRuntimeError] = useState<string>();
+  const [runtimeReopenBusy, setRuntimeReopenBusy] = useState(false);
   const [localSubmissions, setLocalSubmissions] = useState<LocalPromptSubmission[]>([]);
   const [queueActions, setQueueActions] = useState<QueuedPromptAction[]>([]);
   const [toolDecisions, setToolDecisions] = useState<ToolDecisionIntent[]>([]);
@@ -930,6 +931,39 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (activeSessionId) void openRuntimeSession(activeSessionId, true);
     else window.location.reload();
   };
+
+  const reopenRuntime = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId || runtimeReopenBusy) return;
+    setRuntimeReopenBusy(true);
+    setRuntimeStatus('reconnecting');
+    setRuntimeError(undefined);
+    connectionAttempt.current += 1;
+    const previous = connectionRef.current;
+    connectionRef.current = undefined;
+    setConnection(undefined);
+    try {
+      if (previous) await previous.close();
+      const outcome = await adapter.reopenRuntime(sessionId);
+      const reopened = await openRuntimeSession(sessionId, true);
+      if (!reopened) throw new Error('新的 runtime 已准备，但浏览器尚未重新连接。');
+      notify(
+        outcome.status === 'reopened' ? 'Runtime 已安全重启' : 'Runtime 已重新连接',
+        '上下文已从 canonical 数据重新投影；本地运行态不会回放。',
+        'success',
+      );
+    } catch (error) {
+      const detail = productMessage(
+        error instanceof Error ? error.message : undefined,
+        '安全重启没有完成；如果提示隔离状态，请完整重启 Pulsara。',
+      );
+      setRuntimeStatus('failed');
+      setRuntimeError(detail);
+      notify('Runtime 没有重启', detail, 'warning');
+    } finally {
+      setRuntimeReopenBusy(false);
+    }
+  }, [adapter, notify, openRuntimeSession, runtimeReopenBusy]);
 
   const openSession = (id: string) => {
     setActiveView('workbench');
@@ -1998,6 +2032,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           canCreateSession={canCreateSession}
           onOpenCommand={() => setCommandOpen(true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
+          onReopenRuntime={() => void reopenRuntime()}
+          runtimeReopenBusy={runtimeReopenBusy}
         />
       )}
 

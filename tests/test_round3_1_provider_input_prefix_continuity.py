@@ -8,14 +8,12 @@ from pathlib import Path
 import pytest
 
 from pulsara_agent.llm.input import LLMMessage, LLMTextPart
-from pulsara_agent.llm.model_connections import ModelConnectionId
 from pulsara_agent.conversation_kernel.process_local_settlement import (
     await_started_settlement,
 )
 from pulsara_agent.model_input.continuity import (
     ProcessLocalCanonicalFrontier,
     ProviderInputContinuityScope,
-    ProviderInputEpochCompatibility,
     SourceObservationLifecycle,
     SourceObservationPresence,
     decode_runtime_observation,
@@ -135,20 +133,11 @@ def test_frontier_entry_cut_does_not_limit_lowered_blocks_or_tool_closures() -> 
         successor.require_prefix_of(frontier)
 
 
-def test_round3_1_epoch_compatibility_excludes_per_call_identity() -> None:
-    compatibility = ProviderInputEpochCompatibility(
-        compiler_contract_version="compiler:v2",
-        base_system_semantic_fingerprint="sha256:" + "1" * 64,
-        tool_surface_fingerprint="sha256:" + "2" * 64,
-        model_connection_id=ModelConnectionId("model-connection:" + "0" * 32),
-        model_target_fingerprint="sha256:" + "3" * 64,
-        estimator_fingerprint="sha256:" + "4" * 64,
-        provider_message_lowering_contract="lowering:v2",
-        context_base_semantic_identity="sha256:" + "5" * 64,
-    )
-    assert not hasattr(compatibility, "resolved_model_call_id")
-    assert not hasattr(compatibility, "turn_id")
-    assert not hasattr(compatibility, "writer_generation")
+def test_round3_1_compatibility_reset_contract_is_physically_absent() -> None:
+    import pulsara_agent.model_input.continuity as continuity
+
+    assert not hasattr(continuity, "ProviderInputEpochCompatibility")
+    assert not hasattr(continuity, "ProviderInputEpochResetReason")
 
 
 def test_round3_1_started_settlement_outlives_cancelled_waiter() -> None:

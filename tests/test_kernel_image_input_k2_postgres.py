@@ -25,9 +25,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     PromptDeliveryMode,
 )
-from pulsara_agent.conversation_kernel.input_continuity import (
-    HostProviderInputContinuityOwner,
-)
+from tests.support.round3 import new_test_provider_input_continuity_owner
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.conversation_kernel.prompt_content import (
     PROMPT_BODY_CODEC,
@@ -961,7 +959,7 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
     base = CanonicalProviderInputReader(
         repository.connection_provider
     ).read_frozen_compile_snapshot(base_cut, deadline_monotonic=monotonic() + 30)
-    continuity = HostProviderInputContinuityOwner(session_id=lease.guard.session_id)
+    continuity = new_test_provider_input_continuity_owner(lease.guard.session_id)
     planning = continuity.freeze_planning_input(
         scope=ProviderInputContinuityScope(
             session_id=lease.guard.session_id,

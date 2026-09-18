@@ -233,12 +233,22 @@ class CanonicalProviderInputReader:
         ).canonical_input
 
     def read_fork_historical_material(
-        self, connection, source_session_id: str, anchor_entry_id: str,
+        self,
+        connection,
+        source_session_id: str,
+        anchor_entry_id: str,
         deadline_monotonic: float,
     ):
-        from pulsara_agent.conversation_kernel.fork_history import read_fork_historical_material
+        from pulsara_agent.conversation_kernel.fork_history import (
+            read_fork_historical_material,
+        )
+
         return read_fork_historical_material(
-            connection, source_session_id, anchor_entry_id, deadline_monotonic, reader=self
+            connection,
+            source_session_id,
+            anchor_entry_id,
+            deadline_monotonic,
+            reader=self,
         )
 
     def read_frozen_compile_snapshot(
@@ -797,8 +807,7 @@ class CanonicalProviderInputReader:
                 prospective_completed_predecessor_turn_id=(
                     None
                     if _prospective_root_candidate is None
-                    or _prospective_root_candidate.unpublished_plan_handoff_fact
-                    is None
+                    or _prospective_root_candidate.unpublished_plan_handoff_fact is None
                     or _prospective_root_candidate.unpublished_plan_handoff_fact.handoff_kind
                     is not PlanHandoffKind.ENTERED_PLAN
                     else _prospective_root_candidate.permission_snapshot.inherited_from_turn_id
@@ -999,9 +1008,7 @@ class CanonicalProviderInputReader:
                 tuple[str, str], FrozenProviderInputItem
             ] = {}
             if _prospective_root_candidate is not None:
-                for prospective_item in (
-                    _prospective_root_candidate.unpublished_items
-                ):
+                for prospective_item in _prospective_root_candidate.unpublished_items:
                     if (
                         prospective_item.item_kind
                         is FrozenProviderInputItemKind.TOOL_RESULT
@@ -1062,14 +1069,10 @@ class CanonicalProviderInputReader:
                 if kind in ("USER_MESSAGE", "USER_STEER"):
                     prompt_row = _with_inline_payload(row, entry_payloads[entry_id])
                     origin = _canonical_input_origin(row, scope_kind=scope_kind)
-                    if (
-                        scope_kind == "ROOT"
-                        and origin
-                        in {
-                            CanonicalInputOriginKind.HUMAN_MESSAGE,
-                            CanonicalInputOriginKind.HUMAN_STEER,
-                        }
-                    ):
+                    if scope_kind == "ROOT" and origin in {
+                        CanonicalInputOriginKind.HUMAN_MESSAGE,
+                        CanonicalInputOriginKind.HUMAN_STEER,
+                    }:
                         if str(row["content_media_type"]) != PROMPT_BODY_MEDIA_TYPE:
                             raise ConversationKernelConflict(
                                 "ROOT human prompt is not canonical typed content"
@@ -1306,14 +1309,15 @@ class CanonicalProviderInputReader:
                                 "prospective ROOT result already exists"
                             )
                         if state.get("imported_closure_kind") is not None:
-                            raise ConversationKernelConflict("imported call has both visible result and closure")
+                            raise ConversationKernelConflict(
+                                "imported call has both visible result and closure"
+                            )
                         result_row = _with_inline_payload(
                             result,
                             entry_payloads[str(result["result_entry_id"])],
                         )
                         typed_result = (
-                            str(result["content_media_type"])
-                            == PROMPT_BODY_MEDIA_TYPE
+                            str(result["content_media_type"]) == PROMPT_BODY_MEDIA_TYPE
                         )
                         if typed_result:
                             result_prompt = hydrate_canonical_prompt_owner(
@@ -1363,11 +1367,19 @@ class CanonicalProviderInputReader:
                         )
                         continue
                     if prospective_result is not None:
-                        items.append(prospective_result)
+                        items.append(
+                            replace(
+                                prospective_result,
+                                tool_call_ordinal=call_ordinal,
+                                tool_call_arguments=call.arguments,
+                            )
+                        )
                         del prospective_tool_results[(entry_id, call.tool_call_id)]
                         continue
                     closure_kind = historical_tool_closure_kind(
-                        state, owner_kind=str(row["entry_owner_kind"]), target_cut=target_cut
+                        state,
+                        owner_kind=str(row["entry_owner_kind"]),
+                        target_cut=target_cut,
                     )
                     closure = ProviderToolResultClosure(
                         assistant_entry_id=entry_id,
@@ -1399,6 +1411,8 @@ class CanonicalProviderInputReader:
                             content=(LLMTextPart(closure_text),),
                             tool_call_id=call.tool_call_id,
                             tool_request_entry_id=entry_id,
+                            tool_call_ordinal=call_ordinal,
+                            tool_call_arguments=call.arguments,
                         )
                     )
                     if (
@@ -1418,8 +1432,7 @@ class CanonicalProviderInputReader:
                             entry_payloads[str(result["result_entry_id"])],
                         )
                         typed_result = (
-                            str(result["content_media_type"])
-                            == PROMPT_BODY_MEDIA_TYPE
+                            str(result["content_media_type"]) == PROMPT_BODY_MEDIA_TYPE
                         )
                         if typed_result:
                             result_prompt = hydrate_canonical_prompt_owner(
@@ -1460,10 +1473,7 @@ class CanonicalProviderInputReader:
                                     FrozenPromptContent(late_content)
                                 )
                             )
-                            + sum(
-                                len(image.immutable_bytes)
-                                for image in result_images
-                            )
+                            + sum(len(image.immutable_bytes) for image in result_images)
                             if typed_result
                             else len(late_text.encode("utf-8"))
                         )
@@ -1616,8 +1626,6 @@ class CanonicalProviderInputReader:
             manifest_rows = connection.execute(
                 """
                 SELECT e.id AS assistant_entry_id, e.entry_sequence,
-                       e.provider_wire_api, e.provider_replay_disposition,
-                       e.provider_replay_fragment_id,
                        r.id AS replay_id, r.wire_api, r.codec_kind,
                        r.provider_replay_contract_fingerprint,
                        r.replay_target_fingerprint,
@@ -1654,31 +1662,8 @@ class CanonicalProviderInputReader:
                 )
             manifests = []
             for row in manifest_rows:
-                disposition = str(row["provider_replay_disposition"])
-                pointer = row["provider_replay_fragment_id"]
-                native = disposition == "NATIVE_REPLAY"
-                if disposition not in {"PUBLIC_SEMANTIC_ONLY", "NATIVE_REPLAY"}:
-                    raise ConversationKernelConflict(
-                        "assistant replay disposition is not closed"
-                    )
-                if native != (pointer is not None) or native != (
-                    row["replay_id"] is not None
-                ):
-                    raise ConversationKernelConflict(
-                        "assistant replay pointer/row join is partial"
-                    )
-                if not native:
-                    if str(row["provider_wire_api"]) != "openai_chat_completions":
-                        raise ConversationKernelConflict(
-                            "Responses assistant lacks required replay"
-                        )
+                if row["replay_id"] is None:
                     continue
-                if str(pointer) != str(row["replay_id"]) or str(
-                    row["provider_wire_api"]
-                ) != str(row["wire_api"]):
-                    raise ConversationKernelConflict(
-                        "assistant replay cyclic identity drifted"
-                    )
                 manifests.append(
                     freeze_provider_replay_manifest(
                         replay_id=str(row["replay_id"]),
@@ -1921,7 +1906,12 @@ def historical_source_attribution(row: Mapping[str, object]) -> Mapping[str, obj
     if owner != "IMPORTED_HISTORY":
         raise ConversationKernelConflict("unknown transcript entry owner")
     projected = dict(row)
-    for name in ("subagent_task_id", "plan_workflow_id", "plan_interaction_id", "plan_handoff_kind"):
+    for name in (
+        "subagent_task_id",
+        "plan_workflow_id",
+        "plan_interaction_id",
+        "plan_handoff_kind",
+    ):
         projected["source_" + name] = row["imported_source_" + name]
     return projected
 
@@ -1930,8 +1920,13 @@ def historical_tool_closure_kind(
     state: Mapping[str, object], *, owner_kind: str, target_cut: int
 ) -> ProviderToolResultClosureKind:
     if owner_kind == "IMPORTED_HISTORY":
-        if state.get("imported_closure_cut") != target_cut or state.get("imported_closure_kind") is None:
-            raise ConversationKernelConflict("imported tool call lacks its exact historical closure")
+        if (
+            state.get("imported_closure_cut") != target_cut
+            or state.get("imported_closure_kind") is None
+        ):
+            raise ConversationKernelConflict(
+                "imported tool call lacks its exact historical closure"
+            )
         return ProviderToolResultClosureKind[str(state["imported_closure_kind"])]
     if owner_kind != "EXECUTED_TURN":
         raise ConversationKernelConflict("unknown tool call owner")
@@ -2168,9 +2163,7 @@ def _plan_handoff_compile_facts(
             ),
             "transition_semantic_digest": transition_digest,
         }
-        provisional = FrozenPlanHandoffCompileFact.__new__(
-            FrozenPlanHandoffCompileFact
-        )
+        provisional = FrozenPlanHandoffCompileFact.__new__(FrozenPlanHandoffCompileFact)
         for name, value in values.items():
             object.__setattr__(provisional, name, value)
         object.__setattr__(provisional, "fact_fingerprint", "")
@@ -2288,8 +2281,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
 
         if (
             candidate.context_base_kind is not ContextBindingBaseKind.SNAPSHOT
-            or first_candidate.context_base_kind
-            is not ContextBindingBaseKind.SNAPSHOT
+            or first_candidate.context_base_kind is not ContextBindingBaseKind.SNAPSHOT
             or replace(
                 candidate,
                 context_base_kind=first_candidate.context_base_kind,
@@ -2325,7 +2317,8 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         base_binding = base_facts.context_binding_fact
         if (
             base_input.identity.session_id != candidate.session_id
-            or base_input.identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
+            or base_input.identity.conversation_scope_kind
+            is not ModelInputScopeKind.ROOT
             or base_input.identity.scope_subagent_task_id is not None
             or base_input.identity.provider_input_through_sequence
             != candidate.expected_latest_entry_sequence
@@ -2349,8 +2342,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             key = (item.tool_request_entry_id, item.tool_call_id)
             replacement = (
                 prospective_results.get(key)
-                if item.item_kind
-                is FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE
+                if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE
                 else None
             )
             if replacement is None:
@@ -2363,7 +2355,13 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             replaced_closure_bytes += sum(
                 len(part.text.encode("utf-8")) for part in item.content
             )
-            items_list.append(replacement)
+            items_list.append(
+                replace(
+                    replacement,
+                    tool_call_ordinal=item.tool_call_ordinal,
+                    tool_call_arguments=item.tool_call_arguments,
+                )
+            )
             consumed_results.add(key)
         if consumed_results != set(prospective_results):
             raise ConversationKernelConflict(
@@ -3019,7 +3017,9 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         if image_quote is None or int(image_quote["ref_count"]) != int(
             image_quote["blob_count"]
         ):
-            raise ConversationKernelConflict("canonical image ref metadata is incomplete")
+            raise ConversationKernelConflict(
+                "canonical image ref metadata is incomplete"
+            )
         total += int(image_quote["logical_size"])
         if total > self._maximum_canonical_bytes:
             raise ConversationKernelConflict(
@@ -3052,7 +3052,9 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                 or blob["media_type"] != row["content_media_type"]
                 or blob["codec"] != row["content_codec"]
             ):
-                raise ConversationKernelConflict("historical blob descriptor does not exact-join")
+                raise ConversationKernelConflict(
+                    "historical blob descriptor does not exact-join"
+                )
             content = bytes(blob["body"])
         else:
             if self._blob_reader is None:

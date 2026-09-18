@@ -1,4 +1,4 @@
-import { ChevronRight, Eye, Folder, FolderOpen, GitFork, Plus, Search } from 'lucide-react';
+import { ChevronRight, Eye, Folder, FolderOpen, GitFork, Plus, RotateCcw, Search } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
@@ -29,6 +29,8 @@ interface SessionSidebarProps {
   canCreateSession: boolean;
   onOpenCommand: () => void;
   onTakeControl: () => void;
+  onReopenRuntime: () => void;
+  runtimeReopenBusy: boolean;
 }
 
 function taskCountSummary(session: SessionSummary): string | undefined {
@@ -122,6 +124,8 @@ export function SessionSidebar({
   canCreateSession,
   onOpenCommand,
   onTakeControl,
+  onReopenRuntime,
+  runtimeReopenBusy,
 }: SessionSidebarProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const groupedSessions = useMemo(
@@ -169,6 +173,16 @@ export function SessionSidebar({
           <Plus size={14} />
           <span>新建会话</span>
           <kbd>⌘ N</kbd>
+        </button>
+
+        <button
+          className="sidebar-search"
+          disabled={!activeSessionId || runtimeReopenBusy}
+          onClick={onReopenRuntime}
+          title="安全关闭当前 Host runtime，并从 canonical 上下文冷启动"
+        >
+          <RotateCcw size={14} />
+          <span>{runtimeReopenBusy ? '正在重启 runtime…' : '安全重启 runtime'}</span>
         </button>
 
         <section className="session-list" aria-label="会话目录">

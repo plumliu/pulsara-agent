@@ -41,6 +41,7 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
 from pulsara_agent.model_input.contracts import CapabilityActivationSubjectKind
+from pulsara_agent.model_input.lowering import image_reference_part
 from pulsara_agent.primitives.context import context_fingerprint
 from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
@@ -315,14 +316,17 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
         if mixed
         else PromptContent((PromptImagePart(image_bytes, "image/png"),))
     )
+    expected_image = LLMImagePart("image/png", image_bytes, 7, 5)
+    expected_reference = image_reference_part(expected_image)
     expected_content = (
         (
             LLMTextPart("before"),
-            LLMImagePart("image/png", image_bytes, 7, 5),
+            expected_reference,
+            expected_image,
             LLMTextPart("after"),
         )
         if mixed
-        else (LLMImagePart("image/png", image_bytes, 7, 5),)
+        else (expected_reference, expected_image)
     )
     model = _K2ImageCompileProbe()
     compiled_messages = []
@@ -565,11 +569,14 @@ def test_k2_root_install_prepares_ordered_image_gap_without_a_child(
     asyncio.run(scenario())
     assert len(prepared_parent_subjects) == 1
     assert len(prepared_parent_subjects[0].ordered_eligible_units) == 1
+    expected_reference = image_reference_part(
+        LLMImagePart("image/png", image_bytes, 7, 5)
+    ).text
     assert prepared_parent_subjects[0].ordered_eligible_units[
         0
     ].ordered_public_items == (
-        "USER: before[image part 1 omitted from parent context; "
-        "visual content unavailable]after",
+        f"USER: before{expected_reference}"
+        "[image part 2 omitted from parent context; visual content unavailable]after",
     )
 
 
@@ -583,9 +590,11 @@ def test_k2_public_host_consumes_typed_image_steer_at_provider_safe_point(
     payload = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
     image_bytes = payload.getvalue()
+    expected_image = LLMImagePart("image/png", image_bytes, 7, 5)
     expected = (
         LLMTextPart("redirect"),
-        LLMImagePart("image/png", image_bytes, 7, 5),
+        image_reference_part(expected_image),
+        expected_image,
     )
     model = _K2SteerImageCompileProbe()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)

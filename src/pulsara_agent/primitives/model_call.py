@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -16,9 +16,8 @@ from pulsara_agent.llm.model_connections import ModelCallBinding
 class ModelCallPurpose(StrEnum):
     AGENT_MODEL_LOOP = "agent_model_loop"
     CONTEXT_COMPACTION_SUMMARY = "context_compaction_summary"
-    CONTEXT_WINDOW_COMPACTION_SUMMARY = "context_window_compaction_summary"
     MEMORY_GOVERNANCE = "memory_governance"
-    COMPACTION_MEMORY_EXTRACTION = "compaction_memory_extraction"
+    CONNECTION_PROBE = "connection_probe"
 
 
 class ModelContextMode(StrEnum):
@@ -150,17 +149,16 @@ class ModelTokenUsageFact(BaseModel):
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-target:v6"] = "resolved-model-target:v6"
-    target_fingerprint: str
+    contract_version: Literal["resolved-model-target:v7"] = "resolved-model-target:v7"
     route_id: str = Field(min_length=1)
     wire_api: Literal["openai_chat_completions", "openai_responses"]
     model_id: str = Field(min_length=1)
     canonical_endpoint_base_url: str = Field(min_length=1)
-    endpoint_fingerprint: str = Field(min_length=1)
     transport_binding_id: str = Field(min_length=1)
     transport_contract_version: str = Field(min_length=1)
     model_identity_policy: Literal["accept_reported", "exact"]
     input_modalities: tuple[str, ...] | None
+    tool_call_capability: bool
     limits: ModelContextLimits
     context_budget: ResolvedModelContextBudgetFact
     token_estimator: TokenEstimatorFact
@@ -190,12 +188,6 @@ class ResolvedModelTargetFact(BaseModel):
         if self.context_budget.input_budget_tokens != expected_input:
             raise ValueError("input budget is inconsistent with model limits")
         return self
-
-
-def resolved_model_target_fingerprint(payload_without_fingerprint: dict[str, Any]) -> str:
-    return sha256_fingerprint(
-        "resolved-model-target-compatibility:v6", payload_without_fingerprint
-    )
 
 
 class ResolvedModelCallFact(BaseModel):
@@ -475,7 +467,6 @@ __all__ = [
     "ResolvedModelTargetFact",
     "TokenEstimatorFact",
     "canonical_json_bytes",
-    "resolved_model_target_fingerprint",
     "provider_sanitized_error_identity_fingerprint",
     "sha256_fingerprint",
 ]

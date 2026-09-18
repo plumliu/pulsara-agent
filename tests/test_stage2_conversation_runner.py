@@ -37,7 +37,7 @@ from pulsara_agent.conversation_kernel.context_sources import (
 from pulsara_agent.conversation_kernel.cancellation import ActiveTurnCancellationIntent
 from pulsara_agent.conversation_kernel.cold_epoch import (
     CanonicalColdContinuationSeed,
-    CompactionContinuationSeed,
+    AdoptedCompactionContinuationSeed,
     SubagentInitialSeed,
 )
 from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
@@ -45,6 +45,7 @@ import pulsara_agent.conversation_kernel.input_continuity as input_continuity
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
     ProviderInputContinuityConflict,
+    _issue_root_bootstrap_lease_source,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
@@ -180,6 +181,7 @@ from pulsara_agent.storage.postgres_connection_provider import PostgresConnectio
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
     enqueue_test_prompt,
+    include_test_runtime_connections,
     start_test_root_turn,
     test_model_binding,
     test_model_limits,
@@ -516,10 +518,12 @@ class _CompactionScriptedModel(_ScriptedModel):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
         self.summary_transport.contract_version = call.target.transport.contract_version
-        return replace(
+        resolved = replace(
             call,
             target=replace(call.target, transport=self.summary_transport),
         )
+        self._model_runtime.register_test_call_override(resolved)
+        return resolved
 
 
 class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
@@ -860,10 +864,15 @@ class _CancellingFirstSteerRepository(ConversationKernelRepository):
 
 
 class _ExpiredSteerCompiler(StructuredModelInputCompiler):
-    def compile_append(self, request, **kwargs):
+    def compile_new_epoch(self, request, **kwargs):
         if len(request.canonical_input.items) > 1:
             kwargs["deadline_monotonic"] = monotonic() - 1
-        return super().compile_append(request, **kwargs)
+        return super().compile_new_epoch(request, **kwargs)
+
+    def compile_installed_append(self, request, **kwargs):
+        if len(request.canonical_input.items) > 1:
+            kwargs["deadline_monotonic"] = monotonic() - 1
+        return super().compile_installed_append(request, **kwargs)
 
 
 class _OnlyOneSteerCompiler(StructuredModelInputCompiler):
@@ -871,7 +880,7 @@ class _OnlyOneSteerCompiler(StructuredModelInputCompiler):
         super().__init__()
         self.failures: list[tuple[int, ModelInputCompileFailureKind]] = []
 
-    def compile_append(self, request, **kwargs):
+    def _require_one_steer(self, request) -> int:
         steer_count = sum(
             item.input_origin is not None and item.input_origin.value == "HUMAN_STEER"
             for item in request.canonical_input.items
@@ -886,19 +895,39 @@ class _OnlyOneSteerCompiler(StructuredModelInputCompiler):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
             )
+        return steer_count
+
+    def compile_new_epoch(self, request, **kwargs):
+        steer_count = self._require_one_steer(request)
         try:
-            return super().compile_append(request, **kwargs)
+            return super().compile_new_epoch(request, **kwargs)
+        except StructuredModelInputCompileError as exc:
+            self.failures.append((steer_count, exc.kind))
+            raise
+
+    def compile_installed_append(self, request, **kwargs):
+        steer_count = self._require_one_steer(request)
+        try:
+            return super().compile_installed_append(request, **kwargs)
         except StructuredModelInputCompileError as exc:
             self.failures.append((steer_count, exc.kind))
             raise
 
 
 class _FullRequiredBudgetCompiler(StructuredModelInputCompiler):
-    def compile_append(self, request, **kwargs):
-        del request, kwargs
+    @staticmethod
+    def _raise_required_full_budget() -> None:
         raise StructuredModelInputCompileError(
             ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
         )
+
+    def compile_new_epoch(self, request, **kwargs):
+        del request, kwargs
+        self._raise_required_full_budget()
+
+    def compile_installed_append(self, request, **kwargs):
+        del request, kwargs
+        self._raise_required_full_budget()
 
 
 class _AssertingTool:
@@ -1051,15 +1080,13 @@ class _PostAdmissionPendingSteerReadGate:
 
     def __call__(self, *args, **kwargs):
         self.calls += 1
-        if (
-            not self._blocked
-            and kwargs.get("target_turn_id") == self._target_turn_id
-        ):
+        if not self._blocked and kwargs.get("target_turn_id") == self._target_turn_id:
             self._blocked = True
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise TimeoutError("post-admission pending read was not released")
         return self._delegate(*args, **kwargs)  # type: ignore[operator]
+
 
 class _PolicyMemoryProjection:
     def __init__(self) -> None:
@@ -1298,10 +1325,12 @@ class _CompactionSequencedDirectKernelModel(_SequencedDirectKernelModel):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
         self.summary_transport.contract_version = call.target.transport.contract_version
-        return replace(
+        resolved = replace(
             call,
             target=replace(call.target, transport=self.summary_transport),
         )
+        self._model_runtime.register_test_call_override(resolved)
+        return resolved
 
 
 class _NearBoundReplayContinuityOwner(HostProviderInputContinuityOwner):
@@ -2593,12 +2622,14 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     )
 
     assert provider_wire_input_plan_identity_fingerprint(
-        model.requests[0].wire_input_plan
+        model.requests[0].wire_input_plan,
+        target_fact=model.requests[0].prepared_call.call.target.fact,
     ) != provider_wire_input_plan_identity_fingerprint(
-        model.requests[1].wire_input_plan
+        model.requests[1].wire_input_plan,
+        target_fact=model.requests[1].prepared_call.call.target.fact,
     )
     assert any(
-        isinstance(seed, CompactionContinuationSeed)
+        isinstance(seed, AdoptedCompactionContinuationSeed)
         for seed in cold_recorder.semantic_seeds
     )
     with provider.connection(
@@ -2739,6 +2770,7 @@ def test_model_switch_uses_exact_three_tier_handover_path(
             input_safety_margin_tokens=0,
         ),
     )
+    include_test_runtime_connections(destination_runtime, source_runtime)
     active_runtime = [source_runtime]
     model = _CompactionScriptedModel(
         [_text_stream(history), _text_stream("destination answer")],
@@ -2857,6 +2889,7 @@ def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
         connection_id=ModelConnectionId("model-connection:" + "2" * 32),
         input_modalities=("text",),
     )
+    include_test_runtime_connections(destination_runtime, source_runtime)
     active_runtime = [source_runtime]
     model = _CompactionScriptedModel(
         [_text_stream("source answer"), _text_stream("destination answer")],
@@ -2966,6 +2999,7 @@ def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
         connection_id=ModelConnectionId("model-connection:" + "2" * 32),
         input_modalities=("text",),
     )
+    include_test_runtime_connections(destination_runtime, source_runtime)
     active_runtime = [source_runtime]
     model = _CompactionScriptedModel(
         [
@@ -3128,6 +3162,7 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
         connection_id=ModelConnectionId("model-connection:" + "2" * 32),
         input_modalities=("text",),
     )
+    include_test_runtime_connections(destination_runtime, source_runtime)
     repository.update_session_model_call_binding(
         lease.guard,
         binding=test_model_binding(destination_runtime),
@@ -3240,6 +3275,7 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
         connection_id=ModelConnectionId("model-connection:" + "2" * 32),
         input_modalities=("text",),
     )
+    include_test_runtime_connections(destination_runtime, source_runtime)
     source_failure = [
         ProviderStreamTerminal(
             terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
@@ -3387,6 +3423,7 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
         ),
         input_modalities=("text", "image"),
     )
+    include_test_runtime_connections(destination_runtime, source_runtime)
     source_failure = [
         ProviderStreamTerminal(
             terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
@@ -3476,7 +3513,8 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
         destination_quote.effective_input_budget_tokens
     )
     assert destination_quote.final_wire_estimated_input_tokens < int(
-        destination_quote.effective_input_budget_tokens * owner.policy.auto_trigger_ratio
+        destination_quote.effective_input_budget_tokens
+        * owner.policy.auto_trigger_ratio
     )
     assert any(
         isinstance(part, LLMImagePart)
@@ -3631,6 +3669,7 @@ def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
         wire_api="openai_chat_completions",
         connection_id=ModelConnectionId("model-connection:" + "2" * 32),
     )
+    include_test_runtime_connections(destination_runtime, source_runtime)
     active_runtime = [source_runtime]
     model = _CompactionScriptedModel(
         [_text_stream("source answer"), _text_stream("destination answer")],
@@ -3686,10 +3725,17 @@ def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
 
     assert first.final_text == "source answer"
     assert second.final_text == "destination answer"
-    assert len(recorder.semantic_seeds) == 1
+    assert len(recorder.semantic_seeds) == 2
+    assert all(
+        isinstance(seed, CanonicalColdContinuationSeed)
+        for seed in recorder.semantic_seeds
+    )
     assert source_epoch.epoch_nonce != destination_epoch.epoch_nonce
-    assert destination_epoch.compatibility.model_connection_id == ModelConnectionId(
-        "model-connection:" + "2" * 32
+    destination_cohort = runner._continuity.current_cohort(scope)
+    assert destination_cohort is not None
+    assert (
+        destination_cohort.target_bundle.connection.connection_id
+        == ModelConnectionId("model-connection:" + "2" * 32)
     )
     assert model.summary_transport.calls == []
     assert [
@@ -4178,9 +4224,7 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
     Image.new("RGB", (image_side, image_side), (11, 23, 41)).save(
         image_output, "PNG", compress_level=0
     )
-    image = LLMImagePart(
-        "image/png", image_output.getvalue(), image_side, image_side
-    )
+    image = LLMImagePart("image/png", image_output.getvalue(), image_side, image_side)
     assert len(image.immutable_bytes) > 2 << 20
     visual_prompt = freeze_canonical_prompt(
         FrozenPromptContent(
@@ -4281,15 +4325,20 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
         assert failure is None
         assert result is not None
         assert result.final_text in {"chat final", "responses final"}
-        assert sum(
-            isinstance(part, LLMImagePart)
-            for message in model.requests[2].compiled_input.messages
-            for part in message.content
-        ) == 1
+        assert (
+            sum(
+                isinstance(part, LLMImagePart)
+                for message in model.requests[2].compiled_input.messages
+                for part in message.content
+            )
+            == 1
+        )
     else:
         assert result is None
         assert failure is not None
-        assert failure.kind is ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+        assert (
+            failure.kind is ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+        )
         assert len(model.requests) == 2
 
 
@@ -4440,6 +4489,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     )
     assert selected_plan.quote.replaced_generic_wire_estimated_tokens > 0
     assert selected_plan.quote.replay_wire_estimated_tokens > 0
+
 
 @pytest.mark.parametrize("trigger", ("manual", "automatic"))
 def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compact(
@@ -4632,10 +4682,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
             if canonical_read is None
             else canonical_read.compile_snapshot.context_binding_fact
         )
-        if (
-            binding is not None
-            and binding.base_kind is ContextBindingBaseKind.SNAPSHOT
-        ):
+        if binding is not None and binding.base_kind is ContextBindingBaseKind.SNAPSHOT:
             measured_snapshot_successors.append(decision.quote)
         if not rejected_successor_quotes and measured_snapshot_successors:
             quote = decision.quote
@@ -4672,19 +4719,47 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     )
 
     async def exercise():
+        nonlocal runner, dispatch_pre_compact, measure_wire
         await runner.run_turn(frozen_test_prompt("historical question"))
         tool_turn = await runner.run_turn(
             frozen_test_prompt("create one complete tool group")
         )
-        # Exercise the candidate-shrink algorithm from an approved cold-epoch
-        # boundary.  An installed compatible prefix may not be truncated merely
-        # to retain a tool group, which is covered independently below.
-        runner._continuity.discard_scope(
-            ProviderInputContinuityScope(
-                session_id=session_id,
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
-            )
+        # Exercise the candidate-shrink algorithm after a real cold Host
+        # takeover.  The removed discard_scope shortcut is not an approved
+        # provider-input rebase boundary.
+        runner._continuity.close()
+        cold_lease = _acquire_bound_host_writer(
+            repository,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            writer_owner_id=_name("cold-host"),
+            lease_seconds=30,
+            deadline_monotonic=monotonic() + 30,
+        )
+        runner = ConversationKernelRunner(
+            model_resolution_snapshot_provider=test_model_resolution_snapshot,
+            repository=repository,
+            writer_lease=cold_lease,
+            model=model,
+            tools=tools,
+            live_bus=LiveAgentEventBus(),
+            context_source_collector=StaticContextSourceCollector(),
+            compaction_owner=owner,
+            workspace_id=workspace_id,
+        )
+        dispatch_pre_compact = runner.compaction._dispatch_pre_compact
+        measure_wire = (
+            runner.compaction._provider_dispatch.measure_prepared_wire_candidate
+        )
+        monkeypatch.setattr(
+            runner.compaction,
+            "_dispatch_pre_compact",
+            record_pre_compact,
+        )
+        monkeypatch.setattr(
+            runner.compaction._provider_dispatch,
+            "measure_prepared_wire_candidate",
+            reject_first_successor_wire,
         )
         if idle:
             outcome = await runner.compaction.compact_idle_turn(
@@ -5317,10 +5392,13 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
         deadline_monotonic=monotonic() + 30,
     )
     summary = "A concise free-form handoff for the mid-turn continuation."
-    first_response = _text_stream(
-        "accepted assistant context " + "a" * 460_000,
-        block="text:large-before-tool",
-    ) + _tool_stream()
+    first_response = (
+        _text_stream(
+            "accepted assistant context " + "a" * 460_000,
+            block="text:large-before-tool",
+        )
+        + _tool_stream()
+    )
     model = _LimitedCompactionScriptedModel(
         [first_response, _text_stream("finished after mid-turn compaction")],
         summary,
@@ -5542,11 +5620,7 @@ def test_final_wire_late_measurement_failure_closes_linear_dispatch_authority(
     )
     model = _ScriptedModel(
         [
-            *(
-                [_text_stream("initial accepted turn")]
-                if failure_call == 2
-                else []
-            ),
+            *([_text_stream("initial accepted turn")] if failure_call == 2 else []),
             _text_stream("recovered after measurement failure"),
         ]
     )
@@ -6030,9 +6104,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     runner.compaction._input_reader = input_reader
     prospective_family_calls = 0
     prospective_candidate_calls = 0
-    prepare_family = (
-        runner._provider_dispatch.prepare_prospective_root_candidate_family
-    )
+    prepare_family = runner._provider_dispatch.prepare_prospective_root_candidate_family
     prepare_candidate = runner._provider_dispatch.prepare_prospective_root_candidate
 
     async def record_prospective_family(**kwargs):
@@ -6936,9 +7008,7 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
         repository.read_pending_prompt_steer_facts,
         target_turn_id=turn_id,
     )
-    monkeypatch.setattr(
-        repository, "read_pending_prompt_steer_facts", pending_gate
-    )
+    monkeypatch.setattr(repository, "read_pending_prompt_steer_facts", pending_gate)
     # Nested prefixes share the same 64 KiB canonical base.  The injected
     # target admits only one steer.  A 512 KiB planning bound admits the unique
     # base + suffix materialization, while charging the base for each of the
@@ -7045,9 +7115,7 @@ def test_round3_1_expired_steer_planning_rejects_terminal_steer_and_io_closes(
         repository.read_pending_prompt_steer_facts,
         target_turn_id=turn_id,
     )
-    monkeypatch.setattr(
-        repository, "read_pending_prompt_steer_facts", pending_gate
-    )
+    monkeypatch.setattr(repository, "read_pending_prompt_steer_facts", pending_gate)
 
     async def exercise() -> None:
         task = asyncio.create_task(
@@ -7131,9 +7199,7 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
         repository.read_pending_prompt_steer_facts,
         target_turn_id=turn_id,
     )
-    monkeypatch.setattr(
-        repository, "read_pending_prompt_steer_facts", pending_gate
-    )
+    monkeypatch.setattr(repository, "read_pending_prompt_steer_facts", pending_gate)
 
     async def exercise():
         task = asyncio.create_task(
@@ -7313,9 +7379,7 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
         repository.read_pending_prompt_steer_facts,
         target_turn_id=turn_id,
     )
-    monkeypatch.setattr(
-        repository, "read_pending_prompt_steer_facts", pending_gate
-    )
+    monkeypatch.setattr(repository, "read_pending_prompt_steer_facts", pending_gate)
 
     async def exercise() -> None:
         task = asyncio.create_task(
@@ -7400,9 +7464,7 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
         repository.read_pending_prompt_steer_facts,
         target_turn_id=turn_id,
     )
-    monkeypatch.setattr(
-        repository, "read_pending_prompt_steer_facts", pending_gate
-    )
+    monkeypatch.setattr(repository, "read_pending_prompt_steer_facts", pending_gate)
 
     async def exercise():
         task = asyncio.create_task(
@@ -7544,8 +7606,8 @@ def test_k3_soft_trigger_recovery_failure_closes_unpublished_prepared_input(
         compaction_owner=owner,
         workspace_id=workspace_id,
     )
-    runner.compaction.prospective_root_crosses_automatic_threshold = (
-        lambda _prepared: True
+    runner.compaction.prospective_root_crosses_automatic_threshold = lambda _prepared: (
+        True
     )
 
     async def fail_recovery(**_kwargs):
@@ -7564,9 +7626,12 @@ def test_k3_soft_trigger_recovery_failure_closes_unpublished_prepared_input(
     assert tools._active == set()  # noqa: SLF001
     assert tools.release_calls == [1]
     assert model.requests == []
-    assert repository.rehydrate_session(
-        session_id=session_id, deadline_monotonic=monotonic() + 30
-    ) == ()
+    assert (
+        repository.rehydrate_session(
+            session_id=session_id, deadline_monotonic=monotonic() + 30
+        )
+        == ()
+    )
 
 
 def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
@@ -8398,7 +8463,7 @@ def test_round5a1_assistant_settlement_retries_same_candidate_after_transient_no
     assert repository.confirm_calls == 1
 
 
-def test_round5a1_assistant_settlement_conflict_cold_resets_without_hanging(
+def test_round5a1_assistant_settlement_conflict_preserves_epoch_without_hanging(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -8434,7 +8499,7 @@ def test_round5a1_assistant_settlement_conflict_cold_resets_without_hanging(
         scope_kind=ModelInputScopeKind.ROOT,
         scope_subagent_task_id=None,
     )
-    assert runner._continuity.current_view(scope) is None
+    assert runner._continuity.current_view(scope) is not None
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -9260,7 +9325,9 @@ def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(
         ),
         scripts=(_round5a1_chat_scripts()[1],),
     )
-    continuity = _NearBoundReplayContinuityOwner(session_id=session_id)
+    continuity = _NearBoundReplayContinuityOwner(
+        root_lease_source=_issue_root_bootstrap_lease_source(lease)
+    )
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
@@ -9667,7 +9734,7 @@ def test_round10_sole_report_result_atomically_completes_child_without_second_mo
         "pulsara_inter_agent_message"
     ]
     assert envelope["content_semantics"] == "ADVISORY_COLLABORATION_DATA"
-    assert "recorded child attribution and result source" in envelope["handling"]
+    assert "Its source is recorded" in envelope["handling"]
     assert envelope["content"]["result"]["summary"] == "exact explicit summary"
     assert (
         materialized.items[-1].input_origin

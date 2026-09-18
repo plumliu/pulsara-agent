@@ -28,9 +28,14 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionWatchdogPolicy,
     KernelWatchdogOwner,
 )
-from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, WriterLease
+from pulsara_agent.conversation_kernel.contracts import (
+    HostWriterAcquisitionKind,
+    HostWriterGuard,
+    WriterLease,
+)
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorizationKind,
+    KernelToolPhysicalInvocationError,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import (
     DirectKernelToolPort,
@@ -292,7 +297,7 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
         process_id, turn_id, entry_id = await _start_background_process(
             old, session_id=old_session_id
         )
-        with pytest.raises(KeyError):
+        with pytest.raises(KernelToolPhysicalInvocationError) as raised:
             await invoke_direct_tool(
                 new,
                 session_id=new_session_id,
@@ -303,6 +308,8 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
                 turn_id=turn_id,
                 assistant_entry_id=entry_id,
             )
+        assert isinstance(raised.value.physical_error, KeyError)
+        assert raised.value.effect_class == "TERMINAL_OBSERVATION"
         assert (
             new._terminal.live_process_count(  # noqa: SLF001
                 owner_host_session_id=new_owner
@@ -582,7 +589,11 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
             writer_generation=1,
             writer_owner_id="host:renew",
         )
-        initial = WriterLease(guard=guard, expires_at=datetime.now(timezone.utc))
+        initial = WriterLease(
+            guard=guard,
+            expires_at=datetime.now(timezone.utc),
+            acquisition_kind=HostWriterAcquisitionKind.NEW_SESSION,
+        )
         calls: list[tuple[float, float]] = []
 
         class RecordingRepository:
@@ -600,6 +611,7 @@ def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() 
                 return WriterLease(
                     guard=guard,
                     expires_at=datetime.now(timezone.utc),
+                    acquisition_kind=HostWriterAcquisitionKind.SAME_OWNER_RENEWAL,
                 )
 
         class InlineIO:

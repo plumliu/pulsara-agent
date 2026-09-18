@@ -208,13 +208,6 @@ class _ForkOperations:
                             provider_input_through_sequence=local_cut(
                                 int(entry["provider_input_through_sequence"])
                             ),
-                            provider_wire_api=entry["provider_wire_api"],
-                            provider_replay_disposition=entry[
-                                "provider_replay_disposition"
-                            ],
-                            provider_replay_fragment_id=None
-                            if source_id not in replay_map
-                            else replay_map[source_id].replay_id,
                         )
                     _insert(connection, "transcript_entries", values)
                     copy_canonical_prompt_refs(
@@ -247,6 +240,11 @@ class _ForkOperations:
                     )
                     _insert(connection, "assistant_message_blocks", values)
                 for replay in replay_map.values():
+                    replay_entry_kind = next(
+                        str(entry["entry_kind"])
+                        for entry in material.entries
+                        if entry_map[str(entry["id"])] == replay.assistant_entry_id
+                    )
                     _insert(
                         connection,
                         "provider_assistant_replay_fragments",
@@ -255,6 +253,7 @@ class _ForkOperations:
                             "session_id": child_session_id,
                             "workspace_id": material.workspace_id,
                             "assistant_entry_id": replay.assistant_entry_id,
+                            "assistant_entry_kind": replay_entry_kind,
                             "wire_api": replay.wire_api,
                             "codec_kind": replay.codec_kind.value,
                             "provider_replay_contract_fingerprint": replay.provider_replay_contract_fingerprint,

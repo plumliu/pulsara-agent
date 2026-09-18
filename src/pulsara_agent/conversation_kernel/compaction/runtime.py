@@ -23,6 +23,10 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     ResolvedCompactionPolicy,
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.llm.provider_open import (
+    CompactionSummaryPromotionAuthority,
+    _issue_compaction_summary_promotion_authority,
+)
 
 
 _T = TypeVar("_T")
@@ -355,11 +359,13 @@ class HostCompactionRuntimeOwner:
         operation: Callable[[], Awaitable[_T]],
         admitted_writer: CompactionWriteReservation | None = None,
         pending_root_turn_id: str | None = None,
+        attempt_id: str,
     ) -> _T:
         """Run one exact scope after acquiring the Host-wide summary lane."""
 
         async with self._summary_lane:
-            attempt_id = f"compaction-attempt:{uuid4().hex}"
+            if not attempt_id:
+                raise ValueError("compaction fenced run lacks its attempt identity")
             current = asyncio.current_task()
             if current is None:
                 raise RuntimeError("compaction attempt lacks an asyncio owner")
@@ -406,6 +412,14 @@ class HostCompactionRuntimeOwner:
         key = self.scope_key(scope_kind, scope_subagent_task_id)
         return key in self._fenced_scopes
 
+    def has_active_work(self) -> bool:
+        return bool(
+            self._fenced_scopes
+            or self._active_tasks
+            or self._owned_tasks
+            or self._settlement_tasks
+        )
+
     def advance_phase(
         self,
         *,
@@ -421,6 +435,59 @@ class HostCompactionRuntimeOwner:
             raise RuntimeError("compaction phase scope is not fenced")
         attempt_id, trigger, _old_phase = current
         self._fenced_scopes[key] = (attempt_id, trigger, phase)
+
+    def issue_summary_promotion_authority(
+        self,
+        *,
+        attempt_token: object,
+        semantic: object,
+        decision: object,
+        successor_destination: object,
+        required_phase: CompactionAttemptPhase,
+    ) -> CompactionSummaryPromotionAuthority:
+        """Authorize one exact summary promotion from the current fenced phase."""
+
+        scope_kind = getattr(attempt_token, "scope_kind", None)
+        scope_subagent_task_id = getattr(
+            attempt_token, "scope_subagent_task_id", None
+        )
+        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        current = self._fenced_scopes.get(key)
+        if current != (
+            getattr(attempt_token, "attempt_id", None),
+            getattr(attempt_token, "trigger", None),
+            required_phase,
+        ):
+            raise RuntimeError("summary promotion lacks the current fenced phase")
+        return _issue_compaction_summary_promotion_authority(
+            attempt_id=attempt_token.attempt_id,
+            scope_kind=scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            phase=required_phase,
+            semantic=semantic,
+            decision=decision,
+            successor_destination=successor_destination,
+        )
+
+    def restart_preparation_phase(self, *, attempt_token: object) -> None:
+        """Re-enter PREPARING for an explicit in-attempt Tier/replan restart."""
+
+        key = self.scope_key(
+            getattr(attempt_token, "scope_kind", None),
+            getattr(attempt_token, "scope_subagent_task_id", None),
+        )
+        current = self._fenced_scopes.get(key)
+        if (
+            current is None
+            or current[0] != getattr(attempt_token, "attempt_id", None)
+            or current[1] is not getattr(attempt_token, "trigger", None)
+        ):
+            raise RuntimeError("compaction restart lacks its current fenced attempt")
+        self._fenced_scopes[key] = (
+            current[0],
+            current[1],
+            CompactionAttemptPhase.PREPARING,
+        )
 
     def current_projection(
         self,

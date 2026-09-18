@@ -151,6 +151,16 @@ _KERNEL_IMAGE_K3_RETIRED_PYTEST_NODES = {
     "tests/test_stage2_conversation_runner.py::"
     "test_round3_compile_failure_interrupts_after_user_acceptance_with_zero_open",
 }
+_PROVIDER_EPOCH_HARD_CUT_RETIRED_PYTEST_NODES = {
+    (
+        "tests/test_round3_1_provider_input_prefix_continuity.py::"
+        "test_round3_1_epoch_compatibility_excludes_per_call_identity"
+    ),
+    (
+        "tests/test_round3_structured_model_input_compiler.py::"
+        "test_round3_1_compatibility_reset_starts_a_new_epoch_without_prefix_join"
+    ),
+}
 _MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS = {
     "PreparedRootTurnIntent",
     "build_prepared_root_turn_intent",
@@ -1251,6 +1261,7 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
         | _PERMISSION_HOST_SCOPE_HARD_CUT_RETIRED_PYTEST_NODES
         | _MODEL_UNIVERSE_HARD_CUT_RETIRED_PYTEST_NODES
         | _KERNEL_IMAGE_K3_RETIRED_PYTEST_NODES
+        | _PROVIDER_EPOCH_HARD_CUT_RETIRED_PYTEST_NODES
         # SDK transport owns buffering. The capability hard-cut §6.3 explicitly
         # retires the old per-slot raw byte reservation, rather than keeping an
         # unused implementation merely to retain this historical unit test.

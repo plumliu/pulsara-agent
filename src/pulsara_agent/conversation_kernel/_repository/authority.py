@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import timedelta
 from psycopg.types.json import Jsonb
 from psycopg.rows import dict_row
-from pulsara_agent.conversation_kernel.contracts import HostWriterGuard, WriterLease
+from pulsara_agent.conversation_kernel.contracts import (
+    HostWriterAcquisitionKind,
+    HostWriterGuard,
+    WriterLease,
+)
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     model_call_binding_from_dict,
@@ -147,6 +151,7 @@ class _AuthorityOperations:
                         ),
                     )
                     generation = 1
+                    acquisition_kind = HostWriterAcquisitionKind.NEW_SESSION
                 else:
                     if str(row["workspace_id"]) != workspace_id:
                         raise ConversationKernelConflict("session workspace conflict")
@@ -169,8 +174,12 @@ class _AuthorityOperations:
                     )
                     if same_live_owner:
                         generation = int(row["writer_generation"])
+                        acquisition_kind = (
+                            HostWriterAcquisitionKind.SAME_OWNER_RENEWAL
+                        )
                     else:
                         generation = int(row["writer_generation"]) + 1
+                        acquisition_kind = HostWriterAcquisitionKind.HOST_TAKEOVER
                     connection.execute(
                         """
                         UPDATE pulsara_v3.sessions
@@ -204,6 +213,7 @@ class _AuthorityOperations:
                 writer_owner_id=writer_owner_id,
             ),
             expires_at=expires_at,
+            acquisition_kind=acquisition_kind,
         )
 
     def renew_host_writer(
@@ -242,4 +252,8 @@ class _AuthorityOperations:
             ).fetchone()
             if row is None:
                 raise StaleHostWriter("host writer lease is stale")
-        return WriterLease(guard=guard, expires_at=expires_at)
+        return WriterLease(
+            guard=guard,
+            expires_at=expires_at,
+            acquisition_kind=HostWriterAcquisitionKind.SAME_OWNER_RENEWAL,
+        )

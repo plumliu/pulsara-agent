@@ -107,6 +107,7 @@ from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
 )
 from pulsara_agent.conversation_kernel.provider_dispatch import (
+    _semantic_projection_from_compiled,
     prepared_append_candidate,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
@@ -151,7 +152,6 @@ from pulsara_agent.llm.request import (
 )
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.compiler import (
-    COMPILER_CONTRACT_VERSION,
     StructuredModelInputCompiler,
     _message_logical_bytes,
 )
@@ -210,13 +210,11 @@ from pulsara_agent.model_input.continuity import (
     NoNewTriggerAnchor,
     ProcessLocalCanonicalFrontier,
     ProviderInputContinuityScope,
-    ProviderInputEpochCompatibility,
-    ProviderInputEpochResetReason,
-    PROVIDER_MESSAGE_LOWERING_CONTRACT,
     SourceObservationPresence,
     decode_runtime_observation,
     provider_input_prefix_fingerprint,
 )
+from pulsara_agent.conversation_kernel.cold_epoch import CanonicalColdContinuationSeed
 from pulsara_agent.model_input.lowering import (
     lower_canonical_item,
     source_variant_message,
@@ -279,6 +277,8 @@ from pulsara_agent.terminal_process.models import TerminalRequest, TerminalStatu
 from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import (
     StructuredToolPort,
+    new_test_provider_input_continuity_owner,
+    new_test_subagent_lease_source,
     prepare_test_direct_tool_surface,
     prepare_test_model_call,
 )
@@ -1132,33 +1132,6 @@ def _context_binding_fact(
     )
 
 
-def _append_compatibility(
-    request: StructuredModelInputCompileRequest,
-) -> ProviderInputEpochCompatibility:
-    base = next(
-        item
-        for item in request.sources.candidates
-        if item.source_kind is ContextSourceKind.BASE_SYSTEM
-    )
-    binding = request.compile_binding
-    _model, prepared = _PREPARED_MODEL_CALLS[binding.binding_fingerprint]
-    return ProviderInputEpochCompatibility(
-        compiler_contract_version=COMPILER_CONTRACT_VERSION,
-        base_system_semantic_fingerprint=base.source_semantic_fingerprint,
-        tool_surface_fingerprint=binding.tool_surface.surface_fingerprint,
-        model_connection_id=prepared.call.binding.connection_id,
-        model_target_fingerprint=binding.target_fact.target_fingerprint,
-        estimator_fingerprint=binding.estimator_fingerprint,
-        provider_message_lowering_contract=PROVIDER_MESSAGE_LOWERING_CONTRACT,
-        context_base_semantic_identity=(
-            request.canonical_facts.context_binding_fact.context_base_semantic_identity
-        ),
-        provider_assistant_replay_contract_fingerprint=(
-            prepared.call.target.model_profile.route_wire_profile.assistant_replay_contract_fingerprint
-        ),
-    )
-
-
 def _append_frontier(
     request: StructuredModelInputCompileRequest,
 ) -> ProcessLocalCanonicalFrontier:
@@ -1219,11 +1192,10 @@ def _compile_and_install_append(
             _append_anchor(request) if dispatch_anchor is None else dispatch_anchor
         ),
     )
-    compatibility = _append_compatibility(request)
-    result = compiler.compile_append(
-        request,
-        planning=planning,
-        compatibility=compatibility,
+    result = (
+        compiler.compile_new_epoch(request, planning=planning)
+        if planning.predecessor_view is None
+        else compiler.compile_installed_append(request, planning=planning)
     )
     model, prepared_call = _PREPARED_MODEL_CALLS[
         request.compile_binding.binding_fingerprint
@@ -1247,19 +1219,36 @@ def _compile_and_install_append(
     wire_input_plan = model.plan_wire_input(
         prepared_call=prepared_call,
         compiled_input=result.compiled_input,
-        predecessor_view=(
-            None if result.reset_reason is not None else planning.predecessor_view
-        ),
+        predecessor_view=planning.predecessor_view,
         replay_hydration=replay_hydration,
     )
     tool_exposure_plan = prepared_call.tool_surface.capability_exposure_plan
     assert tool_exposure_plan is not None
+    preparation_basis = SimpleNamespace(
+        call_target=prepared_call.epoch_call_target,
+        canonical_read=SimpleNamespace(),
+        capability_dispatch_cut=SimpleNamespace(),
+    )
+    transition = owner.issue_transition(
+        planning=planning,
+        preparation_basis=preparation_basis,
+        call_target=prepared_call.epoch_call_target,
+        seed=(
+            CanonicalColdContinuationSeed(dispatch_read=SimpleNamespace())
+            if planning.predecessor_view is None
+            else None
+        ),
+        semantic_projection=_semantic_projection_from_compiled(result.compiled_input),
+        wire_input_plan=wire_input_plan,
+    )
     candidate = prepared_append_candidate(
         planning=planning,
-        compatibility=compatibility,
+        transition=transition,
+        call_target=prepared_call.epoch_call_target,
         compiled_result=result,
         wire_input_plan=wire_input_plan,
         tool_exposure_plan=tool_exposure_plan,
+        preparation_basis=preparation_basis,
     )
     owner.register(candidate)
     owner.install(candidate=candidate, execution=object())
@@ -1643,7 +1632,7 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
     )
 
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     first_request = _prepared_request(
         first_facts.canonical_input,
         first_sources,
@@ -2726,7 +2715,7 @@ def test_round3_compiler_rejects_expired_deadline_before_allocation() -> None:
         compiler.compile(request, deadline_monotonic=monotonic() - 1)
     assert failure.value.kind is ModelInputCompileFailureKind.DEADLINE_EXPIRED
 
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     scope = ProviderInputContinuityScope(
         session_id="session:test",
         scope_kind=ModelInputScopeKind.ROOT,
@@ -2738,10 +2727,9 @@ def test_round3_compiler_rejects_expired_deadline_before_allocation() -> None:
         dispatch_anchor=_append_anchor(request),
     )
     with pytest.raises(StructuredModelInputCompileError) as append_failure:
-        compiler.compile_append(
+        compiler.compile_new_epoch(
             request,
             planning=planning,
-            compatibility=_append_compatibility(request),
             deadline_monotonic=monotonic() - 1,
         )
     assert append_failure.value.kind is ModelInputCompileFailureKind.DEADLINE_EXPIRED
@@ -2776,7 +2764,7 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
     """Compaction can inspect the exact failed append before ordinary compile."""
 
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     first_item = _user("installed prefix", sequence=1)
     first_request = _prepared_request(
         _snapshot(first_item),
@@ -2812,22 +2800,18 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
         canonical_frontier=_append_frontier(request),
         dispatch_anchor=_append_anchor(request),
     )
-    compatibility = _append_compatibility(request)
-
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        compiler.compile_append(
+        compiler.compile_installed_append(
             request,
             planning=planning,
-            compatibility=compatibility,
         )
     assert failure.value.kind is (
         ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET
     )
 
-    projection = compiler.project_append(
+    projection = compiler.project_installed_append(
         request,
         planning=planning,
-        compatibility=compatibility,
     )
     projected = projection.projected_input
     assert projected.final_estimate.total_input_tokens > 800
@@ -2837,7 +2821,6 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
     assert projection.appended_message_count == (
         len(projected.messages) - len(installed.messages)
     )
-    assert projection.reset_reason is None
 
     source_fingerprint = context_fingerprint(
         "test:round5b-overbudget-source-view:v1",
@@ -2864,16 +2847,25 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
         source_projection=projected,
         deadline_monotonic=monotonic() + 1,
     )
-    tail, prefix = safe_prefixes[-1]
-    summary_estimate = request.compile_binding.estimator.estimate_frozen_input(
-        system_prompt=projected.system_prompt,
-        messages=(
-            projected.messages[: prefix.summary_prefix_message_count]
-            + (LLMMessage.user(summary_request),)
-        ),
-        tools=projected.tools,
+    quoted = tuple(
+        (tail, prefix, estimate)
+        for tail, prefix in safe_prefixes
+        for estimate in (
+            request.compile_binding.estimator.estimate_frozen_input(
+                system_prompt=projected.system_prompt,
+                messages=(
+                    projected.messages[: prefix.summary_prefix_message_count]
+                    + (LLMMessage.user(summary_request),)
+                ),
+                tools=projected.tools,
+            ),
+        )
     )
-    assert summary_estimate.total_input_tokens <= 800
+    # The appended user entry is one indivisible canonical item. Projection is
+    # still valid even when no safe summary prefix fits the summary model.
+    assert quoted
+    tail, prefix, summary_estimate = quoted[-1]
+    assert summary_estimate.total_input_tokens > 800
     assert 0 < prefix.summary_prefix_message_count < len(projected.messages)
     assert tail.protected_tail_message_start_index == (
         prefix.summary_prefix_message_count
@@ -3838,14 +3830,14 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:174c97f44a246a37ea70782a8ea2ada7aa842cdfff60b9b0fa647e1eab386863"
+        "sha256:07cfa2fc5b5ea7dd26d38ec05c7e29d04889c2efe88c0c5325b03cede8704827"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
 
 def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("first", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial),
@@ -3899,7 +3891,7 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
 
 def test_round9_2_hook_context_is_one_shot_user_suffix_with_exact_prefix() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("first", sequence=1)
     first_request = _prepared_request(_snapshot(initial), _sources())
     _first, installed = _compile_and_install_append(
@@ -3999,12 +3991,12 @@ def test_memory_write_hint_is_the_only_final_wire_difference_before_anchor(
     )
     no_hint, no_hint_view = _compile_and_install_append(
         compiler=StructuredModelInputCompiler(),
-        owner=HostProviderInputContinuityOwner(session_id="session:test"),
+        owner=new_test_provider_input_continuity_owner(),
         request=no_hint_request,
     )
     with_hint, hint_view = _compile_and_install_append(
         compiler=StructuredModelInputCompiler(),
-        owner=HostProviderInputContinuityOwner(session_id="session:test"),
+        owner=new_test_provider_input_continuity_owner(),
         request=hint_request,
     )
 
@@ -4069,7 +4061,7 @@ def test_memory_write_hint_is_the_only_final_wire_difference_before_anchor(
 
 def test_memory_write_hint_call_append_does_not_repeat_on_tool_loop() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("Please remember that I like concise answers", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial),
@@ -4139,7 +4131,6 @@ def _assert_replay_final_wire_projection(*, result, view, prepared_call) -> None
         messages=compiled.messages,
         context_id=compiled.context_id,
         resolved_model_call_id=prepared_call.call.resolved_model_call_id,
-        target_fingerprint=prepared_call.call.target.fact.target_fingerprint,
         model_call_index=1,
         system_prompt=compiled.system_prompt,
         compiler_estimated_input_tokens=compiled.final_estimate.total_input_tokens,
@@ -4165,7 +4156,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
         wire_api="openai_chat_completions",
     )
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("first", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial), _sources(), route_wire_profile=profile
@@ -4290,7 +4281,7 @@ def test_round5a1_reasoning_replay_replaces_exact_assistant_and_keeps_wire_prefi
 def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -> None:
     profile = RouteWireProfile(id="test:responses-replay", wire_api="openai_responses")
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("first", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial), _sources(), route_wire_profile=profile
@@ -4392,7 +4383,7 @@ def test_round5a1_responses_replay_preserves_ordered_items_after_wire_prefix() -
 
 def test_round3_1_active_skill_no_change_and_clear_are_causal_once() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("$skill:alpha", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial),
@@ -4516,7 +4507,7 @@ def test_round5b_compaction_inherits_exact_installed_active_skill_body(
     tmp_path: Path,
 ) -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     body = canonical_json_bytes(
         {
             "skills": (
@@ -4559,7 +4550,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
     None
 ):
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("initial", sequence=1)
     first_request = _prepared_request(
         _snapshot(initial),
@@ -4689,7 +4680,7 @@ def test_round9_1_skill_catalog_successors_are_append_only_and_unavailable_once(
 
 def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("continue", sequence=1)
     failure_source = _candidate(
         ContextSourceKind.PREVIOUS_TURN_OUTCOME,
@@ -4776,7 +4767,7 @@ def test_round7_previous_outcome_value_clears_once_without_prefix_rewrite() -> N
 
 def test_round7_freshness_frontier_appends_without_reclassifying_old_messages() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("first", sequence=1)
     first_freshness = _candidate(
         ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
@@ -4880,7 +4871,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
         return _sources(absent_facts=(absence,))
 
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     items: list[FrozenProviderInputItem] = [_user("initial", sequence=1)]
     first = _prepared_request(
         _snapshot(*items),
@@ -4954,7 +4945,7 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
 
 def test_round3_1_compatible_epoch_rejects_old_canonical_rewrite() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     first = _prepared_request(_snapshot(_user("original")), _sources())
     _compile_and_install_append(compiler=compiler, owner=owner, request=first)
     rewritten = _prepared_request(_snapshot(_user("rewritten")), _sources())
@@ -4970,17 +4961,16 @@ def test_round3_1_compatible_epoch_rejects_old_canonical_rewrite() -> None:
         dispatch_anchor=_append_anchor(rewritten),
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        compiler.compile_append(
+        compiler.compile_installed_append(
             rewritten,
             planning=planning,
-            compatibility=_append_compatibility(rewritten),
         )
     assert failure.value.kind is ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
 
 
 def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     first_user = _user("turn one", sequence=1, turn_id="turn:one")
     first_request = _prepared_request(
         _snapshot(first_user, turn_id="turn:one"), _sources()
@@ -5012,7 +5002,7 @@ def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
     assert second_view.epoch_revision == first_view.epoch_revision + 1
     assert second_view.messages[: len(first_view.messages)] == first_view.messages
 
-    replacement = HostProviderInputContinuityOwner(session_id="session:test")
+    replacement = new_test_provider_input_continuity_owner()
     scope = ProviderInputContinuityScope(
         session_id="session:test",
         scope_kind=ModelInputScopeKind.ROOT,
@@ -5030,7 +5020,7 @@ def test_round3_1_root_epoch_spans_turns_and_host_replacement_is_cold() -> None:
 
 def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     first_user = _user("turn one", sequence=1, turn_id="turn:one")
     first_request = _prepared_request(
         _snapshot(first_user, turn_id="turn:one"),
@@ -5130,11 +5120,23 @@ def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> 
 
 def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(
-        session_id="session:test", maximum_child_scopes=2
+    owner = new_test_provider_input_continuity_owner(
+        maximum_child_scopes=2
     )
 
     def install_child(task_id: str, sequence: int):
+        scope = ProviderInputContinuityScope(
+            session_id="session:test",
+            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+            scope_subagent_task_id=task_id,
+        )
+        owner.authorize_new_subagent_scope(
+            scope,
+            source=new_test_subagent_lease_source(
+                session_id=scope.session_id,
+                task_id=task_id,
+            ),
+        )
         objective = _user(
             f"objective {task_id}",
             sequence=sequence,
@@ -5164,13 +5166,15 @@ def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
             scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
             scope_subagent_task_id="task:c",
         )
-        owner.freeze_planning_input(
-            scope=scope,
-            canonical_frontier=first.canonical_frontier,
-            dispatch_anchor=NoNewTriggerAnchor(None),
+        owner.authorize_new_subagent_scope(
+            scope,
+            source=new_test_subagent_lease_source(
+                session_id=scope.session_id,
+                task_id="task:c",
+            ),
         )
 
-    owner.discard_scope(first.scope)
+    owner.retire_terminal_subagent_scope(first.scope)
     third = install_child("task:c", 3)
     assert third.epoch_revision == 1
     assert owner.current_view(first.scope) is None
@@ -5184,8 +5188,8 @@ def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
             dispatch_anchor=NoNewTriggerAnchor(None),
         )
     with pytest.raises(ProviderInputContinuityConflict, match="another session"):
-        HostProviderInputContinuityOwner(
-            session_id="session:other"
+        new_test_provider_input_continuity_owner(
+            "session:other"
         ).freeze_planning_input(
             scope=second.scope,
             canonical_frontier=second.canonical_frontier,
@@ -5193,9 +5197,9 @@ def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
         )
 
 
-def test_round3_1_compatibility_reset_starts_a_new_epoch_without_prefix_join() -> None:
+def test_round3_1_root_drift_cannot_rebuild_an_installed_epoch() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     initial = _user("initial", sequence=1)
     first = _prepared_request(_snapshot(initial), _sources())
     _first, first_view = _compile_and_install_append(
@@ -5211,13 +5215,24 @@ def test_round3_1_compatibility_reset_starts_a_new_epoch_without_prefix_join() -
         context_id="context:reset",
         model_call_index=2,
     )
-    result, reset_view = _compile_and_install_append(
-        compiler=compiler, owner=owner, request=successor
+    scope = ProviderInputContinuityScope(
+        session_id="session:test",
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
     )
-    assert result.reset_reason is ProviderInputEpochResetReason.BASE_SYSTEM_CHANGED
-    assert reset_view.epoch_nonce != first_view.epoch_nonce
-    assert reset_view.epoch_revision == first_view.epoch_revision + 1
-    assert reset_view.system_prompt == "BASE v2"
+    planning = owner.freeze_planning_input(
+        scope=scope,
+        canonical_frontier=_append_frontier(successor),
+        dispatch_anchor=_append_anchor(successor),
+    )
+    result = compiler.compile_installed_append(successor, planning=planning)
+    assert result.compiled_input.system_prompt == first_view.system_prompt
+    assert result.compiled_input.tools == first_view.tools
+    assert (
+        result.compiled_input.messages[: len(first_view.messages)]
+        == first_view.messages
+    )
+    assert owner.current_view(scope) is first_view
 
 
 def test_round3_1_append_quotes_canonical_item_and_snapshot_bounds_before_install() -> (

@@ -2178,7 +2178,6 @@ class CompiledToolResultDecision:
 class ContextCompileBudgetReport:
     compiler_contract_version: str
     estimator_fingerprint: str
-    target_fingerprint: str
     tool_surface_fingerprint: str
     effective_input_budget_tokens: int
     system_tokens: int
@@ -2229,7 +2228,6 @@ class ContextCompileBudgetReport:
             raise ValueError("compile budget report exceeds its effective budget")
         for value in (
             self.estimator_fingerprint,
-            self.target_fingerprint,
             self.tool_surface_fingerprint,
             self.decision_digest,
         ):
@@ -2592,7 +2590,6 @@ def _budget_report_value(report: ContextCompileBudgetReport) -> dict[str, object
     return {
         "compiler_contract_version": report.compiler_contract_version,
         "estimator_fingerprint": report.estimator_fingerprint,
-        "target_fingerprint": report.target_fingerprint,
         "tool_surface_fingerprint": report.tool_surface_fingerprint,
         "effective_input_budget_tokens": report.effective_input_budget_tokens,
         "system_tokens": report.system_tokens,

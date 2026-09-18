@@ -72,7 +72,6 @@ class ModelInputCompileOperationalProjection:
     disposition: CompileObservationDisposition
     compiler_contract_version: str
     model_call_index: int
-    target_fingerprint: str
     tool_surface_fingerprint: str
     effective_input_budget_tokens: int
     total_input_tokens: int
@@ -110,7 +109,6 @@ class ModelInputCompileOperationalProjection:
             raise ValueError("compile observation contains an invalid count")
         if (
             not self.compiler_contract_version
-            or not self.target_fingerprint
             or not self.tool_surface_fingerprint
             or not self.decision_digest
         ):
@@ -121,7 +119,6 @@ class ModelInputCompileOperationalProjection:
             "disposition": self.disposition.value,
             "compiler_contract_version": self.compiler_contract_version,
             "model_call_index": self.model_call_index,
-            "target_fingerprint": self.target_fingerprint,
             "tool_surface_fingerprint": self.tool_surface_fingerprint,
             "effective_input_budget_tokens": self.effective_input_budget_tokens,
             "total_input_tokens": self.total_input_tokens,
@@ -190,7 +187,6 @@ def project_model_input_compile_observation(
         disposition=CompileObservationDisposition.COMPILED,
         compiler_contract_version=report.compiler_contract_version,
         model_call_index=model_call_index,
-        target_fingerprint=report.target_fingerprint,
         tool_surface_fingerprint=report.tool_surface_fingerprint,
         effective_input_budget_tokens=report.effective_input_budget_tokens,
         total_input_tokens=report.total_input_tokens,

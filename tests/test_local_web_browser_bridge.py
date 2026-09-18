@@ -6,18 +6,36 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from aiohttp import ClientSession, DummyCookieJar
 
 import pulsara_agent.web_app.browser_bridge as browser_bridge_module
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
+from pulsara_agent.web_app.browser_bridge import (
+    BridgeDetachFailed,
+    BridgeDetachFull,
+    BridgeSettlementFailed,
+    BridgeSettlementFull,
+)
 from pulsara_agent.web_app.protocol_client import (
     _ATTACHED_FIELDS,
     ProtocolBridgeError,
     TerminalProtocolClient,
 )
 from pulsara_agent.terminal_protocol.v3_gateway import MAXIMUM_FRAME_BYTES
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.web_app.session_controller import (
+    HostSessionHandle,
+    LocalSessionController,
+    NoOldHostReadyToResume,
+    OldHostCloseFull,
+    PreparedRuntimeReopenOperation,
+    PreparedRuntimeResumeOperation,
+    SessionControlRejected,
+)
+from pulsara_agent.web_app.http_server import LocalHttpServer
+from pulsara_agent.workspace_identity import HostWorkspaceInput
+from tests.support.model_config import test_model_runtime
 
 BROWSER_ONE = "00000000-0000-4000-8000-000000000001"
 BROWSER_TWO = "00000000-0000-4000-8000-000000000002"
@@ -591,3 +609,358 @@ async def _exercise_protocol_frame_boundary() -> None:
         await rejected._round_trip(frame)
     assert caught.value.code == "PROTOCOL_FRAME_OUT_OF_BOUNDS"
     assert rejected_writer.written == b""
+
+
+class _RuntimeReopenHost:
+    def __init__(self, session_id: str, host_session_id: str, *, busy: bool = False):
+        self.session_id = session_id
+        self.host_session_id = host_session_id
+        self.writer_generation = 1
+        self.busy = busy
+        self.gated = False
+        self.committed = False
+        self.aborted = False
+
+    async def prepare_safe_runtime_reopen(self):
+        if self.busy:
+            raise RuntimeError("accepted work remains")
+        self.gated = True
+        return SimpleNamespace(
+            session_id=self.session_id,
+            host_session_id=self.host_session_id,
+            writer_generation=self.writer_generation,
+        )
+
+    async def abort_safe_runtime_reopen(self, _quiescence: object) -> None:
+        self.gated = False
+        self.aborted = True
+
+    async def commit_safe_runtime_reopen(self, _quiescence: object) -> None:
+        assert self.gated
+        self.committed = True
+
+
+class _RuntimeReopenCore:
+    def __init__(self, workspace_root: str) -> None:
+        self.workspace_root = workspace_root
+        self.closed_host_ids: list[str] = []
+        self.resume_count = 0
+
+    async def read_resumable_session(self, session_id: str, **_kwargs: object):
+        return SimpleNamespace(
+            session_id=session_id,
+            workspace_kind="project",
+            workspace_root=self.workspace_root,
+            workspace_label="runtime reopen test",
+            memory_domain_id="u_local",
+        )
+
+    async def close_session(
+        self, host_session_id: str, *, close_conversation: bool
+    ) -> None:
+        assert not close_conversation
+        self.closed_host_ids.append(host_session_id)
+
+    async def resume_session(self, session_id: str, **_kwargs: object):
+        self.resume_count += 1
+        return _RuntimeReopenHost(
+            session_id,
+            f"host:resumed:{self.resume_count}",
+        )
+
+
+class _RuntimeReopenConnection:
+    def __init__(self, connection_id: str, session_id: str, *, fail: bool = False):
+        self.connection_id = connection_id
+        self.session_id = session_id
+        self.fail = fail
+        self.close_attempted = False
+
+    async def aclose(self) -> None:
+        self.close_attempted = True
+        if self.fail:
+            raise RuntimeError("close failed")
+
+
+def _runtime_reopen_controller(
+    tmp_path,
+    *,
+    old_host: _RuntimeReopenHost | None,
+) -> tuple[LocalSessionController, _RuntimeReopenCore]:
+    workspace_input = HostWorkspaceInput(
+        workspace_kind="project",
+        workspace_root=tmp_path,
+        display_label="runtime reopen test",
+        memory_domain_id="u_local",
+        cleanup_workspace_root_on_close=False,
+        trust_workspace_mcp_config=False,
+    )
+    core = _RuntimeReopenCore(str(tmp_path))
+    controller = object.__new__(LocalSessionController)
+    controller.core = core
+    controller.workspace_input = workspace_input
+    controller.permission_policy = cast(object, None)
+    controller.active_skill_names = frozenset()
+    controller._by_session = {}
+    controller._by_host = {}
+    controller._operations = {}
+    controller._forks = set()
+    controller._lock = asyncio.Lock()
+    controller._closing = False
+    controller._close_task = None
+    if old_host is not None:
+        handle = HostSessionHandle(cast(object, old_host), workspace_input)
+        controller._by_session[old_host.session_id] = handle
+        controller._by_host[old_host.host_session_id] = handle
+    return controller, core
+
+
+def test_runtime_reopen_busy_keeps_the_old_host_published(tmp_path) -> None:
+    async def scenario() -> None:
+        old = _RuntimeReopenHost("session:busy", "host:busy", busy=True)
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+
+        with pytest.raises(SessionControlRejected) as caught:
+            await controller.prepare_runtime_reopen(old.session_id)
+
+        assert caught.value.public_code == "RUNTIME_REOPEN_BUSY"
+        assert controller._by_session[old.session_id].session is old
+        assert controller._operations == {}
+        assert core.closed_host_ids == []
+
+    asyncio.run(scenario())
+
+
+def test_runtime_reopen_full_detaches_closes_and_resumes_exactly_once(tmp_path) -> None:
+    async def scenario() -> None:
+        old = _RuntimeReopenHost("session:full", "host:old")
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+        bridge = LocalBrowserBridge(
+            sessions=controller,
+            protocol_server=cast(TerminalKernelProtocolServer, object()),
+        )
+        first = _RuntimeReopenConnection("connection:one", old.session_id)
+        second = _RuntimeReopenConnection("connection:two", old.session_id)
+        bridge._connections = {first.connection_id: first, second.connection_id: second}
+        bridge._controller_by_session[old.session_id] = first.connection_id
+
+        operation = await controller.prepare_runtime_reopen(old.session_id)
+        assert isinstance(operation, PreparedRuntimeReopenOperation)
+        assert controller._by_session[old.session_id].session is old
+        detach = await bridge.detach_session_for_runtime_reopen(operation)
+        assert isinstance(detach, BridgeDetachFull)
+        assert first.close_attempted and second.close_attempted
+        assert not bridge._connections
+
+        host_outcome = await controller.prepare_runtime_reopen_close(operation)
+        assert isinstance(host_outcome, OldHostCloseFull)
+        settlement = await bridge.settle_runtime_reopen_detach(
+            detach.token, host_outcome
+        )
+        assert isinstance(settlement, BridgeSettlementFull)
+        observation = await controller.finalize_runtime_reopen(
+            operation,
+            host_outcome=host_outcome,
+            bridge_settlement=settlement,
+            bridge_owner=bridge,
+        )
+        resumed = await controller.resume_session(
+            old.session_id,
+            no_live_observation=observation,
+        )
+
+        assert old.committed
+        assert core.closed_host_ids == [old.host_session_id]
+        assert core.resume_count == 1
+        assert resumed.host_session_id == "host:resumed:1"
+        assert controller._by_session[old.session_id] is resumed
+
+    asyncio.run(scenario())
+
+
+def test_runtime_reopen_without_old_host_uses_distinct_closed_outcome(tmp_path) -> None:
+    async def scenario() -> None:
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=None)
+        bridge = LocalBrowserBridge(
+            sessions=controller,
+            protocol_server=cast(TerminalKernelProtocolServer, object()),
+        )
+
+        operation = await controller.prepare_runtime_reopen("session:cold")
+        assert isinstance(operation, PreparedRuntimeResumeOperation)
+        detach = await bridge.detach_session_for_runtime_reopen(operation)
+        assert isinstance(detach, BridgeDetachFull)
+        host_outcome = await controller.prepare_runtime_reopen_close(operation)
+        assert isinstance(host_outcome, NoOldHostReadyToResume)
+        settlement = await bridge.settle_runtime_reopen_detach(
+            detach.token, host_outcome
+        )
+        assert isinstance(settlement, BridgeSettlementFull)
+        observation = await controller.finalize_runtime_reopen(
+            operation,
+            host_outcome=host_outcome,
+            bridge_settlement=settlement,
+            bridge_owner=bridge,
+        )
+        resumed = await controller.resume_session(
+            operation.session_id,
+            no_live_observation=observation,
+        )
+
+        assert core.closed_host_ids == []
+        assert resumed.host_session_id == "host:resumed:1"
+
+    asyncio.run(scenario())
+
+
+def test_runtime_reopen_abort_after_detach_restores_only_the_exact_old_host(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        old = _RuntimeReopenHost("session:abort", "host:abort")
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+        bridge = LocalBrowserBridge(
+            sessions=controller,
+            protocol_server=cast(TerminalKernelProtocolServer, object()),
+        )
+        connection = _RuntimeReopenConnection("connection:abort", old.session_id)
+        bridge._connections[connection.connection_id] = connection
+
+        operation = await controller.prepare_runtime_reopen(old.session_id)
+        detach = await bridge.detach_session_for_runtime_reopen(operation)
+        assert isinstance(detach, BridgeDetachFull)
+        await controller.prepare_abort_runtime_reopen(operation)
+        settlement = await bridge.settle_runtime_reopen_abort(detach.token)
+        assert isinstance(settlement, BridgeSettlementFull)
+        await controller.finalize_abort_runtime_reopen(
+            operation,
+            bridge_settlement=settlement,
+            bridge_owner=bridge,
+        )
+
+        assert old.aborted and not old.gated and not old.committed
+        assert controller._by_session[old.session_id].session is old
+        assert core.closed_host_ids == []
+        assert controller._operations == {}
+
+    asyncio.run(scenario())
+
+
+def test_runtime_reopen_connection_close_failure_quarantines_both_owners(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        old = _RuntimeReopenHost("session:failed", "host:failed")
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+        bridge = LocalBrowserBridge(
+            sessions=controller,
+            protocol_server=cast(TerminalKernelProtocolServer, object()),
+        )
+        failed = _RuntimeReopenConnection(
+            "connection:failed", old.session_id, fail=True
+        )
+        settled = _RuntimeReopenConnection("connection:settled", old.session_id)
+        bridge._connections = {
+            failed.connection_id: failed,
+            settled.connection_id: settled,
+        }
+
+        operation = await controller.prepare_runtime_reopen(old.session_id)
+        detach = await bridge.detach_session_for_runtime_reopen(operation)
+        assert isinstance(detach, BridgeDetachFailed)
+        assert failed.close_attempted and settled.close_attempted
+        settlement = await bridge.quarantine_detach_failure(
+            detach.token,
+            error=detach.error,
+        )
+        assert isinstance(settlement, BridgeSettlementFailed)
+        await controller.quarantine_runtime_reopen(
+            operation,
+            public_code="RUNTIME_REOPEN_QUARANTINED",
+        )
+
+        with pytest.raises(SessionControlRejected) as caught:
+            await controller.resume_session(old.session_id)
+        assert caught.value.public_code == "RUNTIME_REOPEN_QUARANTINED"
+        with pytest.raises(RuntimeError, match="quarantined"):
+            await bridge.connect(
+                old.session_id,
+                browser_instance_id=BROWSER_ONE,
+            )
+        assert core.closed_host_ids == []
+
+    asyncio.run(scenario())
+
+
+def test_runtime_reopen_post_detach_exception_quarantines_gate_and_operation(
+    tmp_path,
+) -> None:
+    async def scenario() -> None:
+        old = _RuntimeReopenHost("session:post-token", "host:post-token")
+        controller, core = _runtime_reopen_controller(tmp_path, old_host=old)
+        bridge = LocalBrowserBridge(
+            sessions=controller,
+            protocol_server=cast(TerminalKernelProtocolServer, object()),
+        )
+        connection = _RuntimeReopenConnection(
+            "connection:post-token", old.session_id
+        )
+        bridge._connections[connection.connection_id] = connection
+
+        async def fail_after_detach(_operation):
+            raise RuntimeError("injected post-detach failure")
+
+        controller.prepare_runtime_reopen_close = fail_after_detach  # type: ignore[method-assign]
+        static_root = tmp_path / "static"
+        static_root.mkdir()
+        (static_root / "index.html").write_text("Pulsara", encoding="utf-8")
+        runtime = test_model_runtime()
+
+        async def refresh_database_state() -> None:
+            return None
+
+        async def unexpected_reset(_postgres):
+            raise AssertionError("unexpected reset")
+
+        server = LocalHttpServer(
+            sessions=controller,
+            bridge=bridge,
+            static_root=static_root,
+            requested_port=0,
+            is_ready=lambda: True,
+            is_draining=lambda: False,
+            settings=runtime.settings,
+            catalog=runtime.catalog,
+            model_runtime=runtime,
+            database_state=lambda: "ready",
+            refresh_database_state=refresh_database_state,
+            postgres_settings_saved=lambda: None,
+            reset_postgres=unexpected_reset,
+        )
+        await server.start()
+        try:
+            async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+                async with client.post(
+                    f"{server.origin}/api/sessions/{old.session_id}/runtime/reopen",
+                    headers={
+                        "Origin": server.origin,
+                        "Sec-Fetch-Site": "same-origin",
+                    },
+                ) as response:
+                    assert response.status == 409
+                    payload = await response.json()
+                    assert payload["error"]["code"] == "RUNTIME_REOPEN_QUARANTINED"
+            assert connection.close_attempted
+            with pytest.raises(SessionControlRejected) as caught:
+                await controller.resume_session(old.session_id)
+            assert caught.value.public_code == "RUNTIME_REOPEN_QUARANTINED"
+            with pytest.raises(RuntimeError, match="quarantined"):
+                await bridge.connect(
+                    old.session_id,
+                    browser_instance_id=BROWSER_ONE,
+                )
+            assert core.closed_host_ids == []
+        finally:
+            await server.aclose()
+
+    asyncio.run(scenario())

@@ -14,6 +14,7 @@ from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 
 from pulsara_agent.conversation_kernel.contracts import (
+    HostWriterAcquisitionKind,
     InlineContent,
     PromptDeliveryMode,
 )
@@ -31,9 +32,7 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryKindHint,
     prepare_memory_candidate,
 )
-from pulsara_agent.conversation_kernel.input_continuity import (
-    HostProviderInputContinuityOwner,
-)
+from tests.support.round3 import new_test_provider_input_continuity_owner
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     COMPACTION_MODEL_CONTRACT,
     COMPACTION_SNAPSHOT_COMPILER_CONTRACT,
@@ -936,6 +935,8 @@ def test_stage2_stale_writer_cannot_mutate_after_takeover(
         lease_seconds=30,
         deadline_monotonic=deadline,
     )
+    assert first.acquisition_kind is HostWriterAcquisitionKind.NEW_SESSION
+    assert second.acquisition_kind is HostWriterAcquisitionKind.HOST_TAKEOVER
     assert second.guard.writer_generation == first.guard.writer_generation + 1
     with pytest.raises(StaleHostWriter):
         _start_root_turn(
@@ -1850,7 +1851,7 @@ def test_round3_1_steer_consumption_ack_confirmation_is_exact(
         target_turn_id=turn_id,
         deadline_monotonic=deadline,
     )[0]
-    owner = HostProviderInputContinuityOwner(session_id=session_id)
+    owner = new_test_provider_input_continuity_owner(session_id)
     planning = owner.freeze_planning_input(
         scope=ProviderInputContinuityScope(
             session_id=session_id,
@@ -1982,8 +1983,8 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         ),
         deadline_monotonic=deadline,
     )
-    planning = HostProviderInputContinuityOwner(
-        session_id=session_id
+    planning = new_test_provider_input_continuity_owner(
+        session_id
     ).freeze_planning_input(
         scope=ProviderInputContinuityScope(
             session_id=session_id,

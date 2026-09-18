@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -286,6 +287,45 @@ class _RecordingModelRuntime:
             ),
         )
 
+    def resolve_frozen_target_bundle(self, bundle, *, binding, timeout_policy):
+        return self._delegate.resolve_frozen_target_bundle(
+            bundle,
+            binding=binding,
+            timeout_policy=timeout_policy,
+        )
+
+    def borrow_transport(self, purpose_permit):
+        borrowed = self._delegate.borrow_transport(purpose_permit)
+        return _RecordingBorrowedTransport(
+            borrowed,
+            self._records,
+            self._forced_source_summary_error,
+        )
+
+
+class _RecordingBorrowedTransport:
+    """Observe one closed-purpose borrow without bypassing its runtime owner."""
+
+    def __init__(
+        self,
+        delegate,
+        records: list[dict[str, object]],
+        forced_source_summary_error: _ForcedSourceSummaryProviderError | None,
+    ) -> None:
+        self._delegate = delegate
+        self.call = delegate.call
+        self._transport = _RecordingTransport(
+            delegate.call.target.transport,
+            records,
+            forced_source_summary_error,
+        )
+
+    def open_stream(self, *, context):
+        return self._transport.open_stream(call=self.call, context=context)
+
+    def close(self) -> None:
+        self._delegate.close()
+
 
 def _require_disposable_local_root(dsn: str, *, label: str) -> None:
     values = conninfo_to_dict(dsn)
@@ -369,12 +409,21 @@ def _seed_completed_history(
             occurred_at=datetime.now(timezone.utc),
             actor_id="model-switch-dogfood",
         )
+        resolution_snapshot = session._model_runtime.freeze_resolution_snapshot()  # noqa: SLF001
+        candidate = repository.prepare_root_provider_input_candidate(
+            guard,
+            intent=intent,
+            model_resolution_snapshot=resolution_snapshot,
+            deadline_monotonic=monotonic() + 60,
+        )
         repository.accept_root_turn_intent(
             guard,
             intent=intent,
-            model_resolution_snapshot=(
-                session._model_runtime.freeze_resolution_snapshot()  # noqa: SLF001
-            ),
+            # The dogfood fixture seeds completed canonical rows without a
+            # physical model call.  The repository still receives the exact
+            # prospective candidate it issued for this intent.
+            provider_input_admission=SimpleNamespace(candidate=candidate),
+            model_resolution_snapshot=resolution_snapshot,
             deadline_monotonic=monotonic() + 60,
         )
         cut = repository.prepare_provider_input_cut(
@@ -394,9 +443,8 @@ def _seed_completed_history(
                     text=InlineContent.from_bytes(assistant_text.encode("utf-8")),
                 ),
             ),
-            # These rows are deterministic public-semantic fixtures, not
-            # fabricated provider-native Responses replay.
-            provider_wire_api="openai_chat_completions",
+            # These rows are deterministic public-semantic fixtures; no
+            # fabricated provider-native replay is attached.
             complete_turn=True,
             occurred_at=datetime.now(timezone.utc),
             actor_id="model-switch-dogfood",

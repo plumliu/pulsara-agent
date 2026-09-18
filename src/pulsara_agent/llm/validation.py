@@ -72,8 +72,8 @@ def validate_model_context_shape_for_call(
         raise ModelContextIdentityMismatch("LLMContext.context_id is required")
     if context.resolved_model_call_id != fact.resolved_model_call_id:
         raise ModelContextIdentityMismatch("LLMContext resolved call identity mismatch")
-    if context.target_fingerprint != target_fact.target_fingerprint:
-        raise ModelContextIdentityMismatch("LLMContext target fingerprint mismatch")
+    if fact.target != target_fact:
+        raise ModelContextIdentityMismatch("resolved call target fact mismatch")
     if (
         fact.context_mode is ModelContextMode.COMPILED
         and context.model_call_index is None
@@ -81,7 +81,7 @@ def validate_model_context_shape_for_call(
         raise ModelContextIdentityMismatch(
             "compiled model context requires model_call_index"
         )
-    if context.tools and call.target.contract.target_facts.tool_call is False:
+    if context.tools and not target_fact.tool_call_capability:
         raise ModelTargetCapabilityMismatch("model target does not support tools")
     if any(message.role is MessageRole.SYSTEM for message in context.messages):
         raise ModelContextIdentityMismatch(

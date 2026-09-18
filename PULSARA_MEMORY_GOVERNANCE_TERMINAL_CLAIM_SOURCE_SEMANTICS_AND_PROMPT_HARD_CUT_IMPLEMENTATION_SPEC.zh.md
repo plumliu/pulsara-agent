@@ -1,5 +1,7 @@
 # Pulsara 记忆治理 Terminal Claim、来源语义与提示词 Hard-cut 实施规范
 
+> Epoch-boundary hard-cut 覆盖（2026-09-19）：provider-input epoch 与 canonical 重投影的当前唯一权威是 [`PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。canonical transcript row 不再保存 provider、wire API 或 replay disposition；provider replay 是独立可选附件关系。本文中冲突的旧 provider-column 描述均被下文新真值替换，不保留兼容列、双读或 fallback。其余不冲突语义继续有效。
+
 状态：实施前权威规范
 
 适用仓库：pulsara_agent
@@ -223,15 +225,17 @@ terminal occurrence sequence 作为 fence，不新增 terminal marker/event/colu
 每个 `ASSISTANT_MESSAGE | ASSISTANT_TOOL_REQUEST` transcript entry 已经保存：
 
 - `context_binding_revision_id`；
-- `provider_input_through_sequence`；
-- `provider_wire_api`；
-- `provider_replay_disposition` 与可选 replay fragment identity。
+- `provider_input_through_sequence`。
 
-其中前两个字段和既有 retained binding-revision/context-snapshot rows 已经足以重建“该 assistant
+这两个 provider-neutral 字段和既有 retained binding-revision/context-snapshot rows 已经足以重建“该 assistant
 输出产生前，主模型实际使用的 canonical semantic input cut”。但当前
 `CanonicalProviderInputReader.read_frozen_snapshot()` 经 `read_frozen_dispatch()` 仍要求
 `turns.current_context_binding_revision_id == cut.context_binding_revision_id`；candidate 之后若同轮已
 adopt compaction successor，合法 producer cut 会被现有 current-head guard 判 stale。
+
+Provider/wire-specific replay 只存在于可选的 `provider_assistant_replay_fragments` 附件关系；它不属于
+canonical transcript row，也不参与上述 semantic-cut authority。缺失或与目标不兼容的附件只影响
+provider replay 可用性，不能改变、补写或重解释 canonical truth。
 
 因此实现不能原样调用该 current-dispatch API。必须从同一 canonical reader 抽取/复用一个窄的
 historical semantic-cut read seam：其 authority 是 exact producer assistant entry 已持久化的 cut，

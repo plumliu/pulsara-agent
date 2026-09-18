@@ -57,10 +57,18 @@ from pulsara_agent.capability.mcp_management import (
     McpSecretMutation,
 )
 from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalIdentity
-from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
+from pulsara_agent.web_app.browser_bridge import (
+    BridgeDetachFailed,
+    BridgeDetachFull,
+    BridgeDetachNotStarted,
+    BridgeSettlementFailed,
+    LocalBrowserBridge,
+)
 from pulsara_agent.web_app.protocol_client import ProtocolBridgeError
 from pulsara_agent.web_app.session_controller import (
     LocalSessionController,
+    OldHostCloseQuarantined,
+    SessionControlRejected,
     SessionWorkspaceKind,
 )
 from pulsara_agent.settings import (
@@ -206,7 +214,9 @@ def _dashscope_credential_kind(kind: str) -> DashScopeCredentialKind:
 
 def _plugin_import_strings(body, key):
     value = body.get(key, {})
-    if not isinstance(value, dict) or any(not isinstance(item, str) for item in value.values()):
+    if not isinstance(value, dict) or any(
+        not isinstance(item, str) for item in value.values()
+    ):
         raise ValueError("插件普通输入与分类需要文字值")
     return tuple(sorted(value.items()))
 
@@ -436,16 +446,12 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/capabilities/skills/enabled", self._set_user_skill_enabled
         )
-        self._app.router.add_post(
-            "/api/capabilities/skills/remove", self._remove_skill
-        )
+        self._app.router.add_post("/api/capabilities/skills/remove", self._remove_skill)
         self._app.router.add_post(
             "/api/sessions/{session_id}/capabilities/skills/remove", self._remove_skill
         )
         self._app.router.add_post("/api/capabilities/mcp", self._create_user_mcp_server)
-        self._app.router.add_post(
-            "/api/capabilities/mcp/test", self._test_mcp_server
-        )
+        self._app.router.add_post("/api/capabilities/mcp/test", self._test_mcp_server)
         self._app.router.add_post(
             "/api/capabilities/mcp/import/preview", self._preview_mcp_import
         )
@@ -474,7 +480,9 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/capabilities/plugins/install", self._install_user_plugin
         )
-        self._app.router.add_post("/api/capabilities/plugins/preview-import", self._preview_plugin_import)
+        self._app.router.add_post(
+            "/api/capabilities/plugins/preview-import", self._preview_plugin_import
+        )
         self._app.router.add_post(
             "/api/capabilities/plugins/{plugin_id}/enabled",
             self._set_user_plugin_enabled,
@@ -483,10 +491,12 @@ class LocalHttpServer:
             "/api/capabilities/plugins/{plugin_id}", self._remove_user_plugin
         )
         self._app.router.add_put(
-            "/api/capabilities/plugins/{plugin_id}/mcp/{server_id}", self._replace_user_plugin_connection
+            "/api/capabilities/plugins/{plugin_id}/mcp/{server_id}",
+            self._replace_user_plugin_connection,
         )
         self._app.router.add_post(
-            "/api/capabilities/plugins/{plugin_id}/mcp/{server_id}/authorization", self._plugin_mcp_authorization
+            "/api/capabilities/plugins/{plugin_id}/mcp/{server_id}/authorization",
+            self._plugin_mcp_authorization,
         )
         self._app.router.add_get("/api/sessions", self._list_sessions)
         self._app.router.add_get(
@@ -506,7 +516,9 @@ class LocalHttpServer:
         )
         self._app.router.add_post("/api/sessions", self._create_session)
         self._app.router.add_get("/api/sessions/{session_id}", self._read_session)
-        self._app.router.add_post("/api/sessions/{session_id}/fork", self._fork_conversation)
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/fork", self._fork_conversation
+        )
         self._app.router.add_put(
             "/api/sessions/{session_id}/model-call-binding",
             self._update_model_call_binding,
@@ -527,14 +539,31 @@ class LocalHttpServer:
             "/api/sessions/{session_id}/capabilities/mcp",
             self._create_session_mcp_server,
         )
-        self._app.router.add_post("/api/sessions/{session_id}/capabilities/mcp/import", self._import_mcp)
-        self._app.router.add_post("/api/sessions/{session_id}/capabilities/mcp/test", self._test_mcp_server)
-        self._app.router.add_post("/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorize", self._authorize_mcp)
-        self._app.router.add_get("/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization", self._mcp_authorization)
-        self._app.router.add_delete("/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization", self._mcp_authorization)
-        self._app.router.add_post("/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization/cancel", self._mcp_authorization)
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/import", self._import_mcp
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/test", self._test_mcp_server
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorize",
+            self._authorize_mcp,
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization",
+            self._mcp_authorization,
+        )
+        self._app.router.add_delete(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization",
+            self._mcp_authorization,
+        )
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}/authorization/cancel",
+            self._mcp_authorization,
+        )
         self._app.router.add_put(
-            "/api/sessions/{session_id}/capabilities/mcp/{server_id}", self._update_session_mcp_server
+            "/api/sessions/{session_id}/capabilities/mcp/{server_id}",
+            self._update_session_mcp_server,
         )
         self._app.router.add_post(
             "/api/sessions/{session_id}/capabilities/mcp/{server_id}/enabled",
@@ -545,6 +574,10 @@ class LocalHttpServer:
             self._remove_session_mcp_server,
         )
         self._app.router.add_delete("/api/sessions/{session_id}", self._close_session)
+        self._app.router.add_post(
+            "/api/sessions/{session_id}/runtime/reopen",
+            self._runtime_reopen_session,
+        )
         self._app.router.add_post(
             "/api/sessions/{session_id}/connections", self._connect
         )
@@ -1082,7 +1115,8 @@ class LocalHttpServer:
                 status=409,
             )
         if (body["runtime_dsn"], body["admin_dsn"]) != (
-            postgres.runtime_dsn, postgres.admin_dsn
+            postgres.runtime_dsn,
+            postgres.admin_dsn,
         ):
             raise HttpPublicError(
                 "DATABASE_RESET_TARGET_CHANGED",
@@ -1192,7 +1226,8 @@ class LocalHttpServer:
             return payload
         catalog_entry = (
             catalog.entries.get(connection.target.catalog_key)
-            if catalog is not None and connection.user_declared is None else None
+            if catalog is not None and connection.user_declared is None
+            else None
         )
         payload.update(
             {
@@ -1205,7 +1240,9 @@ class LocalHttpServer:
                 "tool_call": contract.target_facts.tool_call,
                 "input_modalities": contract.target_facts.input_modalities,
                 "output_modalities": (
-                    catalog_entry.output_modalities if catalog_entry is not None else None
+                    catalog_entry.output_modalities
+                    if catalog_entry is not None
+                    else None
                 ),
                 "reasoning": _reasoning_payload(contract.reasoning),
                 "default_reasoning": reasoning_selection_to_dict(
@@ -1376,9 +1413,13 @@ class LocalHttpServer:
         if "session_id" in request.match_info:
             if "active_session_id" in body:
                 raise ValueError("Project Skill removal cannot select another session")
-            return web.json_response(await self.sessions.remove_session_skill(
-                request.match_info["session_id"], skill_path=path, expected=expected,
-            ))
+            return web.json_response(
+                await self.sessions.remove_session_skill(
+                    request.match_info["session_id"],
+                    skill_path=path,
+                    expected=expected,
+                )
+            )
         return web.json_response(
             await self.sessions.remove_user_skill(
                 skill_path=path,
@@ -1511,7 +1552,10 @@ class LocalHttpServer:
         if await self._json_body(request):
             raise ValueError("MCP login uses the saved target")
         return web.json_response(
-            await self.sessions.authorize_mcp(request.match_info["server_id"], session_id=request.match_info.get("session_id")),
+            await self.sessions.authorize_mcp(
+                request.match_info["server_id"],
+                session_id=request.match_info.get("session_id"),
+            ),
             status=202,
         )
 
@@ -1535,7 +1579,13 @@ class LocalHttpServer:
 
     async def _install_user_plugin(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"source_path", "active_session_id", "source_format", "classifications", "public_values"}:
+        if set(body) - {
+            "source_path",
+            "active_session_id",
+            "source_format",
+            "classifications",
+            "public_values",
+        }:
             raise ValueError("unexpected Plugin install field")
         source_path = body.get("source_path")
         if not isinstance(source_path, str):
@@ -1557,7 +1607,12 @@ class LocalHttpServer:
 
     async def _set_user_plugin_enabled(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"enabled", "package_install_id", "active_session_id", "connection_review"}:
+        if set(body) - {
+            "enabled",
+            "package_install_id",
+            "active_session_id",
+            "connection_review",
+        }:
             raise ValueError("unexpected Plugin enablement field")
         enabled = body.get("enabled")
         package_install_id = body.get("package_install_id")
@@ -1584,10 +1639,14 @@ class LocalHttpServer:
         action = _optional_body_string(body, "action")
         if not package or action not in {"login", "logout", "cancel", "status"}:
             raise ValueError("Plugin MCP authorization action is invalid")
-        return web.json_response(await self.sessions.plugin_mcp_authorization(
-            plugin_id=request.match_info["plugin_id"], server_id=request.match_info["server_id"],
-            package_install_id=package, action=action,
-        ))
+        return web.json_response(
+            await self.sessions.plugin_mcp_authorization(
+                plugin_id=request.match_info["plugin_id"],
+                server_id=request.match_info["server_id"],
+                package_install_id=package,
+                action=action,
+            )
+        )
 
     async def _remove_user_plugin(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
@@ -1604,24 +1663,45 @@ class LocalHttpServer:
             )
         )
 
-    async def _replace_user_plugin_connection(self, request: web.Request) -> web.Response:
+    async def _replace_user_plugin_connection(
+        self, request: web.Request
+    ) -> web.Response:
         from pulsara_agent.plugins.mcp_connection import overlay_from_dict
 
         body = await self._json_body(request)
-        if set(body) - {"package_install_id", "expected_overlay", "overlay", "secret_changes", "retain_credentials_confirmed", "active_session_id"}:
+        if set(body) - {
+            "package_install_id",
+            "expected_overlay",
+            "overlay",
+            "secret_changes",
+            "retain_credentials_confirmed",
+            "active_session_id",
+        }:
             raise ValueError("unexpected Plugin connection field")
         package = body.get("package_install_id")
-        if not isinstance(package, str) or not package or "expected_overlay" not in body or "overlay" not in body:
+        if (
+            not isinstance(package, str)
+            or not package
+            or "expected_overlay" not in body
+            or "overlay" not in body
+        ):
             raise ValueError("Plugin connection requires exact inspected values")
-        return web.json_response(await self.sessions.replace_user_plugin_connection(
-            plugin_id=request.match_info["plugin_id"], server_id=request.match_info["server_id"],
-            package_install_id=package,
-            expected_overlay=overlay_from_dict(body["expected_overlay"]) if body["expected_overlay"] is not None else None,
-            overlay=overlay_from_dict(body["overlay"]) if body["overlay"] is not None else None,
-            secret_changes=_mcp_secret_changes(body),
-            retain_credentials_confirmed=_retain_credentials_confirmed(body),
-            active_session_id=_optional_body_string(body, "active_session_id"),
-        ))
+        return web.json_response(
+            await self.sessions.replace_user_plugin_connection(
+                plugin_id=request.match_info["plugin_id"],
+                server_id=request.match_info["server_id"],
+                package_install_id=package,
+                expected_overlay=overlay_from_dict(body["expected_overlay"])
+                if body["expected_overlay"] is not None
+                else None,
+                overlay=overlay_from_dict(body["overlay"])
+                if body["overlay"] is not None
+                else None,
+                secret_changes=_mcp_secret_changes(body),
+                retain_credentials_confirmed=_retain_credentials_confirmed(body),
+                active_session_id=_optional_body_string(body, "active_session_id"),
+            )
+        )
 
     async def _reconnect_session_mcp(self, request: web.Request) -> web.Response:
         payload = await self.sessions.reconnect_session_mcp(
@@ -1691,17 +1771,29 @@ class LocalHttpServer:
 
     async def _update_session_mcp_server(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) - {"config", "expected_identity", "secret_changes", "retain_credentials_confirmed"}:
+        if set(body) - {
+            "config",
+            "expected_identity",
+            "secret_changes",
+            "retain_credentials_confirmed",
+        }:
             raise ValueError("unexpected project MCP update field")
         config = body.get("config")
         expected = _optional_body_string(body, "expected_identity")
         if not isinstance(config, dict) or expected is None:
-            raise ValueError("project MCP requires complete config and inspected identity")
-        return web.json_response(await self.sessions.update_session_mcp_server(
-            request.match_info["session_id"], server_id=request.match_info["server_id"],
-            config=config, expected_identity=expected, secret_changes=_mcp_secret_changes(body),
-            retain_credentials_confirmed=_retain_credentials_confirmed(body),
-        ))
+            raise ValueError(
+                "project MCP requires complete config and inspected identity"
+            )
+        return web.json_response(
+            await self.sessions.update_session_mcp_server(
+                request.match_info["session_id"],
+                server_id=request.match_info["server_id"],
+                config=config,
+                expected_identity=expected,
+                secret_changes=_mcp_secret_changes(body),
+                retain_credentials_confirmed=_retain_credentials_confirmed(body),
+            )
+        )
 
     async def _set_session_mcp_enabled(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
@@ -1735,18 +1827,31 @@ class LocalHttpServer:
         )
 
     async def _read_session(self, request: web.Request) -> web.Response:
-        return web.json_response({"session": await self.sessions.read_session(request.match_info["session_id"])})
+        return web.json_response(
+            {
+                "session": await self.sessions.read_session(
+                    request.match_info["session_id"]
+                )
+            }
+        )
 
     async def _fork_conversation(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
         if set(body) != {"anchor_entry_id", "child_session_id"} or any(
             not isinstance(body[key], str) or not body[key] for key in body
         ):
-            raise HttpPublicError("FORK_REQUEST_INVALID", "分叉需要消息 ID 和预先确定的新会话 ID。", status=400)
-        return web.json_response(await self.sessions.fork_conversation(
-            request.match_info["session_id"], anchor_entry_id=body["anchor_entry_id"],
-            child_session_id=body["child_session_id"],
-        ))
+            raise HttpPublicError(
+                "FORK_REQUEST_INVALID",
+                "分叉需要消息 ID 和预先确定的新会话 ID。",
+                status=400,
+            )
+        return web.json_response(
+            await self.sessions.fork_conversation(
+                request.match_info["session_id"],
+                anchor_entry_id=body["anchor_entry_id"],
+                child_session_id=body["child_session_id"],
+            )
+        )
 
     async def _create_session(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
@@ -1791,16 +1896,223 @@ class LocalHttpServer:
         close_conversation = body.get("close_conversation", False)
         if not isinstance(close_conversation, bool):
             raise ValueError("close_conversation must be boolean")
-        await self.bridge.disconnect_session(session_id)
-        await self.sessions.close_session(
+        operation = await self.sessions.prepare_raw_close(
             session_id, close_conversation=close_conversation
         )
+        if operation is not None:
+            detach = await self.bridge.detach_session_for_raw_close(operation)
+            if isinstance(detach, BridgeDetachNotStarted):
+                await self.sessions.abort_prepared_raw_close(
+                    session_id, operation=operation
+                )
+                raise HttpPublicError(
+                    "SESSION_CLOSE_BUSY", detach.reason, status=409, retryable=True
+                )
+            if isinstance(detach, BridgeDetachFailed):
+                await self.bridge.quarantine_detach_failure(
+                    detach.token, error=detach.error
+                )
+                await self.sessions.quarantine_raw_close(
+                    operation, public_code="SESSION_CLOSE_QUARANTINED"
+                )
+                raise HttpPublicError(
+                    "SESSION_CLOSE_QUARANTINED",
+                    "会话关闭结果不确定，请重启 Pulsara 后再继续。",
+                    status=409,
+                )
+            assert isinstance(detach, BridgeDetachFull)
+            close_full = False
+            try:
+                await self.sessions.settle_raw_close(session_id, operation=operation)
+                close_full = True
+            except BaseException:
+                await self.bridge.settle_raw_close_detach(
+                    detach.token, close_full=False
+                )
+                raise
+            settlement = await self.bridge.settle_raw_close_detach(
+                detach.token, close_full=close_full
+            )
+            if isinstance(settlement, BridgeSettlementFailed):
+                await self.sessions.quarantine_raw_close(
+                    operation, public_code="SESSION_CLOSE_QUARANTINED"
+                )
+                raise HttpPublicError(
+                    "SESSION_CLOSE_QUARANTINED",
+                    "会话关闭结果不确定，请重启 Pulsara 后再继续。",
+                    status=409,
+                )
+            await self.sessions.finalize_raw_close(
+                operation,
+                bridge_settlement=settlement,
+                bridge_owner=self.bridge,
+            )
         return web.json_response(
             {
                 "status": "closed",
                 "canonical_conversation_closed": close_conversation,
             }
         )
+
+    async def _runtime_reopen_session(self, request: web.Request) -> web.Response:
+        raw = await request.read()
+        if raw.strip():
+            raise ValueError("runtime reopen request body must be empty")
+        session_id = request.match_info["session_id"]
+        cancel_requested = asyncio.Event()
+        commit_decision = asyncio.Lock()
+
+        async def settle() -> dict[str, object]:
+            try:
+                operation = await self.sessions.prepare_runtime_reopen(session_id)
+            except SessionControlRejected as exc:
+                raise HttpPublicError(
+                    exc.public_code,
+                    (
+                        "当前会话仍有运行中的工作，暂时不能重开运行时。"
+                        if exc.public_code == "RUNTIME_REOPEN_BUSY"
+                        else "会话运行时已隔离，请重启 Pulsara 后再继续。"
+                    ),
+                    status=409,
+                    retryable=exc.public_code == "RUNTIME_REOPEN_BUSY",
+                ) from exc
+
+            async with commit_decision:
+                if cancel_requested.is_set():
+                    await self.sessions.abort_runtime_reopen(
+                        operation, reason="HTTP_REQUEST_CANCELLED"
+                    )
+                    return {"status": "cancelled"}
+
+            detach = await self.bridge.detach_session_for_runtime_reopen(operation)
+            if isinstance(detach, BridgeDetachNotStarted):
+                await self.sessions.abort_runtime_reopen(
+                    operation, reason=detach.reason
+                )
+                raise HttpPublicError(
+                    "RUNTIME_REOPEN_BUSY",
+                    "浏览器连接正在变化，请稍后重试。",
+                    status=409,
+                    retryable=True,
+                )
+            if isinstance(detach, BridgeDetachFailed):
+                await self.bridge.quarantine_detach_failure(
+                    detach.token, error=detach.error
+                )
+                await self.sessions.quarantine_runtime_reopen(
+                    operation,
+                    public_code="RUNTIME_REOPEN_QUARANTINED",
+                )
+                raise HttpPublicError(
+                    "RUNTIME_REOPEN_QUARANTINED",
+                    "运行时连接关闭结果不确定，请重启 Pulsara 后再继续。",
+                    status=409,
+                )
+            assert isinstance(detach, BridgeDetachFull)
+            bridge_token_terminal = False
+            try:
+                async with commit_decision:
+                    if cancel_requested.is_set():
+                        await self.sessions.prepare_abort_runtime_reopen(operation)
+                        abort_settlement = (
+                            await self.bridge.settle_runtime_reopen_abort(detach.token)
+                        )
+                        bridge_token_terminal = True
+                        if isinstance(abort_settlement, BridgeSettlementFailed):
+                            await self.sessions.quarantine_runtime_reopen(
+                                operation,
+                                public_code="RUNTIME_REOPEN_QUARANTINED",
+                            )
+                            return {
+                                "status": "quarantined",
+                                "public_code": "RUNTIME_REOPEN_QUARANTINED",
+                            }
+                        await self.sessions.finalize_abort_runtime_reopen(
+                            operation,
+                            bridge_settlement=abort_settlement,
+                            bridge_owner=self.bridge,
+                        )
+                        return {"status": "cancelled"}
+                    host_outcome = (
+                        await self.sessions.prepare_runtime_reopen_close(operation)
+                    )
+                bridge_settlement = await self.bridge.settle_runtime_reopen_detach(
+                    detach.token, host_outcome
+                )
+                bridge_token_terminal = True
+                if isinstance(host_outcome, OldHostCloseQuarantined) or isinstance(
+                    bridge_settlement, BridgeSettlementFailed
+                ):
+                    await self.sessions.quarantine_runtime_reopen(
+                        operation, public_code="RUNTIME_REOPEN_QUARANTINED"
+                    )
+                    raise HttpPublicError(
+                        "RUNTIME_REOPEN_QUARANTINED",
+                        "运行时关闭结果不确定，请重启 Pulsara 后再继续。",
+                        status=409,
+                    )
+                observation = await self.sessions.finalize_runtime_reopen(
+                    operation,
+                    host_outcome=host_outcome,
+                    bridge_settlement=bridge_settlement,
+                    bridge_owner=self.bridge,
+                )
+                try:
+                    handle = await self.sessions.resume_session(
+                        session_id,
+                        no_live_observation=observation,
+                    )
+                except BaseException as exc:
+                    return {
+                        "status": "deferred",
+                        "public_code": "RUNTIME_CLOSED_REOPEN_DEFERRED",
+                        "detail": str(exc),
+                    }
+                return {
+                    "status": "reopened",
+                    "session_id": handle.session_id,
+                    "host_session_id": handle.host_session_id,
+                }
+            except BaseException as exc:
+                if not bridge_token_terminal:
+                    try:
+                        await self.bridge.quarantine_detach_failure(
+                            detach.token,
+                            error=type(exc).__name__,
+                        )
+                    except BaseException:
+                        pass
+                try:
+                    await self.sessions.quarantine_runtime_reopen(
+                        operation,
+                        public_code="RUNTIME_REOPEN_QUARANTINED",
+                    )
+                except BaseException:
+                    pass
+                if isinstance(exc, HttpPublicError):
+                    raise
+                raise HttpPublicError(
+                    "RUNTIME_REOPEN_QUARANTINED",
+                    "运行时关闭结果不确定，请重启 Pulsara 后再继续。",
+                    status=409,
+                ) from exc
+
+        task = asyncio.create_task(
+            settle(), name=f"local-web-runtime-reopen:{session_id}"
+        )
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            async with commit_decision:
+                cancel_requested.set()
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+            task.result()
+            raise
+        return web.json_response(result)
 
     async def _connect(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
@@ -1849,10 +2161,14 @@ class LocalHttpServer:
                     connection_id, body
                 ),
                 "read-capability-form": lambda: self.bridge.capability_form(
-                    connection_id, body, submit=False,
+                    connection_id,
+                    body,
+                    submit=False,
                 ),
                 "resolve-capability-form": lambda: self.bridge.capability_form(
-                    connection_id, body, submit=True,
+                    connection_id,
+                    body,
+                    submit=True,
                 ),
                 "resolve-plan-interaction": lambda: (
                     self.bridge.resolve_plan_interaction(connection_id, body)

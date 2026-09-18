@@ -755,24 +755,19 @@ class CanonicalProtocolReader:
         entry_kind = str(entry["entry_kind"])
         if entry_kind not in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
             return ()
-        disposition = str(entry.get("provider_replay_disposition") or "")
-        replay_id = entry.get("provider_replay_fragment_id")
-        if disposition == "PUBLIC_SEMANTIC_ONLY":
-            if replay_id is not None:
-                raise RuntimeError("public-only assistant has a replay pointer")
-            return ()
-        if disposition != "NATIVE_REPLAY" or replay_id is None:
-            raise RuntimeError("assistant provider replay union is invalid")
         row = connection.execute(
             """
-            SELECT codec_kind, payload_bytes, payload_digest, payload_size, item_count
+            SELECT assistant_entry_kind, codec_kind, payload_bytes,
+                   payload_digest, payload_size, item_count
             FROM pulsara_v3.provider_assistant_replay_fragments
-            WHERE session_id = %s AND assistant_entry_id = %s AND id = %s
+            WHERE session_id = %s AND assistant_entry_id = %s
             """,
-            (entry["session_id"], entry["id"], replay_id),
+            (entry["session_id"], entry["id"]),
         ).fetchone()
         if row is None:
-            raise RuntimeError("assistant provider replay row is missing")
+            return ()
+        if str(row["assistant_entry_kind"]) != entry_kind:
+            raise RuntimeError("assistant provider replay kind drifted")
         try:
             return project_provider_visible_reasoning(
                 codec_kind=ProviderAssistantReplayCodecKind(str(row["codec_kind"])),

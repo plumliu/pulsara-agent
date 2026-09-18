@@ -48,7 +48,6 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 )
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
-    ProviderReplayDisposition,
 )
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
@@ -2291,10 +2290,6 @@ class _ConversationOperations:
         entry_id: str,
         parent_content: CanonicalContent,
         blocks: Sequence[AssistantBlock],
-        provider_wire_api: str = "openai_chat_completions",
-        provider_replay_disposition: ProviderReplayDisposition = (
-            ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
-        ),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
         subagent_result: FrozenSubagentResultPublicFact | None = None,
         complete_turn: bool = False,
@@ -2316,21 +2311,9 @@ class _ConversationOperations:
             or subagent_result.producer_entry_id != entry_id
         ):
             raise ValueError("inferred subagent result composite is invalid")
-        if (
-            (provider_replay is not None)
-            != (provider_replay_disposition is ProviderReplayDisposition.NATIVE_REPLAY)
-            or provider_wire_api not in {"openai_chat_completions", "openai_responses"}
-            or (
-                provider_wire_api == "openai_responses"
-                and provider_replay_disposition
-                is not ProviderReplayDisposition.NATIVE_REPLAY
-            )
-        ):
-            raise ValueError("assistant provider replay union is invalid")
         if provider_replay is not None and (
             provider_replay.session_id != guard.session_id
             or provider_replay.assistant_entry_id != entry_id
-            or provider_replay.wire_api != provider_wire_api
         ):
             raise ValueError("assistant provider replay does not exact-join")
         event_type = (
@@ -2378,11 +2361,6 @@ class _ConversationOperations:
                 content=parent_content,
                 context_binding_revision_id=cut.context_binding_revision_id,
                 provider_input_through_sequence=cut.provider_input_through_sequence,
-                provider_wire_api=provider_wire_api,
-                provider_replay_disposition=provider_replay_disposition.value,
-                provider_replay_fragment_id=(
-                    None if provider_replay is None else provider_replay.replay_id
-                ),
             )
             for ordinal, block in enumerate(blocks):
                 self._insert_assistant_block(
@@ -2402,13 +2380,14 @@ class _ConversationOperations:
                     """
                     INSERT INTO pulsara_v3.provider_assistant_replay_fragments (
                         id, session_id, workspace_id, assistant_entry_id,
+                        assistant_entry_kind,
                         wire_api, codec_kind,
                         provider_replay_contract_fingerprint,
                         replay_target_fingerprint,
                         public_projection_fingerprint,
                         payload_bytes, payload_digest, payload_size,
                         item_count, fragment_fingerprint
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s,
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
                               %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
@@ -2416,6 +2395,7 @@ class _ConversationOperations:
                         provider_replay.session_id,
                         provider_replay.workspace_id,
                         provider_replay.assistant_entry_id,
+                        entry_kind.value,
                         provider_replay.wire_api,
                         provider_replay.codec_kind.value,
                         provider_replay.provider_replay_contract_fingerprint,
@@ -2630,10 +2610,6 @@ class _ConversationOperations:
         entry_id: str,
         parent_content: CanonicalContent,
         blocks: Sequence[AssistantBlock],
-        provider_wire_api: str = "openai_chat_completions",
-        provider_replay_disposition: ProviderReplayDisposition = (
-            ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
-        ),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
         subagent_result: FrozenSubagentResultPublicFact | None = None,
         complete_turn: bool,
@@ -2700,11 +2676,6 @@ class _ConversationOperations:
                 != cut.context_binding_revision_id
                 or int(row["provider_input_through_sequence"])
                 != cut.provider_input_through_sequence
-                or str(row["provider_wire_api"]) != provider_wire_api
-                or str(row["provider_replay_disposition"])
-                != provider_replay_disposition.value
-                or row["provider_replay_fragment_id"]
-                != (None if provider_replay is None else provider_replay.replay_id)
                 or self._content_from_row(row) != parent_content
                 or str(row["event_type"]) != expected_event_type.value
                 or str(row["actor_kind"]) != "model"
@@ -2731,6 +2702,8 @@ class _ConversationOperations:
                 len(replay_rows) != 1
                 or str(replay_rows[0]["id"]) != provider_replay.replay_id
                 or str(replay_rows[0]["workspace_id"]) != provider_replay.workspace_id
+                or str(replay_rows[0]["assistant_entry_kind"])
+                != expected_entry_kind.value
                 or str(replay_rows[0]["wire_api"]) != provider_replay.wire_api
                 or str(replay_rows[0]["codec_kind"]) != provider_replay.codec_kind.value
                 or str(replay_rows[0]["provider_replay_contract_fingerprint"])

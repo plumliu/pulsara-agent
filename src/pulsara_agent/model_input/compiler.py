@@ -65,8 +65,6 @@ from pulsara_agent.model_input.continuity import (
     NewTriggerAnchor,
     ProcessLocalCanonicalFrontier,
     ProcessLocalSourceHead,
-    ProviderInputEpochCompatibility,
-    ProviderInputEpochResetReason,
     SourceObservationLifecycle,
     SourceObservationPresence,
     encode_runtime_observation,
@@ -985,7 +983,6 @@ class StructuredModelInputCompiler:
         report = ContextCompileBudgetReport(
             compiler_contract_version=COMPILER_CONTRACT_VERSION,
             estimator_fingerprint=request.compile_binding.estimator_fingerprint,
-            target_fingerprint=request.compile_binding.target_fact.target_fingerprint,
             tool_surface_fingerprint=surface.surface_fingerprint,
             effective_input_budget_tokens=budget,
             system_tokens=full.system_tokens,
@@ -1036,12 +1033,11 @@ class StructuredModelInputCompiler:
             compile_binding_fingerprint=request.compile_binding.binding_fingerprint,
         )
 
-    def compile_append(
+    def compile_installed_append(
         self,
         request: StructuredModelInputCompileRequest,
         *,
         planning: FrozenProviderInputAppendPlanningInput,
-        compatibility: ProviderInputEpochCompatibility,
         deadline_monotonic: float | None = None,
     ) -> FrozenProviderInputAppendCompileResult:
         """Compile one causally appended input without relowering old messages."""
@@ -1049,19 +1045,37 @@ class StructuredModelInputCompiler:
         result = self._compile_append(
             request,
             planning=planning,
-            compatibility=compatibility,
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
+            new_epoch=False,
         )
         assert isinstance(result, FrozenProviderInputAppendCompileResult)
         return result
 
-    def project_append(
+    def compile_new_epoch(
         self,
         request: StructuredModelInputCompileRequest,
         *,
         planning: FrozenProviderInputAppendPlanningInput,
-        compatibility: ProviderInputEpochCompatibility,
+        deadline_monotonic: float | None = None,
+    ) -> FrozenProviderInputAppendCompileResult:
+        """Fully reproject canonical truth for one authorized epoch boundary."""
+
+        result = self._compile_append(
+            request,
+            planning=planning,
+            deadline_monotonic=deadline_monotonic,
+            semantic_projection=False,
+            new_epoch=True,
+        )
+        assert isinstance(result, FrozenProviderInputAppendCompileResult)
+        return result
+
+    def project_installed_append(
+        self,
+        request: StructuredModelInputCompileRequest,
+        *,
+        planning: FrozenProviderInputAppendPlanningInput,
         deadline_monotonic: float | None = None,
     ) -> FrozenProviderInputAppendSemanticProjection:
         """Freeze a prospective append without creating executable input."""
@@ -1069,9 +1083,28 @@ class StructuredModelInputCompiler:
         result = self._compile_append(
             request,
             planning=planning,
-            compatibility=compatibility,
             deadline_monotonic=deadline_monotonic,
             semantic_projection=True,
+            new_epoch=False,
+        )
+        assert isinstance(result, FrozenProviderInputAppendSemanticProjection)
+        return result
+
+    def project_new_epoch(
+        self,
+        request: StructuredModelInputCompileRequest,
+        *,
+        planning: FrozenProviderInputAppendPlanningInput,
+        deadline_monotonic: float | None = None,
+    ) -> FrozenProviderInputAppendSemanticProjection:
+        """Project a full destination root without install authority."""
+
+        result = self._compile_append(
+            request,
+            planning=planning,
+            deadline_monotonic=deadline_monotonic,
+            semantic_projection=True,
+            new_epoch=True,
         )
         assert isinstance(result, FrozenProviderInputAppendSemanticProjection)
         return result
@@ -1081,9 +1114,9 @@ class StructuredModelInputCompiler:
         request: StructuredModelInputCompileRequest,
         *,
         planning: FrozenProviderInputAppendPlanningInput,
-        compatibility: ProviderInputEpochCompatibility,
         deadline_monotonic: float | None,
         semantic_projection: bool,
+        new_epoch: bool,
     ) -> (
         FrozenProviderInputAppendCompileResult
         | FrozenProviderInputAppendSemanticProjection
@@ -1097,8 +1130,6 @@ class StructuredModelInputCompiler:
             planning.scope.session_id != identity.session_id
             or planning.scope.scope_kind is not identity.conversation_scope_kind
             or planning.scope.scope_subagent_task_id != identity.scope_subagent_task_id
-            or compatibility.context_base_semantic_identity
-            != request.canonical_facts.context_binding_fact.context_base_semantic_identity
         ):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
@@ -1114,7 +1145,6 @@ class StructuredModelInputCompiler:
             if predecessor is None
             else len(predecessor.canonical_frontier.ordered_item_fingerprints)
         )
-        reset_reason = _compatibility_reset_reason(predecessor, compatibility)
         same_base = predecessor is None or (
             predecessor.canonical_frontier.context_base_semantic_identity
             == request.canonical_facts.context_binding_fact.context_base_semantic_identity
@@ -1123,10 +1153,8 @@ class StructuredModelInputCompiler:
             fingerprints[:predecessor_count]
             == predecessor.canonical_frontier.ordered_item_fingerprints
         )
-        # A provider/tool/compiler reset may rematerialize the provider view,
-        # but it never authorizes rewriting canonical items inside the same
-        # context base.  Only an explicit context-base replacement has no
-        # item-prefix relationship to the old frontier.
+        # A new epoch may select a different adopted base. Within one base,
+        # neither an append nor a boundary may rewrite canonical history.
         if predecessor is not None and same_base and not prefix_matches:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
@@ -1150,7 +1178,11 @@ class StructuredModelInputCompiler:
             through_sequence=identity.provider_input_through_sequence,
             ordered_item_fingerprints=fingerprints,
         )
-        if predecessor is not None and reset_reason is None:
+        if not new_epoch:
+            if predecessor is None or not same_base:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
             try:
                 predecessor.canonical_frontier.require_prefix_of(frontier)
             except ValueError as exc:
@@ -1166,9 +1198,8 @@ class StructuredModelInputCompiler:
                 semantic_projection=semantic_projection,
             )
 
-        # The ordinary compiler remains the unique suffix allocator.  Its
-        # decisions are applied only to new canonical items and newly emitted
-        # source observations; installed messages are never taken from it.
+        # New epochs fully project effective canonical truth. Boundary
+        # authority is validated by continuity; compiler mismatch never grants it.
         fresh = (
             self.project(request, deadline_monotonic=deadline.value)
             if semantic_projection
@@ -1176,7 +1207,7 @@ class StructuredModelInputCompiler:
         )
         deadline.check()
         all_materialized, _ = self._materialize_approved_plan(request)
-        old_count = 0 if reset_reason is not None else predecessor_count
+        old_count = 0
         delta_items = all_materialized[old_count:]
         artifact_read_available = any(
             tool.name == "artifact_read"
@@ -1217,11 +1248,7 @@ class StructuredModelInputCompiler:
 
         previous_heads = {
             item.source_kind: item
-            for item in (
-                ()
-                if predecessor is None or reset_reason is not None
-                else predecessor.source_heads
-            )
+            for item in ()
         }
         source_decisions = {item.source_kind: item for item in fresh.source_decisions}
         observation_messages: list[tuple[int, str, LLMMessage]] = []
@@ -1360,21 +1387,9 @@ class StructuredModelInputCompiler:
             item[2] for item in sorted(observation_messages, key=lambda item: item[:2])
         )
 
-        prefix_messages = (
-            ()
-            if predecessor is None or reset_reason is not None
-            else (predecessor.messages)
-        )
-        system_prompt = (
-            fresh.system_prompt
-            if predecessor is None or reset_reason is not None
-            else predecessor.system_prompt
-        )
-        tools = (
-            fresh.tools
-            if predecessor is None or reset_reason is not None
-            else predecessor.tools
-        )
+        prefix_messages: tuple[LLMMessage, ...] = ()
+        system_prompt = fresh.system_prompt
+        tools = fresh.tools
         if isinstance(planning.dispatch_anchor, NewTriggerAnchor):
             indexes = tuple(
                 index
@@ -1428,11 +1443,7 @@ class StructuredModelInputCompiler:
                 *delta_placement_values,
                 *observation_placement_values,
             )
-        prefix_placements = (
-            ()
-            if predecessor is None or reset_reason is not None
-            else predecessor.message_placements
-        )
+        prefix_placements: tuple[FrozenCompiledMessagePlacement, ...] = ()
         message_placements = _compiled_message_placements(
             prefix=prefix_placements,
             values=suffix_placement_values,
@@ -1479,7 +1490,6 @@ class StructuredModelInputCompiler:
                 ),
                 canonical_frontier=frontier,
                 appended_message_count=len(suffix_messages),
-                reset_reason=reset_reason,
             )
         decision_digest = context_fingerprint(
             "pulsara:model-input-append-decisions:v1",
@@ -1549,7 +1559,6 @@ class StructuredModelInputCompiler:
                 for kind in sorted(resulting_heads, key=lambda item: item.value)
             ),
             appended_message_count=len(suffix_messages),
-            reset_reason=reset_reason,
         )
 
     def _compile_compatible_append(
@@ -2047,7 +2056,6 @@ class StructuredModelInputCompiler:
                 ),
                 canonical_frontier=frontier,
                 appended_message_count=(len(layout.messages) - len(previous_messages)),
-                reset_reason=None,
             )
         prefix_message_tokens = predecessor.final_estimate.message_tokens
         prefix_fingerprint = predecessor.semantic_prefix_fingerprint
@@ -2080,8 +2088,9 @@ class StructuredModelInputCompiler:
         report = ContextCompileBudgetReport(
             compiler_contract_version=COMPILER_CONTRACT_VERSION,
             estimator_fingerprint=request.compile_binding.estimator_fingerprint,
-            target_fingerprint=request.compile_binding.target_fact.target_fingerprint,
-            tool_surface_fingerprint=predecessor.compatibility.tool_surface_fingerprint,
+            tool_surface_fingerprint=(
+                predecessor.tool_exposure_plan.direct_tool_surface.surface_fingerprint
+            ),
             effective_input_budget_tokens=budget,
             system_tokens=layout.estimate.system_tokens,
             message_tokens=layout.estimate.message_tokens,
@@ -2159,7 +2168,6 @@ class StructuredModelInputCompiler:
                 for kind in sorted(resulting_heads, key=lambda value: value.value)
             ),
             appended_message_count=len(layout.messages) - len(previous_messages),
-            reset_reason=None,
         )
 
     def _append_layout(
@@ -3221,40 +3229,6 @@ def _source_occurrence_fingerprint(
             "occurrence": occurrence,
         },
     )
-
-
-def _compatibility_reset_reason(
-    predecessor: object,
-    compatibility: ProviderInputEpochCompatibility,
-) -> ProviderInputEpochResetReason | None:
-    if predecessor is None:
-        return ProviderInputEpochResetReason.COLD_HOST_BOOTSTRAP
-    previous = predecessor.compatibility
-    if (
-        previous.base_system_semantic_fingerprint
-        != compatibility.base_system_semantic_fingerprint
-    ):
-        return ProviderInputEpochResetReason.BASE_SYSTEM_CHANGED
-    if previous.tool_surface_fingerprint != compatibility.tool_surface_fingerprint:
-        return ProviderInputEpochResetReason.TOOL_SURFACE_CHANGED
-    if (
-        previous.model_connection_id != compatibility.model_connection_id
-        or previous.model_target_fingerprint != compatibility.model_target_fingerprint
-        or previous.estimator_fingerprint != compatibility.estimator_fingerprint
-    ):
-        return ProviderInputEpochResetReason.MODEL_TARGET_CHANGED
-    if (
-        previous.compiler_contract_version != compatibility.compiler_contract_version
-        or previous.provider_message_lowering_contract
-        != compatibility.provider_message_lowering_contract
-    ):
-        return ProviderInputEpochResetReason.PROVIDER_LOWERING_CHANGED
-    if (
-        previous.context_base_semantic_identity
-        != compatibility.context_base_semantic_identity
-    ):
-        return ProviderInputEpochResetReason.CONTEXT_BINDING_REWRITE
-    return None
 
 
 __all__ = ["COMPILER_CONTRACT_VERSION", "StructuredModelInputCompiler"]

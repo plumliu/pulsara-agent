@@ -6,6 +6,9 @@ import asyncio
 import base64
 import binascii
 from collections.abc import Iterable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from uuid import uuid4
 
 from google.protobuf.json_format import MessageToDict
 from google.protobuf.message import Message
@@ -28,9 +31,102 @@ from pulsara_agent.web_app.protocol_client import (
     ProtocolBridgeError,
     ProtocolTransportClosed,
 )
-from pulsara_agent.web_app.session_controller import LocalSessionController
+from pulsara_agent.web_app.session_controller import (
+    LocalSessionController,
+    NoOldHostReadyToResume,
+    OldHostCloseFull,
+    OldHostCloseQuarantined,
+    PreparedRawCloseOperation,
+    RuntimeReopenOperation,
+)
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
+
+
+_BROWSER_DETACH_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class BrowserSessionDetachToken:
+    session_id: str
+    detach_nonce: str
+    _operation: RuntimeReopenOperation | PreparedRawCloseOperation
+    _owner: "LocalBrowserBridge"
+    _gate: object
+    _settled: bool
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        detach_nonce: str,
+        operation: RuntimeReopenOperation | PreparedRawCloseOperation,
+        gate: object,
+        owner: "LocalBrowserBridge",
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _BROWSER_DETACH_SEAL
+            or operation.session_id != session_id
+            or not detach_nonce
+        ):
+            raise TypeError("browser detach token is bridge-issued")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "detach_nonce", detach_nonce)
+        object.__setattr__(self, "_operation", operation)
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_gate", gate)
+        object.__setattr__(self, "_settled", False)
+
+    def _consume(self, owner: "LocalBrowserBridge") -> None:
+        if self._owner is not owner or self._settled:
+            raise RuntimeError("browser detach token is stale")
+        object.__setattr__(self, "_settled", True)
+
+
+@dataclass(frozen=True, slots=True)
+class BridgeDetachNotStarted:
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class BridgeDetachFull:
+    token: BrowserSessionDetachToken
+
+
+@dataclass(frozen=True, slots=True)
+class BridgeDetachFailed:
+    token: BrowserSessionDetachToken
+    error: str
+
+
+BridgeDetachOutcome = BridgeDetachNotStarted | BridgeDetachFull | BridgeDetachFailed
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class BridgeSettlementFull:
+    session_id: str
+    _operation: RuntimeReopenOperation | PreparedRawCloseOperation
+    _owner: "LocalBrowserBridge"
+
+    def __init__(
+        self,
+        *,
+        token: BrowserSessionDetachToken,
+        owner: "LocalBrowserBridge",
+        _seal: object,
+    ) -> None:
+        if _seal is not _BROWSER_DETACH_SEAL or token._owner is not owner:
+            raise TypeError("browser settlement is bridge-issued")
+        object.__setattr__(self, "session_id", token.session_id)
+        object.__setattr__(self, "_operation", token._operation)
+        object.__setattr__(self, "_owner", owner)
+
+
+@dataclass(frozen=True, slots=True)
+class BridgeSettlementFailed:
+    token: BrowserSessionDetachToken
+    error: str
 
 
 def protobuf_json(message: Message) -> dict[str, object]:
@@ -61,10 +157,39 @@ class LocalBrowserBridge:
         self._controller_by_session: dict[str, str] = {}
         self._browser_instance_by_connection: dict[str, str] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_gate_users: dict[str, int] = {}
+        self._quarantined_sessions: set[str] = set()
         self._next_generation = 0
         self._lock = asyncio.Lock()
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
+
+    @asynccontextmanager
+    async def _session_gate(self, session_id: str):
+        async with self._lock:
+            if self._closing:
+                raise RuntimeError("Local Web application is draining")
+            if session_id in self._quarantined_sessions:
+                raise RuntimeError("browser Session gate is quarantined")
+            session_lock = self._session_locks.setdefault(session_id, asyncio.Lock())
+            self._session_gate_users[session_id] = (
+                self._session_gate_users.get(session_id, 0) + 1
+            )
+        try:
+            async with session_lock:
+                yield
+        finally:
+            async with self._lock:
+                remaining = self._session_gate_users.get(session_id, 1) - 1
+                if remaining > 0:
+                    self._session_gate_users[session_id] = remaining
+                else:
+                    self._session_gate_users.pop(session_id, None)
+                    if not any(
+                        connection.session_id == session_id
+                        for connection in self._connections.values()
+                    ):
+                        self._session_locks.pop(session_id, None)
 
     async def connect(
         self,
@@ -77,11 +202,7 @@ class LocalBrowserBridge:
             raise ValueError("session_id is required")
         if not browser_instance_id:
             raise ValueError("browser_instance_id is required")
-        async with self._lock:
-            if self._closing:
-                raise RuntimeError("Local Web application is draining")
-            session_lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with session_lock:
+        async with self._session_gate(session_id):
             old: BrowserRuntimeConnection | None = None
             async with self._lock:
                 controller_id = self._controller_by_session.get(session_id)
@@ -118,8 +239,11 @@ class LocalBrowserBridge:
                     role=role,
                 )
             except ProtocolBridgeError as exc:
-                if (role != "controller" or exc.code != "CONTROLLER_UNAVAILABLE"
-                    or (old is not None and takeover)):
+                if (
+                    role != "controller"
+                    or exc.code != "CONTROLLER_UNAVAILABLE"
+                    or (old is not None and takeover)
+                ):
                     raise
                 role = "observer"
                 connection = await BrowserRuntimeConnection.open(
@@ -160,6 +284,10 @@ class LocalBrowserBridge:
             await connection.aclose()
 
     async def disconnect_session(self, session_id: str) -> None:
+        async with self._session_gate(session_id):
+            await self._disconnect_session_under_gate(session_id)
+
+    async def _disconnect_session_under_gate(self, session_id: str) -> None:
         async with self._lock:
             ids = tuple(
                 connection_id
@@ -168,6 +296,142 @@ class LocalBrowserBridge:
             )
         for connection_id in ids:
             await self.disconnect(connection_id)
+
+    async def detach_session_for_runtime_reopen(
+        self, operation: RuntimeReopenOperation
+    ) -> BridgeDetachOutcome:
+        return await self._detach_session_for_operation(
+            operation,
+            confirm=lambda: self.sessions.confirm_runtime_reopen_operation(operation),
+        )
+
+    async def detach_session_for_raw_close(
+        self, operation: PreparedRawCloseOperation
+    ) -> BridgeDetachOutcome:
+        return await self._detach_session_for_operation(
+            operation,
+            confirm=lambda: self.sessions.confirm_raw_close_operation(operation),
+        )
+
+    async def _detach_session_for_operation(
+        self,
+        operation: RuntimeReopenOperation | PreparedRawCloseOperation,
+        *,
+        confirm,
+    ) -> BridgeDetachOutcome:
+        """Detach all exact Session connections behind the shared connect gate."""
+
+        gate = self._session_gate(operation.session_id)
+        try:
+            await gate.__aenter__()
+        except BaseException as exc:
+            return BridgeDetachNotStarted(str(exc))
+        try:
+            await confirm()
+        except BaseException as exc:
+            await gate.__aexit__(None, None, None)
+            return BridgeDetachNotStarted(str(exc))
+
+        token = BrowserSessionDetachToken(
+            session_id=operation.session_id,
+            detach_nonce=f"browser-detach:{uuid4().hex}",
+            operation=operation,
+            gate=gate,
+            owner=self,
+            _seal=_BROWSER_DETACH_SEAL,
+        )
+        async with self._lock:
+            connections = tuple(
+                connection
+                for connection in self._connections.values()
+                if connection.session_id == operation.session_id
+            )
+            for connection in connections:
+                self._connections.pop(connection.connection_id, None)
+                self._browser_instance_by_connection.pop(connection.connection_id, None)
+                if (
+                    self._controller_by_session.get(operation.session_id)
+                    == connection.connection_id
+                ):
+                    self._controller_by_session.pop(operation.session_id, None)
+        errors: list[str] = []
+        for connection in connections:
+            try:
+                await connection.aclose()
+            except BaseException as exc:
+                errors.append(type(exc).__name__)
+        if errors:
+            await self._quarantine_detach(operation.session_id)
+            return BridgeDetachFailed(token, ",".join(errors))
+        return BridgeDetachFull(token)
+
+    async def settle_runtime_reopen_detach(
+        self,
+        token: BrowserSessionDetachToken,
+        host_outcome: object,
+    ) -> BridgeSettlementFull | BridgeSettlementFailed:
+        if (
+            token._operation.session_id != token.session_id
+            or getattr(host_outcome, "operation", None) is not token._operation
+        ):
+            return await self._settle_detach_quarantined(
+                token, "Host outcome lost exact detach operation binding"
+            )
+        if isinstance(host_outcome, OldHostCloseQuarantined):
+            return await self._settle_detach_quarantined(
+                token, "old Host close is quarantined"
+            )
+        if not isinstance(host_outcome, (OldHostCloseFull, NoOldHostReadyToResume)):
+            return await self._settle_detach_quarantined(
+                token, "Host outcome is outside the runtime-reopen closed union"
+            )
+        return await self._settle_detach_full(token)
+
+    async def settle_runtime_reopen_abort(
+        self, token: BrowserSessionDetachToken
+    ) -> BridgeSettlementFull | BridgeSettlementFailed:
+        return await self._settle_detach_full(token)
+
+    async def settle_raw_close_detach(
+        self, token: BrowserSessionDetachToken, *, close_full: bool
+    ) -> BridgeSettlementFull | BridgeSettlementFailed:
+        if not close_full:
+            return await self._settle_detach_quarantined(
+                token, "raw Session close is quarantined"
+            )
+        return await self._settle_detach_full(token)
+
+    async def quarantine_detach_failure(
+        self, token: BrowserSessionDetachToken, *, error: str
+    ) -> BridgeSettlementFailed:
+        return await self._settle_detach_quarantined(token, error)
+
+    async def _settle_detach_full(
+        self, token: BrowserSessionDetachToken
+    ) -> BridgeSettlementFull | BridgeSettlementFailed:
+        try:
+            token._consume(self)
+            await token._gate.__aexit__(None, None, None)
+        except BaseException as exc:
+            await self._quarantine_detach(token.session_id)
+            return BridgeSettlementFailed(token, type(exc).__name__)
+        return BridgeSettlementFull(token=token, owner=self, _seal=_BROWSER_DETACH_SEAL)
+
+    async def _settle_detach_quarantined(
+        self, token: BrowserSessionDetachToken, error: str
+    ) -> BridgeSettlementFailed:
+        await self._quarantine_detach(token.session_id)
+        if not token._settled:
+            token._consume(self)
+            try:
+                await token._gate.__aexit__(None, None, None)
+            except BaseException as exc:
+                error = f"{error};{type(exc).__name__}"
+        return BridgeSettlementFailed(token, error)
+
+    async def _quarantine_detach(self, session_id: str) -> None:
+        async with self._lock:
+            self._quarantined_sessions.add(session_id)
 
     async def snapshot(self, connection_id: str) -> dict[str, object]:
         connection = await self._connection(connection_id)
@@ -343,9 +607,7 @@ class LocalBrowserBridge:
             ),
             force=bool(body.get("force", False)),
             expected_session_id=str(body.get("expected_session_id", "")),
-            expected_host_session_id=str(
-                body.get("expected_host_session_id", "")
-            ),
+            expected_host_session_id=str(body.get("expected_host_session_id", "")),
             target_process_id=str(body.get("target_process_id", "")),
         )
         if "prompt_content" in body:
@@ -452,9 +714,7 @@ class LocalBrowserBridge:
         connection = await self._connection(connection_id)
         request = wire.ListBackgroundProcessesRequest(
             expected_session_id=_required_string(body, "expected_session_id"),
-            expected_host_session_id=_required_string(
-                body, "expected_host_session_id"
-            ),
+            expected_host_session_id=_required_string(body, "expected_host_session_id"),
             cursor=str(body.get("cursor", "")),
             maximum_items=_bounded_uint(
                 body.get("maximum_items", 50),
@@ -473,9 +733,7 @@ class LocalBrowserBridge:
         connection = await self._connection(connection_id)
         request = wire.ReadBackgroundProcessLogRequest(
             expected_session_id=_required_string(body, "expected_session_id"),
-            expected_host_session_id=_required_string(
-                body, "expected_host_session_id"
-            ),
+            expected_host_session_id=_required_string(body, "expected_host_session_id"),
             process_id=_required_string(body, "process_id"),
             output_cursor=str(body.get("output_cursor", "")),
             max_output_chars=_bounded_uint(
@@ -486,9 +744,7 @@ class LocalBrowserBridge:
             ),
         )
         return protobuf_json(
-            await connection.controller.request(
-                "read_background_process_log", request
-            )
+            await connection.controller.request("read_background_process_log", request)
         )
 
     async def resolve_interaction(

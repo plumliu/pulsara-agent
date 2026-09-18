@@ -74,6 +74,10 @@ from pulsara_agent.memory.scope import CTX_GLOBAL, FrozenMemoryReadContextBindin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.llm.model_connections import model_call_binding_from_dict
+from pulsara_agent.llm.provider_open import (
+    ConfirmedMemoryGovernanceTerminalFence,
+    _issue_confirmed_memory_governance_terminal_fence,
+)
 from pulsara_agent.retrieval.embedding.validation import (
     freeze_v1_embedding_vector,
 )
@@ -460,8 +464,8 @@ class _MemoryOperations(_MemoryManagementOperations):
         *,
         candidate: FrozenMemoryCandidateForGovernance,
         deadline_monotonic: float,
-    ) -> bool:
-        """Exact provider-open recheck of the already frozen occurrence fence."""
+    ) -> ConfirmedMemoryGovernanceTerminalFence | None:
+        """Issue the only one-shot provider-open fence after an exact DB recheck."""
 
         with self._provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
@@ -480,14 +484,20 @@ class _MemoryOperations(_MemoryManagementOperations):
                 or _memory_governance_terminal_fence(row)
                 != candidate.terminal_fence
             ):
-                return False
+                return None
             try:
                 observed = self._read_prepared_memory_candidate(
                     connection, candidate.prepared.candidate_id
                 )
             except (ConversationKernelConflict, ValueError):
-                return False
-            return observed == candidate.prepared
+                return None
+            if observed != candidate.prepared:
+                return None
+            return _issue_confirmed_memory_governance_terminal_fence(
+                candidate=candidate,
+                origin_model_call_binding=candidate.origin_model_call_binding,
+                durable_terminal_fence=candidate.terminal_fence,
+            )
 
     @staticmethod
     def _read_memory_governance_producer_cut(

@@ -377,9 +377,6 @@ CREATE TABLE pulsara_v3.transcript_entries (
     scope_subagent_task_id text,
     context_binding_revision_id text,
     provider_input_through_sequence bigint,
-    provider_wire_api text,
-    provider_replay_disposition text,
-    provider_replay_fragment_id text,
     source_subagent_task_id text,
     source_inter_agent_tool_attempt_id text,
     source_plan_workflow_id text,
@@ -403,7 +400,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
     content_codec text NOT NULL,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
-    UNIQUE (session_id, id, provider_wire_api, provider_replay_fragment_id),
+    UNIQUE (session_id, id, entry_kind),
     UNIQUE (session_id, entry_sequence),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
@@ -443,24 +440,11 @@ CREATE TABLE pulsara_v3.transcript_entries (
                 OR (entry_owner_kind = 'IMPORTED_HISTORY' AND context_binding_revision_id IS NULL))
             AND provider_input_through_sequence IS NOT NULL
             AND provider_input_through_sequence >= 0
-            AND provider_input_through_sequence < entry_sequence
-            AND provider_wire_api IN (
-                'openai_chat_completions', 'openai_responses'
-            )
-            AND provider_replay_disposition IN (
-                'PUBLIC_SEMANTIC_ONLY', 'NATIVE_REPLAY'
-            )
-            AND (provider_replay_fragment_id IS NOT NULL) =
-                (provider_replay_disposition = 'NATIVE_REPLAY')
-            AND (provider_wire_api <> 'openai_responses'
-                OR provider_replay_disposition = 'NATIVE_REPLAY'))
+            AND provider_input_through_sequence < entry_sequence)
         OR
         (entry_kind NOT IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
             AND context_binding_revision_id IS NULL
-            AND provider_input_through_sequence IS NULL
-            AND provider_wire_api IS NULL
-            AND provider_replay_disposition IS NULL
-            AND provider_replay_fragment_id IS NULL)
+            AND provider_input_through_sequence IS NULL)
     ),
     CHECK (
         entry_owner_kind = 'IMPORTED_HISTORY' OR (entry_kind = 'INTER_AGENT_MESSAGE'
@@ -626,6 +610,9 @@ CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     assistant_entry_id text NOT NULL,
+    assistant_entry_kind text NOT NULL CHECK (assistant_entry_kind IN (
+        'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'
+    )),
     wire_api text NOT NULL CHECK (wire_api IN (
         'openai_chat_completions', 'openai_responses'
     )),
@@ -644,9 +631,11 @@ CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
     UNIQUE (session_id, id),
     UNIQUE (session_id, assistant_entry_id),
     UNIQUE (session_id, assistant_entry_id, id),
-    UNIQUE (session_id, assistant_entry_id, wire_api, id),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, assistant_entry_id, assistant_entry_kind)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind)
+        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     CHECK ((wire_api = 'openai_chat_completions') =
            (codec_kind = 'CHAT_CLOSED_REASONING_FIELDS')),
     CHECK (payload_size = octet_length(payload_bytes)),
@@ -662,24 +651,6 @@ CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
     CHECK (public_projection_fingerprint ~ '^sha256:[0-9a-f]{64}$'),
     CHECK (fragment_fingerprint ~ '^sha256:[0-9a-f]{64}$')
 );
-
-ALTER TABLE pulsara_v3.transcript_entries
-ADD CONSTRAINT transcript_entries_provider_replay_fk
-FOREIGN KEY (
-    session_id, id, provider_wire_api, provider_replay_fragment_id
-)
-REFERENCES pulsara_v3.provider_assistant_replay_fragments (
-    session_id, assistant_entry_id, wire_api, id
-)
-DEFERRABLE INITIALLY DEFERRED;
-
-ALTER TABLE pulsara_v3.provider_assistant_replay_fragments
-ADD CONSTRAINT provider_replay_assistant_entry_fk
-FOREIGN KEY (session_id, assistant_entry_id, wire_api, id)
-REFERENCES pulsara_v3.transcript_entries (
-    session_id, id, provider_wire_api, provider_replay_fragment_id
-)
-DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.tool_execution_attempts (
     id text PRIMARY KEY,

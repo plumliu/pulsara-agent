@@ -42,14 +42,21 @@ from pulsara_agent.llm.adapters.openai.responses import (
 )
 from pulsara_agent.llm.input import LLMMessage, LLMToolCall, MessageRole, ToolSpec
 from pulsara_agent.llm.model_connections import ModelCallBinding
+from pulsara_agent.llm.frozen_target import (
+    FrozenEpochModelCallTarget,
+    FrozenEpochModelTargetBundle,
+    _freeze_provider_physical_call_target,
+)
 from pulsara_agent.llm.model_target import default_reasoning_selection
 from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.llm.provider_open import (
+    _issue_epoch_agent_loop_provider_open_permit,
+)
 from pulsara_agent.llm.provider import ProviderAssistantReplayCodecKind
 from pulsara_agent.llm.provider import mutable_provider_value
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
     ProviderAssistantReplayFragment,
-    ProviderReplayDisposition,
     ProviderReplayTargetCompatibilityFact,
     build_prepared_durable_provider_assistant_replay,
     build_provider_replay_target_compatibility,
@@ -142,6 +149,7 @@ class PreparedKernelModelTarget:
     effective_input_budget_tokens: int
     native_function_tool_wire_contract_fingerprint: str
     transport_timeout_policy_fingerprint: str
+    epoch_call_target: FrozenEpochModelCallTarget
 
     def __post_init__(self) -> None:
         if (
@@ -153,6 +161,11 @@ class PreparedKernelModelTarget:
             or self.effective_input_budget_tokens < 1
             or self.target.context_budget.effective_output_tokens
             > self.maximum_output_tokens
+            or self.epoch_call_target.session_id != self.session_id
+            or self.epoch_call_target.turn_id != self.turn_id
+            or self.epoch_call_target.model_call_index != self.model_call_index
+            or self.epoch_call_target.model_call_binding != self.call.binding
+            or self.epoch_call_target.target_bundle.target_fact != self.target.fact
         ):
             raise ValueError("prepared model target facts do not exact-join")
         expected_contract = openai_native_function_tool_contract_fingerprint(
@@ -190,6 +203,7 @@ class PreparedKernelModelCall:
     native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
     compile_binding: ModelInputCompileBinding
     transport_timeout_policy_fingerprint: str
+    epoch_call_target: FrozenEpochModelCallTarget
 
     def __post_init__(self) -> None:
         specs = self.tool_surface.model_surface.tool_specs
@@ -207,6 +221,12 @@ class PreparedKernelModelCall:
             or self.tool_surface.model_surface.conversation_scope_kind
             is not self.native_projection_set.conversation_scope_kind
             or not self.transport_timeout_policy_fingerprint.startswith("sha256:")
+            or self.epoch_call_target.session_id != self.session_id
+            or self.epoch_call_target.turn_id != self.turn_id
+            or self.epoch_call_target.model_call_index != self.model_call_index
+            or self.epoch_call_target.model_call_binding != self.call.binding
+            or self.epoch_call_target.target_bundle.target_fact
+            != self.compile_binding.target_fact
         ):
             raise ValueError("prepared model call facts do not exact-join")
         for spec, projection in zip(specs, projections, strict=True):
@@ -227,6 +247,7 @@ class PreparedKernelSemanticModelCall:
     call: ResolvedModelCall = field(repr=False)
     native_projection_set: FrozenNativeToolProjectionSet = field(repr=False)
     compile_binding: ModelInputCompileBinding
+    epoch_call_target: FrozenEpochModelCallTarget
 
     def __post_init__(self) -> None:
         specs = self.compile_binding.tool_surface.tool_specs
@@ -242,6 +263,12 @@ class PreparedKernelSemanticModelCall:
             )
             or self.compile_binding.tool_surface.conversation_scope_kind
             is not self.native_projection_set.conversation_scope_kind
+            or self.epoch_call_target.session_id != self.session_id
+            or self.epoch_call_target.turn_id != self.turn_id
+            or self.epoch_call_target.model_call_index != self.model_call_index
+            or self.epoch_call_target.model_call_binding != self.call.binding
+            or self.epoch_call_target.target_bundle.target_fact
+            != self.compile_binding.target_fact
         ):
             raise ValueError("semantic model call facts do not exact-join")
 
@@ -290,8 +317,6 @@ class KernelModelExecutionRequest:
             != compiled_message_placements_fingerprint(
                 self.compiled_input.message_placements
             )
-            or self.wire_input_plan.resolved_target_semantic_fingerprint
-            != self.prepared_call.call.target.fact.target_fingerprint
             or self.wire_input_plan.materialization.tool_items
             != tuple(
                 item.wire_tool
@@ -352,15 +377,12 @@ class CompletedProviderModelExecution:
         workspace_id: str,
         assistant_entry_id: str,
         public_projection_fingerprint: str,
-    ) -> tuple[
-        ProviderReplayDisposition,
-        PreparedDurableProviderAssistantReplay | None,
-    ]:
+    ) -> PreparedDurableProviderAssistantReplay | None:
         payload = self.replay_payload
         if payload is None:
             if self.replay_target.wire_api == "openai_responses":
                 raise RuntimeError("Responses completion lacks required native replay")
-            return ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY, None
+            return None
         if (
             _completed_replay_public_projection_fingerprint(payload)
             != public_projection_fingerprint
@@ -368,16 +390,13 @@ class CompletedProviderModelExecution:
             raise RuntimeError(
                 "completed provider replay differs from its public projection"
             )
-        return (
-            ProviderReplayDisposition.NATIVE_REPLAY,
-            build_prepared_durable_provider_assistant_replay(
-                session_id=session_id,
-                workspace_id=workspace_id,
-                assistant_entry_id=assistant_entry_id,
-                target=self.replay_target,
-                public_projection_fingerprint=public_projection_fingerprint,
-                ordered_items=payload.ordered_items,
-            ),
+        return build_prepared_durable_provider_assistant_replay(
+            session_id=session_id,
+            workspace_id=workspace_id,
+            assistant_entry_id=assistant_entry_id,
+            target=self.replay_target,
+            public_projection_fingerprint=public_projection_fingerprint,
+            ordered_items=payload.ordered_items,
         )
 
 
@@ -408,6 +427,8 @@ class PreparedKernelModelExecution:
         final_context: LLMContext,
         append_candidate: PreparedProviderInputAppendCandidate,
         transport_timeout_policy_fingerprint: str,
+        model_runtime: ModelRuntime,
+        transport_timeout_policy: OpenAITransportTimeoutPolicy,
         install_authority: ProcessLocalProviderInputInstallAuthority,
         usage_observer: Callable[
             [KernelModelExecutionRequest, TransportUsageReport], None
@@ -423,6 +444,8 @@ class PreparedKernelModelExecution:
         self._transport_timeout_policy_fingerprint = (
             transport_timeout_policy_fingerprint
         )
+        self._model_runtime = model_runtime
+        self._transport_timeout_policy = transport_timeout_policy
         self._install_authority = install_authority
         self._usage_observer = usage_observer
         self._transport_invocation_observer = transport_invocation_observer
@@ -488,12 +511,22 @@ class PreparedKernelModelExecution:
                 with self._lock:
                     self._state = _PreparedExecutionState.DISCARDED
                 raise RuntimeError("prepared tool binding was revoked before open")
-        call = request.prepared_call.call
+        prepared_call = request.prepared_call.call
+        purpose_permit = _issue_epoch_agent_loop_provider_open_permit(
+            epoch_target=request.prepared_call.epoch_call_target,
+            resolved_model_call_id=prepared_call.resolved_model_call_id,
+            timeout_policy=self._transport_timeout_policy,
+            installed_resource_owner=request,
+        )
+        borrowed = None
         try:
-            execution = call.target.transport.open_stream(
-                call=call, context=self.final_context
-            )
+            borrowed = self._model_runtime.borrow_transport(purpose_permit)
+            if borrowed.call.fact != prepared_call.fact:
+                raise RuntimeError("borrowed foreground model call drifted")
+            execution = borrowed.open_stream(context=self.final_context)
         except BaseException as exc:
+            if borrowed is not None:
+                borrowed.close()
             if self._transport_invocation_observer is not None:
                 self._transport_invocation_observer(request, False, str(exc))
             raise
@@ -514,7 +547,7 @@ class PreparedKernelModelExecution:
                         except Exception:
                             pass
                     if item.terminal_kind is ProviderNormalizedTerminalKind.COMPLETED:
-                        profile = call.target.model_profile.route_wire_profile
+                        profile = borrowed.call.target.model_profile.route_wire_profile
                         if (
                             profile.assistant_replay_codec_kind
                             is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS
@@ -537,16 +570,7 @@ class PreparedKernelModelExecution:
                                 replay_payload=item.completed_replay_payload,
                                 replay_target=(
                                     build_provider_replay_target_compatibility(
-                                        wire_api=profile.wire_api,
-                                        endpoint_identity_fingerprint=(
-                                            call.target.fact.endpoint_fingerprint
-                                        ),
-                                        normalized_model_identifier=(
-                                            call.target.fact.model_id
-                                        ),
-                                        transport_binding_id=(
-                                            call.target.fact.transport_binding_id
-                                        ),
+                                        target_fact=borrowed.call.target.fact,
                                     )
                                 ),
                             )
@@ -563,12 +587,15 @@ class PreparedKernelModelExecution:
                     break
                 yield item
         finally:
-            await execution.aclose()
-            completion = await execution.wait_physical_completion()
-            with self._lock:
-                self._state = _PreparedExecutionState.PHYSICALLY_CLOSED
-            if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
-                raise RuntimeError("provider physical operation did not exit")
+            try:
+                await execution.aclose()
+                completion = await execution.wait_physical_completion()
+                with self._lock:
+                    self._state = _PreparedExecutionState.PHYSICALLY_CLOSED
+                if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
+                    raise RuntimeError("provider physical operation did not exit")
+            finally:
+                borrowed.close()
         if semantic_error is not None:
             raise semantic_error
         if self._completed is None:
@@ -630,6 +657,14 @@ class DirectKernelModelPort:
             binding=request.binding,
         )
 
+    @property
+    def model_runtime(self) -> ModelRuntime:
+        return self._model_runtime
+
+    @property
+    def transport_timeout_policy(self) -> OpenAITransportTimeoutPolicy:
+        return self._transport_timeout
+
     def prepare_resolved_target(
         self,
         request: KernelModelTargetPreparationRequest,
@@ -676,6 +711,13 @@ class DirectKernelModelPort:
         native_contract = openai_native_function_tool_contract_fingerprint(
             target.model_profile.route_wire_profile.wire_api
         )
+        epoch_call_target = _freeze_epoch_model_call_target(
+            request=request,
+            target=target,
+            call=call,
+            maximum_input_tokens=input_budget,
+            maximum_output_tokens=request.maximum_output_tokens,
+        )
         return PreparedKernelModelTarget(
             session_id=request.session_id,
             turn_id=request.turn_id,
@@ -690,6 +732,32 @@ class DirectKernelModelPort:
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
+            epoch_call_target=epoch_call_target,
+        )
+
+    def prepare_frozen_epoch_target(
+        self,
+        request: KernelModelTargetPreparationRequest,
+        *,
+        bundle: FrozenEpochModelTargetBundle,
+    ) -> PreparedKernelModelTarget:
+        """Reborrow a physical target only after exact bundle reproduction."""
+
+        binding = ModelCallBinding(
+            bundle.connection.connection_id,
+            default_reasoning_selection(bundle.reasoning_contract),
+        )
+        if request.binding != binding:
+            raise ValueError("frozen epoch source binding drifted")
+        target = self._model_runtime.resolve_frozen_target_bundle(
+            bundle,
+            binding=binding,
+            timeout_policy=self._transport_timeout,
+        )
+        return self.prepare_resolved_target(
+            request,
+            target=target,
+            binding=binding,
         )
 
     def resolve_compaction_summary_call(
@@ -820,6 +888,7 @@ class DirectKernelModelPort:
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
+            epoch_call_target=prepared_target.epoch_call_target,
         )
 
     def bind_semantic_tool_surface(
@@ -880,6 +949,7 @@ class DirectKernelModelPort:
             call=call,
             native_projection_set=native_projection_set,
             compile_binding=binding,
+            epoch_call_target=prepared_target.epoch_call_target,
         )
 
     def preflight_execution(
@@ -920,8 +990,6 @@ class DirectKernelModelPort:
             != compiled.compiled_semantic_fingerprint
             or plan.message_placements_fingerprint
             != compiled_message_placements_fingerprint(compiled.message_placements)
-            or plan.resolved_target_semantic_fingerprint
-            != prepared.call.target.fact.target_fingerprint
             or plan.route_wire_profile_fingerprint
             != provider_wire_profile_fingerprint(prepared.call)
             or plan.materialization.tool_items
@@ -972,7 +1040,6 @@ class DirectKernelModelPort:
             messages=compiled.messages,
             context_id=compiled.context_id,
             resolved_model_call_id=call.resolved_model_call_id,
-            target_fingerprint=call.target.fact.target_fingerprint,
             model_call_index=request.model_call_index,
             tools=tuple(thawed_tools),
             system_prompt=compiled.system_prompt,
@@ -989,6 +1056,8 @@ class DirectKernelModelPort:
             transport_timeout_policy_fingerprint=(
                 self._transport_timeout_policy_fingerprint
             ),
+            model_runtime=self._model_runtime,
+            transport_timeout_policy=self._transport_timeout,
             install_authority=install_authority,
             usage_observer=self._usage_observer,
             transport_invocation_observer=self._transport_invocation_observer,
@@ -1043,12 +1112,8 @@ class DirectKernelModelPort:
     def replay_target_for_resolved_call(
         call: ResolvedModelCall,
     ) -> ProviderReplayTargetCompatibilityFact:
-        profile = call.target.model_profile.route_wire_profile
         return build_provider_replay_target_compatibility(
-            wire_api=profile.wire_api,
-            endpoint_identity_fingerprint=call.target.fact.endpoint_fingerprint,
-            normalized_model_identifier=call.target.fact.model_id,
-            transport_binding_id=call.target.fact.transport_binding_id,
+            target_fact=call.target.fact,
         )
 
 
@@ -1077,6 +1142,30 @@ def provider_wire_profile_fingerprint(call: ResolvedModelCall) -> str:
                 profile.wire_api
             ),
         },
+    )
+
+
+def _freeze_epoch_model_call_target(
+    *,
+    request: KernelModelTargetPreparationRequest,
+    target: ResolvedModelTarget,
+    call: ResolvedModelCall,
+    maximum_input_tokens: int,
+    maximum_output_tokens: int,
+) -> FrozenEpochModelCallTarget:
+    """Strip all live resolution state at the model-boundary factory."""
+
+    physical = _freeze_provider_physical_call_target(
+        target=target,
+        call=call,
+        maximum_input_tokens=maximum_input_tokens,
+        maximum_output_tokens=maximum_output_tokens,
+    )
+    return FrozenEpochModelCallTarget(
+        session_id=request.session_id,
+        turn_id=request.turn_id,
+        model_call_index=request.model_call_index,
+        physical_call_target=physical,
     )
 
 
@@ -1243,7 +1332,6 @@ class ProviderWireMeasurement:
         semantic_input: ProviderWireSemanticInput,
         wire_api: str,
         route_wire_profile_fingerprint: str,
-        resolved_target_semantic_fingerprint: str,
         materialization: FrozenProviderWireMaterialization,
         replacements: tuple[FrozenProviderWireReplacementIdentity, ...],
         provider_replay_hydration_fingerprint: str | None,
@@ -1255,9 +1343,6 @@ class ProviderWireMeasurement:
         self._semantic_input = semantic_input
         self._wire_api = wire_api
         self._route_wire_profile_fingerprint = route_wire_profile_fingerprint
-        self._resolved_target_semantic_fingerprint = (
-            resolved_target_semantic_fingerprint
-        )
         self._materialization: FrozenProviderWireMaterialization | None = (
             materialization
         )
@@ -1317,9 +1402,6 @@ class ProviderWireMeasurement:
             ),
             wire_api=self._wire_api,
             route_wire_profile_fingerprint=self._route_wire_profile_fingerprint,
-            resolved_target_semantic_fingerprint=(
-                self._resolved_target_semantic_fingerprint
-            ),
             materialization=materialization,
             replacements=replacements,
             provider_replay_hydration_fingerprint=(
@@ -1572,7 +1654,6 @@ def freeze_provider_wire_measurement(
         semantic_input=semantic_input,
         wire_api=profile.wire_api,
         route_wire_profile_fingerprint=profile_fingerprint,
-        resolved_target_semantic_fingerprint=call.target.fact.target_fingerprint,
         materialization=materialization,
         replacements=tuple(replacements),
         provider_replay_hydration_fingerprint=hydration_fingerprint,

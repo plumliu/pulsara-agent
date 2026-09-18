@@ -21,7 +21,6 @@ from pulsara_agent.llm.provider_replay import (
     MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
     ProviderAssistantReplayCodecKind,
     build_prepared_durable_provider_assistant_replay,
-    build_provider_replay_target_compatibility,
     provider_replay_id,
     project_provider_visible_reasoning,
 )
@@ -41,6 +40,7 @@ from pulsara_agent.primitives.context import (
     freeze_json,
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+from tests.support.model_config import build_test_provider_replay_target
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,10 +77,10 @@ def _target(
     model: str = "model-a",
     binding: str | None = None,
 ):
-    return build_provider_replay_target_compatibility(
+    return build_test_provider_replay_target(
         wire_api=api,
-        endpoint_identity_fingerprint="sha256:" + endpoint * 64,
-        normalized_model_identifier=model,
+        endpoint=endpoint,
+        model_id=model,
         transport_binding_id=binding or api,
     )
 

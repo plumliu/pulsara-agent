@@ -1749,8 +1749,8 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
         CompactionTrigger,
     )
     from pulsara_agent.conversation_kernel.compaction.coordinator import (
-        CompactionAttemptToken,
         PreparedCompactSessionStartFacts,
+        _new_compaction_attempt_token,
     )
     from pulsara_agent.conversation_kernel.runner import (
         ConversationKernelRunner,
@@ -1804,12 +1804,12 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
         )
 
         compact_boundary = _SessionStartColdBoundaryOwner("resume")
-        attempt = CompactionAttemptToken(
-            "session:1",
-            "turn:compact",
-            ModelInputScopeKind.ROOT,
-            None,
-            CompactionTrigger.MANUAL,
+        attempt = _new_compaction_attempt_token(
+            session_id="session:1",
+            turn_id="turn:compact",
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            trigger=CompactionTrigger.MANUAL,
         )
         await compact_boundary.arm_compact_boundary(
             attempt_token=attempt,
@@ -1989,7 +1989,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
         CompactionTrigger,
     )
     from pulsara_agent.conversation_kernel.compaction.coordinator import (
-        CompactionAttemptToken,
+        _new_compaction_attempt_token,
         CompactionCoordinator,
         _PostAdoptionCompactionFailure,
     )
@@ -2023,10 +2023,29 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
     class _Continuity:
         def __init__(self) -> None:
             self.discarded = False
+            self.cohort = object()
 
-        def discard_scope(self, scope) -> None:
+        def current_cohort(self, scope):
             del scope
-            self.discarded = True
+            return self.cohort
+
+        def install_no_continuation_admission_fence(self, **kwargs):
+            assert kwargs["predecessor"] is self.cohort
+            return SimpleNamespace(**kwargs)
+
+    class _SafePoint:
+            @staticmethod
+            def retire_full_adoption_without_continuation_and_arm_empty(
+                *, continuity, fence, evidence, dispatch
+            ) -> None:
+                assert fence.predecessor is continuity.cohort
+                assert evidence.kind in {
+                    "DURABLE_TURN_NOT_RUNNING",
+                    "SUCCESSOR_FINAL_ABANDONMENT",
+                }
+                if dispatch is not None:
+                    dispatch.close()
+                continuity.discarded = True
 
     async def invoke(status_or_error):
         order = []
@@ -2035,6 +2054,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
         continuity = _Continuity()
         coordinator._compaction_owner = owner
         coordinator._continuity = continuity
+        coordinator._safe_point = _SafePoint()
         coordinator._repository = SimpleNamespace(read_turn_status=object())
 
         async def settle(**kwargs):
@@ -2069,12 +2089,12 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             ModelInputScopeKind.ROOT,
             None,
         )
-        attempt = CompactionAttemptToken(
-            "session:1",
-            "turn:1",
-            ModelInputScopeKind.ROOT,
-            None,
-            CompactionTrigger.MANUAL,
+        attempt = _new_compaction_attempt_token(
+            session_id="session:1",
+            turn_id="turn:1",
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            trigger=CompactionTrigger.MANUAL,
         )
         candidate = SimpleNamespace(
             snapshot=SimpleNamespace(snapshot_id="snapshot:1"),
@@ -2103,9 +2123,10 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             hook_scope=None,
             hook_model_id="model:1",
             hook_cwd=str(ROOT),
-            session_start_compact_port=None,
-            session_start_boundary_port=None,
-        )
+                session_start_compact_port=None,
+                session_start_boundary_port=None,
+                pending_empty_adoption=None,
+            )
         return result, order, dry, owner, continuity
 
     async def exercise() -> None:
@@ -2131,9 +2152,9 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     self.policy = SimpleNamespace(enabled=True)
 
                 async def run_fenced(
-                    self, *, scope, trigger, operation, admitted_writer
+                    self, *, scope, trigger, operation, admitted_writer, attempt_id
                 ):
-                    del scope, trigger
+                    del scope, trigger, attempt_id
                     assert admitted_writer is None
                     return await operation()
 

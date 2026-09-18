@@ -504,7 +504,8 @@ class _ForbiddenGovernanceModel:
         self.calls += 1
         raise AssertionError("source-incomplete governance opened provider planning")
 
-    async def complete_prepared_json(self, _prepared):
+    async def complete_prepared_json(self, _prepared, *, terminal_fence):
+        assert terminal_fence is not None
         self.calls += 1
         raise AssertionError("source-incomplete governance opened provider transport")
 

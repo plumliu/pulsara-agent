@@ -34,7 +34,6 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
-    ProviderReplayDisposition,
 )
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
@@ -63,8 +62,6 @@ class PreparedAssistantMessageSettlement:
     continuity_scope: ProviderInputContinuityScope
     continuity_epoch_nonce: str
     continuity_epoch_revision: int
-    provider_wire_api: str
-    provider_replay_disposition: ProviderReplayDisposition
     provider_replay: PreparedDurableProviderAssistantReplay | None = field(
         default=None, repr=False
     )
@@ -85,19 +82,8 @@ class PreparedAssistantMessageSettlement:
             or self.continuity_scope.session_id != self.cut.session_id
         ):
             raise ValueError("assistant settlement candidate is invalid")
-        if (
-            (self.provider_replay is not None)
-            != (
-                self.provider_replay_disposition
-                is ProviderReplayDisposition.NATIVE_REPLAY
-            )
-            or (
-                self.provider_replay is not None
-                and (
-                    self.provider_replay.assistant_entry_id != self.entry_id
-                    or self.provider_replay.wire_api != self.provider_wire_api
-                )
-            )
+        if self.provider_replay is not None and (
+            self.provider_replay.assistant_entry_id != self.entry_id
         ):
             raise ValueError("assistant replay composite is invalid")
         if (self.provider_replay is not None) != (
@@ -280,10 +266,6 @@ class AssistantMessageSettlementOwner:
                         entry_id=candidate.entry_id,
                         parent_content=candidate.parent_content,
                         blocks=candidate.blocks,
-                        provider_wire_api=candidate.provider_wire_api,
-                        provider_replay_disposition=(
-                            candidate.provider_replay_disposition
-                        ),
                         provider_replay=candidate.provider_replay,
                         subagent_result=candidate.subagent_result,
                         complete_turn=candidate.complete_turn,
@@ -295,7 +277,6 @@ class AssistantMessageSettlementOwner:
                 except StaleHostWriter:
                     raise
                 except ConversationKernelConflict:
-                    self._discard_scope_after_unbound(candidate)
                     raise
                 except BaseException:
                     try:
@@ -306,10 +287,6 @@ class AssistantMessageSettlementOwner:
                             entry_id=candidate.entry_id,
                             parent_content=candidate.parent_content,
                             blocks=candidate.blocks,
-                            provider_wire_api=candidate.provider_wire_api,
-                            provider_replay_disposition=(
-                                candidate.provider_replay_disposition
-                            ),
                             provider_replay=candidate.provider_replay,
                             subagent_result=candidate.subagent_result,
                             complete_turn=candidate.complete_turn,
@@ -320,13 +297,11 @@ class AssistantMessageSettlementOwner:
                     except StaleHostWriter:
                         raise
                     except ConversationKernelConflict:
-                        self._discard_scope_after_unbound(candidate)
                         raise
                     except BaseException:
                         if self._closed or attempt + 1 >= (
                             MAXIMUM_ASSISTANT_SETTLEMENT_WRITE_CONFIRM_ATTEMPTS
                         ):
-                            self._discard_scope_after_unbound(candidate)
                             raise AssistantMessageSettlementAbandoned(
                                 "assistant winner could not be confirmed"
                             )
@@ -336,7 +311,6 @@ class AssistantMessageSettlementOwner:
                         if self._closed or attempt + 1 >= (
                             MAXIMUM_ASSISTANT_SETTLEMENT_WRITE_CONFIRM_ATTEMPTS
                         ):
-                            self._discard_scope_after_unbound(candidate)
                             raise AssistantMessageSettlementAbandoned(
                                 "assistant settlement reached terminal NONE"
                             )
@@ -359,26 +333,13 @@ class AssistantMessageSettlementOwner:
                     # Scope close/takeover may already have retired the claim.
                     # Reservation cleanup must not mask the canonical outcome.
                     pass
-            if candidate.provider_replay is not None:
-                # A canonical assistant winner without its required opaque
-                # carrier cannot remain in the same strict-prefix epoch.  A
-                # cold, process-local scope reset is the only safe fallback;
-                # it neither rewrites the winner nor persists replay state.
-                self._discard_scope_after_unbound(candidate)
+            # Settlement failure is not an epoch boundary. The installed
+            # prefix remains authoritative until cold bootstrap or adopted
+            # compaction explicitly replaces it.
             raise
 
     def _deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
-
-    def _discard_scope_after_unbound(
-        self, candidate: PreparedAssistantMessageSettlement
-    ) -> None:
-        try:
-            self._continuity.discard_scope(candidate.continuity_scope)
-        except BaseException:
-            # Scope close/takeover is already a cold-epoch boundary.  This is
-            # local cleanup only and must never mask the settlement outcome.
-            pass
 
     def _retire_done(
         self, entry_id: str, completed: asyncio.Task[AcceptedEntry]

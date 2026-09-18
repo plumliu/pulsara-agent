@@ -225,12 +225,14 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         # The local-settings owner shields the single-document settlement so
         # cancellation cannot report an unknown publication as settled.
         "src/pulsara_agent/settings.py",
-        # The local application owns four process-local task sites: its HTTP
+        # The local application owns five process-local task sites: its HTTP
         # server, one protocol connection pump, one browser bridge request,
-        # and the session controller's running-turn observation. None is a
-        # durable execution or recovery authority.
+        # the session controller's running-turn observation, and the HTTP
+        # runtime-reopen coordinator's cancellation-shielded settlement. None
+        # is a durable execution or recovery authority.
         "src/pulsara_agent/web_app/application.py",
         "src/pulsara_agent/web_app/browser_bridge.py",
+        "src/pulsara_agent/web_app/http_server.py",
         "src/pulsara_agent/web_app/protocol_client.py",
         "src/pulsara_agent/web_app/session_controller.py",
     }

@@ -1,5 +1,7 @@
 # Pulsara Route + Wire API + Model Universe、GUI Local Configuration 与 Wire Adapter Hard-cut 实施规范
 
+> Epoch-boundary hard-cut 覆盖（2026-09-19）：provider-input epoch 的当前唯一权威是 [`PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。本文中 route/wire/adapter compatibility mismatch 自动建立 cold successor、旧 reset enum 及其 DTO 路径均为 historical/superseded；adapter 只投影冻结的 provider-neutral canonical truth，不自行签发 epoch authority，也不保留兼容路径。其余不冲突语义继续有效。
+
 > 状态：**ACTIVATED — 2026-09-04**
 >
 > 冻结日期：2026-09-04

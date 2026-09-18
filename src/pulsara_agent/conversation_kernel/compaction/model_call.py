@@ -55,6 +55,17 @@ from pulsara_agent.llm.request import (
     provider_wire_input_plan_identity_fingerprint,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.frozen_target import (
+    FrozenEpochModelCallTarget,
+    _freeze_provider_physical_call_target,
+)
+from pulsara_agent.llm.provider_open import (
+    CompactionSummaryPromotionAuthority,
+    CompactionSummaryProviderOpenPermit,
+    _issue_compaction_summary_provider_open_permit,
+)
+from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.validation import validate_model_context_shape_for_call
 from pulsara_agent.model_input.contracts import (
@@ -376,6 +387,8 @@ class PreparedCompactionSummaryCall:
         *,
         semantic: PreparedCompactionSummarySemantic,
         wire_input_plan: FrozenProviderWireInputPlan,
+        model_runtime: ModelRuntime,
+        purpose_permit: CompactionSummaryProviderOpenPermit,
     ) -> None:
         call = semantic.call
         compiled = semantic.semantic_input
@@ -385,8 +398,6 @@ class PreparedCompactionSummaryCall:
             != compiled.compiled_semantic_fingerprint
             or wire_input_plan.message_placements_fingerprint
             != compiled_message_placements_fingerprint(compiled.message_placements)
-            or wire_input_plan.resolved_target_semantic_fingerprint
-            != call.target.fact.target_fingerprint
             or wire_input_plan.materialization.tool_items
             != tuple(
                 item.wire_tool for item in semantic.native_projection_set.projections
@@ -398,7 +409,6 @@ class PreparedCompactionSummaryCall:
             messages=compiled.messages,
             context_id=compiled.context_id,
             resolved_model_call_id=call.resolved_model_call_id,
-            target_fingerprint=call.target.fact.target_fingerprint,
             model_call_index=compiled.canonical_input_identity.provider_input_through_sequence
             + 1,
             tools=tools,
@@ -424,6 +434,8 @@ class PreparedCompactionSummaryCall:
         self._semantic = semantic
         self._wire_input_plan = wire_input_plan
         self._context = context
+        self._model_runtime = model_runtime
+        self._purpose_permit = purpose_permit
         self._state = _SummaryCallState.PREPARED
         self._lock = Lock()
         self.request_fingerprint = context_fingerprint(
@@ -434,7 +446,10 @@ class PreparedCompactionSummaryCall:
                 "call": call.fact,
                 "source": _summary_source_identity_value(semantic.source_proof),
                 "semantic": semantic.semantic_fingerprint,
-                "wire": provider_wire_input_plan_identity_fingerprint(wire_input_plan),
+                "wire": provider_wire_input_plan_identity_fingerprint(
+                    wire_input_plan,
+                    target_fact=call.target.fact,
+                ),
                 "estimate": _estimate_value(compiled.final_estimate),
             },
         )
@@ -452,11 +467,12 @@ class PreparedCompactionSummaryCall:
             if self._state is not _SummaryCallState.PREPARED:
                 raise RuntimeError("compaction summary call is not openable")
             self._state = _SummaryCallState.OPENING
-        call = self._semantic.call
-        execution = call.target.transport.open_stream(
-            call=call,
-            context=self._context,
-        )
+        prepared_call = self._semantic.call
+        borrowed = self._model_runtime.borrow_transport(self._purpose_permit)
+        if borrowed.call.fact != prepared_call.fact:
+            borrowed.close()
+            raise RuntimeError("borrowed compaction summary call drifted")
+        execution = borrowed.open_stream(context=self._context)
         assembler = ProviderStreamAssembler(
             session_id=(
                 self._semantic.canonical_read.compile_snapshot.canonical_input.identity.session_id
@@ -520,19 +536,22 @@ class PreparedCompactionSummaryCall:
                 self._state = _SummaryCallState.DISCARDED
             raise
         finally:
-            drain = asyncio.create_task(
-                _drain_summary_execution(execution),
-                name=f"kernel-compaction-summary-drain:{self.request_fingerprint[7:23]}",
-            )
             try:
-                completion = await asyncio.shield(drain)
-            except asyncio.CancelledError:
-                completion = await drain
-                raise
-            if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
-                with self._lock:
-                    self._state = _SummaryCallState.DISCARDED
-                raise RuntimeError("summary provider physical operation did not exit")
+                drain = asyncio.create_task(
+                    _drain_summary_execution(execution),
+                    name=f"kernel-compaction-summary-drain:{self.request_fingerprint[7:23]}",
+                )
+                try:
+                    completion = await asyncio.shield(drain)
+                except asyncio.CancelledError:
+                    completion = await drain
+                    raise
+                if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
+                    with self._lock:
+                        self._state = _SummaryCallState.DISCARDED
+                    raise RuntimeError("summary provider physical operation did not exit")
+            finally:
+                borrowed.close()
         assert response is not None
         with self._lock:
             self._state = _SummaryCallState.CLOSED
@@ -891,6 +910,10 @@ def promote_compaction_summary_call(
     *,
     decision: PreparedWireMeasurementDecision,
     predecessor_summary_wire_plan: FrozenProviderWireInputPlan | None = None,
+    model_runtime: ModelRuntime,
+    timeout_policy: OpenAITransportTimeoutPolicy,
+    successor_destination: FrozenEpochModelCallTarget,
+    promotion_authority: CompactionSummaryPromotionAuthority,
 ) -> PreparedCompactionSummaryCall:
     if decision.candidate is not semantic:
         raise ValueError("summary wire decision belongs to another candidate")
@@ -925,9 +948,26 @@ def promote_compaction_summary_call(
             or len(new.ordered_input_items) <= len(old.ordered_input_items)
         ):
             raise ValueError("summary repair rewrote its first request")
+    call_target = _freeze_provider_physical_call_target(
+        target=semantic.call.target,
+        call=semantic.call,
+        maximum_input_tokens=semantic.compile_binding.effective_input_budget_tokens,
+        maximum_output_tokens=semantic.call.target.context_budget.effective_output_tokens,
+    )
+    permit = _issue_compaction_summary_provider_open_permit(
+        summary_call_target=call_target,
+        successor_destination=successor_destination,
+        resolved_model_call_id=semantic.call.resolved_model_call_id,
+        timeout_policy=timeout_policy,
+        promotion_authority=promotion_authority,
+        semantic=semantic,
+        decision=decision,
+    )
     return PreparedCompactionSummaryCall(
         semantic=semantic,
         wire_input_plan=plan,
+        model_runtime=model_runtime,
+        purpose_permit=permit,
     )
 
 
@@ -1079,7 +1119,24 @@ def _summary_source_identity_value(
         "kind": "DESTINATION_PROJECTION",
         "canonical": proof.canonical_source.dispatch_read.composite_fingerprint,
         "source_digest": proof.cumulative_source_digest,
-        "target": proof.target_fact.target_fingerprint,
+        "target": context_fingerprint(
+            "resolved-model-target-compatibility:v6",
+            {
+                "route_id": proof.target_fact.route_id,
+                "wire_api": proof.target_fact.wire_api,
+                "model_id": proof.target_fact.model_id,
+                "canonical_endpoint_base_url": (
+                    proof.target_fact.canonical_endpoint_base_url
+                ),
+                "transport_binding_id": proof.target_fact.transport_binding_id,
+                "transport_contract_version": (
+                    proof.target_fact.transport_contract_version
+                ),
+                "model_identity_policy": proof.target_fact.model_identity_policy,
+                "input_modalities": proof.target_fact.input_modalities,
+                "limits": proof.target_fact.limits.model_dump(mode="json"),
+            },
+        ),
         "trigger": proof.resolved_trigger_tokens,
         "projection": llm_content_identity_value(proof.projection.content),
         "active_request": (

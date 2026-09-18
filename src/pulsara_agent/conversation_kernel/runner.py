@@ -91,7 +91,6 @@ from pulsara_agent.llm.request import (
 )
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
-    ProviderReplayDisposition,
 )
 from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
@@ -100,6 +99,8 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
+    _issue_new_subagent_lease_source,
+    _issue_root_bootstrap_lease_source,
 )
 from pulsara_agent.conversation_kernel.contracts import (
     CanonicalContent,
@@ -390,8 +391,6 @@ class OutputResourceInterruption(RuntimeError):
 class _CollectedModelResponse:
     completed: CompletedAssistantMessage
     provider_completion: CompletedProviderModelExecution
-    provider_wire_api: str
-    provider_replay_disposition: ProviderReplayDisposition
     provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
         default=None, repr=False
     )
@@ -414,14 +413,10 @@ class _ImageToolResourceQuoteOwner:
         source: ViewImageSource,
         content: FrozenPromptContent,
     ) -> FrozenImageToolResourceIncrement:
-        images = tuple(
-            part for part in content.parts if isinstance(part, LLMImagePart)
-        )
+        images = tuple(part for part in content.parts if isinstance(part, LLMImagePart))
         if len(images) != 1:
             raise ValueError("image Tool quote requires one validated image")
-        carrier = tool_image_attachment_message(
-            ((tool_call_id, source, images[0]),)
-        )
+        carrier = tool_image_attachment_message(((tool_call_id, source, images[0]),))
         quoted = quote_provider_followup_wire_resources(
             request=self.request,
             actual_assistant_message=self.assistant,
@@ -999,7 +994,7 @@ class ConversationKernelRunner:
         cold_epoch_assembler = KernelColdEpochInputAssembler(resolved_compiler)
         capability_planner = KernelToolCapabilityPlanner()
         self._continuity = continuity_owner or HostProviderInputContinuityOwner(
-            session_id=writer_lease.guard.session_id
+            root_lease_source=_issue_root_bootstrap_lease_source(writer_lease)
         )
         self._assistant_settlements = (
             assistant_settlement_owner
@@ -1240,6 +1235,18 @@ class ConversationKernelRunner:
         """Own one admitted child run and its exact process-local cleanup."""
 
         task_id = launch.task_start.task_id
+        scope = ProviderInputContinuityScope(
+            session_id=self._writer_lease.guard.session_id,
+            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+            scope_subagent_task_id=task_id,
+        )
+        self._continuity.authorize_new_subagent_scope(
+            scope,
+            source=_issue_new_subagent_lease_source(
+                writer_guard=self._writer_lease.guard,
+                durable_runnable_task_fact=launch.task_start,
+            ),
+        )
         try:
             return await self.run_accepted_turn(
                 launch.child_turn_id,
@@ -1247,13 +1254,7 @@ class ConversationKernelRunner:
                 expected_first_model_identity=launch.configured_model_identity,
             )
         finally:
-            scope = ProviderInputContinuityScope(
-                session_id=self._writer_lease.guard.session_id,
-                scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id=task_id,
-            )
-            self._continuity.discard_scope(scope)
-            self._provider_dispatch.discard_installed_target(scope)
+            self._continuity.retire_terminal_subagent_scope(scope)
             self._memory_contexts.discard_scope(scope)
 
     async def _run_turn(
@@ -1390,6 +1391,10 @@ class ConversationKernelRunner:
             soft_trigger = StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
             )
+            # The prospective family may own the only Empty-scope planning
+            # reservation.  Compaction must acquire its own exact source
+            # preparation, so retire the dry prospective authority first.
+            prepared.close()
             try:
                 compacted = await self.compaction.recover_pending_root_input(
                     candidate=candidate,
@@ -1400,12 +1405,15 @@ class ConversationKernelRunner:
                 )
             except BaseException as error:
                 if error is soft_trigger:
-                    return await self._attach_pending_root_hook_context(
-                        prepared, intent
+                    retry = (
+                        await self._provider_dispatch.prepare_prospective_root_input(
+                            candidate=candidate,
+                            inherited_memory_use_policy=self._root_memory_use_policy,
+                            deadline=self._planning_deadline(),
+                        )
                     )
-                prepared.close()
+                    return await self._attach_pending_root_hook_context(retry, intent)
                 raise
-            prepared.close()
             self._emit_pending_root_handover_notice(compacted)
             return await self._attach_pending_root_hook_context(compacted, intent)
         prepared.close()
@@ -1713,9 +1721,11 @@ class ConversationKernelRunner:
                 if pending_prospective_root_dispatch is not None:
                     prepared_root_dispatch = pending_prospective_root_dispatch
                     pending_prospective_root_dispatch = None
-                    activated_root = await self._provider_dispatch.activate_prospective_root_input(
-                        prepared_root_dispatch,
-                        deadline=self._planning_deadline(),
+                    activated_root = (
+                        await self._provider_dispatch.activate_prospective_root_input(
+                            prepared_root_dispatch,
+                            deadline=self._planning_deadline(),
+                        )
                     )
                     if activated_root is None:
                         continue
@@ -1730,6 +1740,8 @@ class ConversationKernelRunner:
                 successor_dispatch = None
                 automatic_compaction_decided = dispatch is not None
                 reusable_wire_observation = None
+                direct_switch_admission = None
+                direct_switch_wire_plan = None
                 wire_decision = successor_wire_decision
                 successor_wire_decision = None
                 if dispatch is None:
@@ -1773,13 +1785,16 @@ class ConversationKernelRunner:
                             ),
                         ):
                             headroom_admission = precompile.ordinary_admission
-                            reusable_wire_observation = (
-                                precompile.reusable_wire_observation
-                            )
                             if isinstance(
                                 precompile, ModelSwitchDirectPrecompileDecision
                             ):
+                                direct_switch_admission = precompile.direct_admission
+                                direct_switch_wire_plan = precompile.wire_input_plan
                                 automatic_compaction_decided = True
+                            else:
+                                reusable_wire_observation = (
+                                    precompile.reusable_wire_observation
+                                )
                         else:
                             headroom_admission = None
                         if isinstance(
@@ -1923,6 +1938,10 @@ class ConversationKernelRunner:
                             break
                         except PreparedSteerPlanStale:
                             headroom_admission = None
+                            if direct_switch_admission is not None:
+                                raise ConversationKernelConflict(
+                                    "direct-switch admission became stale"
+                                )
                             if reusable_wire_observation is not None:
                                 reusable_wire_observation.discard()
                                 reusable_wire_observation = None
@@ -1968,11 +1987,26 @@ class ConversationKernelRunner:
                         dispatch.installed_provider_open is None
                         and wire_decision is None
                     ):
-                        wire_decision = await self.compaction.measure_dispatch_wire(
-                            dispatch,
-                            deadline=planning_deadline,
-                            reusable_observation=reusable_wire_observation,
-                        )
+                        if direct_switch_admission is not None:
+                            if direct_switch_wire_plan is None:
+                                raise RuntimeError(
+                                    "direct-switch admission lost its wire plan"
+                                )
+                            wire_decision = self._provider_dispatch.bind_direct_switch_admission(
+                                candidate=(
+                                    self._provider_dispatch.wire_candidate_for_dispatch(
+                                        dispatch
+                                    )
+                                ),
+                                admission=direct_switch_admission,
+                                wire_input_plan=direct_switch_wire_plan,
+                            )
+                        else:
+                            wire_decision = await self.compaction.measure_dispatch_wire(
+                                dispatch,
+                                deadline=planning_deadline,
+                                reusable_observation=reusable_wire_observation,
+                            )
                         reusable_wire_observation = None
                     if (
                         not automatic_compaction_decided
@@ -2068,6 +2102,7 @@ class ConversationKernelRunner:
                                 owner_dispatch=dispatch,
                                 decision=wire_decision,
                                 deadline=planning_deadline,
+                                direct_switch_admission=direct_switch_admission,
                             )
                             provider_open = (
                                 await self._provider_dispatch.install_provider_open(
@@ -2126,8 +2161,7 @@ class ConversationKernelRunner:
                     pending_steer_before_settlement = False
                     if (
                         not calls
-                        and identity.conversation_scope_kind
-                        is ModelInputScopeKind.ROOT
+                        and identity.conversation_scope_kind is ModelInputScopeKind.ROOT
                         and self._root_control_completion_fence is not None
                     ):
                         # The Host callback may wait after installing its exact
@@ -2153,8 +2187,7 @@ class ConversationKernelRunner:
                         canonical_facts=canonical_facts,
                         root_completion_followup_items=(root_completion_followup_items),
                         pending_root_dynamic_followup=(
-                            pending_control_feedback
-                            or pending_steer_before_settlement
+                            pending_control_feedback or pending_steer_before_settlement
                         ),
                     )
                     try:
@@ -2322,10 +2355,6 @@ class ConversationKernelRunner:
                         continuity_scope=permit.scope,
                         continuity_epoch_nonce=permit.epoch_nonce,
                         continuity_epoch_revision=permit.epoch_revision,
-                        provider_wire_api=collected.provider_wire_api,
-                        provider_replay_disposition=(
-                            collected.provider_replay_disposition
-                        ),
                         provider_replay=collected.provider_replay,
                         provider_replay_reservation=(provider_replay_reservation),
                         subagent_result=subagent_result,
@@ -2642,9 +2671,7 @@ class ConversationKernelRunner:
             source=source,
             permission_mode=external_permission_mode(
                 permission_snapshot.effective_mode.value,
-                active_plan_workflow=(
-                    permission_snapshot.plan_workflow_id is not None
-                ),
+                active_plan_workflow=(permission_snapshot.plan_workflow_id is not None),
             ),
         )
         causal_ref = SessionStartRef(token, source)
@@ -3000,19 +3027,15 @@ class ConversationKernelRunner:
                     ordered_blocks=public_blocks,
                 )
             )
-            replay_disposition, provider_replay = (
-                provider_completion.bind_durable_assistant_entry(
-                    session_id=request.session_id,
-                    workspace_id=await self._resolved_workspace_id(),
-                    assistant_entry_id=proposed_entry_id,
-                    public_projection_fingerprint=public_projection_fingerprint,
-                )
+            provider_replay = provider_completion.bind_durable_assistant_entry(
+                session_id=request.session_id,
+                workspace_id=await self._resolved_workspace_id(),
+                assistant_entry_id=proposed_entry_id,
+                public_projection_fingerprint=public_projection_fingerprint,
             )
             return _CollectedModelResponse(
                 completed=completed,
                 provider_completion=provider_completion,
-                provider_wire_api=provider_completion.replay_target.wire_api,
-                provider_replay_disposition=replay_disposition,
                 provider_replay=provider_replay,
             )
         except BaseException as exc:

@@ -60,9 +60,7 @@ from tests.test_round3_structured_model_input_compiler import (
     _tool_result,
     _user,
 )
-from pulsara_agent.conversation_kernel.input_continuity import (
-    HostProviderInputContinuityOwner,
-)
+from tests.support.round3 import new_test_provider_input_continuity_owner
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -252,7 +250,7 @@ def test_round7_1_fifty_memory_ids_share_the_canonical_eight_kib_bound() -> None
 
 def test_round7_1_compatible_append_keeps_installed_prefix_and_actual_mode() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = HostProviderInputContinuityOwner(session_id="session:test")
+    owner = new_test_provider_input_continuity_owner()
     user = _user("question")
     first = _prepared_request(_snapshot(user), _sources())
     _first, installed = _compile_and_install_append(

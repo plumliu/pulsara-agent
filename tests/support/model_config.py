@@ -32,9 +32,13 @@ from pulsara_agent.llm.model_target import RouteWireRegistry
 from pulsara_agent.llm.normalized_transport import NormalizedLLMTransportRegistry
 from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.provider_replay import provider_replay_contract_fingerprint
+from pulsara_agent.llm.provider_replay import (
+    ProviderReplayTargetCompatibilityFact,
+    build_provider_replay_target_compatibility,
+)
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.route_wires import production_route_wire_registry
-from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.llm.runtime import BorrowedProviderTransport, ModelRuntime
 from pulsara_agent.primitives.model_call import ModelContextLimits
 from pulsara_agent.conversation_kernel.contracts import PromptDeliveryMode
 from pulsara_agent.conversation_kernel.prompt_content import (
@@ -69,6 +73,36 @@ class TestModelRuntime(ModelRuntime):
         init=False,
         repr=False,
     )
+    _test_call_overrides: dict[str, object] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+    _test_default_connection_id: ModelConnectionId | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+
+    def register_test_call_override(self, call) -> None:
+        self._test_call_overrides[call.resolved_model_call_id] = call
+
+    def borrow_transport(self, purpose_permit):
+        call = self._test_call_overrides.get(
+            purpose_permit.resolved_model_call_id,
+            None,
+        )
+        if call is None:
+            return ModelRuntime.borrow_transport(self, purpose_permit)
+        target = purpose_permit.call_target
+        if (
+            call.fact.purpose is not target.purpose
+            or call.binding != target.model_call_binding
+            or call.target.fact != target.target_bundle.target_fact
+        ):
+            raise RuntimeError("test provider-call override does not exact-join")
+        purpose_permit._consume_once()
+        return BorrowedProviderTransport(call, credential_owner=None)
 
     def transport_registry(
         self, timeout_policy: OpenAITransportTimeoutPolicy
@@ -187,19 +221,108 @@ def test_model_runtime(
             profile=profile,
         ),
     )
-    return TestModelRuntime(  # type: ignore[arg-type] - explicit immutable test store
+    runtime = TestModelRuntime(  # type: ignore[arg-type] - explicit immutable test store
         settings=settings,
         catalog=catalog,
         route_wires=route_wires,
         retry=retry,
     )
+    runtime._test_default_connection_id = connection_id
+    return runtime
+
+
+def include_test_runtime_connections(
+    destination: TestModelRuntime,
+    *sources: TestModelRuntime,
+) -> TestModelRuntime:
+    """Keep immutable predecessor connections available after a test model switch."""
+
+    destination_settings = destination.settings.read()
+    connections = {item.id: item for item in destination_settings.model_connections}
+    api_keys = {
+        item.connection_id: item for item in destination_settings.model_api_keys
+    }
+    destination_snapshot = destination.catalog.snapshot
+    if destination_snapshot is None:
+        raise AssertionError("destination test catalog is unavailable")
+    entries = dict(destination_snapshot.entries)
+    route_entries: dict[str, dict[ModelCatalogEntryKey, ModelCatalogEntry]] = {}
+    route_names: dict[str, str] = {}
+    for route in destination_snapshot.routes:
+        route_names[route.route_id] = route.display_name
+        route_entries.setdefault(route.route_id, {}).update(
+            (entry.key, entry) for entry in route.entries
+        )
+    for source in sources:
+        settings = source.settings.read()
+        connections.update((item.id, item) for item in settings.model_connections)
+        api_keys.update((item.connection_id, item) for item in settings.model_api_keys)
+        snapshot = source.catalog.snapshot
+        if snapshot is None:
+            raise AssertionError("source test catalog is unavailable")
+        entries.update(snapshot.entries)
+        for route in snapshot.routes:
+            route_names.setdefault(route.route_id, route.display_name)
+            route_entries.setdefault(route.route_id, {}).update(
+                (entry.key, entry) for entry in route.entries
+            )
+    destination.settings.value = replace(
+        destination_settings,
+        model_connections=tuple(connections.values()),
+        model_api_keys=tuple(api_keys.values()),
+    )
+    destination.catalog._snapshot = ModelCatalogSnapshot(  # noqa: SLF001
+        entries=entries,
+        routes=tuple(
+            ModelCatalogRoute(
+                route_id=route_id,
+                display_name=route_names[route_id],
+                entries=tuple(values.values()),
+            )
+            for route_id, values in route_entries.items()
+        ),
+    )
+    return destination
 
 
 def test_model_binding(runtime: ModelRuntime) -> ModelCallBinding:
     connections = runtime.settings.read().model_connections
-    if len(connections) != 1:
-        raise AssertionError("test runtime must have exactly one connection")
-    return ModelCallBinding(connections[0].id, None)
+    default_id = getattr(runtime, "_test_default_connection_id", None)
+    if default_id is None:
+        if len(connections) != 1:
+            raise AssertionError("test runtime lacks one default connection")
+        default_id = connections[0].id
+    return ModelCallBinding(default_id, None)
+
+
+def build_test_provider_replay_target(
+    *,
+    wire_api: str = "openai_chat_completions",
+    endpoint: str = "1",
+    model_id: str = "test-model",
+    transport_binding_id: str | None = None,
+) -> ProviderReplayTargetCompatibilityFact:
+    """Build replay compatibility through the hard-cut resolved target fact."""
+
+    runtime = test_model_runtime(
+        wire_api=wire_api,
+        base_url=f"https://replay-{endpoint}.example.invalid/v1",
+        model_id=model_id,
+    )
+    target = runtime.resolve_target(
+        test_model_binding(runtime),
+        timeout_policy=OpenAITransportTimeoutPolicy(
+            connect_seconds=1,
+            write_seconds=1,
+            pool_seconds=1,
+            read_idle_seconds=1,
+            total_seconds=2,
+        ),
+    )
+    fact = target.fact
+    if transport_binding_id is not None:
+        fact = fact.model_copy(update={"transport_binding_id": transport_binding_id})
+    return build_provider_replay_target_compatibility(target_fact=fact)
 
 
 def test_model_resolution_snapshot():
@@ -367,6 +490,7 @@ def acquire_bound_test_writer(repository, **kwargs):
 
 test_model_limits.__test__ = False
 test_model_runtime.__test__ = False
+include_test_runtime_connections.__test__ = False
 test_model_binding.__test__ = False
 test_model_resolution_snapshot.__test__ = False
 enqueue_test_prompt.__test__ = False
@@ -381,6 +505,7 @@ __all__ = [
     "acquire_bound_test_writer",
     "bind_test_session",
     "enqueue_test_prompt",
+    "include_test_runtime_connections",
     "start_test_root_turn",
     "test_model_binding",
     "test_model_resolution_snapshot",

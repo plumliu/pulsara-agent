@@ -576,23 +576,11 @@ def read_fork_historical_material(
             "SELECT * FROM pulsara_v3.provider_assistant_replay_fragments WHERE session_id = %s AND assistant_entry_id = %s",
             (source_session_id, entry["id"]),
         ).fetchone()
-        native = entry["provider_replay_disposition"] == "NATIVE_REPLAY"
-        if not native:
-            if (
-                row is not None
-                or entry["provider_wire_api"] != "openai_chat_completions"
-            ):
-                raise ConversationKernelConflict(
-                    "Fork assistant replay union is invalid"
-                )
+        if row is None:
             continue
-        if (
-            row is None
-            or row["id"] != entry["provider_replay_fragment_id"]
-            or row["wire_api"] != entry["provider_wire_api"]
-        ):
+        if row["assistant_entry_kind"] != entry["entry_kind"]:
             raise ConversationKernelConflict(
-                "Fork native replay is absent or mismatched"
+                "Fork replay attachment names a different assistant kind"
             )
         ordered = []
         calls = []

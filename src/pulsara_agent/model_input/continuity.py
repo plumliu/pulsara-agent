@@ -18,10 +18,17 @@ from pulsara_agent.llm.input import (
     llm_content_identity_value,
     llm_content_logical_bytes,
 )
-from pulsara_agent.llm.model_connections import ModelConnectionId
 from pulsara_agent.llm.estimator import TokenEstimate
+from pulsara_agent.llm.frozen_target import (
+    FrozenEpochModelCallTarget,
+    FrozenEpochModelTargetBundle,
+)
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
-from pulsara_agent.llm.request import FrozenProviderWireInputPlan
+from pulsara_agent.llm.request import (
+    FrozenProviderWireInputPlan,
+    FrozenProviderWireInputQuote,
+    FrozenProviderWireMaterialization,
+)
 from pulsara_agent.capability.contracts import (
     FrozenCapabilityDispatchCut,
     FrozenMcpRouteProjection,
@@ -40,7 +47,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
-
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 PROVIDER_MESSAGE_LOWERING_CONTRACT = (
     "pulsara.provider-message-lowering.prefix-continuity.v11-tool-guidance"
@@ -50,9 +57,9 @@ FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     {"kind": "FULL_HISTORY", "lowering": PROVIDER_MESSAGE_LOWERING_CONTRACT},
 )
 MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = 64 << 20
-NO_PROVIDER_ASSISTANT_REPLAY_CONTRACT_FINGERPRINT = context_fingerprint(
-    "pulsara.provider-assistant-replay-profile:v1", {"kind": "NONE"}
-)
+_EMPTY_BOOTSTRAP_AUTHORITY_SEAL = object()
+_EXPLICIT_MODEL_SWITCH_AUTHORITY_SEAL = object()
+_DIRECT_SWITCH_ADMISSION_SEAL = object()
 
 
 def _fingerprint(value: str, name: str) -> None:
@@ -73,41 +80,6 @@ class ProviderInputContinuityScope:
             self.scope_subagent_task_id is None
         ):
             raise ValueError("provider-input continuity scope union is invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderInputEpochCompatibility:
-    compiler_contract_version: str
-    base_system_semantic_fingerprint: str
-    tool_surface_fingerprint: str
-    model_connection_id: ModelConnectionId
-    model_target_fingerprint: str
-    estimator_fingerprint: str
-    provider_message_lowering_contract: str
-    context_base_semantic_identity: str
-    provider_assistant_replay_contract_fingerprint: str = (
-        NO_PROVIDER_ASSISTANT_REPLAY_CONTRACT_FINGERPRINT
-    )
-
-    def __post_init__(self) -> None:
-        if (
-            not self.compiler_contract_version
-            or not self.provider_message_lowering_contract
-            or not isinstance(self.model_connection_id, ModelConnectionId)
-        ):
-            raise ValueError("provider-input epoch compatibility is incomplete")
-        for value, name in (
-            (self.base_system_semantic_fingerprint, "base system"),
-            (self.tool_surface_fingerprint, "tool surface"),
-            (self.model_target_fingerprint, "model target"),
-            (self.estimator_fingerprint, "estimator"),
-            (self.context_base_semantic_identity, "context base"),
-            (
-                self.provider_assistant_replay_contract_fingerprint,
-                "provider assistant replay contract",
-            ),
-        ):
-            _fingerprint(value, name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,16 +273,6 @@ class ProcessLocalSourceHead:
             raise ValueError("source-head call index is invalid")
 
 
-class ProviderInputEpochResetReason(StrEnum):
-    COLD_HOST_BOOTSTRAP = "COLD_HOST_BOOTSTRAP"
-    BASE_SYSTEM_CHANGED = "BASE_SYSTEM_CHANGED"
-    TOOL_SURFACE_CHANGED = "TOOL_SURFACE_CHANGED"
-    MODEL_TARGET_CHANGED = "MODEL_TARGET_CHANGED"
-    PROVIDER_LOWERING_CHANGED = "PROVIDER_LOWERING_CHANGED"
-    CONTEXT_BINDING_REWRITE = "CONTEXT_BINDING_REWRITE"
-    EXPLICIT_TEST_RESET = "EXPLICIT_TEST_RESET"
-
-
 def _message_value(message: LLMMessage) -> object:
     return {
         "role": message.role.value,
@@ -369,7 +331,6 @@ class FrozenProviderInputEpochView:
     scope: ProviderInputContinuityScope
     epoch_nonce: str
     epoch_revision: int
-    compatibility: ProviderInputEpochCompatibility
     system_prompt: str = field(repr=False)
     tools: tuple[FrozenToolSpec, ...] = field(repr=False)
     messages: tuple[LLMMessage, ...] = field(repr=False)
@@ -454,6 +415,209 @@ class FrozenProviderInputEpochView:
         return self.tool_exposure_plan.mcp_catalog_route_projection
 
 
+@dataclass(frozen=True, slots=True)
+class InstalledEpochRuntimeCohort:
+    """One atomic installed semantic prefix and its transport-free target."""
+
+    view: FrozenProviderInputEpochView
+    target_bundle: FrozenEpochModelTargetBundle
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedEmptyScopeBootstrapAuthority:
+    scope: ProviderInputContinuityScope
+    call_target: FrozenEpochModelCallTarget
+    authority_nonce: str
+    _preparation_basis: object = field(repr=False, compare=False)
+    _owner_seal: object = field(repr=False, compare=False)
+
+    def __init__(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        call_target: FrozenEpochModelCallTarget,
+        authority_nonce: str,
+        preparation_basis: object,
+        _owner_seal: object,
+    ) -> None:
+        if (
+            _owner_seal is not _EMPTY_BOOTSTRAP_AUTHORITY_SEAL
+            or not authority_nonce
+            or preparation_basis is None
+        ):
+            raise ValueError("empty bootstrap authority nonce is empty")
+        object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "call_target", call_target)
+        object.__setattr__(self, "authority_nonce", authority_nonce)
+        object.__setattr__(self, "_preparation_basis", preparation_basis)
+        object.__setattr__(self, "_owner_seal", _owner_seal)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class FrozenDirectSwitchAdmission:
+    destination: FrozenEpochModelCallTarget
+    semantic_projection: FrozenModelInputSemanticProjection = field(repr=False)
+    wire_materialization: FrozenProviderWireMaterialization = field(repr=False)
+    quote: FrozenProviderWireInputQuote
+
+    def __init__(
+        self,
+        *,
+        destination: FrozenEpochModelCallTarget,
+        semantic_projection: FrozenModelInputSemanticProjection,
+        wire_materialization: FrozenProviderWireMaterialization,
+        quote: FrozenProviderWireInputQuote,
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _DIRECT_SWITCH_ADMISSION_SEAL
+            or destination.purpose is not ModelCallPurpose.AGENT_MODEL_LOOP
+            or semantic_projection.canonical_input_identity.session_id
+            != destination.session_id
+            or semantic_projection.canonical_input_identity.turn_id
+            != destination.turn_id
+            or quote.wire_api != destination.target_bundle.target_fact.wire_api
+            or quote.effective_input_budget_tokens
+            != destination.input_budget.effective_input_budget_tokens
+        ):
+            raise ValueError("direct switch admission does not exact-join")
+        object.__setattr__(self, "destination", destination)
+        object.__setattr__(self, "semantic_projection", semantic_projection)
+        object.__setattr__(self, "wire_materialization", wire_materialization)
+        object.__setattr__(self, "quote", quote)
+
+
+def _issue_frozen_direct_switch_admission(
+    *,
+    destination: FrozenEpochModelCallTarget,
+    semantic_projection: FrozenModelInputSemanticProjection,
+    wire_input_plan: FrozenProviderWireInputPlan,
+) -> FrozenDirectSwitchAdmission:
+    """Consume no authority; freeze the exact admitted Tier-1 pure result."""
+
+    return FrozenDirectSwitchAdmission(
+        destination=destination,
+        semantic_projection=semantic_projection,
+        wire_materialization=wire_input_plan.materialization,
+        quote=wire_input_plan.quote,
+        _seal=_DIRECT_SWITCH_ADMISSION_SEAL,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledEpochAppend:
+    predecessor: InstalledEpochRuntimeCohort
+
+
+@dataclass(frozen=True, slots=True)
+class EmptyScopeColdStart:
+    bootstrap_authority: PreparedEmptyScopeBootstrapAuthority
+    seed: "CanonicalColdContinuationSeed | SubagentInitialSeed" = field(  # noqa: F821
+        repr=False
+    )
+
+    @property
+    def destination(self) -> FrozenEpochModelCallTarget:
+        return self.bootstrap_authority.call_target
+
+    def __post_init__(self) -> None:
+        if self.bootstrap_authority.scope.session_id != self.destination.session_id:
+            raise ValueError("empty bootstrap transition scope drifted")
+
+
+@dataclass(frozen=True, slots=True)
+class ExplicitModelSwitchColdStart:
+    predecessor: InstalledEpochRuntimeCohort
+    admission: FrozenDirectSwitchAdmission = field(repr=False)
+    _authority: object = field(repr=False, compare=False)
+
+    @property
+    def destination(self) -> FrozenEpochModelCallTarget:
+        return self.admission.destination
+
+    def __post_init__(self) -> None:
+        if (
+            self._authority is not _EXPLICIT_MODEL_SWITCH_AUTHORITY_SEAL
+            or self.predecessor.target_bundle == self.destination.target_bundle
+            or self.predecessor.view.scope.session_id != self.destination.session_id
+        ):
+            raise ValueError("explicit model switch authority is invalid")
+
+
+_ADOPTED_COMPACTION_SUCCESSOR_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class AdoptedCompactionSuccessor:
+    predecessor: InstalledEpochRuntimeCohort
+    destination: FrozenEpochModelCallTarget
+    seed: "AdoptedCompactionContinuationSeed" = field(repr=False)  # noqa: F821
+
+    def __init__(
+        self,
+        *,
+        predecessor: InstalledEpochRuntimeCohort,
+        destination: FrozenEpochModelCallTarget,
+        seed: "AdoptedCompactionContinuationSeed",  # noqa: F821
+        _seal: object,
+    ) -> None:
+        if _seal is not _ADOPTED_COMPACTION_SUCCESSOR_SEAL:
+            raise TypeError("adopted compaction successor is continuity-issued")
+        object.__setattr__(self, "predecessor", predecessor)
+        object.__setattr__(self, "destination", destination)
+        object.__setattr__(self, "seed", seed)
+
+
+def _issue_adopted_compaction_successor(
+    *,
+    predecessor: InstalledEpochRuntimeCohort,
+    destination: FrozenEpochModelCallTarget,
+    seed: "AdoptedCompactionContinuationSeed",  # noqa: F821
+) -> AdoptedCompactionSuccessor:
+    return AdoptedCompactionSuccessor(
+        predecessor=predecessor,
+        destination=destination,
+        seed=seed,
+        _seal=_ADOPTED_COMPACTION_SUCCESSOR_SEAL,
+    )
+
+
+ProviderInputEpochTransition = (
+    InstalledEpochAppend
+    | EmptyScopeColdStart
+    | ExplicitModelSwitchColdStart
+    | AdoptedCompactionSuccessor
+)
+
+
+def _issue_empty_scope_bootstrap_authority(
+    *,
+    scope: ProviderInputContinuityScope,
+    call_target: FrozenEpochModelCallTarget,
+    authority_nonce: str,
+    preparation_basis: object,
+) -> PreparedEmptyScopeBootstrapAuthority:
+    return PreparedEmptyScopeBootstrapAuthority(
+        scope=scope,
+        call_target=call_target,
+        authority_nonce=authority_nonce,
+        preparation_basis=preparation_basis,
+        _owner_seal=_EMPTY_BOOTSTRAP_AUTHORITY_SEAL,
+    )
+
+
+def _issue_explicit_model_switch_transition(
+    *,
+    predecessor: InstalledEpochRuntimeCohort,
+    admission: FrozenDirectSwitchAdmission,
+) -> ExplicitModelSwitchColdStart:
+    return ExplicitModelSwitchColdStart(
+        predecessor=predecessor,
+        admission=admission,
+        _authority=_EXPLICIT_MODEL_SWITCH_AUTHORITY_SEAL,
+    )
+
+
 class ProviderInputAdmissionPredecessorKind(StrEnum):
     EMPTY = "EMPTY"
     INSTALLED = "INSTALLED"
@@ -510,6 +674,9 @@ class FrozenProviderInputAppendPlanningInput:
     predecessor_view: FrozenProviderInputEpochView | None = field(repr=False)
     dispatch_anchor: ProviderInputDispatchAnchor
     canonical_delta_fingerprints: tuple[str, ...]
+    _empty_preparation_reservation: object | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if (self.predecessor is ProviderInputAdmissionPredecessorKind.EMPTY) != (
@@ -525,6 +692,8 @@ class FrozenProviderInputAppendPlanningInput:
 @dataclass(frozen=True, slots=True)
 class PreparedProviderInputAppendCandidate:
     planning: FrozenProviderInputAppendPlanningInput = field(repr=False)
+    transition: ProviderInputEpochTransition = field(repr=False)
+    call_target: FrozenEpochModelCallTarget = field(repr=False)
     epoch_nonce: str
     expected_epoch_revision: int
     resulting_compiled_input: FrozenCompiledModelInput = field(repr=False)
@@ -533,8 +702,7 @@ class PreparedProviderInputAppendCandidate:
     resulting_canonical_frontier: ProcessLocalCanonicalFrontier
     resulting_source_heads: tuple[ProcessLocalSourceHead, ...]
     appended_message_count: int
-    reset_reason: ProviderInputEpochResetReason | None
-    compatibility: ProviderInputEpochCompatibility
+    _preparation_basis: object = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.epoch_nonce or self.expected_epoch_revision < 0:
@@ -551,6 +719,17 @@ class PreparedProviderInputAppendCandidate:
             )
         ):
             raise ValueError("provider-input append candidate capability plan drifted")
+        if isinstance(self.transition, InstalledEpochAppend):
+            if (
+                self.call_target.target_bundle
+                != self.transition.predecessor.target_bundle
+                or self.epoch_nonce != self.transition.predecessor.view.epoch_nonce
+                or self.expected_epoch_revision
+                != self.transition.predecessor.view.epoch_revision
+            ):
+                raise ValueError("installed append transition drifted")
+        elif self.call_target is not self.transition.destination:
+            raise ValueError("new epoch transition destination drifted")
 
     @property
     def scope(self) -> ProviderInputContinuityScope:
@@ -579,7 +758,6 @@ class FrozenProviderInputAppendCompileResult:
     canonical_frontier: ProcessLocalCanonicalFrontier
     source_heads: tuple[ProcessLocalSourceHead, ...]
     appended_message_count: int
-    reset_reason: ProviderInputEpochResetReason | None
 
     def __post_init__(self) -> None:
         if self.appended_message_count < 0:
@@ -593,7 +771,6 @@ class FrozenProviderInputAppendSemanticProjection:
     projected_input: FrozenModelInputSemanticProjection = field(repr=False)
     canonical_frontier: ProcessLocalCanonicalFrontier
     appended_message_count: int
-    reset_reason: ProviderInputEpochResetReason | None
 
     def __post_init__(self) -> None:
         identity = self.projected_input.canonical_input_identity
@@ -604,10 +781,6 @@ class FrozenProviderInputAppendSemanticProjection:
             != identity.context_binding_revision_id
             or self.canonical_frontier.through_sequence
             != identity.provider_input_through_sequence
-            or (
-                self.reset_reason is not None
-                and self.appended_message_count != len(self.projected_input.messages)
-            )
         ):
             raise ValueError("projected append message count is invalid")
 
@@ -625,25 +798,31 @@ class ProcessLocalProviderInputInstallPermit:
 
 
 __all__ = [
+    "AdoptedCompactionSuccessor",
+    "EmptyScopeColdStart",
+    "ExplicitModelSwitchColdStart",
     "FULL_HISTORY_CONTEXT_BASE_IDENTITY",
+    "FrozenDirectSwitchAdmission",
     "FrozenProviderInputAppendPlanningInput",
     "FrozenProviderInputAppendCompileResult",
     "FrozenProviderInputAppendSemanticProjection",
     "FrozenProviderInputEpochView",
+    "InstalledEpochAppend",
+    "InstalledEpochRuntimeCohort",
     "MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES",
     "NewTriggerAnchor",
     "NoNewTriggerAnchor",
     "PROVIDER_MESSAGE_LOWERING_CONTRACT",
     "ProviderRuntimeObservation",
     "PreparedProviderInputAppendCandidate",
+    "PreparedEmptyScopeBootstrapAuthority",
     "ProcessLocalCanonicalFrontier",
     "ProcessLocalProviderInputInstallPermit",
     "ProcessLocalSourceHead",
     "ProviderInputAdmissionPredecessorKind",
     "ProviderInputContinuityScope",
     "ProviderInputDispatchAnchor",
-    "ProviderInputEpochCompatibility",
-    "ProviderInputEpochResetReason",
+    "ProviderInputEpochTransition",
     "RuntimeObservation",
     "SourceObservationLifecycle",
     "SourceObservationPresence",

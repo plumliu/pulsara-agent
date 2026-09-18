@@ -1,5 +1,7 @@
 # Pulsara Round 5B：Long-horizon Context Compaction 与 Successor Capability Rebase 实施规格
 
+> Epoch-boundary hard-cut 覆盖（2026-09-19）：provider-input epoch 的当前唯一权威是 [`PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。本文中 `CONTEXT_BINDING_REWRITE` 或其他 compatibility 差异自动授权 reset 的内容均为 historical/superseded；compaction 只有 adoption FULL 后的 sealed successor authority 可以重建 root，不保留兼容路径。其余不冲突语义继续有效。
+
 > 状态：**ACTIVATED**
 >
 > Conversation Fork hard cut（2026-09-08）：当前 carrier 唯一 contract 为

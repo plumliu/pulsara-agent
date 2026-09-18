@@ -1,5 +1,7 @@
 # Pulsara Round 3.1：Process-local Provider-Input Prefix Continuity 实施规格
 
+> Epoch-boundary hard-cut 覆盖（2026-09-19）：provider-input epoch 的当前唯一权威是 [`PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。本文中 generic reset reason、compatibility mismatch 自动重建 root 以及相关旧 schema/DTO 路径均为 historical/superseded；实现不得保留 alias、fallback、双路径或其他兼容层。其余不冲突语义继续有效。
+
 > 状态：**ACTIVATED**
 >
 > Fingerprint hard-cut：[`PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)覆盖本文冗余的candidate/execution fingerprint路由、same-process DTO proof以及逐文件、文档与activation evidence SHA门禁；continuity slot、epoch nonce/revision、exact object、wire prefix与compatibility digest继续有效。

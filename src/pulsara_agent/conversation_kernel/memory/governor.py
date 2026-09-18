@@ -312,13 +312,13 @@ class AdvisoryMemoryGovernor:
                     call, selected_ordinal = selected
                     selected_variant = packet_variants[selected_ordinal]
                     allowed_targets = selected_variant.allowed_targets
-                    fence_current = await self._io.run(
+                    terminal_fence = await self._io.run(
                         self._repository.confirm_memory_governance_terminal_fence,
                         self._guard,
                         candidate=candidate,
                         deadline_monotonic=deadline_monotonic,
                     )
-                    if not fence_current:
+                    if terminal_fence is None:
                         raise ConversationKernelConflict(
                             "memory governance terminal fence changed before provider open"
                         )
@@ -326,7 +326,10 @@ class AdvisoryMemoryGovernor:
                     if provider_remaining <= 0:
                         return
                     async with asyncio.timeout(provider_remaining):
-                        output = await self._model.complete_prepared_json(call)
+                        output = await self._model.complete_prepared_json(
+                            call,
+                            terminal_fence=terminal_fence,
+                        )
                     decision = _parse_governance_decision(
                         output,
                         allowed_targets,

@@ -7,7 +7,7 @@ conversation continuity, canonical mutation, or retry authority.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import json
 from hashlib import sha256
 from typing import Callable, Mapping, Protocol
@@ -31,6 +31,14 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.model_target import default_reasoning_selection
+from pulsara_agent.llm.frozen_target import (
+    FrozenProviderPhysicalCallTarget,
+    _freeze_provider_physical_call_target,
+)
+from pulsara_agent.llm.provider_open import (
+    ConfirmedMemoryGovernanceTerminalFence,
+    _issue_auxiliary_model_provider_open_permit,
+)
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import (
     ResolvedModelCall,
@@ -67,6 +75,9 @@ class PreparedAuxiliaryJsonModelCall:
     final_wire_utf8_bytes: int
     maximum_result_bytes: int
     transport_timeout_policy_fingerprint: str
+    call_target: FrozenProviderPhysicalCallTarget
+    timeout_policy: OpenAITransportTimeoutPolicy = field(repr=False)
+    origin_model_call_binding: ModelCallBinding
 
 
 class AuxiliaryJsonModelPort(Protocol):
@@ -97,7 +108,10 @@ class AuxiliaryJsonModelPort(Protocol):
     ) -> tuple[PreparedAuxiliaryJsonModelCall, int] | None: ...
 
     async def complete_prepared_json(
-        self, prepared: PreparedAuxiliaryJsonModelCall
+        self,
+        prepared: PreparedAuxiliaryJsonModelCall,
+        *,
+        terminal_fence: ConfirmedMemoryGovernanceTerminalFence,
     ) -> Mapping[str, object]: ...
 
 
@@ -162,10 +176,7 @@ class DirectKernelAuxiliaryJsonModel:
         opened by the transport.
         """
 
-        if purpose not in {
-            ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
-            ModelCallPurpose.MEMORY_GOVERNANCE,
-        }:
+        if purpose is not ModelCallPurpose.MEMORY_GOVERNANCE:
             raise ValueError("auxiliary JSON purpose is not in the closed contract")
         if timeout_policy.total_seconds is None:
             raise ValueError("auxiliary provider call requires a finite total timeout")
@@ -210,7 +221,6 @@ class DirectKernelAuxiliaryJsonModel:
                 messages=ordered_messages,
                 context_id=f"auxiliary-context:{uuid4().hex}",
                 resolved_model_call_id=call.resolved_model_call_id,
-                target_fingerprint=target.fact.target_fingerprint,
                 model_call_index=None,
                 compiler_estimated_input_tokens=None,
             )
@@ -258,19 +268,46 @@ class DirectKernelAuxiliaryJsonModel:
                     transport_timeout_policy_fingerprint=(
                         timeout_policy.policy_fingerprint
                     ),
+                    call_target=_freeze_provider_physical_call_target(
+                        target=call.target,
+                        call=call,
+                        maximum_input_tokens=effective_input_cap,
+                        maximum_output_tokens=maximum_output_tokens,
+                    ),
+                    timeout_policy=timeout_policy,
+                    origin_model_call_binding=origin_binding,
                 ),
                 ordinal,
             )
         return None
 
     async def complete_prepared_json(
-        self, prepared: PreparedAuxiliaryJsonModelCall
+        self,
+        prepared: PreparedAuxiliaryJsonModelCall,
+        *,
+        terminal_fence: ConfirmedMemoryGovernanceTerminalFence,
     ) -> Mapping[str, object]:
         if not prepared.transport_timeout_policy_fingerprint.startswith("sha256:"):
             raise ValueError("auxiliary timeout policy fingerprint is invalid")
-        execution = prepared.call.target.transport.open_stream(
-            call=prepared.call, context=prepared.context
+        permit = _issue_auxiliary_model_provider_open_permit(
+            auxiliary_call_target=prepared.call_target,
+            resolved_model_call_id=prepared.call.resolved_model_call_id,
+            timeout_policy=prepared.timeout_policy,
+            terminal_fence=terminal_fence,
+            origin_model_call_binding=prepared.origin_model_call_binding,
+            context=prepared.context,
+            estimated_input_tokens=prepared.estimated_input_tokens,
+            final_wire_utf8_bytes=prepared.final_wire_utf8_bytes,
+            maximum_result_bytes=prepared.maximum_result_bytes,
+            timeout_policy_fingerprint=(
+                prepared.transport_timeout_policy_fingerprint
+            ),
         )
+        borrowed = self._model_runtime.borrow_transport(permit)
+        if borrowed.call.fact != prepared.call.fact:
+            borrowed.close()
+            raise RuntimeError("borrowed auxiliary model call drifted")
+        execution = borrowed.open_stream(context=prepared.context)
         block_order: list[str] = []
         open_blocks: dict[str, list[str]] = {}
         completed_blocks: dict[str, str] = {}
@@ -315,8 +352,11 @@ class DirectKernelAuxiliaryJsonModel:
         except BaseException as exc:
             body_error = exc
         finally:
-            await execution.aclose()
-            completion = await execution.wait_physical_completion()
+            try:
+                await execution.aclose()
+                completion = await execution.wait_physical_completion()
+            finally:
+                borrowed.close()
         if body_error is not None:
             raise body_error
         if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:

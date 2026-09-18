@@ -43,6 +43,12 @@ class TurnStatus(StrEnum):
     INTERRUPTED = "INTERRUPTED"
 
 
+class HostWriterAcquisitionKind(StrEnum):
+    NEW_SESSION = "NEW_SESSION"
+    SAME_OWNER_RENEWAL = "SAME_OWNER_RENEWAL"
+    HOST_TAKEOVER = "HOST_TAKEOVER"
+
+
 class ConversationScopeKind(StrEnum):
     ROOT = "ROOT"
     SUBAGENT_TASK = "SUBAGENT_TASK"
@@ -196,6 +202,18 @@ CanonicalContent = InlineContent | BlobContent
 class WriterLease:
     guard: HostWriterGuard
     expires_at: datetime
+    acquisition_kind: HostWriterAcquisitionKind
+
+    def __post_init__(self) -> None:
+        if self.expires_at.tzinfo is None:
+            raise ValueError("writer lease expiry must be timezone-aware")
+        if not isinstance(self.acquisition_kind, HostWriterAcquisitionKind):
+            raise TypeError("writer lease acquisition kind must be closed")
+        if (
+            self.acquisition_kind is HostWriterAcquisitionKind.NEW_SESSION
+            and self.guard.writer_generation != 1
+        ):
+            raise ValueError("new-session writer lease must start at generation one")
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +242,7 @@ __all__ = [
     "CommittedEventSubject",
     "ConversationScopeKind",
     "EntryKind",
+    "HostWriterAcquisitionKind",
     "HostWriterGuard",
     "InlineContent",
     "PromptDeliveryMode",

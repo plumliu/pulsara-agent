@@ -239,7 +239,6 @@ def manual_compaction_stable_suffix(*, session_id: str, command_id: str) -> str:
 class CompactionSourceCompatibility(StrEnum):
     EMPTY_COLD = "EMPTY_COLD"
     COMPATIBLE_APPEND = "COMPATIBLE_APPEND"
-    PENDING_NON_COMPACTION_RESET = "PENDING_NON_COMPACTION_RESET"
 
 
 @dataclass(frozen=True, slots=True)

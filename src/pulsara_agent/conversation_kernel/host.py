@@ -94,6 +94,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
+    _issue_root_bootstrap_lease_source,
 )
 from pulsara_agent.conversation_kernel.assistant_settlement import (
     AssistantMessageSettlementOwner,
@@ -385,6 +386,49 @@ class KernelSessionSummary:
         }
 
 
+_KERNEL_RUNTIME_REOPEN_QUIESCENCE_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class KernelRuntimeReopenQuiescence:
+    session_id: str
+    host_session_id: str
+    writer_generation: int
+    operation_nonce: str
+    _owner: "KernelHostSession"
+    _consumed: bool
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        host_session_id: str,
+        writer_generation: int,
+        operation_nonce: str,
+        owner: "KernelHostSession",
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _KERNEL_RUNTIME_REOPEN_QUIESCENCE_SEAL
+            or not session_id
+            or not host_session_id
+            or writer_generation < 1
+            or not operation_nonce
+        ):
+            raise TypeError("runtime-reopen quiescence is Host-issued")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "host_session_id", host_session_id)
+        object.__setattr__(self, "writer_generation", writer_generation)
+        object.__setattr__(self, "operation_nonce", operation_nonce)
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_consumed", False)
+
+    def _consume(self, owner: "KernelHostSession") -> None:
+        if self._owner is not owner or self._consumed:
+            raise RuntimeError("runtime-reopen quiescence is stale")
+        object.__setattr__(self, "_consumed", True)
+
+
 @dataclass(frozen=True, slots=True)
 class KernelPromptDelivery:
     queue_item_id: str
@@ -633,7 +677,9 @@ class KernelHostSession:
         self._presentation_notices: dict[str, list[str]] = {}
         self._plan_interactions = KernelPlanInteractionCoordinator()
         self._plan_continuations = ContinuationAdmissionOwner()
-        self._input_continuity = HostProviderInputContinuityOwner(session_id=session_id)
+        self._input_continuity = HostProviderInputContinuityOwner(
+            root_lease_source=_issue_root_bootstrap_lease_source(writer_lease)
+        )
         self._compaction = HostCompactionRuntimeOwner()
         self._assistant_settlements = AssistantMessageSettlementOwner(
             repository=repository,
@@ -889,6 +935,7 @@ class KernelHostSession:
         self._capability_refresh_applied_revision = 0
         self._capability_refresh_attention: str | None = None
         self._ingress_hook_attempts: dict[str, _IngressHookAttempt] = {}
+        self._runtime_reopen_quiescence: KernelRuntimeReopenQuiescence | None = None
         self._compaction_write_reservations: dict[
             tuple[ModelInputScopeKind, str | None], set[CompactionWriteReservation]
         ] = {}
@@ -940,8 +987,7 @@ class KernelHostSession:
             external_recovery_owner = (
                 admitted_writer is not None
                 and admitted_writers == {admitted_writer}
-                and
-                scope.scope_kind is ModelInputScopeKind.ROOT
+                and scope.scope_kind is ModelInputScopeKind.ROOT
             )
             if admitted_writer is not None and not external_recovery_owner:
                 raise RuntimeError(
@@ -979,9 +1025,13 @@ class KernelHostSession:
                     and self._active_turn_id != scope.turn_id
                 ):
                     raise RuntimeError("compaction active ROOT target changed")
-                if idle_owner and not external_recovery_owner and (
-                    self._external_new_turn_accepting
-                    or self._pending_root_successor is not None
+                if (
+                    idle_owner
+                    and not external_recovery_owner
+                    and (
+                        self._external_new_turn_accepting
+                        or self._pending_root_successor is not None
+                    )
                 ):
                     raise RuntimeError("compaction idle ROOT admission is busy")
                 if self._plan_exit_fence:
@@ -2453,9 +2503,7 @@ class KernelHostSession:
             return KernelCommandOutcome(
                 command_id, "REJECTED", "", "INVALID_REQUEST", "Command is invalid."
             )
-        if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (
-            target_turn_id is None
-        ):
+        if (delivery_mode is PromptDeliveryMode.NEW_TURN) != (target_turn_id is None):
             return KernelCommandOutcome(
                 command_id,
                 "REJECTED",
@@ -2846,16 +2894,25 @@ class KernelHostSession:
     async def cancel_queued_prompt(
         self, *, command_id: str, source_queue_item_id: str
     ) -> KernelCommandOutcome:
-        return await self._apply_queued_prompt_action(QueuedPromptAction(
-            self.session_id, command_id, source_queue_item_id,
-        ))
+        return await self._apply_queued_prompt_action(
+            QueuedPromptAction(
+                self.session_id,
+                command_id,
+                source_queue_item_id,
+            )
+        )
 
     async def steer_queued_prompt(
         self, *, command_id: str, source_queue_item_id: str, target_turn_id: str
     ) -> KernelCommandOutcome:
-        return await self._apply_queued_prompt_action(QueuedPromptAction(
-            self.session_id, command_id, source_queue_item_id, target_turn_id,
-        ))
+        return await self._apply_queued_prompt_action(
+            QueuedPromptAction(
+                self.session_id,
+                command_id,
+                source_queue_item_id,
+                target_turn_id,
+            )
+        )
 
     async def _apply_queued_prompt_action(
         self, candidate: QueuedPromptAction
@@ -2866,29 +2923,41 @@ class KernelHostSession:
             self._require_open()
             if self._plan_exit_fence:
                 return KernelCommandOutcome(
-                    candidate.command_id, "REJECTED", "", "PLAN_TRANSITION_BUSY",
+                    candidate.command_id,
+                    "REJECTED",
+                    "",
+                    "PLAN_TRANSITION_BUSY",
                     "A Plan force-exit transition is in progress.",
                 )
             try:
                 reservation = self._reserve_compaction_write_locked(
-                    scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None,
+                    scope_kind=ModelInputScopeKind.ROOT,
+                    scope_subagent_task_id=None,
                 )
             except RuntimeError:
                 return KernelCommandOutcome(
-                    candidate.command_id, "REJECTED", "", "COMPACTION_IN_PROGRESS",
+                    candidate.command_id,
+                    "REJECTED",
+                    "",
+                    "COMPACTION_IN_PROGRESS",
                     "Context compaction is in progress for the ROOT scope.",
                 )
         try:
             try:
                 await self._io.run(
-                    self.repository.apply_queued_prompt_action, self._lease.guard,
-                    candidate=candidate, occurred_at=datetime.now().astimezone(),
+                    self.repository.apply_queued_prompt_action,
+                    self._lease.guard,
+                    candidate=candidate,
+                    occurred_at=datetime.now().astimezone(),
                     actor_id=self.host_session_id,
                     deadline_monotonic=self._canonical_deadline(),
                 )
             except QueuedPromptActionRejected as error:
                 return KernelCommandOutcome(
-                    candidate.command_id, "REJECTED", "", error.code,
+                    candidate.command_id,
+                    "REJECTED",
+                    "",
+                    error.code,
                     {
                         "COMMAND_CONFLICT": "该操作身份已经用于另一项操作。",
                         "PROMPT_NOT_PENDING": "这条输入已不在等待队列中。",
@@ -2903,10 +2972,14 @@ class KernelHostSession:
                 row = await self._query_command_row(candidate.command_id)
                 if row is None:
                     raise
-                if (row["command_kind"] != candidate.command_kind
+                if (
+                    row["command_kind"] != candidate.command_kind
                     or row["semantic_digest"] != candidate.semantic_digest
-                    or row["target_queue_item_id"] != candidate.target_queue_item_id):
-                    raise ConversationKernelConflict("queue action confirmation conflicts")
+                    or row["target_queue_item_id"] != candidate.target_queue_item_id
+                ):
+                    raise ConversationKernelConflict(
+                        "queue action confirmation conflicts"
+                    )
             self._hook_context.retire_prompt_candidate(
                 scope=self._hook_root_scope,
                 prompt_candidate_id=candidate.source_queue_item_id,
@@ -3207,12 +3280,10 @@ class KernelHostSession:
                     deadline_monotonic=self._canonical_deadline(),
                 )
                 assert write_reservation is not None
-                prepared = (
-                    await self._runner.prepare_plan_question_resolution_input(
-                        provider_candidate,
-                        cancellation_intent=active_cancellation_intent,
-                        admitted_writer=write_reservation,
-                    )
+                prepared = await self._runner.prepare_plan_question_resolution_input(
+                    provider_candidate,
+                    cancellation_intent=active_cancellation_intent,
+                    admitted_writer=write_reservation,
                 )
                 publication_handle = prepared.take_handle_for_publication()
                 try:
@@ -3912,9 +3983,7 @@ class KernelHostSession:
             ):
                 candidate = replace(
                     candidate,
-                    provider_input_candidate=(
-                        prospective_dispatch.admission.candidate
-                    ),
+                    provider_input_candidate=(prospective_dispatch.admission.candidate),
                 )
         except BaseException:
             self._hook_context.retire_prompt_candidate(
@@ -4216,8 +4285,10 @@ class KernelHostSession:
                             )
                 try:
                     assert write_reservation is not None
-                    accepted, prospective_root_dispatch = (
-                        await self._runner.install_terminal_observation(
+                    (
+                        accepted,
+                        prospective_root_dispatch,
+                    ) = await self._runner.install_terminal_observation(
                         coordinator=coordinator,
                         monitor_id=monitor_id,
                         target=target,
@@ -4226,7 +4297,6 @@ class KernelHostSession:
                         deadline_monotonic=self._canonical_deadline(),
                         admitted_writer=write_reservation,
                         cancellation_intent=active_cancellation_intent,
-                        )
                     )
                 except asyncio.CancelledError:
                     if write_reservation is not None:
@@ -4355,6 +4425,69 @@ class KernelHostSession:
 
         task = self._active_task
         return self._active_turn_id if task is not None and not task.done() else None
+
+    async def prepare_safe_runtime_reopen(self) -> KernelRuntimeReopenQuiescence:
+        """Gate new admission and prove no accepted process-local work remains."""
+
+        async with self._lock:
+            self._require_open()
+            self._retire_done_active_root_locked()
+            self._retire_control_attempts_locked()
+            manual_tasks = tuple(
+                task
+                for _turn_id, task in self._manual_compaction_command_attempts.values()
+            )
+            if (
+                self._active_task is not None
+                or self._external_new_turn_accepting
+                or self._pending_root_successor is not None
+                or self._control_completion_sealed_turn_id is not None
+                or self._control_completion_write_reservation is not None
+                or self._plan_exit_fence
+                or self._compaction_write_reservations
+                or any(not task.done() for task in manual_tasks)
+                or self._ingress_hook_attempts
+                or any(
+                    attempt.task is not None and not attempt.task.done()
+                    for attempt in self._user_control_attempts.values()
+                )
+                or self._capability_reload_settlement_lock.locked()
+                or self._compaction.has_active_work()
+                or self._subagents.has_active_work()
+                or not self._runner._safe_point.is_idle()
+            ):
+                raise RuntimeError("HostSession is not quiescent for runtime reopen")
+            quiescence = KernelRuntimeReopenQuiescence(
+                session_id=self.session_id,
+                host_session_id=self.host_session_id,
+                writer_generation=self._lease.guard.writer_generation,
+                operation_nonce=f"host-runtime-reopen:{uuid4().hex}",
+                owner=self,
+                _seal=_KERNEL_RUNTIME_REOPEN_QUIESCENCE_SEAL,
+            )
+            self._runtime_reopen_quiescence = quiescence
+            return quiescence
+
+    async def abort_safe_runtime_reopen(
+        self, quiescence: KernelRuntimeReopenQuiescence
+    ) -> None:
+        """Restore admission only for the exact uncommitted Host gate."""
+
+        async with self._lock:
+            if self._runtime_reopen_quiescence is not quiescence:
+                raise RuntimeError("runtime-reopen quiescence is stale")
+            quiescence._consume(self)
+            self._runtime_reopen_quiescence = None
+
+    async def commit_safe_runtime_reopen(
+        self, quiescence: KernelRuntimeReopenQuiescence
+    ) -> None:
+        """Consume the exact gate while keeping admission closed for teardown."""
+
+        async with self._lock:
+            if self._runtime_reopen_quiescence is not quiescence:
+                raise RuntimeError("runtime-reopen quiescence is stale")
+            quiescence._consume(self)
 
     def _control_rejection(
         self,
@@ -4720,15 +4853,13 @@ class KernelHostSession:
                             attempt.normal_end_coordination_exhausted = True
                             continue
                         if (
-                            feedback.canonical_status
-                            is FeedbackCanonicalStatus.PENDING
+                            feedback.canonical_status is FeedbackCanonicalStatus.PENDING
                             and attempt.feedback_candidate is None
                         ):
                             wait_events.append(attempt.feedback_candidate_ready)
                             deadlines.append(deadline)
                         elif (
-                            feedback.canonical_status
-                            is FeedbackCanonicalStatus.PENDING
+                            feedback.canonical_status is FeedbackCanonicalStatus.PENDING
                         ):
                             attempt.normal_end_coordination_fenced = True
                             should_fence = True
@@ -6061,15 +6192,21 @@ class KernelHostSession:
             status = str(row.get("consumed_turn_status") or "")
             if command_kind == "CANCEL_PROMPT" and queue_status == "CANCELLED":
                 return KernelCommandOutcome(
-                    command_id, "SUCCEEDED", target, "PROMPT_CANCELLED",
-                    "排队输入已取消。", prompt_delivery=prompt_delivery,
+                    command_id,
+                    "SUCCEEDED",
+                    target,
+                    "PROMPT_CANCELLED",
+                    "排队输入已取消。",
+                    prompt_delivery=prompt_delivery,
                 )
             if queue_status == "PENDING":
                 return KernelCommandOutcome(
                     command_id,
                     "PENDING",
                     target,
-                    "PROMPT_STEER_QUEUED" if command_kind == "STEER_QUEUED_PROMPT" else "PROMPT_QUEUED",
+                    "PROMPT_STEER_QUEUED"
+                    if command_kind == "STEER_QUEUED_PROMPT"
+                    else "PROMPT_QUEUED",
                     "Prompt is queued.",
                     prompt_delivery=prompt_delivery,
                 )
@@ -6079,7 +6216,9 @@ class KernelHostSession:
                     "REJECTED",
                     target,
                     str(row.get("queue_terminal_reason") or queue_status),
-                    "已改为引导。" if row.get("queue_terminal_reason") == "USER_REDIRECTED_TO_STEER" else "The queued prompt was not delivered.",
+                    "已改为引导。"
+                    if row.get("queue_terminal_reason") == "USER_REDIRECTED_TO_STEER"
+                    else "The queued prompt was not delivered.",
                     prompt_delivery=prompt_delivery,
                 )
             if queue_status == "CONSUMED" and not status:
@@ -6289,8 +6428,10 @@ class KernelHostSession:
                     active_cancellation_intent = self._active_cancellation_intent
         try:
             assert write_reservation is not None
-            accepted, prospective_root_dispatch = (
-                await self._runner.accept_subagent_completion(
+            (
+                accepted,
+                prospective_root_dispatch,
+            ) = await self._runner.accept_subagent_completion(
                 turn_id=resolved_turn_id,
                 new_context_binding_revision_id=new_revision_id,
                 requested_permission_mode=requested_permission_mode,
@@ -6300,7 +6441,6 @@ class KernelHostSession:
                 deadline_monotonic=self._canonical_deadline(),
                 admitted_writer=write_reservation,
                 cancellation_intent=active_cancellation_intent,
-                )
             )
         except ExternalSourceNotAtSafePoint:
             if new_turn:
@@ -6817,6 +6957,8 @@ class KernelHostSession:
     def _require_open(self) -> None:
         if self._closing:
             raise RuntimeError("kernel Host session is closing")
+        if getattr(self, "_runtime_reopen_quiescence", None) is not None:
+            raise RuntimeError("kernel Host session is gated for runtime reopen")
 
 
 async def _join_close_task(

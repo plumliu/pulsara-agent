@@ -24,6 +24,7 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
     ToolSpec,
 )
+from pulsara_agent.llm.frozen_target import _freeze_provider_physical_call_target
 from pulsara_agent.llm.model_catalog import (
     ModelTargetKey,
     ReasoningEffortChoices,
@@ -60,12 +61,10 @@ from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.request import LLMContext
 from pulsara_agent.llm.resolution import resolve_model_call, resolve_model_target
 from pulsara_agent.llm.route_wires import production_route_wire_registry
+from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
 from pulsara_agent.llm.validation import validate_model_context_shape_for_call
-from pulsara_agent.primitives.model_call import (
-    ModelCallPurpose,
-    resolved_model_target_fingerprint,
-)
-from tests.support.model_config import test_model_runtime
+from pulsara_agent.primitives.model_call import ModelCallPurpose
+from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.test_llm_model_catalog import catalog_fixture
 
 
@@ -117,7 +116,6 @@ def _resolved_call(
         messages=(LLMMessage.user("hello"),),
         context_id="reasoning-wire-golden",
         resolved_model_call_id=call.resolved_model_call_id,
-        target_fingerprint=call.target.fact.target_fingerprint,
         model_call_index=1,
     )
     return call, context
@@ -564,29 +562,9 @@ def test_reasoning_selection_is_excluded_from_target_compatibility_digest() -> N
         ReasoningEffortSelection("max"),
     )
     fact = low.target.fact
-    payload = {
-        "route_id": "zhipuai",
-        "wire_api": "openai_chat_completions",
-        "model_id": "glm-5.3",
-        "canonical_endpoint_base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "transport_binding_id": "pulsara.openai.chat_completions",
-        "transport_contract_version": (
-            "v6-route-target-reasoning-and-tool-correlation"
-        ),
-        "model_identity_policy": "accept_reported",
-        "input_modalities": ("text",),
-        "limits": {
-            "total_context_tokens": 1_000_000,
-            "max_input_tokens": 1_000_000,
-            "max_output_tokens": 131_072,
-            "default_output_tokens": 8_192,
-            "input_safety_margin_tokens": 8_192,
-        },
-    }
-    assert fact.target_fingerprint == resolved_model_target_fingerprint(payload)
-    assert maximum.target.fact.target_fingerprint == fact.target_fingerprint
-    assert "reasoning" not in payload
-    assert "endpoint_fingerprint" not in payload
+    assert maximum.target.fact == fact
+    assert not hasattr(fact, "target_fingerprint")
+    assert not hasattr(fact, "endpoint_fingerprint")
 
 
 def test_explicit_tool_rejection_happens_before_provider_open() -> None:
@@ -615,7 +593,6 @@ def test_explicit_tool_rejection_happens_before_provider_open() -> None:
         tools=(ToolSpec("read", "Read a file", {"type": "object"}),),
         context_id=context.context_id,
         resolved_model_call_id=context.resolved_model_call_id,
-        target_fingerprint=context.target_fingerprint,
         model_call_index=context.model_call_index,
     )
     with pytest.raises(ModelTargetCapabilityMismatch, match="does not support tools"):
@@ -727,10 +704,50 @@ def test_input_modalities_are_part_of_the_frozen_target_identity() -> None:
 
     assert text_call.target.fact.input_modalities == ("text",)
     assert image_call.target.fact.input_modalities == ("text", "image")
-    assert (
-        text_call.target.fact.target_fingerprint
-        != image_call.target.fact.target_fingerprint
+    assert text_call.target.fact != image_call.target.fact
+
+
+@pytest.mark.parametrize("drift", ("lowerer", "estimator"))
+def test_frozen_target_rejects_executable_projection_strategy_drift(
+    drift: str,
+) -> None:
+    runtime = test_model_runtime(wire_api="openai_chat_completions")
+    binding = test_model_binding(runtime)
+    timeout = OpenAITransportTimeoutPolicy(1, 1, 1, 1, 5)
+    target = runtime.resolve_target(binding, timeout_policy=timeout)
+    call = resolve_model_call(
+        target=target,
+        binding=binding,
+        purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
     )
+    bundle = _freeze_provider_physical_call_target(
+        target=target,
+        call=call,
+        maximum_input_tokens=target.context_budget.input_budget_tokens,
+        maximum_output_tokens=target.context_budget.effective_output_tokens,
+    ).target_bundle
+    if drift == "lowerer":
+        key, contract = next(iter(runtime.route_wires._dialect_contracts.items()))
+
+        def drifted_lowerer(selection, controls):
+            return contract.lower_reasoning(selection, controls)
+
+        runtime.route_wires._dialect_contracts[key] = replace(
+            contract,
+            lower_reasoning=drifted_lowerer,
+        )
+    else:
+        bundle = replace(
+            bundle,
+            estimator=replace(bundle.estimator, implementation_type=object),
+        )
+
+    with pytest.raises(ModelRuntimeUnavailable, match="cannot reproduce"):
+        runtime.resolve_frozen_target_bundle(
+            bundle,
+            binding=binding,
+            timeout_policy=timeout,
+        )
 
 
 @pytest.mark.parametrize(
@@ -821,7 +838,6 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
         messages=(LLMMessage.user("hello"),),
         context_id="custom-target",
         resolved_model_call_id=call.resolved_model_call_id,
-        target_fingerprint=call.target.fact.target_fingerprint,
         model_call_index=1,
     )
 

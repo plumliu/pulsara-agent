@@ -58,7 +58,6 @@ from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendPlanningInput,
     ProcessLocalSourceHead,
     ProviderInputContinuityScope,
-    ProviderInputEpochCompatibility,
     provider_input_logical_bytes,
     encode_runtime_observation,
     SourceObservationLifecycle,
@@ -424,7 +423,7 @@ class MemoryDispatchSupport:
         *,
         request: StructuredModelInputCompileRequest,
         planning: FrozenProviderInputAppendPlanningInput,
-        compatibility: ProviderInputEpochCompatibility,
+        new_epoch: bool,
         canonical_facts: FrozenCanonicalCompileSnapshot,
         sources: CollectedContextSources,
         preference_source: ContextSourceCandidate | ContextSourceAbsentFact | None,
@@ -470,11 +469,15 @@ class MemoryDispatchSupport:
 
         async def compile_one(selected_sources: CollectedContextSources):
             selected_request = request_for(selected_sources)
+            compile_method = (
+                self._compiler.compile_new_epoch
+                if new_epoch
+                else self._compiler.compile_installed_append
+            )
             return await self._io.run(
-                self._compiler.compile_append,
+                compile_method,
                 selected_request,
                 planning=planning,
-                compatibility=compatibility,
                 deadline_monotonic=deadline,
             )
 

@@ -4,11 +4,11 @@ from hashlib import sha256
 
 from pulsara_agent.llm.provider_replay import (
     build_prepared_durable_provider_assistant_replay,
-    build_provider_replay_target_compatibility,
 )
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
+from tests.support.model_config import build_test_provider_replay_target
 
 
 class _Result:
@@ -49,10 +49,8 @@ def _fixture(reasoning: str) -> tuple[dict[str, object], dict[str, object]]:
         }
     )
     assert isinstance(frozen, FrozenJsonObjectFact)
-    target = build_provider_replay_target_compatibility(
-        wire_api="openai_chat_completions",
-        endpoint_identity_fingerprint="sha256:" + "1" * 64,
-        normalized_model_identifier="reasoning-model",
+    target = build_test_provider_replay_target(
+        model_id="reasoning-model",
         transport_binding_id="test-chat",
     )
     replay = build_prepared_durable_provider_assistant_replay(
@@ -76,8 +74,6 @@ def _fixture(reasoning: str) -> tuple[dict[str, object], dict[str, object]]:
         "source_subagent_task_id": None,
         "context_binding_revision_id": None,
         "provider_input_through_sequence": 0,
-        "provider_replay_disposition": "NATIVE_REPLAY",
-        "provider_replay_fragment_id": replay.replay_id,
         "inline_content": answer,
         "blob_id": None,
         "content_digest": "sha256:" + sha256(answer).hexdigest(),
@@ -87,6 +83,7 @@ def _fixture(reasoning: str) -> tuple[dict[str, object], dict[str, object]]:
         "accepted_at": "2026-08-30T00:00:00Z",
     }
     replay_row = {
+        "assistant_entry_kind": "ASSISTANT_MESSAGE",
         "codec_kind": replay.codec_kind.value,
         "payload_bytes": replay.payload_bytes,
         "payload_digest": replay.payload_digest,

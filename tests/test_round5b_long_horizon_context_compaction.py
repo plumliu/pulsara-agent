@@ -1375,7 +1375,7 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     estimator = PulsaraHeuristicTokenEstimatorV2()
-    source_target_fact = SimpleNamespace(target_fingerprint="sha256:" + "0" * 64)
+    source_target_fact = SimpleNamespace(model_id="model-a")
     source_profile = SimpleNamespace(
         route_wire_profile=SimpleNamespace(wire_api="openai_chat_completions")
     )
@@ -1383,9 +1383,7 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
         fact=source_target_fact,
         model_profile=source_profile,
     )
-    destination_target_fact = SimpleNamespace(
-        target_fingerprint="sha256:" + "1" * 64
-    )
+    destination_target_fact = SimpleNamespace(model_id="model-b")
     destination_profile = SimpleNamespace(
         route_wire_profile=SimpleNamespace(wire_api="openai_responses")
     )
@@ -1778,6 +1776,12 @@ def test_compaction_fenced_restarts_are_stack_free_and_keep_one_attempt_token(
     coordinator = object.__new__(compaction_coordinator.CompactionCoordinator)
     restart_count = sys.getrecursionlimit() + 17
     calls: list[dict[str, object]] = []
+    restart_tokens: list[object] = []
+    coordinator._compaction_owner = SimpleNamespace(
+        restart_preparation_phase=lambda *, attempt_token: restart_tokens.append(
+            attempt_token
+        )
+    )
 
     async def execute_once(_self, **kwargs):
         calls.append(kwargs)
@@ -1827,6 +1831,7 @@ def test_compaction_fenced_restarts_are_stack_free_and_keep_one_attempt_token(
     assert len(calls) == restart_count + 1
     attempt_token = calls[0]["attempt_token"]
     assert all(item["attempt_token"] is attempt_token for item in calls)
+    assert restart_tokens == [attempt_token] * restart_count
     assert calls[0]["pre_compact_dispatched"] is False
     assert all(item["pre_compact_dispatched"] is True for item in calls[1:])
     assert all(item["maximum_retained_tool_groups"] == 1 for item in calls)
@@ -2215,6 +2220,7 @@ def test_round5b_global_lane_installs_only_one_scope_fence() -> None:
                 scope=first,
                 trigger=CompactionTrigger.MANUAL,
                 operation=first_operation,
+                attempt_id="compaction-attempt:first",
             )
         )
         await entered.wait()
@@ -2223,6 +2229,7 @@ def test_round5b_global_lane_installs_only_one_scope_fence() -> None:
                 scope=second,
                 trigger=CompactionTrigger.AUTO_ACTIVE_CONTEXT,
                 operation=second_operation,
+                attempt_id="compaction-attempt:second",
             )
         )
         await asyncio.sleep(0)
@@ -2829,18 +2836,27 @@ def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> No
         and isinstance(call.func, ast.Attribute)
         and call.func.attr == "bind_selected_compaction_candidate"
     )
-    assert len(family_prepares) == len(family_binds) == 2
+    assert len(family_prepares) == 2
+    assert len(family_binds) == 1
     assert len(family_candidates) == 4
-    # PRE_FULL and POST_FULL each measure the base and, when present, its
-    # unpublished active suffix using the same frozen family before one bind.
-    for prepare, bind in zip(
-        sorted(family_prepares, key=lambda call: call.lineno),
-        sorted(family_binds, key=lambda call: call.lineno),
-        strict=True,
-    ):
+    # PRE_FULL is dry-only and cannot yield execution authority.  After FULL,
+    # the adopted-base lease prepares a fresh family and binds exactly once.
+    ordered_prepares = sorted(family_prepares, key=lambda call: call.lineno)
+    ordered_candidates = sorted(family_candidates, key=lambda call: call.lineno)
+    bind = family_binds[0]
+    assert len(
+        tuple(
+            candidate
+            for candidate in ordered_candidates
+            if ordered_prepares[0].lineno
+            < candidate.lineno
+            < ordered_prepares[1].lineno
+        )
+    ) == 2
+    for prepare in ordered_prepares[1:]:
         candidates = tuple(
             candidate
-            for candidate in family_candidates
+            for candidate in ordered_candidates
             if prepare.lineno < candidate.lineno < bind.lineno
         )
         assert len(candidates) == 2

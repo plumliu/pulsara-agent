@@ -53,9 +53,8 @@ from pulsara_agent.llm.provider import (
     ProviderChatReplayFieldContract,
     RouteWireProfile,
 )
-from pulsara_agent.llm.provider_replay import (
-    ProviderReplayDisposition,
-    build_provider_replay_target_compatibility,
+from pulsara_agent.llm.provider_open import (
+    _issue_confirmed_memory_governance_terminal_fence,
 )
 from pulsara_agent.ports.live_agent_event import (
     ReasoningPresentationKind,
@@ -84,6 +83,7 @@ from pulsara_agent.model_input.contracts import (
     PreparedProviderInputCut,
 )
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
+from pulsara_agent.memory.product_contract import MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
 from pulsara_agent.llm.request import (
     LLMContext,
     provider_assistant_public_projection_fingerprint,
@@ -100,7 +100,11 @@ from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ProviderModelStreamErrorCode,
 )
-from tests.support.model_config import test_model_binding, test_model_runtime
+from tests.support.model_config import (
+    test_model_binding,
+    test_model_runtime,
+    build_test_provider_replay_target,
+)
 
 
 def _chat_profile(
@@ -286,10 +290,6 @@ def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
             continuity_scope=scope,
             continuity_epoch_nonce=nonce,
             continuity_epoch_revision=revision,
-            provider_wire_api="openai_chat_completions",
-            provider_replay_disposition=(
-                ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
-            ),
             provider_replay=None,
         )
 
@@ -653,7 +653,6 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
         messages=(LLMMessage.user("bounded"),),
         context_id="round5a1:opaque-overflow",
         resolved_model_call_id=call.resolved_model_call_id,
-        target_fingerprint=call.target.fact.target_fingerprint,
         model_call_index=None,
     )
 
@@ -748,10 +747,7 @@ def test_chat_tool_response_without_reasoning_carrier_needs_no_replay() -> None:
             usage=TransportUsageReport(usage_status="missing", usage=None),
         ),
         replay_payload=None,
-        replay_target=build_provider_replay_target_compatibility(
-            wire_api="openai_chat_completions",
-            endpoint_identity_fingerprint="sha256:" + "1" * 64,
-            normalized_model_identifier="test-model",
+        replay_target=build_test_provider_replay_target(
             transport_binding_id="openai_chat_completions",
         ),
     )
@@ -2934,10 +2930,7 @@ def test_completed_replay_must_exactly_match_public_projection() -> None:
             completed_replay_payload=payload,
         ),
         replay_payload=payload,
-        replay_target=build_provider_replay_target_compatibility(
-            wire_api="openai_chat_completions",
-            endpoint_identity_fingerprint="sha256:" + "1" * 64,
-            normalized_model_identifier="test-model",
+        replay_target=build_test_provider_replay_target(
             transport_binding_id="openai_chat_completions",
         ),
     )
@@ -3017,10 +3010,9 @@ def test_responses_accepts_message_before_ordered_function_calls() -> None:
             completed_replay_payload=payload,
         ),
         replay_payload=payload,
-        replay_target=build_provider_replay_target_compatibility(
+        replay_target=build_test_provider_replay_target(
             wire_api="openai_responses",
-            endpoint_identity_fingerprint="sha256:" + "4" * 64,
-            normalized_model_identifier="test-model",
+            endpoint="4",
             transport_binding_id="openai_responses",
         ),
     )
@@ -3054,10 +3046,13 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
     )
     auxiliary = DirectKernelAuxiliaryJsonModel(runtime)
     prepared = auxiliary.prepare_json_call(
-        purpose=ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY,
-        messages=(LLMMessage.user("return a bounded JSON object"),),
-        maximum_input_tokens=1024,
-        maximum_input_bytes=4096,
+        purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
+        messages=(
+            LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3),
+            LLMMessage.user("return a bounded JSON object"),
+        ),
+        maximum_input_tokens=8192,
+        maximum_input_bytes=32768,
         maximum_output_tokens=32,
         timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, 5),
         origin_binding=test_model_binding(runtime),
@@ -3074,9 +3069,33 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
         },
         {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]},
     ]
+    with pytest.raises(TypeError, match="repository-issued"):
+        asyncio.run(
+            auxiliary.complete_prepared_json(
+                prepared,
+                terminal_fence=object(),  # type: ignore[arg-type]
+            )
+        )
+    terminal_fence = _issue_confirmed_memory_governance_terminal_fence(
+        candidate=object(),
+        origin_model_call_binding=prepared.origin_model_call_binding,
+        durable_terminal_fence=object(),
+    )
     with pytest.raises(ProviderModelOutputIncomplete) as captured:
-        asyncio.run(auxiliary.complete_prepared_json(prepared))
+        asyncio.run(
+            auxiliary.complete_prepared_json(
+                prepared,
+                terminal_fence=terminal_fence,
+            )
+        )
     assert captured.value.reason is ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT
+    with pytest.raises(RuntimeError, match="already consumed"):
+        asyncio.run(
+            auxiliary.complete_prepared_json(
+                prepared,
+                terminal_fence=terminal_fence,
+            )
+        )
 
 
 class _Round5A1SSEHandler(BaseHTTPRequestHandler):
@@ -3180,7 +3199,6 @@ async def _consume_provider_shaped_sse(*, api: str, base_url: str) -> list[objec
         messages=(LLMMessage.user("bounded local fixture"),),
         context_id="round5a1:local-sse",
         resolved_model_call_id=call.resolved_model_call_id,
-        target_fingerprint=call.target.fact.target_fingerprint,
         model_call_index=None,
     )
     return [item async for item in adapter.stream(call=call, context=context)]

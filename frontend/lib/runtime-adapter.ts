@@ -468,6 +468,10 @@ export interface RuntimeAdapter {
   putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<boolean>;
   deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<boolean>;
   updateModelCallBinding(sessionId: string, binding: ModelCallBindingPayload): Promise<ModelCallBindingUpdate>;
+  reopenRuntime(sessionId: string): Promise<{
+    status: 'reopened' | 'deferred';
+    publicCode?: string;
+  }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection>;
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
   forkConversation(sessionId: string, anchorEntryId: string, childSessionId: string): Promise<ForkOutcome>;
@@ -1345,6 +1349,19 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   async listSessions(): Promise<SessionSummary[]> {
     const payload = await apiRequest<{ sessions: Array<Record<string, unknown>> }>('/api/sessions');
     return payload.sessions.map(projectSessionSummary);
+  }
+
+  async reopenRuntime(sessionId: string): Promise<{
+    status: 'reopened' | 'deferred';
+    publicCode?: string;
+  }> {
+    const payload = await apiRequest<{
+      status: 'reopened' | 'deferred';
+      public_code?: string;
+    }>(`/api/sessions/${encodeURIComponent(sessionId)}/runtime/reopen`, {
+      method: 'POST',
+    });
+    return { status: payload.status, publicCode: payload.public_code };
   }
 
   async listSessionTaskGroups(sessionId: string, cursor?: string): Promise<AgentTaskGroupPage> {

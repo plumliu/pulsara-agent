@@ -1159,10 +1159,8 @@ def freeze_compaction_source_view(
         )
     if predecessor_epoch_view is None:
         compatibility = CompactionSourceCompatibility.EMPTY_COLD
-    elif semantic_projection.reset_reason is None:
-        compatibility = CompactionSourceCompatibility.COMPATIBLE_APPEND
     else:
-        compatibility = CompactionSourceCompatibility.PENDING_NON_COMPACTION_RESET
+        compatibility = CompactionSourceCompatibility.COMPATIBLE_APPEND
 
     if compatibility is CompactionSourceCompatibility.COMPATIBLE_APPEND:
         assert predecessor_epoch_view is not None

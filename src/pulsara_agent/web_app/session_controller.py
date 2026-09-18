@@ -58,6 +58,7 @@ from pulsara_agent.conversation_kernel.host import (
     KernelHostCoreClosing,
     KernelHostSession,
     KernelSessionSummary,
+    KernelRuntimeReopenQuiescence,
 )
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
@@ -119,6 +120,206 @@ class HostSessionHandle:
         return self.session.host_session_id
 
 
+_NO_LIVE_HOST_SEAL = object()
+_RUNTIME_REOPEN_OPERATION_SEAL = object()
+_RUNTIME_REOPEN_OUTCOME_SEAL = object()
+_RAW_CLOSE_OPERATION_SEAL = object()
+
+
+class SessionControlRejected(RuntimeError):
+    """Typed process-local rejection for a current Session control fence."""
+
+    def __init__(self, public_code: str, message: str) -> None:
+        super().__init__(message)
+        self.public_code = public_code
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class StableNoLiveHostObservation:
+    session_id: str
+    operation_nonce: str
+    _owner: "LocalSessionController"
+    _consumed: bool
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        operation_nonce: str,
+        owner: "LocalSessionController",
+        _seal: object,
+    ) -> None:
+        if _seal is not _NO_LIVE_HOST_SEAL or not session_id or not operation_nonce:
+            raise TypeError("no-live Host observation is controller-issued")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "operation_nonce", operation_nonce)
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_consumed", False)
+
+    def _consume(self, owner: "LocalSessionController") -> None:
+        if self._owner is not owner or self._consumed:
+            raise RuntimeError("no-live Host observation is stale")
+        object.__setattr__(self, "_consumed", True)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedRuntimeReopenOperation:
+    session_id: str
+    old_handle: HostSessionHandle
+    operation_nonce: str
+    host_quiescence: KernelRuntimeReopenQuiescence
+    _owner: "LocalSessionController"
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        old_handle: HostSessionHandle,
+        operation_nonce: str,
+        host_quiescence: KernelRuntimeReopenQuiescence,
+        owner: "LocalSessionController",
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _RUNTIME_REOPEN_OPERATION_SEAL
+            or old_handle.session_id != session_id
+            or host_quiescence.session_id != session_id
+            or host_quiescence.host_session_id != old_handle.host_session_id
+            or not operation_nonce
+        ):
+            raise TypeError("runtime-reopen operation is controller-issued")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "old_handle", old_handle)
+        object.__setattr__(self, "operation_nonce", operation_nonce)
+        object.__setattr__(self, "host_quiescence", host_quiescence)
+        object.__setattr__(self, "_owner", owner)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedRuntimeResumeOperation:
+    session_id: str
+    operation_nonce: str
+    _owner: "LocalSessionController"
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        operation_nonce: str,
+        owner: "LocalSessionController",
+        _seal: object,
+    ) -> None:
+        if _seal is not _RUNTIME_REOPEN_OPERATION_SEAL or not operation_nonce:
+            raise TypeError("runtime-resume operation is controller-issued")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "operation_nonce", operation_nonce)
+        object.__setattr__(self, "_owner", owner)
+
+
+RuntimeReopenOperation = PreparedRuntimeReopenOperation | PreparedRuntimeResumeOperation
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PreparedRawCloseOperation:
+    session_id: str
+    handle: HostSessionHandle
+    close_conversation: bool
+    operation_nonce: str
+    _owner: "LocalSessionController"
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        handle: HostSessionHandle,
+        close_conversation: bool,
+        operation_nonce: str,
+        owner: "LocalSessionController",
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _RAW_CLOSE_OPERATION_SEAL
+            or handle.session_id != session_id
+            or not operation_nonce
+        ):
+            raise TypeError("raw-close operation is controller-issued")
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "handle", handle)
+        object.__setattr__(self, "close_conversation", close_conversation)
+        object.__setattr__(self, "operation_nonce", operation_nonce)
+        object.__setattr__(self, "_owner", owner)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class OldHostCloseFull:
+    operation: PreparedRuntimeReopenOperation
+
+    def __init__(self, operation: PreparedRuntimeReopenOperation, *, _seal: object):
+        if _seal is not _RUNTIME_REOPEN_OUTCOME_SEAL:
+            raise TypeError("old-Host close outcome is controller-issued")
+        object.__setattr__(self, "operation", operation)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class OldHostCloseQuarantined:
+    operation: PreparedRuntimeReopenOperation
+    public_code: str
+
+    def __init__(
+        self,
+        operation: PreparedRuntimeReopenOperation,
+        *,
+        public_code: str,
+        _seal: object,
+    ) -> None:
+        if _seal is not _RUNTIME_REOPEN_OUTCOME_SEAL or not public_code:
+            raise TypeError("old-Host quarantine outcome is controller-issued")
+        object.__setattr__(self, "operation", operation)
+        object.__setattr__(self, "public_code", public_code)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class NoOldHostReadyToResume:
+    operation: PreparedRuntimeResumeOperation
+
+    def __init__(self, operation: PreparedRuntimeResumeOperation, *, _seal: object):
+        if _seal is not _RUNTIME_REOPEN_OUTCOME_SEAL:
+            raise TypeError("no-old-Host outcome is controller-issued")
+        object.__setattr__(self, "operation", operation)
+
+
+RuntimeReopenHostOutcome = (
+    OldHostCloseFull | OldHostCloseQuarantined | NoOldHostReadyToResume
+)
+
+
+@dataclass(slots=True)
+class _ResumeInFlight:
+    task: asyncio.Task[HostSessionHandle]
+
+
+@dataclass(slots=True)
+class _RawCloseInFlight:
+    operation: PreparedRawCloseOperation
+    physical_close_full: bool = False
+
+
+@dataclass(slots=True)
+class _RuntimeReopenInFlight:
+    operation: RuntimeReopenOperation
+    abort_requested: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _Quarantined:
+    public_code: str
+
+
+_SessionOperation = (
+    _ResumeInFlight | _RawCloseInFlight | _RuntimeReopenInFlight | _Quarantined
+)
+
+
 def _display_session_id(session_id: str) -> str:
     suffix = session_id.removeprefix("session:")
     return suffix[:8] if suffix else session_id[:8]
@@ -154,7 +355,7 @@ class LocalSessionController:
         self.active_skill_names = active_skill_names
         self._by_session: dict[str, HostSessionHandle] = {}
         self._by_host: dict[str, HostSessionHandle] = {}
-        self._resumes: dict[str, asyncio.Task[HostSessionHandle]] = {}
+        self._operations: dict[str, _SessionOperation] = {}
         self._forks: set[asyncio.Task[dict[str, object]]] = set()
         self._lock = asyncio.Lock()
         self._capability_mutation_lock = core.mcp_management.lane
@@ -375,13 +576,16 @@ class LocalSessionController:
             after_sequence = _decode_task_activity_cursor(
                 cursor, session_id=session_id, task_id=task_id
             )
-        entries, blocks, results, has_more = (
-            await self.core.read_subagent_task_activity_page(
-                session_id=session_id,
-                task_id=task_id,
-                maximum_items=maximum_items,
-                after_entry_sequence=after_sequence,
-            )
+        (
+            entries,
+            blocks,
+            results,
+            has_more,
+        ) = await self.core.read_subagent_task_activity_page(
+            session_id=session_id,
+            task_id=task_id,
+            maximum_items=maximum_items,
+            after_entry_sequence=after_sequence,
         )
         blocks_by_entry: dict[str, list[dict[str, object]]] = {}
         for block in blocks:
@@ -403,9 +607,9 @@ class LocalSessionController:
                 "result_entry_id": str(result["result_entry_id"]),
                 "result_state": str(result["result_state"]),
             }
-            results_by_entry.setdefault(
-                str(result["assistant_entry_id"]), []
-            ).append(result_payload)
+            results_by_entry.setdefault(str(result["assistant_entry_id"]), []).append(
+                result_payload
+            )
             results_by_entry.setdefault(str(result["result_entry_id"]), []).append(
                 result_payload
             )
@@ -544,19 +748,30 @@ class LocalSessionController:
         handle = await self.resume_session(session_id)
         workspace_root = handle.session.workspace.workspace_root
         async with self._capability_mutation_lock:
-            outcome = await _settle_capability_io(asyncio.to_thread(
-                LocalSkillManagementService().remove_loose_local_skill,
-                skill_path=Path(skill_path), scope=LocalSkillInstallScope.WORKSPACE,
-                expected=expected, workspace_root=workspace_root,
-            ))
+            outcome = await _settle_capability_io(
+                asyncio.to_thread(
+                    LocalSkillManagementService().remove_loose_local_skill,
+                    skill_path=Path(skill_path),
+                    scope=LocalSkillInstallScope.WORKSPACE,
+                    expected=expected,
+                    workspace_root=workspace_root,
+                )
+            )
         changed = outcome.disposition in {
-            LocalSkillRemovalDisposition.REMOVED, LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
+            LocalSkillRemovalDisposition.REMOVED,
+            LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
         }
         pending = await self._mark_capability_refresh(workspace_root) if changed else 0
         return {
-            "operation": {"status": outcome.disposition.value, "success": changed,
-                          "message": "项目技能安装副本已删除。" if changed else "技能未删除，请刷新后重新确认。",
-                          "cleanup_attention": outcome.disposition is LocalSkillRemovalDisposition.CLEANUP_ATTENTION},
+            "operation": {
+                "status": outcome.disposition.value,
+                "success": changed,
+                "message": "项目技能安装副本已删除。"
+                if changed
+                else "技能未删除，请刷新后重新确认。",
+                "cleanup_attention": outcome.disposition
+                is LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
+            },
             "adoption": _workspace_adoption_payload(pending),
             "capabilities": await self._session_capability_payload(handle),
         }
@@ -584,12 +799,22 @@ class LocalSessionController:
         )
         return await self._workspace_mcp_settlement(handle, outcome, "ADDED")
 
-    async def update_session_mcp_server(self, session_id, *, server_id, config, expected_identity,
-                                        secret_changes=(), retain_credentials_confirmed=False):
+    async def update_session_mcp_server(
+        self,
+        session_id,
+        *,
+        server_id,
+        config,
+        expected_identity,
+        secret_changes=(),
+        retain_credentials_confirmed=False,
+    ):
         handle = await self.resume_session(session_id)
         result = await self.core.mcp_management.update(
-            LocalMcpTarget(server_id, handle.session.workspace.workspace_root), config,
-            expected=expected_identity, secrets=secret_changes,
+            LocalMcpTarget(server_id, handle.session.workspace.workspace_root),
+            config,
+            expected=expected_identity,
+            secrets=secret_changes,
             retain_credentials_confirmed=retain_credentials_confirmed,
         )
         return await self._workspace_mcp_settlement(handle, result, "UPDATED")
@@ -741,13 +966,21 @@ class LocalSessionController:
                     ),
                 )
             )
-        pending = await self._mark_capability_refresh() if outcome.disposition.value == "INSTALLED" else 0
+        pending = (
+            await self._mark_capability_refresh()
+            if outcome.disposition.value == "INSTALLED"
+            else 0
+        )
         capabilities = await self.inspect_user_capabilities(
             active_session_id=active_session_id
         )
         return {
             "operation": _skill_install_payload(outcome),
-            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
+            "adoption": {
+                "updated_sessions": 0,
+                "pending_sessions": pending,
+                "attention_sessions": 0,
+            },
             "capabilities": capabilities,
         }
 
@@ -787,7 +1020,11 @@ class LocalSessionController:
             )
         pending = await self._mark_capability_refresh()
         return {
-            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
+            "adoption": {
+                "updated_sessions": 0,
+                "pending_sessions": pending,
+                "attention_sessions": 0,
+            },
             "operation": {
                 "status": "ENABLED" if enabled else "DISABLED",
                 "success": True,
@@ -838,7 +1075,11 @@ class LocalSessionController:
                     LocalSkillRemovalDisposition.CLEANUP_ATTENTION: "技能已从列表移除，但部分本地清理未完成。",
                 }[outcome.disposition],
             },
-            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
+            "adoption": {
+                "updated_sessions": 0,
+                "pending_sessions": pending,
+                "attention_sessions": 0,
+            },
             "capabilities": await self.inspect_user_capabilities(
                 active_session_id=active_session_id
             ),
@@ -887,8 +1128,13 @@ class LocalSessionController:
         selected = [draft for draft in drafts if draft.server_id == selected_server_id]
         if len(selected) != 1:
             raise ValueError("请选择一个明确的 MCP 服务。")
-        handle = await self.resume_session(session_id) if session_id is not None else None
-        target = LocalMcpTarget(selected_server_id, handle.session.workspace.workspace_root if handle else None)
+        handle = (
+            await self.resume_session(session_id) if session_id is not None else None
+        )
+        target = LocalMcpTarget(
+            selected_server_id,
+            handle.session.workspace.workspace_root if handle else None,
+        )
         entry, secrets = materialize_mcp_import(
             selected[0],
             target.owner,
@@ -897,9 +1143,18 @@ class LocalSessionController:
             transport=transport,
             allow_http_localhost=allow_http_localhost,
         )
-        managed_ids = tuple(item.server_id for item in handle.session.inspect_capability_catalog().mcp_configured_servers
-                            if item.source_kind == "MANAGED_PACKAGE") if handle else ()
-        outcome = await self.core.mcp_management.create(target, entry, secrets, managed_server_ids=managed_ids)
+        managed_ids = (
+            tuple(
+                item.server_id
+                for item in handle.session.inspect_capability_catalog().mcp_configured_servers
+                if item.source_kind == "MANAGED_PACKAGE"
+            )
+            if handle
+            else ()
+        )
+        outcome = await self.core.mcp_management.create(
+            target, entry, secrets, managed_server_ids=managed_ids
+        )
         if handle:
             return await self._workspace_mcp_settlement(handle, outcome, "ADDED")
         return await self._user_mcp_settlement(outcome, "ADDED", active_session_id)
@@ -932,8 +1187,14 @@ class LocalSessionController:
         retain_credentials_confirmed: bool = False,
         session_id: str | None = None,
     ) -> dict[str, object]:
-        handle = await self.resume_session(session_id) if session_id is not None else None
-        workspace_root = handle.session.workspace.workspace_root if handle else resolve_workspace(self.workspace_input).workspace_root
+        handle = (
+            await self.resume_session(session_id) if session_id is not None else None
+        )
+        workspace_root = (
+            handle.session.workspace.workspace_root
+            if handle
+            else resolve_workspace(self.workspace_input).workspace_root
+        )
         result = await self.core.mcp_management.test(
             LocalMcpTarget(server_id, workspace_root if handle else None),
             config,
@@ -973,23 +1234,41 @@ class LocalSessionController:
                 else "MCP 服务已移除。",
                 "cleanup_attention": outcome.cleanup_attention,
             },
-            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
+            "adoption": {
+                "updated_sessions": 0,
+                "pending_sessions": pending,
+                "attention_sessions": 0,
+            },
             "capabilities": await self.inspect_user_capabilities(
                 active_session_id=active_session_id
             ),
         }
 
-    async def authorize_mcp(self, server_id: str, *, session_id: str | None = None) -> dict[str, object]:
-        handle = await self.resume_session(session_id) if session_id is not None else None
-        target = LocalMcpTarget(server_id, handle.session.workspace.workspace_root if handle else None)
+    async def authorize_mcp(
+        self, server_id: str, *, session_id: str | None = None
+    ) -> dict[str, object]:
+        handle = (
+            await self.resume_session(session_id) if session_id is not None else None
+        )
+        target = LocalMcpTarget(
+            server_id, handle.session.workspace.workspace_root if handle else None
+        )
         flow = await self.core.mcp_management.authorize(target)
         return {"state": flow.state, "error": flow.error}
 
     async def mcp_authorization(
-        self, server_id: str, *, action: str, session_id: str | None = None,
+        self,
+        server_id: str,
+        *,
+        action: str,
+        session_id: str | None = None,
     ) -> dict[str, object]:
-        handle = await self.resume_session(session_id) if session_id is not None else None
-        owner = LocalMcpTarget(server_id, handle.session.workspace.workspace_root if handle else None).owner
+        handle = (
+            await self.resume_session(session_id) if session_id is not None else None
+        )
+        owner = LocalMcpTarget(
+            server_id, handle.session.workspace.workspace_root if handle else None
+        ).owner
         manager = self.core.mcp_management.oauth
         if action == "cancel":
             await manager.cancel(owner)
@@ -1000,12 +1279,21 @@ class LocalSessionController:
         return manager.login_state(owner)
 
     async def install_user_plugin(
-        self, *, source_path: str, active_session_id: str | None = None,
-        source_format="native", classifications=(), public_values=(),
+        self,
+        *,
+        source_path: str,
+        active_session_id: str | None = None,
+        source_format="native",
+        classifications=(),
+        public_values=(),
     ) -> dict[str, object]:
         source = _absolute_local_source(source_path, "Plugin")
-        outcome = await self.core.install_user_plugin(source, source_format=source_format,
-            import_classifications=classifications, import_public_values=public_values)
+        outcome = await self.core.install_user_plugin(
+            source,
+            source_format=source_format,
+            import_classifications=classifications,
+            import_public_values=public_values,
+        )
         capabilities = await self.inspect_user_capabilities(
             active_session_id=active_session_id
         )
@@ -1017,9 +1305,11 @@ class LocalSessionController:
     async def preview_plugin_import(self, *, source_path):
         from pulsara_agent.plugins.source_import import preview_plugin_imports
         from pulsara_agent.plugins.contracts import NeverCancelPluginOperation
+
         source = _absolute_local_source(source_path, "Plugin")
         return await asyncio.to_thread(
-            preview_plugin_imports, source,
+            preview_plugin_imports,
+            source,
             deadline_monotonic=self.core._canonical_deadline(),
             cancellation=NeverCancelPluginOperation(),
             credential_boundary=self.core._credential_boundary,
@@ -1041,7 +1331,11 @@ class LocalSessionController:
                 enabled=enabled,
                 connection_review=connection_review,
             )
-        pending = await self._mark_capability_refresh() if isinstance(outcome, SettledPluginEnablementOutcome) else 0
+        pending = (
+            await self._mark_capability_refresh()
+            if isinstance(outcome, SettledPluginEnablementOutcome)
+            else 0
+        )
         capabilities = await self.inspect_user_capabilities(
             active_session_id=active_session_id
         )
@@ -1056,10 +1350,18 @@ class LocalSessionController:
         }
 
     async def remove_user_plugin(
-        self, *, plugin_id: str, package_install_id: str, active_session_id: str | None = None
+        self,
+        *,
+        plugin_id: str,
+        package_install_id: str,
+        active_session_id: str | None = None,
     ) -> dict[str, object]:
         outcome = await self.core.remove_user_plugin(plugin_id, package_install_id)
-        pending = await self._mark_capability_refresh() if isinstance(outcome, RemovedPluginOutcome) else 0
+        pending = (
+            await self._mark_capability_refresh()
+            if isinstance(outcome, RemovedPluginOutcome)
+            else 0
+        )
         capabilities = await self.inspect_user_capabilities(
             active_session_id=active_session_id
         )
@@ -1074,38 +1376,73 @@ class LocalSessionController:
         }
 
     async def replace_user_plugin_connection(
-        self, *, plugin_id, server_id, package_install_id, expected_overlay,
-        overlay, secret_changes, retain_credentials_confirmed=False,
+        self,
+        *,
+        plugin_id,
+        server_id,
+        package_install_id,
+        expected_overlay,
+        overlay,
+        secret_changes,
+        retain_credentials_confirmed=False,
         active_session_id=None,
     ):
-        from pulsara_agent.plugins.connection_management import ReplacePluginMcpConnectionRequest
+        from pulsara_agent.plugins.connection_management import (
+            ReplacePluginMcpConnectionRequest,
+        )
         from pulsara_agent.plugins.contracts import PluginInstanceIdentity
 
-        result = await self.core._plugin_management().replace_plugin_mcp_connection_overlay(
-            ReplacePluginMcpConnectionRequest(
-                PluginInstanceIdentity(PluginScopeKind.USER, plugin_id), server_id,
-                package_install_id, expected_overlay, overlay, self.core._canonical_deadline(),
-                secret_changes, retain_credentials_confirmed,
-            ), connections=self.core.mcp_management,
+        result = (
+            await self.core._plugin_management().replace_plugin_mcp_connection_overlay(
+                ReplacePluginMcpConnectionRequest(
+                    PluginInstanceIdentity(PluginScopeKind.USER, plugin_id),
+                    server_id,
+                    package_install_id,
+                    expected_overlay,
+                    overlay,
+                    self.core._canonical_deadline(),
+                    secret_changes,
+                    retain_credentials_confirmed,
+                ),
+                connections=self.core.mcp_management,
+            )
         )
         pending = await self._mark_capability_refresh() if result.applied else 0
         return {
-            "operation": {"status": "UPDATED", "success": result.applied,
-                          "cleanup_attention": result.cleanup_attention, "message": "插件连接已保存。"},
-            "adoption": {"updated_sessions": 0, "pending_sessions": pending, "attention_sessions": 0},
-            "capabilities": await self.inspect_user_capabilities(active_session_id=active_session_id),
+            "operation": {
+                "status": "UPDATED",
+                "success": result.applied,
+                "cleanup_attention": result.cleanup_attention,
+                "message": "插件连接已保存。",
+            },
+            "adoption": {
+                "updated_sessions": 0,
+                "pending_sessions": pending,
+                "attention_sessions": 0,
+            },
+            "capabilities": await self.inspect_user_capabilities(
+                active_session_id=active_session_id
+            ),
         }
 
-    async def plugin_mcp_authorization(self, *, plugin_id, server_id, package_install_id, action):
+    async def plugin_mcp_authorization(
+        self, *, plugin_id, server_id, package_install_id, action
+    ):
         from pulsara_agent.plugins.contracts import PluginInstanceIdentity
 
         result = await self.core._plugin_management().authorize_plugin_mcp(
             identity=PluginInstanceIdentity(PluginScopeKind.USER, plugin_id),
-            local_server_id=server_id, expected_package_install_id=package_install_id,
+            local_server_id=server_id,
+            expected_package_install_id=package_install_id,
             deadline_monotonic=self.core._canonical_deadline(),
-            connections=self.core.mcp_management, action=action,
+            connections=self.core.mcp_management,
+            action=action,
         )
-        return {"state": result.state, "error": result.error} if action == "login" else result
+        return (
+            {"state": result.state, "error": result.error}
+            if action == "login"
+            else result
+        )
 
     async def open_capability_root(self, root: str) -> dict[str, object]:
         if root == "agents":
@@ -1210,55 +1547,113 @@ class LocalSessionController:
 
     async def read_session(self, session_id: str) -> dict[str, object] | None:
         summary = await self.core.read_resumable_session(
-            session_id, memory_domain_id=self.workspace_input.memory_domain_id,
+            session_id,
+            memory_domain_id=self.workspace_input.memory_domain_id,
         )
-        return None if summary is None else self._summary_payload(summary, session_id in self._by_session)
+        return (
+            None
+            if summary is None
+            else self._summary_payload(summary, session_id in self._by_session)
+        )
 
     async def fork_conversation(
-        self, source_session_id: str, *, anchor_entry_id: str, child_session_id: str,
+        self,
+        source_session_id: str,
+        *,
+        anchor_entry_id: str,
+        child_session_id: str,
     ) -> dict[str, object]:
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Local Web application is draining")
-            task = asyncio.create_task(self._fork_owner(source_session_id, anchor_entry_id, child_session_id),
-                                       name=f"local-web-fork:{child_session_id}")
+            task = asyncio.create_task(
+                self._fork_owner(source_session_id, anchor_entry_id, child_session_id),
+                name=f"local-web-fork:{child_session_id}",
+            )
             self._forks.add(task)
             task.add_done_callback(self._forks.discard)
         # A disconnected browser must not cancel a commit or turn an open failure
         # into a false NOT_CREATED. Shutdown joins this same settlement owner.
         return await asyncio.shield(task)
 
-    async def _fork_owner(self, source_session_id: str, anchor_entry_id: str, child_session_id: str) -> dict[str, object]:
+    async def _fork_owner(
+        self, source_session_id: str, anchor_entry_id: str, child_session_id: str
+    ) -> dict[str, object]:
         creation = await self.core.fork_conversation(
-            source_session_id=source_session_id, anchor_entry_id=anchor_entry_id,
-            child_session_id=child_session_id, memory_domain_id=self.workspace_input.memory_domain_id,
+            source_session_id=source_session_id,
+            anchor_entry_id=anchor_entry_id,
+            child_session_id=child_session_id,
+            memory_domain_id=self.workspace_input.memory_domain_id,
         )
         if not creation.created:
-            return {"outcome": "NOT_CREATED", "child_session_id": child_session_id,
-                    "public_code": creation.public_code}
+            return {
+                "outcome": "NOT_CREATED",
+                "child_session_id": child_session_id,
+                "public_code": creation.public_code,
+            }
         try:
             await self.resume_session(child_session_id)
         except Exception as error:
-            return {"outcome": "CREATED_OPEN_DEFERRED", "child_session_id": child_session_id,
-                    "public_code": f"CHILD_OPEN_DEFERRED: {error}"}
+            return {
+                "outcome": "CREATED_OPEN_DEFERRED",
+                "child_session_id": child_session_id,
+                "public_code": f"CHILD_OPEN_DEFERRED: {error}",
+            }
         return {"outcome": "CREATED_AND_OPENED", "child_session_id": child_session_id}
 
-    async def resume_session(self, session_id: str) -> HostSessionHandle:
+    async def resume_session(
+        self,
+        session_id: str,
+        *,
+        no_live_observation: StableNoLiveHostObservation | None = None,
+    ) -> HostSessionHandle:
         if not session_id:
             raise ValueError("session_id is required")
+        summary = None
+        if no_live_observation is None:
+            summary = await self.core.read_resumable_session(
+                session_id,
+                memory_domain_id=self.workspace_input.memory_domain_id,
+            )
+            if summary is None:
+                raise KeyError(session_id)
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Local Web application is draining")
             live = self._by_session.get(session_id)
+            current = self._operations.get(session_id)
+            if isinstance(current, _Quarantined):
+                raise SessionControlRejected(
+                    current.public_code,
+                    "Session runtime is quarantined; restart Pulsara to continue.",
+                )
             if live is not None:
+                if no_live_observation is not None or current is not None:
+                    raise RuntimeError("Session has another current operation")
                 return live
-            task = self._resumes.get(session_id)
-            if task is None:
+            if isinstance(current, _ResumeInFlight):
+                if no_live_observation is not None:
+                    raise RuntimeError("runtime reopen observation raced with resume")
+                task = current.task
+            else:
+                if no_live_observation is not None:
+                    if (
+                        not isinstance(current, _RuntimeReopenInFlight)
+                        or no_live_observation.session_id != session_id
+                        or no_live_observation.operation_nonce
+                        != current.operation.operation_nonce
+                    ):
+                        raise RuntimeError("runtime reopen observation is not current")
+                    no_live_observation._consume(self)
+                else:
+                    if current is not None:
+                        raise RuntimeError("Session has another current operation")
+                    self._issue_no_live_observation_locked(session_id)._consume(self)
                 task = asyncio.create_task(
                     self._resume_owner(session_id),
                     name=f"local-web-resume:{session_id}",
                 )
-                self._resumes[session_id] = task
+                self._operations[session_id] = _ResumeInFlight(task)
         return await asyncio.shield(task)
 
     async def _resume_owner(self, session_id: str) -> HostSessionHandle:
@@ -1294,9 +1689,17 @@ class LocalSessionController:
                 async with self._lock:
                     if self._closing:
                         raise KernelHostCoreClosing("Local Web application is draining")
+                    current = self._operations.get(session_id)
+                    if (
+                        not isinstance(current, _ResumeInFlight)
+                        or current.task is not task
+                    ):
+                        raise RuntimeError("Session resume is no longer current")
                     raced = self._by_session.get(session_id)
-                    if raced is None:
-                        self._publish_locked(handle)
+                    if raced is not None:
+                        raise RuntimeError("Session resume raced with live publication")
+                    self._operations.pop(session_id, None)
+                    self._publish_locked(handle)
                 if raced is not None:
                     await self.core.close_session(
                         session.host_session_id, close_conversation=False
@@ -1310,12 +1713,30 @@ class LocalSessionController:
                 raise
         finally:
             async with self._lock:
-                if self._resumes.get(session_id) is task:
-                    self._resumes.pop(session_id, None)
+                current = self._operations.get(session_id)
+                if isinstance(current, _ResumeInFlight) and current.task is task:
+                    self._operations.pop(session_id, None)
+
+    def _issue_no_live_observation_locked(
+        self, session_id: str
+    ) -> StableNoLiveHostObservation:
+        if (
+            self._by_session.get(session_id) is not None
+            or self._operations.get(session_id) is not None
+        ):
+            raise RuntimeError("Session does not have a stable no-live state")
+        return StableNoLiveHostObservation(
+            session_id=session_id,
+            operation_nonce=f"no-live-host:{uuid4().hex}",
+            owner=self,
+            _seal=_NO_LIVE_HOST_SEAL,
+        )
 
     def _publish_locked(self, handle: HostSessionHandle) -> None:
         if handle.session_id in self._by_session:
             raise RuntimeError("canonical Session already has a live local owner")
+        if handle.session_id in self._operations:
+            raise RuntimeError("canonical Session has a current control operation")
         if handle.host_session_id in self._by_host:
             raise RuntimeError("HostSession identity collision")
         self._by_session[handle.session_id] = handle
@@ -1381,23 +1802,385 @@ class LocalSessionController:
             "reasoning_preference_reset": accepted != binding,
         }
 
-    async def close_session(self, session_id: str, *, close_conversation: bool) -> None:
+    async def prepare_raw_close(
+        self, session_id: str, *, close_conversation: bool
+    ) -> PreparedRawCloseOperation | None:
+        if close_conversation:
+            async with self._lock:
+                needs_resume = self._by_session.get(session_id) is None
+            if needs_resume:
+                await self.resume_session(session_id)
         async with self._lock:
-            handle = self._by_session.pop(session_id, None)
-            if handle is not None:
-                self._by_host.pop(handle.host_session_id, None)
-        if handle is None:
-            if close_conversation:
-                # Canonical close is only legal through a live writer owner.
-                handle = await self.resume_session(session_id)
-                async with self._lock:
-                    self._by_session.pop(session_id, None)
-                    self._by_host.pop(handle.host_session_id, None)
-            else:
-                return
-        await self.core.close_session(
-            handle.host_session_id, close_conversation=close_conversation
+            if self._closing:
+                raise KernelHostCoreClosing("Local Web application is draining")
+            current = self._operations.get(session_id)
+            if current is not None:
+                code = (
+                    current.public_code
+                    if isinstance(current, _Quarantined)
+                    else "SESSION_CONTROL_BUSY"
+                )
+                raise SessionControlRejected(
+                    code, "Session has another current operation"
+                )
+            handle = self._by_session.get(session_id)
+            if handle is None:
+                return None
+            operation = PreparedRawCloseOperation(
+                session_id=session_id,
+                handle=handle,
+                close_conversation=close_conversation,
+                operation_nonce=f"raw-close:{uuid4().hex}",
+                owner=self,
+                _seal=_RAW_CLOSE_OPERATION_SEAL,
+            )
+            self._operations[session_id] = _RawCloseInFlight(operation)
+            return operation
+
+    async def confirm_raw_close_operation(
+        self, operation: PreparedRawCloseOperation
+    ) -> None:
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                operation._owner is not self
+                or not isinstance(current, _RawCloseInFlight)
+                or current.operation is not operation
+                or self._by_session.get(operation.session_id) is not operation.handle
+            ):
+                raise SessionControlRejected(
+                    "RAW_CLOSE_NOT_CURRENT", "raw close operation is stale"
+                )
+
+    async def settle_raw_close(
+        self, session_id: str, *, operation: PreparedRawCloseOperation
+    ) -> None:
+        async with self._lock:
+            current = self._operations.get(session_id)
+            if (
+                not isinstance(current, _RawCloseInFlight)
+                or current.operation is not operation
+            ):
+                raise RuntimeError("raw close operation is stale")
+            if self._by_session.get(session_id) is not operation.handle:
+                raise RuntimeError("raw close lost its exact live Host")
+            self._by_session.pop(session_id, None)
+            self._by_host.pop(operation.handle.host_session_id, None)
+        try:
+            await self.core.close_session(
+                operation.handle.host_session_id,
+                close_conversation=operation.close_conversation,
+            )
+        except BaseException:
+            async with self._lock:
+                current = self._operations.get(session_id)
+                if (
+                    isinstance(current, _RawCloseInFlight)
+                    and current.operation is operation
+                ):
+                    self._operations[session_id] = _Quarantined(
+                        "SESSION_CLOSE_QUARANTINED"
+                    )
+            raise
+        async with self._lock:
+            current = self._operations.get(session_id)
+            if (
+                isinstance(current, _RawCloseInFlight)
+                and current.operation is operation
+            ):
+                current.physical_close_full = True
+
+    async def finalize_raw_close(
+        self,
+        operation: PreparedRawCloseOperation,
+        *,
+        bridge_settlement: object,
+        bridge_owner: object,
+    ) -> None:
+        from pulsara_agent.web_app.browser_bridge import BridgeSettlementFull
+
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                not isinstance(current, _RawCloseInFlight)
+                or current.operation is not operation
+                or not current.physical_close_full
+                or not isinstance(bridge_settlement, BridgeSettlementFull)
+                or bridge_settlement._owner is not bridge_owner
+                or bridge_settlement._operation is not operation
+            ):
+                raise RuntimeError("raw close finalization is stale")
+            self._operations.pop(operation.session_id, None)
+
+    async def abort_prepared_raw_close(
+        self, session_id: str, *, operation: PreparedRawCloseOperation
+    ) -> None:
+        async with self._lock:
+            current = self._operations.get(session_id)
+            if (
+                isinstance(current, _RawCloseInFlight)
+                and current.operation is operation
+                and not current.physical_close_full
+                and self._by_session.get(session_id) is operation.handle
+            ):
+                self._operations.pop(session_id, None)
+
+    async def quarantine_raw_close(
+        self, operation: PreparedRawCloseOperation, *, public_code: str
+    ) -> None:
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                isinstance(current, _RawCloseInFlight)
+                and current.operation is operation
+            ):
+                self._operations[operation.session_id] = _Quarantined(public_code)
+
+    async def prepare_runtime_reopen(self, session_id: str) -> RuntimeReopenOperation:
+        if not session_id:
+            raise ValueError("session_id is required")
+        summary = await self.core.read_resumable_session(
+            session_id,
+            memory_domain_id=self.workspace_input.memory_domain_id,
         )
+        if summary is None:
+            raise KeyError(session_id)
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Local Web application is draining")
+            current = self._operations.get(session_id)
+            if current is not None:
+                code = (
+                    current.public_code
+                    if isinstance(current, _Quarantined)
+                    else "RUNTIME_REOPEN_BUSY"
+                )
+                raise SessionControlRejected(
+                    code, "Session has another current operation"
+                )
+            handle = self._by_session.get(session_id)
+            operation: RuntimeReopenOperation
+            if handle is None:
+                observation = self._issue_no_live_observation_locked(session_id)
+                observation._consume(self)
+                operation = PreparedRuntimeResumeOperation(
+                    session_id=session_id,
+                    operation_nonce=f"runtime-resume:{uuid4().hex}",
+                    owner=self,
+                    _seal=_RUNTIME_REOPEN_OPERATION_SEAL,
+                )
+            else:
+                try:
+                    quiescence = await handle.session.prepare_safe_runtime_reopen()
+                except RuntimeError as exc:
+                    raise SessionControlRejected(
+                        "RUNTIME_REOPEN_BUSY",
+                        "Session still has accepted process-local work.",
+                    ) from exc
+                operation = PreparedRuntimeReopenOperation(
+                    session_id=session_id,
+                    old_handle=handle,
+                    operation_nonce=f"runtime-reopen:{uuid4().hex}",
+                    host_quiescence=quiescence,
+                    owner=self,
+                    _seal=_RUNTIME_REOPEN_OPERATION_SEAL,
+                )
+            self._operations[session_id] = _RuntimeReopenInFlight(operation)
+            return operation
+
+    async def confirm_runtime_reopen_operation(
+        self, operation: RuntimeReopenOperation
+    ) -> None:
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                operation._owner is not self
+                or not isinstance(current, _RuntimeReopenInFlight)
+                or current.operation is not operation
+                or (
+                    isinstance(operation, PreparedRuntimeReopenOperation)
+                    and self._by_session.get(operation.session_id)
+                    is not operation.old_handle
+                )
+                or (
+                    isinstance(operation, PreparedRuntimeResumeOperation)
+                    and self._by_session.get(operation.session_id) is not None
+                )
+            ):
+                raise SessionControlRejected(
+                    "RUNTIME_REOPEN_NOT_CURRENT",
+                    "runtime-reopen operation is stale",
+                )
+
+    async def abort_runtime_reopen(
+        self, operation: RuntimeReopenOperation, *, reason: str
+    ) -> None:
+        del reason
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                not isinstance(current, _RuntimeReopenInFlight)
+                or current.operation is not operation
+            ):
+                raise RuntimeError("runtime-reopen operation is stale")
+            if isinstance(operation, PreparedRuntimeReopenOperation):
+                if (
+                    self._by_session.get(operation.session_id)
+                    is not operation.old_handle
+                ):
+                    raise RuntimeError("runtime-reopen old Host is no longer published")
+                await operation.old_handle.session.abort_safe_runtime_reopen(
+                    operation.host_quiescence
+                )
+            self._operations.pop(operation.session_id, None)
+
+    async def prepare_abort_runtime_reopen(
+        self, operation: RuntimeReopenOperation
+    ) -> None:
+        """Freeze cancellation before old-Host unpublication; keep both gates."""
+
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                not isinstance(current, _RuntimeReopenInFlight)
+                or current.operation is not operation
+                or current.abort_requested
+                or (
+                    isinstance(operation, PreparedRuntimeReopenOperation)
+                    and self._by_session.get(operation.session_id)
+                    is not operation.old_handle
+                )
+                or (
+                    isinstance(operation, PreparedRuntimeResumeOperation)
+                    and self._by_session.get(operation.session_id) is not None
+                )
+            ):
+                raise RuntimeError("runtime-reopen abort is stale")
+            current.abort_requested = True
+
+    async def finalize_abort_runtime_reopen(
+        self,
+        operation: RuntimeReopenOperation,
+        *,
+        bridge_settlement: object,
+        bridge_owner: object,
+    ) -> None:
+        from pulsara_agent.web_app.browser_bridge import BridgeSettlementFull
+
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                not isinstance(current, _RuntimeReopenInFlight)
+                or current.operation is not operation
+                or not current.abort_requested
+                or not isinstance(bridge_settlement, BridgeSettlementFull)
+                or bridge_settlement._owner is not bridge_owner
+                or bridge_settlement._operation is not operation
+            ):
+                raise RuntimeError("runtime-reopen abort finalization is stale")
+            if isinstance(operation, PreparedRuntimeReopenOperation):
+                if (
+                    self._by_session.get(operation.session_id)
+                    is not operation.old_handle
+                ):
+                    raise RuntimeError("runtime-reopen abort lost its old Host")
+                await operation.old_handle.session.abort_safe_runtime_reopen(
+                    operation.host_quiescence
+                )
+            elif self._by_session.get(operation.session_id) is not None:
+                raise RuntimeError("runtime-resume abort gained a live Host")
+            self._operations.pop(operation.session_id, None)
+
+    async def prepare_runtime_reopen_close(
+        self, operation: RuntimeReopenOperation
+    ) -> RuntimeReopenHostOutcome:
+        if operation._owner is not self:
+            raise RuntimeError("runtime-reopen operation belongs to another owner")
+        session_id = operation.session_id
+        if isinstance(operation, PreparedRuntimeResumeOperation):
+            async with self._lock:
+                current = self._operations.get(session_id)
+                if (
+                    not isinstance(current, _RuntimeReopenInFlight)
+                    or current.operation is not operation
+                    or current.abort_requested
+                    or self._by_session.get(session_id) is not None
+                ):
+                    raise RuntimeError("runtime-resume operation is stale")
+            return NoOldHostReadyToResume(operation, _seal=_RUNTIME_REOPEN_OUTCOME_SEAL)
+
+        async with self._lock:
+            current = self._operations.get(session_id)
+            if (
+                not isinstance(current, _RuntimeReopenInFlight)
+                or current.operation is not operation
+                or current.abort_requested
+                or self._by_session.get(session_id) is not operation.old_handle
+            ):
+                raise RuntimeError("runtime-reopen operation is stale")
+            await operation.old_handle.session.commit_safe_runtime_reopen(
+                operation.host_quiescence
+            )
+            self._by_session.pop(session_id, None)
+            self._by_host.pop(operation.old_handle.host_session_id, None)
+        try:
+            await self.core.close_session(
+                operation.old_handle.host_session_id,
+                close_conversation=False,
+            )
+        except BaseException:
+            await self.quarantine_runtime_reopen(
+                operation, public_code="RUNTIME_REOPEN_OLD_HOST_CLOSE_QUARANTINED"
+            )
+            return OldHostCloseQuarantined(
+                operation,
+                public_code="RUNTIME_REOPEN_OLD_HOST_CLOSE_QUARANTINED",
+                _seal=_RUNTIME_REOPEN_OUTCOME_SEAL,
+            )
+        return OldHostCloseFull(operation, _seal=_RUNTIME_REOPEN_OUTCOME_SEAL)
+
+    async def finalize_runtime_reopen(
+        self,
+        operation: RuntimeReopenOperation,
+        *,
+        host_outcome: RuntimeReopenHostOutcome,
+        bridge_settlement: object,
+        bridge_owner: object,
+    ) -> StableNoLiveHostObservation:
+        from pulsara_agent.web_app.browser_bridge import BridgeSettlementFull
+
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                not isinstance(current, _RuntimeReopenInFlight)
+                or current.operation is not operation
+                or current.abort_requested
+                or host_outcome.operation is not operation
+                or isinstance(host_outcome, OldHostCloseQuarantined)
+                or not isinstance(bridge_settlement, BridgeSettlementFull)
+                or bridge_settlement._owner is not bridge_owner
+                or bridge_settlement._operation is not operation
+                or bridge_settlement.session_id != operation.session_id
+                or self._by_session.get(operation.session_id) is not None
+            ):
+                raise RuntimeError("runtime-reopen finalization is stale")
+            return StableNoLiveHostObservation(
+                session_id=operation.session_id,
+                operation_nonce=operation.operation_nonce,
+                owner=self,
+                _seal=_NO_LIVE_HOST_SEAL,
+            )
+
+    async def quarantine_runtime_reopen(
+        self, operation: RuntimeReopenOperation, *, public_code: str
+    ) -> None:
+        async with self._lock:
+            current = self._operations.get(operation.session_id)
+            if (
+                isinstance(current, _RuntimeReopenInFlight)
+                and current.operation is operation
+            ):
+                self._operations[operation.session_id] = _Quarantined(public_code)
 
     async def aclose(self) -> None:
         task = self._close_task
@@ -1411,7 +2194,14 @@ class LocalSessionController:
     async def _close_owner(self) -> None:
         async with self._lock:
             self._closing = True
-            resumes = (*self._resumes.values(), *self._forks)
+            resumes = (
+                *(
+                    operation.task
+                    for operation in self._operations.values()
+                    if isinstance(operation, _ResumeInFlight)
+                ),
+                *self._forks,
+            )
         if resumes:
             await asyncio.gather(
                 *(asyncio.shield(task) for task in resumes), return_exceptions=True
@@ -1420,6 +2210,7 @@ class LocalSessionController:
             handles = tuple(self._by_session.values())
             self._by_session.clear()
             self._by_host.clear()
+            self._operations.clear()
         for handle in handles:
             await self.core.close_session(
                 handle.host_session_id, close_conversation=False
@@ -1652,7 +2443,9 @@ def _inspect_workspace_skills(workspace_root: Path) -> dict[str, object]:
         items.append(
             {
                 "id": f"{root}:{item.name}",
-                "removal_identity": _skill_removal_identity(item.path, LocalSkillInstallScope.WORKSPACE, workspace_root),
+                "removal_identity": _skill_removal_identity(
+                    item.path, LocalSkillInstallScope.WORKSPACE, workspace_root
+                ),
                 "name": item.name,
                 "description": item.description,
                 "location": item.location,
@@ -1756,7 +2549,9 @@ def _user_capability_payload(
                 "kind": "stdio",
                 "summary": config.transport.command,
             }
-        elif isinstance(config.transport, (StreamableHttpTransportConfig, LegacySseTransportConfig)):
+        elif isinstance(
+            config.transport, (StreamableHttpTransportConfig, LegacySseTransportConfig)
+        ):
             transport = {
                 "kind": "http",
                 "summary": config.transport.endpoint,
@@ -1811,6 +2606,7 @@ def _user_capability_payload(
 
 def _user_plugins_payload(inspection: object, secret_resolver) -> dict[str, object]:
     from pulsara_agent.plugins.mcp_connection import connection_review, review_to_dict
+
     if isinstance(inspection, PluginInspectionAbort):
         return {
             "status": "attention",
@@ -1845,8 +2641,14 @@ def _user_plugins_payload(inspection: object, secret_resolver) -> dict[str, obje
                 "effective_skill_names": list(item.effective_skill_names),
                 "effective_mcp_server_ids": list(item.effective_mcp_server_ids),
                 "mcp_connections": _plugin_connection_editors(item),
-                "connection_review": review_to_dict(connection_review(item.mcp_connection_overlays, secret_resolver,
-                    servers=item.summary.mcp.mcp_servers, identity=item.identity)),
+                "connection_review": review_to_dict(
+                    connection_review(
+                        item.mcp_connection_overlays,
+                        secret_resolver,
+                        servers=item.summary.mcp.mcp_servers,
+                        identity=item.identity,
+                    )
+                ),
                 "details": [_diagnostic_message(value) for value in item.diagnostics],
             }
         )
@@ -1858,18 +2660,42 @@ def _user_plugins_payload(inspection: object, secret_resolver) -> dict[str, obje
 
 
 def _plugin_connection_editors(instance):
-    from pulsara_agent.plugins.mcp_connection import connection_editor_definition, overlay_to_dict, plugin_connection_owner
+    from pulsara_agent.plugins.mcp_connection import (
+        connection_editor_definition,
+        overlay_to_dict,
+        plugin_connection_owner,
+    )
     from dataclasses import asdict
 
     result = []
     for server in instance.summary.mcp.mcp_servers:
-        overlay = next((item for item in instance.mcp_connection_overlays if item.local_server_id == server.local_server_id), None)
-        defaults, effective = connection_editor_definition(server, overlay,
-            owner=plugin_connection_owner(instance.identity, server.local_server_id))
-        result.append({"server_id": server.local_server_id, "defaults": defaults, "config": effective,
-                       "connection_inputs": [asdict(value) for value in server.connection_inputs.inputs],
-                       "overlay": overlay_to_dict(overlay) if overlay is not None else None,
-                       "credential_owner": asdict(plugin_connection_owner(instance.identity, server.local_server_id))})
+        overlay = next(
+            (
+                item
+                for item in instance.mcp_connection_overlays
+                if item.local_server_id == server.local_server_id
+            ),
+            None,
+        )
+        defaults, effective = connection_editor_definition(
+            server,
+            overlay,
+            owner=plugin_connection_owner(instance.identity, server.local_server_id),
+        )
+        result.append(
+            {
+                "server_id": server.local_server_id,
+                "defaults": defaults,
+                "config": effective,
+                "connection_inputs": [
+                    asdict(value) for value in server.connection_inputs.inputs
+                ],
+                "overlay": overlay_to_dict(overlay) if overlay is not None else None,
+                "credential_owner": asdict(
+                    plugin_connection_owner(instance.identity, server.local_server_id)
+                ),
+            }
+        )
     return result
 
 
@@ -1902,7 +2728,9 @@ def _plugin_install_operation(outcome: object) -> dict[str, object]:
             ),
             "plugin_id": outcome.identity.plugin_id,
             "cleanup_attention": installed and outcome.cleanup_attention,
-            "details": [_diagnostic_message(item) for item in outcome.diagnostics] if installed else [],
+            "details": [_diagnostic_message(item) for item in outcome.diagnostics]
+            if installed
+            else [],
         }
     if isinstance(outcome, FailedPluginInstallOutcome):
         return {
@@ -1936,7 +2764,9 @@ def _plugin_removal_operation(outcome: object) -> dict[str, object]:
         return {
             "status": outcome.disposition.value,
             "success": True,
-            "message": "插件已移除；部分本机凭据清理需要检查。" if outcome.cleanup_attention else "插件已移除。",
+            "message": "插件已移除；部分本机凭据清理需要检查。"
+            if outcome.cleanup_attention
+            else "插件已移除。",
             "cleanup_attention": outcome.cleanup_attention,
         }
     if isinstance(outcome, FailedPluginRemovalOutcome):
@@ -1956,7 +2786,9 @@ def _mcp_transport_payload(config: McpServerConfig) -> dict[str, str]:
             "summary": config.transport.command,
             "detail": shlex.join((config.transport.command, *config.transport.args)),
         }
-    if isinstance(config.transport, (StreamableHttpTransportConfig, LegacySseTransportConfig)):
+    if isinstance(
+        config.transport, (StreamableHttpTransportConfig, LegacySseTransportConfig)
+    ):
         return {
             "kind": "http",
             "summary": config.transport.endpoint,
@@ -2495,9 +3327,7 @@ def _decode_task_group_cursor(
     ):
         raise ValueError("task group cursor is invalid")
     try:
-        first_accepted_at = datetime.fromisoformat(
-            str(value["first_accepted_at"])
-        )
+        first_accepted_at = datetime.fromisoformat(str(value["first_accepted_at"]))
     except ValueError as exc:
         raise ValueError("task group cursor is invalid") from exc
     if first_accepted_at.tzinfo is None:
@@ -2523,9 +3353,7 @@ def _encode_task_activity_cursor(
     return base64.urlsafe_b64encode(body).rstrip(b"=").decode("ascii")
 
 
-def _decode_task_activity_cursor(
-    cursor: str, *, session_id: str, task_id: str
-) -> int:
+def _decode_task_activity_cursor(cursor: str, *, session_id: str, task_id: str) -> int:
     if not cursor or len(cursor.encode("utf-8")) > _TASK_CURSOR_MAXIMUM_BYTES:
         raise ValueError("task activity cursor is invalid")
     try:

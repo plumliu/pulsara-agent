@@ -18,9 +18,7 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
 )
 from pulsara_agent.llm.provider_replay import (
-    ProviderReplayDisposition,
     build_prepared_durable_provider_assistant_replay,
-    build_provider_replay_target_compatibility,
 )
 from pulsara_agent.llm.request import (
     provider_assistant_public_projection_fingerprint,
@@ -34,6 +32,7 @@ from tests.support.model_config import (
     start_test_root_turn,
     test_model_binding,
     test_model_runtime,
+    build_test_provider_replay_target,
 )
 
 
@@ -76,10 +75,7 @@ def _native_candidate(*, session_id: str, workspace_id: str, entry_id: str):
         }
     )
     assert isinstance(frozen, FrozenJsonObjectFact)
-    target = build_provider_replay_target_compatibility(
-        wire_api="openai_chat_completions",
-        endpoint_identity_fingerprint="sha256:" + "1" * 64,
-        normalized_model_identifier="test-model",
+    target = build_test_provider_replay_target(
         transport_binding_id="openai_chat_completions",
     )
     return build_prepared_durable_provider_assistant_replay(
@@ -112,8 +108,6 @@ def _commit_arguments(repository, lease, *, workspace_id: str):
         "entry_id": entry_id,
         "parent_content": content,
         "blocks": blocks,
-        "provider_wire_api": "openai_chat_completions",
-        "provider_replay_disposition": ProviderReplayDisposition.NATIVE_REPLAY,
         "provider_replay": replay,
         "complete_turn": True,
         "occurred_at": occurred_at,
@@ -161,20 +155,12 @@ def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
             lease.guard,
             **{
                 **arguments,
-                "provider_replay_disposition": (
-                    ProviderReplayDisposition.PUBLIC_SEMANTIC_ONLY
-                ),
                 "provider_replay": None,
             },
             deadline_monotonic=monotonic() + 30,
         )
 
     for statement, values in (
-        (
-            "UPDATE pulsara_v3.transcript_entries SET provider_replay_fragment_id = NULL "
-            "WHERE session_id = %s AND id = %s",
-            (session_id, arguments["entry_id"]),
-        ),
         (
             "UPDATE pulsara_v3.provider_assistant_replay_fragments "
             "SET payload_digest = %s WHERE session_id = %s",
@@ -215,17 +201,19 @@ def test_round5a2_deferred_fk_rejects_replay_without_assistant(
                 """
                 INSERT INTO pulsara_v3.provider_assistant_replay_fragments (
                     id, session_id, workspace_id, assistant_entry_id,
+                    assistant_entry_kind,
                     wire_api, codec_kind, provider_replay_contract_fingerprint,
                     replay_target_fingerprint, public_projection_fingerprint,
                     payload_bytes, payload_digest, payload_size, item_count,
                     fragment_fingerprint
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     candidate.replay_id,
                     candidate.session_id,
                     candidate.workspace_id,
                     candidate.assistant_entry_id,
+                    "ASSISTANT_MESSAGE",
                     candidate.wire_api,
                     candidate.codec_kind.value,
                     candidate.provider_replay_contract_fingerprint,

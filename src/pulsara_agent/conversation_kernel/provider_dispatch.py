@@ -40,8 +40,9 @@ from pulsara_agent.conversation_kernel.compaction.retained_skill import (
     remove_full_tail_duplicates,
 )
 from pulsara_agent.conversation_kernel.cold_epoch import (
+    AdoptedCompactionContinuationSeed,
     CanonicalColdContinuationSeed,
-    CompactionContinuationSeed,
+    CompactionDryProjectionSeed,
     FrozenColdConversationSeed,
     KernelColdEpochInputAssembler,
     PreparedColdEpochSemanticAssembly,
@@ -95,6 +96,13 @@ from pulsara_agent.llm.request import (
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall, ResolvedModelTarget
 from pulsara_agent.llm.model_connections import ModelCallBinding
+from pulsara_agent.llm.model_target import default_reasoning_selection
+from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
+from pulsara_agent.llm.frozen_target import (
+    FrozenEpochModelCallTarget,
+    FrozenEpochModelTargetBundle,
+)
 from pulsara_agent.llm.provider_replay import (
     ProviderReplayTargetCompatibilityFact,
     build_provider_replay_target_compatibility,
@@ -140,6 +148,7 @@ from pulsara_agent.conversation_kernel.reader import (
 from pulsara_agent.conversation_kernel.safe_point import (
     PreparedProviderInputHandle,
     ProviderSafePointCoordinator,
+    SealedProviderInputPreparationBasis,
 )
 from pulsara_agent.conversation_kernel.steer import (
     MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES,
@@ -163,10 +172,7 @@ from pulsara_agent.conversation_kernel.steer_consumption import (
     PreparedSteerPlanStale,
     SteerConsumptionCoordinator,
 )
-from pulsara_agent.model_input.compiler import (
-    COMPILER_CONTRACT_VERSION,
-    StructuredModelInputCompiler,
-)
+from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.hooks.context import HookContextReservation
 from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
@@ -188,6 +194,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenModelToolSurface,
     PreparedProviderInputCut,
     FrozenCompiledModelInput,
+    FrozenModelInputSemanticProjection,
     ProviderWireSemanticInput,
     ModelInputCompileFailureKind,
     ModelInputCompileBinding,
@@ -203,17 +210,19 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.model_input.continuity import (
     NewTriggerAnchor,
+    FrozenDirectSwitchAdmission,
     FrozenProviderInputAppendCompileResult,
     FrozenProviderInputAppendPlanningInput,
     FrozenProviderInputAppendSemanticProjection,
     FrozenProviderInputEpochView,
+    InstalledEpochAppend,
     NoNewTriggerAnchor,
-    PROVIDER_MESSAGE_LOWERING_CONTRACT,
     PreparedProviderInputAppendCandidate,
     ProcessLocalCanonicalFrontier,
     ProcessLocalProviderInputInstallPermit,
     ProviderInputContinuityScope,
-    ProviderInputEpochCompatibility,
+    ProviderInputEpochTransition,
+    _issue_frozen_direct_switch_admission,
     provider_input_logical_bytes,
 )
 
@@ -244,6 +253,12 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 
 
 class KernelModelPort(Protocol):
+    @property
+    def model_runtime(self) -> ModelRuntime: ...
+
+    @property
+    def transport_timeout_policy(self) -> OpenAITransportTimeoutPolicy: ...
+
     def prepare_target(
         self, request: KernelModelTargetPreparationRequest
     ) -> PreparedKernelModelTarget: ...
@@ -254,6 +269,13 @@ class KernelModelPort(Protocol):
         *,
         target: ResolvedModelTarget,
         binding: ModelCallBinding,
+    ) -> PreparedKernelModelTarget: ...
+
+    def prepare_frozen_epoch_target(
+        self,
+        request: KernelModelTargetPreparationRequest,
+        *,
+        bundle: FrozenEpochModelTargetBundle,
     ) -> PreparedKernelModelTarget: ...
 
     def freeze_native_tool_eligibility(
@@ -490,8 +512,6 @@ class PreparedWireMeasurementDecision:
             != compiled_message_placements_fingerprint(
                 candidate.semantic_input.message_placements
             )
-            or plan.resolved_target_semantic_fingerprint
-            != candidate.call.target.fact.target_fingerprint
             or plan.route_wire_profile_fingerprint
             != provider_wire_profile_fingerprint(candidate.call)
             or plan.materialization.tool_items
@@ -550,18 +570,57 @@ class PreparedExecutableProviderWireInput:
 class ProviderDispatchExecutionAuthority:
     """One-shot owner of the physical resources for one provider dispatch."""
 
-    __slots__ = ("_handle", "_surface_borrow", "_lock")
+    __slots__ = (
+        "_basis",
+        "_handle",
+        "_installable",
+        "_surface_borrow",
+        "_safe_point",
+        "_lock",
+    )
 
     def __init__(
         self,
         handle: PreparedProviderInputHandle,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
+        *,
+        safe_point: ProviderSafePointCoordinator,
+        canonical_read: FrozenCanonicalProviderDispatchRead,
+        capability_dispatch_cut: FrozenCapabilityDispatchCut,
+        call_target: FrozenEpochModelCallTarget,
+        basis_canonical_read: FrozenCanonicalProviderDispatchRead | None = None,
+        installable: bool = True,
     ) -> None:
         if handle is None or surface_borrow is None:
             raise ValueError("provider execution authority is incomplete")
         self._handle: PreparedProviderInputHandle | None = handle
         self._surface_borrow: ProcessLocalToolSurfaceBorrow | None = surface_borrow
+        self._safe_point = safe_point
+        self._installable = installable
+        observed_read = (
+            canonical_read if basis_canonical_read is None else basis_canonical_read
+        )
+        canonical_observation = safe_point.issue_canonical_dispatch_observation(
+            handle=handle,
+            canonical_read=observed_read,
+        )
+        capability_observation = safe_point.issue_capability_dispatch_observation(
+            handle=handle,
+            capability_dispatch_cut=capability_dispatch_cut,
+            prepared_surface=surface_borrow.prepared,
+            surface_borrow=surface_borrow,
+        )
+        self._basis = safe_point.seal_provider_input_preparation_basis(
+            handle=handle,
+            canonical_observation=canonical_observation,
+            capability_observation=capability_observation,
+            call_target=call_target,
+        )
         self._lock = Lock()
+
+    @property
+    def basis(self) -> SealedProviderInputPreparationBasis:
+        return self._basis
 
     @property
     def cut(self) -> PreparedProviderInputCut:
@@ -573,13 +632,18 @@ class ProviderDispatchExecutionAuthority:
 
     def require_for_install(
         self,
-    ) -> tuple[PreparedProviderInputHandle, ProcessLocalToolSurfaceBorrow]:
+    ) -> tuple[
+        SealedProviderInputPreparationBasis,
+        PreparedProviderInputHandle,
+        ProcessLocalToolSurfaceBorrow,
+    ]:
         with self._lock:
             handle = self._handle
             borrow = self._surface_borrow
-        if handle is None or borrow is None:
+            installable = self._installable
+        if handle is None or borrow is None or not installable:
             raise RuntimeError("provider execution authority is already consumed")
-        return handle, borrow
+        return self._basis, handle, borrow
 
     def close(self) -> None:
         with self._lock:
@@ -590,6 +654,7 @@ class ProviderDispatchExecutionAuthority:
         if handle is None or borrow is None:
             raise RuntimeError("provider execution authority is already consumed")
         try:
+            self._safe_point.revoke_provider_input_preparation_basis(self._basis)
             handle.close()
         finally:
             borrow.close()
@@ -604,6 +669,7 @@ class ProviderDispatchExecutionAuthority:
             self._surface_borrow = None
         if handle is None or borrow is None:
             raise RuntimeError("provider execution authority is already consumed")
+        self._safe_point.revoke_provider_input_preparation_basis(self._basis)
         borrow.close()
         return handle
 
@@ -618,6 +684,7 @@ class ProviderDispatchExecutionAuthority:
         if handle is None or borrow is None:
             raise RuntimeError("provider execution authority is already consumed")
         try:
+            self._safe_point.revoke_provider_input_preparation_basis(self._basis)
             handle.close()
         except BaseException:
             borrow.close()
@@ -625,9 +692,124 @@ class ProviderDispatchExecutionAuthority:
         return borrow
 
 
+class CompactionDryResourceAuthority:
+    """Own resources for one pre-adoption dry projection, never installation."""
+
+    __slots__ = (
+        "_basis",
+        "_handle",
+        "_continuity",
+        "_planning",
+        "_abort_planning",
+        "_surface_borrow",
+        "_safe_point",
+        "_lock",
+    )
+
+    def __init__(
+        self,
+        handle: PreparedProviderInputHandle,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        *,
+        safe_point: ProviderSafePointCoordinator,
+        source_read: FrozenCanonicalProviderDispatchRead,
+        capability_dispatch_cut: FrozenCapabilityDispatchCut,
+        call_target: FrozenEpochModelCallTarget,
+        continuity: HostProviderInputContinuityOwner,
+        planning: FrozenProviderInputAppendPlanningInput,
+    ) -> None:
+        self._handle: PreparedProviderInputHandle | None = handle
+        self._continuity = continuity
+        self._planning = planning
+        self._abort_planning = True
+        self._surface_borrow: ProcessLocalToolSurfaceBorrow | None = surface_borrow
+        self._safe_point = safe_point
+        canonical_observation = safe_point.issue_canonical_dispatch_observation(
+            handle=handle,
+            canonical_read=source_read,
+        )
+        capability_observation = safe_point.issue_capability_dispatch_observation(
+            handle=handle,
+            capability_dispatch_cut=capability_dispatch_cut,
+            prepared_surface=surface_borrow.prepared,
+            surface_borrow=surface_borrow,
+        )
+        self._basis = safe_point.seal_provider_input_preparation_basis(
+            handle=handle,
+            canonical_observation=canonical_observation,
+            capability_observation=capability_observation,
+            call_target=call_target,
+        )
+        self._lock = Lock()
+
+    def begin_empty_adoption(self) -> None:
+        with self._lock:
+            if self._handle is None or not self._abort_planning:
+                raise RuntimeError("compaction dry resources are already consumed")
+            self._abort_planning = False
+
+    def restore_empty_adoption_abort(self) -> None:
+        with self._lock:
+            if self._handle is None or self._abort_planning:
+                raise RuntimeError("compaction dry resources cannot be restored")
+            self._abort_planning = True
+
+    def _abort_source_planning_if_owned(self) -> None:
+        with self._lock:
+            abort = self._abort_planning
+            self._abort_planning = False
+        if abort:
+            self._continuity.abort_planning(self._planning)
+
+    def require_for_empty_adoption(
+        self,
+    ) -> tuple[SealedProviderInputPreparationBasis, PreparedProviderInputHandle]:
+        with self._lock:
+            handle = self._handle
+            borrow = self._surface_borrow
+        if handle is None or borrow is None:
+            raise RuntimeError("compaction dry resources are already consumed")
+        return self._basis, handle
+
+    def close(self) -> None:
+        with self._lock:
+            handle = self._handle
+            borrow = self._surface_borrow
+            self._handle = None
+            self._surface_borrow = None
+        if handle is None or borrow is None:
+            raise RuntimeError("compaction dry resources are already consumed")
+        try:
+            self._safe_point.revoke_provider_input_preparation_basis(self._basis)
+            handle.close()
+        finally:
+            try:
+                borrow.close()
+            finally:
+                self._abort_source_planning_if_owned()
+
+    def take_handle_for_rotation(self) -> PreparedProviderInputHandle:
+        with self._lock:
+            handle = self._handle
+            borrow = self._surface_borrow
+            self._handle = None
+            self._surface_borrow = None
+        if handle is None or borrow is None:
+            raise RuntimeError("compaction dry resources are already consumed")
+        self._safe_point.revoke_provider_input_preparation_basis(self._basis)
+        try:
+            borrow.close()
+        finally:
+            self._abort_source_planning_if_owned()
+        return handle
+
+
 @dataclass(slots=True)
 class PreparedProviderDispatch:
     _execution_authority: ProviderDispatchExecutionAuthority | None = dataclass_field(
+        repr=False, compare=False
+    )
+    _continuity_owner: HostProviderInputContinuityOwner = dataclass_field(
         repr=False, compare=False
     )
     canonical_read: FrozenCanonicalProviderDispatchRead
@@ -639,6 +821,9 @@ class PreparedProviderDispatch:
     sources: CollectedContextSources
     append_result: FrozenProviderInputAppendCompileResult
     memory_context: FrozenModelCallMemoryContext
+    direct_switch_admission: FrozenDirectSwitchAdmission | None = dataclass_field(
+        default=None, repr=False
+    )
     compaction_headroom_preflight: FrozenCompactionHeadroomPreflight | None = (
         dataclass_field(default=None, repr=False)
     )
@@ -674,6 +859,17 @@ class PreparedProviderDispatch:
             != self.canonical_facts.canonical_input.identity
             or self.append_result.compiled_input.compile_binding_fingerprint
             != self.prepared_call.compile_binding.binding_fingerprint
+            or (
+                self.direct_switch_admission is not None
+                and (
+                    self.direct_switch_admission.destination
+                    != self.prepared_call.epoch_call_target
+                    or self.direct_switch_admission.semantic_projection
+                    != _semantic_projection_from_compiled(
+                        self.append_result.compiled_input
+                    )
+                )
+            )
         ):
             raise ValueError("prepared provider dispatch does not exact-join")
 
@@ -708,7 +904,11 @@ class PreparedProviderDispatch:
 
     def claim_install_authority(
         self,
-    ) -> tuple[PreparedProviderInputHandle, ProcessLocalToolSurfaceBorrow]:
+    ) -> tuple[
+        SealedProviderInputPreparationBasis,
+        PreparedProviderInputHandle,
+        ProcessLocalToolSurfaceBorrow,
+    ]:
         with self._authority_lock:
             authority = self._execution_authority
             if authority is None:
@@ -717,6 +917,14 @@ class PreparedProviderDispatch:
                 raise RuntimeError("provider dispatch install is already consumed")
             self._install_started = True
         return authority.require_for_install()
+
+    @property
+    def preparation_basis(self) -> SealedProviderInputPreparationBasis:
+        with self._authority_lock:
+            authority = self._execution_authority
+        if authority is None:
+            raise RuntimeError("provider dispatch execution authority is consumed")
+        return authority.basis
 
     def finish_model_operation(self) -> ProcessLocalToolSurfaceBorrow:
         authority = self.take_execution_authority()
@@ -737,7 +945,11 @@ class PreparedProviderDispatch:
         try:
             authority.close()
         finally:
-            self.retire_hook_context_reservation()
+            try:
+                if not self._installed_sealed:
+                    self._continuity_owner.abort_planning(self.planning)
+            finally:
+                self.retire_hook_context_reservation()
 
     def close_for_canonical_replan(self) -> None:
         # HOOK_CONTEXT is one-shot advisory input.  Once a planning cut
@@ -774,6 +986,9 @@ class PreparedProspectiveRootDispatch:
     """Fully measured ROOT input whose canonical USER row is not published yet."""
 
     admission: PreparedRootProviderInputAdmission
+    _continuity_owner: HostProviderInputContinuityOwner = dataclass_field(
+        repr=False, compare=False
+    )
     prepared_target: PreparedKernelModelTarget = dataclass_field(repr=False)
     prepared_call: PreparedKernelModelCall = dataclass_field(repr=False)
     capability_dispatch_cut: FrozenCapabilityDispatchCut = dataclass_field(repr=False)
@@ -863,13 +1078,42 @@ class PreparedProspectiveRootDispatch:
                 )
             self._model_switch_tier = tier
 
+    def authorize_adopted_compaction_seed(
+        self, seed: AdoptedCompactionContinuationSeed
+    ) -> None:
+        """Replace the pre-adoption dry marker with its post-FULL authority."""
+
+        with self._lock:
+            decision = self._wire_decision
+            cold = self.cold_semantic
+            if (
+                self._surface_borrow is None
+                or decision is None
+                or cold is None
+                or not isinstance(cold.seed, CompactionDryProjectionSeed)
+                or seed.dispatch_read != self.admission.canonical_read
+            ):
+                raise RuntimeError(
+                    "prospective ROOT compaction authority does not exact-join"
+                )
+            candidate = decision.candidate
+            if not isinstance(candidate, PreparedProviderWireCandidate):
+                raise RuntimeError("prospective ROOT wire candidate is not concrete")
+            adopted_cold = replace(cold, seed=seed)
+            adopted_candidate = replace(candidate, cold_semantic=adopted_cold)
+            self.cold_semantic = adopted_cold
+            self._wire_decision = replace(decision, candidate=adopted_candidate)
+
     def close(self) -> None:
         borrow, reservation, _decision = self.take_resources()
         try:
             borrow.close()
         finally:
-            if reservation is not None:
-                reservation.retire()
+            try:
+                if reservation is not None:
+                    reservation.retire()
+            finally:
+                self._continuity_owner.abort_planning(self.planning)
 
 
 @dataclass(slots=True)
@@ -877,6 +1121,9 @@ class PreparedProspectiveRootCandidateFamily:
     """One frozen new-ROOT physical/source basis for snapshot variants."""
 
     first_candidate: PreparedRootProviderInputCandidate = dataclass_field(repr=False)
+    _continuity_owner: HostProviderInputContinuityOwner = dataclass_field(
+        repr=False, compare=False
+    )
     first_candidate_read: FrozenCanonicalProviderDispatchRead = dataclass_field(
         repr=False
     )
@@ -902,6 +1149,9 @@ class PreparedProspectiveRootCandidateFamily:
     _resolved_sources: CollectedContextSources | None = dataclass_field(
         repr=False, compare=False
     )
+    compaction_seed: (
+        AdoptedCompactionContinuationSeed | CompactionDryProjectionSeed | None
+    ) = dataclass_field(default=None, repr=False)
     _surface_borrow: ProcessLocalToolSurfaceBorrow | None = dataclass_field(
         default=None, repr=False, compare=False
     )
@@ -925,8 +1175,7 @@ class PreparedProspectiveRootCandidateFamily:
             or self.tool_exposure_plan.dispatch_view is not self.tool_view
             or self.non_trigger_sources.tool_exposure_plan != self.tool_exposure_plan
             or self.non_trigger_sources.skill_dispatch_view != self.skill_view
-            or (self.preference_source is None)
-            != (self.trigger_disposition is None)
+            or (self.preference_source is None) != (self.trigger_disposition is None)
             or (self._resolved_sources is None) != (self.preference_source is not None)
             or (self.write_hint and self.preference_source is None)
         ):
@@ -972,8 +1221,11 @@ class PreparedProspectiveRootCandidateFamily:
         try:
             borrow.close()
         finally:
-            if reservation is not None:
-                reservation.retire()
+            try:
+                if reservation is not None:
+                    reservation.retire()
+            finally:
+                self._continuity_owner.abort_planning(self.planning_basis)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1076,13 +1328,19 @@ class PreparedProviderHeadroomAdmission:
 class PreparedCompactionCandidateFamily:
     """One frozen physical/source basis for ordered recent-window variants."""
 
-    _execution_authority: ProviderDispatchExecutionAuthority | None = dataclass_field(
-        repr=False, compare=False
-    )
+    _resource_authority: (
+        ProviderDispatchExecutionAuthority | CompactionDryResourceAuthority | None
+    ) = dataclass_field(repr=False, compare=False)
     first_candidate_read: FrozenCanonicalProviderDispatchRead = dataclass_field(
         repr=False
     )
-    seed: CompactionContinuationSeed = dataclass_field(repr=False)
+    seed: (
+        AdoptedCompactionContinuationSeed
+        | CanonicalColdContinuationSeed
+        | CompactionDryProjectionSeed
+    ) = (
+        dataclass_field(repr=False)
+    )
     model_call_index: int
     planning_basis: FrozenProviderInputAppendPlanningInput = dataclass_field(repr=False)
     prepared_call: PreparedKernelModelCall = dataclass_field(repr=False)
@@ -1102,7 +1360,7 @@ class PreparedCompactionCandidateFamily:
     def __post_init__(self) -> None:
         identity = self.first_candidate_read.compile_snapshot.canonical_input.identity
         if (
-            self._execution_authority is None
+            self._resource_authority is None
             or self.model_call_index < 1
             or self.seed.dispatch_read != self.first_candidate_read
             or self.prepared_call.session_id != identity.session_id
@@ -1123,18 +1381,40 @@ class PreparedCompactionCandidateFamily:
     @property
     def owns_execution_authority(self) -> bool:
         with self._lock:
-            return self._execution_authority is not None
+            return isinstance(
+                self._resource_authority, ProviderDispatchExecutionAuthority
+            )
+
+    @property
+    def owns_resource_authority(self) -> bool:
+        with self._lock:
+            return self._resource_authority is not None
 
     def take_execution_authority(self) -> ProviderDispatchExecutionAuthority:
         with self._lock:
-            authority = self._execution_authority
-            self._execution_authority = None
-        if authority is None:
+            authority = self._resource_authority
+            if isinstance(authority, ProviderDispatchExecutionAuthority):
+                self._resource_authority = None
+        if not isinstance(authority, ProviderDispatchExecutionAuthority):
             raise RuntimeError("compaction candidate family authority is consumed")
         return authority
 
+    def take_dry_resource_authority(self) -> CompactionDryResourceAuthority:
+        with self._lock:
+            authority = self._resource_authority
+            if isinstance(authority, CompactionDryResourceAuthority):
+                self._resource_authority = None
+        if not isinstance(authority, CompactionDryResourceAuthority):
+            raise RuntimeError("compaction dry resource authority is consumed")
+        return authority
+
     def close(self) -> None:
-        self.take_execution_authority().close()
+        with self._lock:
+            authority = self._resource_authority
+            self._resource_authority = None
+        if authority is None:
+            raise RuntimeError("compaction candidate family authority is consumed")
+        authority.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1151,11 +1431,125 @@ class PreparedCompactionCandidate:
             raise ValueError("compaction candidate lacks cold semantic assembly")
 
 
+@dataclass(frozen=True, slots=True)
+class InstalledCompactionDrySource:
+    predecessor: object = dataclass_field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PendingEmptyCompactionDrySource:
+    reservation: object = dataclass_field(repr=False)
+
+
+CompactionDryProjectionSource = (
+    InstalledCompactionDrySource | PendingEmptyCompactionDrySource
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionDryProjectionBasis:
+    """Pure destination basis; it carries no install/open capability."""
+
+    source: CompactionDryProjectionSource = dataclass_field(repr=False)
+    destination: FrozenEpochModelCallTarget
+    canonical_read: FrozenCanonicalProviderDispatchRead = dataclass_field(repr=False)
+    capability_dispatch_cut: FrozenCapabilityDispatchCut = dataclass_field(repr=False)
+
+    def __post_init__(self) -> None:
+        identity = self.canonical_read.compile_snapshot.canonical_input.identity
+        if (
+            self.destination.session_id != identity.session_id
+            or self.destination.turn_id != identity.turn_id
+            or self.capability_dispatch_cut.conversation_scope_kind
+            is not identity.conversation_scope_kind
+            or self.capability_dispatch_cut.scope_subagent_task_id
+            != identity.scope_subagent_task_id
+        ):
+            raise ValueError("compaction dry basis does not exact-join")
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionDryProjectionResult:
+    """Authority-free dry admission; never accepted by register/install."""
+
+    basis: CompactionDryProjectionBasis = dataclass_field(repr=False)
+    semantic_projection: FrozenModelInputSemanticProjection = dataclass_field(
+        repr=False
+    )
+    wire_materialization: object = dataclass_field(repr=False)
+    quote: FrozenProviderWireInputQuote
+    admitted: bool
+
+    def __post_init__(self) -> None:
+        if (
+            not self.admitted
+            or self.semantic_projection.canonical_input_identity
+            != self.basis.canonical_read.compile_snapshot.canonical_input.identity
+            or self.quote.wire_api
+            != self.basis.destination.target_bundle.target_fact.wire_api
+        ):
+            raise ValueError("compaction dry projection is not admitted")
+
+
+@dataclass(slots=True)
+class PreparedCompactionDryProjection:
+    """Resource owner around a non-installable dry result."""
+
+    result: CompactionDryProjectionResult
+    _resource_authority: CompactionDryResourceAuthority | None = dataclass_field(
+        repr=False, compare=False
+    )
+    _lock: Lock = dataclass_field(default_factory=Lock, init=False, repr=False)
+    _empty_adoption_started: bool = dataclass_field(
+        default=False, init=False, repr=False
+    )
+
+    def _require_for_empty_adoption(
+        self,
+    ) -> tuple[SealedProviderInputPreparationBasis, PreparedProviderInputHandle]:
+        with self._lock:
+            authority = self._resource_authority
+            start = not self._empty_adoption_started
+            self._empty_adoption_started = True
+        if authority is None:
+            raise RuntimeError("compaction dry projection authority is consumed")
+        if start:
+            authority.begin_empty_adoption()
+        return authority.require_for_empty_adoption()
+
+    def take_handle_for_rotation(self) -> PreparedProviderInputHandle:
+        with self._lock:
+            authority = self._resource_authority
+            self._resource_authority = None
+        if authority is None:
+            raise RuntimeError("compaction dry projection authority is consumed")
+        return authority.take_handle_for_rotation()
+
+    def close_after_empty_adoption_none(self) -> None:
+        with self._lock:
+            authority = self._resource_authority
+        if authority is None:
+            raise RuntimeError("compaction dry projection authority is consumed")
+        authority.restore_empty_adoption_abort()
+        self.close()
+
+    def close(self) -> None:
+        with self._lock:
+            authority = self._resource_authority
+            self._resource_authority = None
+        if authority is None:
+            raise RuntimeError("compaction dry projection authority is consumed")
+        authority.close()
+
+
 @dataclass(slots=True)
 class PreparedCompactionSourceDispatch:
     """Non-executable normal semantic projection for compaction planning."""
 
     _handle: PreparedProviderInputHandle | None = dataclass_field(repr=False)
+    _continuity_owner: HostProviderInputContinuityOwner = dataclass_field(
+        repr=False, compare=False
+    )
     canonical_read: FrozenCanonicalProviderDispatchRead
     canonical_facts: FrozenCanonicalCompileSnapshot
     planning: FrozenProviderInputAppendPlanningInput
@@ -1172,6 +1566,16 @@ class PreparedCompactionSourceDispatch:
         repr=False, compare=False
     )
     _lock: Lock = dataclass_field(default_factory=Lock, init=False, repr=False)
+    _planning_owned: bool = dataclass_field(
+        default=True, init=False, repr=False, compare=False
+    )
+
+    def _settle_planning(self, *, transfer: bool) -> None:
+        with self._lock:
+            owned = self._planning_owned
+            self._planning_owned = False
+        if owned and not transfer:
+            self._continuity_owner.abort_planning(self.planning)
 
     @property
     def cut(self) -> PreparedProviderInputCut:
@@ -1199,6 +1603,7 @@ class PreparedCompactionSourceDispatch:
             self._wire_measurement = None
         if handle is None or measurement is None:
             raise RuntimeError("compaction source ownership is already consumed")
+        self._settle_planning(transfer=False)
         return handle, measurement
 
     def discard_wire_materialization_to_quote(
@@ -1222,6 +1627,7 @@ class PreparedCompactionSourceDispatch:
             self._handle = None
         if handle is None:
             raise RuntimeError("compaction source handle is already consumed")
+        self._settle_planning(transfer=True)
         return handle
 
     def close(self) -> None:
@@ -1236,7 +1642,10 @@ class PreparedCompactionSourceDispatch:
             if measurement is not None:
                 measurement.discard_materialization_to_quote()
         finally:
-            handle.close()
+            try:
+                handle.close()
+            finally:
+                self._settle_planning(transfer=False)
 
 
 class PreparedHookContextSibling:
@@ -1279,13 +1688,6 @@ class InstalledProviderOpen:
     subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
         dataclass_field(default=None, repr=False)
     )
-
-
-@dataclass(frozen=True, slots=True)
-class _InstalledResolvedModelCall:
-    epoch_nonce: str
-    epoch_revision: int
-    call: ResolvedModelCall = dataclass_field(repr=False)
 
 
 class ProviderDispatchCoordinator:
@@ -1341,14 +1743,6 @@ class ProviderDispatchCoordinator:
         )
         self._compaction_owner = compaction_owner
         self._subagent_runtime = subagent_runtime
-        self._installed_targets: dict[
-            ProviderInputContinuityScope, _InstalledResolvedModelCall
-        ] = {}
-
-    def discard_installed_target(self, scope: ProviderInputContinuityScope) -> None:
-        """Release the process-local target owned by a discarded scope."""
-
-        self._installed_targets.pop(scope, None)
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -1358,32 +1752,14 @@ class ProviderDispatchCoordinator:
         *,
         scope: ProviderInputContinuityScope,
         destination: PreparedKernelModelTarget,
-    ) -> ResolvedModelCall | None:
-        """Return A only when the installed epoch proves an A -> B switch.
+    ) -> FrozenEpochModelTargetBundle | None:
+        """Return installed A only when the frozen destination is a different B."""
 
-        The dictionary is merely the process-local owner of the exact target
-        object used for the installed epoch.  Continuity remains authoritative:
-        stale entries are ignored and no fingerprint is used to recreate data.
-        """
-
-        predecessor = self._continuity.current_view(scope)
+        predecessor = self._continuity.current_cohort(scope)
         if predecessor is None:
-            self._installed_targets.pop(scope, None)
             return None
-        source_owner = self._installed_targets.get(scope)
-        if (
-            source_owner is None
-            or source_owner.epoch_nonce != predecessor.epoch_nonce
-            or source_owner.epoch_revision != predecessor.epoch_revision
-        ):
-            raise RuntimeError(
-                "installed provider epoch lost its exact process-local model target"
-            )
-        source = source_owner.call
-        if (
-            source.binding.connection_id == destination.call.binding.connection_id
-            and source.target.fact == destination.target.fact
-        ):
+        source = predecessor.target_bundle
+        if source == destination.epoch_call_target.target_bundle:
             return None
         return source
 
@@ -1391,21 +1767,18 @@ class ProviderDispatchCoordinator:
         self,
         *,
         scope: ProviderInputContinuityScope,
-        source: ResolvedModelCall,
+        source: FrozenEpochModelTargetBundle,
         turn_id: str,
         model_call_index: int,
     ) -> PreparedKernelModelTarget:
-        predecessor = self._continuity.current_view(scope)
-        if (
-            predecessor is None
-            or predecessor.compatibility.model_connection_id
-            != source.binding.connection_id
-            or predecessor.compatibility.model_target_fingerprint
-            != source.target.fact.target_fingerprint
-        ):
+        predecessor = self._continuity.current_cohort(scope)
+        if predecessor is None or predecessor.target_bundle is not source:
             raise RuntimeError("model-switch source epoch drifted")
-        binding = source.binding
-        return self._model.prepare_resolved_target(
+        binding = ModelCallBinding(
+            source.connection.connection_id,
+            default_reasoning_selection(source.reasoning_contract),
+        )
+        return self._model.prepare_frozen_epoch_target(
             KernelModelTargetPreparationRequest(
                 session_id=self._writer_lease.guard.session_id,
                 turn_id=turn_id,
@@ -1415,8 +1788,7 @@ class ProviderDispatchCoordinator:
                 maximum_output_tokens=self._maximum_output_tokens_per_call,
                 binding=binding,
             ),
-            target=source.target,
-            binding=binding,
+            bundle=source,
         )
 
     async def _prepare_root_completion_suffix(
@@ -1632,13 +2004,19 @@ class ProviderDispatchCoordinator:
         deadline: float,
         canonical_read: FrozenCanonicalProviderDispatchRead,
         expected_source_read: FrozenCanonicalProviderDispatchRead,
-        seed: CompactionContinuationSeed,
+        seed: (
+            AdoptedCompactionContinuationSeed
+            | CanonicalColdContinuationSeed
+            | CompactionDryProjectionSeed
+        ),
         existing_handle: PreparedProviderInputHandle,
         source_replacements: tuple[
             ContextSourceCandidate | ContextSourceAbsentFact, ...
         ],
         retained_skill_read: FrozenCompactionCanonicalRead,
         prepared_target_override: PreparedKernelModelTarget | None = None,
+        dry_projection: bool = False,
+        source_planning_basis: FrozenProviderInputAppendPlanningInput | None = None,
     ) -> PreparedCompactionCandidateFamily:
         """Freeze the one physical/source basis shared by recent variants."""
 
@@ -1658,6 +2036,8 @@ class ProviderDispatchCoordinator:
             include_hook_context=False,
             prepared_target_override=prepared_target_override,
             _compaction_candidate_family=True,
+            _compaction_dry_projection=dry_projection,
+            _compaction_source_planning_basis=source_planning_basis,
         )
         assert isinstance(result, PreparedCompactionCandidateFamily)
         return result
@@ -1700,6 +2080,10 @@ class ProviderDispatchCoordinator:
         inherited_memory_use_policy: MemoryUsePolicy,
         deadline: float,
         canonical_read_override: FrozenCanonicalProviderDispatchRead | None = None,
+        compaction_seed: (
+            AdoptedCompactionContinuationSeed | CompactionDryProjectionSeed | None
+        ) = None,
+        source_planning_basis: FrozenProviderInputAppendPlanningInput | None = None,
     ) -> PreparedProspectiveRootCandidateFamily:
         """Freeze one new ROOT's physical and source observations."""
 
@@ -1711,6 +2095,8 @@ class ProviderDispatchCoordinator:
             allow_steers=False,
             prospective_root_candidate=candidate,
             prospective_root_read_override=canonical_read_override,
+            _prospective_compaction_seed=compaction_seed,
+            _prospective_source_planning_basis=source_planning_basis,
             include_hook_context=False,
         )
         assert isinstance(result, PreparedProspectiveRootCandidateFamily)
@@ -1751,6 +2137,7 @@ class ProviderDispatchCoordinator:
                 canonical_read_override=prospective,
                 expected_source_read=base,
                 existing_handle=handle,
+                _noninstallable_preparation=True,
             )
             handle = None
             if not isinstance(result, PreparedProviderDispatch):
@@ -1948,9 +2335,39 @@ class ProviderDispatchCoordinator:
                 if hook_reservation is not None:
                     hook_reservation_owned = False
                     hook_reservation.retire()
+                self._continuity.abort_planning(prepared.planning)
                 return None
+            direct_switch_admission = None
+            predecessor = self._continuity.current_cohort(prepared.planning.scope)
+            if (
+                predecessor is not None
+                and prepared.planning.predecessor_view is predecessor.view
+                and predecessor.target_bundle
+                != prepared.prepared_call.epoch_call_target.target_bundle
+                and prepared.cold_semantic is not None
+                and isinstance(
+                    prepared.cold_semantic.seed, CanonicalColdContinuationSeed
+                )
+            ):
+                measured_candidate = decision.candidate
+                if not isinstance(measured_candidate, PreparedProviderWireCandidate):
+                    raise StructuredModelInputCompileError(
+                        ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                    )
+                direct_switch_admission, _ = self.freeze_direct_switch_admission(
+                    candidate=measured_candidate,
+                    decision=decision,
+                )
             dispatch = PreparedProviderDispatch(
-                _execution_authority=ProviderDispatchExecutionAuthority(handle, borrow),
+                _execution_authority=ProviderDispatchExecutionAuthority(
+                    handle,
+                    borrow,
+                    safe_point=self._safe_point,
+                    canonical_read=actual_read,
+                    capability_dispatch_cut=prepared.capability_dispatch_cut,
+                    call_target=prepared.prepared_call.epoch_call_target,
+                ),
+                _continuity_owner=self._continuity,
                 canonical_read=actual_read,
                 canonical_facts=actual_read.compile_snapshot,
                 planning=prepared.planning,
@@ -1960,6 +2377,7 @@ class ProviderDispatchCoordinator:
                 sources=prepared.sources,
                 append_result=prepared.append_result,
                 memory_context=prepared.memory_context,
+                direct_switch_admission=direct_switch_admission,
                 cold_semantic=prepared.cold_semantic,
                 _hook_context_reservation=hook_reservation,
             )
@@ -1974,8 +2392,11 @@ class ProviderDispatchCoordinator:
                 if borrow_owned:
                     borrow.close()
             finally:
-                if hook_reservation_owned and hook_reservation is not None:
-                    hook_reservation.retire()
+                try:
+                    if hook_reservation_owned and hook_reservation is not None:
+                        hook_reservation.retire()
+                finally:
+                    self._continuity.abort_planning(prepared.planning)
             raise
 
     async def prepare(
@@ -2005,7 +2426,18 @@ class ProviderDispatchCoordinator:
         | None = None,
         _compaction_source_projection: bool = False,
         _compaction_candidate_family: bool = False,
+        _compaction_dry_projection: bool = False,
+        _compaction_source_planning_basis: (
+            FrozenProviderInputAppendPlanningInput | None
+        ) = None,
+        _noninstallable_preparation: bool = False,
         _destination_projection_source: bool = False,
+        _prospective_compaction_seed: (
+            AdoptedCompactionContinuationSeed | CompactionDryProjectionSeed | None
+        ) = None,
+        _prospective_source_planning_basis: (
+            FrozenProviderInputAppendPlanningInput | None
+        ) = None,
     ) -> (
         PreparedProviderDispatch
         | PreparedCompactionSourceDispatch
@@ -2042,6 +2474,14 @@ class ProviderDispatchCoordinator:
             or model_call_index != 1
         ):
             raise ValueError("prospective ROOT dispatch inputs are invalid")
+        if _prospective_compaction_seed is not None and (
+            prospective_root_candidate is None or prospective_root_read_override is None
+        ):
+            raise ValueError("prospective compaction seed is incomplete")
+        if (_prospective_source_planning_basis is not None) != (
+            _prospective_compaction_seed is not None
+        ):
+            raise ValueError("prospective compaction planning basis is incomplete")
         if (prospective_root_read_override is not None) != (
             prospective_root_candidate is not None
         ) and prospective_root_read_override is not None:
@@ -2053,11 +2493,31 @@ class ProviderDispatchCoordinator:
             or semantic_only
             or _compaction_source_projection
             or include_hook_context
-            or not isinstance(cold_seed_override, CompactionContinuationSeed)
+            or not isinstance(
+                cold_seed_override,
+                (
+                    AdoptedCompactionContinuationSeed,
+                    CanonicalColdContinuationSeed,
+                    CompactionDryProjectionSeed,
+                ),
+            )
             or compaction_retained_skill_read is None
         ):
             raise ValueError("compaction candidate family inputs are invalid")
-        if isinstance(cold_seed_override, CompactionContinuationSeed) and not (
+        if _compaction_dry_projection and not _compaction_candidate_family:
+            raise ValueError("compaction dry projection requires a candidate family")
+        if (_compaction_source_planning_basis is not None) != (
+            _compaction_dry_projection
+        ):
+            raise ValueError("compaction dry projection source planning is incomplete")
+        if _noninstallable_preparation and (
+            _compaction_candidate_family or canonical_read_override is None
+        ):
+            raise ValueError("noninstallable preparation requires a projected read")
+        if isinstance(
+            cold_seed_override,
+            (AdoptedCompactionContinuationSeed, CompactionDryProjectionSeed),
+        ) and not (
             _compaction_candidate_family
         ):
             raise ValueError(
@@ -2084,6 +2544,7 @@ class ProviderDispatchCoordinator:
         borrow: ProcessLocalToolSurfaceBorrow | None = None
         hook_context_reservation: HookContextReservation | None = None
         completion_candidates: tuple[PreparedAutomaticSubagentCompletion, ...] = ()
+        planning: FrozenProviderInputAppendPlanningInput | None = None
         try:
             workspace_id = await self._resolved_workspace_id(deadline=deadline)
             if prospective_root_candidate is not None and (
@@ -2211,6 +2672,20 @@ class ProviderDispatchCoordinator:
                 and current_epoch.canonical_frontier.context_base_semantic_identity
                 != base_frontier.context_base_semantic_identity
             )
+            if (
+                context_base_changed
+                and not isinstance(
+                    cold_seed_override,
+                    (AdoptedCompactionContinuationSeed, CompactionDryProjectionSeed),
+                )
+                and not (
+                    prospective_root_candidate is not None
+                    and prospective_root_read_override is not None
+                )
+            ):
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
             predecessor_count = (
                 0
                 if (
@@ -2287,10 +2762,17 @@ class ProviderDispatchCoordinator:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.MODEL_TARGET_PREPARATION_FAILED
                 ) from exc
+            current_cohort = self._continuity.current_cohort(scope)
+            model_switch_requested = (
+                current_cohort is not None
+                and current_cohort.target_bundle
+                != prepared_target.epoch_call_target.target_bundle
+            )
             try:
                 if (
                     current_epoch is None
                     or context_base_changed
+                    or model_switch_requested
                     or force_empty_capability_predecessor
                     or _destination_projection_source
                 ):
@@ -2301,7 +2783,7 @@ class ProviderDispatchCoordinator:
                         conversation_scope_kind=identity.conversation_scope_kind,
                         tool_specs=current_epoch.tools,
                         surface_fingerprint=(
-                            current_epoch.compatibility.tool_surface_fingerprint
+                            current_epoch.tool_exposure_plan.direct_tool_surface.surface_fingerprint
                         ),
                     )
                     capability_predecessor = InstalledCapabilityEpochPredecessor(
@@ -2476,7 +2958,14 @@ class ProviderDispatchCoordinator:
                 ) from exc
 
             if _compaction_candidate_family:
-                assert isinstance(cold_seed_override, CompactionContinuationSeed)
+                assert isinstance(
+                    cold_seed_override,
+                    (
+                        AdoptedCompactionContinuationSeed,
+                        CanonicalColdContinuationSeed,
+                        CompactionDryProjectionSeed,
+                    ),
+                )
                 if cold_seed_override.dispatch_read != base_read:
                     raise StructuredModelInputCompileError(
                         ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
@@ -2489,10 +2978,25 @@ class ProviderDispatchCoordinator:
                     raise RuntimeError(
                         "compaction candidate family lacks physical authority"
                     )
-                planning = self._continuity.freeze_planning_input(
-                    scope=scope,
-                    canonical_frontier=base_frontier,
-                    dispatch_anchor=base_anchor,
+                detached_source_planning = (
+                    _compaction_source_planning_basis is not None
+                    and _compaction_source_planning_basis.predecessor_view is None
+                    and _compaction_source_planning_basis._empty_preparation_reservation
+                    is None
+                )
+                planning = (
+                    self._continuity.freeze_planning_sibling(
+                        basis=_compaction_source_planning_basis,
+                        canonical_frontier=base_frontier,
+                        dispatch_anchor=base_anchor,
+                    )
+                    if _compaction_source_planning_basis is not None
+                    and not detached_source_planning
+                    else self._continuity.freeze_planning_input(
+                        scope=scope,
+                        canonical_frontier=base_frontier,
+                        dispatch_anchor=base_anchor,
+                    )
                 )
                 try:
                     sources = await self._io.run(
@@ -2508,10 +3012,29 @@ class ProviderDispatchCoordinator:
                     raise StructuredModelInputCompileError(
                         ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                     ) from exc
+                resource_authority = (
+                    CompactionDryResourceAuthority(
+                        handle,
+                        borrow,
+                        safe_point=self._safe_point,
+                        source_read=expected_source_read,
+                        capability_dispatch_cut=capability_dispatch_cut,
+                        call_target=prepared_call.epoch_call_target,
+                        continuity=self._continuity,
+                        planning=planning,
+                    )
+                    if _compaction_dry_projection
+                    else ProviderDispatchExecutionAuthority(
+                        handle,
+                        borrow,
+                        safe_point=self._safe_point,
+                        canonical_read=base_read,
+                        capability_dispatch_cut=capability_dispatch_cut,
+                        call_target=prepared_call.epoch_call_target,
+                    )
+                )
                 return PreparedCompactionCandidateFamily(
-                    _execution_authority=ProviderDispatchExecutionAuthority(
-                        handle, borrow
-                    ),
+                    _resource_authority=resource_authority,
                     first_candidate_read=base_read,
                     seed=cold_seed_override,
                     model_call_index=model_call_index,
@@ -2550,6 +3073,7 @@ class ProviderDispatchCoordinator:
             selected_facts: FrozenCanonicalCompileSnapshot | None = None
             selected_sources: CollectedContextSources | None = None
             selected_append: FrozenProviderInputAppendCompileResult | None = None
+            selected_cold_semantic: PreparedColdEpochSemanticAssembly | None = None
             selected_memory_context: FrozenModelCallMemoryContext | None = None
             selected_dispatch_read: FrozenCanonicalProviderDispatchRead | None = None
             prepared_preference: (
@@ -2782,18 +3306,22 @@ class ProviderDispatchCoordinator:
                             )
                         )[1],
                     )
-                    compatibility = provider_input_compatibility(
-                        prepared_call=prepared_call,
-                        canonical_facts=prospective,
-                        sources=sources,
-                    )
                     try:
+                        steer_new_epoch = (
+                            planning.predecessor_view is None
+                            or context_base_changed
+                            or model_switch_requested
+                        )
+                        compile_method = (
+                            compile_structured_new_epoch
+                            if steer_new_epoch
+                            else compile_structured_installed_append
+                        )
                         append = await self._io.run(
-                            compile_structured_append,
+                            compile_method,
                             self._compiler,
                             compile_request,
                             planning=planning,
-                            compatibility=compatibility,
                             deadline_monotonic=deadline,
                         )
                     except StructuredModelInputCompileError as exc:
@@ -2806,6 +3334,7 @@ class ProviderDispatchCoordinator:
                             ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
                         }:
                             raise
+                        self._continuity.abort_planning(planning)
                         continue
                     recall_reservation = None
                     preference_reservation = None
@@ -2845,6 +3374,7 @@ class ProviderDispatchCoordinator:
                         )
                         > (64 << 20)
                     ):
+                        self._continuity.abort_planning(planning)
                         continue
                     quote = build_steer_suffix_quote(
                         candidates=candidates,
@@ -2936,11 +3466,7 @@ class ProviderDispatchCoordinator:
                         ) = await self._memory_support.compile_with_fallback(
                             request=final_request,
                             planning=planning,
-                            compatibility=provider_input_compatibility(
-                                prepared_call=prepared_call,
-                                canonical_facts=prospective,
-                                sources=final_sources,
-                            ),
+                            new_epoch=steer_new_epoch,
                             canonical_facts=prospective,
                             sources=final_sources,
                             preference_source=effective_preference,
@@ -2960,6 +3486,7 @@ class ProviderDispatchCoordinator:
                             ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
                         }:
                             raise
+                        self._continuity.abort_planning(planning)
                         continue
                     final_memory = self._memory_support.freeze_call_context(
                         scope=scope,
@@ -2972,6 +3499,28 @@ class ProviderDispatchCoordinator:
                         base_read,
                         prospective,
                     )
+                    trial_cold_semantic = None
+                    if steer_new_epoch:
+                        cold_request = replace(
+                            final_request,
+                            sources=final_sources,
+                            memory_citation_handles=final_memory[1],
+                        )
+                        trial_cold_semantic = await self._io.run(
+                            self._cold_epoch_assembler.prepare_semantic,
+                            seed=CanonicalColdContinuationSeed(prospective_read),
+                            compile_request=cold_request,
+                            planning=planning,
+                            prepared_call=prepared_call,
+                            capability_dispatch_cut=capability_dispatch_cut,
+                            tool_view=tool_view,
+                            skill_view=skill_view,
+                            tool_exposure_plan=tool_exposure_plan,
+                            non_trigger_sources=frozen_sources,
+                            replay_target=provider_replay_target(prepared_call),
+                            deadline_monotonic=deadline,
+                        )
+                        final_append = trial_cold_semantic.compiled_result
                     trial_candidate = PreparedProviderWireCandidate(
                         canonical_read=prospective_read,
                         semantic_input=final_append.compiled_input,
@@ -2979,6 +3528,7 @@ class ProviderDispatchCoordinator:
                         native_projection_set=(prepared_call.native_projection_set),
                         planning=planning,
                         append_result=final_append,
+                        cold_semantic=trial_cold_semantic,
                         sources=final_sources,
                         tool_exposure_plan=tool_exposure_plan,
                         memory_context=final_memory[0],
@@ -2988,11 +3538,13 @@ class ProviderDispatchCoordinator:
                         deadline=deadline,
                     )
                     if trial_wire.wire_input_plan is None:
+                        self._continuity.abort_planning(planning)
                         continue
                     selected_plan = trial_plan
                     selected_facts = prospective
                     selected_sources = final_sources
                     selected_append = final_append
+                    selected_cold_semantic = trial_cold_semantic
                     selected_memory_context = final_memory[0]
                     selected_dispatch_read = prospective_read
                     break
@@ -3084,8 +3636,14 @@ class ProviderDispatchCoordinator:
                 )
                 return PreparedProviderDispatch(
                     _execution_authority=ProviderDispatchExecutionAuthority(
-                        handle, borrow
+                        handle,
+                        borrow,
+                        safe_point=self._safe_point,
+                        canonical_read=actual_read,
+                        capability_dispatch_cut=capability_dispatch_cut,
+                        call_target=prepared_call.epoch_call_target,
                     ),
+                    _continuity_owner=self._continuity,
                     canonical_read=actual_read,
                     canonical_facts=actual_read.compile_snapshot,
                     planning=selected_plan.predecessor,
@@ -3096,20 +3654,28 @@ class ProviderDispatchCoordinator:
                     append_result=selected_append,
                     memory_context=selected_memory_context,
                     accepted_steers=batch,
+                    cold_semantic=selected_cold_semantic,
                     retained_skill_selection=retained_skill_selection,
                     _hook_context_reservation=hook_context_reservation,
                 )
 
-            freeze_planning = (
-                self._continuity.freeze_destination_projection_planning_input
-                if _destination_projection_source
-                else self._continuity.freeze_planning_input
-            )
-            planning = freeze_planning(
-                scope=scope,
-                canonical_frontier=base_frontier,
-                dispatch_anchor=base_anchor,
-            )
+            if _prospective_source_planning_basis is not None:
+                planning = self._continuity.freeze_planning_sibling(
+                    basis=_prospective_source_planning_basis,
+                    canonical_frontier=base_frontier,
+                    dispatch_anchor=base_anchor,
+                )
+            else:
+                freeze_planning = (
+                    self._continuity.freeze_destination_projection_planning_input
+                    if _destination_projection_source
+                    else self._continuity.freeze_planning_input
+                )
+                planning = freeze_planning(
+                    scope=scope,
+                    canonical_frontier=base_frontier,
+                    dispatch_anchor=base_anchor,
+                )
             activation_subject, activation_text = _activation_subject_for_anchor(
                 base_input, base_anchor
             )
@@ -3189,9 +3755,8 @@ class ProviderDispatchCoordinator:
                     ),
                 )
             if prospective_root_candidate is not None:
-                if (
-                    borrow is None
-                    or not isinstance(prepared_call, PreparedKernelModelCall)
+                if borrow is None or not isinstance(
+                    prepared_call, PreparedKernelModelCall
                 ):
                     raise RuntimeError(
                         "prospective ROOT candidate family lacks physical authority"
@@ -3199,6 +3764,7 @@ class ProviderDispatchCoordinator:
                 return PreparedProspectiveRootCandidateFamily(
                     first_candidate=prospective_root_candidate,
                     first_candidate_read=base_read,
+                    _continuity_owner=self._continuity,
                     prepared_target=prepared_target,
                     prepared_call=prepared_call,
                     capability_dispatch_cut=capability_dispatch_cut,
@@ -3216,6 +3782,7 @@ class ProviderDispatchCoordinator:
                     write_hint=write_hint,
                     memory_use_policy=memory_use_policy,
                     replay_target=provider_replay_target(prepared_call),
+                    compaction_seed=_prospective_compaction_seed,
                     _resolved_sources=(
                         base_sources if preference_source is None else None
                     ),
@@ -3244,22 +3811,21 @@ class ProviderDispatchCoordinator:
                     )
                 )[1],
             )
-            compatibility = provider_input_compatibility(
-                prepared_call=prepared_call,
-                canonical_facts=base_facts,
-                sources=base_sources,
-            )
             cold_seed = cold_seed_override
             if cold_seed is not None and cold_seed.dispatch_read != base_read:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
                 )
+            if context_base_changed and cold_seed is None:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
             if cold_seed is None and (
-                planning.predecessor_view is None or context_base_changed
+                planning.predecessor_view is None or model_switch_requested
             ):
                 cold_seed = (
                     subagent_seed
-                    if subagent_seed is not None
+                    if subagent_seed is not None and planning.predecessor_view is None
                     else CanonicalColdContinuationSeed(base_read)
                 )
             if _compaction_source_projection:
@@ -3286,16 +3852,18 @@ class ProviderDispatchCoordinator:
                     sources=projection_sources,
                     memory_citation_handles=projection_memory[1],
                 )
+                projection_method = (
+                    project_structured_new_epoch
+                    if _destination_projection_source
+                    or planning.predecessor_view is None
+                    or context_base_changed
+                    else project_structured_installed_append
+                )
                 projection = await self._io.run(
-                    project_structured_append,
+                    projection_method,
                     self._compiler,
                     projection_request,
                     planning=planning,
-                    compatibility=provider_input_compatibility(
-                        prepared_call=prepared_call,
-                        canonical_facts=base_facts,
-                        sources=projection_sources,
-                    ),
                     deadline_monotonic=deadline,
                 )
                 if borrow is not None:
@@ -3315,6 +3883,7 @@ class ProviderDispatchCoordinator:
                 try:
                     return PreparedCompactionSourceDispatch(
                         _handle=handle,
+                        _continuity_owner=self._continuity,
                         canonical_read=base_read,
                         canonical_facts=base_facts,
                         planning=planning,
@@ -3338,7 +3907,6 @@ class ProviderDispatchCoordinator:
                     seed=cold_seed,
                     compile_request=compile_request,
                     planning=planning,
-                    compatibility=compatibility,
                     prepared_call=prepared_call,
                     capability_dispatch_cut=capability_dispatch_cut,
                     tool_view=tool_view,
@@ -3351,11 +3919,10 @@ class ProviderDispatchCoordinator:
                 base_append = cold_semantic.compiled_result
             else:
                 base_append = await self._io.run(
-                    compile_structured_append,
+                    compile_structured_installed_append,
                     self._compiler,
                     compile_request,
                     planning=planning,
-                    compatibility=compatibility,
                     deadline_monotonic=deadline,
                 )
             final_sources = base_sources
@@ -3410,11 +3977,7 @@ class ProviderDispatchCoordinator:
                 ) = await self._memory_support.compile_with_fallback(
                     request=final_request,
                     planning=planning,
-                    compatibility=provider_input_compatibility(
-                        prepared_call=prepared_call,
-                        canonical_facts=base_facts,
-                        sources=final_sources,
-                    ),
+                    new_epoch=cold_seed is not None,
                     canonical_facts=base_facts,
                     sources=final_sources,
                     preference_source=preference_source,
@@ -3438,17 +4001,11 @@ class ProviderDispatchCoordinator:
                             )[1]
                         ),
                     )
-                    final_compatibility = provider_input_compatibility(
-                        prepared_call=prepared_call,
-                        canonical_facts=base_facts,
-                        sources=final_sources,
-                    )
                     cold_semantic = await self._io.run(
                         self._cold_epoch_assembler.prepare_semantic,
                         seed=cold_seed,
                         compile_request=final_request,
                         planning=planning,
-                        compatibility=final_compatibility,
                         prepared_call=prepared_call,
                         capability_dispatch_cut=capability_dispatch_cut,
                         tool_view=tool_view,
@@ -3504,7 +4061,19 @@ class ProviderDispatchCoordinator:
                 base_read = actual_completion_read
                 base_facts = actual_completion_read.compile_snapshot
             return PreparedProviderDispatch(
-                _execution_authority=ProviderDispatchExecutionAuthority(handle, borrow),
+                _execution_authority=ProviderDispatchExecutionAuthority(
+                    handle,
+                    borrow,
+                    safe_point=self._safe_point,
+                    canonical_read=base_read,
+                    capability_dispatch_cut=capability_dispatch_cut,
+                    call_target=prepared_call.epoch_call_target,
+                    basis_canonical_read=(
+                        expected_source_read if _noninstallable_preparation else None
+                    ),
+                    installable=not _noninstallable_preparation,
+                ),
+                _continuity_owner=self._continuity,
                 canonical_read=base_read,
                 canonical_facts=base_facts,
                 planning=planning,
@@ -3520,6 +4089,8 @@ class ProviderDispatchCoordinator:
                 _hook_context_reservation=hook_context_reservation,
             )
         except BaseException:
+            if planning is not None:
+                self._continuity.abort_planning(planning)
             if handle is not None:
                 handle.close()
             if borrow is not None:
@@ -3596,24 +4167,33 @@ class ProviderDispatchCoordinator:
             ),
             memory_citation_handles=base_memory[1],
         )
-        compatibility = provider_input_compatibility(
-            prepared_call=family.prepared_call,
-            canonical_facts=facts,
-            sources=family.base_sources,
+        if context_base_changed and family.compaction_seed is None:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        predecessor_cohort = self._continuity.current_cohort(planning.scope)
+        model_switch_requested = (
+            predecessor_cohort is not None
+            and predecessor_view is predecessor_cohort.view
+            and predecessor_cohort.target_bundle
+            != family.prepared_call.epoch_call_target.target_bundle
         )
         cold_seed = (
-            CanonicalColdContinuationSeed(canonical_read)
-            if predecessor_view is None or context_base_changed
+            _compaction_seed_with_dispatch_read(
+                family.compaction_seed, canonical_read
+            )
+            if context_base_changed and family.compaction_seed is not None
+            else CanonicalColdContinuationSeed(canonical_read)
+            if predecessor_view is None or model_switch_requested
             else None
         )
         cold_semantic: PreparedColdEpochSemanticAssembly | None = None
-        if cold_seed is not None and family.preference_source is None:
+        if cold_seed is not None:
             cold_semantic = await self._io.run(
                 self._cold_epoch_assembler.prepare_semantic,
                 seed=cold_seed,
                 compile_request=compile_request,
                 planning=planning,
-                compatibility=compatibility,
                 prepared_call=family.prepared_call,
                 capability_dispatch_cut=family.capability_dispatch_cut,
                 tool_view=family.tool_view,
@@ -3626,11 +4206,10 @@ class ProviderDispatchCoordinator:
             append = cold_semantic.compiled_result
         else:
             append = await self._io.run(
-                compile_structured_append,
+                compile_structured_installed_append,
                 self._compiler,
                 compile_request,
                 planning=planning,
-                compatibility=compatibility,
                 deadline_monotonic=deadline,
             )
         final_sources = family.base_sources
@@ -3690,11 +4269,7 @@ class ProviderDispatchCoordinator:
             append, final_sources = await self._memory_support.compile_with_fallback(
                 request=final_request,
                 planning=planning,
-                compatibility=provider_input_compatibility(
-                    prepared_call=family.prepared_call,
-                    canonical_facts=facts,
-                    sources=final_sources,
-                ),
+                new_epoch=cold_seed is not None,
                 canonical_facts=facts,
                 sources=final_sources,
                 preference_source=family.preference_source,
@@ -3722,11 +4297,6 @@ class ProviderDispatchCoordinator:
                     seed=cold_seed,
                     compile_request=final_request,
                     planning=planning,
-                    compatibility=provider_input_compatibility(
-                        prepared_call=family.prepared_call,
-                        canonical_facts=facts,
-                        sources=final_sources,
-                    ),
                     prepared_call=family.prepared_call,
                     capability_dispatch_cut=family.capability_dispatch_cut,
                     tool_view=family.tool_view,
@@ -3811,6 +4381,7 @@ class ProviderDispatchCoordinator:
             )
             return PreparedProspectiveRootDispatch(
                 admission=admission,
+                _continuity_owner=self._continuity,
                 prepared_target=family.prepared_target,
                 prepared_call=family.prepared_call,
                 capability_dispatch_cut=family.capability_dispatch_cut,
@@ -3828,8 +4399,11 @@ class ProviderDispatchCoordinator:
             try:
                 borrow.close()
             finally:
-                if reservation is not None:
-                    reservation.retire()
+                try:
+                    if reservation is not None:
+                        reservation.retire()
+                finally:
+                    self._continuity.abort_planning(family.planning_basis)
             raise
 
     async def prepare_compaction_candidate(
@@ -3837,12 +4411,16 @@ class ProviderDispatchCoordinator:
         family: PreparedCompactionCandidateFamily,
         *,
         canonical_read: FrozenCanonicalProviderDispatchRead,
-        seed: CompactionContinuationSeed,
+        seed: (
+            AdoptedCompactionContinuationSeed
+            | CanonicalColdContinuationSeed
+            | CompactionDryProjectionSeed
+        ),
         deadline: float,
     ) -> PreparedCompactionCandidate:
         """Compile one ordered variant from a previously frozen family basis."""
 
-        if not family.owns_execution_authority:
+        if not family.owns_resource_authority:
             raise RuntimeError("compaction candidate family authority is consumed")
         _require_compaction_family_candidate_read(
             family,
@@ -3900,17 +4478,11 @@ class ProviderDispatchCoordinator:
             ),
             memory_citation_handles=memory[1],
         )
-        compatibility = provider_input_compatibility(
-            prepared_call=family.prepared_call,
-            canonical_facts=facts,
-            sources=sources,
-        )
         semantic = await self._io.run(
             self._cold_epoch_assembler.prepare_semantic,
             seed=seed,
             compile_request=compile_request,
             planning=planning,
-            compatibility=compatibility,
             prepared_call=family.prepared_call,
             capability_dispatch_cut=family.capability_dispatch_cut,
             tool_view=family.tool_view,
@@ -3969,11 +4541,6 @@ class ProviderDispatchCoordinator:
                     seed=seed,
                     compile_request=compile_request,
                     planning=planning,
-                    compatibility=provider_input_compatibility(
-                        prepared_call=family.prepared_call,
-                        canonical_facts=facts,
-                        sources=sources,
-                    ),
                     prepared_call=family.prepared_call,
                     capability_dispatch_cut=family.capability_dispatch_cut,
                     tool_view=family.tool_view,
@@ -4048,6 +4615,7 @@ class ProviderDispatchCoordinator:
         try:
             final = PreparedProviderDispatch(
                 _execution_authority=authority,
+                _continuity_owner=self._continuity,
                 canonical_read=candidate.canonical_read,
                 canonical_facts=candidate.canonical_read.compile_snapshot,
                 planning=candidate.planning,
@@ -4067,6 +4635,63 @@ class ProviderDispatchCoordinator:
             else:
                 authority.close()
             raise
+
+    def bind_selected_compaction_dry_projection(
+        self,
+        *,
+        family: PreparedCompactionCandidateFamily,
+        selected: PreparedCompactionCandidate,
+        decision: PreparedWireMeasurementDecision,
+    ) -> PreparedCompactionDryProjection:
+        """Consume the family into a dry-only result with no install API."""
+
+        candidate = selected.wire_candidate
+        plan = decision.wire_input_plan
+        if (
+            decision.candidate is not candidate
+            or plan is None
+            or candidate.planning is None
+            or candidate.append_result is None
+            or candidate.cold_semantic is None
+            or candidate.prepared_call is not family.prepared_call
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        _require_compaction_family_candidate_read(
+            family,
+            canonical_read=candidate.canonical_read,
+            seed=candidate.cold_semantic.seed,
+        )
+        cohort = self._continuity.current_cohort(candidate.planning.scope)
+        if cohort is not None:
+            source: CompactionDryProjectionSource = InstalledCompactionDrySource(cohort)
+        else:
+            reservation = candidate.planning._empty_preparation_reservation
+            if reservation is None:
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+                )
+            source = PendingEmptyCompactionDrySource(reservation)
+        basis = CompactionDryProjectionBasis(
+            source=source,
+            destination=family.prepared_call.epoch_call_target,
+            canonical_read=candidate.canonical_read,
+            capability_dispatch_cut=family.capability_dispatch_cut,
+        )
+        result = CompactionDryProjectionResult(
+            basis=basis,
+            semantic_projection=_semantic_projection_from_compiled(
+                candidate.append_result.compiled_input
+            ),
+            wire_materialization=plan.materialization,
+            quote=decision.quote,
+            admitted=True,
+        )
+        return PreparedCompactionDryProjection(
+            result=result,
+            _resource_authority=family.take_dry_resource_authority(),
+        )
 
     async def prepare_hook_context_sibling(
         self,
@@ -4123,26 +4748,16 @@ class ProviderDispatchCoordinator:
                     for item in base.memory_context.citation_handles
                 ),
             )
-            compatibility = provider_input_compatibility(
-                prepared_call=base.prepared_call,
-                canonical_facts=canonical_facts,
-                sources=hook_sources,
-            )
             if semantic is None:
                 hook_append = await self._io.run(
-                    compile_structured_append,
+                    compile_structured_installed_append,
                     self._compiler,
                     compile_request,
                     planning=base.planning,
-                    compatibility=compatibility,
                     deadline_monotonic=deadline,
                 )
                 hook_semantic = None
             else:
-                if compatibility != semantic.compatibility:
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-                    )
                 hook_non_trigger = replace_frozen_hook_context_source(
                     semantic.non_trigger_sources,
                     replacement,
@@ -4153,7 +4768,6 @@ class ProviderDispatchCoordinator:
                     seed=semantic.seed,
                     compile_request=compile_request,
                     planning=semantic.planning,
-                    compatibility=compatibility,
                     prepared_call=semantic.prepared_call,
                     capability_dispatch_cut=semantic.capability_dispatch_cut,
                     tool_view=semantic.tool_view,
@@ -4252,6 +4866,7 @@ class ProviderDispatchCoordinator:
             reservation = sibling.take_reservation()
             final = PreparedProviderDispatch(
                 _execution_authority=authority,
+                _continuity_owner=self._continuity,
                 canonical_read=selected.canonical_read,
                 canonical_facts=selected.canonical_read.compile_snapshot,
                 planning=selected.planning,
@@ -4329,6 +4944,7 @@ class ProviderDispatchCoordinator:
                     semantic_input=selected.append_result.compiled_input,
                     wire_quote=decision.quote,
                 ),
+                _continuity_owner=self._continuity,
                 prepared_target=base.prepared_target,
                 prepared_call=base.prepared_call,
                 capability_dispatch_cut=base.capability_dispatch_cut,
@@ -4348,8 +4964,11 @@ class ProviderDispatchCoordinator:
             try:
                 borrow.close()
             finally:
-                if reservation is not None:
-                    reservation.retire()
+                try:
+                    if reservation is not None:
+                        reservation.retire()
+                finally:
+                    self._continuity.abort_planning(base.planning)
             raise
 
     async def _freeze_candidate_wire_measurement(
@@ -4403,6 +5022,10 @@ class ProviderDispatchCoordinator:
                 candidate,
                 deadline=deadline,
             )
+            measurement = HandleFreeProviderWireObservation(
+                candidate=candidate,
+                measurement=measurement,
+            ).take_for(candidate)
         try:
             _require_dispatch_planning_deadline(deadline)
         except BaseException:
@@ -4425,14 +5048,77 @@ class ProviderDispatchCoordinator:
         _require_dispatch_planning_deadline(deadline)
         return decision
 
+    @staticmethod
+    def freeze_direct_switch_admission(
+        *,
+        candidate: PreparedProviderWireCandidate,
+        decision: PreparedWireMeasurementDecision,
+    ) -> tuple[FrozenDirectSwitchAdmission, FrozenProviderWireInputPlan]:
+        """Extract the pure Tier-1 result after its observation was consumed."""
+
+        plan = decision.wire_input_plan
+        if (
+            decision.candidate is not candidate
+            or plan is None
+            or not isinstance(candidate.prepared_call, PreparedKernelModelCall)
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        admission = _issue_frozen_direct_switch_admission(
+            destination=candidate.prepared_call.epoch_call_target,
+            semantic_projection=_semantic_projection_from_compiled(
+                candidate.semantic_input
+            ),
+            wire_input_plan=plan,
+        )
+        return admission, plan
+
+    @staticmethod
+    def bind_direct_switch_admission(
+        *,
+        candidate: PreparedProviderWireCandidate,
+        admission: FrozenDirectSwitchAdmission,
+        wire_input_plan: FrozenProviderWireInputPlan,
+    ) -> PreparedWireMeasurementDecision:
+        """Exact-bind a consumed Tier-1 admission to the final owner dispatch."""
+
+        if (
+            not isinstance(candidate.prepared_call, PreparedKernelModelCall)
+            or candidate.prepared_call.epoch_call_target != admission.destination
+            or _semantic_projection_from_compiled(candidate.semantic_input)
+            != admission.semantic_projection
+            or wire_input_plan.materialization != admission.wire_materialization
+            or wire_input_plan.quote != admission.quote
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        return PreparedWireMeasurementDecision(
+            candidate=candidate,
+            quote=admission.quote,
+            wire_input_plan=wire_input_plan,
+        )
+
     def bind_prepared_executable_wire_input(
         self,
         *,
         owner_dispatch: PreparedProviderDispatch,
         decision: PreparedWireMeasurementDecision,
         deadline: float,
+        direct_switch_admission: FrozenDirectSwitchAdmission | None = None,
     ) -> PreparedExecutableProviderWireInput:
         _require_dispatch_planning_deadline(deadline)
+        owned_direct_admission = owner_dispatch.direct_switch_admission
+        if (
+            direct_switch_admission is not None
+            and owned_direct_admission is not None
+            and direct_switch_admission is not owned_direct_admission
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        direct_switch_admission = direct_switch_admission or owned_direct_admission
         if decision.wire_input_plan is None:
             kind = (
                 ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
@@ -4466,26 +5152,39 @@ class ProviderDispatchCoordinator:
                     ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
                 )
             inputs = assembly.continuity_candidate_inputs
-            append_candidate = prepared_append_candidate(
-                planning=inputs.planning,
-                compatibility=inputs.compatibility,
-                compiled_result=inputs.compiled_result,
-                wire_input_plan=inputs.wire_input_plan,
-                tool_exposure_plan=inputs.tool_exposure_plan,
-            )
+            candidate_planning = inputs.planning
+            candidate_result = inputs.compiled_result
+            candidate_plan = inputs.wire_input_plan
+            candidate_tools = inputs.tool_exposure_plan
         else:
-            compatibility = provider_input_compatibility(
-                prepared_call=selected.prepared_call,
-                canonical_facts=owner_dispatch.canonical_facts,
-                sources=selected.sources,
-            )
-            append_candidate = prepared_append_candidate(
-                planning=selected.planning,
-                compatibility=compatibility,
-                compiled_result=selected.append_result,
-                wire_input_plan=wire_input_plan,
-                tool_exposure_plan=selected.tool_exposure_plan,
-            )
+            candidate_planning = selected.planning
+            candidate_result = selected.append_result
+            candidate_plan = wire_input_plan
+            candidate_tools = selected.tool_exposure_plan
+        semantic_projection = _semantic_projection_from_compiled(
+            candidate_result.compiled_input
+        )
+        preparation_basis = owner_dispatch.preparation_basis
+        transition = self._safe_point.issue_provider_input_transition(
+            preparation_basis,
+            self._continuity,
+            planning=candidate_planning,
+            seed=(
+                None if selected.cold_semantic is None else selected.cold_semantic.seed
+            ),
+            semantic_projection=semantic_projection,
+            wire_input_plan=candidate_plan,
+            direct_switch_admission=direct_switch_admission,
+        )
+        append_candidate = prepared_append_candidate(
+            planning=candidate_planning,
+            transition=transition,
+            call_target=selected.prepared_call.epoch_call_target,
+            compiled_result=candidate_result,
+            wire_input_plan=candidate_plan,
+            tool_exposure_plan=candidate_tools,
+            preparation_basis=preparation_basis,
+        )
         prepared = PreparedExecutableProviderWireInput(
             owner_dispatch=owner_dispatch,
             quote=decision.quote,
@@ -4572,7 +5271,7 @@ class ProviderDispatchCoordinator:
             is ModelInputScopeKind.ROOT
             else None
         )
-        handle, borrow = dispatch.claim_install_authority()
+        preparation_basis, handle, borrow = dispatch.claim_install_authority()
         compiled_input = selected.append_result.compiled_input
         wire_input_plan = prepared_wire.wire_input_plan
         append_candidate = prepared_wire.append_candidate
@@ -4581,7 +5280,9 @@ class ProviderDispatchCoordinator:
         registered = False
         installed = False
         try:
-            self._continuity.register(append_candidate)
+            self._safe_point.register_provider_input_candidate(
+                preparation_basis, self._continuity, append_candidate
+            )
             registered = True
             request = KernelModelExecutionRequest(
                 session_id=self._writer_lease.guard.session_id,
@@ -4616,17 +5317,13 @@ class ProviderDispatchCoordinator:
                     ModelInputCompileFailureKind.FINAL_ESTIMATE_MISMATCH
                 ) from exc
             _require_dispatch_planning_deadline(deadline)
-            handle.begin_model_operation()
-            permit = self._continuity.install(
+            permit = self._safe_point.install_provider_input_candidate(
+                preparation_basis,
+                self._continuity,
                 candidate=append_candidate,
                 execution=execution,
             )
             installed = True
-            self._installed_targets[permit.scope] = _InstalledResolvedModelCall(
-                epoch_nonce=permit.epoch_nonce,
-                epoch_revision=permit.epoch_revision,
-                call=prepared_call.call,
-            )
             self._tools.install_provider_input_tool_result_deliveries(
                 permit=permit,
                 canonical_facts=canonical_facts,
@@ -4748,47 +5445,96 @@ def _require_dispatch_planning_deadline(deadline_monotonic: float) -> None:
         )
 
 
-def compile_structured_append(
+def compile_structured_installed_append(
     compiler: StructuredModelInputCompiler,
     request: StructuredModelInputCompileRequest,
     *,
     planning: FrozenProviderInputAppendPlanningInput,
-    compatibility: ProviderInputEpochCompatibility,
     deadline_monotonic: float,
 ) -> FrozenProviderInputAppendCompileResult:
     if monotonic() >= deadline_monotonic:
         raise TimeoutError("structured model input deadline expired")
-    return compiler.compile_append(
+    return compiler.compile_installed_append(
         request,
         planning=planning,
-        compatibility=compatibility,
         deadline_monotonic=deadline_monotonic,
     )
 
 
-def project_structured_append(
+def compile_structured_new_epoch(
     compiler: StructuredModelInputCompiler,
     request: StructuredModelInputCompileRequest,
     *,
     planning: FrozenProviderInputAppendPlanningInput,
-    compatibility: ProviderInputEpochCompatibility,
+    deadline_monotonic: float,
+) -> FrozenProviderInputAppendCompileResult:
+    if monotonic() >= deadline_monotonic:
+        raise TimeoutError("structured model input deadline expired")
+    return compiler.compile_new_epoch(
+        request,
+        planning=planning,
+        deadline_monotonic=deadline_monotonic,
+    )
+
+
+def project_structured_installed_append(
+    compiler: StructuredModelInputCompiler,
+    request: StructuredModelInputCompileRequest,
+    *,
+    planning: FrozenProviderInputAppendPlanningInput,
     deadline_monotonic: float,
 ) -> FrozenProviderInputAppendSemanticProjection:
     if monotonic() >= deadline_monotonic:
         raise TimeoutError("structured model input deadline expired")
-    return compiler.project_append(
+    return compiler.project_installed_append(
         request,
         planning=planning,
-        compatibility=compatibility,
         deadline_monotonic=deadline_monotonic,
     )
+
+
+def project_structured_new_epoch(
+    compiler: StructuredModelInputCompiler,
+    request: StructuredModelInputCompileRequest,
+    *,
+    planning: FrozenProviderInputAppendPlanningInput,
+    deadline_monotonic: float,
+) -> FrozenProviderInputAppendSemanticProjection:
+    if monotonic() >= deadline_monotonic:
+        raise TimeoutError("structured model input deadline expired")
+    return compiler.project_new_epoch(
+        request,
+        planning=planning,
+        deadline_monotonic=deadline_monotonic,
+    )
+
+
+def _compaction_seed_with_dispatch_read(
+    seed: (
+        AdoptedCompactionContinuationSeed
+        | CanonicalColdContinuationSeed
+        | CompactionDryProjectionSeed
+    ),
+    dispatch_read: FrozenCanonicalProviderDispatchRead,
+) -> (
+    AdoptedCompactionContinuationSeed
+    | CanonicalColdContinuationSeed
+    | CompactionDryProjectionSeed
+):
+    if isinstance(seed, AdoptedCompactionContinuationSeed):
+        return seed._with_dispatch_read(dispatch_read)
+    return replace(seed, dispatch_read=dispatch_read)
 
 
 def _require_compaction_family_candidate_read(
     family: PreparedCompactionCandidateFamily,
     *,
     canonical_read: FrozenCanonicalProviderDispatchRead,
-    seed: CompactionContinuationSeed,
+    seed: (
+        AdoptedCompactionContinuationSeed
+        | CanonicalColdContinuationSeed
+        | CompactionDryProjectionSeed
+    ),
 ) -> None:
     first_read = family.first_candidate_read
     first_facts = first_read.compile_snapshot
@@ -4836,7 +5582,7 @@ def _require_compaction_family_candidate_read(
     )
     if (
         seed.dispatch_read != canonical_read
-        or replace(seed, dispatch_read=first_read) != family.seed
+        or _compaction_seed_with_dispatch_read(seed, first_read) != family.seed
         or not replay_cut_matches
         or (
             identity.session_id,
@@ -4927,15 +5673,25 @@ def _require_prospective_root_family_candidate(
             not non_result_suffix
             or canonical_input.items[-len(non_result_suffix) :] == non_result_suffix
         )
-        and all(item in canonical_input.items for item in result_items)
+        and all(
+            any(
+                replace(
+                    canonical_item,
+                    tool_call_ordinal=item.tool_call_ordinal,
+                    tool_call_arguments=item.tool_call_arguments,
+                )
+                == item
+                for canonical_item in canonical_input.items
+                if canonical_item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
+            )
+            for item in result_items
+        )
     )
     same_read_variant = canonical_read == first_read or (
         len(canonical_input.items) == len(first_input.items)
         and bool(canonical_input.items)
         and canonical_input.items[1:] == first_input.items[1:]
-        and replace(
-            canonical_input.items[0], content=first_input.items[0].content
-        )
+        and replace(canonical_input.items[0], content=first_input.items[0].content)
         == first_input.items[0]
         and canonical_input.closures == first_input.closures
         and canonical_input.late_outcomes == first_input.late_outcomes
@@ -4971,8 +5727,7 @@ def _require_prospective_root_family_candidate(
             ModelInputScopeKind.ROOT,
             None,
         )
-        or binding.binding_revision_id
-        != candidate.exact_context_binding_revision_id
+        or binding.binding_revision_id != candidate.exact_context_binding_revision_id
         or binding.base_kind is not candidate.context_base_kind
         or binding.context_snapshot_id != candidate.context_snapshot_id
         or binding.source_through_sequence != candidate.source_through_sequence
@@ -5143,8 +5898,7 @@ def _prospective_provider_input_suffix_compile_snapshot(
         key = (item.tool_request_entry_id, item.tool_call_id)
         replacement = (
             appended_results.get(key)
-            if item.item_kind
-            is FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE
+            if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE
             else None
         )
         if replacement is None:
@@ -5155,7 +5909,13 @@ def _prospective_provider_input_suffix_compile_snapshot(
         replaced_closure_bytes += sum(
             len(part.text.encode("utf-8")) for part in item.content
         )
-        items_list.append(replacement)
+        items_list.append(
+            replace(
+                replacement,
+                tool_call_ordinal=item.tool_call_ordinal,
+                tool_call_arguments=item.tool_call_arguments,
+            )
+        )
         consumed_results.add(key)
     if consumed_results != set(appended_results):
         raise ValueError("prospective provider result has no canonical closure")
@@ -5173,8 +5933,7 @@ def _prospective_provider_input_suffix_compile_snapshot(
     closures = tuple(
         closure
         for closure in canonical.closures
-        if (closure.assistant_entry_id, closure.tool_call_id)
-        not in appended_results
+        if (closure.assistant_entry_id, closure.tool_call_id) not in appended_results
     )
     successor_input = CanonicalModelInputSnapshot(
         identity=successor_identity,
@@ -5299,9 +6058,7 @@ def _prospective_active_root_dispatch_read(
         base.compile_snapshot,
         appended=candidate.unpublished_items,
         canonical_expanded_bytes=(candidate.unpublished_canonical_expanded_bytes),
-        prospective_plan_workflow_fact=(
-            candidate.prospective_plan_workflow_fact
-        ),
+        prospective_plan_workflow_fact=(candidate.prospective_plan_workflow_fact),
         deadline_monotonic=deadline_monotonic,
     )
     return _prospective_provider_input_suffix_dispatch_read(base, prospective)
@@ -5399,72 +6156,35 @@ def _provider_wire_candidate_matches_dispatch(
     )
 
 
-def provider_input_compatibility(
-    *,
-    prepared_call: PreparedKernelModelCall | PreparedKernelSemanticModelCall,
-    canonical_facts: FrozenCanonicalCompileSnapshot,
-    sources: CollectedContextSources,
-) -> ProviderInputEpochCompatibility:
-    base = next(
-        item for item in sources.candidates if item.source_kind.value == "BASE_SYSTEM"
-    )
-    binding = prepared_call.compile_binding
-    return ProviderInputEpochCompatibility(
-        compiler_contract_version=COMPILER_CONTRACT_VERSION,
-        base_system_semantic_fingerprint=base.source_semantic_fingerprint,
-        tool_surface_fingerprint=binding.tool_surface.surface_fingerprint,
-        model_connection_id=prepared_call.call.binding.connection_id,
-        model_target_fingerprint=binding.target_fact.target_fingerprint,
-        estimator_fingerprint=binding.estimator_fingerprint,
-        provider_message_lowering_contract=context_fingerprint(
-            "provider-message-and-native-tool-lowering-contract:v1",
-            {
-                "messages": PROVIDER_MESSAGE_LOWERING_CONTRACT,
-                "native_tools": (
-                    prepared_call.native_projection_set.native_function_tool_wire_contract_fingerprint
-                ),
-            },
-        ),
-        context_base_semantic_identity=(
-            canonical_facts.context_binding_fact.context_base_semantic_identity
-        ),
-        provider_assistant_replay_contract_fingerprint=(
-            prepared_call.call.target.model_profile.route_wire_profile.assistant_replay_contract_fingerprint
-        ),
-    )
-
-
 def provider_replay_target(
     prepared_call: PreparedKernelModelCall,
 ):
-    profile = prepared_call.call.target.model_profile.route_wire_profile
     return build_provider_replay_target_compatibility(
-        wire_api=profile.wire_api,
-        endpoint_identity_fingerprint=(
-            prepared_call.call.target.fact.endpoint_fingerprint
-        ),
-        normalized_model_identifier=prepared_call.call.target.fact.model_id,
-        transport_binding_id=(prepared_call.call.target.fact.transport_binding_id),
+        target_fact=prepared_call.call.target.fact,
     )
 
 
 def prepared_append_candidate(
     *,
     planning: FrozenProviderInputAppendPlanningInput,
-    compatibility: ProviderInputEpochCompatibility,
+    transition: ProviderInputEpochTransition,
+    call_target: FrozenEpochModelCallTarget,
     compiled_result: FrozenProviderInputAppendCompileResult,
     wire_input_plan: FrozenProviderWireInputPlan,
     tool_exposure_plan: FrozenToolCapabilityExposurePlan,
+    preparation_basis: SealedProviderInputPreparationBasis,
 ) -> PreparedProviderInputAppendCandidate:
     predecessor = planning.predecessor_view
     epoch_nonce = (
-        f"provider-input-epoch:{uuid4().hex}"
-        if predecessor is None or compiled_result.reset_reason is not None
-        else predecessor.epoch_nonce
+        predecessor.epoch_nonce
+        if isinstance(transition, InstalledEpochAppend)
+        else f"provider-input-epoch:{uuid4().hex}"
     )
     expected_revision = 0 if predecessor is None else predecessor.epoch_revision
     return PreparedProviderInputAppendCandidate(
         planning=planning,
+        transition=transition,
+        call_target=call_target,
         epoch_nonce=epoch_nonce,
         expected_epoch_revision=expected_revision,
         resulting_compiled_input=compiled_result.compiled_input,
@@ -5472,9 +6192,26 @@ def prepared_append_candidate(
         resulting_canonical_frontier=compiled_result.canonical_frontier,
         resulting_source_heads=compiled_result.source_heads,
         appended_message_count=compiled_result.appended_message_count,
-        reset_reason=compiled_result.reset_reason,
-        compatibility=compatibility,
         tool_exposure_plan=tool_exposure_plan,
+        _preparation_basis=preparation_basis,
+    )
+
+
+def _semantic_projection_from_compiled(
+    compiled: FrozenCompiledModelInput,
+) -> FrozenModelInputSemanticProjection:
+    return FrozenModelInputSemanticProjection(
+        canonical_input_identity=compiled.canonical_input_identity,
+        system_prompt=compiled.system_prompt,
+        messages=compiled.messages,
+        message_placements=compiled.message_placements,
+        tools=compiled.tools,
+        final_estimate=compiled.final_estimate,
+        source_decisions=compiled.source_decisions,
+        tool_result_decisions=compiled.tool_result_decisions,
+        diagnostic_codes=compiled.diagnostic_codes,
+        source_collection_fingerprint=compiled.source_collection_fingerprint,
+        compile_binding_fingerprint=compiled.compile_binding_fingerprint,
     )
 
 
@@ -5636,10 +6373,13 @@ def _prepare_subagent_parent_context_call_subject(
 
 
 __all__ = [
+    "CompactionDryProjectionBasis",
+    "CompactionDryProjectionResult",
     "HandleFreeProviderWireObservation",
     "InstalledProviderOpen",
     "KernelModelPort",
     "PreparedCompactionSourceDispatch",
+    "PreparedCompactionDryProjection",
     "PreparedExecutableProviderWireInput",
     "PreparedProviderDispatch",
     "PreparedProviderHeadroomAdmission",
@@ -5653,8 +6393,8 @@ __all__ = [
     "ProviderDispatchExecutionAuthority",
     "ProviderDispatchCoordinator",
     "canonical_frontier",
-    "compile_structured_append",
+    "compile_structured_installed_append",
+    "compile_structured_new_epoch",
     "prepared_append_candidate",
-    "provider_input_compatibility",
     "provider_replay_target",
 ]

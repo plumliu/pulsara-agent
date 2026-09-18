@@ -12,7 +12,6 @@ import asyncio
 from dataclasses import dataclass
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Mapping
 
@@ -49,14 +48,20 @@ from pulsara_agent.conversation_kernel.memory.governor import (
 )
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.input import LLMMessage
+from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
+from pulsara_agent.llm.model_connections import ModelCallBinding
+from pulsara_agent.llm.model_target import default_reasoning_selection
+from pulsara_agent.llm.provider_open import (
+    _issue_confirmed_memory_governance_terminal_fence,
+)
+from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.memory.product_contract import (
     MEMORY_GOVERNANCE_CONTRACT_ID,
     MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3,
 )
 from pulsara_agent.memory.scope import CTX_GLOBAL
 from pulsara_agent.primitives.model_call import ModelCallPurpose
-from pulsara_agent.process_api_key_boundary import ProcessApiKeyBoundary
-from pulsara_agent.settings import PulsaraSettings, load_env_file
+from pulsara_agent.settings import LocalSettingsStore
 
 
 _PROJECT_CONTEXT = "ctx:workspace/dogfood"
@@ -858,15 +863,27 @@ async def _run(
     output: Path | None,
 ) -> int:
     logging.getLogger("jieba").setLevel(logging.ERROR)
-    load_env_file(".env", override=False)
-    os.environ["PULSARA_API"] = api
-    settings = PulsaraSettings.from_env()
-    if not settings.llm.api_key:
-        raise RuntimeError("PULSARA_API_KEY is unavailable")
-    model = DirectKernelAuxiliaryJsonModel(
-        settings.llm,
-        api_key_boundary=ProcessApiKeyBoundary(),
+    settings_store = LocalSettingsStore()
+    settings = settings_store.read()
+    matches = tuple(
+        item for item in settings.model_connections if item.target.wire_api.value == api
     )
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected exactly one saved {api} model connection; found {len(matches)}"
+        )
+    connection = matches[0]
+    if settings.model_api_key(connection.id) is None:
+        raise RuntimeError(f"saved connection {connection.id.value!r} has no API key")
+    catalog = ModelCatalogOwner(ModelsDevCatalogClient())
+    await catalog.refresh()
+    runtime = ModelRuntime.production(settings=settings_store, catalog=catalog)
+    resolved = runtime.freeze_resolution_snapshot().connection(connection.id).target
+    origin_binding = ModelCallBinding(
+        connection.id,
+        default_reasoning_selection(resolved.reasoning),
+    )
+    model = DirectKernelAuxiliaryJsonModel(runtime)
     all_scenarios = _scenarios()
     scenarios = (
         all_scenarios
@@ -876,7 +893,8 @@ async def _run(
     report: dict[str, object] = {
         "contract": MEMORY_GOVERNANCE_CONTRACT_ID,
         "wire_api": settings.llm.api,
-        "model": settings.llm.flash_model,
+        "model": connection.target.model_id,
+        "provider_open_authority_evidence": False,
         "scenario_total": len(all_scenarios),
         "scenario_slice_count": len(scenarios),
         "system": (
@@ -901,12 +919,23 @@ async def _run(
             maximum_input_bytes=MAXIMUM_GOVERNANCE_FINAL_WIRE_BYTES,
             maximum_output_tokens=MAXIMUM_GOVERNANCE_OUTPUT_TOKENS,
             timeout_policy=OpenAITransportTimeoutPolicy(10, 20, 10, 45, 60),
+            origin_binding=origin_binding,
             maximum_result_bytes=MAXIMUM_GOVERNANCE_OUTPUT_BYTES,
         )
         if selected is None:
             raise RuntimeError(f"scenario {scenario.name} did not fit final wire")
         prepared_call, _ = selected
-        raw_model_json = await model.complete_prepared_json(prepared_call)
+        # This semantic probe does not claim repository-authority coverage; the
+        # production governor obtains this carrier only from the exact DB recheck.
+        terminal_fence = _issue_confirmed_memory_governance_terminal_fence(
+            candidate=scenario,
+            origin_model_call_binding=origin_binding,
+            durable_terminal_fence=(scenario.name, "semantic-dogfood"),
+        )
+        raw_model_json = await model.complete_prepared_json(
+            prepared_call,
+            terminal_fence=terminal_fence,
+        )
         try:
             parsed = _parse_governance_decision(
                 raw_model_json,

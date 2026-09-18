@@ -1,5 +1,7 @@
 # Pulsara Round 6：MCP Production Capability Restoration 实施规格
 
+> Epoch-boundary hard-cut 覆盖（2026-09-19）：provider-input epoch 的当前唯一权威是 [`PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。本文中 tool-surface 变化自动触发 `TOOL_SURFACE_CHANGED` reset 的内容均为 historical/superseded；同 epoch 的 provider tools 必须 byte-identical，变化只能等待显式合法边界，不保留兼容路径。其余不冲突语义继续有效。
+
 > 状态：**ACTIVATED — 2026-08-14（post-activation boundary review closed）**
 >
 > 2026-09-06 SDK ownership hard-cut：当前能力页规范 §6.3 覆盖本文旧 HTTP/SSE framing、

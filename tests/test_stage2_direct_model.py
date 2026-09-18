@@ -22,12 +22,13 @@ from pulsara_agent.conversation_kernel.direct_model import (
     quote_provider_followup_wire_resources,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
-    HostProviderInputContinuityOwner,
     ProviderInputContinuityConflict,
 )
 from pulsara_agent.conversation_kernel.provider_dispatch import (
+    _semantic_projection_from_compiled,
     prepared_append_candidate,
 )
+from pulsara_agent.conversation_kernel.cold_epoch import CanonicalColdContinuationSeed
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
     build_chat_completions_payload,
@@ -60,7 +61,6 @@ from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
     NoNewTriggerAnchor,
     ProcessLocalCanonicalFrontier,
-    ProviderInputEpochCompatibility,
     ProviderInputContinuityScope,
 )
 from pulsara_agent.model_input.contracts import (
@@ -88,7 +88,6 @@ from pulsara_agent.ports.provider_stream import (
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
-    context_fingerprint,
     freeze_json,
     thaw_json,
 )
@@ -96,6 +95,7 @@ from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import (
     StaticContextSourceCollector,
     StructuredToolPort,
+    new_test_provider_input_continuity_owner,
     prepare_test_direct_tool_surface,
     prepare_test_model_call,
     static_canonical_compile_facts,
@@ -503,7 +503,7 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
         scope_kind=identity.conversation_scope_kind,
         scope_subagent_task_id=identity.scope_subagent_task_id,
     )
-    owner = HostProviderInputContinuityOwner(session_id=request.session_id)
+    owner = new_test_provider_input_continuity_owner(request.session_id)
     frontier = ProcessLocalCanonicalFrontier(
         latest_context_binding_revision_id=identity.context_binding_revision_id,
         context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
@@ -515,36 +515,36 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
         canonical_frontier=frontier,
         dispatch_anchor=NoNewTriggerAnchor(None),
     )
-    compatibility = ProviderInputEpochCompatibility(
-        compiler_contract_version="test:compiler",
-        base_system_semantic_fingerprint=context_fingerprint("test:base", "base"),
-        tool_surface_fingerprint=(
-            request.prepared_call.tool_surface.model_surface.surface_fingerprint
-        ),
-        model_connection_id=request.prepared_call.call.binding.connection_id,
-        model_target_fingerprint=(
-            request.prepared_call.compile_binding.target_fact.target_fingerprint
-        ),
-        estimator_fingerprint=(
-            request.prepared_call.compile_binding.estimator_fingerprint
-        ),
-        provider_message_lowering_contract="test:lowering",
-        context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
-    )
     tool_exposure_plan = request.prepared_call.tool_surface.capability_exposure_plan
     assert tool_exposure_plan is not None
+    preparation_basis = SimpleNamespace(
+        call_target=request.prepared_call.epoch_call_target,
+        canonical_read=SimpleNamespace(),
+        capability_dispatch_cut=SimpleNamespace(),
+    )
+    transition = owner.issue_transition(
+        planning=planning,
+        preparation_basis=preparation_basis,
+        call_target=request.prepared_call.epoch_call_target,
+        seed=CanonicalColdContinuationSeed(dispatch_read=SimpleNamespace()),
+        semantic_projection=_semantic_projection_from_compiled(
+            request.compiled_input
+        ),
+        wire_input_plan=request.wire_input_plan,
+    )
     candidate = prepared_append_candidate(
         planning=planning,
-        compatibility=compatibility,
+        transition=transition,
+        call_target=request.prepared_call.epoch_call_target,
         compiled_result=FrozenProviderInputAppendCompileResult(
             compiled_input=request.compiled_input,
             canonical_frontier=frontier,
             source_heads=(),
             appended_message_count=len(request.compiled_input.messages),
-            reset_reason=None,
         ),
         wire_input_plan=request.wire_input_plan,
         tool_exposure_plan=tool_exposure_plan,
+        preparation_basis=preparation_basis,
     )
     owner.register(candidate)
     return owner, candidate

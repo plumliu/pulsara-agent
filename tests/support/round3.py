@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -54,7 +55,15 @@ from pulsara_agent.conversation_kernel.capability_composition import (
 from pulsara_agent.conversation_kernel.mcp.contracts import build_catalog_snapshot
 from pulsara_agent.conversation_kernel.input_continuity import (
     FrozenProviderInputEpochView,
+    HostProviderInputContinuityOwner,
     ProcessLocalProviderInputInstallAuthority,
+    _issue_new_subagent_lease_source,
+    _issue_root_bootstrap_lease_source,
+)
+from pulsara_agent.conversation_kernel.contracts import (
+    HostWriterAcquisitionKind,
+    HostWriterGuard,
+    WriterLease,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
@@ -71,12 +80,14 @@ from pulsara_agent.conversation_kernel.cold_epoch import (
     build_subagent_initial_seed,
 )
 from pulsara_agent.conversation_kernel.subagents.contracts import (
+    FrozenSubagentParentContextSelection,
     SubagentContextMode,
     SubagentProfileKind,
     SubagentResultSource,
     build_parent_context_call_subject,
     build_parent_context_selection,
     build_subagent_result_public_fact,
+    build_subagent_task_start,
     parent_context_call_subject_identity_digest,
     parent_context_selection_identity_digest,
     parent_context_source_identity_digest,
@@ -153,6 +164,58 @@ from pulsara_agent.primitives.run_permission import (
 from tests.support.model_config import test_model_runtime
 
 
+def new_test_provider_input_continuity_owner(
+    session_id: str = "session:test",
+    *,
+    maximum_child_scopes: int = 4,
+) -> HostProviderInputContinuityOwner:
+    """Build a unit-test Host owner from an exact synthetic session genesis."""
+
+    writer_lease = WriterLease(
+        guard=HostWriterGuard(
+            session_id=session_id,
+            writer_generation=1,
+            writer_owner_id=f"host:test:{session_id}",
+        ),
+        expires_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
+        acquisition_kind=HostWriterAcquisitionKind.NEW_SESSION,
+    )
+    return HostProviderInputContinuityOwner(
+        root_lease_source=_issue_root_bootstrap_lease_source(writer_lease),
+        maximum_child_scopes=maximum_child_scopes,
+    )
+
+
+def new_test_subagent_lease_source(*, session_id: str, task_id: str):
+    guard = HostWriterGuard(
+        session_id=session_id,
+        writer_generation=1,
+        writer_owner_id=f"host:test:{session_id}",
+    )
+    task_start = build_subagent_task_start(
+        session_id=session_id,
+        workspace_id="workspace:test",
+        writer_generation=guard.writer_generation,
+        task_id=task_id,
+        parent_turn_id="turn:test-parent",
+        objective="test objective",
+        profile=SubagentProfileKind.GENERAL_WORKER,
+        parent_context=FrozenSubagentParentContextSelection(
+            SubagentContextMode.NONE,
+            None,
+            (),
+            None,
+        ),
+        dependency_context=None,
+        occurred_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
+        actor_id="test",
+    )
+    return _issue_new_subagent_lease_source(
+        writer_guard=guard,
+        durable_runnable_task_fact=task_start,
+    )
+
+
 class ScriptedKernelModel:
     def __init__(self, calls: list[list[object]]) -> None:
         self._calls = calls
@@ -164,6 +227,14 @@ class ScriptedKernelModel:
         )
         self._preparer = DirectKernelModelPort(model_runtime=self._model_runtime)
 
+    @property
+    def model_runtime(self):
+        return self._model_runtime
+
+    @property
+    def transport_timeout_policy(self):
+        return self._preparer.transport_timeout_policy
+
     def prepare_target(
         self, request: KernelModelTargetPreparationRequest
     ) -> PreparedKernelModelTarget:
@@ -173,6 +244,10 @@ class ScriptedKernelModel:
     def prepare_resolved_target(self, request, **kwargs):
         self.preparation_requests.append(request)
         return self._preparer.prepare_resolved_target(request, **kwargs)
+
+    def prepare_frozen_epoch_target(self, request, **kwargs):
+        self.preparation_requests.append(request)
+        return self._preparer.prepare_frozen_epoch_target(request, **kwargs)
 
     def freeze_native_tool_eligibility(self, **kwargs):
         return self._preparer.freeze_native_tool_eligibility(**kwargs)
@@ -239,11 +314,22 @@ class CallbackScriptedKernelModel:
         )
         self._preparer = DirectKernelModelPort(model_runtime=self._model_runtime)
 
+    @property
+    def model_runtime(self):
+        return self._model_runtime
+
+    @property
+    def transport_timeout_policy(self):
+        return self._preparer.transport_timeout_policy
+
     def prepare_target(self, request):
         return self._preparer.prepare_target(request)
 
     def prepare_resolved_target(self, request, **kwargs):
         return self._preparer.prepare_resolved_target(request, **kwargs)
+
+    def prepare_frozen_epoch_target(self, request, **kwargs):
+        return self._preparer.prepare_frozen_epoch_target(request, **kwargs)
 
     def freeze_native_tool_eligibility(self, **kwargs):
         return self._preparer.freeze_native_tool_eligibility(**kwargs)

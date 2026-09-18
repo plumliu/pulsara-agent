@@ -10,6 +10,7 @@ plan to the cold continuity candidate.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from threading import Lock
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -55,7 +56,6 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
     FrozenProviderInputAppendPlanningInput,
-    ProviderInputEpochCompatibility,
 )
 from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
@@ -76,8 +76,8 @@ class CanonicalColdContinuationSeed:
 
 
 @dataclass(frozen=True, slots=True)
-class CompactionContinuationSeed:
-    """Exact cold base used to prove every compaction candidate."""
+class CompactionDryProjectionSeed:
+    """Non-authorizing synthetic base used only before canonical adoption."""
 
     dispatch_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
     binding_rewrite_identity: str
@@ -89,6 +89,152 @@ class CompactionContinuationSeed:
             or not self.protected_tail_selection_fingerprint.startswith("sha256:")
         ):
             raise ValueError("compaction continuation seed is incomplete")
+
+
+_ADOPTED_COMPACTION_SEED_SEAL = object()
+
+
+@dataclass(slots=True, init=False)
+class _AdoptedCompactionContinuationAuthority:
+    predecessor: object = field(repr=False)
+    destination: object = field(repr=False)
+    confirmation: object = field(repr=False)
+    attempt_token: object = field(repr=False)
+    candidate: object = field(repr=False)
+    _consumed: bool = field(repr=False)
+    _lock: Lock = field(repr=False)
+
+    def __init__(
+        self,
+        *,
+        predecessor: object,
+        destination: object,
+        confirmation: object,
+        attempt_token: object,
+        candidate: object,
+        _seal: object,
+    ) -> None:
+        if _seal is not _ADOPTED_COMPACTION_SEED_SEAL:
+            raise TypeError("adopted compaction authority is safe-point-issued")
+        self.predecessor = predecessor
+        self.destination = destination
+        self.confirmation = confirmation
+        self.attempt_token = attempt_token
+        self.candidate = candidate
+        self._consumed = False
+        self._lock = Lock()
+
+    def consume(self, *, predecessor: object, destination: object) -> None:
+        with self._lock:
+            if self._consumed:
+                raise RuntimeError("adopted compaction authority is already consumed")
+            if predecessor is not self.predecessor or destination != self.destination:
+                raise RuntimeError("adopted compaction authority subject drifted")
+            self._consumed = True
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class AdoptedCompactionContinuationSeed:
+    """Safe-point-issued one-shot authority for one FULL-adopted successor."""
+
+    dispatch_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
+    binding_rewrite_identity: str
+    protected_tail_selection_fingerprint: str
+    _authority: _AdoptedCompactionContinuationAuthority = field(
+        repr=False, compare=False
+    )
+
+    def __init__(
+        self,
+        *,
+        dispatch_read: FrozenCanonicalProviderDispatchRead,
+        binding_rewrite_identity: str,
+        protected_tail_selection_fingerprint: str,
+        authority: _AdoptedCompactionContinuationAuthority,
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _ADOPTED_COMPACTION_SEED_SEAL
+            or getattr(
+                getattr(authority.confirmation, "kind", None), "value", None
+            )
+            != "FULL"
+            or not binding_rewrite_identity
+            or not protected_tail_selection_fingerprint.startswith("sha256:")
+        ):
+            raise TypeError("adopted compaction seed is safe-point-issued")
+        object.__setattr__(self, "dispatch_read", dispatch_read)
+        object.__setattr__(self, "binding_rewrite_identity", binding_rewrite_identity)
+        object.__setattr__(
+            self,
+            "protected_tail_selection_fingerprint",
+            protected_tail_selection_fingerprint,
+        )
+        object.__setattr__(self, "_authority", authority)
+
+    def _with_dispatch_read(
+        self, dispatch_read: FrozenCanonicalProviderDispatchRead
+    ) -> "AdoptedCompactionContinuationSeed":
+        old = self.dispatch_read.compile_snapshot.context_binding_fact
+        new = dispatch_read.compile_snapshot.context_binding_fact
+        if (
+            old.binding_revision_id != new.binding_revision_id
+            or old.context_snapshot_id != new.context_snapshot_id
+        ):
+            raise RuntimeError("adopted compaction seed variant changed its base")
+        return AdoptedCompactionContinuationSeed(
+            dispatch_read=dispatch_read,
+            binding_rewrite_identity=self.binding_rewrite_identity,
+            protected_tail_selection_fingerprint=(
+                self.protected_tail_selection_fingerprint
+            ),
+            authority=self._authority,
+            _seal=_ADOPTED_COMPACTION_SEED_SEAL,
+        )
+
+    def _consume_for(
+        self,
+        *,
+        predecessor: object,
+        destination: object,
+        preparation_basis: object,
+    ) -> None:
+        if getattr(preparation_basis, "canonical_read", None) != self.dispatch_read:
+            raise RuntimeError("adopted compaction seed subject drifted")
+        self._authority.consume(
+            predecessor=predecessor,
+            destination=destination,
+        )
+
+
+def _issue_adopted_compaction_continuation_seed(
+    *,
+    dispatch_read: FrozenCanonicalProviderDispatchRead,
+    binding_rewrite_identity: str,
+    protected_tail_selection_fingerprint: str,
+    predecessor: object,
+    destination: object,
+    confirmation: object,
+    attempt_token: object,
+    candidate: object,
+) -> AdoptedCompactionContinuationSeed:
+    authority = _AdoptedCompactionContinuationAuthority(
+        predecessor=predecessor,
+        destination=destination,
+        confirmation=confirmation,
+        attempt_token=attempt_token,
+        candidate=candidate,
+        _seal=_ADOPTED_COMPACTION_SEED_SEAL,
+    )
+    return AdoptedCompactionContinuationSeed(
+        dispatch_read=dispatch_read,
+        binding_rewrite_identity=binding_rewrite_identity,
+        protected_tail_selection_fingerprint=(
+            protected_tail_selection_fingerprint
+        ),
+        authority=authority,
+        _seal=_ADOPTED_COMPACTION_SEED_SEAL,
+    )
 
 
 _SUBAGENT_SEED_AUTHORITY = object()
@@ -260,7 +406,10 @@ def build_subagent_initial_seed(
 
 
 FrozenColdConversationSeed = (
-    CanonicalColdContinuationSeed | CompactionContinuationSeed | SubagentInitialSeed
+    CanonicalColdContinuationSeed
+    | CompactionDryProjectionSeed
+    | AdoptedCompactionContinuationSeed
+    | SubagentInitialSeed
 )
 
 
@@ -268,7 +417,6 @@ FrozenColdConversationSeed = (
 class PreparedColdEpochSemanticAssembly:
     seed: FrozenColdConversationSeed = field(repr=False)
     planning: FrozenProviderInputAppendPlanningInput = field(repr=False)
-    compatibility: ProviderInputEpochCompatibility
     compiled_result: FrozenProviderInputAppendCompileResult = field(repr=False)
     prepared_call: "PreparedKernelModelCall | PreparedKernelSemanticModelCall" = field(
         repr=False
@@ -284,7 +432,6 @@ class PreparedColdEpochSemanticAssembly:
 @dataclass(frozen=True, slots=True)
 class ColdEpochContinuityCandidateInputs:
     planning: FrozenProviderInputAppendPlanningInput = field(repr=False)
-    compatibility: ProviderInputEpochCompatibility
     compiled_result: FrozenProviderInputAppendCompileResult = field(repr=False)
     wire_input_plan: FrozenProviderWireInputPlan = field(repr=False)
     tool_exposure_plan: FrozenToolCapabilityExposurePlan = field(repr=False)
@@ -333,7 +480,6 @@ class KernelColdEpochInputAssembler:
         seed: FrozenColdConversationSeed,
         compile_request: StructuredModelInputCompileRequest,
         planning: FrozenProviderInputAppendPlanningInput,
-        compatibility: ProviderInputEpochCompatibility,
         prepared_call: "PreparedKernelModelCall | PreparedKernelSemanticModelCall",
         capability_dispatch_cut: FrozenCapabilityDispatchCut,
         tool_view: FrozenToolCapabilityDispatchView,
@@ -355,17 +501,15 @@ class KernelColdEpochInputAssembler:
             non_trigger_sources=non_trigger_sources,
             deadline_monotonic=deadline_monotonic,
         )
-        compiled_result = self._compiler.compile_append(
+        compiled_result = self._compiler.compile_new_epoch(
             compile_request,
             planning=planning,
-            compatibility=compatibility,
             deadline_monotonic=deadline_monotonic,
         )
         self._require_deadline(deadline_monotonic)
         return PreparedColdEpochSemanticAssembly(
             seed=seed,
             planning=planning,
-            compatibility=compatibility,
             compiled_result=compiled_result,
             prepared_call=prepared_call,
             capability_dispatch_cut=capability_dispatch_cut,
@@ -393,7 +537,6 @@ class KernelColdEpochInputAssembler:
             raise ValueError("cold epoch wire plan changed semantic input")
         candidate_inputs = ColdEpochContinuityCandidateInputs(
             planning=prepared.planning,
-            compatibility=prepared.compatibility,
             compiled_result=prepared.compiled_result,
             wire_input_plan=wire_input_plan,
             tool_exposure_plan=prepared.tool_exposure_plan,
@@ -427,7 +570,8 @@ class KernelColdEpochInputAssembler:
         cls._require_deadline(deadline_monotonic)
         if type(seed) not in {
             CanonicalColdContinuationSeed,
-            CompactionContinuationSeed,
+            CompactionDryProjectionSeed,
+            AdoptedCompactionContinuationSeed,
             SubagentInitialSeed,
         }:
             raise TypeError("cold epoch seed union is not closed")
@@ -479,7 +623,8 @@ __all__ = [
     "CanonicalColdContinuationSeed",
     "ColdEpochContinuityCandidateInputs",
     "ColdEpochInputAssemblyResult",
-    "CompactionContinuationSeed",
+    "CompactionDryProjectionSeed",
+    "AdoptedCompactionContinuationSeed",
     "FrozenColdConversationSeed",
     "KernelColdEpochInputAssembler",
     "PreparedColdEpochSemanticAssembly",

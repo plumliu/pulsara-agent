@@ -212,10 +212,12 @@ class _CompactionScriptedModel(ScriptedKernelModel):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
         self.summary_transport.contract_version = call.target.transport.contract_version
-        return replace(
+        call = replace(
             call,
             target=replace(call.target, transport=self.summary_transport),
         )
+        self.model_runtime.register_test_call_override(call)
+        return call
 
 
 class _ActiveCompactionModel(CallbackScriptedKernelModel):
@@ -231,10 +233,12 @@ class _ActiveCompactionModel(CallbackScriptedKernelModel):
         call = super().resolve_compaction_summary_call(**kwargs)
         self.summary_transport.binding_id = call.target.transport.binding_id
         self.summary_transport.contract_version = call.target.transport.contract_version
-        return replace(
+        call = replace(
             call,
             target=replace(call.target, transport=self.summary_transport),
         )
+        self.model_runtime.register_test_call_override(call)
+        return call
 
     async def _stream(self, request):
         del request
@@ -794,9 +798,18 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
     assert [value["prompt"] for value in logs].count("different") == 0
     assert len(logs) == 2
     assert model.semantic_input is not None
+    projected_image = LLMImagePart("image/png", image_bytes, 7, 5)
     assert any(
         message.role is MessageRole.USER
-        and message.content == (LLMImagePart("image/png", image_bytes, 7, 5),)
+        and message.content
+        == (
+            LLMTextPart(
+                '{"pulsara_image":{"image_ref":"'
+                + projected_image.content_digest
+                + '"}}'
+            ),
+            projected_image,
+        )
         for message in model.semantic_input.messages
     )
 

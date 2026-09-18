@@ -1,5 +1,7 @@
 # Pulsara 模型切换 Handover Compaction 与 Destination-side Projection Compaction Hard-cut 实施规范
 
+> Epoch-boundary hard-cut 覆盖（2026-09-19）：provider-input epoch 的当前唯一权威是 [`PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_PROVIDER_INPUT_EPOCH_BOUNDARIES_AND_CANONICAL_REPROJECTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。本文中以 A/B same-epoch incompatibility 本身解释或授权 cold reset 的内容均为 historical/superseded；模型切换只能走显式 model-switch cold 子路径或 adopted compaction successor，不保留兼容路径。其余三档 handover 与不冲突语义继续有效。
+
 > 状态：生产 hard cut 已实施；K4 Kernel 验收于 2026-09-15 通过，证据见 [K4 验收记录](PULSARA_KERNEL_IMAGE_INPUT_K4_ACCEPTANCE.zh.md)；U1/U2 浏览器链路另行验收。
 >
 > 图片输入修订（2026-09-14）：
