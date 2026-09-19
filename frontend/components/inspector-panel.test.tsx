@@ -239,4 +239,32 @@ describe('InspectorPanel PR03 production navigation', () => {
     expect(within(actions).getAllByRole('button').map((button) => button.textContent?.trim())).toEqual(['导入 MCP', '添加']);
     expect(within(actions).getAllByRole('button')[0].className).toBe(within(actions).getAllByRole('button')[1].className);
   });
+
+  it('animates inherited capabilities and nested MCP details without unmounting on collapse', () => {
+    const view = render(<InspectorPanel {...props({ capabilities: capabilitySnapshot, capabilityLoading: false })} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'MCP 2' }));
+
+    const inheritedToggle = screen.getByRole('button', { name: '继承的能力1' });
+    const inheritedGroup = inheritedToggle.closest('.project-capability-group')!;
+    const inheritedDisclosure = inheritedGroup.querySelector('.project-capability-group__disclosure')!;
+    expect(inheritedDisclosure.classList.contains('is-open')).toBe(false);
+
+    fireEvent.click(inheritedToggle);
+    expect(inheritedDisclosure.classList.contains('is-open')).toBe(true);
+    const mcpRow = screen.getByText('用户 MCP').closest('.project-capability-row')!;
+    const detailDisclosure = mcpRow.querySelector('.project-capability-row__detail-disclosure')!;
+    expect(detailDisclosure.classList.contains('is-open')).toBe(false);
+
+    fireEvent.click(within(mcpRow as HTMLElement).getByRole('button', { name: /用户 MCP/ }));
+    expect(detailDisclosure.classList.contains('is-open')).toBe(true);
+    expect(mcpRow.querySelector('.project-capability-row__detail')).toBeTruthy();
+
+    fireEvent.click(within(mcpRow as HTMLElement).getByRole('button', { name: '收起详情' }));
+    expect(detailDisclosure.classList.contains('is-open')).toBe(false);
+    expect(mcpRow.querySelector('.project-capability-row__detail')).toBeTruthy();
+
+    fireEvent.click(inheritedToggle);
+    expect(inheritedDisclosure.classList.contains('is-open')).toBe(false);
+    expect(view.container.querySelector('.project-capability-row__detail')).toBeTruthy();
+  });
 });

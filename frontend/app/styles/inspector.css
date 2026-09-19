@@ -143,8 +143,8 @@
 .background-process__info:hover { background: color-mix(in srgb,var(--paper-deep) 52%,transparent); }
 .background-process__info[aria-pressed='true'] { background: var(--paper-deep); color: var(--muted); }
 .background-process__stop { color: var(--red); background: var(--red-soft); }
-.background-process > dl { display: grid; gap: 5px; margin: 0; padding: 9px 11px; border-top: 1px solid var(--line); background: color-mix(in srgb,var(--paper-deep) 54%,transparent); }
-.background-process > dl div { display: grid; grid-template-columns: 62px minmax(0,1fr); gap: 8px; }
+.background-process__details dl { display: grid; gap: 5px; margin: 0; padding: 9px 11px; border-top: 1px solid var(--line); background: color-mix(in srgb,var(--paper-deep) 54%,transparent); }
+.background-process__details dl div { display: grid; grid-template-columns: 62px minmax(0,1fr); gap: 8px; }
 .background-process dt { color: var(--faint); font-size: var(--type-micro); }
 .background-process dd { min-width: 0; margin: 0; color: var(--muted); font-family: var(--mono); font-size: var(--type-micro); overflow-wrap: anywhere; }
 .background-process__attention, .background-process__feedback { display: flex; gap: 5px; align-items: flex-start; margin: 0; padding: 8px 10px; border-top: 1px solid color-mix(in srgb,var(--red) 18%,var(--line)); background: var(--red-soft); color: var(--red); font-size: var(--type-micro); line-height: 1.45; overflow-wrap: anywhere; }
@@ -199,6 +199,7 @@
 .project-capability-group__toggle svg:last-child { transition: transform .15s ease; }
 .project-capability-group--inherited.is-expanded .project-capability-group__toggle svg:last-child { transform: rotate(180deg); }
 .project-capability-group__manage { margin-left: auto; color: var(--violet); }
+.project-capability-group__items { display: grid; gap: 6px; }
 .project-capability-row { display: grid; grid-template-columns: 28px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb,var(--paper-solid) 91%,transparent); box-shadow: var(--shadow-sm); }
 .project-capability-row.is-disabled .project-capability-row__copy { opacity: .58; }
 .project-capability-row__icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px; background: var(--amber-soft); color: var(--amber); }

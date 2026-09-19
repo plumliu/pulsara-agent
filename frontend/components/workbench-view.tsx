@@ -73,6 +73,7 @@ import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-bo
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
 import { WelcomeTypewriter } from './welcome-typewriter';
+import { AnimatedDisclosure } from './animated-disclosure';
 import { builtinToolSummary } from '../lib/builtin-tool-summary';
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
@@ -512,17 +513,17 @@ function TraceCard({
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
         ) : <div className="trace-card__summary">{summary}</div>}
-        {expanded && trace.resultContent && (
-          <section className="tool-result-images" aria-label="工具读取的图片">
-            <PromptContentView
-              content={trace.resultContent}
-              variant="tool"
-              onReadImage={onReadPromptImage}
-            />
-          </section>
-        )}
-        {expanded && expandable && !trace.resultContent && (
-          <div className="terminal-output">
+        {expandable && <AnimatedDisclosure open={expanded} className="trace-card__disclosure">
+          {trace.resultContent ? (
+            <section className="tool-result-images" aria-label="工具读取的图片">
+              <PromptContentView
+                content={trace.resultContent}
+                variant="tool"
+                onReadImage={onReadPromptImage}
+              />
+            </section>
+          ) : (
+            <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
             {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
             {hasTerminalOutput && (
@@ -642,8 +643,9 @@ function TraceCard({
               </section>
             )}
             {trace.meta && <footer><span>{trace.meta}</span></footer>}
-          </div>
-        )}
+            </div>
+          )}
+        </AnimatedDisclosure>}
       </article>
     </div>
   );
@@ -786,7 +788,9 @@ function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: Ma
         {running && <span className="reasoning-row__live"><i />思考中</span>}
         <ChevronRight className="reasoning-row__chevron" size={12} />
       </button>
-      {expanded && <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} /></div>}
+      <AnimatedDisclosure open={expanded}>
+        <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} /></div>
+      </AnimatedDisclosure>
     </section>
   );
 }
@@ -858,7 +862,7 @@ function SubagentRunCard({
         </span>
         <ChevronDown size={13} />
       </button>
-      {expanded && (
+      <AnimatedDisclosure open={expanded}>
         <div className="subagent-run__body">
           {run.objective && <div className="subagent-objective"><span>目标</span><p>{run.objective}</p></div>}
           {run.activities.map((activity) => (
@@ -883,7 +887,7 @@ function SubagentRunCard({
             <section className="subagent-summary"><span>结果</span><div className="assistant-markdown"><MarkdownBody body={run.summary} onNotify={onNotify} /></div></section>
           )}
         </div>
-      )}
+      </AnimatedDisclosure>
     </article>
   );
 }
@@ -1039,6 +1043,7 @@ function AssistantHeading({ message, response, label = 'Pulsara' }: { message: M
 
 function AssistantMessage({
   message,
+  responseActionEligible,
   startsAssistantRun,
   joinsPreviousToolChain,
   joinsNextToolChain,
@@ -1055,6 +1060,7 @@ function AssistantMessage({
   assistantLabel,
 }: {
   message: Message;
+  responseActionEligible: boolean;
   startsAssistantRun: boolean;
   joinsPreviousToolChain: boolean;
   joinsNextToolChain: boolean;
@@ -1073,9 +1079,8 @@ function AssistantMessage({
   const [forking, setForking] = useState(false);
   const forkInFlight = useRef(false);
   const hasNaturalLanguage = Boolean(message.body.trim());
-  const canCopyResponse = hasNaturalLanguage
-    && message.assistantKind === 'terminal'
-    && message.status !== 'running';
+  const isStreaming = message.status === 'running';
+  const canCopyResponse = hasNaturalLanguage && responseActionEligible;
   const hasReasoning = Boolean(message.reasoning?.length);
   const hasOperationalContent = Boolean(
     hasReasoning || message.traces?.length || message.subagentRuns?.length,
@@ -1100,7 +1105,9 @@ function AssistantMessage({
       {hasNaturalLanguage && (
         <>
           <div className="assistant-copy">
-            <div className="assistant-markdown"><MarkdownBody body={message.body} onNotify={onNotify} /></div>
+            <div className={`assistant-markdown${isStreaming ? '' : ' assistant-markdown--pretty'}`}>
+              <MarkdownBody body={message.body} onNotify={onNotify} />
+            </div>
             {(canCopyResponse || message.forkEligible) && (
               <div className="response-actions">
                 <button
@@ -1262,7 +1269,7 @@ export function ConversationMessages({
     <div key={message.id} data-memory-entry={message.id} style={{ display: 'contents' }}>
       {message.role === 'user'
         ? <UserMessage message={message} label={userLabel} onReadPromptImage={onReadPromptImage} />
-        : <AssistantMessage message={message} startsAssistantRun={startsRun}
+        : <AssistantMessage message={message} responseActionEligible={isCompleteAnswer(message, taskFinalAnswerId)} startsAssistantRun={startsRun}
             joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
             joinsNextToolChain={toolChainConnections.after.has(message.id)}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}

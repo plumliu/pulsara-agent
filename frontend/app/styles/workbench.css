@@ -150,6 +150,7 @@
 .thread-column > .assistant-turn:last-child { margin-bottom: 0; }
 .thread-column > .assistant-turn:last-child > .assistant-copy:last-child { margin-bottom: 0; }
 .assistant-markdown { min-width: 0; overflow-wrap: anywhere; color: var(--ink-soft); font-size: var(--type-body); line-height: 1.78; }
+.assistant-markdown--pretty :is(p, li, blockquote) { text-wrap: pretty; }
 .assistant-markdown > :first-child, .assistant-markdown > .markdown-copy-surface > :first-child { margin-top: 0; }
 .assistant-markdown > :last-child, .assistant-markdown > .markdown-copy-surface > :last-child { margin-bottom: 0; }
 .assistant-markdown p { margin: 0 0 10px; }

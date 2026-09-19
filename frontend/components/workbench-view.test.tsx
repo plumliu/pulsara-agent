@@ -737,11 +737,14 @@ describe('completed reply process disclosure', () => {
     const draft = { ...final, id: 'live-final', assistantKind: 'live' as const, status: 'running' as const, forkEligible: false };
     view.rerender(<WorkbenchView {...props({ messages: [progress, steer, draft] })} />);
     expect(hiddenProgress()).toBe(false);
+    expect(screen.getByText(draft.body).closest('.assistant-markdown')?.classList.contains('assistant-markdown--pretty')).toBe(false);
     // A committed assistant text without terminal-final eligibility is not enough.
     view.rerender(<WorkbenchView {...props({ messages: [progress, steer, { ...final, forkEligible: false }] })} />);
     expect(hiddenProgress()).toBe(false);
+    expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
     view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [progress, steer, final] })} />);
     expect(hiddenProgress()).toBe(true);
+    expect(screen.getByText(final.body).closest('.assistant-markdown')?.classList.contains('assistant-markdown--pretty')).toBe(true);
     expect(screen.getByText(steer.body).closest('.conversation-run__step')?.getAttribute('aria-hidden')).toBe('false');
     expect(screen.getByText(progress.body).closest('[inert]')).toBeTruthy();
     expect(screen.getByText(steer.body).closest('[inert]')).toBeNull();

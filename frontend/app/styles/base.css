@@ -202,10 +202,14 @@ svg { flex: 0 0 auto; }
 .empty-state { display: grid; place-items: center; min-height: 250px; padding: 30px; border: 1px dashed var(--line-strong); border-radius: 14px; color: var(--faint); text-align: center; }
 .empty-state h3 { margin: 10px 0 3px; color: var(--ink); font-family: var(--serif); font-size: var(--type-heading-small); }
 .empty-state p { margin: 0; font-size: var(--type-control); }
+.animated-disclosure { display: grid; grid-template-rows: 0fr; opacity: 0; visibility: hidden; transition: grid-template-rows .22s cubic-bezier(.2,.7,.2,1), opacity .16s ease, visibility 0s .22s; }
+.animated-disclosure.is-open { grid-template-rows: 1fr; opacity: 1; visibility: visible; transition: grid-template-rows .22s cubic-bezier(.2,.7,.2,1), opacity .18s ease, visibility 0s; }
+.animated-disclosure__content { min-height: 0; overflow: hidden; }
 
 .verified { color: var(--green) !important; }
 .verified i { display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 13%, transparent); }
 
 @media (prefers-reduced-motion: reduce) {
+  .animated-disclosure, .animated-disclosure.is-open { transition: none; }
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }

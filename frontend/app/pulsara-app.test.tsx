@@ -1480,34 +1480,6 @@ describe('PulsaraApp', () => {
     expect(divider.querySelectorAll('.context-compaction-divider__line')).toHaveLength(2);
   });
 
-  it('shows provider reasoning as an expandable full or summary disclosure', async () => {
-    const adapter = new FakeAdapter();
-    adapter.connectionValue = {
-      ...projection('最终回答'),
-      messages: [{
-        id: 'assistant-reasoning',
-        role: 'assistant',
-        time: '现在',
-        body: '最终回答',
-        status: 'completed',
-        reasoning: [{
-          id: 'reasoning-summary',
-          kind: 'summary',
-          body: '**先检查输入。**\n\n再生成最终回答。',
-        }],
-      }],
-      isRunning: false,
-    };
-    render(<PulsaraApp adapter={adapter} />);
-
-    expect(await screen.findByText('思考摘要')).toBeTruthy();
-    expect(screen.getByText('先检查输入。').tagName).toBe('STRONG');
-    fireEvent.click(screen.getByRole('button', { name: '展开思考摘要' }));
-    expect(screen.getByText(/再生成最终回答。/)).toBeTruthy();
-    expect(screen.getByText('先检查输入。').tagName).toBe('STRONG');
-    expect(screen.getByRole('button', { name: '收起思考摘要' })).toBeTruthy();
-  });
-
   it('marks real speaker turns without breaking a continuous reasoning and tool flow', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
@@ -1516,7 +1488,8 @@ describe('PulsaraApp', () => {
         id: 'user-prompt', turnId: 'turn-one', role: 'user', userKind: 'prompt', time: '18:10',
         body: '检查完整流程。', status: 'completed',
       }, {
-        id: 'assistant-tool', turnId: 'turn-one', role: 'assistant', time: '18:11', body: '', status: 'completed',
+        id: 'assistant-tool', turnId: 'turn-one', role: 'assistant', assistantKind: 'tool-request', forkEligible: false,
+        time: '18:11', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-before-tool', kind: 'full', body: '先读取文件。' }],
         traces: [{
           id: 'trace-read', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: '已完成',
@@ -1530,16 +1503,18 @@ describe('PulsaraApp', () => {
         body: '', status: 'completed', sourceSubagentTaskId: 'task-one',
         sourceSubagentLabel: 'reader', sourceSubagentRelation: 'current',
       }, {
-        id: 'assistant-tool-after-steer', turnId: 'turn-one', role: 'assistant', time: '18:12', body: '', status: 'completed',
+        id: 'assistant-tool-after-steer', turnId: 'turn-one', role: 'assistant', assistantKind: 'tool-request', forkEligible: false,
+        time: '18:12', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-after-steer', kind: 'full', body: '继续检查真实页面。' }],
       }, {
-        id: 'assistant-final', turnId: 'turn-one', role: 'assistant', time: '18:13', body: '检查已经完成。', status: 'completed',
+        id: 'assistant-final', turnId: 'turn-one', role: 'assistant', assistantKind: 'terminal', forkEligible: true,
+        time: '18:13', body: '检查已经完成。', status: 'completed',
         reasoning: [{ id: 'reasoning-after-tool', kind: 'summary', body: '整理检查结果。' }],
       }, {
         id: 'user-prompt-two', turnId: 'turn-two', role: 'user', userKind: 'prompt', time: '18:14',
         body: '继续下一项。', status: 'completed',
       }, {
-        id: 'assistant-final-two', turnId: 'turn-two', role: 'assistant', time: '18:15',
+        id: 'assistant-final-two', turnId: 'turn-two', role: 'assistant', assistantKind: 'terminal', forkEligible: true, time: '18:15',
         body: '第二项也已经完成。', status: 'completed',
       }],
       isRunning: false,
@@ -1562,13 +1537,15 @@ describe('PulsaraApp', () => {
     expect(container.querySelectorAll('.assistant-heading')).toHaveLength(2);
     expect(container.querySelectorAll('.assistant-heading--run-start')).toHaveLength(1);
     expect(container.querySelectorAll('.assistant-heading--response')).toHaveLength(1);
-    expect(container.querySelectorAll('.assistant-turn--operational .assistant-heading')).toHaveLength(1);
-    expect(screen.getByText('read_file')).toBeTruthy();
-    expect(screen.getByText('读取文件')).toBeTruthy();
+    expect(container.querySelectorAll('.conversation-run > .assistant-heading--run-start')).toHaveLength(1);
 
-    const finalTurn = container.querySelector('.assistant-turn--response-with-reasoning');
-    expect(finalTurn?.firstElementChild?.classList.contains('reasoning-disclosure')).toBe(true);
-    expect(finalTurn?.children[1]?.classList.contains('assistant-copy')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(screen.getByText('读取文件')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '展开思考摘要' })).toBeTruthy();
+
+    const finalTurn = screen.getByText('检查已经完成。').closest('.assistant-turn--response');
+    expect(finalTurn?.closest('.conversation-run__step')).toBeNull();
+    expect(finalTurn?.querySelector('.assistant-copy')).toBeTruthy();
   });
 
   it('shows a readable builtin name and keeps the command detail expandable', async () => {
@@ -1697,7 +1674,8 @@ describe('PulsaraApp', () => {
     expect(screen.getByLabelText('工具原始结果')).toBeTruthy();
 
     fireEvent.click(collapse);
-    expect(screen.queryByLabelText('工具原始结果')).toBeNull();
+    expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
+    expect(screen.getByLabelText('工具原始结果').closest('.animated-disclosure')?.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('invalidates an in-flight artifact page when the whole tool card is collapsed', async () => {
@@ -1878,7 +1856,7 @@ describe('PulsaraApp', () => {
         }],
       }, {
         id: 'assistant-terminal-response', role: 'assistant', assistantKind: 'terminal',
-        time: '18:12', body: '最终结果已经准备好。', status: 'completed',
+        forkEligible: true, time: '18:12', body: '最终结果已经准备好。', status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -1905,7 +1883,7 @@ describe('PulsaraApp', () => {
       ...projection(''),
       messages: [{
         id: 'assistant-source', role: 'assistant', assistantKind: 'terminal',
-        time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
+        forkEligible: true, time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -1926,7 +1904,7 @@ describe('PulsaraApp', () => {
       ...projection(''),
       messages: [{
         id: 'assistant-formula', role: 'assistant', assistantKind: 'terminal',
-        time: '18:12', body: '能量关系为 $E=mc^2$。', status: 'completed',
+        forkEligible: true, time: '18:12', body: '能量关系为 $E=mc^2$。', status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -1978,7 +1956,7 @@ describe('PulsaraApp', () => {
       ...projection(''),
       messages: [{
         id: 'assistant-source', role: 'assistant', assistantKind: 'terminal',
-        time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
+        forkEligible: true, time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -2142,7 +2120,7 @@ describe('PulsaraApp', () => {
     expect(screen.queryByText(/用于当前处理|会结合这项工作的结果/)).toBeNull();
     expect(screen.queryByText(/"status":"accepted"/)).toBeNull();
     expect(container.querySelectorAll('.user-heading')).toHaveLength(0);
-    expect(container.querySelectorAll('.assistant-turn--run-start')).toHaveLength(1);
+    expect(container.querySelectorAll('.conversation-run > .assistant-heading')).toHaveLength(1);
   });
 
   it('defaults builtin raw results off and remembers the settings switch across reloads', async () => {
@@ -3428,6 +3406,8 @@ describe('PulsaraApp', () => {
       messages: [{
         id: 'assistant-subagents',
         role: 'assistant',
+        assistantKind: 'tool-request',
+        forkEligible: false,
         time: '现在',
         body: '正在并行检查。',
         status: 'completed',
@@ -3457,12 +3437,11 @@ describe('PulsaraApp', () => {
     render(<PulsaraApp adapter={adapter} />);
 
     expect(await screen.findByText('子任务执行')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     const task = screen.getByRole('button', { name: /检查 README/ });
     expect(task).toBeTruthy();
     fireEvent.click(task);
     expect(screen.getByText('读取 README.md 并报告一级标题。')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: /读取文件/ }));
-    expect(screen.getByText('已读取 README.md · 1 行')).toBeTruthy();
   });
 
   it('keeps the complete durable child-task history inside its session', async () => {

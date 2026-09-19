@@ -43,6 +43,7 @@ import type {
 import type { MarkdownNotify } from './markdown-body';
 import { TaskWorkspace } from './task-workspace';
 import { BackgroundTerminalPanel } from './background-terminal-panel';
+import { AnimatedDisclosure } from './animated-disclosure';
 import type {
   BackgroundProcessLog,
   BackgroundProcessPage,
@@ -309,7 +310,7 @@ function ProjectCapabilityPanel({
           )}
           <button className="project-capability-row__expand" type="button" aria-label={expanded ? '收起详情' : '展开详情'} onClick={() => setExpandedMcp(expanded ? undefined : rowKey)}><ChevronDown size={12} /></button>
         </div>
-        {expanded && (
+        <AnimatedDisclosure open={expanded} className="project-capability-row__detail-disclosure">
           <div className="project-capability-row__detail">
             {server.transport && <p><code>{server.transport.kind === 'stdio' ? '本地命令' : 'HTTP'}</code><span className="project-capability-row__transport">{server.transport.detail}</span></p>}
             {server.availableToSubagents && <small><Bot size={11} /> 子代理也可使用</small>}
@@ -324,7 +325,7 @@ function ProjectCapabilityPanel({
               {server.editable && <button className="is-danger" type="button" disabled={Boolean(busy)} onClick={() => void onRemoveMcp(server)}><Trash2 size={11} /> 移除</button>}
             </footer>
           </div>
-        )}
+        </AnimatedDisclosure>
       </article>
     );
   };
@@ -388,7 +389,13 @@ function ProjectCapabilityPanel({
                 </button>
                 <button className="project-capability-group__manage" type="button" onClick={onOpenUserCapabilities}>管理 <ExternalLink size={10} /></button>
               </header>
-              {inheritedExpanded && (kind === 'skills' ? inheritedSkills.map(renderSkill) : inheritedMcp.map(renderMcp))}
+              <AnimatedDisclosure
+                open={inheritedExpanded}
+                className="project-capability-group__disclosure"
+                contentClassName="project-capability-group__items"
+              >
+                {kind === 'skills' ? inheritedSkills.map(renderSkill) : inheritedMcp.map(renderMcp)}
+              </AnimatedDisclosure>
             </div>
           )}
         </section>
