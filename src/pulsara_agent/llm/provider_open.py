@@ -130,6 +130,8 @@ class ConfirmedMemoryGovernanceTerminalFence:
     def _consume_for(
         self,
         *,
+        candidate: object,
+        durable_terminal_fence: object,
         origin_model_call_binding: ModelCallBinding,
         call_target: FrozenProviderPhysicalCallTarget,
         resolved_model_call_id: str,
@@ -143,7 +145,9 @@ class ConfirmedMemoryGovernanceTerminalFence:
             if self._consumed:
                 raise RuntimeError("memory terminal fence is already consumed")
             if (
-                origin_model_call_binding != self.origin_model_call_binding
+                candidate is not self.candidate
+                or durable_terminal_fence != self.durable_terminal_fence
+                or origin_model_call_binding != self.origin_model_call_binding
                 or call_target.purpose is not ModelCallPurpose.MEMORY_GOVERNANCE
                 or not resolved_model_call_id
                 or estimated_input_tokens < 1
@@ -459,6 +463,8 @@ def _issue_auxiliary_model_provider_open_permit(
     resolved_model_call_id: str,
     timeout_policy: OpenAITransportTimeoutPolicy,
     terminal_fence: ConfirmedMemoryGovernanceTerminalFence,
+    candidate: object,
+    durable_terminal_fence: object,
     origin_model_call_binding: ModelCallBinding,
     context: object,
     estimated_input_tokens: int,
@@ -471,6 +477,8 @@ def _issue_auxiliary_model_provider_open_permit(
     ):
         raise TypeError("memory terminal fence is not repository-issued")
     terminal_fence._consume_for(
+        candidate=candidate,
+        durable_terminal_fence=durable_terminal_fence,
         origin_model_call_binding=origin_model_call_binding,
         call_target=auxiliary_call_target,
         resolved_model_call_id=resolved_model_call_id,

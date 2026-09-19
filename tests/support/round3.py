@@ -958,6 +958,7 @@ class StructuredToolPort:
         self.delegate = delegate
         self._authority = object()
         self._active: set[str] = set()
+        self._borrow_owners: dict[str, ProcessLocalToolSurfaceBorrow] = {}
         self._mcp_owner = object()
         specs = tuple(
             FrozenToolSpec(
@@ -1101,7 +1102,6 @@ class StructuredToolPort:
         self, prepared: PreparedKernelToolSurface
     ) -> ProcessLocalToolSurfaceBorrow:
         borrow_id = f"test-borrow:{len(self._active) + 1}"
-        self._active.add(borrow_id)
 
         def validate(
             borrow: ProcessLocalToolSurfaceBorrow, tool_name: str
@@ -1114,15 +1114,21 @@ class StructuredToolPort:
             raise RuntimeError("test tool was not advertised")
 
         def release(borrow: ProcessLocalToolSurfaceBorrow) -> None:
+            if self._borrow_owners.get(borrow.borrow_id) is not borrow:
+                raise RuntimeError("test tool surface borrow is not current")
             self._active.discard(borrow.borrow_id)
+            self._borrow_owners.pop(borrow.borrow_id, None)
 
-        return ProcessLocalToolSurfaceBorrow(
+        borrow = ProcessLocalToolSurfaceBorrow(
             prepared=prepared,
             borrow_id=borrow_id,
             _authority=self._authority,
             _validate=validate,
             _release=release,
         )
+        self._active.add(borrow_id)
+        self._borrow_owners[borrow_id] = borrow
+        return borrow
 
     def validate_tool_surface_borrow(
         self,
@@ -1132,11 +1138,45 @@ class StructuredToolPort:
         if (
             borrow._closed
             or borrow.borrow_id not in self._active
+            or self._borrow_owners.get(borrow.borrow_id) is not borrow
             or not borrow.exactly_joins(prepared)
         ):
             raise RuntimeError("test tool surface borrow is inactive")
         if prepared.model_surface.tool_specs:
             borrow.binding_fingerprint(prepared.model_surface.tool_specs[0].name)
+
+    def issue_capability_dispatch_observation(
+        self, *, capability_dispatch_cut, prepared_surface, surface_borrow
+    ):
+        from pulsara_agent.conversation_kernel.tool_surface import (
+            _issue_capability_dispatch_observation,
+        )
+
+        self.validate_tool_surface_borrow(surface_borrow, prepared_surface)
+        if (
+            prepared_surface.access.conversation_scope_kind
+            is not capability_dispatch_cut.conversation_scope_kind
+            or prepared_surface.access.scope_subagent_task_id
+            != capability_dispatch_cut.scope_subagent_task_id
+        ):
+            raise RuntimeError("test capability dispatch cut drifted")
+        return _issue_capability_dispatch_observation(
+            capability_dispatch_cut=capability_dispatch_cut,
+            prepared_surface=prepared_surface,
+            surface_borrow=surface_borrow,
+            owner=self,
+        )
+
+    def assert_no_tool_surface_borrows(
+        self, *, scope_kind, scope_subagent_task_id
+    ) -> None:
+        if any(
+            borrow.prepared.access.conversation_scope_kind is scope_kind
+            and borrow.prepared.access.scope_subagent_task_id
+            == scope_subagent_task_id
+            for borrow in self._borrow_owners.values()
+        ):
+            raise RuntimeError("test tool surface borrow remains active")
 
     def install_provider_input_tool_result_deliveries(self, **kwargs: object) -> None:
         permit = kwargs["permit"]

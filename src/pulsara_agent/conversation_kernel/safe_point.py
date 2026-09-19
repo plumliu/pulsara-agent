@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import RLock
 from typing import TYPE_CHECKING, Callable, Iterator, TypeVar
-from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.steer import (
@@ -21,6 +20,12 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
     ConversationKernelRepository,
     PreparedAutomaticSubagentCompletion,
+)
+from pulsara_agent.conversation_kernel.reader import (
+    OwnerIssuedCanonicalDispatchObservation,
+)
+from pulsara_agent.conversation_kernel.tool_surface import (
+    OwnerIssuedCapabilityDispatchObservation,
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
@@ -52,8 +57,6 @@ if TYPE_CHECKING:
 
 
 _PREPARATION_BASIS_SEAL = object()
-_CANONICAL_OBSERVATION_SEAL = object()
-_CAPABILITY_OBSERVATION_SEAL = object()
 _PROVIDER_PREPARATION_RELEASE_FULL_SEAL = object()
 
 
@@ -109,82 +112,6 @@ class PreparedProviderInputHandle:
         if self._closed:
             return
         self._owner._close_handle(self)
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class OwnerIssuedCanonicalDispatchObservation:
-    """One-shot proof that the current safe-point owner observed one exact read."""
-
-    handle: PreparedProviderInputHandle
-    canonical_read: object
-    operation_nonce: str
-    _owner: "ProviderSafePointCoordinator"
-    _consumed: bool
-
-    def __init__(
-        self,
-        *,
-        handle: PreparedProviderInputHandle,
-        canonical_read: object,
-        operation_nonce: str,
-        owner: "ProviderSafePointCoordinator",
-        _seal: object,
-    ) -> None:
-        if _seal is not _CANONICAL_OBSERVATION_SEAL or not operation_nonce:
-            raise TypeError("canonical dispatch observation is owner-issued")
-        object.__setattr__(self, "handle", handle)
-        object.__setattr__(self, "canonical_read", canonical_read)
-        object.__setattr__(self, "operation_nonce", operation_nonce)
-        object.__setattr__(self, "_owner", owner)
-        object.__setattr__(self, "_consumed", False)
-
-    def _consume(self, owner: "ProviderSafePointCoordinator") -> object:
-        if self._owner is not owner or self._consumed:
-            raise RuntimeError("canonical dispatch observation is stale")
-        object.__setattr__(self, "_consumed", True)
-        return self.canonical_read
-
-
-@dataclass(frozen=True, slots=True, init=False)
-class OwnerIssuedCapabilityDispatchObservation:
-    """One-shot proof binding an exact capability cut to its physical borrow."""
-
-    handle: PreparedProviderInputHandle
-    capability_dispatch_cut: object
-    prepared_surface: object
-    surface_borrow: object
-    operation_nonce: str
-    _owner: "ProviderSafePointCoordinator"
-    _consumed: bool
-
-    def __init__(
-        self,
-        *,
-        handle: PreparedProviderInputHandle,
-        capability_dispatch_cut: object,
-        prepared_surface: object,
-        surface_borrow: object,
-        operation_nonce: str,
-        owner: "ProviderSafePointCoordinator",
-        _seal: object,
-    ) -> None:
-        if _seal is not _CAPABILITY_OBSERVATION_SEAL or not operation_nonce:
-            raise TypeError("capability dispatch observation is owner-issued")
-        object.__setattr__(self, "handle", handle)
-        object.__setattr__(self, "capability_dispatch_cut", capability_dispatch_cut)
-        object.__setattr__(self, "prepared_surface", prepared_surface)
-        object.__setattr__(self, "surface_borrow", surface_borrow)
-        object.__setattr__(self, "operation_nonce", operation_nonce)
-        object.__setattr__(self, "_owner", owner)
-        object.__setattr__(self, "_consumed", False)
-
-    def _consume(
-        self, owner: "ProviderSafePointCoordinator"
-    ) -> tuple[object, object]:
-        if self._owner is not owner or self._consumed:
-            raise RuntimeError("capability dispatch observation is stale")
-        object.__setattr__(self, "_consumed", True)
-        return self.capability_dispatch_cut, self.surface_borrow
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -249,69 +176,11 @@ class ProviderSafePointCoordinator:
         self._lock = RLock()
         self._generation = 0
         self._active_handle: PreparedProviderInputHandle | None = None
+        self._active_basis: SealedProviderInputPreparationBasis | None = None
 
     def is_idle(self) -> bool:
         with self._lock:
             return self._active_handle is None
-
-    def issue_canonical_dispatch_observation(
-        self,
-        *,
-        handle: PreparedProviderInputHandle,
-        canonical_read: object,
-    ) -> OwnerIssuedCanonicalDispatchObservation:
-        """Bind a completed canonical read to the exact current handle."""
-
-        with self._lock:
-            self._require_current(handle)
-            identity = canonical_read.compile_snapshot.canonical_input.identity
-            if (
-                identity.session_id != handle.cut.session_id
-                or identity.turn_id != handle.cut.turn_id
-                or identity.context_binding_revision_id
-                != handle.cut.context_binding_revision_id
-                or identity.provider_input_through_sequence
-                != handle.cut.provider_input_through_sequence
-            ):
-                raise RuntimeError("canonical dispatch observation does not exact-join")
-            return OwnerIssuedCanonicalDispatchObservation(
-                handle=handle,
-                canonical_read=canonical_read,
-                operation_nonce=f"canonical-dispatch-observation:{uuid4().hex}",
-                owner=self,
-                _seal=_CANONICAL_OBSERVATION_SEAL,
-            )
-
-    def issue_capability_dispatch_observation(
-        self,
-        *,
-        handle: PreparedProviderInputHandle,
-        capability_dispatch_cut: object,
-        prepared_surface: object,
-        surface_borrow: object,
-    ) -> OwnerIssuedCapabilityDispatchObservation:
-        """Bind one owner-produced capability cut to the exact active borrow."""
-
-        with self._lock:
-            self._require_current(handle)
-            identity = prepared_surface.access
-            cut_scope = capability_dispatch_cut.conversation_scope_kind
-            cut_task = capability_dispatch_cut.scope_subagent_task_id
-            if (
-                identity.conversation_scope_kind is not cut_scope
-                or identity.scope_subagent_task_id != cut_task
-                or not surface_borrow.exactly_joins(prepared_surface)
-            ):
-                raise RuntimeError("capability dispatch observation does not exact-join")
-            return OwnerIssuedCapabilityDispatchObservation(
-                handle=handle,
-                capability_dispatch_cut=capability_dispatch_cut,
-                prepared_surface=prepared_surface,
-                surface_borrow=surface_borrow,
-                operation_nonce=f"capability-dispatch-observation:{uuid4().hex}",
-                owner=self,
-                _seal=_CAPABILITY_OBSERVATION_SEAL,
-            )
 
     def seal_provider_input_preparation_basis(
         self,
@@ -325,11 +194,14 @@ class ProviderSafePointCoordinator:
 
         with self._lock:
             self._require_current(handle)
-            if (
-                canonical_observation.handle is not handle
-                or capability_observation.handle is not handle
+            if not isinstance(
+                canonical_observation, OwnerIssuedCanonicalDispatchObservation
+            ) or not isinstance(
+                capability_observation, OwnerIssuedCapabilityDispatchObservation
             ):
-                raise RuntimeError("provider-input observations use another handle")
+                raise TypeError("provider-input observations require physical owners")
+            if self._active_basis is not None:
+                raise RuntimeError("provider-input preparation basis is already active")
             canonical_read = canonical_observation.canonical_read
             capability_dispatch_cut = (
                 capability_observation.capability_dispatch_cut
@@ -347,14 +219,15 @@ class ProviderSafePointCoordinator:
                 or call_target.turn_id != handle.cut.turn_id
             ):
                 raise RuntimeError("provider-input preparation basis does not exact-join")
-            canonical_observation._consume(self)
-            consumed_cut, consumed_borrow = capability_observation._consume(self)
+            if canonical_observation.consume() is not canonical_read:
+                raise RuntimeError("canonical observation consumption drifted")
+            consumed_cut, consumed_borrow = capability_observation.consume()
             if (
                 consumed_cut is not capability_dispatch_cut
                 or consumed_borrow is not surface_borrow
             ):
                 raise RuntimeError("provider-input observation consumption drifted")
-            return SealedProviderInputPreparationBasis(
+            basis = SealedProviderInputPreparationBasis(
                 handle=handle,
                 canonical_read=canonical_read,
                 capability_dispatch_cut=capability_dispatch_cut,
@@ -363,6 +236,8 @@ class ProviderSafePointCoordinator:
                 owner=self,
                 _seal=_PREPARATION_BASIS_SEAL,
             )
+            self._active_basis = basis
+            return basis
 
     def issue_provider_input_transition(
         self,
@@ -389,17 +264,24 @@ class ProviderSafePointCoordinator:
         dispatch_read: object,
         destination: "FrozenEpochModelCallTarget",
         protected_tail_selection_fingerprint: str,
+        successor_turn_id: str | None = None,
     ) -> object:
         """Issue the adopted seed only from FULL plus the exact current handle."""
 
         from pulsara_agent.conversation_kernel.cold_epoch import (
             _issue_adopted_compaction_continuation_seed,
         )
+        from pulsara_agent.conversation_kernel.compaction.contracts import (
+            CompactionAdoptionConfirmation,
+        )
         from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 
         with self._lock:
             self._require_current(handle)
-            if getattr(getattr(confirmation, "kind", None), "value", None) != "FULL":
+            if (
+                not isinstance(confirmation, CompactionAdoptionConfirmation)
+                or getattr(confirmation.kind, "value", None) != "FULL"
+            ):
                 raise RuntimeError("adopted successor requires FULL confirmation")
             identity = dispatch_read.compile_snapshot.canonical_input.identity
             binding = dispatch_read.compile_snapshot.context_binding_fact
@@ -413,6 +295,7 @@ class ProviderSafePointCoordinator:
             candidate_binding = getattr(candidate, "binding", None)
             if (
                 predecessor is None
+                or getattr(confirmation, "candidate", None) is not candidate
                 or handle.cut.session_id != identity.session_id
                 or handle.cut.turn_id != identity.turn_id
                 or handle.cut.context_binding_revision_id
@@ -430,7 +313,7 @@ class ProviderSafePointCoordinator:
                 or getattr(candidate_binding, "binding_revision_id", None)
                 != binding.binding_revision_id
                 or destination.session_id != identity.session_id
-                or destination.turn_id != identity.turn_id
+                or destination.turn_id != (successor_turn_id or identity.turn_id)
             ):
                 raise RuntimeError("adopted successor authority does not exact-join")
             return _issue_adopted_compaction_continuation_seed(
@@ -455,6 +338,8 @@ class ProviderSafePointCoordinator:
             if basis._owner is not self:
                 raise RuntimeError("provider-input basis belongs to another safe-point")
             basis._revoke(self)
+            if self._active_basis is basis:
+                self._active_basis = None
 
     def retire_full_adoption_without_continuation_and_arm_empty(
         self,
@@ -463,6 +348,7 @@ class ProviderSafePointCoordinator:
         fence: "NoContinuationAdmissionFence",
         evidence: "NoContinuationProductEvidence",
         dispatch: object | None,
+        verify_physical_release: Callable[[], None],
     ) -> None:
         """Settle one FULL adoption only after every preparation handle is gone."""
 
@@ -485,10 +371,11 @@ class ProviderSafePointCoordinator:
             )
             if dispatch is not None:
                 dispatch.close()
-            if self._active_handle is not None:
+            if self._active_handle is not None or self._active_basis is not None:
                 raise RuntimeError(
-                    "no-continuation release left a provider-input handle active"
+                    "no-continuation release left a provider-input basis active"
                 )
+            verify_physical_release()
             release_full = ProviderPreparationReleaseFull(
                 exact_subject=closure,
                 owner=self,
@@ -583,6 +470,7 @@ class ProviderSafePointCoordinator:
         continuity: "HostProviderInputContinuityOwner",
         dry_projection: object,
         pending: "EmptyAdoptionPending",
+        confirmation: object,
     ) -> None:
         """Restore and retire a source-less attempt with no canonical winner."""
 
@@ -595,7 +483,7 @@ class ProviderSafePointCoordinator:
                 or pending.dry_result is not dry_projection.result
             ):
                 raise RuntimeError("empty adoption NONE does not exact-join")
-            continuity.restore_empty_adoption_none(pending)
+            continuity.restore_empty_adoption_none(pending, confirmation)
             dry_projection.close_after_empty_adoption_none()
 
     def settle_empty_adoption_conflict(

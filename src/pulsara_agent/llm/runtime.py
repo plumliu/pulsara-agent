@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Lock
+from typing import Callable
 
 from pulsara_agent.llm.adapters.openai.chat_completions import (
     OpenAIChatCompletionsTransport,
@@ -57,13 +58,20 @@ class ModelRuntimeUnavailable(RuntimeError):
 class BorrowedProviderTransport:
     """One-operation live borrow created only after a purpose permit is consumed."""
 
-    __slots__ = ("call", "_credential_owner", "_closed", "_lock")
+    __slots__ = ("call", "_credential_owner", "_closed", "_lock", "_on_close")
 
-    def __init__(self, call: ResolvedModelCall, *, credential_owner: object | None) -> None:
+    def __init__(
+        self,
+        call: ResolvedModelCall,
+        *,
+        credential_owner: object | None,
+        on_close: Callable[["BorrowedProviderTransport"], None] | None = None,
+    ) -> None:
         self.call = call
         self._credential_owner = credential_owner
         self._closed = False
         self._lock = Lock()
+        self._on_close = on_close
 
     def open_stream(self, *, context):
         with self._lock:
@@ -78,8 +86,12 @@ class BorrowedProviderTransport:
             self._closed = True
             owner = self._credential_owner
             self._credential_owner = None
-        if owner is not None:
-            owner.close()
+        try:
+            if owner is not None:
+                owner.close()
+        finally:
+            if self._on_close is not None:
+                self._on_close(self)
 
 
 @dataclass(slots=True)
@@ -88,6 +100,24 @@ class ModelRuntime:
     catalog: ModelCatalogOwner
     route_wires: RouteWireRegistry
     retry: LLMRetryConfig = LLMRetryConfig()
+    _borrow_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _active_borrows: dict[int, tuple[BorrowedProviderTransport, str, str]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
+    def assert_no_provider_borrows(self, *, session_id: str, turn_id: str) -> None:
+        """Prove this turn has no process-local open stream/transport borrow."""
+
+        with self._borrow_lock:
+            if any(
+                session == session_id and turn == turn_id
+                for _, session, turn in self._active_borrows.values()
+            ):
+                raise RuntimeError("no-continuation left a provider borrow active")
+
+    def _release_borrow(self, borrow: BorrowedProviderTransport) -> None:
+        with self._borrow_lock:
+            self._active_borrows.pop(id(borrow), None)
 
     @classmethod
     def production(
@@ -259,10 +289,25 @@ class ModelRuntime:
                 purpose=call_target.purpose,
                 resolved_model_call_id=purpose_permit.resolved_model_call_id,
             )
-            return BorrowedProviderTransport(
+            borrowed = BorrowedProviderTransport(
                 call,
                 credential_owner=credential_owner,
+                on_close=self._release_borrow,
             )
+            scoped_target = (
+                purpose_permit.epoch_target
+                if isinstance(purpose_permit, EpochAgentLoopProviderOpenPermit)
+                else purpose_permit.successor_destination
+                if isinstance(purpose_permit, CompactionSummaryProviderOpenPermit)
+                else None
+            )
+            with self._borrow_lock:
+                self._active_borrows[id(borrowed)] = (
+                    borrowed,
+                    "" if scoped_target is None else scoped_target.session_id,
+                    "" if scoped_target is None else scoped_target.turn_id,
+                )
+            return borrowed
         except BaseException:
             if credential_owner is not None:
                 credential_owner.close()

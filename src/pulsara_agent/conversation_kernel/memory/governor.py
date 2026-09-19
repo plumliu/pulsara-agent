@@ -329,6 +329,7 @@ class AdvisoryMemoryGovernor:
                         output = await self._model.complete_prepared_json(
                             call,
                             terminal_fence=terminal_fence,
+                            candidate=candidate,
                         )
                     decision = _parse_governance_decision(
                         output,

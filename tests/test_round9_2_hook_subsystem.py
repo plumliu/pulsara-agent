@@ -2001,6 +2001,9 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
         def __init__(self) -> None:
             self.handle = SimpleNamespace(close=self._close)
             self.closed = False
+            self.result = SimpleNamespace(
+                basis=SimpleNamespace(destination=SimpleNamespace())
+            )
 
         def _close(self) -> None:
             self.closed = True
@@ -2036,7 +2039,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
     class _SafePoint:
             @staticmethod
             def retire_full_adoption_without_continuation_and_arm_empty(
-                *, continuity, fence, evidence, dispatch
+                *, continuity, fence, evidence, dispatch, verify_physical_release
             ) -> None:
                 assert fence.predecessor is continuity.cohort
                 assert evidence.kind in {
@@ -2045,6 +2048,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                 }
                 if dispatch is not None:
                     dispatch.close()
+                verify_physical_release()
                 continuity.discarded = True
 
     async def invoke(status_or_error):
@@ -2056,6 +2060,14 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
         coordinator._continuity = continuity
         coordinator._safe_point = _SafePoint()
         coordinator._repository = SimpleNamespace(read_turn_status=object())
+        coordinator._tools = SimpleNamespace(
+            assert_no_tool_surface_borrows=lambda **_kwargs: None
+        )
+        coordinator._model = SimpleNamespace(
+            model_runtime=SimpleNamespace(
+                assert_no_provider_borrows=lambda **_kwargs: None
+            )
+        )
 
         async def settle(**kwargs):
             del kwargs
@@ -2111,13 +2123,28 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             preconditions=None,
             dry_dispatch=dry,
             source_view=None,
-            source_wire_candidate=None,
+            source_wire_candidate=SimpleNamespace(
+                prepared_call=SimpleNamespace(epoch_call_target=SimpleNamespace())
+            ),
             model_switch_candidate=None,
             model_switch_tier=None,
             prospective_root_dispatch=None,
             pending_active_candidate=None,
             protected_tail_selection_fingerprint="tail:1",
-            compaction_read=None,
+            compaction_read=SimpleNamespace(
+                dispatch_read=SimpleNamespace(
+                    compile_snapshot=SimpleNamespace(
+                        canonical_input=SimpleNamespace(
+                            identity=SimpleNamespace(
+                                session_id="session:1",
+                                turn_id="turn:1",
+                                context_binding_revision_id="revision:0",
+                                provider_input_through_sequence=1,
+                            )
+                        )
+                    )
+                )
+            ),
             trigger=CompactionTrigger.MANUAL,
             attempt_token=attempt,
             hook_scope=None,

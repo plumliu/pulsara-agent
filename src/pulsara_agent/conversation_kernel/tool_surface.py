@@ -41,6 +41,7 @@ _TERMINAL_TOOL_NAMES = frozenset(
 _PLAN_CONTROL_TOOL_NAMES = frozenset(
     {"enter_plan", "ask_plan_question", "exit_plan"}
 )
+_CAPABILITY_DISPATCH_OBSERVATION_SEAL = object()
 
 
 class McpEffectKind(StrEnum):
@@ -276,12 +277,63 @@ class ProcessLocalToolSurfaceBorrow:
         self._closed = True
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class OwnerIssuedCapabilityDispatchObservation:
+    """One-shot carrier issued only while ToolRuntime owns the exact borrow."""
+
+    capability_dispatch_cut: object
+    prepared_surface: PreparedKernelToolSurface
+    surface_borrow: ProcessLocalToolSurfaceBorrow
+    _owner: object
+    _consumed: bool
+
+    def __init__(
+        self,
+        *,
+        capability_dispatch_cut: object,
+        prepared_surface: PreparedKernelToolSurface,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        owner: object,
+        _seal: object,
+    ) -> None:
+        if _seal is not _CAPABILITY_DISPATCH_OBSERVATION_SEAL:
+            raise TypeError("capability dispatch observation is ToolRuntime-issued")
+        object.__setattr__(self, "capability_dispatch_cut", capability_dispatch_cut)
+        object.__setattr__(self, "prepared_surface", prepared_surface)
+        object.__setattr__(self, "surface_borrow", surface_borrow)
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_consumed", False)
+
+    def consume(self) -> tuple[object, ProcessLocalToolSurfaceBorrow]:
+        if self._consumed:
+            raise RuntimeError("capability dispatch observation is already consumed")
+        object.__setattr__(self, "_consumed", True)
+        return self.capability_dispatch_cut, self.surface_borrow
+
+
+def _issue_capability_dispatch_observation(
+    *,
+    capability_dispatch_cut: object,
+    prepared_surface: PreparedKernelToolSurface,
+    surface_borrow: ProcessLocalToolSurfaceBorrow,
+    owner: object,
+) -> OwnerIssuedCapabilityDispatchObservation:
+    return OwnerIssuedCapabilityDispatchObservation(
+        capability_dispatch_cut=capability_dispatch_cut,
+        prepared_surface=prepared_surface,
+        surface_borrow=surface_borrow,
+        owner=owner,
+        _seal=_CAPABILITY_DISPATCH_OBSERVATION_SEAL,
+    )
+
+
 __all__ = [
     "BuiltinExecutionPolicyRef",
     "DirectToolAccessLeaf",
     "McpEffectKind",
     "McpPolicyClassificationSource",
     "McpToolExecutionPolicyFact",
+    "OwnerIssuedCapabilityDispatchObservation",
     "PreparedKernelToolSurface",
     "PreparedToolExecutionBinding",
     "ProcessLocalToolSurfaceAccess",

@@ -158,6 +158,47 @@ def _permission_fingerprint(repository, lease, turn_id: str) -> str:
     return str(row[0])
 
 
+def test_reader_dispatch_carrier_requires_real_read_and_is_one_shot(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    lease = repository.acquire_host_writer(
+        session_id=_id("session"),
+        workspace_id=_id("workspace"),
+        writer_owner_id=_id("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    turn_id = _start_turn(repository, lease, b"owner-issued read")
+    safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
+    handle = safe_point.freeze_provider_input(
+        turn_id=turn_id, deadline_monotonic=monotonic() + 30
+    )
+    try:
+        reader = CanonicalProviderInputReader(provider)
+        observation = reader.read_owner_issued_dispatch_observation(
+            handle.cut, deadline_monotonic=monotonic() + 30
+        )
+        same_shape = reader.read_frozen_dispatch(
+            handle.cut, deadline_monotonic=monotonic() + 30
+        )
+        assert observation.canonical_read == same_shape
+        assert observation.canonical_read is not same_shape
+        with pytest.raises(TypeError, match="physical owners"):
+            safe_point.seal_provider_input_preparation_basis(
+                handle=handle,
+                canonical_observation=same_shape,  # type: ignore[arg-type]
+                capability_observation=object(),  # type: ignore[arg-type]
+                call_target=object(),  # type: ignore[arg-type]
+            )
+        assert observation.consume() is observation.canonical_read
+        with pytest.raises(RuntimeError, match="already consumed"):
+            observation.consume()
+    finally:
+        handle.close()
+
+
 def test_protocol_reader_reauthorizes_only_pending_queue_content_in_session(
     stage2_migrated_postgres_database,
 ) -> None:

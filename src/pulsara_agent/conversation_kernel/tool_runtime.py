@@ -34,6 +34,7 @@ from pulsara_agent.capability.pulsara_home import (
 )
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
+    FrozenCapabilityDispatchCut,
     CapabilitySourceKind,
     CapabilitySourceRefreshMode,
     CapabilitySourceSnapshotDisposition,
@@ -752,6 +753,7 @@ class DirectKernelToolPort:
         self._surface_generation = 1
         self._surface_owner_epoch = 1
         self._surface_borrows: dict[str, int] = {}
+        self._surface_borrow_owners: dict[str, ProcessLocalToolSurfaceBorrow] = {}
         self._prepared_surfaces: dict[
             tuple[int, ModelInputScopeKind, str | None], PreparedKernelToolSurface
         ] = {}
@@ -1493,14 +1495,16 @@ class DirectKernelToolPort:
             if prepared.access.surface_generation != self._surface_generation:
                 raise RuntimeError("retiring tool surface refuses new borrows")
             borrow_id = f"tool-surface-borrow:{uuid4().hex}"
-            self._surface_borrows[borrow_id] = prepared.access.surface_generation
-            return ProcessLocalToolSurfaceBorrow(
+            borrow = ProcessLocalToolSurfaceBorrow(
                 prepared=prepared,
                 borrow_id=borrow_id,
                 _authority=self._surface_authority,
                 _validate=self._validate_surface_borrow,
                 _release=self._release_surface_borrow,
             )
+            self._surface_borrows[borrow_id] = prepared.access.surface_generation
+            self._surface_borrow_owners[borrow_id] = borrow
+            return borrow
 
     def validate_tool_surface_borrow(
         self,
@@ -1514,10 +1518,69 @@ class DirectKernelToolPort:
                 borrow._closed
                 or borrow._authority is not self._surface_authority
                 or borrow.borrow_id not in self._surface_borrows
+                or self._surface_borrow_owners.get(borrow.borrow_id) is not borrow
                 or not borrow.exactly_joins(prepared)
             ):
                 raise RuntimeError("tool surface borrow is not active")
             self._require_prepared_surface_locked(prepared)
+
+    def assert_no_tool_surface_borrows(
+        self,
+        *,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+    ) -> None:
+        """Prove all process-local surface borrows for this scope are closed."""
+
+        with self._surface_lock:
+            if any(
+                borrow.prepared.access.conversation_scope_kind is scope_kind
+                and borrow.prepared.access.scope_subagent_task_id
+                == scope_subagent_task_id
+                for borrow in self._surface_borrow_owners.values()
+            ):
+                raise RuntimeError("no-continuation left a tool surface borrow active")
+
+    def issue_capability_dispatch_observation(
+        self,
+        *,
+        capability_dispatch_cut: FrozenCapabilityDispatchCut,
+        prepared_surface: PreparedKernelToolSurface,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> object:
+        """Issue an exact one-shot carrier only for a registry-current borrow."""
+
+        from pulsara_agent.conversation_kernel.tool_surface import (
+            _issue_capability_dispatch_observation,
+        )
+
+        with self._surface_lock:
+            if (
+                surface_borrow._closed
+                or surface_borrow._authority is not self._surface_authority
+                or surface_borrow.borrow_id not in self._surface_borrows
+                or self._surface_borrow_owners.get(surface_borrow.borrow_id)
+                is not surface_borrow
+                or not surface_borrow.exactly_joins(prepared_surface)
+            ):
+                raise RuntimeError("tool surface borrow is not active")
+            self._require_prepared_surface_locked(prepared_surface)
+            access = prepared_surface.access
+            if (
+                access.conversation_scope_kind
+                is not capability_dispatch_cut.conversation_scope_kind
+                or access.scope_subagent_task_id
+                != capability_dispatch_cut.scope_subagent_task_id
+            ):
+                raise RuntimeError(
+                    "capability dispatch observation does not exact-join"
+                )
+            return _issue_capability_dispatch_observation(
+                capability_dispatch_cut=capability_dispatch_cut,
+                prepared_surface=prepared_surface,
+                surface_borrow=surface_borrow,
+                owner=self,
+            )
 
     def install_provider_input_tool_result_deliveries(
         self,
@@ -1622,6 +1685,7 @@ class DirectKernelToolPort:
                 borrow._closed
                 or borrow._authority is not self._surface_authority
                 or borrow.borrow_id not in self._surface_borrows
+                or self._surface_borrow_owners.get(borrow.borrow_id) is not borrow
             ):
                 raise RuntimeError("tool surface borrow is not active")
             self._require_prepared_surface_locked(borrow.prepared)
@@ -1634,7 +1698,10 @@ class DirectKernelToolPort:
         with self._surface_condition:
             if borrow._authority is not self._surface_authority:
                 raise RuntimeError("tool surface borrow authority conflicts")
+            if self._surface_borrow_owners.get(borrow.borrow_id) is not borrow:
+                raise RuntimeError("tool surface borrow is not registry-current")
             generation = self._surface_borrows.pop(borrow.borrow_id, None)
+            self._surface_borrow_owners.pop(borrow.borrow_id, None)
             self._installed_epoch_by_borrow.pop(borrow.borrow_id, None)
             if generation is not None and generation != self._surface_generation:
                 if generation not in self._surface_borrows.values():

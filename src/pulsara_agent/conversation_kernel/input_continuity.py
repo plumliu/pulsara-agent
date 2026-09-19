@@ -50,6 +50,7 @@ from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
 from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
+    PreparedProviderInputCut,
     compiled_message_placements_fingerprint,
 )
 
@@ -367,6 +368,9 @@ class NoContinuationAdmissionFence:
     turn_id: str
     attempt_token: object
     confirmation: object
+    candidate: object
+    cut: PreparedProviderInputCut
+    destination: FrozenEpochModelCallTarget
     adopted_snapshot_id: str
     adopted_binding_revision_id: str
     fence_nonce: str
@@ -379,11 +383,18 @@ class NoContinuationAdmissionFence:
         turn_id: str,
         attempt_token: object,
         confirmation: object,
+        candidate: object,
+        cut: PreparedProviderInputCut,
+        destination: FrozenEpochModelCallTarget,
         adopted_snapshot_id: str,
         adopted_binding_revision_id: str,
         fence_nonce: str,
         _seal: object,
     ) -> None:
+        from pulsara_agent.conversation_kernel.compaction.contracts import (
+            CompactionAdoptionConfirmation,
+        )
+
         if (
             _seal is not _NO_CONTINUATION_FENCE_SEAL
             or not turn_id
@@ -391,6 +402,33 @@ class NoContinuationAdmissionFence:
             or not adopted_binding_revision_id
             or not fence_nonce
             or getattr(getattr(confirmation, "kind", None), "value", None) != "FULL"
+            or not isinstance(confirmation, CompactionAdoptionConfirmation)
+            or getattr(confirmation, "candidate", None) is not candidate
+            or getattr(getattr(candidate, "scope", None), "session_id", None)
+            != scope.session_id
+            or getattr(getattr(candidate, "scope", None), "turn_id", None)
+            != turn_id
+            or getattr(getattr(candidate, "scope", None), "scope_kind", None)
+            is not scope.scope_kind
+            or getattr(getattr(candidate, "scope", None), "scope_subagent_task_id", None)
+            != scope.scope_subagent_task_id
+            or getattr(getattr(candidate, "snapshot", None), "snapshot_id", None)
+            != adopted_snapshot_id
+            or getattr(getattr(candidate, "binding", None), "binding_revision_id", None)
+            != adopted_binding_revision_id
+            or getattr(attempt_token, "session_id", None) != scope.session_id
+            or getattr(attempt_token, "turn_id", None) != turn_id
+            or getattr(attempt_token, "scope_kind", None) is not scope.scope_kind
+            or getattr(attempt_token, "scope_subagent_task_id", None)
+            != scope.scope_subagent_task_id
+            or cut.session_id != scope.session_id
+            or cut.turn_id != turn_id
+            or cut.context_binding_revision_id
+            != candidate.predecessor.binding_revision_id
+            or cut.provider_input_through_sequence
+            != candidate.snapshot.source_through_sequence
+            or destination.session_id != scope.session_id
+            or destination.turn_id != turn_id
         ):
             raise TypeError("no-continuation fence is compaction-owner issued")
         object.__setattr__(self, "scope", scope)
@@ -398,6 +436,9 @@ class NoContinuationAdmissionFence:
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "attempt_token", attempt_token)
         object.__setattr__(self, "confirmation", confirmation)
+        object.__setattr__(self, "candidate", candidate)
+        object.__setattr__(self, "cut", cut)
+        object.__setattr__(self, "destination", destination)
         object.__setattr__(self, "adopted_snapshot_id", adopted_snapshot_id)
         object.__setattr__(
             self, "adopted_binding_revision_id", adopted_binding_revision_id
@@ -566,6 +607,7 @@ class EmptyAdoptionFullSettling:
         if (
             _seal is not _EMPTY_ADOPTION_SETTLING_SEAL
             or getattr(getattr(confirmation, "kind", None), "value", None) != "FULL"
+            or getattr(confirmation, "candidate", None) is not pending.candidate
         ):
             raise TypeError("empty adoption FULL settlement is owner-issued")
         object.__setattr__(self, "pending", pending)
@@ -587,6 +629,7 @@ class EmptyAdoptionConflictSettling:
         if (
             _seal is not _EMPTY_ADOPTION_SETTLING_SEAL
             or getattr(getattr(confirmation, "kind", None), "value", None) != "CONFLICT"
+            or getattr(confirmation, "candidate", None) is not pending.candidate
         ):
             raise TypeError("empty adoption CONFLICT settlement is owner-issued")
         object.__setattr__(self, "pending", pending)
@@ -1632,6 +1675,9 @@ class HostProviderInputContinuityOwner:
         turn_id: str,
         attempt_token: object,
         confirmation: object,
+        candidate: object,
+        cut: PreparedProviderInputCut,
+        destination: FrozenEpochModelCallTarget,
         adopted_snapshot_id: str,
         adopted_binding_revision_id: str,
     ) -> NoContinuationAdmissionFence:
@@ -1658,6 +1704,9 @@ class HostProviderInputContinuityOwner:
                 turn_id=turn_id,
                 attempt_token=attempt_token,
                 confirmation=confirmation,
+                candidate=candidate,
+                cut=cut,
+                destination=destination,
                 adopted_snapshot_id=adopted_snapshot_id,
                 adopted_binding_revision_id=adopted_binding_revision_id,
                 fence_nonce=f"no-continuation-fence:{uuid4().hex}",
@@ -1683,6 +1732,18 @@ class HostProviderInputContinuityOwner:
             slot = self._slots.get(scope)
             dry_basis = getattr(dry_result, "basis", None)
             dry_source = getattr(dry_basis, "source", None)
+            canonical_read = getattr(dry_basis, "canonical_read", None)
+            identity = getattr(
+                getattr(getattr(canonical_read, "compile_snapshot", None), "canonical_input", None),
+                "identity",
+                None,
+            )
+            binding = getattr(
+                getattr(canonical_read, "compile_snapshot", None),
+                "context_binding_fact",
+                None,
+            )
+            adoption_scope = getattr(candidate, "scope", None)
             if (
                 self._closed
                 or slot is None
@@ -1691,6 +1752,27 @@ class HostProviderInputContinuityOwner:
                 or getattr(dry_source, "reservation", None) is not reservation
                 or getattr(preparation_basis, "call_target", None)
                 is not getattr(dry_basis, "destination", None)
+                or getattr(attempt_token, "session_id", None) != scope.session_id
+                or getattr(attempt_token, "turn_id", None)
+                != getattr(adoption_scope, "turn_id", None)
+                or getattr(attempt_token, "scope_kind", None) is not scope.scope_kind
+                or getattr(attempt_token, "scope_subagent_task_id", None)
+                != scope.scope_subagent_task_id
+                or getattr(adoption_scope, "session_id", None) != scope.session_id
+                or getattr(adoption_scope, "scope_kind", None) is not scope.scope_kind
+                or getattr(adoption_scope, "scope_subagent_task_id", None)
+                != scope.scope_subagent_task_id
+                or getattr(adoption_scope, "turn_id", None)
+                != getattr(identity, "turn_id", None)
+                or getattr(candidate, "snapshot", None) is None
+                or candidate.snapshot.snapshot_id
+                != getattr(binding, "context_snapshot_id", None)
+                or candidate.binding.binding_revision_id
+                != getattr(binding, "binding_revision_id", None)
+                or getattr(dry_basis.destination, "session_id", None)
+                != scope.session_id
+                or getattr(dry_basis.destination, "turn_id", None)
+                != getattr(adoption_scope, "turn_id", None)
                 or slot.prepared is not None
                 or slot.replay_reservation is not None
             ):
@@ -1725,6 +1807,7 @@ class HostProviderInputContinuityOwner:
                 or slot.empty_adoption_pending is not pending
                 or slot.empty_reservation is not pending.reservation
                 or slot.empty_adoption_revocation is not None
+                or getattr(confirmation, "candidate", None) is not pending.candidate
             ):
                 raise ProviderInputContinuityConflict(
                     "empty adoption FULL confirmation is stale"
@@ -1742,7 +1825,9 @@ class HostProviderInputContinuityOwner:
             slot.state = _SlotState.EMPTY_ADOPTION_FULL_SETTLING
             return settling
 
-    def restore_empty_adoption_none(self, pending: EmptyAdoptionPending) -> None:
+    def restore_empty_adoption_none(
+        self, pending: EmptyAdoptionPending, confirmation: object
+    ) -> None:
         """Restore the exact pre-adoption Empty preparation after a NONE result."""
 
         scope = pending.reservation.lease.scope
@@ -1755,6 +1840,9 @@ class HostProviderInputContinuityOwner:
                 or slot.empty_adoption_pending is not pending
                 or slot.empty_reservation is not pending.reservation
                 or slot.empty_adoption_revocation is not None
+                or getattr(confirmation, "candidate", None) is not pending.candidate
+                or getattr(getattr(confirmation, "kind", None), "value", None)
+                != "NONE"
             ):
                 raise ProviderInputContinuityConflict(
                     "empty adoption NONE settlement is stale"
@@ -1778,6 +1866,7 @@ class HostProviderInputContinuityOwner:
                 or slot.empty_adoption_pending is not pending
                 or slot.empty_reservation is not pending.reservation
                 or slot.empty_adoption_revocation is not None
+                or getattr(confirmation, "candidate", None) is not pending.candidate
             ):
                 raise ProviderInputContinuityConflict(
                     "empty adoption CONFLICT confirmation is stale"

@@ -140,10 +140,7 @@ def _direct_intent(repository, lease, runtime, content: FrozenPromptContent):
         model_resolution_snapshot=resolution_snapshot,
         deadline_monotonic=monotonic() + 30,
     )
-    admission = cast(
-        PreparedRootProviderInputAdmission,
-        SimpleNamespace(candidate=candidate),
-    )
+    admission = _fixture_root_admission(candidate)
     accepted = repository.accept_root_turn_intent(
         lease.guard,
         intent=intent,
@@ -152,6 +149,14 @@ def _direct_intent(repository, lease, runtime, content: FrozenPromptContent):
         deadline_monotonic=monotonic() + 30,
     )
     return intent, accepted, admission
+
+
+def _fixture_root_admission(candidate) -> PreparedRootProviderInputAdmission:
+    """Repository-only fixture; production admission is compiler/materializer-owned."""
+
+    admission = object.__new__(PreparedRootProviderInputAdmission)
+    object.__setattr__(admission, "candidate", candidate)
+    return admission
 
 
 def _rows(repository, query: str, args: tuple[object, ...] = ()):
@@ -242,21 +247,18 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
         == "CONFLICT"
     )
     with pytest.raises(ConversationKernelConflict, match="command identity conflict"):
-        changed_admission = cast(
-            PreparedRootProviderInputAdmission,
-            SimpleNamespace(
-                candidate=replace(
-                    admission.candidate,
-                    unpublished_items=(
-                        replace(
-                            admission.candidate.unpublished_items[0],
-                            content=changed.canonical_prompt.content.parts,
-                        ),
+        changed_admission = _fixture_root_admission(
+            replace(
+                admission.candidate,
+                unpublished_items=(
+                    replace(
+                        admission.candidate.unpublished_items[0],
+                        content=changed.canonical_prompt.content.parts,
                     ),
-                    unpublished_item_canonical_expanded_bytes=(
-                        changed.canonical_prompt.resource_quote.canonical_expanded_bytes,
-                    ),
-                )
+                ),
+                unpublished_item_canonical_expanded_bytes=(
+                    changed.canonical_prompt.resource_quote.canonical_expanded_bytes,
+                ),
             ),
         )
         repository.accept_root_turn_intent(
@@ -1034,10 +1036,7 @@ def test_direct_publication_rolls_back_body_image_refs_and_command_together(
         repository.accept_root_turn_intent(
             lease.guard,
             intent=intent,
-            provider_input_admission=cast(
-                PreparedRootProviderInputAdmission,
-                SimpleNamespace(candidate=provider_candidate),
-            ),
+            provider_input_admission=_fixture_root_admission(provider_candidate),
             model_resolution_snapshot=resolution_snapshot,
             deadline_monotonic=monotonic() + 30,
         )

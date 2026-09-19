@@ -126,7 +126,6 @@ from pulsara_agent.conversation_kernel.cold_epoch import (
     AdoptedCompactionContinuationSeed,
     CanonicalColdContinuationSeed,
     CompactionDryProjectionSeed,
-    _issue_adopted_compaction_continuation_seed,
 )
 
 
@@ -238,7 +237,10 @@ from pulsara_agent.ports.provider_stream import (
     ProviderModelOutputIncomplete,
 )
 from pulsara_agent.conversation_kernel.direct_model import PreparedKernelModelTarget
-from pulsara_agent.llm.frozen_target import FrozenEpochModelTargetBundle
+from pulsara_agent.llm.frozen_target import (
+    FrozenEpochModelCallTarget,
+    FrozenEpochModelTargetBundle,
+)
 
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.hooks.context import PendingHookContextReservation
@@ -3395,6 +3397,23 @@ class CompactionCoordinator:
         prospective_active_input: PreparedProspectiveActiveRootInput | None = None
         adopted_outcome: CompactionOutcome | None = None
         no_continuation_retirement_started = False
+        source_identity = (
+            compaction_read.dispatch_read.compile_snapshot.canonical_input.identity
+        )
+        source_cut = PreparedProviderInputCut(
+            session_id=source_identity.session_id,
+            turn_id=source_identity.turn_id,
+            context_binding_revision_id=(source_identity.context_binding_revision_id),
+            provider_input_through_sequence=(
+                source_identity.provider_input_through_sequence
+            ),
+        )
+        if isinstance(dry_dispatch, PreparedProviderDispatch):
+            dry_destination = dry_dispatch.prepared_call.epoch_call_target
+        else:
+            if dry_dispatch is None:
+                raise RuntimeError("compaction settlement lost its dry destination")
+            dry_destination = dry_dispatch.result.basis.destination
         try:
             confirmation = await self._settle_compaction_adoption(
                 candidate=candidate,
@@ -3410,6 +3429,7 @@ class CompactionCoordinator:
                         continuity=self._continuity,
                         dry_projection=dry_dispatch,
                         pending=pending_empty_adoption,
+                        confirmation=confirmation,
                     )
                     dry_dispatch = None
                 raise CompactionPlanningError(
@@ -3459,30 +3479,76 @@ class CompactionCoordinator:
                         )
                     )
             elif prospective_root_dispatch is not None:
-                predecessor = self._continuity.current_cohort(continuity_scope)
-                if predecessor is None:
-                    raise RuntimeError(
-                        "post-FULL prospective ROOT lacks its predecessor"
+                pre_full_root = prospective_root_dispatch
+                prospective_root_dispatch = None
+                rebased_candidate = pre_full_root.admission.candidate
+                pre_full_root.close()
+                if dry_dispatch is None:
+                    raise RuntimeError("post-FULL prospective ROOT lost its dry dispatch")
+                dry_dispatch.close()
+                dry_dispatch = None
+                post_full_deadline = (
+                    monotonic() + owner.policy.planning_attempt_seconds
+                )
+                adopted_handle = await self._io.run(
+                    self._safe_point.freeze_compaction_input,
+                    turn_id=turn_id,
+                    allow_terminal=True,
+                    deadline_monotonic=post_full_deadline,
+                )
+                try:
+                    adopted_read = await self._provider_dispatch.read_dispatch_read(
+                        adopted_handle.cut, deadline=post_full_deadline
                     )
-                prospective_seed = _issue_adopted_compaction_continuation_seed(
-                    dispatch_read=prospective_root_dispatch.admission.canonical_read,
-                    binding_rewrite_identity=(
-                        candidate.binding.binding_revision_id
-                    ),
-                    protected_tail_selection_fingerprint=(
-                        protected_tail_selection_fingerprint
-                    ),
-                    predecessor=predecessor,
-                    destination=(
-                        prospective_root_dispatch.prepared_call.epoch_call_target
-                    ),
-                    confirmation=confirmation,
-                    attempt_token=attempt_token,
-                    candidate=candidate,
+                    destination = self._provider_dispatch.prepare_prospective_root_target(
+                        rebased_candidate
+                    ).epoch_call_target
+                    prospective_seed = self._safe_point.issue_adopted_compaction_continuation_seed(
+                        handle=adopted_handle,
+                        continuity=self._continuity,
+                        confirmation=confirmation,
+                        candidate=candidate,
+                        attempt_token=attempt_token,
+                        dispatch_read=adopted_read,
+                        destination=destination,
+                        protected_tail_selection_fingerprint=(
+                            protected_tail_selection_fingerprint
+                        ),
+                        successor_turn_id=rebased_candidate.exact_turn_id,
+                    )
+                finally:
+                    adopted_handle.close()
+                prospective_read = await self._io.run(
+                    self._input_reader.build_prospective_root_dispatch_from_snapshot,
+                    rebased_candidate,
+                    snapshot_dispatch=adopted_read,
+                    deadline_monotonic=post_full_deadline,
                 )
-                prospective_root_dispatch.authorize_adopted_compaction_seed(
-                    prospective_seed
+                post_full_family = await self._provider_dispatch.prepare_prospective_root_candidate_family(
+                    candidate=rebased_candidate,
+                    inherited_memory_use_policy=inherited_memory_use_policy,
+                    deadline=post_full_deadline,
+                    canonical_read_override=prospective_read,
+                    compaction_seed=prospective_seed._with_dispatch_read(prospective_read),
                 )
+                try:
+                    if post_full_family.prepared_call.epoch_call_target != destination:
+                        raise CompactionPlanningError(
+                            "post-FULL prospective ROOT target drifted"
+                        )
+                    post_full_candidate = await self._provider_dispatch.prepare_prospective_root_candidate(
+                        post_full_family,
+                        candidate=rebased_candidate,
+                        canonical_read=prospective_read,
+                        deadline=post_full_deadline,
+                    )
+                    prospective_root_dispatch = self._provider_dispatch.bind_selected_prospective_root_candidate(
+                        family=post_full_family,
+                        selected=post_full_candidate,
+                    )
+                finally:
+                    if post_full_family.owns_resources:
+                        post_full_family.close()
             post_hook_deadline = monotonic() + owner.policy.planning_attempt_seconds
             adopted_outcome = CompactionOutcome(
                 CompactionDisposition.COMPACTED,
@@ -3537,6 +3603,8 @@ class CompactionCoordinator:
                             candidate=candidate,
                             evidence=_issue_durable_turn_not_running_evidence(status),
                             dispatch=retiring_dispatch,
+                            cut=source_cut,
+                            destination=dry_destination,
                         )
                     owner.reset_automatic_failures(
                         scope_kind=expected_scope.scope_kind,
@@ -3566,6 +3634,8 @@ class CompactionCoordinator:
                                 (post_proceed, post_reason)
                             ),
                             dispatch=retiring_dispatch,
+                            cut=source_cut,
+                            destination=dry_destination,
                         )
                     owner.reset_automatic_failures(
                         scope_kind=expected_scope.scope_kind,
@@ -3843,6 +3913,8 @@ class CompactionCoordinator:
                                     )
                                 ),
                                 dispatch=retiring_dispatch,
+                                cut=source_cut,
+                                destination=dry_destination,
                             )
                             owner.reset_automatic_failures(
                                 scope_kind=expected_scope.scope_kind,
@@ -4012,6 +4084,8 @@ class CompactionCoordinator:
                                 target_branch
                             ),
                             dispatch=retiring_dispatch,
+                            cut=source_cut,
+                            destination=dry_destination,
                         )
                 owner.advance_phase(
                     scope_kind=expected_scope.scope_kind,
@@ -4071,6 +4145,8 @@ class CompactionCoordinator:
                     candidate=candidate,
                     evidence=_issue_successor_final_abandonment_evidence(error),
                     dispatch=retiring_dispatch,
+                    cut=source_cut,
+                    destination=dry_destination,
                 )
             raise _PostAdoptionCompactionFailure(adopted_outcome, error) from error
         finally:
@@ -4216,6 +4292,8 @@ class CompactionCoordinator:
         candidate: PreparedCompactionCanonicalAdoption,
         evidence: NoContinuationProductEvidence,
         dispatch: PreparedCompactionDryProjection | PreparedProviderDispatch | None,
+        cut: PreparedProviderInputCut,
+        destination: FrozenEpochModelCallTarget,
     ) -> None:
         """Fence retries, release the exact preparation, then publish Empty."""
 
@@ -4230,14 +4308,28 @@ class CompactionCoordinator:
             turn_id=turn_id,
             attempt_token=attempt_token,
             confirmation=confirmation,
+            candidate=candidate,
+            cut=cut,
+            destination=destination,
             adopted_snapshot_id=candidate.snapshot.snapshot_id,
             adopted_binding_revision_id=candidate.binding.binding_revision_id,
         )
+        def verify_physical_release() -> None:
+            self._tools.assert_no_tool_surface_borrows(
+                scope_kind=scope.scope_kind,
+                scope_subagent_task_id=scope.scope_subagent_task_id,
+            )
+            self._model.model_runtime.assert_no_provider_borrows(
+                session_id=scope.session_id,
+                turn_id=turn_id,
+            )
+
         self._safe_point.retire_full_adoption_without_continuation_and_arm_empty(
             continuity=self._continuity,
             fence=fence,
             evidence=evidence,
             dispatch=dispatch,
+            verify_physical_release=verify_physical_release,
         )
 
 

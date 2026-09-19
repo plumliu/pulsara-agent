@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 import json
 import logging
 from pathlib import Path
@@ -927,14 +928,19 @@ async def _run(
         prepared_call, _ = selected
         # This semantic probe does not claim repository-authority coverage; the
         # production governor obtains this carrier only from the exact DB recheck.
+        candidate = SimpleNamespace(
+            terminal_fence=(scenario.name, "semantic-dogfood"),
+            scenario=scenario,
+        )
         terminal_fence = _issue_confirmed_memory_governance_terminal_fence(
-            candidate=scenario,
+            candidate=candidate,
             origin_model_call_binding=origin_binding,
-            durable_terminal_fence=(scenario.name, "semantic-dogfood"),
+            durable_terminal_fence=candidate.terminal_fence,
         )
         raw_model_json = await model.complete_prepared_json(
             prepared_call,
             terminal_fence=terminal_fence,
+            candidate=candidate,
         )
         try:
             parsed = _parse_governance_decision(

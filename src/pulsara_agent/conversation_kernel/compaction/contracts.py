@@ -1277,16 +1277,51 @@ def build_prepared_compaction_canonical_adoption(
     )
 
 
-@dataclass(frozen=True, slots=True)
+_COMPACTION_ADOPTION_CONFIRMATION_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class CompactionAdoptionConfirmation:
     kind: CompactionConfirmationKind
     revision_ordinal: int | None = None
+    candidate: PreparedCompactionCanonicalAdoption = field(repr=False)
 
-    def __post_init__(self) -> None:
-        if (self.kind is CompactionConfirmationKind.FULL) != (
-            self.revision_ordinal is not None
+    def __init__(
+        self,
+        kind: CompactionConfirmationKind,
+        revision_ordinal: int | None,
+        *,
+        candidate: PreparedCompactionCanonicalAdoption,
+        _seal: object,
+    ) -> None:
+        if (
+            _seal is not _COMPACTION_ADOPTION_CONFIRMATION_SEAL
+            or not isinstance(candidate, PreparedCompactionCanonicalAdoption)
+            or (kind is CompactionConfirmationKind.FULL)
+            != (revision_ordinal is not None)
+            or (
+                kind is CompactionConfirmationKind.FULL
+                and revision_ordinal != candidate.binding.revision_ordinal
+            )
         ):
-            raise ValueError("compaction confirmation union is invalid")
+            raise TypeError("compaction confirmation is repository-issued")
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "revision_ordinal", revision_ordinal)
+        object.__setattr__(self, "candidate", candidate)
+
+
+def _issue_compaction_adoption_confirmation(
+    *,
+    kind: CompactionConfirmationKind,
+    revision_ordinal: int | None,
+    candidate: PreparedCompactionCanonicalAdoption,
+) -> CompactionAdoptionConfirmation:
+    return CompactionAdoptionConfirmation(
+        kind,
+        revision_ordinal,
+        candidate=candidate,
+        _seal=_COMPACTION_ADOPTION_CONFIRMATION_SEAL,
+    )
 
 
 @dataclass(frozen=True, slots=True)

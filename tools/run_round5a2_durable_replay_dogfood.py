@@ -137,14 +137,14 @@ def _assistant_replay_summary(session) -> dict[str, object]:
     ) as connection:
         row = connection.execute(
             """
-            SELECT count(*) FILTER (
-                       WHERE e.provider_replay_disposition = 'NATIVE_REPLAY'
+            SELECT count(DISTINCT e.id) FILTER (
+                       WHERE r.id IS NOT NULL
                    ) AS native_entries,
                    count(r.id) AS replay_rows,
                    coalesce(sum(r.payload_size), 0) AS replay_bytes,
                    coalesce(sum(r.item_count), 0) AS replay_items,
-                   count(*) FILTER (
-                       WHERE e.provider_replay_disposition = 'PUBLIC_SEMANTIC_ONLY'
+                   count(DISTINCT e.id) FILTER (
+                       WHERE r.id IS NULL
                    ) AS public_only_entries
             FROM pulsara_v3.transcript_entries AS e
             LEFT JOIN pulsara_v3.provider_assistant_replay_fragments AS r

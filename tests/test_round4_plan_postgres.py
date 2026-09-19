@@ -307,10 +307,7 @@ def _fresh_plan_provider_input_admission(
     )
     # These repository tests exercise the transaction and exact candidate join.
     # Full compiler/materialization admission is covered at the Host boundary.
-    return cast(
-        PreparedRootProviderInputAdmission,
-        SimpleNamespace(candidate=prospective),
-    )
+    return _root_provider_input_admission(prospective)
 
 
 def _active_provider_input_admission(
@@ -329,10 +326,9 @@ def _root_provider_input_admission(
 ) -> PreparedRootProviderInputAdmission:
     # These repository tests exercise the transaction and exact candidate join.
     # Full compiler/materialization admission is covered at the Host boundary.
-    return cast(
-        PreparedRootProviderInputAdmission,
-        SimpleNamespace(candidate=candidate),
-    )
+    admission = object.__new__(PreparedRootProviderInputAdmission)
+    object.__setattr__(admission, "candidate", candidate)
+    return admission
 
 
 def _open_user_plan(repository, lease, *, resume=PermissionMode.ACCEPT_EDITS):

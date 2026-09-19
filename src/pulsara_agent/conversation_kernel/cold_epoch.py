@@ -177,9 +177,23 @@ class AdoptedCompactionContinuationSeed:
     ) -> "AdoptedCompactionContinuationSeed":
         old = self.dispatch_read.compile_snapshot.context_binding_fact
         new = dispatch_read.compile_snapshot.context_binding_fact
+        old_identity = self.dispatch_read.compile_snapshot.canonical_input.identity
+        new_identity = dispatch_read.compile_snapshot.canonical_input.identity
         if (
-            old.binding_revision_id != new.binding_revision_id
-            or old.context_snapshot_id != new.context_snapshot_id
+            old.context_snapshot_id != new.context_snapshot_id
+            or old.source_through_sequence != new.source_through_sequence
+            or old_identity.session_id != new_identity.session_id
+            or new_identity.turn_id != self._authority.destination.turn_id
+            or new_identity.context_binding_revision_id != new.binding_revision_id
+            or (
+                old_identity.turn_id == new_identity.turn_id
+                and old.binding_revision_id != new.binding_revision_id
+            )
+            or (
+                old_identity.turn_id != new_identity.turn_id
+                and old_identity.turn_id
+                != getattr(getattr(self._authority.candidate, "scope", None), "turn_id", None)
+            )
         ):
             raise RuntimeError("adopted compaction seed variant changed its base")
         return AdoptedCompactionContinuationSeed(

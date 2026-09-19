@@ -20,6 +20,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionSourceLineageBase,
     PreparedCompactionCanonicalAdoption,
     PreparedManualCompactionCommand,
+    _issue_compaction_adoption_confirmation,
     canonical_compaction_range_digest,
     freeze_compaction_canonical_range,
 )
@@ -294,6 +295,8 @@ class _ConversationOperations:
 
         if intent.session_id != guard.session_id:
             raise ValueError("ROOT turn intent belongs to another session")
+        if not isinstance(provider_input_admission, PreparedRootProviderInputAdmission):
+            raise TypeError("ROOT provider input admission must be prepared")
         prospective = provider_input_admission.candidate
         if (
             prospective.session_id != intent.session_id
@@ -1894,9 +1897,10 @@ class _ConversationOperations:
                 workspace_id=candidate.scope.workspace_id,
                 drafts=(candidate.event,),
             )
-            return CompactionAdoptionConfirmation(
-                CompactionConfirmationKind.FULL,
-                binding.revision_ordinal,
+            return _issue_compaction_adoption_confirmation(
+                kind=CompactionConfirmationKind.FULL,
+                revision_ordinal=binding.revision_ordinal,
+                candidate=candidate,
             )
 
     def confirm_context_snapshot_adoption(
@@ -1953,11 +1957,15 @@ class _ConversationOperations:
                     == candidate.predecessor.binding_revision_id
                     and self._compaction_predecessor_row_matches(predecessor, candidate)
                 ):
-                    return CompactionAdoptionConfirmation(
-                        CompactionConfirmationKind.NONE
+                    return _issue_compaction_adoption_confirmation(
+                        kind=CompactionConfirmationKind.NONE,
+                        revision_ordinal=None,
+                        candidate=candidate,
                     )
-                return CompactionAdoptionConfirmation(
-                    CompactionConfirmationKind.CONFLICT
+                return _issue_compaction_adoption_confirmation(
+                    kind=CompactionConfirmationKind.CONFLICT,
+                    revision_ordinal=None,
+                    candidate=candidate,
                 )
             if (
                 any(row is None for row in rows)
@@ -1972,12 +1980,15 @@ class _ConversationOperations:
                 or not self._compaction_predecessor_row_matches(predecessor, candidate)
                 or not _event_row_matches_draft(event, candidate.event)
             ):
-                return CompactionAdoptionConfirmation(
-                    CompactionConfirmationKind.CONFLICT
+                return _issue_compaction_adoption_confirmation(
+                    kind=CompactionConfirmationKind.CONFLICT,
+                    revision_ordinal=None,
+                    candidate=candidate,
                 )
-            return CompactionAdoptionConfirmation(
-                CompactionConfirmationKind.FULL,
-                candidate.binding.revision_ordinal,
+            return _issue_compaction_adoption_confirmation(
+                kind=CompactionConfirmationKind.FULL,
+                revision_ordinal=candidate.binding.revision_ordinal,
+                candidate=candidate,
             )
 
     def _require_compaction_target(

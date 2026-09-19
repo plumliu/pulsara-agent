@@ -3,8 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from time import monotonic
-from types import SimpleNamespace
-from typing import cast
 from uuid import uuid4
 
 import psycopg
@@ -131,10 +129,9 @@ pytestmark = pytest.mark.postgres
 
 
 def _root_provider_input_admission(candidate) -> PreparedRootProviderInputAdmission:
-    return cast(
-        PreparedRootProviderInputAdmission,
-        SimpleNamespace(candidate=candidate),
-    )
+    admission = object.__new__(PreparedRootProviderInputAdmission)
+    object.__setattr__(admission, "candidate", candidate)
+    return admission
 
 
 def _two_connection_resolution_cut():

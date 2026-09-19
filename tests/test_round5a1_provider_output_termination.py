@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from threading import Thread
+from types import SimpleNamespace
 
 import pytest
 
@@ -3074,18 +3075,40 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
             auxiliary.complete_prepared_json(
                 prepared,
                 terminal_fence=object(),  # type: ignore[arg-type]
+                candidate=object(),
             )
         )
+    durable_terminal = object()
+    candidate = SimpleNamespace(terminal_fence=durable_terminal)
     terminal_fence = _issue_confirmed_memory_governance_terminal_fence(
-        candidate=object(),
+        candidate=candidate,
         origin_model_call_binding=prepared.origin_model_call_binding,
-        durable_terminal_fence=object(),
+        durable_terminal_fence=durable_terminal,
     )
+    with pytest.raises(RuntimeError, match="subject drifted"):
+        asyncio.run(
+            auxiliary.complete_prepared_json(
+                prepared,
+                terminal_fence=terminal_fence,
+                candidate=SimpleNamespace(terminal_fence=durable_terminal),
+            )
+        )
+    candidate.terminal_fence = object()
+    with pytest.raises(RuntimeError, match="subject drifted"):
+        asyncio.run(
+            auxiliary.complete_prepared_json(
+                prepared,
+                terminal_fence=terminal_fence,
+                candidate=candidate,
+            )
+        )
+    candidate.terminal_fence = durable_terminal
     with pytest.raises(ProviderModelOutputIncomplete) as captured:
         asyncio.run(
             auxiliary.complete_prepared_json(
                 prepared,
                 terminal_fence=terminal_fence,
+                candidate=candidate,
             )
         )
     assert captured.value.reason is ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT
@@ -3094,6 +3117,7 @@ def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
             auxiliary.complete_prepared_json(
                 prepared,
                 terminal_fence=terminal_fence,
+                candidate=candidate,
             )
         )
 

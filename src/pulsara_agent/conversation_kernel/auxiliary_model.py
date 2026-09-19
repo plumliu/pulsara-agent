@@ -112,6 +112,7 @@ class AuxiliaryJsonModelPort(Protocol):
         prepared: PreparedAuxiliaryJsonModelCall,
         *,
         terminal_fence: ConfirmedMemoryGovernanceTerminalFence,
+        candidate: object,
     ) -> Mapping[str, object]: ...
 
 
@@ -286,6 +287,7 @@ class DirectKernelAuxiliaryJsonModel:
         prepared: PreparedAuxiliaryJsonModelCall,
         *,
         terminal_fence: ConfirmedMemoryGovernanceTerminalFence,
+        candidate: object,
     ) -> Mapping[str, object]:
         if not prepared.transport_timeout_policy_fingerprint.startswith("sha256:"):
             raise ValueError("auxiliary timeout policy fingerprint is invalid")
@@ -294,6 +296,8 @@ class DirectKernelAuxiliaryJsonModel:
             resolved_model_call_id=prepared.call.resolved_model_call_id,
             timeout_policy=prepared.timeout_policy,
             terminal_fence=terminal_fence,
+            candidate=candidate,
+            durable_terminal_fence=getattr(candidate, "terminal_fence", None),
             origin_model_call_binding=prepared.origin_model_call_binding,
             context=prepared.context,
             estimated_input_tokens=prepared.estimated_input_tokens,

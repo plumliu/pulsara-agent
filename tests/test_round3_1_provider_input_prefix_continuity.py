@@ -4,6 +4,7 @@ import asyncio
 import ast
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,10 +26,101 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
     ContextTrustClass,
     ModelInputScopeKind,
+    PreparedProviderInputCut,
+)
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    CompactionAdoptionConfirmation,
+    CompactionConfirmationKind,
+)
+from pulsara_agent.conversation_kernel.input_continuity import (
+    EmptyAdoptionFullSettling,
+    EmptyAdoptionPending,
+    NoContinuationAdmissionFence,
+    _EMPTY_ADOPTION_SETTLING_SEAL,
+    _NO_CONTINUATION_FENCE_SEAL,
 )
 
 
 _REPOSITORY_ROOT = Path(__file__).parents[1]
+
+
+def test_compaction_release_authorities_reject_another_adoption_candidate() -> None:
+    scope = ProviderInputContinuityScope(
+        session_id="session:1",
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    adoption_scope = SimpleNamespace(
+        session_id="session:1",
+        turn_id="turn:1",
+        scope_kind=ModelInputScopeKind.ROOT,
+        scope_subagent_task_id=None,
+    )
+    candidate_a = SimpleNamespace(
+        scope=adoption_scope,
+        predecessor=SimpleNamespace(binding_revision_id="revision:old"),
+        snapshot=SimpleNamespace(
+            snapshot_id="snapshot:adopted", source_through_sequence=1
+        ),
+        binding=SimpleNamespace(binding_revision_id="revision:adopted"),
+    )
+    candidate_b = SimpleNamespace(**vars(candidate_a))
+    confirmation = object.__new__(CompactionAdoptionConfirmation)
+    object.__setattr__(confirmation, "kind", CompactionConfirmationKind.FULL)
+    object.__setattr__(confirmation, "revision_ordinal", 1)
+    object.__setattr__(confirmation, "candidate", candidate_a)
+    pending = object.__new__(EmptyAdoptionPending)
+    object.__setattr__(pending, "candidate", candidate_b)
+    with pytest.raises(TypeError, match="owner-issued"):
+        EmptyAdoptionFullSettling(
+            pending=pending,
+            confirmation=confirmation,
+            _seal=_EMPTY_ADOPTION_SETTLING_SEAL,
+        )
+    with pytest.raises(TypeError, match="compaction-owner issued"):
+        NoContinuationAdmissionFence(
+            scope=scope,
+            predecessor=object(),  # type: ignore[arg-type]
+            turn_id="turn:1",
+            attempt_token=SimpleNamespace(
+                session_id="session:1",
+                turn_id="turn:1",
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            ),
+            confirmation=confirmation,
+            candidate=candidate_b,
+            cut=PreparedProviderInputCut("session:1", "turn:1", "revision:old", 1),
+            destination=SimpleNamespace(  # type: ignore[arg-type]
+                session_id="session:1", turn_id="turn:1"
+            ),
+            adopted_snapshot_id="snapshot:adopted",
+            adopted_binding_revision_id="revision:adopted",
+            fence_nonce="fence:1",
+            _seal=_NO_CONTINUATION_FENCE_SEAL,
+        )
+    with pytest.raises(TypeError, match="compaction-owner issued"):
+        NoContinuationAdmissionFence(
+            scope=scope,
+            predecessor=object(),  # type: ignore[arg-type]
+            turn_id="turn:1",
+            attempt_token=SimpleNamespace(
+                session_id="session:1",
+                turn_id="turn:1",
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            ),
+            confirmation=confirmation,
+            candidate=candidate_a,
+            cut=PreparedProviderInputCut("session:1", "turn:1", "revision:old", 2),
+            destination=SimpleNamespace(  # type: ignore[arg-type]
+                session_id="session:1", turn_id="turn:1"
+            ),
+            adopted_snapshot_id="snapshot:adopted",
+            adopted_binding_revision_id="revision:adopted",
+            fence_nonce="fence:2",
+            _seal=_NO_CONTINUATION_FENCE_SEAL,
+        )
 
 
 def test_round3_1_runtime_observation_codec_is_canonical_and_inert() -> None:

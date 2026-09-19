@@ -190,6 +190,37 @@ ProviderInputItemKind = FrozenProviderInputItemKind
 ProviderInputItem = FrozenProviderInputItem
 
 
+_CANONICAL_DISPATCH_OBSERVATION_SEAL = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class OwnerIssuedCanonicalDispatchObservation:
+    """One-shot carrier for a canonical dispatch read performed by this reader."""
+
+    canonical_read: FrozenCanonicalProviderDispatchRead
+    _owner: "CanonicalProviderInputReader"
+    _consumed: bool
+
+    def __init__(
+        self,
+        *,
+        canonical_read: FrozenCanonicalProviderDispatchRead,
+        owner: "CanonicalProviderInputReader",
+        _seal: object,
+    ) -> None:
+        if _seal is not _CANONICAL_DISPATCH_OBSERVATION_SEAL:
+            raise TypeError("canonical dispatch observation is reader-issued")
+        object.__setattr__(self, "canonical_read", canonical_read)
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_consumed", False)
+
+    def consume(self) -> FrozenCanonicalProviderDispatchRead:
+        if self._consumed:
+            raise RuntimeError("canonical dispatch observation is already consumed")
+        object.__setattr__(self, "_consumed", True)
+        return self.canonical_read
+
+
 @dataclass(frozen=True, slots=True)
 class _HistoricalMemoryGovernanceReadAuthority:
     producer_cut: FrozenMemoryGovernanceProducerCut
@@ -231,6 +262,24 @@ class CanonicalProviderInputReader:
         return self.read_frozen_compile_snapshot(
             cut, deadline_monotonic=deadline_monotonic
         ).canonical_input
+
+    def read_owner_issued_dispatch_observation(
+        self,
+        cut: PreparedProviderInputCut,
+        *,
+        deadline_monotonic: float,
+    ) -> OwnerIssuedCanonicalDispatchObservation:
+        """Perform the exact canonical read and return its one-shot owner carrier."""
+
+        canonical_read = self.read_frozen_dispatch(
+            cut,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return OwnerIssuedCanonicalDispatchObservation(
+            canonical_read=canonical_read,
+            owner=self,
+            _seal=_CANONICAL_DISPATCH_OBSERVATION_SEAL,
+        )
 
     def read_fork_historical_material(
         self,

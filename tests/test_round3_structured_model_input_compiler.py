@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from copy import copy
 from dataclasses import fields, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 import json
@@ -3521,6 +3522,55 @@ def test_round3_tool_invocation_rejects_other_subagent_access() -> None:
             )
     finally:
         borrow.close()
+
+
+def test_tool_runtime_dispatch_observation_requires_registry_current_borrow(
+    tmp_path: Path,
+) -> None:
+    port = DirectKernelToolPort(
+        workspace_root=tmp_path,
+        host_owner_id="host:test",
+        session_id="session:test",
+        live_bus=LiveAgentEventBus(),
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+    )
+    try:
+        surface = prepare_test_direct_tool_surface(port)
+        cut = surface.capability_exposure_plan.dispatch_view.parent_dispatch_cut
+        borrow = port.borrow_tool_surface(surface)
+        copied_borrow = copy(borrow)
+        with pytest.raises(RuntimeError, match="not active"):
+            port.issue_capability_dispatch_observation(
+                capability_dispatch_cut=cut,
+                prepared_surface=surface,
+                surface_borrow=copied_borrow,
+            )
+        with pytest.raises(RuntimeError, match="borrow active"):
+            port.assert_no_tool_surface_borrows(
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            )
+        observation = port.issue_capability_dispatch_observation(
+            capability_dispatch_cut=cut,
+            prepared_surface=surface,
+            surface_borrow=borrow,
+        )
+        assert observation.consume() == (cut, borrow)
+        with pytest.raises(RuntimeError, match="already consumed"):
+            observation.consume()
+        borrow.close()
+        with pytest.raises(RuntimeError, match="not active"):
+            port.issue_capability_dispatch_observation(
+                capability_dispatch_cut=cut,
+                prepared_surface=surface,
+                surface_borrow=borrow,
+            )
+        port.assert_no_tool_surface_borrows(
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+    finally:
+        asyncio.run(port.aclose(timeout_seconds=2))
 
 
 def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -> None:

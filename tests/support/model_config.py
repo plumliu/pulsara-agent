@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from time import monotonic
-from types import SimpleNamespace
-from typing import cast
 
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 
@@ -457,10 +455,8 @@ def start_test_root_turn(
     # This helper seeds repository fixtures whose subject is downstream durable
     # behavior.  Production ROOT admission is exercised through Runner/Host tests;
     # here the exact candidate still crosses the hard-cut writer precondition.
-    admission = cast(
-        PreparedRootProviderInputAdmission,
-        SimpleNamespace(candidate=candidate),
-    )
+    admission = object.__new__(PreparedRootProviderInputAdmission)
+    object.__setattr__(admission, "candidate", candidate)
     return repository.accept_root_turn_intent(
         guard,
         intent=intent,

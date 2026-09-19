@@ -768,7 +768,6 @@ def _seed_completed_history(session, *, segments: int = 3) -> None:
                     text=InlineContent.from_bytes(b"seed complete"),
                 ),
             ),
-            provider_wire_api="openai_chat_completions",
             complete_turn=True,
             occurred_at=datetime.now(timezone.utc),
             actor_id="round9-2-dogfood",

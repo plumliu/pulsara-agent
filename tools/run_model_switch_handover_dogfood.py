@@ -21,7 +21,6 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
-from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -302,6 +301,11 @@ class _RecordingModelRuntime:
             self._forced_source_summary_error,
         )
 
+    def assert_no_provider_borrows(self, *, session_id: str, turn_id: str) -> None:
+        self._delegate.assert_no_provider_borrows(
+            session_id=session_id, turn_id=turn_id
+        )
+
 
 class _RecordingBorrowedTransport:
     """Observe one closed-purpose borrow without bypassing its runtime owner."""
@@ -376,7 +380,7 @@ def _drop_database(settings: LocalSettings, name: str) -> None:
         )
 
 
-def _seed_completed_history(
+async def _seed_completed_history(
     session,
     *,
     segments: int,
@@ -416,16 +420,21 @@ def _seed_completed_history(
             model_resolution_snapshot=resolution_snapshot,
             deadline_monotonic=monotonic() + 60,
         )
-        repository.accept_root_turn_intent(
-            guard,
-            intent=intent,
-            # The dogfood fixture seeds completed canonical rows without a
-            # physical model call.  The repository still receives the exact
-            # prospective candidate it issued for this intent.
-            provider_input_admission=SimpleNamespace(candidate=candidate),
-            model_resolution_snapshot=resolution_snapshot,
-            deadline_monotonic=monotonic() + 60,
+        prepared = await session._runner._provider_dispatch.prepare_prospective_root_input(  # noqa: SLF001
+            candidate=candidate,
+            inherited_memory_use_policy=session._runner._root_memory_use_policy,  # noqa: SLF001
+            deadline=monotonic() + 60,
         )
+        try:
+            repository.accept_root_turn_intent(
+                guard,
+                intent=intent,
+                provider_input_admission=prepared.admission,
+                model_resolution_snapshot=resolution_snapshot,
+                deadline_monotonic=monotonic() + 60,
+            )
+        finally:
+            prepared.close()
         cut = repository.prepare_provider_input_cut(
             guard,
             turn_id=turn_id,
@@ -616,7 +625,7 @@ async def _run(
                     "exact marker MODEL_SWITCH_REAL_TOOL_OK."),
                     command_id="command:model-switch-dogfood:source",
                 )
-                seeded_bytes = _seed_completed_history(
+                seeded_bytes = await _seed_completed_history(
                     session,
                     segments=segments,
                     repetitions=repetitions,

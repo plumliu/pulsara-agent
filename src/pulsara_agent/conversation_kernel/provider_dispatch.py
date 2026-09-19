@@ -144,6 +144,10 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
+    OwnerIssuedCanonicalDispatchObservation,
+)
+from pulsara_agent.conversation_kernel.tool_surface import (
+    OwnerIssuedCapabilityDispatchObservation,
 )
 from pulsara_agent.conversation_kernel.safe_point import (
     PreparedProviderInputHandle,
@@ -585,10 +589,9 @@ class ProviderDispatchExecutionAuthority:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         *,
         safe_point: ProviderSafePointCoordinator,
-        canonical_read: FrozenCanonicalProviderDispatchRead,
-        capability_dispatch_cut: FrozenCapabilityDispatchCut,
+        canonical_observation: OwnerIssuedCanonicalDispatchObservation,
+        capability_observation: OwnerIssuedCapabilityDispatchObservation,
         call_target: FrozenEpochModelCallTarget,
-        basis_canonical_read: FrozenCanonicalProviderDispatchRead | None = None,
         installable: bool = True,
     ) -> None:
         if handle is None or surface_borrow is None:
@@ -597,19 +600,6 @@ class ProviderDispatchExecutionAuthority:
         self._surface_borrow: ProcessLocalToolSurfaceBorrow | None = surface_borrow
         self._safe_point = safe_point
         self._installable = installable
-        observed_read = (
-            canonical_read if basis_canonical_read is None else basis_canonical_read
-        )
-        canonical_observation = safe_point.issue_canonical_dispatch_observation(
-            handle=handle,
-            canonical_read=observed_read,
-        )
-        capability_observation = safe_point.issue_capability_dispatch_observation(
-            handle=handle,
-            capability_dispatch_cut=capability_dispatch_cut,
-            prepared_surface=surface_borrow.prepared,
-            surface_borrow=surface_borrow,
-        )
         self._basis = safe_point.seal_provider_input_preparation_basis(
             handle=handle,
             canonical_observation=canonical_observation,
@@ -712,8 +702,8 @@ class CompactionDryResourceAuthority:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         *,
         safe_point: ProviderSafePointCoordinator,
-        source_read: FrozenCanonicalProviderDispatchRead,
-        capability_dispatch_cut: FrozenCapabilityDispatchCut,
+        canonical_observation: OwnerIssuedCanonicalDispatchObservation,
+        capability_observation: OwnerIssuedCapabilityDispatchObservation,
         call_target: FrozenEpochModelCallTarget,
         continuity: HostProviderInputContinuityOwner,
         planning: FrozenProviderInputAppendPlanningInput,
@@ -724,16 +714,6 @@ class CompactionDryResourceAuthority:
         self._abort_planning = True
         self._surface_borrow: ProcessLocalToolSurfaceBorrow | None = surface_borrow
         self._safe_point = safe_point
-        canonical_observation = safe_point.issue_canonical_dispatch_observation(
-            handle=handle,
-            canonical_read=source_read,
-        )
-        capability_observation = safe_point.issue_capability_dispatch_observation(
-            handle=handle,
-            capability_dispatch_cut=capability_dispatch_cut,
-            prepared_surface=surface_borrow.prepared,
-            surface_borrow=surface_borrow,
-        )
         self._basis = safe_point.seal_provider_input_preparation_basis(
             handle=handle,
             canonical_observation=canonical_observation,
@@ -1077,32 +1057,6 @@ class PreparedProspectiveRootDispatch:
                     "prospective ROOT model-switch tier is already bound"
                 )
             self._model_switch_tier = tier
-
-    def authorize_adopted_compaction_seed(
-        self, seed: AdoptedCompactionContinuationSeed
-    ) -> None:
-        """Replace the pre-adoption dry marker with its post-FULL authority."""
-
-        with self._lock:
-            decision = self._wire_decision
-            cold = self.cold_semantic
-            if (
-                self._surface_borrow is None
-                or decision is None
-                or cold is None
-                or not isinstance(cold.seed, CompactionDryProjectionSeed)
-                or seed.dispatch_read != self.admission.canonical_read
-            ):
-                raise RuntimeError(
-                    "prospective ROOT compaction authority does not exact-join"
-                )
-            candidate = decision.candidate
-            if not isinstance(candidate, PreparedProviderWireCandidate):
-                raise RuntimeError("prospective ROOT wire candidate is not concrete")
-            adopted_cold = replace(cold, seed=seed)
-            adopted_candidate = replace(candidate, cold_semantic=adopted_cold)
-            self.cold_semantic = adopted_cold
-            self._wire_decision = replace(decision, candidate=adopted_candidate)
 
     def close(self) -> None:
         borrow, reservation, _decision = self.take_resources()
@@ -2358,13 +2312,22 @@ class ProviderDispatchCoordinator:
                     candidate=measured_candidate,
                     decision=decision,
                 )
+            canonical_observation, capability_observation = (
+                await self._owner_dispatch_observations(
+                    handle=handle,
+                    expected_read=actual_read,
+                    capability_dispatch_cut=prepared.capability_dispatch_cut,
+                    borrow=borrow,
+                    deadline=deadline,
+                )
+            )
             dispatch = PreparedProviderDispatch(
                 _execution_authority=ProviderDispatchExecutionAuthority(
                     handle,
                     borrow,
                     safe_point=self._safe_point,
-                    canonical_read=actual_read,
-                    capability_dispatch_cut=prepared.capability_dispatch_cut,
+                    canonical_observation=canonical_observation,
+                    capability_observation=capability_observation,
                     call_target=prepared.prepared_call.epoch_call_target,
                 ),
                 _continuity_owner=self._continuity,
@@ -2478,8 +2441,12 @@ class ProviderDispatchCoordinator:
             prospective_root_candidate is None or prospective_root_read_override is None
         ):
             raise ValueError("prospective compaction seed is incomplete")
-        if (_prospective_source_planning_basis is not None) != (
-            _prospective_compaction_seed is not None
+        if (
+            _prospective_source_planning_basis is not None
+            and _prospective_compaction_seed is None
+        ) or (
+            isinstance(_prospective_compaction_seed, CompactionDryProjectionSeed)
+            and _prospective_source_planning_basis is None
         ):
             raise ValueError("prospective compaction planning basis is incomplete")
         if (prospective_root_read_override is not None) != (
@@ -3012,13 +2979,26 @@ class ProviderDispatchCoordinator:
                     raise StructuredModelInputCompileError(
                         ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                     ) from exc
+                canonical_observation, capability_observation = (
+                    await self._owner_dispatch_observations(
+                        handle=handle,
+                        expected_read=(
+                            expected_source_read
+                            if _compaction_dry_projection
+                            else base_read
+                        ),
+                        capability_dispatch_cut=capability_dispatch_cut,
+                        borrow=borrow,
+                        deadline=deadline,
+                    )
+                )
                 resource_authority = (
                     CompactionDryResourceAuthority(
                         handle,
                         borrow,
                         safe_point=self._safe_point,
-                        source_read=expected_source_read,
-                        capability_dispatch_cut=capability_dispatch_cut,
+                        canonical_observation=canonical_observation,
+                        capability_observation=capability_observation,
                         call_target=prepared_call.epoch_call_target,
                         continuity=self._continuity,
                         planning=planning,
@@ -3028,8 +3008,8 @@ class ProviderDispatchCoordinator:
                         handle,
                         borrow,
                         safe_point=self._safe_point,
-                        canonical_read=base_read,
-                        capability_dispatch_cut=capability_dispatch_cut,
+                        canonical_observation=canonical_observation,
+                        capability_observation=capability_observation,
                         call_target=prepared_call.epoch_call_target,
                     )
                 )
@@ -3634,13 +3614,22 @@ class ProviderDispatchCoordinator:
                         selected_plan.quote.resulting_epoch_logical_bytes
                     ),
                 )
+                canonical_observation, capability_observation = (
+                    await self._owner_dispatch_observations(
+                        handle=handle,
+                        expected_read=actual_read,
+                        capability_dispatch_cut=capability_dispatch_cut,
+                        borrow=borrow,
+                        deadline=deadline,
+                    )
+                )
                 return PreparedProviderDispatch(
                     _execution_authority=ProviderDispatchExecutionAuthority(
                         handle,
                         borrow,
                         safe_point=self._safe_point,
-                        canonical_read=actual_read,
-                        capability_dispatch_cut=capability_dispatch_cut,
+                        canonical_observation=canonical_observation,
+                        capability_observation=capability_observation,
                         call_target=prepared_call.epoch_call_target,
                     ),
                     _continuity_owner=self._continuity,
@@ -4060,17 +4049,27 @@ class ProviderDispatchCoordinator:
                 )
                 base_read = actual_completion_read
                 base_facts = actual_completion_read.compile_snapshot
+            canonical_observation, capability_observation = (
+                await self._owner_dispatch_observations(
+                    handle=handle,
+                    expected_read=(
+                        expected_source_read
+                        if _noninstallable_preparation
+                        else base_read
+                    ),
+                    capability_dispatch_cut=capability_dispatch_cut,
+                    borrow=borrow,
+                    deadline=deadline,
+                )
+            )
             return PreparedProviderDispatch(
                 _execution_authority=ProviderDispatchExecutionAuthority(
                     handle,
                     borrow,
                     safe_point=self._safe_point,
-                    canonical_read=base_read,
-                    capability_dispatch_cut=capability_dispatch_cut,
+                    canonical_observation=canonical_observation,
+                    capability_observation=capability_observation,
                     call_target=prepared_call.epoch_call_target,
-                    basis_canonical_read=(
-                        expected_source_read if _noninstallable_preparation else None
-                    ),
                     installable=not _noninstallable_preparation,
                 ),
                 _continuity_owner=self._continuity,
@@ -5222,6 +5221,41 @@ class ProviderDispatchCoordinator:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.DEADLINE_EXPIRED
             ) from exc
+
+    async def _owner_dispatch_observations(
+        self,
+        *,
+        handle: PreparedProviderInputHandle,
+        expected_read: FrozenCanonicalProviderDispatchRead,
+        capability_dispatch_cut: FrozenCapabilityDispatchCut,
+        borrow: ProcessLocalToolSurfaceBorrow,
+        deadline: float,
+    ) -> tuple[
+        OwnerIssuedCanonicalDispatchObservation,
+        OwnerIssuedCapabilityDispatchObservation,
+    ]:
+        """Fresh reader/tool owner observations at the final authority boundary."""
+
+        canonical = await self._io.run(
+            self._input_reader.read_owner_issued_dispatch_observation,
+            handle.cut,
+            deadline_monotonic=deadline,
+        )
+        if canonical.canonical_read != expected_read:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+            )
+        try:
+            capability = self._tools.issue_capability_dispatch_observation(
+                capability_dispatch_cut=capability_dispatch_cut,
+                prepared_surface=borrow.prepared,
+                surface_borrow=borrow,
+            )
+        except RuntimeError as exc:
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
+            ) from exc
+        return canonical, capability
 
     async def read_compaction_headroom_preflight(
         self, cut: PreparedProviderInputCut, *, deadline: float

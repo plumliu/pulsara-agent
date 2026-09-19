@@ -726,6 +726,11 @@ class _RevocableStructuredToolPort(StructuredToolPort):
         borrow._validate = validate
         return borrow
 
+    def validate_tool_surface_borrow(self, borrow, prepared):
+        if self.revoked:
+            raise RuntimeError("injected tool surface revocation")
+        return super().validate_tool_surface_borrow(borrow, prepared)
+
 
 class _RecordingBorrowToolPort(StructuredToolPort):
     def __init__(self, delegate: object, *, tool_names: tuple[str, ...] = ()) -> None:
@@ -1384,6 +1389,14 @@ class _FailingPostConsumptionReader:
             cut, deadline_monotonic=deadline_monotonic
         )
 
+    def read_owner_issued_dispatch_observation(self, cut, *, deadline_monotonic):
+        self.calls += 1
+        if self.calls == 3:
+            raise RuntimeError("injected post-consumption canonical mismatch")
+        return self._delegate.read_owner_issued_dispatch_observation(
+            cut, deadline_monotonic=deadline_monotonic
+        )
+
     def hydrate_selected_provider_replays(self, **kwargs):
         return self._delegate.hydrate_selected_provider_replays(**kwargs)
 
@@ -1417,6 +1430,12 @@ class _RecordingReplayHydrationReader:
     def read_frozen_dispatch(self, cut, *, deadline_monotonic):
         self.dispatch_deadlines.append(deadline_monotonic)
         return self._delegate.read_frozen_dispatch(
+            cut, deadline_monotonic=deadline_monotonic
+        )
+
+    def read_owner_issued_dispatch_observation(self, cut, *, deadline_monotonic):
+        self.dispatch_deadlines.append(deadline_monotonic)
+        return self._delegate.read_owner_issued_dispatch_observation(
             cut, deadline_monotonic=deadline_monotonic
         )
 
@@ -6204,13 +6223,14 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     # before its writer, so it does not first become an active auto-trigger.
     assert trigger_candidates == []
     # One pre-compaction prospective attempt discovers the hard pressure.  The
-    # compaction retry loop then freezes exactly one successor family; removing
-    # another recent item adds only one authority-free candidate compilation.
-    assert prospective_family_calls == 2
-    assert prospective_candidate_calls == (3 if retry_recent else 2)
-    assert pending_root_freezes == 2
-    assert memory_projection.preference_calls == 3
-    assert memory_projection.recall_calls == 2
+    # compaction retry loop freezes one dry family; after FULL it discards that
+    # authority and freezes/measures a fresh adopted successor family.
+    # Removing another recent item adds one authority-free dry compilation.
+    assert prospective_family_calls == 3
+    assert prospective_candidate_calls == (4 if retry_recent else 3)
+    assert pending_root_freezes == 3
+    assert memory_projection.preference_calls == 4
+    assert memory_projection.recall_calls == 3
     # The predecessor remains executable by itself; the exact predecessor plus
     # unpublished next request is the candidate that crosses the hard budget.
     assert source_wire_quotes[0][0] <= source_wire_quotes[0][1]
@@ -9288,13 +9308,15 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
             ].wire_input_plan.provider_replay_hydration_fingerprint
             is not None
         )
-    assert len(reader.dispatch_deadlines) == (1 if fail_hydration else 2)
+    assert len(reader.dispatch_deadlines) == (1 if fail_hydration else 3)
     assert len(reader.hydration_deadlines) == 1
     assert reader.dispatch_deadlines[0] == reader.hydration_deadlines[0]
     if not fail_hydration:
         # Post-writer activation performs one exact canonical reread under its
-        # fresh safe-point deadline; it does not rehydrate the selected replay.
+        # fresh safe-point deadline, then Reader itself issues the authority
+        # carrier from a second fresh read; neither rehydrates selected replay.
         assert reader.dispatch_deadlines[1] >= reader.dispatch_deadlines[0]
+        assert reader.dispatch_deadlines[2] == reader.dispatch_deadlines[1]
 
 
 def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(

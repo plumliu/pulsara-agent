@@ -41,6 +41,7 @@ from pulsara_agent.conversation_kernel.tool_surface import (
 )
 from pulsara_agent.capability.contracts import (
     FrozenMcpCapabilityProjectionInput,
+    FrozenCapabilityDispatchCut,
     FrozenToolCapabilityExposurePlan,
 )
 from pulsara_agent.model_input.contracts import (
@@ -634,6 +635,21 @@ class ToolSurfacePlanningPort(Protocol):
         self,
         borrow: ProcessLocalToolSurfaceBorrow,
         prepared: PreparedKernelToolSurface,
+    ) -> None: ...
+
+    def issue_capability_dispatch_observation(
+        self,
+        *,
+        capability_dispatch_cut: FrozenCapabilityDispatchCut,
+        prepared_surface: PreparedKernelToolSurface,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+    ) -> object: ...
+
+    def assert_no_tool_surface_borrows(
+        self,
+        *,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
     ) -> None: ...
 
     def install_provider_input_tool_result_deliveries(
