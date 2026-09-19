@@ -403,6 +403,16 @@ export interface Message {
   status?: SessionStatus;
   traces?: ToolTrace[];
   subagentRuns?: SubagentRun[];
+  visualizations?: VisualizationOccurrence[];
+}
+
+export interface VisualizationOccurrence {
+  ordinal: number;
+  state: 'READY' | 'FAILED';
+  visualizationRef?: string;
+  contentSize?: number;
+  failureCode?: string;
+  failureDetail?: string;
 }
 
 export interface AgentTask {

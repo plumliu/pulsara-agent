@@ -80,6 +80,7 @@ from pulsara_agent.primitives.tool_observation import (
     freeze_tool_observation_timing_fact,
 )
 from pulsara_agent.tools.builtins.filesystem import ViewImageSource
+from pulsara_agent.conversation_kernel.visualization import VisualizationSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,7 +290,7 @@ class ImageToolResourceQuotePort(Protocol):
         self,
         *,
         tool_call_id: str,
-        source: ViewImageSource,
+        source: ViewImageSource | VisualizationSource,
         content: FrozenPromptContent,
     ) -> FrozenImageToolResourceIncrement: ...
 
@@ -593,6 +594,13 @@ def build_accepted_canonical_tool_result_settlement(
             delivery=classify_tool_result_delivery(
                 tool_name=tool_name,
                 result_state=result_state,
+                has_image_attachment=(
+                    canonical_content is not None
+                    and any(
+                        isinstance(part, LLMImagePart)
+                        for part in canonical_content.parts
+                    )
+                ),
             ),
         ),
         canonical_content=canonical_content,

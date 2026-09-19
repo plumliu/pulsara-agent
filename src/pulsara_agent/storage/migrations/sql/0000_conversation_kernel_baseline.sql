@@ -401,6 +401,8 @@ CREATE TABLE pulsara_v3.transcript_entries (
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
     UNIQUE (session_id, id, entry_kind),
+    UNIQUE (session_id, id, turn_id),
+    UNIQUE (session_id, id, imported_history_group_id),
     UNIQUE (session_id, entry_sequence),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
@@ -1021,6 +1023,67 @@ CREATE UNIQUE INDEX uq_pulsara_v3_image_ref_snapshot_ordinal
     ) WHERE context_snapshot_id IS NOT NULL;
 CREATE INDEX ix_pulsara_v3_image_ref_blob
     ON pulsara_v3.canonical_image_refs (blob_id, workspace_id);
+
+-- One immutable user-visible HTML/failed-placeholder result owned by an
+-- assistant message.  This is not a subscription log or execution receipt.
+CREATE TABLE pulsara_v3.assistant_visualizations (
+    session_id text NOT NULL,
+    workspace_id text NOT NULL,
+    assistant_entry_id text NOT NULL,
+    assistant_entry_kind text NOT NULL DEFAULT 'ASSISTANT_MESSAGE'
+        CHECK (assistant_entry_kind = 'ASSISTANT_MESSAGE'),
+    ordinal integer NOT NULL CHECK (ordinal >= 0),
+    turn_id text,
+    imported_history_group_id text,
+    source_result_entry_id text,
+    source_result_entry_kind text NOT NULL DEFAULT 'TOOL_RESULT'
+        CHECK (source_result_entry_kind = 'TOOL_RESULT'),
+    state text NOT NULL CHECK (state IN ('READY', 'FAILED')),
+    blob_id text,
+    failure_code text,
+    failure_detail text,
+    PRIMARY KEY (session_id, assistant_entry_id, ordinal),
+    FOREIGN KEY (session_id, workspace_id)
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, assistant_entry_id, assistant_entry_kind)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind)
+        ON DELETE CASCADE,
+    FOREIGN KEY (session_id, assistant_entry_id, turn_id)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id, turn_id)
+        ON DELETE CASCADE,
+    FOREIGN KEY (session_id, assistant_entry_id, imported_history_group_id)
+        REFERENCES pulsara_v3.transcript_entries (
+            session_id, id, imported_history_group_id
+        ) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, source_result_entry_id, source_result_entry_kind)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, source_result_entry_id, turn_id)
+        REFERENCES pulsara_v3.transcript_entries (session_id, id, turn_id)
+        ON DELETE RESTRICT,
+    FOREIGN KEY (session_id, source_result_entry_id, imported_history_group_id)
+        REFERENCES pulsara_v3.transcript_entries (
+            session_id, id, imported_history_group_id
+        ) ON DELETE RESTRICT,
+    FOREIGN KEY (blob_id, workspace_id)
+        REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
+    CHECK (
+        (turn_id IS NOT NULL AND imported_history_group_id IS NULL
+            AND source_result_entry_id IS NOT NULL)
+        OR
+        (turn_id IS NULL AND imported_history_group_id IS NOT NULL)
+    ),
+    CHECK (
+        (state = 'READY' AND blob_id IS NOT NULL
+            AND failure_code IS NULL AND failure_detail IS NULL)
+        OR
+        (state = 'FAILED' AND blob_id IS NULL
+            AND failure_code IS NOT NULL AND failure_detail IS NOT NULL)
+    )
+);
+CREATE INDEX ix_pulsara_v3_assistant_visualization_blob
+    ON pulsara_v3.assistant_visualizations (blob_id, workspace_id)
+    WHERE blob_id IS NOT NULL;
 
 CREATE TABLE pulsara_v3.interaction_decisions (
     id text PRIMARY KEY,

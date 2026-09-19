@@ -25,6 +25,7 @@ import {
   Menu,
   LoaderCircle,
   MessageSquarePlus,
+  MoreHorizontal,
   PanelRight,
   Play,
   Pencil,
@@ -67,7 +68,7 @@ import type {
   CanonicalPromptImagePart,
   EditablePromptContent,
 } from '../lib/runtime-adapter';
-import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
+import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, VisualizationOccurrence, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
 import { PromptComposer } from './prompt-composer';
@@ -78,6 +79,12 @@ import { builtinToolSummary } from '../lib/builtin-tool-summary';
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { promptContentTextProjection } from '../lib/prompt-content';
+import {
+  usableVisualizationRootRect,
+  visualizationFrameMeasurementScript,
+  visualizationLayoutMessageType,
+  type VisualizationRootRect,
+} from '../lib/visualization-frame';
 
 interface WorkbenchViewProps {
   focusMemoryEntry?: { sessionId: string; entryId: string };
@@ -125,6 +132,8 @@ interface WorkbenchViewProps {
   ) => Promise<boolean>;
   onStop: () => void;
   onCompact: () => Promise<void>;
+  onReopenRuntime: () => void;
+  runtimeReopenBusy: boolean;
   onReadInteraction: (
     interaction: RuntimeInteractionSummary,
   ) => Promise<RuntimeInteractionContent>;
@@ -135,6 +144,7 @@ interface WorkbenchViewProps {
   artifactOwnerKey: string;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
+  onReadVisualization?: (entryId: string, ordinal: number, digest: string, size: number) => Promise<string>;
   promptDraftStore: PromptDraftStore;
   onNotify: MarkdownNotify;
   onPermissionChange: (permission: PermissionMode) => void;
@@ -943,6 +953,96 @@ const unavailablePromptImage = async (): Promise<Uint8Array> => {
   throw new Error('这张图片当前无法读取。');
 };
 
+const unavailableVisualization = async (): Promise<string> => {
+  throw new Error('Visualization content reader is unavailable');
+};
+
+const visualizationCsp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; worker-src 'none'; frame-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; navigate-to 'none'";
+
+function VisualizationPanel({ entryId, visualization, onRead }: {
+  entryId: string;
+  visualization: VisualizationOccurrence;
+  onRead: NonNullable<WorkbenchViewProps['onReadVisualization']>;
+}) {
+  const [state, setState] = useState<{ html?: string; error?: string }>({});
+  const [probeWidth, setProbeWidth] = useState<number | null>(null);
+  const [rootRect, setRootRect] = useState<VisualizationRootRect | null>(null);
+  const probeWidthRef = useRef<number | null>(null);
+  const widthProbeRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLIFrameElement>(null);
+  const ordinal = visualization.ordinal;
+  const digest = visualization.visualizationRef;
+  const size = visualization.contentSize;
+  useEffect(() => {
+    if (visualization.state !== 'READY' || !digest || !size) return;
+    let active = true;
+    void onRead(entryId, ordinal, digest, size).then(
+      (html) => { if (active) { setRootRect(null); setState({ html }); } },
+      () => { if (active) setState({ error: '已保存的可视化暂时无法读取。' }); },
+    );
+    return () => { active = false; };
+  }, [entryId, ordinal, digest, size, onRead, visualization.state]);
+  useEffect(() => {
+    const probe = widthProbeRef.current;
+    if (!probe) return;
+    const measure = () => {
+      const width = Math.max(1, probe.clientWidth - 2);
+      if (probeWidthRef.current === width) return;
+      probeWidthRef.current = width;
+      setProbeWidth(width);
+      setRootRect(null);
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(probe);
+    measure();
+    return () => observer.disconnect();
+  }, [state.html]);
+  useEffect(() => {
+    const receive = (event: MessageEvent) => {
+      const frame = frameRef.current;
+      if (!frame || event.source !== frame.contentWindow) return;
+      const message = event.data;
+      if (!message || typeof message !== 'object' || message.type !== visualizationLayoutMessageType) return;
+      if (message.mode === 'page') {
+        setRootRect(null);
+      } else if (message.mode === 'root') {
+        setRootRect(usableVisualizationRootRect(message.rect, frame.clientWidth, frame.clientHeight));
+      }
+    };
+    window.addEventListener('message', receive);
+    return () => window.removeEventListener('message', receive);
+  }, []);
+  if (visualization.state === 'FAILED') {
+    return <div className="assistant-visualization assistant-visualization--failed" role="status">
+      {visualization.failureDetail ?? '可视化未能生成。'}
+    </div>;
+  }
+  if (!digest || !size) {
+    return <div className="assistant-visualization assistant-visualization--failed" role="status">可视化引用不完整。</div>;
+  }
+  if (state.error) {
+    return <div className="assistant-visualization assistant-visualization--failed" role="status">{state.error}</div>;
+  }
+  if (state.html === undefined) {
+    return <div className="assistant-visualization assistant-visualization--loading" role="status">正在加载可视化…</div>;
+  }
+  const documentBody = state.html.replace(/^\s*<!doctype[^>]*>/i, '');
+  const source = `<!doctype html><meta http-equiv="Content-Security-Policy" content="${visualizationCsp}">${documentBody}${visualizationFrameMeasurementScript}`;
+  return <div className="assistant-visualization" data-visualization-ordinal={ordinal}
+    data-visualization-layout={rootRect ? 'root' : 'page'}
+    style={rootRect ? { width: Math.ceil(rootRect.width) + 2 } : undefined}>
+    <div className="assistant-visualization__width-probe" ref={widthProbeRef} aria-hidden="true" />
+    <div className="assistant-visualization__viewport" style={rootRect ? { height: Math.ceil(rootRect.height) } : undefined}>
+      <iframe ref={frameRef} title={`可视化 ${ordinal + 1}`} sandbox="allow-scripts"
+        referrerPolicy="no-referrer" srcDoc={source}
+        style={{
+          width: probeWidth === null ? '100%' : probeWidth,
+          transform: rootRect ? `translate(${-rootRect.x}px, ${-rootRect.y}px)` : undefined,
+        }} />
+    </div>
+  </div>;
+}
+
 function UserMessage({
   message,
   label = '你',
@@ -1057,6 +1157,7 @@ function AssistantMessage({
   artifactOwnerKey,
   onReadToolArtifact,
   onReadPromptImage,
+  onReadVisualization,
   assistantLabel,
 }: {
   message: Message;
@@ -1074,6 +1175,7 @@ function AssistantMessage({
   artifactOwnerKey: string;
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
+  onReadVisualization: NonNullable<WorkbenchViewProps['onReadVisualization']>;
   assistantLabel?: string;
 }) {
   const [forking, setForking] = useState(false);
@@ -1144,6 +1246,14 @@ function AssistantMessage({
       {message.subagentRuns?.length ? (
         <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
       ) : null}
+      {message.visualizations?.map((visualization) => (
+        <VisualizationPanel
+          key={`${artifactOwnerKey}:${message.id}:${visualization.ordinal}`}
+          entryId={message.id}
+          visualization={visualization}
+          onRead={onReadVisualization}
+        />
+      ))}
     </article>
   );
 }
@@ -1179,7 +1289,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const process = messages.flatMap((message) => {
     if (message !== answer) return [message];
     return message.reasoning?.length || message.traces?.length || message.subagentRuns?.length
-      ? [{ ...message, id: `${message.id}:process`, body: '', forkEligible: false }] : [];
+      ? [{ ...message, id: `${message.id}:process`, body: '', forkEligible: false, visualizations: undefined }] : [];
   });
   const hasProcess = process.some((message) => message.role === 'assistant');
   if (!hasProcess) return renderMessage(answer!, true);
@@ -1193,8 +1303,8 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     </button>
     {process.map((message) => <div key={message.id}
       className="conversation-run__step"
-      aria-hidden={message.role === 'assistant' && !disclosure.expanded}
-      inert={message.role === 'assistant' && !disclosure.expanded}>
+      aria-hidden={message.role === 'assistant' && !disclosure.expanded && !message.visualizations?.length}
+      inert={message.role === 'assistant' && !disclosure.expanded && !message.visualizations?.length}>
       <div className="conversation-run__step-content">{renderMessage(message, false)}</div>
     </div>)}
     {answer && renderMessage({ ...answer, reasoning: undefined, traces: undefined, subagentRuns: undefined }, false)}
@@ -1234,6 +1344,7 @@ export function ConversationMessages({
   onNotify,
   onFork = async () => undefined,
   onReadPromptImage = unavailablePromptImage,
+  onReadVisualization = unavailableVisualization,
   userLabel = '你',
   assistantLabel = 'Pulsara',
   taskFinalAnswerId,
@@ -1251,6 +1362,7 @@ export function ConversationMessages({
   onNotify: MarkdownNotify;
   onFork?: (entryId: string) => Promise<void>;
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
+  onReadVisualization?: WorkbenchViewProps['onReadVisualization'];
   userLabel?: string;
   assistantLabel?: string;
   taskFinalAnswerId?: string;
@@ -1276,6 +1388,7 @@ export function ConversationMessages({
             focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs}
             onNotify={onNotify} onFork={onFork} artifactOwnerKey={artifactOwnerKey}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
+            onReadVisualization={onReadVisualization}
             assistantLabel={assistantLabel} />}
     </div>
   );
@@ -1563,11 +1676,14 @@ export function WorkbenchView({
   onSend,
   onStop,
   onCompact,
+  onReopenRuntime,
+  runtimeReopenBusy,
   onReadInteraction,
   onResolveInteraction,
   artifactOwnerKey,
   onReadToolArtifact,
   onReadPromptImage,
+  onReadVisualization = unavailableVisualization,
   promptDraftStore: draftStore,
   onNotify,
   onPermissionChange,
@@ -1586,6 +1702,7 @@ export function WorkbenchView({
   }
   const welcomeDeparture = useRef<{ sessionId: string; top: number } | null>(null);
   const [compacting, setCompacting] = useState(false);
+  const [sessionActionsOpen, setSessionActionsOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
@@ -1598,6 +1715,8 @@ export function WorkbenchView({
   const followLatestRef = useRef(true);
   const locatingTaskRef = useRef(false);
   const workbenchRef = useRef<HTMLElement>(null);
+  const sessionActionsRef = useRef<HTMLDivElement>(null);
+  const sessionActionsTriggerRef = useRef<HTMLButtonElement>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const composerEditorRef = useRef<HTMLDivElement>(null);
@@ -1757,6 +1876,28 @@ export function WorkbenchView({
     || modelOpen || reasoningOpen || skillOpen || permissionOpen;
   const hasCompactionContext = messages.length > 0 || isRunning
     || initialContextBase?.base_kind === 'SNAPSHOT' || Boolean(contextCompaction);
+  useEffect(() => {
+    setSessionActionsOpen(false);
+  }, [session.id]);
+  useEffect(() => {
+    if (!sessionActionsOpen) return;
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !sessionActionsRef.current?.contains(event.target)) {
+        setSessionActionsOpen(false);
+      }
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setSessionActionsOpen(false);
+      sessionActionsTriggerRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', outside);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('pointerdown', outside);
+      document.removeEventListener('keydown', escape);
+    };
+  }, [sessionActionsOpen]);
   useLayoutEffect(() => {
     const departure = welcomeDeparture.current;
     if (welcome || !departure) return;
@@ -2051,6 +2192,25 @@ export function WorkbenchView({
         <div className="topbar-actions">
           {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}
           {isObserver && <span className="observer-badge"><Eye size={11} /> 旁观中</span>}
+          <div className="popover-anchor session-actions" ref={sessionActionsRef}>
+            <button
+              ref={sessionActionsTriggerRef}
+              className={`icon-button${sessionActionsOpen ? ' is-active' : ''}`}
+              type="button"
+              aria-label="更多会话操作"
+              aria-expanded={sessionActionsOpen}
+              disabled={!session.id || runtimeReopenBusy}
+              onClick={() => setSessionActionsOpen((open) => !open)}
+            >
+              {runtimeReopenBusy ? <LoaderCircle size={15} className="session-actions__busy" /> : <MoreHorizontal size={16} />}
+            </button>
+            {sessionActionsOpen && <div className="menu-popover session-actions-menu" aria-label="会话操作">
+              <button type="button" onClick={() => { setSessionActionsOpen(false); onReopenRuntime(); }}>
+                <RotateCcw size={15} />
+                <span><strong>重新载入当前会话运行时</strong><small>仅作用于当前会话；空闲时从已保存记录重建</small></span>
+              </button>
+            </div>}
+          </div>
           {canControl && (
             <button
               className={`ghost-button${compacting ? ' is-compacting' : ''}`}
@@ -2100,6 +2260,7 @@ export function WorkbenchView({
           {initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
           <ConversationMessages messages={messages} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
+            onReadVisualization={onReadVisualization}
             onNotify={onNotify} onFork={onFork} contextCompactionIndex={contextCompactionIndex}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
             focusTaskHighlighted={focusTaskHighlighted} focusMemoryEntry={focusMemoryEntry} />

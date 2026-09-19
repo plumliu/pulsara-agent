@@ -385,6 +385,10 @@ class FakeConnection implements RuntimeConnection {
     throw new Error('No canonical task activity fixture');
   }
 
+  async readVisualizationHtml(): Promise<string> {
+    throw new Error('No visualization fixture');
+  }
+
   async readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array> {
     void image;
     throw new Error('No prompt image fixture');
@@ -569,6 +573,10 @@ class FakeAdapter implements RuntimeAdapter {
       ? { ...session, modelCallBinding: binding }
       : session);
     return { modelCallBinding: binding, reasoningPreferenceReset: false };
+  }
+
+  async reopenRuntime(_sessionId: string) {
+    return { status: 'reopened' as const };
   }
 
   listSessions = vi.fn(async () => this.sessions.map((session) => ({ ...session })));

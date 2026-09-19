@@ -682,6 +682,10 @@ class LocalBrowserBridge:
             request.image_ref_ordinal = _uint(
                 body["image_ref_ordinal"], "image_ref_ordinal"
             )
+        if "visualization_ordinal" in body:
+            request.visualization_ordinal = _uint(
+                body["visualization_ordinal"], "visualization_ordinal"
+            )
         if isinstance(entry_id, str) and entry_id:
             request.entry_id = entry_id
         else:

@@ -1,0 +1,87 @@
+- main [ref=e3]:
+  - navigation "主要功能" [ref=e4]:
+    - button "返回 Pulsara 总览" [ref=e5] [cursor=pointer]
+    - generic [ref=e9]:
+      - button "总览" [ref=e10] [cursor=pointer]
+      - button "会话" [ref=e14] [cursor=pointer]
+      - button "能力" [ref=e17] [cursor=pointer]
+      - button "记忆" [ref=e21] [cursor=pointer]
+    - generic [ref=e30]:
+      - button "命令面板" [ref=e31] [cursor=pointer]: 命令面板 ⌘K
+      - button "设置" [ref=e34] [cursor=pointer]
+      - generic "本地用户" [ref=e38]: PL
+  - generic [ref=e127]:
+    - dialog [ref=e238]:
+      - heading "重置 Pulsara 数据？" [level=2] [ref=e239]
+      - paragraph [ref=e240]: 将永久删除目标数据库中的 Pulsara 会话、图片、任务和记忆，并重新初始化。此操作无法撤销。
+      - generic [ref=e241]:
+        - term [ref=e242]: Runtime DSN
+        - definition [ref=e243]: postgresql://pulsara:pulsara@localhost:5432/pulsara
+        - term [ref=e244]: Admin DSN
+        - definition [ref=e245]: postgresql://plumliu@localhost:5432/pulsara
+      - paragraph [ref=e246]: 模型配置、API key 和工作目录中的文件会保留。正在运行的数据服务将先关闭；若内核已经启动，完成后需要重启 Pulsara。
+      - generic [ref=e247]:
+        - button "取消" [active] [ref=e248] [cursor=pointer]
+        - button "确认清空并初始化" [ref=e249] [cursor=pointer]
+    - generic [ref=e129]:
+      - text: 本机设置
+      - heading "设置" [level=1] [ref=e130]
+      - paragraph [ref=e131]: 配置模型、记忆检索与本机 PostgreSQL。访问密钥保存在权限受限的本机设置文件中。
+    - generic [ref=e132]:
+      - complementary [ref=e133]:
+        - generic [ref=e134]:
+          - generic [ref=e135]: PL
+          - generic [ref=e136]:
+            - strong [ref=e137]: 本机用户
+            - generic [ref=e138]: 无需账号登录
+        - button "通用" [ref=e139] [cursor=pointer]
+        - button "模型" [ref=e144] [cursor=pointer]
+        - button "本地服务" [ref=e151] [cursor=pointer]
+        - generic [ref=e157]:
+          - strong [ref=e158]: Pulsara
+          - generic [ref=e159]: 0.1.0
+          - generic [ref=e160]: 运行在这台 Mac 上
+      - generic [ref=e161]:
+        - generic [ref=e162]:
+          - generic [ref=e168]:
+            - heading "PostgreSQL" [level=2] [ref=e169]
+            - paragraph [ref=e170]: 会话数据平面使用本机 PostgreSQL；保存不会自动连接或迁移。
+          - generic [ref=e171]:
+            - generic [ref=e172]: 现有数据与当前版本不兼容，需要重置
+            - generic [ref=e174]: 浏览器设置壳：连接正常
+          - generic [ref=e175]:
+            - generic [ref=e176]:
+              - generic [ref=e177]: Runtime DSN
+              - textbox "Runtime DSN" [ref=e178]:
+                - /placeholder: postgresql://pulsara:…@localhost:5432/pulsara
+                - text: postgresql://pulsara:pulsara@localhost:5432/pulsara
+            - generic [ref=e179]:
+              - generic [ref=e180]: Admin DSN（可选）
+              - textbox "Admin DSN（可选）" [ref=e181]:
+                - /placeholder: 只用于显式初始化、升级或重置
+                - text: postgresql://plumliu@localhost:5432/pulsara
+            - paragraph [ref=e182]: 初始化/升级将使用上方已保存的 Admin DSN 管理同一数据库，并按 Runtime DSN 验证运行角色。请先核对目标数据库与角色。
+            - generic [ref=e183]:
+              - button "保存连接" [ref=e184] [cursor=pointer]
+              - button "检查连接" [ref=e187] [cursor=pointer]
+              - button "初始化 / 升级" [disabled] [ref=e193]
+              - button "重置数据…" [ref=e198] [cursor=pointer]
+        - generic [ref=e202]:
+          - generic [ref=e206]:
+            - heading "本地服务" [level=2] [ref=e207]
+            - paragraph [ref=e208]: Pulsara 的设置与任务都由这台设备上的进程管理。
+          - generic [ref=e209]:
+            - generic [ref=e213]:
+              - strong [ref=e214]: 页面连接
+              - generic [ref=e215]: 浏览器与本地设置服务
+            - status [ref=e217]: 连接正常
+          - generic [ref=e219]:
+            - generic [ref=e223]:
+              - strong [ref=e224]: 数据位置
+              - generic [ref=e225]: 配置与会话数据保存在本机
+            - generic [ref=e226]: 本地
+          - generic [ref=e228]:
+            - generic [ref=e233]:
+              - strong [ref=e234]: 登录方式
+              - generic [ref=e235]: 仅允许本机同源页面访问
+            - generic [ref=e236]: 无需账号

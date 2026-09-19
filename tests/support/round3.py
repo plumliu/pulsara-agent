@@ -982,6 +982,15 @@ class StructuredToolPort:
             for scope in ModelInputScopeKind
         }
 
+    def visualization_subscriptions(self, turn_id: str):
+        return ()
+
+    def consume_visualization_subscriptions(self, turn_id: str, expected) -> None:
+        assert expected == ()
+
+    def discard_visualization_subscriptions(self, turn_id: str) -> None:
+        pass
+
     def sealed_builtin_capability_snapshot(
         self, *, conversation_scope_kind, scope_subagent_task_id
     ):

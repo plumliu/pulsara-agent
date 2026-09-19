@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../lib/runtime-adapter';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { promptContentTextProjection } from '../lib/prompt-content';
+import { visualizationLayoutMessageType } from '../lib/visualization-frame';
 import { ConversationMessages, WorkbenchView } from './workbench-view';
 import { WELCOME_TYPEWRITER_PHRASES } from './welcome-typewriter';
 
@@ -23,9 +24,67 @@ let promptDraftStore: PromptDraftStore;
 beforeEach(() => {
   promptDraftStore = new PromptDraftStore();
 });
+
+describe('visualization occurrence layout', () => {
+  it('crops only a measured root from its own iframe and falls back to the page', async () => {
+    let notifyResize: ResizeObserverCallback | null = null;
+    let availableWidth = 962;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(private readonly callback: ResizeObserverCallback) { notifyResize = callback; }
+      observe() { this.callback([], this as unknown as ResizeObserver); }
+      disconnect() {}
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) {
+      return this instanceof HTMLIFrameElement ? availableWidth - 2 : availableWidth;
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this instanceof HTMLIFrameElement ? 560 : 0;
+    });
+    const html = '<!doctype html><html><body><main data-pulsara-visualization-root>Chart</main></body></html>';
+    const view = render(<ConversationMessages
+      messages={[{
+        id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
+        time: '13:04', body: '图表如下。', visualizations: [{
+          ordinal: 0, state: 'READY', visualizationRef: 'sha256:test', contentSize: html.length,
+        }],
+      }]}
+      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
+      onReadVisualization={vi.fn(async () => html)}
+    />);
+    const panel = await waitFor(() => {
+      const element = view.container.querySelector<HTMLElement>('.assistant-visualization[data-visualization-layout]');
+      expect(element?.querySelector('iframe')).toBeTruthy();
+      return element!;
+    });
+    const frame = panel.querySelector('iframe')!;
+    await waitFor(() => expect(frame.style.width).toBe('960px'));
+    const announce = (source: MessageEventSource, mode: string, rect?: object) => {
+      act(() => window.dispatchEvent(new MessageEvent('message', {
+        source, data: { type: visualizationLayoutMessageType, mode, rect },
+      })));
+    };
+    announce(window, 'root', { x: 100, y: 20, width: 420, height: 300 });
+    expect(panel.dataset.visualizationLayout).toBe('page');
+    announce(frame.contentWindow!, 'root', { x: 100, y: 20, width: 420, height: 300 });
+    expect(panel.dataset.visualizationLayout).toBe('root');
+    expect(panel.style.width).toBe('422px');
+    expect(frame.style.transform).toBe('translate(-100px, -20px)');
+    availableWidth = 602;
+    act(() => notifyResize?.([], {} as ResizeObserver));
+    expect(panel.dataset.visualizationLayout).toBe('page');
+    expect(frame.style.width).toBe('600px');
+    announce(frame.contentWindow!, 'root', { x: 40, y: 20, width: 420, height: 300 });
+    expect(panel.dataset.visualizationLayout).toBe('root');
+    announce(frame.contentWindow!, 'root', { x: 100, y: 20, width: 900, height: 300 });
+    expect(panel.dataset.visualizationLayout).toBe('page');
+    announce(frame.contentWindow!, 'page');
+    expect(panel.dataset.visualizationLayout).toBe('page');
+  });
+});
 afterEach(() => {
   cleanup();
   promptDraftStore.destroy();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -305,6 +364,8 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onSend: vi.fn(async () => true),
     onStop: vi.fn(),
     onCompact: vi.fn(async () => undefined),
+    onReopenRuntime: vi.fn(),
+    runtimeReopenBusy: false,
     onReadInteraction: vi.fn(),
     onResolveInteraction: vi.fn(),
     artifactOwnerKey: 'session-one:host-one:entry-result',
@@ -316,6 +377,38 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     ...overrides,
   };
 }
+
+describe('current-session runtime actions', () => {
+  it('keeps runtime reopen in the header menu, separate from compaction', () => {
+    const onReopenRuntime = vi.fn();
+    render(<WorkbenchView {...props({ onReopenRuntime })} />);
+    const trigger = screen.getByRole('button', { name: '更多会话操作' });
+    expect(screen.getByRole('button', { name: '压缩上下文' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '重新载入当前会话运行时' })).toBeNull();
+
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: /重新载入当前会话运行时/ }));
+    expect(onReopenRuntime).toHaveBeenCalledOnce();
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('closes the runtime menu on Escape or outside click and disables it while reopening', () => {
+    const view = render(<WorkbenchView {...props()} />);
+    const trigger = screen.getByRole('button', { name: '更多会话操作' }) as HTMLButtonElement;
+    fireEvent.click(trigger);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(trigger);
+
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(document.body);
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+
+    view.rerender(<WorkbenchView {...props({ runtimeReopenBusy: true })} />);
+    expect(trigger.disabled).toBe(true);
+  });
+});
 
 describe('empty session welcome composer', () => {
   it('disables compaction for an empty session even with an unsent draft, but allows existing context', () => {

@@ -7,6 +7,7 @@
   "relation_grants": {
     "agent_events": ["SELECT", "INSERT"],
     "assistant_message_blocks": ["SELECT", "INSERT"],
+    "assistant_visualizations": ["SELECT", "INSERT"],
     "provider_assistant_replay_fragments": ["SELECT", "INSERT"],
     "blobs": ["SELECT", "INSERT", "DELETE"],
     "canonical_image_refs": ["SELECT", "INSERT"],

@@ -36,6 +36,13 @@ from pulsara_agent.conversation_kernel.contracts import (
     TurnStatus,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
+from pulsara_agent.conversation_kernel.visualization import (
+    FrozenVisualizationOccurrence,
+    VisualizationOccurrenceState,
+    VISUALIZATION_CODEC,
+    VISUALIZATION_MEDIA_TYPE,
+)
 from pulsara_agent.conversation_kernel.prompt_storage import (
     canonical_prompt_owner_is_exact,
     canonical_snapshot_owner_is_exact,
@@ -2301,6 +2308,7 @@ class _ConversationOperations:
         entry_id: str,
         parent_content: CanonicalContent,
         blocks: Sequence[AssistantBlock],
+        visualizations: Sequence[FrozenVisualizationOccurrence] = (),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
         subagent_result: FrozenSubagentResultPublicFact | None = None,
         complete_turn: bool = False,
@@ -2315,6 +2323,8 @@ class _ConversationOperations:
         tool_request = any(isinstance(item, AssistantToolCallBlock) for item in blocks)
         if complete_turn and tool_request:
             raise ValueError("a tool-request message cannot complete its turn")
+        if tool_request and visualizations:
+            raise ValueError("a tool-request message cannot own visualizations")
         if subagent_result is not None and (
             not complete_turn
             or tool_request
@@ -2381,6 +2391,51 @@ class _ConversationOperations:
                     entry_id=entry_id,
                     ordinal=ordinal,
                     block=block,
+                )
+            for ordinal, item in enumerate(visualizations):
+                source = connection.execute(
+                    """SELECT r.result_state, b.tool_name
+                       FROM pulsara_v3.transcript_entries AS e
+                       JOIN pulsara_v3.tool_results AS r
+                         ON r.session_id = e.session_id AND r.result_entry_id = e.id
+                       JOIN pulsara_v3.assistant_message_blocks AS b
+                         ON b.session_id = r.session_id
+                        AND b.assistant_entry_id = r.tool_call_entry_id
+                        AND b.tool_call_id = r.tool_call_id
+                       WHERE e.session_id = %s AND e.id = %s
+                         AND e.turn_id = %s AND e.entry_kind = 'TOOL_RESULT'""",
+                    (guard.session_id, item.source_result_entry_id, cut.turn_id),
+                ).fetchone()
+                if (
+                    source is None
+                    or str(source["result_state"]) != "SUCCESS"
+                    or str(source["tool_name"]) != "visualization_render"
+                ):
+                    raise ConversationKernelConflict(
+                        "visualization subscription has no accepted source"
+                    )
+                blob_id = None
+                if item.state is VisualizationOccurrenceState.READY:
+                    assert item.html is not None
+                    blob_id = PostgresCanonicalBlobStore.publish_in_connection(
+                        connection,
+                        workspace_id=str(turn["workspace_id"]),
+                        content=item.html,
+                        media_type=VISUALIZATION_MEDIA_TYPE,
+                        codec=VISUALIZATION_CODEC,
+                    ).blob_id
+                connection.execute(
+                    """INSERT INTO pulsara_v3.assistant_visualizations (
+                           session_id, workspace_id, assistant_entry_id,
+                           ordinal, turn_id, source_result_entry_id,
+                           state, blob_id, failure_code, failure_detail
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        guard.session_id, str(turn["workspace_id"]), entry_id,
+                        ordinal, cut.turn_id, item.source_result_entry_id,
+                        item.state.value, blob_id, item.failure_code,
+                        item.failure_detail,
+                    ),
                 )
             if provider_replay is not None:
                 if provider_replay.workspace_id != str(turn["workspace_id"]):
@@ -2621,6 +2676,7 @@ class _ConversationOperations:
         entry_id: str,
         parent_content: CanonicalContent,
         blocks: Sequence[AssistantBlock],
+        visualizations: Sequence[FrozenVisualizationOccurrence] = (),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
         subagent_result: FrozenSubagentResultPublicFact | None = None,
         complete_turn: bool,
@@ -2780,6 +2836,52 @@ class _ConversationOperations:
                 raise ConversationKernelConflict(
                     "assistant entry blocks differ from the stable candidate"
                 )
+            visualization_rows = connection.execute(
+                """SELECT ordinal, turn_id, source_result_entry_id,
+                          state, blob_id, failure_code, failure_detail
+                   FROM pulsara_v3.assistant_visualizations
+                   WHERE session_id = %s AND assistant_entry_id = %s
+                   ORDER BY ordinal""",
+                (guard.session_id, entry_id),
+            ).fetchall()
+            if len(visualization_rows) != len(visualizations):
+                raise ConversationKernelConflict(
+                    "assistant visualization candidate count differs"
+                )
+            for ordinal, (item, visualization_row) in enumerate(
+                zip(visualizations, visualization_rows, strict=True)
+            ):
+                if (
+                    int(visualization_row["ordinal"]) != ordinal
+                    or str(visualization_row["turn_id"]) != cut.turn_id
+                    or str(visualization_row["source_result_entry_id"])
+                    != item.source_result_entry_id
+                    or str(visualization_row["state"]) != item.state.value
+                    or visualization_row["failure_code"] != item.failure_code
+                    or visualization_row["failure_detail"] != item.failure_detail
+                ):
+                    raise ConversationKernelConflict(
+                        "assistant visualization differs from stable candidate"
+                    )
+                if item.state is VisualizationOccurrenceState.READY:
+                    assert item.html is not None
+                    blob_id = visualization_row["blob_id"]
+                    if blob_id is None or PostgresCanonicalBlobStore.read_exact_in_connection(
+                        connection,
+                        blob_id=str(blob_id),
+                        expected_digest="sha256:" + sha256(item.html).hexdigest(),
+                        expected_size=len(item.html),
+                        expected_workspace_id=str(row["workspace_id"]),
+                        expected_media_type=VISUALIZATION_MEDIA_TYPE,
+                        expected_codec=VISUALIZATION_CODEC,
+                    ) != item.html:
+                        raise ConversationKernelConflict(
+                            "assistant visualization HTML differs"
+                        )
+                elif visualization_row["blob_id"] is not None:
+                    raise ConversationKernelConflict(
+                        "failed assistant visualization has a blob"
+                    )
             if (
                 str(row["conversation_scope_kind"])
                 == ConversationScopeKind.SUBAGENT_TASK.value

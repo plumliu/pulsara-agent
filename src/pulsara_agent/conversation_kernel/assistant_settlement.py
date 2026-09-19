@@ -40,6 +40,7 @@ from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     FrozenSubagentResultPublicFact,
 )
+from pulsara_agent.conversation_kernel.visualization import FrozenVisualizationOccurrence
 
 
 MAXIMUM_ASSISTANT_SETTLEMENT_WRITE_CONFIRM_ATTEMPTS = 4
@@ -62,6 +63,9 @@ class PreparedAssistantMessageSettlement:
     continuity_scope: ProviderInputContinuityScope
     continuity_epoch_nonce: str
     continuity_epoch_revision: int
+    visualizations: tuple[FrozenVisualizationOccurrence, ...] = field(
+        default=(), repr=False
+    )
     provider_replay: PreparedDurableProviderAssistantReplay | None = field(
         default=None, repr=False
     )
@@ -266,6 +270,7 @@ class AssistantMessageSettlementOwner:
                         entry_id=candidate.entry_id,
                         parent_content=candidate.parent_content,
                         blocks=candidate.blocks,
+                        visualizations=candidate.visualizations,
                         provider_replay=candidate.provider_replay,
                         subagent_result=candidate.subagent_result,
                         complete_turn=candidate.complete_turn,
@@ -287,6 +292,7 @@ class AssistantMessageSettlementOwner:
                             entry_id=candidate.entry_id,
                             parent_content=candidate.parent_content,
                             blocks=candidate.blocks,
+                            visualizations=candidate.visualizations,
                             provider_replay=candidate.provider_replay,
                             subagent_result=candidate.subagent_result,
                             complete_turn=candidate.complete_turn,

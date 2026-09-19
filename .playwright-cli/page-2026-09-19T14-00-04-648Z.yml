@@ -1,0 +1,159 @@
+- main [ref=e3]:
+  - navigation "主要功能" [ref=e4]:
+    - button "返回 Pulsara 总览" [ref=e5] [cursor=pointer]
+    - generic [ref=e9]:
+      - button "总览" [ref=e10] [cursor=pointer]
+      - button "会话" [ref=e14] [cursor=pointer]
+      - button "能力" [ref=e17] [cursor=pointer]
+      - button "记忆" [ref=e21] [cursor=pointer]
+    - generic [ref=e30]:
+      - button "命令面板" [ref=e31] [cursor=pointer]: 命令面板 ⌘K
+      - button "设置" [ref=e34] [cursor=pointer]
+      - generic "本地用户" [ref=e38]: PL
+  - complementary [ref=e251]:
+    - generic [ref=e252]:
+      - generic [ref=e254]:
+        - paragraph [ref=e255]: 本地智能工作台
+        - heading "Pulsara" [level=1] [ref=e256]
+      - generic "已连接本地服务" [ref=e257]
+    - button "搜索与命令 ⌘ K" [ref=e258] [cursor=pointer]:
+      - generic [ref=e262]: 搜索与命令
+      - generic [ref=e263]: ⌘ K
+    - button "新建会话 ⌘ N" [ref=e264] [cursor=pointer]:
+      - generic [ref=e266]: 新建会话
+      - generic [ref=e267]: ⌘ N
+    - button "安全重启 runtime" [ref=e268] [cursor=pointer]
+    - region "会话目录" [ref=e273]:
+      - generic [ref=e274]:
+        - region "从目录中打开" [ref=e275]:
+          - button [expanded] [ref=e276] [cursor=pointer]:
+            - strong [ref=e277]: 从目录中打开
+          - generic [ref=e280]: 还没有从目录中打开的会话
+        - region "快速开始" [ref=e282]:
+          - button [expanded] [ref=e283] [cursor=pointer]:
+            - strong [ref=e284]: 快速开始
+          - button "会话 4116a100 0 条记录 · 当前会话" [ref=e363] [cursor=pointer]:
+            - generic [ref=e365]:
+              - strong [ref=e366]: 会话 4116a100
+              - generic [ref=e367]: 0 条记录 · 当前会话
+    - generic [ref=e289]:
+      - generic [ref=e290]:
+        - generic [ref=e292]: 已连接本地服务
+        - code [ref=e293]: 本机
+      - generic [ref=e294]: 数据保存在这台设备上
+  - region "会话工作台" [ref=e296]:
+    - generic [ref=e297]:
+      - generic [ref=e298]:
+        - generic [ref=e299]: 已完成
+        - generic [ref=e300]:
+          - heading "会话 4116a100" [level=2] [ref=e368]
+          - paragraph [ref=e302]: 快速开始 · /Users/plumliu/.pulsara/workspaces/quick-20260919-215814-2a08dcfd
+      - generic [ref=e303]:
+        - button "压缩上下文" [ref=e369] [cursor=pointer]
+        - button "切换检查器" [ref=e304] [cursor=pointer]
+    - generic [ref=e308]:
+      - article [ref=e497]:
+        - strong [ref=e499]: 你
+        - generic [ref=e504]:
+          - generic [ref=e505]: 请在当前空工作区完成一次可视化链路验收：1）用 write_file 创建 dogfood-chart.html，写一份完全自包含的 HTML，深色背景，标题‘季度营收’，用内联 CSS 和内联 SVG 画 Q1/Q2/Q3 三根柱，数值 12/18/27，不要使用网络资源；2）调用 visualization_render，参数 path=dogfood-chart.html、review=true，查看即时截图；3）再用 read_file 获取版本并用 edit_file 把标题改成‘季度营收 · 已复核’，将 Q3 改为 30；4）不再调用 visualization_render，直接以不带工具调用的简短最终消息结束。请按顺序真实执行工具，不要只描述步骤。
+          - time [ref=e507]: 21:59
+      - generic [ref=e562]:
+        - strong [ref=e567]: Pulsara
+        - button "展开中间过程" [ref=e568] [cursor=pointer]:
+          - generic [ref=e569]: 处理过程
+        - text: The user wants a specific sequence. Let me do it.
+        - article [ref=e573]:
+          - generic [ref=e574]:
+            - generic [ref=e576]:
+              - paragraph [ref=e577]: <tool_call> <function=write_file> <parameter=path> dogfood-chart.html </parameter> <parameter=content>
+              - text: "<!DOCTYPE html> <html lang=\"zh-CN\"> <head> <meta charset=\"utf-8\"> <title>季度营收</title> <style> html, body { margin: 0; padding: 0; background: #0f1115; color: #e6e9ef; font-family: -apple-system, \"Helvetica Neue\", \"PingFang SC\", sans-serif; } .wrap { max-width: 720px; margin: 0 auto; padding: 40px 32px 48px; } h1 { margin: 0 0 6px; font-size: 28px; font-weight: 600; letter-spacing: 0.5px; } .sub { margin: 0 0 28px; font-size: 13px; color: #8b93a1; } svg { display: block; width: 100%; height: auto; } .bar { fill: #4f8cff; } .bar3 { fill: #37d0a0; } .grid { stroke: #262b36; stroke-width: 1; } .axis { fill: #8b93a1; font-size: 12px; } .val { fill: #e6e9ef; font-size: 14px; font-weight: 600; } .foot { margin-top: 18px; font-size: 12px; color: #6b7482; } </style> </head> <body> <div class=\"wrap\"> <h1>季度营收</h1> <p class=\"sub\">单位：百万元 · Q1–Q3</p>"
+              - code [ref=e579]: <svg viewBox="0 0 640 340" role="img" aria-label="Q1 12，Q2 18，Q3 27 的柱状图"> <!-- 网格线与刻度 --> <line class="grid" x1="70" y1="40" x2="610" y2="40"></line> <line class="grid" x1="70" y1="100" x2="610" y2="100"></line> <line class="grid" x1="70" y1="160" x2="610" y2="160"></line> <line class="grid" x1="70" y1="220" x2="610" y2="220"></line> <line class="grid" x1="70" y1="280" x2="610" y2="280"></line> <text class="axis" x="60" y="44" text-anchor="end">30</text> <text class="axis" x="60" y="104" text-anchor="end">24</text> <text class="axis" x="60" y="164" text-anchor="end">18</text> <text class="axis" x="60" y="224" text-anchor="end">12</text> <text class="axis" x="60" y="284" text-anchor="end">0</text> <!-- 柱体：基线 y=280，每单位 8px --> <rect class="bar" x="120" y="184" width="100" height="96" rx="6"></rect> <rect class="bar" x="270" y="136" width="100" height="144" rx="6"></rect> <rect class="bar3" x="420" y="64" width="100" height="216" rx="6"></rect> <!-- 数值标签 --> <text class="val" x="170" y="174" text-anchor="middle">12</text> <text class="val" x="320" y="126" text-anchor="middle">18</text> <text class="val" x="470" y="54" text-anchor="middle">27</text> <!-- 类别标签 --> <text class="axis" x="170" y="306" text-anchor="middle">Q1</text> <text class="axis" x="320" y="306" text-anchor="middle">Q2</text> <text class="axis" x="470" y="306" text-anchor="middle">Q3</text> </svg> <p class="foot">内联 CSS + 内联 SVG，无任何外部资源引用。</p>
+              - text: </div> </body> </html> </parameter> </function> </tool_call>
+            - generic [ref=e580]:
+              - button "复制回复" [ref=e581] [cursor=pointer]
+              - button "从此处分叉" [ref=e585] [cursor=pointer]
+              - time [ref=e591]: 21:59
+    - generic [ref=e314]:
+      - generic [ref=e374]:
+        - generic [ref=e375]:
+          - generic [ref=e379]:
+            - textbox "发送给 Pulsara" [ref=e509]:
+              - paragraph [ref=e510]
+            - generic [aria-hidden]: 让 Pulsara 处理复杂工作…
+          - button "发送" [disabled] [ref=e592]
+        - generic [ref=e404]:
+          - generic [ref=e405]:
+            - button "testQwenFlash · qwen3.8-flash-next-nvfp4 · Chat" [expanded] [active] [ref=e483] [cursor=pointer]
+            - generic [ref=e596]:
+              - generic [ref=e597]: 此会话的模型
+              - button "bobaigpt · gpt-5.5 Responses · 密钥已配置" [ref=e598] [cursor=pointer]:
+                - generic [ref=e599]:
+                  - strong [ref=e600]: bobaigpt · gpt-5.5
+                  - generic [ref=e601]: Responses · 密钥已配置
+              - button "Alibaba (China) · Qwen3.8 Flash Chat Completions · 密钥已配置" [ref=e602] [cursor=pointer]:
+                - generic [ref=e603]:
+                  - strong [ref=e604]: Alibaba (China) · Qwen3.8 Flash
+                  - generic [ref=e605]: Chat Completions · 密钥已配置
+              - button "OpenRouter · Muse Spark 1.3 Contributor Chat Completions · 密钥已配置" [ref=e606] [cursor=pointer]:
+                - generic [ref=e607]:
+                  - strong [ref=e608]: OpenRouter · Muse Spark 1.3 Contributor
+                  - generic [ref=e609]: Chat Completions · 密钥已配置
+              - button "OpenRouter · GPT-5.6 Luna Chat Completions · 密钥已配置" [ref=e610] [cursor=pointer]:
+                - generic [ref=e611]:
+                  - strong [ref=e612]: OpenRouter · GPT-5.6 Luna
+                  - generic [ref=e613]: Chat Completions · 密钥已配置
+              - button "test-qwen · Qwen3.8-27B Chat Completions · 密钥已配置" [ref=e614] [cursor=pointer]:
+                - generic [ref=e615]:
+                  - strong [ref=e616]: test-qwen · Qwen3.8-27B
+                  - generic [ref=e617]: Chat Completions · 密钥已配置
+              - button "DeepSeek · DeepSeek V4.1 Flash Chat Completions · 密钥已配置" [ref=e618] [cursor=pointer]:
+                - generic [ref=e619]:
+                  - strong [ref=e620]: DeepSeek · DeepSeek V4.1 Flash
+                  - generic [ref=e621]: Chat Completions · 密钥已配置
+              - button "Zhipu AI · GLM-5.3-Flash Chat Completions · 密钥已配置" [ref=e622] [cursor=pointer]:
+                - generic [ref=e623]:
+                  - strong [ref=e624]: Zhipu AI · GLM-5.3-Flash
+                  - generic [ref=e625]: Chat Completions · 密钥已配置
+              - button "DeepSeek · DeepSeek V4.1 Flash Responses · 密钥已配置" [ref=e626] [cursor=pointer]:
+                - generic [ref=e627]:
+                  - strong [ref=e628]: DeepSeek · DeepSeek V4.1 Flash
+                  - generic [ref=e629]: Responses · 密钥已配置
+              - button "testQwenFlash · qwen3.8-flash-next-nvfp4 Chat Completions · 密钥已配置" [ref=e630] [cursor=pointer]:
+                - generic [ref=e631]:
+                  - strong [ref=e632]: testQwenFlash · qwen3.8-flash-next-nvfp4
+                  - generic [ref=e633]: Chat Completions · 密钥已配置
+              - button "管理模型配置" [ref=e636] [cursor=pointer]
+          - generic [ref=e413]:
+            - button "推理由提供方决定" [disabled] [ref=e484]
+            - button "选择技能" [ref=e429] [cursor=pointer]: 技能
+            - button "先规划" [ref=e434] [cursor=pointer]
+            - button "完全访问" [ref=e439] [cursor=pointer]
+      - paragraph [ref=e515]: Enter 发送 · Shift Enter 换行 · 规划与权限只作用于本轮
+  - complementary "当前会话详情":
+    - generic:
+      - generic:
+        - strong: 当前会话
+        - generic: 会话 4116a100
+      - button "关闭检查器"
+      - navigation "详情视图":
+        - button "项目能力": 能力
+        - button "任务"
+        - button "后台终端"
+    - generic:
+      - generic:
+        - generic:
+          - generic: 工作目录能力
+          - paragraph: 这里的修改会应用到同一目录的所有会话。
+          - generic:
+            - tablist "能力类型":
+              - tab "技能 23" [selected]
+              - tab "MCP 1"
+            - group "能力操作":
+              - button "添加"
+        - generic:
+          - generic:
+            - generic:
+              - button "继承的能力 23":
+                - generic: 继承的能力
+                - generic: "23"
+              - button "管理"

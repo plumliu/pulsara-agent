@@ -803,6 +803,7 @@ export interface RuntimeConnection {
   listBackgroundProcesses(cursor?: string): Promise<BackgroundProcessPage>;
   readBackgroundProcessLog(processId: string, outputCursor?: string): Promise<BackgroundProcessLog>;
   readCanonicalEntryContent(entryId: string, digest: string, size: number): Promise<string>;
+  readVisualizationHtml(entryId: string, ordinal: number, digest: string, size: number): Promise<string>;
   readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
   readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent>;
   compactContext(targetTurnId?: string): Promise<CommandReceipt>;
@@ -907,6 +908,10 @@ interface ProtocolEntry {
     source_coverage_reason?: string; artifact_unavailability_reason?: string;
   };
   input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string };
+  visualizations?: Array<{
+    ordinal: string | number; state: string; visualization_ref?: string;
+    content_size?: string | number; failure_code?: string; failure_detail?: string;
+  }>;
 }
 
 interface ProtocolActiveTurn {
@@ -2126,6 +2131,23 @@ class LocalRuntimeConnection implements RuntimeConnection {
     return decodeContent(reference, { kind: 'entry', entryId });
   }
 
+  async readVisualizationHtml(
+    entryId: string, ordinal: number, digest: string, size: number,
+  ): Promise<string> {
+    if (!entryId || !Number.isSafeInteger(ordinal) || ordinal < 0
+      || !/^sha256:[0-9a-f]{64}$/.test(digest)
+      || !Number.isSafeInteger(size) || size < 1) {
+      throw new RuntimeApiError(
+        'VISUALIZATION_REFERENCE_INVALID', '可视化内容缺少精确身份。', false,
+      );
+    }
+    const bytes = await this.readExactContentBytes(
+      { entry_id: entryId, visualization_ordinal: ordinal },
+      digest, size, '可视化内容暂时无法读取。', true,
+    );
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  }
+
   async readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array> {
     const target = image.owner.kind === 'entry'
       ? { entry_id: image.owner.entryId }
@@ -2726,7 +2748,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     target: (
       | { entry_id: string; block_id?: string }
       | { queue_item_id: string }
-    ) & { image_ref_ordinal?: number },
+    ) & { image_ref_ordinal?: number; visualization_ordinal?: number },
     expectedDigest: string,
     expectedSize: number,
     publicMessage: string,
@@ -3727,6 +3749,14 @@ function projectEntries(
         reasoning: reasoning.length ? reasoning : undefined,
         status: 'completed',
         traces: traces.length ? traces : undefined,
+        visualizations: (entry.visualizations ?? []).map((item) => ({
+          ordinal: numeric(item.ordinal),
+          state: item.state === 'READY' ? 'READY' as const : 'FAILED' as const,
+          visualizationRef: item.visualization_ref || undefined,
+          contentSize: item.state === 'READY' ? numeric(item.content_size) : undefined,
+          failureCode: item.failure_code || undefined,
+          failureDetail: item.failure_detail || undefined,
+        })),
       });
       continue;
     }

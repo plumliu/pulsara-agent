@@ -194,6 +194,15 @@ message CanonicalInputSource {
   string delivery_mode = 3;
 }
 
+message CanonicalVisualization {
+  uint32 ordinal = 1;
+  string state = 2;
+  string visualization_ref = 3;
+  uint64 content_size = 4;
+  string failure_code = 5;
+  string failure_detail = 6;
+}
+
 message CanonicalEntry {
   string entry_id = 1;
   string turn_id = 2;
@@ -212,6 +221,7 @@ message CanonicalEntry {
   bool fork_eligible = 15;
   string entry_owner_kind = 16;
   CanonicalInputSource input_source = 17;
+  repeated CanonicalVisualization visualizations = 18;
 }
 
 message ActiveTurnControl {
@@ -1037,6 +1047,7 @@ message ReadContentRequest {
   uint64 offset_bytes = 6;
   uint32 limit_bytes = 7;
   optional uint32 image_ref_ordinal = 9;
+  optional uint32 visualization_ordinal = 10;
 }
 
 message ReadToolArtifactRequest {

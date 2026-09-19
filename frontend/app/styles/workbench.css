@@ -23,6 +23,7 @@
 .topbar-actions { display: flex; align-items: center; gap: 6px; }
 .topbar .ghost-button { min-height: 31px; padding: 0 9px; font-size: var(--type-label); }
 .topbar .ghost-button.is-compacting svg { animation: spin .9s linear infinite; }
+.session-actions__busy { animation: spin .9s linear infinite; }
 .queue-badge { padding: 4px 7px; border-radius: 9px; background: var(--violet-soft); color: var(--violet); font-family: var(--mono); font-size: var(--type-caption); }
 .runtime-banner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 8px 0 20px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-raised); color: var(--muted); font-family: var(--sans); font-size: var(--type-small); line-height: 1.6; }
 .runtime-banner--offline, .runtime-banner--failed { border-color: color-mix(in srgb, var(--red) 24%, var(--line)); color: var(--red); }
@@ -38,6 +39,10 @@
 .menu-popover strong, .menu-popover small { display: block; }
 .menu-popover strong { font-size: var(--type-small); }
 .menu-popover small { margin-top: 3px; color: var(--muted); font-size: var(--type-caption); line-height: 1.4; }
+.session-actions-menu { width: min(310px, calc(100vw - 24px)); min-width: 0; }
+.session-actions-menu > button { justify-content: flex-start; align-items: flex-start; gap: 10px; }
+.session-actions-menu > button > svg { flex: none; margin-top: 2px; color: var(--muted); }
+.session-actions-menu > button > span { flex: 1; }
 .permission-menu--composer { right: auto; left: 0; bottom: calc(100% + 7px); top: auto; }
 .model-menu, .reasoning-menu { right: auto; left: 0; bottom: calc(100% + 7px); top: auto; width: min(390px, calc(100vw - 28px)); max-height: min(430px, 58vh); overflow-y: auto; }
 .model-menu > button:disabled { cursor: default; opacity: .48; }
@@ -65,7 +70,7 @@
 .skill-menu__list svg { flex: none; color: var(--violet); }
 .skill-menu__note { display: block; margin: 5px 7px 2px; padding-top: 7px; border-top: 1px solid var(--line); color: var(--faint); font-size: var(--type-micro); line-height: 1.45; }
 
-.thread-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }
+.thread-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; container-type: inline-size; }
 .thread-column { width: min(690px, calc(100% - 54px)); margin: 0 auto; padding: 34px 0 42px; font-family: var(--serif); }
 .assistant-turn:has(+ .context-compaction-divider), .user-turn:has(+ .context-compaction-divider) { margin-bottom: 16px; }
 .context-compaction-divider { display: flex; align-items: center; gap: 12px; margin: 2px 0 10px; color: var(--faint); font-family: var(--mono); font-size: var(--type-micro); font-weight: 700; letter-spacing: .1em; white-space: nowrap; }
@@ -147,6 +152,13 @@
 .reasoning-row__body { max-height: 360px; overflow: auto; padding: 2px 12px 12px 34px; color: var(--muted); font-family: var(--serif); font-size: var(--type-small); line-height: 1.7; overflow-wrap: anywhere; }
 .reasoning-row__body.assistant-markdown { color: var(--muted); font-size: var(--type-small); line-height: 1.7; }
 .assistant-copy { margin: 10px 0 18px 40px; }
+.assistant-visualization { position: relative; left: 50%; transform: translateX(-50%); width: min(960px, calc(100cqw - 54px)); max-width: calc(100cqw - 54px); margin: 18px 0 24px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--paper-solid); font-family: var(--sans); }
+.assistant-visualization__width-probe { position: absolute; width: min(960px, calc(100cqw - 54px)); height: 0; visibility: hidden; pointer-events: none; }
+.assistant-visualization__viewport { position: relative; height: min(70dvh, 560px); overflow: hidden; }
+.assistant-visualization iframe { display: block; width: 100%; height: min(70dvh, 560px); border: 0; background: #fff; }
+.assistant-visualization[data-visualization-layout="root"] iframe { position: absolute; top: 0; left: 0; max-width: none; }
+.assistant-visualization--failed, .assistant-visualization--loading { padding: 16px 18px; color: var(--muted); font-size: var(--type-small); }
+.conversation-run__step-content:has(.assistant-visualization) { overflow: visible; }
 .thread-column > .assistant-turn:last-child { margin-bottom: 0; }
 .thread-column > .assistant-turn:last-child > .assistant-copy:last-child { margin-bottom: 0; }
 .assistant-markdown { min-width: 0; overflow-wrap: anywhere; color: var(--ink-soft); font-size: var(--type-body); line-height: 1.78; }

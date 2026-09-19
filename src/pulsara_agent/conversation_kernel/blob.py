@@ -27,8 +27,10 @@ MAXIMUM_BLOB_BYTES = STAGE2_LIMITS.canonical_blob_hard_bytes
 MAXIMUM_CONTENT_CHUNK_BYTES = STAGE2_LIMITS.content_chunk_hard_bytes
 
 
-def _blob_id(workspace_id: str, digest: str) -> str:
-    identity = sha256(f"{workspace_id}\0{digest}".encode()).hexdigest()
+def _blob_id(workspace_id: str, digest: str, media_type: str, codec: str) -> str:
+    identity = sha256(
+        f"{workspace_id}\0{media_type}\0{codec}\0{digest}".encode()
+    ).hexdigest()
     return f"blob:{identity}"
 
 
@@ -87,7 +89,7 @@ class PostgresCanonicalBlobStore:
         if len(value) > MAXIMUM_BLOB_BYTES:
             raise ValueError("blob exceeds the Stage 2 physical bound")
         digest = "sha256:" + sha256(value).hexdigest()
-        blob_id = _blob_id(workspace_id, digest)
+        blob_id = _blob_id(workspace_id, digest, media_type, codec)
         storage_identity = f"postgres:pulsara_v3.blobs/{blob_id}"
         connection.execute(
             """
@@ -332,6 +334,10 @@ def _delete_orphans_in_connection(
                   WHERE i.blob_id = b.id
               )
               AND NOT EXISTS (
+                  SELECT 1 FROM pulsara_v3.assistant_visualizations AS v
+                  WHERE v.blob_id = b.id
+              )
+              AND NOT EXISTS (
                   SELECT 1 FROM pulsara_v3.tool_results AS r
                   WHERE r.output_artifact_blob_id = b.id
               )
@@ -439,7 +445,7 @@ class CanonicalContentPublisher:
             raise ValueError("blob exceeds the Stage 2 physical bound")
         digest = "sha256:" + sha256(value).hexdigest()
         return BlobContent(
-            _blob_id(workspace_id, digest),
+            _blob_id(workspace_id, digest, media_type, codec),
             digest,
             len(value),
             media_type,

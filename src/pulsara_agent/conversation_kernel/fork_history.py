@@ -28,6 +28,11 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
     hydrate_canonical_snapshot_owner,
 )
 from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE
+from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
+from pulsara_agent.conversation_kernel.visualization import (
+    VISUALIZATION_CODEC,
+    VISUALIZATION_MEDIA_TYPE,
+)
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
@@ -98,6 +103,7 @@ class FrozenForkHistoricalMaterial:
     entries: tuple[Mapping[str, object], ...]
     blocks: tuple[Mapping[str, object], ...]
     tool_results: tuple[Mapping[str, object], ...]
+    visualizations: tuple[Mapping[str, object], ...]
     required_tool_closures: tuple[Mapping[str, object], ...]
     replay_fragments: tuple[tuple[str, ProviderAssistantReplayFragment], ...]
     referenced_artifact_blobs: tuple[Mapping[str, object], ...]
@@ -329,6 +335,7 @@ def read_fork_historical_material(
 
     entries = []
     blocks = []
+    visualizations = []
     results = []
     replays = []
     artifacts = {}
@@ -366,6 +373,37 @@ def read_fork_historical_material(
             "AND assistant_entry_id = ANY(%s) ORDER BY assistant_entry_id, block_ordinal",
             (source_session_id, ids),
         ).fetchall()
+        page_visualizations = connection.execute(
+            """SELECT v.*, b.logical_digest, b.logical_size
+               FROM pulsara_v3.assistant_visualizations AS v
+               LEFT JOIN pulsara_v3.blobs AS b
+                 ON b.id = v.blob_id AND b.workspace_id = v.workspace_id
+               WHERE v.session_id = %s AND v.assistant_entry_id = ANY(%s)
+               ORDER BY v.assistant_entry_id, v.ordinal""",
+            (source_session_id, ids),
+        ).fetchall()
+        next_ordinal: dict[str, int] = {}
+        for row in page_visualizations:
+            owner = str(row["assistant_entry_id"])
+            ordinal = int(row["ordinal"])
+            if ordinal != next_ordinal.get(owner, 0):
+                raise ConversationKernelConflict(
+                    "Fork visualization ordinals are not contiguous"
+                )
+            next_ordinal[owner] = ordinal + 1
+            if row["state"] == "READY":
+                if row["logical_digest"] is None or row["logical_size"] is None:
+                    raise ConversationKernelConflict("Fork visualization blob is absent")
+                PostgresCanonicalBlobStore.read_exact_in_connection(
+                    connection,
+                    blob_id=str(row["blob_id"]),
+                    expected_digest=str(row["logical_digest"]),
+                    expected_size=int(row["logical_size"]),
+                    expected_workspace_id=str(session["workspace_id"]),
+                    expected_media_type=VISUALIZATION_MEDIA_TYPE,
+                    expected_codec=VISUALIZATION_CODEC,
+                )
+            visualizations.append(MappingProxyType(dict(row)))
         for block in page_blocks:
             if block["block_kind"] in {"TEXT", "DATA"}:
                 block_bodies[str(block["id"])] = reader._read_content(
@@ -693,6 +731,7 @@ def read_fork_historical_material(
             for b in blocks
         ),
         tool_results=tuple(results),
+        visualizations=tuple(visualizations),
         required_tool_closures=tuple(closures),
         replay_fragments=tuple(replays),
         referenced_artifact_blobs=tuple(artifacts.values()),

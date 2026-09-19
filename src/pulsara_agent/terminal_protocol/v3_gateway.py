@@ -105,7 +105,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:aaecce829bdaa9b5c957f740caad5fbb4ad1e2a72729a3f5d44e24d349dae7db"
+    "sha256:9c393b239755610acb10131477c7965ec313e20350c43730ac27695e67d4fd9c"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -1161,6 +1161,12 @@ class TerminalKernelProtocolServer:
         target = request.WhichOneof("target")
         if target is None or (target == "queue_item_id" and request.block_id) or (
             request.HasField("image_ref_ordinal") and request.block_id
+        ) or (
+            request.HasField("visualization_ordinal")
+            and (
+                target != "entry_id" or request.block_id
+                or request.HasField("image_ref_ordinal")
+            )
         ):
             return _error(request.request_id, "CONTENT_TARGET_INVALID")
         try:
@@ -1175,6 +1181,11 @@ class TerminalKernelProtocolServer:
                 image_ref_ordinal=(
                     request.image_ref_ordinal
                     if request.HasField("image_ref_ordinal")
+                    else None
+                ),
+                visualization_ordinal=(
+                    request.visualization_ordinal
+                    if request.HasField("visualization_ordinal")
                     else None
                 ),
                 deadline_monotonic=monotonic() + 10.0,

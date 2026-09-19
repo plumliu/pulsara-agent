@@ -52,6 +52,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
+      <head><meta httpEquiv="Content-Security-Policy" content="frame-src about:" /></head>
       <body>{children}</body>
     </html>
   );

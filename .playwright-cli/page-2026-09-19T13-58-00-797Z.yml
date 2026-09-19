@@ -1,0 +1,92 @@
+- main [ref=e3]:
+  - navigation "主要功能" [ref=e4]:
+    - button "返回 Pulsara 总览" [ref=e5] [cursor=pointer]
+    - generic [ref=e9]:
+      - button "总览" [ref=e10] [cursor=pointer]
+      - button "会话" [ref=e14] [cursor=pointer]
+      - button "能力" [ref=e17] [cursor=pointer]
+      - button "记忆" [ref=e21] [cursor=pointer]
+    - generic [ref=e30]:
+      - button "命令面板" [ref=e31] [cursor=pointer]: 命令面板 ⌘K
+      - button "设置" [ref=e34] [cursor=pointer]
+      - generic "本地用户" [ref=e38]: PL
+  - complementary [ref=e251]:
+    - generic [ref=e252]:
+      - generic [ref=e254]:
+        - paragraph [ref=e255]: 本地智能工作台
+        - heading "Pulsara" [level=1] [ref=e256]
+      - generic "已连接本地服务" [ref=e257]
+    - button "搜索与命令 ⌘ K" [ref=e258] [cursor=pointer]:
+      - generic [ref=e262]: 搜索与命令
+      - generic [ref=e263]: ⌘ K
+    - button "新建会话 ⌘ N" [ref=e264] [cursor=pointer]:
+      - generic [ref=e266]: 新建会话
+      - generic [ref=e267]: ⌘ N
+    - button "安全重启 runtime" [disabled] [ref=e268]
+    - region "会话目录" [ref=e273]:
+      - generic [ref=e274]:
+        - region "从目录中打开" [ref=e275]:
+          - button [expanded] [ref=e276] [cursor=pointer]:
+            - strong [ref=e277]: 从目录中打开
+          - generic [ref=e280]: 还没有从目录中打开的会话
+        - region "快速开始" [ref=e282]:
+          - button [expanded] [ref=e283] [cursor=pointer]:
+            - strong [ref=e284]: 快速开始
+          - generic [ref=e287]: 还没有快速开始会话
+    - generic [ref=e289]:
+      - generic [ref=e290]:
+        - generic [ref=e292]: 已连接本地服务
+        - code [ref=e293]: 本机
+      - generic [ref=e294]: 数据保存在这台设备上
+  - region "会话工作台" [ref=e296]:
+    - generic [ref=e297]:
+      - generic [ref=e298]:
+        - generic [ref=e299]: 草稿
+        - generic [ref=e300]:
+          - heading "尚未选择会话" [level=2] [ref=e301]
+          - paragraph [ref=e302]: 指定目录 · /Users/plumliu/Desktop/python_workspace/pulsara_agent
+      - button "切换检查器" [ref=e304] [cursor=pointer]
+    - generic [ref=e309]:
+      - strong [ref=e313]: 准备开始一次真实运行
+      - text: 新建会话后，任务进展和回复会持续显示在这里。
+    - generic [ref=e314]:
+      - generic [ref=e317]:
+        - generic [ref=e322]:
+          - strong [ref=e323]: 创建或选择会话后开始
+          - generic [ref=e324]: 模型、推理、规划和本轮权限都会跟随当前会话。
+        - button "创建会话" [active] [ref=e325] [cursor=pointer]
+      - paragraph [ref=e328]: 当前没有活动会话
+  - complementary "当前会话详情":
+    - generic:
+      - generic:
+        - strong: 当前会话
+        - generic: 尚未选择会话
+      - button "关闭检查器"
+      - navigation "详情视图":
+        - button "项目能力": 能力
+        - button "任务"
+        - button "后台终端"
+    - generic: 创建或选择会话后查看项目能力
+  - dialog [ref=e329]:
+    - button "关闭新建会话" [ref=e330] [cursor=pointer]
+    - generic [ref=e331]:
+      - generic [ref=e332]:
+        - generic [ref=e333]:
+          - text: 本地会话
+          - heading "新建会话" [level=2] [ref=e334]
+          - paragraph [ref=e335]: 选择这次会话使用的工作目录
+        - button "关闭" [ref=e336] [cursor=pointer]
+      - radiogroup "工作目录来源" [ref=e340]:
+        - radio "快速开始 Pulsara 创建并管理一个持久目录" [checked] [ref=e341] [cursor=pointer]:
+          - generic [ref=e345]:
+            - strong [ref=e346]: 快速开始
+            - generic [ref=e347]: Pulsara 创建并管理一个持久目录
+        - radio "指定目录 使用一个已有的本地工作目录" [ref=e351] [cursor=pointer]:
+          - generic [ref=e355]:
+            - strong [ref=e356]: 指定目录
+            - generic [ref=e357]: 使用一个已有的本地工作目录
+      - generic [ref=e359]:
+        - paragraph [ref=e360]: 创建后，在会话输入框中描述要完成的工作。
+        - button "创建会话 ↗" [ref=e361] [cursor=pointer]:
+          - text: 创建会话
+          - generic [ref=e362]: ↗

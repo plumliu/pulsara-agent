@@ -1,0 +1,103 @@
+- main [ref=e3]:
+  - navigation "主要功能" [ref=e4]:
+    - button "返回 Pulsara 总览" [ref=e5] [cursor=pointer]
+    - generic [ref=e9]:
+      - button "总览" [ref=e10] [cursor=pointer]
+      - button "会话" [ref=e14] [cursor=pointer]
+      - button "能力" [ref=e17] [cursor=pointer]
+      - button "记忆" [ref=e21] [cursor=pointer]
+    - generic [ref=e30]:
+      - button "命令面板" [ref=e31] [cursor=pointer]: 命令面板 ⌘K
+      - button "设置" [ref=e34] [cursor=pointer]
+      - generic "本地用户" [ref=e38]: PL
+  - complementary [ref=e251]:
+    - generic [ref=e252]:
+      - generic [ref=e254]:
+        - paragraph [ref=e255]: 本地智能工作台
+        - heading "Pulsara" [level=1] [ref=e256]
+      - generic "已连接本地服务" [ref=e257]
+    - button "搜索与命令 ⌘ K" [ref=e258] [cursor=pointer]:
+      - generic [ref=e262]: 搜索与命令
+      - generic [ref=e263]: ⌘ K
+    - button "新建会话 ⌘ N" [ref=e264] [cursor=pointer]:
+      - generic [ref=e266]: 新建会话
+      - generic [ref=e267]: ⌘ N
+    - button "安全重启 runtime" [ref=e268] [cursor=pointer]
+    - region "会话目录" [ref=e273]:
+      - generic [ref=e274]:
+        - region "从目录中打开" [ref=e275]:
+          - button [expanded] [ref=e276] [cursor=pointer]:
+            - strong [ref=e277]: 从目录中打开
+          - generic [ref=e280]: 还没有从目录中打开的会话
+        - region "快速开始" [ref=e282]:
+          - button [expanded] [ref=e283] [cursor=pointer]:
+            - strong [ref=e284]: 快速开始
+          - button "会话 4116a100 0 条记录 · 当前会话" [ref=e363] [cursor=pointer]:
+            - generic [ref=e365]:
+              - strong [ref=e366]: 会话 4116a100
+              - generic [ref=e367]: 0 条记录 · 当前会话
+    - generic [ref=e289]:
+      - generic [ref=e290]:
+        - generic [ref=e292]: 已连接本地服务
+        - code [ref=e293]: 本机
+      - generic [ref=e294]: 数据保存在这台设备上
+  - region "会话工作台" [ref=e296]:
+    - generic [ref=e297]:
+      - generic [ref=e298]:
+        - generic [ref=e299]: 草稿
+        - generic [ref=e300]:
+          - heading "会话 4116a100" [level=2] [ref=e368]
+          - paragraph [ref=e302]: 快速开始 · /Users/plumliu/.pulsara/workspaces/quick-20260919-215814-2a08dcfd
+      - generic [ref=e303]:
+        - button "压缩上下文" [disabled] [ref=e369]
+        - button "切换检查器" [ref=e304] [cursor=pointer]
+    - generic [ref=e373]:
+      - generic:
+        - heading "今天有什么安排？" [level=1]:
+          - generic [aria-hidden]:
+            - generic:
+              - generic: 今天有什么
+              - generic: _
+      - generic [ref=e374]:
+        - generic [ref=e375]:
+          - generic [ref=e379]:
+            - textbox "发送给 Pulsara" [ref=e381]:
+              - paragraph [ref=e382]
+            - generic [aria-hidden]: 让 Pulsara 处理复杂工作…
+          - button "输入选项" [expanded] [active] [ref=e383] [cursor=pointer]
+          - button "发送" [disabled] [ref=e386]
+        - generic [ref=e404]:
+          - button "选择模型" [ref=e406] [cursor=pointer]
+          - generic [ref=e413]:
+            - button "推理不可用" [disabled] [ref=e415]
+            - button "选择技能" [ref=e429] [cursor=pointer]: 技能
+            - button "先规划" [ref=e434] [cursor=pointer]
+            - button "完全访问" [ref=e439] [cursor=pointer]
+  - complementary "当前会话详情":
+    - generic:
+      - generic:
+        - strong: 当前会话
+        - generic: 会话 4116a100
+      - button "关闭检查器"
+      - navigation "详情视图":
+        - button "项目能力": 能力
+        - button "任务"
+        - button "后台终端"
+    - generic:
+      - generic:
+        - generic:
+          - generic: 工作目录能力
+          - paragraph: 这里的修改会应用到同一目录的所有会话。
+          - generic:
+            - tablist "能力类型":
+              - tab "技能 23" [selected]
+              - tab "MCP 1"
+            - group "能力操作":
+              - button "添加"
+        - generic:
+          - generic:
+            - generic:
+              - button "继承的能力 23":
+                - generic: 继承的能力
+                - generic: "23"
+              - button "管理"

@@ -2013,6 +2013,24 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return bytes;
   }, [ownsConnection]);
 
+  const readVisualization = useCallback(async (
+    entryId: string, ordinal: number, digest: string, size: number,
+  ) => {
+    const active = connectionRef.current;
+    if (!active) {
+      throw new RuntimeApiError(
+        'LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true,
+      );
+    }
+    const html = await active.readVisualizationHtml(entryId, ordinal, digest, size);
+    if (!ownsConnection(active)) {
+      throw new RuntimeApiError(
+        'VISUALIZATION_OWNER_CHANGED', '可视化所属的会话已经改变。', true,
+      );
+    }
+    return html;
+  }, [ownsConnection]);
+
   return (
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
@@ -2032,8 +2050,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           canCreateSession={canCreateSession}
           onOpenCommand={() => setCommandOpen(true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
-          onReopenRuntime={() => void reopenRuntime()}
-          runtimeReopenBusy={runtimeReopenBusy}
         />
       )}
 
@@ -2105,11 +2121,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onSend={sendPrompt}
           onStop={() => void stopRun()}
           onCompact={compact}
+          onReopenRuntime={() => void reopenRuntime()}
+          runtimeReopenBusy={runtimeReopenBusy}
           onReadInteraction={readInteraction}
           onResolveInteraction={resolveInteraction}
           artifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
           onReadToolArtifact={readToolArtifact}
           onReadPromptImage={readPromptImage}
+          onReadVisualization={readVisualization}
           promptDraftStore={promptDraftStore}
           onNotify={notify}
           permission={turnPermission}

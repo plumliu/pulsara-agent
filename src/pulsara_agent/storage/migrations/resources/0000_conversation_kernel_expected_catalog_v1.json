@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:13a3d5278f1e7cb249190c49039dc3e073d115ee0633c198b6c48f7e323e78d5",
+  "observed_catalog_fingerprint": "sha256:a1e41a8702408acfd1cc1a6e6a5d80bd6f8584d3bbdb36f7b81bde58a6d6f17a",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -22,6 +22,7 @@
     "imported_tool_call_closures",
     "transcript_entries",
     "assistant_message_blocks",
+    "assistant_visualizations",
     "provider_assistant_replay_fragments",
     "tool_execution_attempts",
     "tool_results",

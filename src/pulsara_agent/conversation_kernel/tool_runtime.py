@@ -113,6 +113,18 @@ from pulsara_agent.tools.builtins.filesystem import (
     WriteFileTool,
     parse_view_image_source,
 )
+from pulsara_agent.tools.builtins.visualization import VisualizationRenderTool
+from pulsara_agent.conversation_kernel.visualization import (
+    PostgresCanonicalVisualizationReadPort,
+    VisualizationSourceKind,
+    VisualizationSubscription,
+    parse_visualization_source,
+    read_visualization_file,
+)
+from pulsara_agent.conversation_kernel.visualization_screenshot import (
+    VisualizationScreenshotError,
+    VisualizationScreenshotOwner,
+)
 from pulsara_agent.conversation_kernel.prompt_storage import (
     CanonicalImageReferenceReadPort,
     CanonicalImageReferenceResourceExceeded,
@@ -666,6 +678,7 @@ class DirectKernelToolPort:
         live_bus: LiveAgentEventBus,
         artifact_read_port: ToolArtifactReadPort | None = None,
         image_reference_read_port: CanonicalImageReferenceReadPort | None = None,
+        visualization_reference_read_port: PostgresCanonicalVisualizationReadPort | None = None,
         terminal_monitor_wake_scheduler: Callable[[], None] | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
@@ -685,6 +698,8 @@ class DirectKernelToolPort:
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._image_validator = image_validator
         self._image_reference_read_port = image_reference_read_port
+        self._visualization_reference_read_port = visualization_reference_read_port
+        self._visualization_screenshots = VisualizationScreenshotOwner()
         self._terminal = TerminalSessionManager(
             workspace_root=root,
             completion_subscriber=self._terminal_process_completed,
@@ -704,6 +719,11 @@ class DirectKernelToolPort:
                 user_home_resolution=frozen_user_home,
             ),
             ViewImageTool(
+                root,
+                pulsara_home_resolution=frozen_pulsara_home,
+                user_home_resolution=frozen_user_home,
+            ),
+            VisualizationRenderTool(
                 root,
                 pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
@@ -772,6 +792,12 @@ class DirectKernelToolPort:
             str, ProcessLocalEffectSettlementToken
         ] = {}
         self._todo_settlements: dict[str, ProcessLocalEffectSettlementToken] = {}
+        self._visualization_settlements: dict[
+            str, ProcessLocalEffectSettlementToken
+        ] = {}
+        self._visualization_subscriptions: dict[
+            str, dict[tuple[str, str], VisualizationSubscription]
+        ] = {}
         self._mcp_ref_settlements: dict[
             str, ProcessLocalEffectSettlementToken
         ] = {}
@@ -802,6 +828,25 @@ class DirectKernelToolPort:
         self._mcp_meta_refs = ProcessLocalNewMcpToolRefOwner()
         self._mcp_directory = McpDirectoryPageFactory()
         self._installed_epoch_by_borrow: dict[str, _InstalledBorrowEpoch] = {}
+
+    def visualization_subscriptions(
+        self, turn_id: str
+    ) -> tuple[VisualizationSubscription, ...]:
+        with self._surface_lock:
+            return tuple(self._visualization_subscriptions.get(turn_id, {}).values())
+
+    def consume_visualization_subscriptions(
+        self, turn_id: str, expected: tuple[VisualizationSubscription, ...]
+    ) -> None:
+        with self._surface_lock:
+            actual = tuple(self._visualization_subscriptions.get(turn_id, {}).values())
+            if actual != expected:
+                raise RuntimeError("visualization subscription batch changed")
+            self._visualization_subscriptions.pop(turn_id, None)
+
+    def discard_visualization_subscriptions(self, turn_id: str) -> None:
+        with self._surface_lock:
+            self._visualization_subscriptions.pop(turn_id, None)
 
     def bind_subagent_port(self, port: KernelSubagentToolPort) -> None:
         with self._surface_lock:
@@ -911,6 +956,7 @@ class DirectKernelToolPort:
                         "wait_agent",
                         "send_agent_message",
                         "stop_agent",
+                        "visualization_render",
                     }
                 )
             else:
@@ -1802,6 +1848,15 @@ class DirectKernelToolPort:
         if tool_name == "view_image":
             try:
                 parse_view_image_source(arguments)
+            except ValueError as exc:
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                    f"descriptor:{entry.descriptor.id}",
+                    f"invalid tool arguments: {exc}",
+                )
+        if tool_name == "visualization_render":
+            try:
+                parse_visualization_source(dict(arguments))
             except ValueError as exc:
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
@@ -3132,6 +3187,123 @@ class DirectKernelToolPort:
             name=tool_name,
             arguments=dict(arguments),
         )
+        if isinstance(tool, VisualizationRenderTool):
+            source, review = parse_visualization_source(dict(arguments))
+            try:
+                source = tool.freeze_source(source)
+            except (ValueError, OSError) as exc:
+                return KernelToolResult(
+                    state="APPLICATION_ERROR",
+                    content=json.dumps(
+                        {"error": "VISUALIZATION_PATH_INVALID", "detail": str(exc)},
+                        ensure_ascii=False,
+                    ).encode("utf-8"),
+                    effect_class="read_only",
+                )
+            preview: FrozenPromptContent | None = None
+            preview_failure: str | None = None
+            if review:
+                if invocation_context.input_modalities is not None and (
+                    "image" not in invocation_context.input_modalities
+                ):
+                    preview_failure = "MODEL_IMAGE_INPUT_UNSUPPORTED"
+                else:
+                    allowance = invocation_context.image_resource_allowance
+                    if allowance is None or (
+                        allowance.tool_call_id != tool_call_id
+                        or allowance.executor_binding_fingerprint
+                        != binding.executor_binding_fingerprint
+                    ):
+                        raise RuntimeError(
+                            "visualization review resource allowance does not exact-join"
+                        )
+                    deadline = self._deadlines.deadline(
+                        KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+                    )
+                    try:
+                        if source.kind is VisualizationSourceKind.PATH:
+                            html = await asyncio.to_thread(
+                                read_visualization_file, Path(source.value)
+                            )
+                            if html is None:
+                                raise VisualizationScreenshotError("HTML_NOT_FOUND")
+                        else:
+                            if self._visualization_reference_read_port is None:
+                                raise RuntimeError(
+                                    "visualization reference read owner is unavailable"
+                                )
+                            html = await asyncio.to_thread(
+                                self._visualization_reference_read_port.read_ref,
+                                source.value,
+                                deadline_monotonic=deadline,
+                            )
+                        png = await self._visualization_screenshots.render(
+                            html, deadline_monotonic=deadline
+                        )
+                        if self._image_validator is None:
+                            raise RuntimeError("image validation owner is unavailable")
+                        image = await self._image_validator.freeze_local_image(
+                            png, deadline_monotonic=deadline
+                        )
+                        candidate_content = FrozenPromptContent(
+                            (
+                                LLMTextPart(
+                                    "Visualization is subscribed for this response. "
+                                    "Current preview attached."
+                                ),
+                                image,
+                            )
+                        )
+                        increment = allowance.quote_owner.quote(
+                            tool_call_id=tool_call_id,
+                            source=source,
+                            content=candidate_content,
+                        )
+                        if (
+                            increment.canonical_bytes > allowance.canonical_bytes
+                            or increment.logical_bytes > allowance.logical_bytes
+                            or increment.wire_bytes > allowance.wire_bytes
+                            or increment.input_tokens > allowance.input_tokens
+                        ):
+                            raise VisualizationScreenshotError("IMAGE_RESOURCE_EXCEEDED")
+                        preview = candidate_content
+                    except asyncio.CancelledError:
+                        raise
+                    except (
+                        VisualizationScreenshotError,
+                        PromptImageValidationError,
+                        TimeoutError,
+                        KeyError,
+                        ValueError,
+                        OSError,
+                    ) as exc:
+                        preview_failure = type(exc).__name__
+                        if isinstance(exc, VisualizationScreenshotError):
+                            preview_failure = str(exc).split(":", 1)[0]
+            prepared = VisualizationSubscription(
+                turn_id=turn_id,
+                source_result_entry_id=invocation_context.result_entry_id,
+                source=source,
+            )
+            token = ProcessLocalEffectSettlementToken(
+                f"visualization:{invocation_context.result_entry_id}", prepared
+            )
+            with self._surface_lock:
+                self._visualization_settlements[token.token_id] = token
+            message = "Visualization is subscribed for this response."
+            if review and preview is None:
+                message += (
+                    " Current preview was not generated: "
+                    + (preview_failure or "preview unavailable")
+                    + "."
+                )
+            return KernelToolResult(
+                state="SUCCESS", content=(preview or message.encode("utf-8")),
+                process_local_settlement=token, effect_class="read_only",
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
+            )
         if isinstance(tool, ViewImageTool):
             source = parse_view_image_source(arguments)
             if (
@@ -3615,6 +3787,30 @@ class DirectKernelToolPort:
         token: ProcessLocalEffectSettlementToken,
         disposition: ProcessLocalEffectSettlementDisposition,
     ) -> ProcessLocalEffectSettlementResult:
+        if isinstance(token.prepared, VisualizationSubscription):
+            with self._surface_lock:
+                retained = self._visualization_settlements.get(token.token_id)
+                if retained is not token:
+                    if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
+                        raise RuntimeError("committed visualization settlement is absent")
+                    return ProcessLocalEffectSettlementResult(
+                        ProcessLocalEffectSettlementOutcome.DISCARDED
+                    )
+                self._visualization_settlements.pop(token.token_id, None)
+                if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
+                    prepared = token.prepared
+                    bucket = self._visualization_subscriptions.setdefault(
+                        prepared.turn_id, {}
+                    )
+                    bucket.setdefault(
+                        (prepared.source.kind.value, prepared.source.value), prepared
+                    )
+                    return ProcessLocalEffectSettlementResult(
+                        ProcessLocalEffectSettlementOutcome.INSTALLED
+                    )
+                return ProcessLocalEffectSettlementResult(
+                    ProcessLocalEffectSettlementOutcome.DISCARDED
+                )
         if isinstance(token.prepared, PreparedNewMcpToolRefSettlement):
             retained = self._mcp_ref_settlements.get(token.token_id)
             if retained is not token:
@@ -3779,6 +3975,7 @@ class DirectKernelToolPort:
             # same borrow deadline and are never replaced or detached.
             close_error: BaseException | None = None
             try:
+                await self._visualization_screenshots.aclose()
                 await self._stop_terminal_physical_owners_locked(deadline)
             except BaseException as exc:
                 close_error = exc
@@ -3803,6 +4000,8 @@ class DirectKernelToolPort:
             self._mcp_meta_refs.close()
             self._mcp_ref_settlements.clear()
             self._todo_settlements.clear()
+            self._visualization_settlements.clear()
+            self._visualization_subscriptions.clear()
             for permit in permits:
                 try:
                     permit.release()

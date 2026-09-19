@@ -101,6 +101,7 @@ def classify_tool_result_delivery(
     *,
     tool_name: str,
     result_state: str,
+    has_image_attachment: bool = False,
 ) -> FrozenToolResultDeliveryRequirement:
     """Rebuild the closed requirement from exact tool identity and result state.
 
@@ -110,7 +111,9 @@ def classify_tool_result_delivery(
 
     if result_state != "SUCCESS":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    if tool_name == "view_image":
+    if tool_name == "view_image" or (
+        tool_name == "visualization_render" and has_image_attachment
+    ):
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.IMAGE_ATTACHMENT
         )

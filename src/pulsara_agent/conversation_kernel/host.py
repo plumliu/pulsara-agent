@@ -164,6 +164,9 @@ from pulsara_agent.conversation_kernel.prompt_content import (
 from pulsara_agent.conversation_kernel.prompt_storage import (
     PostgresCanonicalImageReferenceReadPort,
 )
+from pulsara_agent.conversation_kernel.visualization import (
+    PostgresCanonicalVisualizationReadPort,
+)
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelRunResult,
@@ -735,6 +738,11 @@ class KernelHostSession:
                 workspace_id=workspace.workspace_key,
             ),
             image_reference_read_port=PostgresCanonicalImageReferenceReadPort(
+                repository.connection_provider,
+                session_id=session_id,
+                workspace_id=workspace.workspace_key,
+            ),
+            visualization_reference_read_port=PostgresCanonicalVisualizationReadPort(
                 repository.connection_provider,
                 session_id=session_id,
                 workspace_id=workspace.workspace_key,

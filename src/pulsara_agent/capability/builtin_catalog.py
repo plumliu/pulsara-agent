@@ -109,6 +109,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "use_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "view_image": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
+    "visualization_render": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "reload_hooks": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "reload_capabilities": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
@@ -1012,6 +1013,78 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "minLength": 1,
                     "description": (
                         "Exact sha256: image reference previously shown in this session."
+                    ),
+                },
+            },
+            required=[],
+        ),
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="filesystem_read",
+    ),
+    "visualization_render": _descriptor(
+        name="visualization_render",
+        description=(
+            "Show a self-contained HTML visualization beneath your next assistant "
+            "message without tool calls. First create a complete HTML file with the "
+            "normal file tools, preferably in .pulsara/visualizations/, then call "
+            "this tool with exactly one path or a visualization_ref previously shown "
+            "in this session. For a chart, card, or single component, put "
+            "data-pulsara-visualization-root on the one element to display; the "
+            "display and preview will frame that element when it fits; multiple, "
+            "hidden, or oversized marked elements fall back to the whole page. "
+            "For a whole website/page demo, omit the attribute. Make the HTML "
+            "responsive and include all styles, scripts, data, SVG, and images in "
+            "the file; external sites, CDN assets, local companion files, and network "
+            "requests cannot load in the embedded display or preview. A normal call "
+            "only schedules display: it does not read the file yet. You may keep "
+            "editing, and the version at the next tool-free assistant message is "
+            "shown for a path; a saved reference stays unchanged. Repeating the "
+            "same source before that message produces one display. Deleting a "
+            "path source before then cancels that display. Use "
+            "review=true to also try an immediate screenshot you can inspect now; "
+            "it does not freeze the final version. If screenshot review is unavailable "
+            "or fails, the display remains scheduled. At display time, a missing "
+            "path silently cancels that item; other file-read failures show a "
+            "visible failure instead of HTML."
+        ),
+        input_schema=object_schema(
+            properties={
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Path to a complete, self-contained HTML file you wrote. "
+                        "Use this OR visualization_ref, not both. Relative paths "
+                        "start at the workspace root, not a terminal's current "
+                        "directory; absolute paths and ~ also work under normal "
+                        "file permissions. The file is read for display when your "
+                        "next tool-free assistant message is saved, so edits before "
+                        "then appear and deletion before then cancels it."
+                    ),
+                },
+                "visualization_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Exact visualization reference already shown from a "
+                        "published HTML display in this session. Use this OR path, "
+                        "not both, to show that saved HTML again without relying "
+                        "on its original file. Do not invent a reference."
+                    ),
+                },
+                "review": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Default false: schedule display without opening or "
+                        "checking the HTML. True: also try a screenshot of the "
+                        "current file or saved reference now so you can inspect it; "
+                        "a path still uses its later version at display time, "
+                        "while a saved reference stays unchanged. If the "
+                        "model cannot receive images or reading/rendering fails, "
+                        "the result explains that no preview was made, while the "
+                        "display remains scheduled."
                     ),
                 },
             },
@@ -2078,7 +2151,7 @@ class BuiltinToolCatalogEntry:
 
 
 _FILESYSTEM = frozenset(
-    {"edit_file", "read_file", "search_files", "view_image", "write_file"}
+    {"edit_file", "read_file", "search_files", "view_image", "visualization_render", "write_file"}
 )
 _MEMORY_PROPOSAL = frozenset({"remember"})
 _MEMORY_QUERY = frozenset({"memory_explain", "memory_get"})
@@ -2432,6 +2505,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "inspect_new_mcp_tool",
         "read_file",
         "view_image",
+        "visualization_render",
         "read_mcp_resource",
         "reload_hooks",
         "reload_capabilities",

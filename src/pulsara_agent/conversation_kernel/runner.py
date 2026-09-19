@@ -30,6 +30,14 @@ from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
     PostgresCanonicalBlobStore,
 )
+from pulsara_agent.conversation_kernel.visualization import (
+    PostgresCanonicalVisualizationReadPort,
+    VisualizationSource,
+    VisualizationSourceKind,
+    VisualizationSubscription,
+    materialize_visualization_subscription,
+    parse_visualization_source,
+)
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
 )
@@ -410,7 +418,7 @@ class _ImageToolResourceQuoteOwner:
         self,
         *,
         tool_call_id: str,
-        source: ViewImageSource,
+        source: ViewImageSource | VisualizationSource,
         content: FrozenPromptContent,
     ) -> FrozenImageToolResourceIncrement:
         images = tuple(part for part in content.parts if isinstance(part, LLMImagePart))
@@ -884,6 +892,16 @@ class _RootSessionStartCompactPort(SessionStartCompactPort):
 
 class _RunnerToolCompositionPort(ToolSurfacePlanningPort, ToolInvocationPort, Protocol):
     """Require one Tool owner to satisfy the runner's two narrow consumers."""
+
+    def visualization_subscriptions(
+        self, turn_id: str
+    ) -> tuple[VisualizationSubscription, ...]: ...
+
+    def consume_visualization_subscriptions(
+        self, turn_id: str, expected: tuple[VisualizationSubscription, ...]
+    ) -> None: ...
+
+    def discard_visualization_subscriptions(self, turn_id: str) -> None: ...
 
 
 class ConversationKernelRunner:
@@ -2343,6 +2361,26 @@ class ConversationKernelRunner:
                         complete_turn = not (
                             pending_completion or pending_control_feedback
                         )
+                    visualization_batch = (
+                        self._tools.visualization_subscriptions(turn_id)
+                        if not calls else ()
+                    )
+                    frozen_visualizations = []
+                    if visualization_batch:
+                        visualization_reader = PostgresCanonicalVisualizationReadPort(
+                            self._repository.connection_provider,
+                            session_id=request.session_id,
+                            workspace_id=await self._resolved_workspace_id(),
+                        )
+                        for subscription in visualization_batch:
+                            item = await self._io.run(
+                                materialize_visualization_subscription,
+                                subscription,
+                                visualization_reader,
+                                deadline_monotonic=self._canonical_deadline(),
+                            )
+                            if item is not None:
+                                frozen_visualizations.append(item)
                     settlement = PreparedAssistantMessageSettlement(
                         guard=self._writer_lease.guard,
                         cut=request.cut,
@@ -2355,6 +2393,7 @@ class ConversationKernelRunner:
                         continuity_scope=permit.scope,
                         continuity_epoch_nonce=permit.epoch_nonce,
                         continuity_epoch_revision=permit.epoch_revision,
+                        visualizations=tuple(frozen_visualizations),
                         provider_replay=collected.provider_replay,
                         provider_replay_reservation=(provider_replay_reservation),
                         subagent_result=subagent_result,
@@ -2385,6 +2424,10 @@ class ConversationKernelRunner:
                                 completion_prepared.permit, committed=False
                             )
                         raise
+                    if visualization_batch:
+                        self._tools.consume_visualization_subscriptions(
+                            turn_id, visualization_batch
+                        )
                     if (
                         control_answer_fenced
                         and self._root_control_completion_settlement is not None
@@ -2635,6 +2678,7 @@ class ConversationKernelRunner:
             self._memory_dispatch.offer_governance_wake()
             raise
         finally:
+            self._tools.discard_visualization_subscriptions(turn_id)
             if pending_prospective_root_dispatch is not None:
                 pending_prospective_root_dispatch.close()
             if root_completion_phase_opened and self._subagent_runtime is not None:
@@ -3176,7 +3220,7 @@ class ConversationKernelRunner:
 
         image_calls: list[tuple[int, CompletedToolCallBlock, str]] = []
         for call_ordinal, call in enumerate(calls):
-            if call.tool_name != "view_image":
+            if call.tool_name not in {"view_image", "visualization_render"}:
                 continue
             try:
                 binding = request.prepared_call.tool_surface.binding(call.tool_name)
@@ -3188,7 +3232,12 @@ class ConversationKernelRunner:
             if not isinstance(arguments, dict):
                 continue
             try:
-                image_source = parse_view_image_source(arguments)
+                if call.tool_name == "visualization_render":
+                    image_source, review = parse_visualization_source(arguments)
+                    if not review:
+                        continue
+                else:
+                    image_source = parse_view_image_source(arguments)
             except ValueError:
                 continue
             image_calls.append(
@@ -3196,7 +3245,10 @@ class ConversationKernelRunner:
             )
             reference_upper = (
                 image_source.value
-                if image_source.kind is ViewImageSourceKind.IMAGE_REF
+                if image_source.kind in {
+                    ViewImageSourceKind.IMAGE_REF,
+                    VisualizationSourceKind.VISUALIZATION_REF,
+                }
                 else "sha256:" + ("0" * 64)
             )
             image_source_upper = LLMMessage(

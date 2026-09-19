@@ -106,7 +106,6 @@ class PostgresCanonicalImageReferenceReadPort:
             raise CanonicalImageReferenceResourceExceeded(
                 "canonical image reference exceeds its encoded-byte allowance"
             )
-        blob_id = _blob_id(workspace_id, image_ref)
         with self._provider.connection(
             lane=PostgresConnectionLane.ARTIFACT,
             row_factory=dict_row,
@@ -119,15 +118,18 @@ class PostgresCanonicalImageReferenceReadPort:
                     SELECT 0 AS owner_kind_rank,
                            e.id AS owner_id,
                            r.ref_ordinal,
-                           e.content_size
+                           e.content_size,
+                           r.blob_id
                     FROM pulsara_v3.canonical_image_refs AS r
+                    JOIN pulsara_v3.blobs AS b
+                      ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
                     JOIN pulsara_v3.transcript_entries AS e
                       ON e.session_id = r.session_id
                      AND e.workspace_id = r.workspace_id
                      AND e.id = r.transcript_entry_id
                     WHERE r.session_id = %s
                       AND r.workspace_id = %s
-                      AND r.blob_id = %s
+                      AND b.logical_digest = %s
                       AND e.entry_kind IN (
                           'USER_MESSAGE', 'USER_STEER', 'TOOL_RESULT'
                       )
@@ -135,17 +137,20 @@ class PostgresCanonicalImageReferenceReadPort:
                     SELECT 1 AS owner_kind_rank,
                            s.id AS owner_id,
                            r.ref_ordinal,
-                           s.content_size
+                           s.content_size,
+                           r.blob_id
                     FROM pulsara_v3.canonical_image_refs AS r
+                    JOIN pulsara_v3.blobs AS b
+                      ON b.id = r.blob_id AND b.workspace_id = r.workspace_id
                     JOIN pulsara_v3.context_snapshots AS s
                       ON s.session_id = r.session_id
                      AND s.workspace_id = r.workspace_id
                      AND s.id = r.context_snapshot_id
                     WHERE r.session_id = %s
                       AND r.workspace_id = %s
-                      AND r.blob_id = %s
+                      AND b.logical_digest = %s
                 )
-                SELECT owner_kind_rank, owner_id, ref_ordinal, content_size
+                SELECT owner_kind_rank, owner_id, ref_ordinal, content_size, blob_id
                 FROM candidates
                 ORDER BY content_size ASC,
                          owner_kind_rank ASC,
@@ -156,10 +161,10 @@ class PostgresCanonicalImageReferenceReadPort:
                 (
                     session_id,
                     workspace_id,
-                    blob_id,
+                    image_ref,
                     session_id,
                     workspace_id,
-                    blob_id,
+                    image_ref,
                 ),
             ).fetchone()
             if candidate is None:
@@ -172,6 +177,7 @@ class PostgresCanonicalImageReferenceReadPort:
             owner_kind_rank = int(candidate["owner_kind_rank"])
             owner_id = str(candidate["owner_id"])
             ref_ordinal = int(candidate["ref_ordinal"])
+            blob_id = str(candidate["blob_id"])
             if owner_kind_rank == 0:
                 row = connection.execute(
                     """SELECT session_id, workspace_id, inline_content, blob_id,
@@ -245,6 +251,10 @@ class PostgresCanonicalImageReferenceReadPort:
             if (
                 descriptor.digest != image_ref
                 or str(reference["blob_id"]) != blob_id
+                or blob_id != _blob_id(
+                    workspace_id, descriptor.digest,
+                    descriptor.media_type, PROMPT_IMAGE_BLOB_CODEC,
+                )
             ):
                 raise ConversationKernelConflict(
                     "canonical image reference does not exact-join its owner"
@@ -783,7 +793,10 @@ def _refs_match_descriptors(
             or row["logical_size"] is None
             or int(row["ref_ordinal"]) != ordinal
             or str(row["workspace_id"]) != workspace_id
-            or str(row["blob_id"]) != _blob_id(workspace_id, descriptor.digest)
+            or str(row["blob_id"]) != _blob_id(
+                workspace_id, descriptor.digest,
+                descriptor.media_type, PROMPT_IMAGE_BLOB_CODEC,
+            )
             or row["logical_digest"] is None
             or str(row["logical_digest"]) != descriptor.digest
             or int(row["logical_size"]) != descriptor.encoded_bytes

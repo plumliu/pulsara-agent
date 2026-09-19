@@ -281,6 +281,35 @@ class _ForkOperations:
                         result_record_kind="IMPORTED_HISTORY",
                     )
                     _insert(connection, "tool_results", values)
+                source_group_by_entry = {
+                    str(entry["id"]): str(entry["source_group_key"])
+                    for entry in material.entries
+                }
+                for visualization in material.visualizations:
+                    source_assistant_id = str(visualization["assistant_entry_id"])
+                    source_result_id = visualization["source_result_entry_id"]
+                    _insert(
+                        connection,
+                        "assistant_visualizations",
+                        {
+                            "session_id": child_session_id,
+                            "workspace_id": material.workspace_id,
+                            "assistant_entry_id": entry_map[source_assistant_id],
+                            "ordinal": int(visualization["ordinal"]),
+                            "imported_history_group_id": group_map[
+                                source_group_by_entry[source_assistant_id]
+                            ],
+                            "source_result_entry_id": (
+                                None
+                                if source_result_id is None
+                                else entry_map.get(str(source_result_id))
+                            ),
+                            "state": visualization["state"],
+                            "blob_id": visualization["blob_id"],
+                            "failure_code": visualization["failure_code"],
+                            "failure_detail": visualization["failure_detail"],
+                        },
+                    )
                 for closure in material.required_tool_closures:
                     values = dict(closure)
                     values.update(

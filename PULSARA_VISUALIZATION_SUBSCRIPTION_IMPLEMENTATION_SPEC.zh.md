@@ -1,547 +1,153 @@
-# Pulsara HTML 可视化订阅与渲染回看实施规格
+# Pulsara HTML 可视化订阅与回看实施规格
 
-状态：**设计定稿，尚未实施**。日期：2026-09-17。
+状态：**设计冻结，首版已实施并完成交叉审阅**。日期：2026-09-20。
 
-## 0. 执行结论
+## 0. 产品形状
 
-Pulsara 新增一个模型可调用的 `visualization_render` 工具，但该工具不拥有 HTML 的创作、编辑或版本管理。模型继续复用现有 `write` / `edit` 文件工具创建和修改 HTML；`visualization_render` 只承担两件事：
+这是一个轻量的对话展示工具，不是内置浏览器、网页托管服务或可视化项目系统。模型用现有文件工具写一份自包含 HTML，再调用 `visualization_render` 登记“在接下来一条无工具调用的 assistant message 下展示它”。前端从该消息的 canonical 展示结果得到一个内部展示引用，在对话里用隔离 iframe 渲染；展示标记不由模型写入消息正文，也不进入 provider 输入。
 
-1. 把一个本地 HTML 路径或已知 `visualization_ref` 登记为“在本轮 terminal assistant message 完成时展示”的进程内订阅；
-2. 当调用显式携带 `review=true` 时，在保留订阅的同时，对该来源当前表示的 HTML 做一次即时渲染回看，并把截图沿现有工具图片链路交给模型。
+普通订阅只登记进程内意图，不读取文件、不启动浏览器、不写 HTML blob。模型可以在订阅后继续编辑。目标 assistant message 提交前，runtime 才读取当时的文件并冻结确切 HTML 字节；消息、HTML blob 与有序展示结果在同一 canonical 事务中提交。后续编辑或删除工作文件都不改变历史展示。
 
-普通订阅调用不读取 HTML、不渲染、不写 PostgreSQL，只返回简短的“已订阅”工具结果。路径来源在订阅后仍可由模型继续任意次数地编辑，无需重新订阅；引用来源始终指向已经冻结的 immutable HTML。
+`review=true` 是同一工具的可选即时回看：它不替代订阅，只在该次调用中读取当前版本、做一次性截图，并沿现有工具图片链路交给支持图片输入的模型。普通展示和历史重载不启动截图浏览器。
 
-当本轮 terminal assistant message 已由模型生成、但尚未完成 canonical publication 时，runtime 才读取每个订阅路径的最终内容，完成安全校验和渲染准备，冻结确切 HTML 字节，并仅将这个最终版本写入现有 PostgreSQL blob 存储。最终消息引用该 immutable blob；以后修改或删除工作区文件都不得改变历史消息。
+即使待处理 steer、Stop Hook 或其他 continuation 使 turn 继续，只要这条无工具调用 assistant message 已成功提交，展示就属于这条消息并消费这一批订阅；不等待真正结束 turn 的后续消息，也不重复展示。
 
-最终 HTML 在 publication 时才获得 `visualization_ref`，因此原 `visualization_render(path=...)` 工具结果不可能提前返回该引用。当前 terminal message 的自动展示不依赖模型知道引用；当后续用户输入触发下一次 provider call 时，prompt compiler 才在新进入 provider 历史的上一条 terminal assistant message 之后派生一个不可见于聊天 UI 的引用 carrier，让模型在后续轮次知道并复用该最终可视化。
+本规格服从 [AGENTS.md](AGENTS.md)：保持 provider-input prefix 连续性、只增加必要的持久化事实、实施时 hard-cut，不保留旧路径兼容。
 
-路径订阅同时采用“删除即取消”：如果用户在 active turn 中 steer 表示不再需要该可视化，模型可以通过现有文件工具删除对应 HTML。terminal publication 最终读取时若路径已经不存在，runtime 静默把该项视为取消订阅，不生成错误、不保存 blob、不显示失败占位。
+## 1. 首版边界与 owner
 
-本规格不保存 HTML 编辑过程中的版本，不增加 visualization 专用编辑协议、版本图、草稿表、恢复任务、订阅收据或跨重启 replay 机制。
+| 事项 | owner 与首版合同 |
+|---|---|
+| HTML 创作和删除 | 现有文件/terminal 工具及其权限、Hook、确认；`visualization_render` 不写文件 |
+| 当前轮订阅 | active-turn runtime 的进程内有序槽位；崩溃后允许丢失，不恢复 |
+| 即时回看 | 仅显式 `review=true` 使用一次性隔离截图；截图复用现有工具图片与 `image_ref` |
+| 最终冻结 | assistant message publication 在提交前读取来源，调用现有 PostgreSQL blob owner |
+| 历史展示 | 该 assistant message 拥有零到多个有序 `READY` / `FAILED` 结果；前端只投影它们 |
+| HTML 执行 | 前端隔离 iframe；不提供任意文件、资源或网页导航服务 |
 
-## 1. 产品目标与范围
+工作文件是普通完整 HTML，默认放在 `<workspace_root>/.pulsara/visualizations/<descriptive-name>.html`。它应能由用户直接用普通浏览器打开。这里的相对路径与现有只读文件工具一样锚定本次调用冻结的 `workspace_root`，**不跟随 terminal 的进程 cwd 或先前的 `cd`**；模型若在其他目录创建文件，应传 workspace-relative 或绝对路径。标准目录只是创作约定，不是新权限边界：用户指定的其他本地路径仍走现有路径解析和权限语义，不能仅因绝对路径或 `..` 离开 workspace 就被本工具额外拒绝。
 
-### 1.1 用户可见目标
+首版嵌入展示要求**自包含 HTML**：样式、脚本、数据与图片随同一个 HTML 文件提供，可使用内联 SVG、Canvas 和 `data:` 图片。需要第三方库时，模型可通过现有授权工具取得并打包进这个文件；`visualization_render` 不安装、注入或映射库。嵌入展示与回看不加载 CDN、开发服务器、工作区配套文件、`file:` URL 或其他外部资源，也不开放 `fetch`、XHR、WebSocket 等网络出口。运行时不为此自造完整的 HTML/JavaScript 静态资源分析器；若作者仍写了外部依赖，请求会在隔离执行时被阻止，该 HTML 不保证正确显示，已提交的 `READY` 不因此倒写成 `FAILED`。用户脱离 Pulsara 手动打开工作文件时，由普通浏览器及用户环境决定其行为；Pulsara 不承诺替用户管理那条路径。
 
-- 模型能用普通文件工具制作一份可交互 HTML 可视化。
-- 模型调用一次 `visualization_render` 后，可以继续修改该文件；本轮最终展示自动采用 terminal message 落定时的最终文件内容。
-- 工具调用本身仍是中间过程，只显示简短状态；可视化作为 terminal assistant message 的展示内容出现。
-- 模型需要检查效果时，可用同一个工具请求一次截图回看；回看不会取消或替代最终展示订阅。
-- 回看截图获得现有 `image_ref`，以后只要模型仍知道该引用，就可以通过 `view_image(image_ref=...)` 再次查看。
-- 最终 HTML 获得独立的 `visualization_ref`；它在下一次 provider call 中由 compiler 告知模型，可由 `visualization_render(visualization_ref=...)` 重新订阅或回看已经冻结的可视化。
-- 最终 HTML 不受普通对话正文的居中版心/max-width 约束，而是在 transcript 中使用中央工作区的完整可用横向空间；普通 assistant 文本仍保持原对话排版。
-- 历史消息不依赖可变的本地文件；最终展示内容一经提交即不可变。
+若创作的是图表、卡片或单个组件，作者可在希望展示的**唯一元素**上加 `data-pulsara-visualization-root`，例如 `<main data-pulsara-visualization-root>…</main>`。这是普通浏览器会忽略的可选 HTML 属性，文件仍是完整、可独立打开的网页。若创作的是完整网站页面，则不加标记，展示整页。不能猜测 `<main>`、`body` 或任意最大的元素为主体，也不能把主体选择另存为工具参数、blob metadata 或 canonical 字段。
 
-### 1.2 权威顺序
+因此首版**没有**内置 ECharts/Vega-Lite/D3 profile、`_vendor` 目录、库 metadata、资产 manifest、版本保留表或通用资源代理。若以后要让多文件或联网 HTML 在 Pulsara 内嵌展示，必须另立产品合同，不能推断现有 terminal 联网批准自动覆盖浏览器请求。
 
-用户本轮明确约定 → [AGENTS.md](AGENTS.md) → 本规格 → [Pulsara 已知图片引用重读实施规范](archived_docs/PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 与其他仍适用的 canonical/blob/tool execution 规格。
+## 2. 工具接口与订阅
 
-图片回看的引用、归属、工具图片 carrier、provider lowering 和 PostgreSQL 图片 blob 行为全部复用现有图片规范。本规格只定义 HTML 可视化订阅、即时回看和最终消息展示的新增边界。
-
-## 2. 所有权边界
-
-| 能力 | 唯一 owner | 本功能的行为 |
-|---|---|---|
-| HTML 创建与修改 | 现有 `write` / `edit` 文件工具 | 创建文件、增量修改、提供正常 diff 与文件权限语义 |
-| 当前轮订阅 | conversation runtime 的 active-turn owner | 进程内登记闭合来源值、顺序和调用来源；不持久化草稿状态 |
-| 即时回看 | `visualization_render(review=true)` 与现有图片结果链路 | 读取当前路径或已冻结引用、沙箱渲染截图、生成普通工具图片结果 |
-| 最终 HTML 冻结 | terminal assistant message 的 canonical publication owner | 在消息提交前读取最终文件，只冻结并保存最终版本 |
-| HTML 字节持久化 | 现有 PostgreSQL canonical blob owner | 保存最终 immutable bytes 与内容完整性信息 |
-| 最终消息展示 | terminal assistant message 的 visualization occurrence / projection | 引用最终 HTML blob，在聊天中渲染；不借用 tool result artifact 字段 |
-| 最终可视化重用 | `visualization_ref` 解析与 `visualization_render` | 只允许重用当前 session/workspace 已有 canonical occurrence 所拥有的 immutable HTML |
-| 截图重读 | 现有 `view_image(image_ref=...)` | 按当前图片引用规范重读 review 截图 |
-
-`visualization_render` 不得自行写文件、修改文件、生成 HTML、应用 patch、维护源码版本、回写格式化结果或替代 `write` / `edit`。PostgreSQL 中的最终 HTML blob 也不是后续编辑入口。
-
-## 3. 工作区文件约定
-
-### 3.1 标准目录
-
-模型生成的可视化 HTML 使用以下标准目录：
-
-```text
-<cwd>/.pulsara/visualizations/
-```
-
-首版以一个普通、可由用户直接用浏览器打开的 HTML 文件作为入口：
-
-```text
-.pulsara/visualizations/<descriptive-name>.html
-```
-
-为了便携和最终冻结，CSS、JavaScript 和可视化数据可以尽量内嵌，但这只是推荐而不是资源 allowlist。HTML 可以像普通网页一样引用相对或绝对的本地配套文件、模型通过现有终端与权限体系安装或构建的包产物，以及在现有网络权限允许时引用外部资源。文件名应稳定、可读并能表达内容；不得把随机临时名或 PostgreSQL blob ID 当作用户工作文件名。
-
-该文件不是 Pulsara 私有片段格式。宿主专用 metadata 必须保持可选且能被普通浏览器安全忽略；可视化若使用宿主能力，应提供普通浏览器可用的资源引用或降级路径。用户手动打开工作文件是正式支持的创作与调试路径，而不是需要阻止的旁路。
-
-`visualizations` 表示可继续编辑的可视化源文件，不使用容易与一次性输出混淆的 `renders`，也不使用会与现有 tool artifact 概念混淆的 `artifacts`。
-
-### 3.2 目录不是新的权限边界
-
-该目录是模型生成内容的标准落点，而不是第二套文件系统沙箱。`path` 沿用 Pulsara 现有本地路径解析、权限、Hook 与确认语义；绝对路径和含 `..` 的相对路径不得仅因离开 workspace 而被本工具额外拒绝。
-
-当模型从头制作可视化时，工具描述和模型指令应要求优先写入标准目录。用户明确指定已有 HTML 文件时，可以直接订阅该本地路径，不必复制一份到标准目录。
-
-### 3.3 文件与最终消息的关系
-
-工作区文件是创作载体，不是历史展示的 durable authority。terminal message 提交前，文件可以继续变化；提交后，历史展示只认已经冻结的 blob，不再读取原路径。
-
-在 terminal message 最终物化前删除路径来源文件，表示取消该路径的当前轮订阅。runtime 自身不替模型删除文件；删除仍由现有文件工具、权限、Hook 与确认语义拥有。文件已经冻结并随 terminal message 成功提交后，再删除原文件只清理创作载体，不会撤销或改变历史展示。
-
-## 4. 模型工具接口
-
-### 4.1 固定 schema
-
-新建或继续编辑本地可视化时使用路径来源：
+工具只有一个，来源二选一：
 
 ```json
-{
-  "path": ".pulsara/visualizations/example.html",
-  "review": false
-}
+{"path":".pulsara/visualizations/example.html","review":false}
 ```
-
-后续轮次重新订阅已经冻结的最终可视化时使用引用来源：
 
 ```json
-{
-  "visualization_ref": "sha256:...",
-  "review": false
-}
+{"visualization_ref":"sha256:...","review":false}
 ```
 
-字段：
+- `path` 是非空本地路径；相对路径按本次调用冻结的 `workspace_root` 解析，沿用现有只读文件工具的 `~`、绝对路径与 `..` 语义。登记时只冻结经现有 owner 规范化的闭合路径值；review 与最终物化均使用同一值，不重新按后来变化的 cwd 解释，也不跳过实际读取时的既有权限和文件检查。
+- `visualization_ref` 是模型已获知的、已提交 `READY` HTML 内容引用。它不是数据库 row/blob ID；解析时必须验证当前 session/workspace 存在拥有该内容的 canonical `READY` 展示结果，知道摘要本身不授予访问权。
+- `review` 是可选布尔值，默认 `false`。`path` 与 `visualization_ref` 必须恰有一个；顶层不接受其他字段。
 
-- `path`：可选、非空本地文件路径；相对路径基于本次调用冻结的 `cwd`。
-- `visualization_ref`：可选、格式固定的已知最终可视化内容引用，只能原样复制 compiler 已提供的引用。
-- `review`：可选布尔值，默认 `false`。`true` 表示在订阅之外立即生成一次当前版本的模型回看截图。
+模型可见的工具及三个参数说明必须交代实际工作流和分岔：先用现有工具写/改完整的自包含 HTML；组件/图表可标记唯一主体，网站整页不标记；普通调用只预约下一条无工具调用的回复展示，允许继续修改，发布时才取最终文件；删除文件会取消该路径的待展示；`review=true` 当场尝试截图供模型检查，但不是最终版本锁定；无图片能力、读取/截图失败时仅回看失败而订阅仍有效；已发布的引用可在同一会话中重新订阅，不应臆造未知引用。描述只使用模型完成任务所需的概念，不泄露 canonical row、epoch、owner、exact-join 等内部机制。
 
-`path` 与 `visualization_ref` 必须恰有一个。顶层禁止额外字段。首版不提供 `html`、`visualization_id`、`title`、`mode`、`patch`、`replace`、`revision` 或内部数据库 blob ID 参数。
-
-`visualization_ref` 使用最终 HTML 已有内容摘要的稳定表示，而不是暴露数据库 row/blob ID、消息 ID 或可枚举的 visualization registry。引用成立仍须验证当前 session/workspace 内存在拥有该内容的 canonical visualization occurrence；知道摘要字符串本身不建立权限。
-
-### 4.2 工具描述必须说明
-
-- 先用现有文件工具创建或编辑 HTML，再传入路径；需要重用既有最终可视化时，原样传入已知 `visualization_ref`。
-- 路径来源会把该路径订阅到本轮最终回复，之后仍可继续编辑；引用来源订阅的是已经冻结的 immutable HTML，不能借此编辑源码。
-- 对路径来源，在本轮 terminal publication 前删除对应 HTML 会静默取消最终展示；无需调用额外的 unsubscribe 工具。
-- 普通调用不检查视觉效果，也不代表当前文件已经形成最终版本。
-- `review=true` 会附加一次当前版本截图；路径来源的最终展示仍读取本轮结束时的最新文件，引用来源的最终展示继续使用同一 immutable HTML。
-- 同一规范化路径或同一引用在同一轮重复调用不会产生重复的最终可视化。
-- 工具不是浏览器导航器、HTML 编辑器、文件写入器或永久发布服务。
-
-### 4.3 普通工具结果
-
-工具结果只用短文本陈述本次调用观察到的订阅状态。首次登记与已经登记必须使用不同但同样中立的文案：
+普通调用在现有 schema、权限、Hook 与 attempt 流程允许该工具执行后，只生成闭合来源值与进程内待登记 token；被拒绝的调用不生成 token。只有对应 canonical `SUCCESS` ToolResult 已提交或经现有 exact confirmation 确认后，active-turn owner 才原子 install 该 token；失败、取消或未确认时 discard，不提前留下可物化槽位，也不新增持久事实。成功调用只返回简短状态：
 
 ```text
-Visualization is now subscribed for this response.
+Visualization is subscribed for this response.
 ```
 
-```text
-Visualization is already subscribed for this response.
-```
+再次调用同一来源不是模型错误，也不得标作 duplicate、ignored 或 warning；统一的中立状态不提前声称自己是首次登记。`review=true` 每次都重新回看当前来源，不能因已订阅而跳过；成功时在相应状态后附加 `Current preview attached.`。工具结果不包含 HTML、blob ID、路径内容摘要，也不假称普通订阅已验证或持久化文件。
 
-不得把后者描述为 duplicate call、redundant、unnecessary、ignored、no-op、warning 或模型错误。再次调用可能是模型忘记了先前状态，也可能只是为了在修改后通过 `review=true` 重新查看当前效果；工具结果不能猜测调用动机。
+同一批待消费订阅以规范化路径或完整 `visualization_ref` 去重，第一次已确认 `SUCCESS` 结果的 token 被原子 install 时决定展示顺序。进程内 owner 提供原子 insert-if-absent；并发同源调用只形成一个槽位，所有成功调用返回同一中立状态。不同来源各占一项，一个调用只订阅一个来源。不为判断内容相同而提前读取文件，也不跨路径与引用来源去重。
 
-附加回看成功时，在对应订阅状态之后增加同一个中立后缀：
+带工具调用的 assistant message 不消费订阅。下一条无工具调用 assistant message 及其展示结果写入成功返回，或不确定回执经现有 exact confirmation 确认为同一 winner 后，消费这一批。若提交未确认，不得提前清空；若 turn 取消、失败或始终没有这样的消息，丢弃进程内订阅。订阅不写入 snapshot、不跨进程重启/新 Host 恢复，也不由子代理继承；**同一进程的 active-turn owner 在已采纳的 compaction successor 或前端 UI reconnect 后仍保留已确认的槽位**，不能把这些过程当成隐式取消。已消费后同一 turn 若继续执行，新的显式调用可开启下一批，包括再次订阅相同来源。
 
-```text
-Current preview attached.
-```
+### 删除即取消
 
-因此，首次订阅并回看与已经订阅后再次回看分别形成：
+路径来源以目标消息物化读取时的真实文件存在性为准。可靠的 not-found 表示取消该项：不产生 `READY`、`FAILED`、HTML blob、工具补充结果或 durable 取消记录；同批其他结果保留顺序并重新编号为连续 ordinal。删除后在读取前重建同一路径，则使用新内容。权限拒绝、I/O 错误、非普通文件或无法可靠判断的读取错误不得伪装成 not-found。引用来源没有本地路径，不适用删除取消。
 
-```text
-Visualization is now subscribed for this response. Current preview attached.
-```
+用户 steer 只在下一个 safe point 才能指导模型；模型经现有授权工具在物化前删除文件才能取消。若展示消息已先提交，随后才消费的 steer 不能追溯撤销它。已有 review 图片也不因后来删除工作文件而回滚。
 
-```text
-Visualization is already subscribed for this response. Current preview attached.
-```
+## 3. 显式回看
 
-结果不得包含 HTML 正文、数据库 blob ID、内部订阅对象、路径内容摘要、虚构的完成预览或“已经持久化”等不真实陈述。
+`review=true` 先接受订阅，再对该次调用时刻的路径字节或已冻结引用做一次性截图。它不建立 HTML 草稿 blob；模型看完截图后仍可编辑路径，最终展示照样以目标消息提交前读取的版本为准。
 
-`visualization_render` 的 canonical tool result 不是最终 HTML 的载体。最终 HTML 也不得写入 `tool_results.output_artifact_blob_id`，因为它不是工具执行输出 artifact，而是 terminal assistant message 的展示内容。
+截图使用已有 canonical 工具图片 occurrence、图片 blob、derived user-role 图片 carrier 和 `image_ref`；模型日后可用 `view_image(image_ref=...)` 重读像素，但不能据此恢复 HTML。现有 typed 工具图片结果、图片资源额度 quote/校验、图片结果交付以及 compiler 来源解析目前都按 `view_image` 收口；实施时只把 `visualization_render(review=true)` 的成功截图纳入这些既有 owner 的窄分支，以 tool name、call ID、冻结参数和图片 occurrence exact-join，不创建通用媒体框架或第二套截图存储。`review=true` 调用在执行前按现有图片 owner 预留本次调用的资源额度，实际截图仍须经现有图片验证并在该额度内；`review=false` 不预留图片额度。
 
-## 5. 当前轮订阅语义
+图片交付要求必须从**实际已结算的 typed 图片内容及其 canonical image occurrence** 推导，不能仅凭 `visualization_render` 工具名与 `SUCCESS` 推断。settlement、正常历史读取和 late outcome 均用同一闭合判别：只有实际带一张图片的成功回看按图片附件 FULL 交付；普通订阅或“订阅已接受、回看未生成”的纯文本成功结果不附图片，也不错误占用图片交付语义。现有 `view_image` 成功必须带图片的既有不变量保持不变；不为分类增加持久标志。截图遵循现有图片像素与字节边界，首版采样视口定为 **1200×800 CSS px、DPR 1、非 full-page**；这是模型回看的固定采样，不承诺与用户当前 UI 尺寸逐像素相同，不增加 turn 或任务总量上限。截图按 §5 的同一可选主体规则选择画面：唯一、可见且整个边界位于该采样视口中的主体，直接用浏览器的元素截图；无标记、多个标记或主体不适于安全裁剪时仍截固定视口整页，不失败或猜测其他主体。回看和用户 UI 的视口不同，因而不承诺像素一致。
 
-### 5.1 订阅登记
+若当前模型不支持图片输入，或本次读取、隔离加载、截图失败，工具结果仍如实说明订阅已接受以及“本次回看未生成”的公开原因；不附图片、不生成新的 `image_ref`、不回退到旧截图，也不撤销订阅。随后修复文件再调用 `review=true` 可以重新尝试。普通 `review=false` 调用不启动浏览器。
 
-普通调用只执行以下工作：
+回看与前端展示使用同一自包含、禁外部资源的 HTML 策略。一次性截图可使用维护中的浏览器依赖及其受限上下文；Pulsara 只负责来源、资源策略、截图物理边界和图片结算，不实现自己的浏览器引擎。现有通用 physical-I/O watchdog 会在逻辑超时后等待线程物理退出，不能单独用它保证卡死页面可终止。截图 owner 必须为浏览器加载、脚本等待和截图设置依赖自身的逐操作 deadline，并使该次隔离 context/浏览器进程在超时、取消或 Host close 时可以被终止和回收；不得把不可终止的浏览器调用留在需 join 的线程中。调用超时而 turn 仍在运行时，物理退出确认后按纯文本回看失败结算且订阅仍保留；turn 取消或 Host close 时则按 §2 丢弃未消费订阅。不增加 durable job 或浏览器调度框架。
 
-1. 解析恰有一个来源：按冻结 `cwd` 规范化 `path`，或校验 `visualization_ref` 的固定语法；
-2. 执行既有工具 schema、权限、Hook、attempt 和 settlement 流程；
-3. 在当前 active turn 的进程内 visualization subscription owner 中登记闭合来源值；
-4. 返回简短成功状态。
+## 4. 消息提交与 canonical 真相
 
-普通调用不打开文件、不读取文件字节、不解析 HTML、不读取 visualization blob、不启动浏览器、不生成截图、不建立 blob，也不向数据库写订阅行。引用的 canonical owner 与权限在 review 或 terminal publication 实际消费时验证；“已订阅”不声称引用已经成功物化。
+模型生成订阅后的下一条无工具调用 assistant message、但尚未完成 canonical publication 时，publication owner 一次性物化当前批次：
 
-来源登记成功只表示 runtime 接受了“本轮结束时尝试展示此来源”的请求，不表示路径当下存在、引用当下可解析、HTML 当下有效或最终结算一定成功。模型需要即时验证时应显式使用 `review=true`。
+1. 按订阅顺序取得来源；路径按现有 filesystem owner 读取当时的完整字节，可靠 not-found 按 §2 取消；引用按当前 session/workspace 的 canonical `READY` owner exact read。
+2. 只做提交前可确定的检查：普通文件、现有单次内容大小边界、非空 UTF-8 文本。工具描述要求作者提供完整 HTML 文档，但 publication 不自造 HTML 语法解析器，也不为了“预验证”启动浏览器；脚本、解析或资源加载问题属于展示时观察，不能在此阶段伪装成已知物化失败。
+3. 冻结本次候选的确切字节或公开失败结果。同一 assistant 候选的提交/确认重试沿用同一冻结值，不重读可变路径。
+4. 在该 assistant message 的同一 canonical 事务中，成功路径内容通过现有 blob owner 保存为 immutable `text/html`；成功引用复用已有 blob；各项有序 `READY` / `FAILED` 结果与消息一起提交。事务失败则消息、展示结果和本次 blob 都不成立。
+5. 消息提交确认后消费订阅。即使 steer 或 Stop Hook 使 turn 继续，也不把该批展示挪到后续消息。
 
-### 5.2 去重与顺序
+不保存 `write`/`edit` 中间版本、每次订阅版本或 review 所见 HTML。历史 UI 不能回读原路径；同一 workspace、相同 media type/codec 与相同字节可由现有 blob owner 自然复用，但每次已提交展示仍有自己的消息 occurrence。当前 blob ID 只由 workspace 与内容摘要构造：若相同字节已以其他 media type/codec 发布，再写 `text/html` 会报 identity conflict 并错误地失败整条消息。clean-v0 hard cut 必须让 blob 身份包含完整的 workspace、media type、codec 和内容摘要；逻辑内容摘要本身保持按字节计算，不增加 DTO fingerprint 或第二套 blob store。同字节跨 media type/codec 为不同 blob，同类型同字节仍 exact-reuse；HTML `visualization_ref` 继续使用原有内容摘要表示，并以 `READY` owner 验权，不能把 blob ID 充当引用。**同步 hard-cut 所有只凭 workspace＋摘要反算 blob ID 的消费者**：尤其 `PostgresCanonicalImageReferenceReadPort` 的 `view_image(image_ref=...)` 候选定位与 canonical refs/descriptor 校验，必须先由当前 session/workspace 的 canonical 图片 owner 和其 blob/descriptor 得到真实 media type、codec，再按新完整身份 exact-join 并读取；`image_ref` 仍是逻辑摘要，不能增加旧 ID fallback 或双读。
 
-- 同一 active turn 内，以闭合来源值作为进程内订阅槽位键：路径来源使用规范化本地路径，引用来源使用完整 `visualization_ref`。
-- 第一次成功订阅决定该可视化在最终消息中的相对顺序。
-- 同一闭合来源再次订阅保持原顺序且不增加第二项。
-- 不同来源按首次成功订阅的调用顺序展示。
-- 一个调用只订阅一个来源；多个可视化使用多个调用。
-- 不向模型暴露 `visualization_id`。canonical identity 由最终消息 occurrence 和 blob owner 建立，不由路径充当跨消息身份。
+唯一新增 durable 产品关系是 assistant message 的有序展示结果，包含所属 assistant entry、连续 ordinal；新执行的结果还须 exact-join 最初成功订阅的 canonical tool result，fork 导入结果的来源规则见下文。结果种类互斥：
 
-订阅 owner 必须提供原子的 insert-if-absent 语义，并把“本次新登记”或“此前已登记”作为 process-local 调用结果返回给工具 renderer。即使两个相同来源的调用并发到达，也只能有一个调用观察到首次登记；其他调用观察到已经订阅。首次成功登记决定顺序，后续调用不得移动、替换或复制该槽位。
+- `READY`：HTML blob 引用；没有失败原因。
+- `FAILED`：安全可公开的失败分类与简短说明；没有 HTML blob 或 `visualization_ref`。
 
-幂等键只使用 §5.2 的闭合来源值。两个不同写法规范化到同一路径时视为同一订阅；相同 `visualization_ref` 视为同一订阅。路径来源与引用来源不为了判断 HTML 内容是否相同而提前读取或跨来源去重，即使最终字节碰巧一致，也仍是两个明确来源的订阅。
+该关系的理由只有历史 HTML 稳定展示与历史失败占位可重载。新执行的展示只由 assistant message publication 写入；须约束同 session/workspace、assistant entry kind、连续 ordinal 和 `READY`/`FAILED` 字段互斥。`EXECUTED_TURN` 展示与其 assistant entry、首次订阅的 canonical tool result 同 turn exact-join；fork 产生的 `IMPORTED_HISTORY` 展示随已复制的 assistant entry 归属 imported group，`turn_id` 为 NULL，不能套用执行轮的同 turn 约束。不要为此新增订阅表、事件、subject slot、guard、job、receipt、checkpoint、恢复机制、版本链或通用 artifact registry。
 
-幂等性只约束订阅状态。`review=true` 是本次调用请求的即时观察，不是订阅槽位属性，也不得因来源已经订阅而跳过。每次显式 review 都重新读取该调用时刻的路径内容或已冻结引用、重新渲染并产生本次截图结果。
+提交前已知的权限、读取、编码、大小或引用解析失败，可作为 `FAILED` 随消息提交；其他成功项照常展示。数据库、blob 或消息事务失败是整次 publication 失败，不能转换成已提交的 `FAILED`。消息提交后浏览器才遇到的脚本错误或被阻止的资源请求，只是当次前端展示/回看的运行时错误，不能倒写 canonical 结果。`FAILED` 占位必须在历史重载后仍可见；可靠 not-found 取消没有占位。
 
-### 5.3 订阅生命周期
+`visualization_ref` 只从已提交 `READY` HTML 的现有内容摘要派生，同内容可有相同引用；解析时仍要 exact-join 当前 session/workspace 的 canonical owner。不借 tool result artifact 字段承载 HTML，也不向工具结果提前返回尚未提交的最终引用。
 
-订阅只属于当前 active turn：
+会话 fork 若复制了拥有展示结果的 assistant entry，必须在同一 fork 事务中复制其有序 `READY` / `FAILED` 结果，重映射 assistant entry ID，并沿用同 workspace 的 immutable HTML blob 与公开失败说明；否则子会话历史会丢展示，`visualization_ref` 也无法在子 session 验权。若首次订阅 tool result 也在 fork 的有效历史内，重映射其 result entry ID；若因合法的有效上下文 cut 未复制该 tool result，导入的展示只由复制后的 assistant entry 和结果 blob/失败说明拥有，不伪造 tool result、attempt 或跨 session FK。执行轮展示始终必须保有本轮订阅结果归属；导入展示不成为新的订阅执行事实。fork material reader 必须 exact-read 并验证所有被复制 `READY` 的 blob；任一 owner/blob 不一致时 fork 事务整体失败，不静默丢项。
 
-- terminal assistant message 成功提交后清空；
-- turn 被取消、失败或未形成 terminal message 时丢弃；
-- 进程在 terminal publication 前崩溃时允许丢失；
-- reconnect、snapshot 或历史读取不得尝试恢复未完成订阅；
-- 子代理与 ROOT 各自拥有自己的 active-turn 订阅，不隐式继承或合并。
+现有 blob GC 仅检查既有引用表；新 `READY` 展示关系也必须进入其可达性检查，直到最后一个拥有它的消息/会话被合法移除才允许回收 HTML blob。fork 复用同 workspace blob，不复制字节或建持久计数器；`FAILED` 没有 blob。实施时同时测试原会话、fork 子会话和源消息清理后的历史读取与 GC，不增加独立保留 job。
 
-这是一项本轮输出提示，不是需要 durable recovery 的执行事实。不得为它新增 receipt、checkpoint、event、job、lease、generation、replay reducer 或 repair path。
+## 5. Provider 与前端投影
 
-### 5.4 删除即取消
+普通订阅只产生正常 tool call 和短文本 tool result。HTML 字节、展示标记与前端 iframe 不进入 provider prompt。仅显式回看图片进入现有工具图片 carrier；本功能不创建新的 SYSTEM/tools/messages 重建边界。
 
-路径订阅以 terminal publication 实际读取时的文件存在性作为最终取消判断：
+最终 `visualization_ref` 直到所属 assistant message 提交后才存在。若以后发生 provider call，compiler 首次将该 assistant entry 追加到 provider 历史时，紧随它派生一个不显示于 UI 的稳定 user-role metadata carrier，逐项告知实际 `READY` 引用；没有后续调用则不额外唤醒模型。carrier 不写进 canonical 用户正文、不改变 recent human 或 Hook/Skill 匹配，后续调用保持同一历史位置和字节；compaction 随所属 assistant evidence 取舍，不维护全会话引用清单。`FAILED` 和取消项不产生引用。
 
-- 如果路径不存在，移除该进程内订阅槽位并继续结算其他内容；
-- 不返回新的工具结果，不生成 visualization occurrence、失败 placeholder、HTML blob、durable cancellation row 或事件；
-- 多个路径中只取消缺失的项，其余项保持原相对顺序；成功 occurrence ordinal 按剩余项连续生成；
-- 订阅后删除、随后又在最终读取前重新创建同一路径时，按最终存在的最新文件正常物化；runtime 不保存或解释中间存在性历史；
-- 已经产生的 review 工具结果和截图 occurrence 不因后来删除源 HTML 而回滚；删除只取消 terminal message 的最终 HTML 展示；
-- `visualization_ref` 来源没有可删除的本地路径，不适用本节规则。引用不可解析、无权访问或 blob 损坏仍按真实引用失败处理。
+前端收到的是 assistant entry 所拥有的有序展示结果，效果类似识别一枚内部可视化标记，但**不解析模型正文中的任意路径或伪造标记**。协议在 `CanonicalEntry` 暴露 `READY` / `FAILED` 摘要；HTML 字节沿现有内容读取链路增加窄目标 `(session_id, assistant_entry_id, ordinal)`，读取时重新验证该 `READY` owner，不能用 blob ID 或摘要直接绕过授权。`FAILED` 摘要足以显示占位，无 HTML 读取。
 
-“路径不存在”只包含既有 filesystem owner 可靠识别的 not-found 结果。权限拒绝、读取 I/O 失败、路径指向目录/非普通文件、内容非法、安全校验失败或渲染失败不得被伪装成取消订阅。
+assistant 正文与工具卡仍在普通对话版心；每个 `READY` 结果在它所属消息下独占一行，不继承正文 max-width，但也不强制铺满中央工作区。未标记主体时展示整页，宽度上限 `960px`、高度上限 `min(70dvh, 560px)`，超出部分在 iframe 内滚动。若 HTML 中恰有一个 `data-pulsara-visualization-root`，在独立于外层裁剪尺寸的 iframe 采样视口中量取该元素的实际渲染边界，只在边界有限、可见且完整落于采样视口内时裁出主体；展示宽高取主体尺寸，仍受上述宽高上限约束。主体旁的整页背景不会填满对话区。面板开合、响应式布局、字体或内容变更后重新量取；不能因外层缩小导致 iframe 视口随之缩小，再引起不断重排的反馈环。标记缺失、重复、隐藏、越过采样视口或测量无效时安全退回整页视口，不猜主体、不把它记成 durable 失败。作者应让想单独展示的主体在采样视口内响应式适配；本工具不替任意超宽/超高网页重写布局。面板不能进入侧栏下方或造成应用级横向滚动。`FAILED` 用短占位说明，不伪装为工具卡。
 
-## 6. `review=true`：订阅之外的即时回看
+隔离 iframe 只向父页面报告“整页/主体”与有限边界数据；父页面仅接受**该 iframe 的**消息，校验数值和边界，不接收 HTML、路径、脚本或导航命令。测量协议是可丢失的前端布局观察，不新增持久状态、前端回执或跨进程恢复；没有测量结果时展示整页。作者脚本也在该隔离 iframe 中，因此不得把消息里的几何数值当成授权或可信内容。截图直接使用浏览器元素截图，不另造 HTML 解析/裁剪引擎。
 
-### 6.1 行为顺序
+前端只用受限 iframe 显示 canonical HTML，不把它注入 Pulsara 主 DOM。iframe 可执行该 HTML 的内联可视化脚本，但必须隔离主页面 DOM、凭据、cookie、存储和内部 API，阻止顶层导航、弹窗、下载、任意本地文件及外部网络资源。可以复用现有内容读取并在 iframe 中装载字节；若为施加浏览器 CSP 需要一个文档响应入口，它只能服务经授权的 canonical occurrence，不能变成任意路径/资产服务器。实施必须用浏览器测试实际证明上述隔离与禁网，而不能把 terminal 的网络权限当成浏览器授权。
 
-`review=true` 不建立另一种工具模式。runtime 先按 §5 接受订阅，再执行附加回看：
+## 6. 明确不做
 
-1. 原子登记来源并取得“本次新登记”或“此前已登记”的状态；无论是哪一种状态都继续本次回看；
-2. 路径来源读取该文件在本次回看时刻的当前字节；引用来源按当前 session/workspace 的 canonical occurrence 解析并 exact read 已冻结的 HTML blob；
-3. 完成 HTML 安全校验；
-4. 在隔离渲染环境中加载并截图；
-5. 让工具结果按 §4.3 如实报告订阅状态，并沿现有工具图片结果机制附带截图；
-6. compiler 按现有图片规范派生 user-role 图片 carrier，并给截图提供普通 `image_ref`。
+- 不提供 HTML 参数、可视化专用 write/edit/patch、草稿版本、撤销/分支、latest pointer 或跨重启订阅恢复。
+- 不提供通用浏览器导航器、站点托管、分享 URL、任意本地资源映射或内嵌联网代理。
+- 不内置或自动注入图表库；不提供 `_vendor`、profile metadata、资产 manifest 或旧库版本保留机制。第三方代码若用于首版嵌入展示，应由现有授权工具打包进自包含 HTML。
+- 不因脚本运行时错误修改已提交 canonical `READY`，也不为失败另开事件、表或后台修复任务。
+- 不把图片 `image_ref` 当作 HTML 引用，不让前端从历史路径重读文件，不把 HTML 自动重放进 provider 输入。
+- 不增加 feature flag、旧/新双轨、兼容 schema 或迁移期 fallback。
 
-回看读取的 HTML 不写新的 PostgreSQL HTML blob，也不成为路径来源的最终展示版本。路径来源可以在模型看到截图后继续使用 `edit` 修改原文件；最终消息仍按 §7 重新读取当时的最新内容。引用来源保持原 immutable HTML，只额外产生截图结果。
+## 7. 实施与验收
 
-### 6.2 截图引用复用
+实施前检查现有 builtin catalog、DirectKernelToolPort、权限/Hook、active-turn owner、assistant publication 与 exact confirmation、PostgreSQL blob、图片 result/compiler、terminal canonical 内容读取和前端消息投影。只扩展这些 owner 的必要窄字段与分支，不复制工具、存储、图片或浏览器框架。开发期采用 clean-v0 hard cut，生产代码、schema baseline、协议、前端、工具描述与测试只保留新合同。
 
-回看截图是普通 canonical 工具图片 occurrence，不新增 `visualization_image_ref` 或第二套媒体引用。只要模型仍知道其 `image_ref`，以后可以调用：
+至少证明：
 
-```json
-{"image_ref":"sha256:..."}
-```
+1. 普通订阅不读文件、不启动浏览器、不写 HTML blob；并发和重复同源调用只有一个有序槽位，状态文案中立。ToolResult 未确认 SUCCESS、确认失败或取消时不 install；已确认后 install 与 assistant publication 的顺序用 settlement 故障测试证明。
+2. 订阅后继续编辑只展示消息提交前的最终版本；带工具调用的 assistant message 不消费订阅；可靠 not-found 静默取消，其他已知读取失败随消息提交 `FAILED` 且重载仍可见。
+3. 待处理 steer 使 turn 继续时，已提交的无工具调用 assistant message 立即展示并消费订阅，后续消息不重复附着；提交不确定回执的确认重试不重读路径。
+4. `READY` HTML 与所属消息同事务提交，修改/删除原文件不影响历史；数据库或 blob 事务失败不留下孤儿结果。相同字节跨 media type/codec 发布不会碰撞，同类型同字节 exact-reuse，`visualization_ref` 仍按当前 session/workspace 的 `READY` owner 验权。现有图片 `image_ref` 的 canonical refs 校验和 `view_image` 重读在新 blob 身份下仍正确，且无旧 ID 兼容路径。
+5. `review=true` 每次查看当前版本；成功截图通过扩展现有 typed 图片结果、额度 quote/校验、交付和 compiler 来源分支形成可重读的 `image_ref`，不增加独立图片存储。settlement、历史读取和 late outcome 对实际带图片的成功结果要求 FULL；普通订阅、无图片能力模型和回看失败均只有纯文本结果，不伪造图片附件或 FULL 图片语义，订阅仍成立。
+6. 前端从 canonical occurrence 展示而非解析模型正文或可变路径；HTML 不进入 provider 输入，引用 carrier 在下一次真实 provider call 中稳定追加，冷启动、append、compaction、reconnect 不破坏已安装前缀。
+7. 工作文件无需 Pulsara 专用 metadata 即可由普通浏览器打开；Pulsara 嵌入与回看只接受自包含资源策略。浏览器测试覆盖外部请求、`file:`、主应用 DOM/API/凭据、导航/弹窗/下载的阻断，以及无标记整页、唯一标记裁出主体、重复/无效标记安全退回整页、动态尺寸与面板开合后重测、主体外背景消失、超出正文版心但不强制铺满工作区的布局。模型可见工具/参数说明须让模型正确选择组件主体或整页路径，并理解普通订阅、即时回看、继续编辑、删除取消和失败后继续的结果。
+8. 真实 provider dogfood 覆盖 `write` / `edit` → subscribe → review → edit → 无工具调用 assistant message 展示，并保留实际工具结果、截图 `image_ref`、`READY` HTML blob 和失败/取消边界的可复核证据；证据只排除真实凭据值。
+9. 截图浏览器遇到永不结束的脚本/加载或取消时，单次操作 deadline 与进程终止使物理执行可回收；仍在运行的 turn 获得“订阅已接受、回看未生成”的纯文本结果，Host close 不被卡死页面无限阻塞。
+10. fork 复制范围内的 `READY` / `FAILED` 展示随 assistant entry 导入，归属重映射正确；有效 cut 省略源 tool result 时不伪造执行事实。原会话或 fork 子会话仍引用 HTML 时 GC 不删除 blob，合法移除最后一个 owner 后才可回收。
+11. 相对路径始终锚定冻结的 `workspace_root`；terminal 后续 `cd` 不改变订阅目标，review 与最终读取指向同一规范化路径，绝对路径和 `..` 继续走现有权限语义。
+12. 同一 active turn 中 subscribe → compaction successor／前端重连 → 最终消息仍展示；崩溃和新 Host 不恢复槽位。
 
-由现有 `view_image` 重新读取截图。该引用只能恢复截图像素，不能恢复、反编译或编辑 HTML 源码。
-
-为满足现有图片引用的重读合同，截图字节按现有工具图片 blob 规则持久化。这是用户显式要求回看所产生的图片 occurrence，不等于保存 HTML 编辑历史。一次 turn 内多次显式 review 可以产生多张截图；HTML 仍只在 terminal message 落定时保存一个最终版本。
-
-### 6.3 回看失败
-
-回看失败不撤销已经接受的订阅。工具结果先按 §4.3 如实说明“本次新登记”或“此前已登记”，再中立说明当前预览未生成，并给出既有公开错误分类允许披露的具体原因。它不得因已经订阅而跳过回看，也不得把回看失败描述成重复订阅造成的错误。模型可以继续编辑，再次请求回看。
-
-不得因回看失败写入一个 HTML 草稿 blob，也不得把上一次成功截图误称为当前文件预览。
-
-## 7. Terminal message 落定与唯一 HTML 持久化时机
-
-### 7.1 最终物化顺序
-
-模型已经生成 terminal assistant message 的文本、但该消息尚未完成 canonical publication 时，terminal publication owner 对当前 turn 的订阅做一次最终物化：
-
-1. 按订阅顺序逐个取得闭合来源值；
-2. 路径来源在真实 filesystem 权限和资源边界内读取当时的最终文件字节；若得到可靠 not-found，则按 §5.4 静默取消该项并跳过后续物化步骤；引用来源验证当前 session/workspace 的 canonical owner 并 exact read 已有 immutable HTML；
-3. 校验文件类型、UTF-8/HTML 结构和可视化安全策略；
-4. 在隔离环境中确认内容可形成可展示结果；
-5. 冻结确切 HTML 字节；
-6. 路径来源通过现有 canonical blob owner 保存 immutable `text/html` 内容；引用来源直接复用已验证的现有 blob；
-7. 在 terminal assistant message 上提交有序 visualization occurrence，引用对应 blob 和来源 tool call；
-8. 消息 publication 成功后清空进程内订阅。
-
-最终读取与冻结是 publication 的组成部分，不能先发布一条只含可变路径的历史消息，再异步补写内容。历史 UI 的加载不得回到本地路径重新读文件。
-
-### 7.2 只保存最终版本
-
-数据库只保存每个最终 visualization occurrence 所引用的最终 HTML 字节：
-
-- `write` / `edit` 的中间版本不进入 visualization HTML blob；
-- 普通订阅不产生 blob；
-- review 不产生 HTML blob；
-- 同一路径重复订阅不产生多个最终 occurrence；
-- 同一 `visualization_ref` 重新订阅会创建当前 terminal message 的新 occurrence，但复用已有 HTML blob，不复制内容版本；
-- 内容相同的最终 HTML 可以沿现有 blob 内容身份自然复用字节，但每条消息的展示 occurrence 仍分别成立；
-- 不维护 visualization revision table、版本链、latest pointer、草稿表或 path-to-blob registry。
-
-最终 occurrence 应引用 existing blob，并直接属于 terminal assistant message。不要把 HTML blob 挂到 canonical tool result，也不要为了证明订阅执行过而新增 durable event。
-
-### 7.3 最终物化失败
-
-某个订阅在 terminal publication 时无法读取、校验或渲染，不得持久化不可信 HTML，也不得回退到某次 review 的旧内容。其他成功订阅和 terminal 文本可以正常提交。
-
-路径 not-found 不是本节所称失败，而是 §5.4 的取消信号。只有可靠区分为其他错误时才进入失败投影；unknown read failure 不得猜测成 not-found，也不得静默吞掉。
-
-失败项应在该 terminal message 的展示投影中形成一个简短、用户可见的“可视化未能附加”占位及安全的公开原因；它不伪装成工具失败重跑，也不触发新的模型调用。实现应复用 terminal message 的 occurrence/投影事务边界表达该结果，不为失败增加后台修复任务。
-
-如果 terminal message 的 canonical transaction 整体失败，则沿既有 message publication 失败语义处理；不得单独提交孤立 HTML blob owner 或无消息归属的 visualization occurrence。
-
-## 8. Canonical、provider 与 UI 投影
-
-### 8.1 Canonical 关系
-
-最终需要的是“terminal assistant message 拥有零到多个有序 visualization occurrence”的窄关系。每个成功 occurrence 至少能解析到：
-
-- terminal assistant entry；
-- occurrence ordinal；
-- 最终 HTML blob；
-- 发起订阅的 tool call / attempt 归属；
-- 固定的展示 kind。
-
-具体 SQL 名称由实现阶段结合 clean-v0 baseline 确定。本规格不授权通用 artifact registry、visualization project 表、revision 表或跨消息 mutable pointer。路径已经存在于原 tool arguments，不应为展示再复制成新的 durable authority。
-
-`visualization_ref` 复用最终 HTML blob 的内容摘要稳定表示。它是内容引用，不是 occurrence ID；同一 HTML 被多个消息展示时可以具有相同引用，而每条消息的 occurrence 与 ordinal 仍分别成立。解析引用必须同时验证当前 session/workspace 存在允许的 canonical visualization owner，不得仅凭内容摘要直接读取任意 blob。
-
-### 8.2 Provider 输入
-
-- 普通订阅只产生正常的 tool call + 短文本 tool result，保持现有消息 suffix 追加语义。
-- 最终 HTML 和聊天 UI visualization projection 不自动注入后续 provider 输入，不把任意 HTML 当 prompt 文本。
-- 只有 `review=true` 时，截图通过既有工具图片 carrier 成为一次明确的模型视觉输入。
-- 不因订阅、最终物化或 UI 重载重建当前 epoch 的 SYSTEM/tools/messages 前缀。
-
-### 8.3 下一轮的 `visualization_ref` carrier
-
-最终引用在 terminal publication 时才存在，不能伪造为更早的 tool result。下一次真实用户输入触发 provider call 时，上一条 terminal assistant entry 也首次成为 provider 输入的新 suffix；prompt compiler 在该 assistant entry 之后、真实用户消息之前派生一个独立的 user-role metadata carrier。每个实际 visualization occurrence 使用同一 formatter，形如：
-
-```text
-{"pulsara_visualization":{"visualization_ref":"sha256:..."}}
-```
-
-该 carrier：
-
-- 不是 canonical 用户消息，不写回用户正文，不显示在聊天 UI；
-- 不改变 recent human、队列归属、Hook/Skill 文本匹配或用户消息 Figure 语义；
-- 不与下一条用户正文拼接，避免让模型误认为该 JSON 是用户输入；
-- 只描述紧邻的上一条 terminal assistant message 所拥有的实际可视化 occurrence；同一内容出现多次时不按摘要删除 occurrence；
-- 在后续 compiler 调用中保持在同一历史位置和相同字节，满足 epoch 内 provider prefix append-only；
-- 不主动触发一次额外模型调用。没有下一条用户输入时，不需要为了“回传 ID”唤醒模型；
-- 在 compaction 中随其所属 assistant evidence 一起保留或省略，不维护无限增长的全会话引用清单。
-
-这与 review 图片的 `image_ref` 时序不同：review 图片引用在工具结果阶段已经存在，可以在当前轮立即交给模型；最终 HTML 的 `visualization_ref` 只能在后续 provider call 中首次出现。
-
-### 8.4 前端展示
-
-- 可视化展示属于 terminal assistant message，而不是中间 tool bubble。
-- tool bubble 只显示“已订阅”或“已订阅并附加回看”的简短状态；review 截图仍按现有工具图片 UI 展示。
-- 最终可视化按 occurrence ordinal 出现在 terminal message 的引用区域；canonical ownership 不因宽屏布局而改变。
-- 历史重载直接读取 canonical blob projection；不依赖 cwd、原文件或仍存活的 runtime。
-- HTML 必须运行在隔离容器中，不能直接注入 Pulsara 应用 DOM。
-
-### 8.5 完整工作区宽度，而不是对话版心宽度
-
-普通用户/assistant 消息、思考过程和工具卡可以继续使用居中的 conversation measure。最终 HTML visualization 是该排版的明确例外：它虽然在 transcript 流中由 terminal assistant message 拥有，但 visualization shell 必须横向 breakout 到当前中央工作区的完整可用宽度。
-
-这里的“完整可用宽度”指：
-
-```text
-主工作区可滚动内容视口宽度
-- visualization shell 自身必要的左右安全留白
-= visualization 可用宽度
-```
-
-它不包括全局导航栏、左侧会话栏、右侧当前会话/能力检查器，也不能延伸到这些面板下方。右侧检查器打开、关闭或调整宽度时，可视化应随中央工作区重新布局；不得继续使用一个基于普通正文的固定 `max-width`。窄屏或面板压缩时同样以当时的中央工作区为准，不强行维持桌面宽度，不造成应用级横向滚动。
-
-实现可以使用 transcript grid 的 full-bleed track、受控 portal 或等价布局机制，但必须满足：
-
-- assistant 的头像、正文、引用说明和操作仍留在普通对话版心；
-- 只有最终 HTML visualization shell 横向突破版心；
-- shell 使用 `inline-size: 100%` 对应中央工作区可用 track，并取消 conversation message 的 max-inline-size 继承；
-- iframe/document viewport 跟随 shell 宽度，HTML 内部可以使用响应式布局；
-- 多个 visualization occurrence 各自占一行完整可用宽度，仍按 occurrence ordinal 排列；
-- 宽屏布局只是前端 projection，不复制消息、不改变 canonical entry 或 provider 内容。
-
-用户提供截图中的绿色框只标识本节的**横向范围**。绿色框的上、下边界和纵向高度不构成产品要求，也不得据此写死 iframe 高度、最小高度、最大高度、viewport 比例或占满剩余屏幕等规则。可视化的纵向尺寸需要由独立的高度/内容适配合同决定；在该合同明确前，本规格只冻结横向 full-width 行为。
-
-## 9. HTML 安全与资源边界
-
-### 9.1 Sandbox 安全边界
-
-Pulsara 负责安全展示用户/模型提供的 HTML，而不是信任其脚本。首版至少应满足：
-
-- 使用隔离 iframe / 独立受限 origin 或等价隔离边界；
-- 禁止访问 Pulsara 页面 DOM、认证信息、cookies、本地存储和应用内部 API；
-- 顶层导航、弹窗、下载和本地文件访问继续受 sandbox 与现有权限策略控制；
-- 网络请求、外部脚本和其他资源遵循调用时已经存在的网络权限、Hook 与用户确认语义，不由 visualization 功能另建一套永久禁止规则，也不得借渲染绕过现有策略；
-- 不通过前端 `dangerouslySetInnerHTML` 一类路径把 HTML 直接注入主应用；
-- 最终物化和 review 使用同一安全策略，避免“回看可用、最终不可用”或安全边界分叉；
-- 继续使用现有文件读取、工具执行、浏览器渲染和 blob 物理资源边界，不为本功能发明任意总历史或总任务上限。
-
-这里必须区分两层边界：Pulsara 内嵌 renderer 要隔离宿主权限，但工作区中的 HTML 仍是用户拥有的普通物理文件。模型可以在现有授权范围内使用本地模块、多个配套文件、包管理器构建产物和联网资源；用户也可以脱离 Pulsara 手动打开它。`visualization_render` 本身只订阅或回看，不负责安装依赖，安装、构建和文件修改继续由现有 terminal / write / edit 及其权限 owner 负责。
-
-### 9.2 内置常用可视化库池
-
-首版预装以下三个本地、版本固定的库 profile。它们作为普通、版本化的本地资源按需提供给 visualization HTML，但不加入普通 Pulsara 聊天页面的首屏 bundle：
-
-| alias | sandbox 全局 | 主要用途 |
-|---|---|---|
-| `echarts` | `window.echarts` | 默认通用方案；折线、柱状、散点、饼图、热力、关系图和常规交互式 dashboard 图表 |
-| `vega-lite` | `window.vega`、`window.vegaLite`、`window.vegaEmbed` | 声明式统计图、分面、组合视图、自动比例尺/图例和可验证 JSON specification |
-| `d3` | `window.d3` | 需要自定义 SVG/Canvas、比例尺、布局、过渡或非标准图形时的底层能力 |
-
-这些 profile 按抽象层和任务类型分工：一般业务图、交互图和 dashboard 优先 ECharts；字段编码、统计变换、分面和声明式分析图优先 Vega-Lite；只有成品图表库无法表达的自定义图形、布局或地图才使用 D3。非常简单且无需库能力的单图继续使用原生 SVG。默认每份 HTML 只声明一个主要 profile；不得仅为“可能用到”而同时声明多个库。
-
-ECharts profile 至少包含 line、bar、scatter、pie，以及 grid、dataset、transform、title、tooltip、legend、dataZoom 和一种浏览器 renderer。Vega-Lite profile 作为一个闭合能力同时提供 Vega、Vega-Lite 与 Vega-Embed；不能要求 HTML 自行从网络拼齐三项依赖。D3 使用官方浏览器 bundle。
-
-Chart.js 不进入首版默认库池。它的常用 line、bar、scatter、pie/doughnut、radar、bubble、tooltip、legend、动画和响应式能力与 ECharts 高度重叠；主要差异是 API 简洁度和 bundle 取舍，而不是新增一类 Pulsara 无法完成的日常可视化。这只是 Pulsara 默认分发面的取舍，不是使用禁令；模型或用户仍可在既有权限下安装、打包或正常引用 Chart.js。
-
-Plotly 不进入首版默认库池。其当前官方条款对随桌面软件分发另列许可要求；只有完成明确的产品/法务许可审查后，Pulsara 才能把它作为随应用分发的 versioned profile。该分发决定不限制用户或模型在普通文件中自行安装、打包或引用 Plotly；这类使用继续遵循用户授权、网络策略和适用许可。
-
-### 9.3 声明、按需加载与版本冻结
-
-HTML 通过固定 metadata 声明实际需要的内置 alias，并用普通浏览器资源标签引用工具描述所给出的具体版本路径。例如，下列 `<profile-version>` 在实际文件中必须替换为 concrete version：
-
-```html
-<meta name="pulsara-visualization-libs" content="echarts">
-<script src="./_vendor/echarts/<profile-version>/echarts.min.js"></script>
-```
-
-确有必要时可以用逗号声明多个不同 alias：
-
-```html
-<meta name="pulsara-visualization-libs" content="d3, echarts">
-<script src="./_vendor/d3/<profile-version>/d3.min.js"></script>
-<script src="./_vendor/echarts/<profile-version>/echarts.min.js"></script>
-```
-
-没有该 metadata 时，runtime 不解析或映射任何 Pulsara 内置图表 profile；HTML 自己通过普通 `<script>`、`<link>`、ES module 或构建后的 bundle 引用其他资源仍然有效。runtime 必须在作者脚本执行前解析、去重、校验声明的 profile，并把对应 concrete local asset path 映射进隔离 renderer；真正的库加载仍由 HTML 的标准资源标签完成。未知 alias 只表示 Pulsara 无法提供该内置 profile，并明确报告这一点；它不构成对 HTML 里其他正常资源引用的全局否决。
-
-“预装”表示宿主为离线、稳定和低摩擦创作提供可信的本地 immutable library assets，而不是把所有库注入每个 iframe，也不是形成唯一 allowlist。内置 profile 应暴露为普通 HTML 可以引用的、版本固定的本地资源（例如 `.pulsara/visualizations/_vendor/<alias>/<profile>/...`）；metadata 只帮助 runtime 解析、校验、映射和冻结对应 manifest，不能成为只能在 Pulsara 中运行的私有加载协议。review 和 terminal publication 只映射该 HTML 明确声明的内置 profile；普通聊天前端和未使用相应库的可视化不承担其下载、解析或执行成本。
-
-模型若要安装其他依赖，应调用现有 terminal 工具并走相同的 permission / Hook / 用户确认链路；`visualization_render` 不运行 `npm install`，也不偷偷从用户环境猜测包位置。安装完成后，HTML 可以引用明确的本地构建产物。CDN 或其他远程资源在 renderer 中能否访问，由现有网络权限和 sandbox policy 决定；被拒绝时应报告具体受阻资源，不能提升权限或静默替换依赖。
-
-final visualization occurrence 除 HTML blob 外，还要冻结已经解析的 versioned runtime profile/asset manifest。历史重载、即时 review 和最终展示必须使用相同 profile；应用升级不得让已有 occurrence 自动漂移到新的库版本。旧 profile 的保留属于真实的历史渲染依赖边界，不是 HTML 草稿版本或 visualization revision history。
-
-上述冻结保证只覆盖 Pulsara 自带 profile。用户自行引用的 CDN、工作区包产物或其他配套文件不会因为订阅而自动复制进 PostgreSQL；如果这些资源后来变化或消失，历史展示可能无法逐字节复现。需要长期可复现时，模型应把依赖打包进单文件 HTML 或稳定的本地 bundle。首版接受这一明确限制，不以禁止外部库来伪造可复现性。
-
-tool description / 模型指令应列出可用的内置 alias、对应全局和首选场景，并明确它们不是外部库 allowlist，同时给出响应式模板。由于可视化 shell 会随左右面板变化，ECharts 等需要显式 resize 的库必须通过 `ResizeObserver` 或宿主提供的薄生命周期适配响应容器尺寸变化，并在 iframe 销毁时释放实例。
-
-### 9.4 普通浏览器打开合同
-
-- 工作文件必须是合法的完整 HTML document，用户可从文件系统直接打开；Pulsara metadata 在普通浏览器中应无害地被忽略。
-- 内置 profile 的示例模板应使用普通、可解析的本地资源引用；不能只依赖宿主注入一个浏览器外不存在的全局变量。
-- 如果作者选择 CDN、开发服务器或其他远程依赖，手动打开时由浏览器与用户环境决定是否可访问；Pulsara 不伪装成这些依赖的唯一入口。
-- 如果作者选择需要构建的 npm 包，产出的 HTML / bundle 应是可被普通浏览器消费的文件；安装和构建不是 `visualization_render` 的职责。
-- 离开 Pulsara 手动打开时不再受 Pulsara iframe sandbox 保护，而受浏览器自身安全模型、用户系统配置和资源来源策略约束。
-
-## 10. 并发、取消与文件变化
-
-- 路径来源只在 terminal publication 时读取一次最终版本；runtime 不建立文件 watcher。引用来源只解析并 exact read 已冻结内容。
-- `write` / `edit` 与 review 的文件读取按既有工具调用顺序和并发规则结算。
-- 相同来源的并发订阅通过 active-turn owner 的原子 insert-if-absent 线性化；只能有一个“首次订阅”结果，最终仍只有一个槽位。
-- review 只描述它实际读取到的那个时刻，不承诺与最终版本相同。
-- terminal publication 读取期间取得的完整字节形成 frozen candidate；之后文件再变化不影响本次消息。
-- 如果读取期间检测到既有文件完整性/稳定性条件不成立，按最终物化失败处理，不循环重试直到“碰巧稳定”。
-- 用户取消 turn 时，尚未提交的订阅和进程内 HTML bytes 一并丢弃；已经接纳的 review 图片结果按既有 tool settlement 语义处理。
-- 用户 steer 后由文件工具完成的删除若先于最终物化结算，则该路径按 §5.4 取消；runtime 不需要 watcher、steer 专用事件或额外 unsubscribe 状态。
-
-## 11. 明确不做
-
-本轮不实现：
-
-- 在 `visualization_render` 参数里直接传 HTML；
-- visualization 专用 write/edit/patch/diff 工具；
-- 根据截图反向编辑 HTML；
-- 自动保存每次 `edit`、每次订阅或每次 review 对应的 HTML 版本；
-- visualization revision history、undo、branch、merge 或 latest-version registry；
-- 未完成订阅的跨重启恢复；
-- 后台发布站点、分享链接或永久 URL；
-- visualization 列表、搜索、分页、历史发现或数据库源码编辑入口；
-- 独立的 `visualization_unsubscribe` 工具或持久化取消记录；路径来源通过最终读取时 not-found 表达取消；
-- 把 `image_ref` 当 HTML 引用；
-- 在 provider 历史中自动重放 HTML；
-- 让前端从任意历史本地路径重新加载内容；
-- 让 `visualization_render` 自己安装依赖、调用包管理器、修改 lockfile 或替模型完成构建；这些动作继续由现有 terminal 与权限链路负责；
-- 在未获得现有权限或用户确认时自动联网、安装包或执行外部资源；
-- 承诺把任意 CDN、本地配套文件或用户安装依赖自动冻结进 canonical HTML blob；首版只对 HTML bytes 和已解析的 Pulsara 内置 profile 提供历史冻结；
-- 未经许可审查把 Plotly 作为 Pulsara 默认随应用分发的内置 profile；这不限制用户自行安装或引用；
-- 为本功能增加 feature flag、旧/新双轨、兼容 schema 或迁移期 fallback。
-
-## 12. 实施落点原则
-
-实施前必须先检查并复用现有 owner：
-
-1. builtin catalog 与 tool schema/description；
-2. DirectKernelToolPort、Hook、permission、attempt、settlement；
-3. active-turn process-local observation/state owner；
-4. terminal assistant message publication transaction；
-5. PostgreSQL canonical blob store；
-6. `view_image` 工具图片 result、derived user-role carrier 与 `image_ref` lowering；
-7. 浏览器/前端对 canonical terminal message 的有序投影；
-8. 前端构建系统、sandbox asset loader 与第三方 license/NOTICE 汇总 owner；
-9. terminal 包管理器调用、网络访问、Hook、permission 与用户确认 owner。
-
-只增加 visualization 所必需的窄 typed value、进程内订阅 owner 和最终 message occurrence。若现有 blob、图片 carrier、安全浏览器或 message attachment 扩展点已经足够，必须使用这些扩展点，不复制存储引擎、图片协议、tool result compiler 或 iframe runtime。
-
-由于仓库仍处于开发阶段，实施采用 clean-v0 hard cut：生产代码、数据库 baseline、协议 DTO、前端 projection、工具描述、测试和本规格一起更新，不增加 legacy alias、双写、fallback 或迁移期适配。
-
-## 13. 验收矩阵
-
-至少覆盖以下行为：
-
-1. 普通订阅只返回短状态，不打开/读取 HTML，也不写数据库。
-2. 订阅后继续多次 `edit`，最终只展示 terminal publication 时的最新内容。
-3. 同一规范化路径或同一 `visualization_ref` 重复订阅只产生一个最终 occurrence，顺序保持第一次订阅位置。
-4. 多个不同来源按首次订阅顺序展示。
-5. 首次订阅返回中立的 now subscribed 状态；后续相同来源返回中立的 already subscribed 状态，不出现 duplicate、ignored、unnecessary、warning 或归责文案。
-6. 相同来源并发调用只能有一个首次订阅结果，最终仍只有一个订阅槽位和 occurrence。
-7. `review=true` 在首次和后续订阅调用中都执行当前回看；随后编辑不会让最终消息错误使用旧 review 版本。
-8. review 截图具有合法 `image_ref`，可由 `view_image(image_ref=...)` 重读。
-9. 多次 review 可以形成多张图片 occurrence，但数据库中不产生对应的 HTML 草稿版本。
-10. 路径来源在 terminal publication 时只保存一个最终 HTML blob/occurrence；引用来源复用已有 blob，只新增当前消息 occurrence。
-11. 提交后修改或删除原文件，历史消息展示不变。
-12. review 失败不撤销订阅；工具结果保留准确且中立的首次/已订阅状态，修复文件后再次 review 可以成功。
-13. 最终读取失败不回退到旧 review，不提交不可信 HTML，terminal 文本和其他成功可视化仍可用。
-14. turn 取消或进程在 publication 前退出，不留下订阅行、孤立 occurrence、恢复 job 或 HTML 草稿版本。
-15. 当前轮普通订阅不产生图片 carrier；review 才复用现有工具图片 carrier。
-16. 下一次 provider call 在上一条 terminal assistant entry 后产生稳定的 `visualization_ref` metadata carrier；它不进入用户正文、UI、recent human 或 Hook/Skill 匹配。
-17. `visualization_ref` 可以在后续轮次由同一工具重新订阅或 review；解析必须验证当前 session/workspace canonical owner，不能仅凭 digest 读取 blob。
-18. 最终 HTML 正文不进入 provider prompt，也不写入 tool result artifact 字段。
-19. 相对路径按冻结 cwd 解析；绝对路径与 `..` 不因 workspace 边界被该只读工具额外拒绝，仍完整执行既有权限和 Hook。
-20. iframe/渲染隔离阻止 HTML 访问 Pulsara DOM、凭据、存储和内部 API；顶层导航、弹窗、下载、本地文件与网络访问遵循 sandbox 和现有权限策略，不能借 visualization 提权。
-21. 冷启动、append、compaction、reconnect 和历史重载不改变同一 epoch 的 provider prefix，也不尝试恢复进程内订阅。
-22. 最终 HTML shell 不继承普通 conversation measure/max-width，在左右面板之间占用中央工作区的完整可用横向空间；assistant 正文仍保持原版心。
-23. 打开、关闭或调整右侧检查器后，visualization shell 随中央工作区宽度响应，不进入侧栏下方，也不造成应用级横向滚动。
-24. 不从参考截图绿色框的纵向尺寸推导或写死 iframe 高度；横向 full-width 与纵向 sizing 分别验证。
-25. 路径订阅后删除文件，terminal publication 静默取消该项：无错误、无失败占位、无 HTML blob、无 occurrence 或 durable cancellation 记录。
-26. 用户 steer → 文件工具删除 → terminal publication 的真实路径可取消最终展示；此前 review 图片仍保留原有 canonical 结果。
-27. 删除后在最终读取前重建同一路径时，使用重建后的最新内容正常展示；不追踪中间删除历史。
-28. permission denied、I/O failure、目录/非普通文件、无效 HTML、安全校验或渲染失败不会被误判为 not-found 取消；unknown failure 也不得静默吞掉。
-29. 多个订阅中删除一个路径只取消该项，其余成功 occurrence 保持相对顺序并使用连续 ordinal；`visualization_ref` 来源不适用删除取消。
-30. ECharts、Vega-Lite 与 D3 三个内置 alias 均能离线按需加载，并分别暴露规格固定的 sandbox 全局；普通聊天 bundle 不因未使用而加载它们。
-31. 单库 HTML 只映射声明的内置 profile；多库声明按固定顺序去重映射；无 metadata 时 runtime 不映射内置图表库，但 HTML 自己的普通资源引用仍可工作。
-32. 未知内置 alias 明确报告“宿主不提供该 profile”，但不把正常 `<script>`、`<link>`、ES module、本地 bundle 或经授权的远程资源误判为非法；`visualization_render` 不自行运行包管理器。
-33. review 与 terminal publication 对同一 HTML 使用完全相同的 resolved runtime profile；截图与最终展示不因库版本不同而分叉。
-34. final occurrence 冻结 versioned runtime profile/asset manifest；应用升级后重载历史消息仍使用原 profile，不自动漂移到新版本。
-35. ECharts 图表在右侧检查器开关和中央工作区 resize 后正确 resize，iframe 销毁时释放实例与监听器。
-36. 首版没有默认 Chart.js 或 Plotly profile；测试确认对应 alias 未登记，但用户或模型经现有权限链路安装、打包或正常引用后仍可使用它们。
-37. 工作文件可以由普通浏览器直接打开；Pulsara metadata 会被安全忽略，内置 profile 模板不依赖只能由宿主注入的私有协议。
-38. 经现有权限允许的 CDN、开发服务器和本地配套资源可在 renderer 中加载；被权限或 sandbox 拒绝时返回具体资源错误，不静默提权或替换依赖。
-39. 通过 terminal 安装并构建的第三方库产物可以被 HTML 正常引用；安装动作仍产生现有 permission / Hook / settlement 事实，visualization 工具不新增安装旁路。
-40. 使用非内置依赖的最终消息只冻结 HTML bytes；删除或改变未捕获的外部资源可能影响历史渲染，该限制被明确呈现而不是通过禁用第三方库掩盖。
-
-## 14. 激活条件
-
-本文当前只记录已确认的产品合同，不宣称已经实现。只有在以下条件全部满足后，状态才可改为 ACTIVATED：
-
-- clean-v0 schema 与生产实现完成 hard cut；
-- focused backend、storage、compiler 和 frontend tests 全部通过；
-- 浏览器验收确认中间工具卡、即时 review、最终引用展示、三个内置库 profile 与历史重载；
-- 真实 provider dogfood 证明模型能用 `write` / `edit` → subscribe → review → edit → terminal display 的完整路径；
-- dogfood 证据保留实际工具调用、短 tool result、截图 `image_ref`、最终消息 occurrence、最终 HTML blob 与冻结 runtime profile/asset manifest 的数据库事实；
-- 未新增 HTML 版本表、订阅恢复机制、visualization 专用编辑工具或 provider prefix 重建边界。
+设计冻结不代表自动验收；backend、storage、compiler、frontend、浏览器与真实 provider 的证据均应与代码一起复核，交叉审阅发现的实际问题须在标记实施完成前修复。
