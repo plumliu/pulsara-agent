@@ -34,7 +34,7 @@ Pulsara 新增一个模型可调用的 `visualization_render` 工具，但该工
 
 ### 1.2 权威顺序
 
-用户本轮明确约定 → [AGENTS.md](AGENTS.md) → 本规格 → [Pulsara 已知图片引用重读实施规范](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 与其他仍适用的 canonical/blob/tool execution 规格。
+用户本轮明确约定 → [AGENTS.md](AGENTS.md) → 本规格 → [Pulsara 已知图片引用重读实施规范](archived_docs/PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 与其他仍适用的 canonical/blob/tool execution 规格。
 
 图片回看的引用、归属、工具图片 carrier、provider lowering 和 PostgreSQL 图片 blob 行为全部复用现有图片规范。本规格只定义 HTML 可视化订阅、即时回看和最终消息展示的新增边界。
 
