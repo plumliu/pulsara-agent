@@ -53,6 +53,8 @@ from pulsara_agent.llm.provider import (
 )
 from pulsara_agent.llm.provider_replay import (
     MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS,
+    RESPONSES_NON_REPLAY_EMPTY_MESSAGE_ITEM_FIELDS,
+    RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS,
     RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS,
     RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES,
     RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS,
@@ -859,10 +861,20 @@ class ResponsesCompletionAccumulator:
     def _validate_done_content_parts(
         self, output: list[dict[str, Any] | object]
     ) -> None:
+        if self._content_part_added:
+            raise LLMTransportContractError(
+                "Responses completed with an outstanding content part",
+                reason_code="transport_responses_output_mismatch",
+            )
         if self._content_part_done:
+            # A Responses stream can use reasoning_part.* for reasoning while
+            # using content_part.* for text. Require a full part sequence only
+            # for items that actually chose the content_part event shape.
+            observed_indexes = {index for index, _ in self._content_part_done}
             expected_parts = {
                 (output_index, content_index)
                 for output_index, item in enumerate(output)
+                if output_index in observed_indexes
                 if isinstance(item, dict)
                 and item.get("type") in {"message", "reasoning"}
                 for content_index, _part in enumerate(
@@ -997,6 +1009,14 @@ def _normalize_response_output_item(item: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(item)
     for field_name in RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS:
         normalized.pop(field_name, None)
+    if normalized.get("type") == "message":
+        for field_name in RESPONSES_NON_REPLAY_EMPTY_MESSAGE_ITEM_FIELDS:
+            if normalized.get(field_name) in (None, []):
+                normalized.pop(field_name, None)
+    if normalized.get("type") == "function_call":
+        for field_name in RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS:
+            if normalized.get(field_name) is None:
+                normalized.pop(field_name, None)
     return normalized
 
 
@@ -1239,7 +1259,20 @@ def _project_completed_response(
                     and not observed_summary_keys
                     and summary_text == streamed_content
                 )
-                if content_text != streamed_content and not exact_summary_alias:
+                # Some compatible streams expose reasoning only while live;
+                # their completed reasoning item has no text to replay. Keep
+                # the live observation, but never manufacture replay content.
+                stream_only_reasoning = (
+                    output_index in reasoning_content_done
+                    and item.get("content") in (None, [])
+                    and item.get("summary") in (None, [])
+                    and not observed_summary_keys
+                )
+                if (
+                    content_text != streamed_content
+                    and not exact_summary_alias
+                    and not stream_only_reasoning
+                ):
                     raise LLMTransportContractError(
                         "final Responses reasoning content differs from the stream",
                         reason_code="transport_responses_output_mismatch",

@@ -37,6 +37,8 @@ RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES = frozenset(
 RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS = frozenset(
     {"metadata", "internal_chat_message_metadata_passthrough"}
 )
+RESPONSES_NON_REPLAY_EMPTY_MESSAGE_ITEM_FIELDS = frozenset({"summary"})
+RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS = frozenset({"namespace"})
 RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS = frozenset(
     {"id", "status", "phase"}
 )
@@ -44,7 +46,7 @@ RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS = frozenset(
     {"annotations", "logprobs"}
 )
 RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT = (
-    "terminal-output-or-contiguous-settled-item-done-with-operational-elision:v5"
+    "terminal-output-or-contiguous-settled-item-done-with-operational-elision:v6"
 )
 
 PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION = (
@@ -94,6 +96,12 @@ def provider_replay_contract_fingerprint(
             "completed_output_source": RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT,
             "excluded_operational_item_fields": tuple(
                 sorted(RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS)
+            ),
+            "excluded_empty_message_item_fields": tuple(
+                sorted(RESPONSES_NON_REPLAY_EMPTY_MESSAGE_ITEM_FIELDS)
+            ),
+            "excluded_null_function_call_item_fields": tuple(
+                sorted(RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS)
             ),
             "terminal_elidable_operational_item_fields": tuple(
                 sorted(RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS)
@@ -314,21 +322,22 @@ def project_provider_visible_reasoning(
             projected.append(ProviderVisibleReasoningBlock(key[0], "".join(parts)))
         # Top-level reasoning commonly mirrors the structured detail stream.
         # Suppress only exact aliases; distinct public text remains visible.
-        detail_texts = {block.text for block in projected}
-        detail_texts.add("".join(block.text for block in projected))
+        seen_texts = {block.text for block in projected}
+        seen_texts.add("".join(block.text for block in projected))
         for field_name in ("reasoning_content", "reasoning"):
             if field_name not in message:
                 continue
             value = message[field_name]
             if not isinstance(value, str):
                 raise ValueError("Chat provider-visible reasoning is not text")
-            if value and value not in detail_texts:
+            if value and value not in seen_texts:
                 projected.append(
                     ProviderVisibleReasoningBlock(
                         ReasoningPresentationKind.FULL,
                         value,
                     )
                 )
+                seen_texts.add(value)
         return tuple(projected)
 
     if codec_kind is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS:

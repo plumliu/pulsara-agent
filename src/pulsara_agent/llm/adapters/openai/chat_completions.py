@@ -518,6 +518,7 @@ class ChatCompletionAccumulator:
     _replay_item_count: int = 0
     _unknown_nonempty_field_seen: bool = False
     _live_reasoning_source: str | None = None
+    _live_reasoning_text_field: str | None = None
     _live_reasoning_detail_key: tuple[object, ...] | None = None
 
     def __post_init__(self) -> None:
@@ -525,18 +526,10 @@ class ChatCompletionAccumulator:
 
     def apply(self, raw_chunk: Any) -> list[ProviderStreamPayload]:
         chunk = sdk_event_to_dict(raw_chunk)
-        report = transport_usage_report_from_mapping(chunk.get("usage"))
-        if report.usage_status == "reported":
-            if self.usage_report is not None:
-                if self.terminal is None or self.usage_report != report:
-                    raise LLMTransportContractError(
-                        "transport emitted more than one usage report",
-                        reason_code="transport_usage_report_duplicate",
-                    )
-            else:
-                self.usage_report = report
         choices = chunk.get("choices")
         if choices is None:
+            if self.terminal is not None:
+                self._adopt_final_usage(chunk.get("usage"))
             return []
         if not isinstance(choices, list):
             raise LLMTransportContractError(
@@ -544,6 +537,8 @@ class ChatCompletionAccumulator:
                 reason_code="transport_chat_choice_contract_invalid",
             )
         if not choices:
+            if self.terminal is not None:
+                self._adopt_final_usage(chunk.get("usage"))
             return []
         if len(choices) != 1 or not isinstance(choices[0], dict):
             raise LLMTransportContractError(
@@ -558,6 +553,7 @@ class ChatCompletionAccumulator:
             )
         if self.terminal is not None:
             if self._is_exact_empty_terminal_echo(choice):
+                self._adopt_final_usage(chunk.get("usage"))
                 return []
             raise LLMTransportContractError(
                 "chat transport emitted semantic data after its terminal",
@@ -585,7 +581,7 @@ class ChatCompletionAccumulator:
             unknown = set(delta).difference(allowed)
             self._record_unknown_fields(delta, unknown)
             role = delta.get("role")
-            if role is not None and role != "assistant":
+            if role not in (None, "", "assistant"):
                 raise LLMTransportContractError(
                     "chat delta changed the assistant role",
                     reason_code="transport_chat_delta_contract_invalid",
@@ -645,7 +641,7 @@ class ChatCompletionAccumulator:
                     events.extend(self.tool_calls.apply_tool_call_delta(raw_tool_call))
 
         finish_reason = choice.get("finish_reason")
-        if finish_reason is None:
+        if finish_reason is None or finish_reason == "":
             return events
         if not isinstance(finish_reason, str):
             raise LLMTransportContractError(
@@ -666,6 +662,7 @@ class ChatCompletionAccumulator:
                 ),
             )
             self._clear_replay_fields()
+            self._adopt_final_usage(chunk.get("usage"))
             return events
 
         events.extend(self.tool_calls.close_active_tool_calls())
@@ -685,14 +682,22 @@ class ChatCompletionAccumulator:
             ProviderAdapterTerminalKind.COMPLETED,
             completed_replay_payload=replay,
         )
+        self._adopt_final_usage(chunk.get("usage"))
         return events
+
+    def _adopt_final_usage(self, raw_usage: Any) -> None:
+        # Only a terminal chunk (or a later usage-only carrier) can settle
+        # cumulative Chat usage. Earlier snapshots are deliberately discarded.
+        report = transport_usage_report_from_mapping(raw_usage)
+        if report.usage_status == "reported":
+            self.usage_report = report
 
     def _project_live_reasoning(
         self, value: dict[str, Any]
     ) -> list[ProviderStreamPayload]:
         details = tuple(chat_reasoning_detail_parts(value.get("reasoning_details")))
         text = tuple(
-            value.get(name)
+            (name, value[name])
             for name in ("reasoning_content", "reasoning")
             if isinstance(value.get(name), str) and value[name]
         )
@@ -704,6 +709,7 @@ class ChatCompletionAccumulator:
                 self._live_reasoning_source = "details"
             elif text:
                 self._live_reasoning_source = "text"
+                self._live_reasoning_text_field = text[0][0]
         events: list[ProviderStreamPayload] = []
         if self._live_reasoning_source == "details":
             for key, block in details:
@@ -717,8 +723,11 @@ class ChatCompletionAccumulator:
                     )
                 )
         elif self._live_reasoning_source == "text":
-            for part in text:
-                events.extend(self.builder.thinking_delta(part))
+            # Two top-level Chat fields may be aliases. Stream only one field;
+            # completed replay still retains both exact observed carriers.
+            for name, part in text:
+                if name == self._live_reasoning_text_field:
+                    events.extend(self.builder.thinking_delta(part))
         return events
 
     def _is_exact_empty_terminal_echo(self, choice: dict[str, Any]) -> bool:
@@ -736,7 +745,7 @@ class ChatCompletionAccumulator:
             delta = {}
         if not isinstance(delta, dict):
             return False
-        if delta.get("role") not in (None, "assistant"):
+        if delta.get("role") not in (None, "", "assistant"):
             return False
         for field_name, value in delta.items():
             if field_name == "role":
@@ -1144,7 +1153,7 @@ class ChatToolCallAccumulator:
             reported_index=raw_index,
         )
         raw_type = raw_tool_call.get("type")
-        if raw_type is not None and raw_type != "function":
+        if raw_type not in (None, "", "function"):
             raise LLMTransportContractError(
                 "chat tool-call type is unsupported",
                 reason_code="transport_tool_call_contract_invalid",

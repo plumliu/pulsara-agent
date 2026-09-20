@@ -947,6 +947,154 @@ def test_chat_exact_empty_terminal_echo_is_idempotent_usage_metadata() -> None:
     assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
 
 
+def test_chat_cumulative_usage_only_settles_from_terminal_or_later_carrier() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    first = _chat_chunk({"role": "", "content": "O"}, "")
+    first["usage"] = {"prompt_tokens": 10, "completion_tokens": 1}  # type: ignore[assignment]
+    accumulator.apply(first)
+    assert accumulator.usage_report is None
+
+    second = _chat_chunk({"role": "", "content": "K"}, "")
+    second["usage"] = {"prompt_tokens": 10, "completion_tokens": 2}  # type: ignore[assignment]
+    accumulator.apply(second)
+    assert accumulator.usage_report is None
+
+    final = _chat_chunk({"role": "", "content": ""}, "stop")
+    final["usage"] = {"prompt_tokens": 10, "completion_tokens": 3}  # type: ignore[assignment]
+    accumulator.apply(final)
+    assert accumulator.usage_report is not None
+    assert accumulator.usage_report.usage is not None
+    assert accumulator.usage_report.usage.output_tokens == 3
+
+    accumulator.apply(
+        {
+            "choices": [],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+        }
+    )
+    assert accumulator.usage_report is not None
+    assert accumulator.usage_report.usage is not None
+    assert accumulator.usage_report.usage.input_tokens == 10
+    assert accumulator.usage_report.usage.output_tokens == 4
+    assert isinstance(accumulator.finish(), ProviderAdapterTerminal)
+
+
+def test_chat_intermediate_usage_cannot_be_used_when_final_is_missing() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    interim = _chat_chunk({"content": "answer"})
+    interim["usage"] = {"prompt_tokens": 10, "completion_tokens": 1}  # type: ignore[assignment]
+    accumulator.apply(interim)
+    accumulator.apply(_chat_chunk({}, "stop"))
+    assert accumulator.usage_report is None
+    assert isinstance(accumulator.finish(), ProviderAdapterTerminal)
+
+
+def test_chat_mirrored_reasoning_fields_emit_once_but_replay_both() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    events = accumulator.apply(
+        _chat_chunk({"reasoning_content": "thinking", "reasoning": "thinking"})
+    )
+    events.extend(accumulator.apply(_chat_chunk({"content": "answer"}, "stop")))
+    assert [
+        item.delta for item in events if isinstance(item, ThinkingDeltaPayload)
+    ] == ["thinking"]
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    replay = thaw_json(terminal.completed_replay_payload.ordered_items[0])
+    assert replay["reasoning_content"] == replay["reasoning"] == "thinking"
+
+
+def test_chat_delayed_reasoning_alias_does_not_repeat_live_thinking() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    events = accumulator.apply(_chat_chunk({"reasoning_content": "thinking"}))
+    events.extend(accumulator.apply(_chat_chunk({"reasoning": "thinking"})))
+    events.extend(accumulator.apply(_chat_chunk({"content": "answer"}, "stop")))
+    assert [
+        item.delta for item in events if isinstance(item, ThinkingDeltaPayload)
+    ] == ["thinking"]
+
+
+def test_chat_empty_role_does_not_authorize_another_role() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    accumulator.apply(_chat_chunk({"role": "", "content": "prefix"}, ""))
+    with pytest.raises(LLMTransportContractError, match="assistant role"):
+        accumulator.apply(_chat_chunk({"role": "user", "content": "bad"}))
+
+
+def test_chat_empty_tool_type_continues_an_existing_function_call() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    accumulator.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call:virtual",
+                        "type": "function",
+                        "function": {"name": "virtual", "arguments": "{"},
+                    }
+                ]
+            }
+        )
+    )
+    accumulator.apply(
+        _chat_chunk(
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "",
+                        "type": "",
+                        "function": {"name": "", "arguments": '"city":"Beijing"}'},
+                    }
+                ]
+            }
+        )
+    )
+    accumulator.apply(_chat_chunk({}, "tool_calls"))
+    assert accumulator.tool_calls.completed_calls == (
+        {
+            "id": "call:virtual",
+            "type": "function",
+            "function": {"name": "virtual", "arguments": '{"city":"Beijing"}'},
+        },
+    )
+
+
+def test_chat_nonempty_unknown_tool_type_still_fails() -> None:
+    accumulator = ChatCompletionAccumulator(
+        builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
+    )
+    with pytest.raises(LLMTransportContractError, match="type is unsupported"):
+        accumulator.apply(
+            _chat_chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call:unsupported",
+                            "type": "computer",
+                            "function": {"name": "virtual", "arguments": "{}"},
+                        }
+                    ]
+                }
+            )
+        )
+
+
 def test_chat_terminal_echo_must_not_change_reason_or_carry_semantics() -> None:
     profile = RouteWireProfile(wire_api="openai_chat_completions")
     changed_reason = ChatCompletionAccumulator(
@@ -2390,6 +2538,251 @@ def test_responses_exact_reasoning_text_to_summary_alias_is_provider_neutral() -
         "status": "completed",
         "summary": [{"type": "summary_text", "text": "public summary"}],
     }
+
+
+def test_responses_stream_only_reasoning_stays_live_and_replay_is_exact() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    initial = {
+        "type": "reasoning",
+        "id": "reasoning:stream-only",
+        "status": "in_progress",
+        "summary": [],
+        "content": None,
+        "encrypted_content": None,
+    }
+    final = {**initial, "status": "completed"}
+    accumulator.apply(
+        {"type": "response.output_item.added", "output_index": 0, "item": initial}
+    )
+    accumulator.apply({"type": "response.reasoning_part.added", "output_index": 0})
+    live = accumulator.apply(
+        {
+            "type": "response.reasoning_text.delta",
+            "output_index": 0,
+            "delta": "thinking",
+        }
+    )
+    live.extend(
+        accumulator.apply(
+            {
+                "type": "response.reasoning_text.done",
+                "output_index": 0,
+                "text": "thinking",
+            }
+        )
+    )
+    accumulator.apply({"type": "response.reasoning_part.done", "output_index": 0})
+    accumulator.apply(
+        {"type": "response.output_item.done", "output_index": 0, "item": final}
+    )
+    message = {
+        "type": "message",
+        "id": "message:answer",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "answer"}],
+    }
+    accumulator.apply(
+        {"type": "response.output_item.done", "output_index": 1, "item": message}
+    )
+    assert [item.delta for item in live if isinstance(item, ThinkingDeltaPayload)] == [
+        "thinking"
+    ]
+    accumulator.apply(_completed_response([final, message]))
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    assert thaw_json(terminal.completed_replay_payload.ordered_items[0]) == final
+
+
+def test_responses_stream_only_reasoning_requires_done() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    accumulator.apply(
+        {
+            "type": "response.reasoning_text.delta",
+            "output_index": 0,
+            "delta": "unfinished",
+        }
+    )
+    with pytest.raises(LLMTransportContractError, match="reasoning content differs"):
+        accumulator.apply(
+            _completed_response(
+                [
+                    {
+                        "type": "reasoning",
+                        "id": "reasoning:unfinished",
+                        "status": "completed",
+                        "summary": [],
+                        "content": None,
+                    }
+                ]
+            )
+        )
+
+
+def test_responses_reasoning_part_and_content_part_are_separate_shapes() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    reasoning = {
+        "type": "reasoning",
+        "id": "reasoning:1",
+        "status": "completed",
+        "summary": [],
+        "content": [{"type": "reasoning_text", "text": "think"}],
+        "encrypted_content": None,
+    }
+    message = {
+        "type": "message",
+        "id": "message:1",
+        "status": "completed",
+        "role": "assistant",
+        "phase": None,
+        "summary": [],
+        "content": [
+            {
+                "type": "output_text",
+                "text": "OK",
+                "annotations": [],
+                "logprobs": None,
+            }
+        ],
+    }
+    events = (
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {**reasoning, "status": "in_progress", "content": None},
+        },
+        {"type": "response.reasoning_part.added", "output_index": 0},
+        {"type": "response.reasoning_text.delta", "output_index": 0, "delta": "think"},
+        {"type": "response.reasoning_text.done", "output_index": 0, "text": "think"},
+        {"type": "response.reasoning_part.done", "output_index": 0},
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {
+            "type": "response.output_item.added",
+            "output_index": 1,
+            "item": {**message, "status": "in_progress", "content": []},
+        },
+        {
+            "type": "response.content_part.added",
+            "output_index": 1,
+            "content_index": 0,
+            "item_id": "message:1",
+            "part": {
+                "type": "output_text",
+                "text": "",
+                "annotations": [],
+                "logprobs": [],
+            },
+        },
+        {"type": "response.output_text.delta", "output_index": 1, "delta": "OK"},
+        {"type": "response.output_text.done", "output_index": 1, "text": "OK"},
+        {
+            "type": "response.content_part.done",
+            "output_index": 1,
+            "content_index": 0,
+            "item_id": "message:1",
+            "part": message["content"][0],
+        },
+        {"type": "response.output_item.done", "output_index": 1, "item": message},
+        _completed_response([reasoning, message]),
+    )
+    for event in events:
+        accumulator.apply(event)
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    replay = [
+        thaw_json(item) for item in terminal.completed_replay_payload.ordered_items
+    ]
+    assert replay[0] == reasoning
+    assert replay[1] == {
+        key: value for key, value in message.items() if key != "summary"
+    }
+
+
+def test_responses_nonempty_terminal_rejects_unfinished_content_part() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    accumulator.apply(
+        {
+            "type": "response.content_part.added",
+            "output_index": 0,
+            "content_index": 0,
+            "item_id": "message:unfinished",
+            "part": {"type": "output_text", "text": ""},
+        }
+    )
+    with pytest.raises(LLMTransportContractError, match="outstanding content part"):
+        accumulator.apply(
+            _completed_response(
+                [
+                    {
+                        "type": "message",
+                        "id": "message:unfinished",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "answer"}],
+                    }
+                ]
+            )
+        )
+
+
+def test_responses_nonempty_message_summary_is_not_silently_discarded() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    with pytest.raises(LLMTransportContractError, match="unsupported fields"):
+        accumulator.apply(
+            _completed_response(
+                [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "OK"}],
+                        "summary": [{"type": "summary_text", "text": "semantic"}],
+                    }
+                ]
+            )
+        )
+
+
+def test_responses_null_function_call_namespace_is_not_replayed() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    item = {
+        "type": "function_call",
+        "id": "item:virtual",
+        "status": "completed",
+        "call_id": "call:virtual",
+        "name": "virtual",
+        "arguments": '{"city":"Beijing"}',
+        "namespace": None,
+    }
+    accumulator.apply(
+        {"type": "response.output_item.done", "output_index": 0, "item": item}
+    )
+    accumulator.apply(_completed_response([item]))
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    assert thaw_json(terminal.completed_replay_payload.ordered_items[0]) == {
+        key: value for key, value in item.items() if key != "namespace"
+    }
+
+
+def test_responses_nonnull_function_call_namespace_still_fails() -> None:
+    accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+    with pytest.raises(LLMTransportContractError, match="unsupported fields"):
+        accumulator.apply(
+            _completed_response(
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": "call:virtual",
+                        "name": "virtual",
+                        "arguments": "{}",
+                        "namespace": "unsupported",
+                    }
+                ]
+            )
+        )
 
 
 def test_responses_reasoning_text_to_summary_alias_must_be_exact() -> None:

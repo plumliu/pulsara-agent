@@ -223,6 +223,29 @@ def test_provider_visible_chat_reasoning_is_derived_from_exact_replay_text() -> 
     ]
 
 
+def test_provider_visible_chat_top_level_reasoning_alias_is_not_duplicated() -> None:
+    candidate = _candidate(
+        _frozen_object(
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "same reasoning",
+                "reasoning": "same reasoning",
+            }
+        )
+    )
+    projected = project_provider_visible_reasoning(
+        codec_kind=candidate.codec_kind,
+        payload_bytes=candidate.payload_bytes,
+        expected_payload_digest=candidate.payload_digest,
+        expected_payload_size=candidate.payload_size,
+        expected_item_count=candidate.item_count,
+    )
+    assert [(item.presentation_kind, item.text) for item in projected] == [
+        (ReasoningPresentationKind.FULL, "same reasoning")
+    ]
+
+
 @pytest.mark.parametrize(
     "mirror", [None, "summary one", "summary onepublic thinking", "different text"]
 )
