@@ -53,7 +53,10 @@ from pulsara_agent.llm.provider_replay import (
     build_prepared_durable_provider_assistant_replay,
 )
 from pulsara_agent.llm.provider import RouteWireProfile
-from pulsara_agent.llm.request import MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
+from pulsara_agent.llm.request import (
+    MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
+    provider_assistant_message_public_projection_fingerprint,
+)
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.continuity import (
@@ -62,6 +65,12 @@ from pulsara_agent.model_input.continuity import (
     NoNewTriggerAnchor,
     ProcessLocalCanonicalFrontier,
     ProviderInputContinuityScope,
+)
+from pulsara_agent.model_input.provider_replay import (
+    freeze_provider_replay_manifest,
+    freeze_provider_replay_manifest_cut,
+    freeze_selected_provider_replay_hydration,
+    select_compatible_provider_replay_manifests,
 )
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
@@ -998,6 +1007,137 @@ def test_final_wire_quote_is_one_shot_without_creating_an_executable_plan(
     with pytest.raises(RuntimeError, match="already consumed"):
         measurement.prepare_executable_plan()
     request.surface_borrow.close()
+
+
+@pytest.mark.parametrize("api", ("openai_chat_completions", "openai_responses"))
+def test_native_replay_replaces_assistant_but_keeps_visualization_metadata(
+    api: str,
+) -> None:
+    assistant_entry_id = "entry:visualization-owner"
+    metadata_text = (
+        '{"pulsara_visualizations":[{"visualization_ref":"sha256:' + "a" * 64 + '"}]}'
+    )
+    assistant = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.ASSISTANT,
+        source_entry_id=assistant_entry_id,
+        source_entry_sequence=1,
+        source_turn_id="turn:earlier",
+        content=(LLMTextPart("answer"),),
+    )
+    visualization_metadata = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.USER,
+        source_entry_id=assistant_entry_id,
+        source_entry_sequence=1,
+        source_turn_id="turn:earlier",
+        content=(LLMTextPart(metadata_text),),
+        input_origin=CanonicalInputOriginKind.VISUALIZATION_METADATA,
+    )
+    next_user = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.USER,
+        source_entry_id="entry:initial",
+        source_entry_sequence=2,
+        source_turn_id="turn:test",
+        content=(LLMTextPart("continue"),),
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+    )
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(
+        port,
+        canonical_items=(assistant, visualization_metadata, next_user),
+    )
+    try:
+        compiled = request.compiled_input
+        owner_indexes = [
+            index
+            for index, placement in enumerate(compiled.message_placements)
+            if placement.origin_entry_id == assistant_entry_id
+        ]
+        assert len(owner_indexes) == 2
+        assert [compiled.messages[index].role for index in owner_indexes] == [
+            MessageRole.ASSISTANT,
+            MessageRole.USER,
+        ]
+        assistant_index = owner_indexes[0]
+        target = port.replay_target(request.prepared_call)
+        native_item = (
+            {"role": "assistant", "content": "answer", "reasoning_content": "thought"}
+            if api == "openai_chat_completions"
+            else {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "answer"}],
+            }
+        )
+        frozen_native_item = freeze_json(native_item)
+        candidate = build_prepared_durable_provider_assistant_replay(
+            session_id="session:test",
+            workspace_id="workspace:test",
+            assistant_entry_id=assistant_entry_id,
+            target=target,
+            public_projection_fingerprint=(
+                provider_assistant_message_public_projection_fingerprint(
+                    compiled.messages[assistant_index]
+                )
+            ),
+            ordered_items=(frozen_native_item,),
+        )
+        manifest = freeze_provider_replay_manifest(
+            replay_id=candidate.replay_id,
+            assistant_entry_id=assistant_entry_id,
+            wire_api=candidate.wire_api,
+            codec_kind=candidate.codec_kind.value,
+            provider_replay_contract_fingerprint=(
+                candidate.provider_replay_contract_fingerprint
+            ),
+            replay_target_fingerprint=candidate.replay_target_fingerprint,
+            public_projection_fingerprint=candidate.public_projection_fingerprint,
+            payload_digest=candidate.payload_digest,
+            payload_size=candidate.payload_size,
+            item_count=candidate.item_count,
+            fragment_fingerprint=candidate.fragment_fingerprint,
+        )
+        identity = compiled.canonical_input_identity
+        manifest_cut = freeze_provider_replay_manifest_cut(
+            session_id=identity.session_id,
+            scope=ProviderInputContinuityScope(
+                session_id=identity.session_id,
+                scope_kind=identity.conversation_scope_kind,
+                scope_subagent_task_id=identity.scope_subagent_task_id,
+            ),
+            context_binding_revision_id=identity.context_binding_revision_id,
+            provider_input_through_sequence=identity.provider_input_through_sequence,
+            manifests=(manifest,),
+        )
+        selected, placements = select_compatible_provider_replay_manifests(
+            manifest_cut=manifest_cut,
+            compiled_input=compiled,
+            replay_target=target,
+        )
+        hydration = freeze_selected_provider_replay_hydration(
+            manifest_cut=manifest_cut,
+            compiled_input=compiled,
+            replay_target=target,
+            selected_manifests=selected,
+            selected_placements=placements,
+            fragments=(candidate.fragment(),),
+        )
+        plan = port.plan_wire_input(
+            prepared_call=request.prepared_call,
+            compiled_input=compiled,
+            predecessor_view=None,
+            replay_hydration=hydration,
+        )
+        wire_items = tuple(
+            thaw_json(item) for item in plan.materialization.ordered_input_items
+        )
+        native_index = wire_items.index(native_item)
+        assert len(plan.replacements) == 1
+        assert plan.replacements[0].message_count == 1
+        assert plan.replacements[0].first_message_ordinal == assistant_index
+        assert metadata_text in str(wire_items[native_index + 1])
+        assert any("continue" in str(item) for item in wire_items[native_index + 2 :])
+    finally:
+        request.surface_borrow.close()
 
 
 def test_final_wire_quote_can_cross_hard_bounds_but_plan_cannot() -> None:

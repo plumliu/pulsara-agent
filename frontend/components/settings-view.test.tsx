@@ -28,6 +28,13 @@ function setup() {
   return { reset, refresh, target };
 }
 
+it('shows only the connection row in local service', async () => {
+  setup();
+  expect(await screen.findByText('页面连接')).toBeTruthy();
+  expect(screen.queryByText('数据位置')).toBeNull();
+  expect(screen.queryByText('登录方式')).toBeNull();
+});
+
 it('shows the saved target, cancels without deletion, and resets only after confirmation', async () => {
   const { reset, refresh, target } = setup();
   const opener = await screen.findByRole('button', { name: '重置数据…' });

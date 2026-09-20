@@ -74,7 +74,7 @@ export function OverviewView({
   return (
     <section className="surface-view overview-view">
       <header className="surface-topbar">
-        <div className="surface-brand"><BrandMark compact /><span>Pulsara 工作台</span></div>
+        <div className="surface-brand"><BrandMark compact /><span>Pulsara</span></div>
         <div className={`runtime-health runtime-health--${runtimeStatus}`}>
           <span /><strong>{connectionLabels[runtimeStatus]}</strong>
         </div>
@@ -83,7 +83,6 @@ export function OverviewView({
       <div className="surface-scroll overview-scroll">
         <section className="overview-hero">
           <div>
-            <span className="page-kicker">{databaseBlocked ? '完成本机设置' : '你的本地智能工作台'}</span>
             <h1>{databaseBlocked ? <>先准备好<br /><em>本地数据</em></> : <>准备好继续<br /><em>航行</em>了吗？</>}</h1>
             <p>{databaseBlocked ? '连接 PostgreSQL 后，Pulsara 才能安全保存会话、任务进度和记忆。' : '从一个清晰目标开始，Pulsara 会在这里整理会话、任务进度与需要你处理的事项。'}</p>
             <div className="hero-actions">
@@ -101,7 +100,6 @@ export function OverviewView({
             <span className="hero-orbit__ring ring-a" /><span className="hero-orbit__ring ring-b" /><span className="hero-orbit__ring ring-c" />
             <span className="hero-orbit__sat satellite-a" /><span className="hero-orbit__sat satellite-b" /><span className="hero-orbit__sat satellite-c" />
             <div className="hero-orbit__core"><BrandMark /></div>
-            <span className="orbit-coordinate">私密 · 仅限本机</span>
           </div>
         </section>
 

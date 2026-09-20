@@ -1474,7 +1474,11 @@ def freeze_provider_wire_measurement(
     while index < len(semantic_input.messages):
         placement = semantic_input.message_placements[index]
         entry_id = placement.origin_entry_id
-        fragment = None if entry_id is None else fragment_by_entry.get(entry_id)
+        fragment = (
+            None
+            if entry_id is None or placement.role is not MessageRole.ASSISTANT
+            else fragment_by_entry.get(entry_id)
+        )
         if fragment is None:
             final_items.extend(generic_groups[index])
             final_sources.extend(
@@ -1488,6 +1492,7 @@ def freeze_provider_wire_measurement(
         while (
             end < len(semantic_input.message_placements)
             and semantic_input.message_placements[end].origin_entry_id == entry_id
+            and semantic_input.message_placements[end].role is MessageRole.ASSISTANT
         ):
             end += 1
         placements = semantic_input.message_placements[index:end]
@@ -1546,7 +1551,10 @@ def freeze_provider_wire_measurement(
         replay_placements = tuple(
             item
             for item in semantic_input.message_placements
-            if item.origin_entry_id in used_entries
+            if (
+                item.origin_entry_id in used_entries
+                and item.role is MessageRole.ASSISTANT
+            )
         )
         if selected_message_placements_fingerprint(
             replay_placements

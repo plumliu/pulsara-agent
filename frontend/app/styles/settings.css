@@ -41,7 +41,6 @@
 .connection-value--online { color: var(--green); }
 .connection-value--starting, .connection-value--reconnecting { color: var(--amber); }
 .connection-value--offline, .connection-value--failed { color: var(--red); }
-.storage-value { color: var(--muted); font-family: var(--mono); font-size: var(--type-caption); }
 .settings-group > header > div { min-width: 0; flex: 1; }
 .settings-header-action, .credential-actions button, .form-actions button, .settings-alert button, .model-config-card__actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 30px; padding: 0 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); font-size: var(--type-caption); white-space: nowrap; }
 .settings-header-action:hover, .credential-actions button:hover, .form-actions button:hover, .settings-alert button:hover, .model-config-card__actions button:hover { border-color: var(--line-strong); color: var(--ink); }

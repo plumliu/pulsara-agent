@@ -2,7 +2,7 @@
 
 import {
   Bot, Check, ChevronRight, CircleAlert, Database, HardDrive, KeyRound,
-  Laptop, LoaderCircle, Moon, Palette, Plus, RefreshCw, ShieldCheck,
+  LoaderCircle, Moon, Palette, Plus, RefreshCw,
   SlidersHorizontal, Sun, Trash2,
 } from 'lucide-react';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
@@ -479,7 +479,7 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
             <div className="database-state-row"><span className={`database-state database-state--${databaseState}`}><i />{databaseStateCopy}</span><small>浏览器设置壳：{statusLabels[runtimeStatus]}</small></div>
             <div className="database-form"><label><span>Runtime DSN</span><input value={runtimeDsn} onChange={(event) => setRuntimeDsn(event.target.value)} placeholder="postgresql://pulsara:…@localhost:5432/pulsara" /></label><label><span>Admin DSN（可选）</span><input value={adminDsn} onChange={(event) => setAdminDsn(event.target.value)} placeholder="只用于显式初始化、升级或重置" /></label><p>初始化/升级将使用上方已保存的 Admin DSN 管理同一数据库，并按 Runtime DSN 验证运行角色。请先核对目标数据库与角色。</p>{databaseMessage && <div className="database-message">{databaseMessage}</div>}<div className="form-actions"><button className="primary-action" disabled={Boolean(databaseBusy) || !runtimeDsn.trim()} onClick={() => void saveDatabase()}>{databaseBusy === 'save' ? <LoaderCircle size={13} /> : <Check size={13} />}保存连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres} onClick={() => void databaseAction('check')}>{databaseBusy === 'check' ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}检查连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres?.admin_dsn || databaseState === 'database_reset_required'} onClick={() => void databaseAction('migrate')}>{databaseBusy === 'migrate' ? <LoaderCircle size={13} /> : <Database size={13} />}初始化 / 升级</button><button className="subtle-danger" disabled={Boolean(databaseBusy) || runtimeStatus !== 'online' || !settings?.local_settings.postgres?.admin_dsn || databaseState === 'database_resetting'} onClick={() => { setResetError(undefined); setResetTarget(settings!.local_settings.postgres!); }}><Trash2 size={13} />重置数据…</button></div></div>
           </section>
-          <section className="settings-group"><header><HardDrive size={16} /><div><h2>本地服务</h2><p>Pulsara 的设置与任务都由这台设备上的进程管理。</p></div></header><SettingRow icon={HardDrive} title="页面连接" detail="浏览器与本地设置服务"><span className={`connection-value connection-value--${runtimeStatus}`} role="status"><i aria-hidden="true" />{statusLabels[runtimeStatus]}</span></SettingRow><SettingRow icon={Laptop} title="数据位置" detail="配置与会话数据保存在本机"><span className="storage-value">本地</span></SettingRow><SettingRow icon={ShieldCheck} title="登录方式" detail="仅允许本机同源页面访问"><span className="storage-value">无需账号</span></SettingRow></section>
+          <section className="settings-group"><header><HardDrive size={16} /><div><h2>本地服务</h2><p>Pulsara 的设置与任务都由这台设备上的进程管理。</p></div></header><SettingRow icon={HardDrive} title="页面连接" detail="浏览器与本地设置服务"><span className={`connection-value connection-value--${runtimeStatus}`} role="status"><i aria-hidden="true" />{statusLabels[runtimeStatus]}</span></SettingRow></section>
         </>}
       </div>
     </div>

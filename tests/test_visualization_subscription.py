@@ -17,6 +17,7 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     build_prepared_tool_result_acceptance,
 )
+from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.visualization import (
     FrozenVisualizationOccurrence,
     PostgresCanonicalVisualizationReadPort,
@@ -32,9 +33,14 @@ from pulsara_agent.conversation_kernel.visualization_screenshot import (
     VisualizationScreenshotOwner,
 )
 from pulsara_agent.llm.input import FrozenPromptContent
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    FrozenProviderInputItemKind,
+    provider_input_item_text,
+)
 from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition, ToolResultDisplayKind
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
-from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from tests.support.model_config import (
@@ -150,6 +156,8 @@ def test_visualization_tool_explains_authoring_and_each_path() -> None:
     tool = next(item for item in builtin_tool_descriptors() if item.name == "visualization_render")
     assert "data-pulsara-visualization-root" in tool.description
     assert "whole website/page demo" in tool.description
+    assert "resources needed to render it in the file" in tool.description
+    assert "URLs in text, SVG metadata, or namespace declarations" in tool.description
     assert "does not read the file yet" in tool.description
     assert "fails" in tool.description
     assert tool.input_schema is not None
@@ -159,7 +167,21 @@ def test_visualization_tool_explains_authoring_and_each_path() -> None:
         assert properties[name]["description"]
     assert "deletion" in properties["path"]["description"]
     assert "Do not invent" in properties["visualization_ref"]["description"]
+    assert (
+        "pulsara_visualizations[].visualization_ref"
+        in properties["visualization_ref"]["description"]
+    )
+    assert "not a visualization_ref" in properties["review"]["description"]
     assert "display remains scheduled" in properties["review"]["description"]
+    view_image = next(
+        item for item in builtin_tool_descriptors() if item.name == "view_image"
+    )
+    assert "visualization_render(review=true)" in view_image.description
+    assert "cannot be used here" in view_image.description
+    assert (
+        "Not a visualization_ref"
+        in view_image.input_schema["properties"]["image_ref"]["description"]
+    )
 
 
 @pytest.mark.postgres
@@ -263,6 +285,35 @@ def test_visualization_publication_fork_and_reference(
         repo.connection_provider, session_id=lease.guard.session_id,
         workspace_id=workspace_id,
     ).read_ref(str(digest), deadline_monotonic=monotonic() + 30) == html
+    next_turn_id = _id("turn")
+    start_test_root_turn(
+        repo, lease.guard,
+        command_id=_id("command"), turn_id=next_turn_id,
+        permission_snapshot_id=_id("permission"),
+        requested_permission_mode=DEFAULT_PERMISSION_MODE,
+        entry_id=_id("entry"), context_binding_revision_id=_id("revision"),
+        content=FrozenPromptContent.text("inspect the chart again"),
+        occurred_at=datetime.now(timezone.utc), deadline_monotonic=monotonic() + 30,
+        model_call_binding=test_model_binding(test_model_runtime()),
+    )
+    next_cut = repo.prepare_provider_input_cut(
+        lease.guard, turn_id=next_turn_id, deadline_monotonic=monotonic() + 30
+    )
+    next_input = CanonicalProviderInputReader(
+        repo.connection_provider
+    ).read_frozen_snapshot(next_cut, deadline_monotonic=monotonic() + 30)
+    owner_items = tuple(
+        item for item in next_input.items if item.source_entry_id == final_id
+    )
+    assert tuple(item.item_kind for item in owner_items) == (
+        FrozenProviderInputItemKind.ASSISTANT,
+        FrozenProviderInputItemKind.USER,
+    )
+    assert owner_items[1].input_origin is CanonicalInputOriginKind.VISUALIZATION_METADATA
+    assert provider_input_item_text(owner_items[1]) == canonical_json_bytes(
+        {"pulsara_visualizations": [{"visualization_ref": str(digest)}]}
+    ).decode("utf-8")
+    assert html.decode("utf-8") not in provider_input_item_text(owner_items[1])
     child = fork(repo, lease.guard.session_id, final_id)
     assert child.created, child.public_code
     copied = rows(repo, "SELECT * FROM pulsara_v3.assistant_visualizations WHERE session_id=%s", (child.child_session_id,))[0]

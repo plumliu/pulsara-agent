@@ -993,7 +993,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "the current workspace and may traverse outside it with ../; absolute paths "
             "and ~ are also accepted. Use image_ref only to reread an exact reference "
             "already shown beside an image in this session; copy it unchanged and do "
-            "not guess or enumerate references. Provide exactly one source. Use multiple "
+            "not guess or enumerate references. A screenshot attached by "
+            "visualization_render(review=true) has an image_ref you can reread here; "
+            "a visualization_ref names saved HTML and cannot be used here. "
+            "Provide exactly one source. Use multiple "
             "view_image calls for multiple images. URLs, directories, PDFs, animated "
             "images, multi-frame images, resize, and detail are unsupported."
         ),
@@ -1012,7 +1015,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Exact sha256: image reference previously shown in this session."
+                        "Exact sha256: image reference previously shown beside an "
+                        "image in this session, including a visualization screenshot. "
+                        "Not a visualization_ref."
                     ),
                 },
             },
@@ -1025,28 +1030,23 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "visualization_render": _descriptor(
         name="visualization_render",
         description=(
-            "Show a self-contained HTML visualization beneath your next assistant "
-            "message without tool calls. First create a complete HTML file with the "
-            "normal file tools, preferably in .pulsara/visualizations/, then call "
-            "this tool with exactly one path or a visualization_ref previously shown "
-            "in this session. For a chart, card, or single component, put "
-            "data-pulsara-visualization-root on the one element to display; the "
-            "display and preview will frame that element when it fits; multiple, "
-            "hidden, or oversized marked elements fall back to the whole page. "
-            "For a whole website/page demo, omit the attribute. Make the HTML "
-            "responsive and include all styles, scripts, data, SVG, and images in "
-            "the file; external sites, CDN assets, local companion files, and network "
-            "requests cannot load in the embedded display or preview. A normal call "
-            "only schedules display: it does not read the file yet. You may keep "
-            "editing, and the version at the next tool-free assistant message is "
-            "shown for a path; a saved reference stays unchanged. Repeating the "
-            "same source before that message produces one display. Deleting a "
-            "path source before then cancels that display. Use "
-            "review=true to also try an immediate screenshot you can inspect now; "
-            "it does not freeze the final version. If screenshot review is unavailable "
-            "or fails, the display remains scheduled. At display time, a missing "
-            "path silently cancels that item; other file-read failures show a "
-            "visible failure instead of HTML."
+            "Display an HTML file beneath your next tool-free assistant message. "
+            "Write it first, preferably in .pulsara/visualizations/, then call with "
+            "a path or a visualization_ref previously shown in this session. For a "
+            "chart or card, mark one visible element data-pulsara-visualization-root; "
+            "it is framed when it fits, otherwise the whole page is shown. For a "
+            "whole website/page demo, omit the mark. Make the HTML responsive and "
+            "include resources needed to render it in the file; CDN assets, companion "
+            "files, and external network resources cannot load in the embedded display "
+            "or preview. URLs in text, SVG metadata, or namespace declarations do not "
+            "themselves need removal. A normal call schedules display but does not "
+            "read the file yet. You can edit a path before the next tool-free message; "
+            "its latest version is shown, deletion cancels it, and repeating the same "
+            "source displays it once. A visualization_ref keeps the saved version. "
+            "review=true also tries an immediate screenshot with an image_ref for "
+            "view_image; it does not freeze the path. If the preview fails or is "
+            "unavailable, the display remains scheduled. A missing path at display "
+            "cancels it; other file-read failures show a visible error."
         ),
         input_schema=object_schema(
             properties={
@@ -1054,7 +1054,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Path to a complete, self-contained HTML file you wrote. "
+                        "Path to the complete HTML file you wrote. "
                         "Use this OR visualization_ref, not both. Relative paths "
                         "start at the workspace root, not a terminal's current "
                         "directory; absolute paths and ~ also work under normal "
@@ -1067,8 +1067,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Exact visualization reference already shown from a "
-                        "published HTML display in this session. Use this OR path, "
+                        "Exact reference from a published HTML display in this session, "
+                        "shown later as pulsara_visualizations[].visualization_ref. "
+                        "It is not a screenshot image_ref. Use this OR path, "
                         "not both, to show that saved HTML again without relying "
                         "on its original file. Do not invent a reference."
                     ),
@@ -1080,7 +1081,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                         "Default false: schedule display without opening or "
                         "checking the HTML. True: also try a screenshot of the "
                         "current file or saved reference now so you can inspect it; "
-                        "a path still uses its later version at display time, "
+                        "a successful preview image has its own image_ref for "
+                        "view_image later, not a visualization_ref. "
+                        "A path still uses its later version at display time, "
                         "while a saved reference stays unchanged. If the "
                         "model cannot receive images or reading/rendering fails, "
                         "the result explains that no preview was made, while the "

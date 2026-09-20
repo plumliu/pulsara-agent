@@ -375,17 +375,6 @@ def select_compatible_provider_replay_manifests(
     selected: list[FrozenDurableProviderReplayManifest] = []
     selected_placements: list[FrozenCompiledMessagePlacement] = []
     for manifest in manifest_cut.manifests:
-        placements = placements_by_entry.get(manifest.assistant_entry_id)
-        if placements is None:
-            continue
-        indexes = indexes_by_entry[manifest.assistant_entry_id]
-        if (
-            indexes != list(range(indexes[0], indexes[0] + len(indexes)))
-            or tuple(item.within_origin_ordinal for item in placements)
-            != tuple(range(len(placements)))
-            or any(item.role is not MessageRole.ASSISTANT for item in placements)
-        ):
-            raise ValueError("provider replay assistant placement group is invalid")
         if (
             manifest.wire_api != replay_target.wire_api
             or manifest.codec_kind != replay_target.codec_kind.value
@@ -395,8 +384,31 @@ def select_compatible_provider_replay_manifests(
             != replay_target.replay_target_fingerprint
         ):
             continue
+        placements = placements_by_entry.get(manifest.assistant_entry_id)
+        if placements is None:
+            continue
+        indexes = indexes_by_entry[manifest.assistant_entry_id]
+        assistant_count = next(
+            (
+                index
+                for index, placement in enumerate(placements)
+                if placement.role is not MessageRole.ASSISTANT
+            ),
+            len(placements),
+        )
+        if (
+            indexes != list(range(indexes[0], indexes[0] + len(indexes)))
+            or tuple(item.within_origin_ordinal for item in placements)
+            != tuple(range(len(placements)))
+            or assistant_count == 0
+            or tuple(item.role for item in placements[assistant_count:])
+            not in ((), (MessageRole.USER,))
+        ):
+            raise ValueError("provider replay assistant placement group is invalid")
         selected.append(manifest)
-        selected_placements.extend(placements)
+        # A visualization reference is a derived USER carrier after the
+        # assistant message; it shares the canonical entry, not native replay.
+        selected_placements.extend(placements[:assistant_count])
     return tuple(selected), tuple(selected_placements)
 
 
@@ -428,7 +440,10 @@ def freeze_selected_provider_replay_hydration(
 
     message_by_entry: dict[str, list[int]] = {}
     for index, placement in enumerate(compiled_input.message_placements):
-        if placement.origin_entry_id is not None:
+        if (
+            placement.origin_entry_id is not None
+            and placement.role is MessageRole.ASSISTANT
+        ):
             message_by_entry.setdefault(placement.origin_entry_id, []).append(index)
     for manifest, fragment in zip(selected_manifests, fragments, strict=True):
         indexes = message_by_entry[manifest.assistant_entry_id]

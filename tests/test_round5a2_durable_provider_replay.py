@@ -6,6 +6,7 @@ import ast
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,13 +25,25 @@ from pulsara_agent.llm.provider_replay import (
     provider_replay_id,
     project_provider_visible_reasoning,
 )
+from pulsara_agent.llm.input import LLMMessage, LLMTextPart, MessageRole
+from pulsara_agent.llm.request import (
+    provider_assistant_message_public_projection_fingerprint,
+)
+from pulsara_agent.model_input.contracts import (
+    FrozenCompiledMessagePlacement,
+    ModelInputScopeKind,
+)
+from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.ports.live_agent_event import ReasoningPresentationKind
 from pulsara_agent.model_input.provider_replay import (
     ProviderReplayHydrationError,
     ProviderReplayHydrationFailureKind,
     decode_provider_replay_fragment,
     freeze_provider_replay_manifest,
+    freeze_provider_replay_manifest_cut,
+    freeze_selected_provider_replay_hydration,
     quote_provider_dispatch_composite_bytes,
+    select_compatible_provider_replay_manifests,
 )
 from pulsara_agent.ports.provider_stream import (
     freeze_provider_adapter_completed_replay_payload,
@@ -104,6 +117,143 @@ def _candidate(
         public_projection_fingerprint="sha256:" + "2" * 64,
         ordered_items=(item,),
     )
+
+
+def _visualization_metadata_replay_input():
+    session_id = "session:visualization-replay"
+    assistant_entry_id = "entry:visualization-owner"
+    revision_id = "context-revision:visualization-replay"
+    target = _target()
+    assistant = LLMMessage(
+        role=MessageRole.ASSISTANT,
+        content=(LLMTextPart("public"),),
+    )
+    metadata = LLMMessage(
+        role=MessageRole.USER,
+        content=(
+            LLMTextPart(
+                '{"pulsara_visualizations":[{"visualization_ref":"sha256:'
+                + "a" * 64
+                + '"}]}'
+            ),
+        ),
+    )
+    frozen_item = _frozen_object(
+        {"role": "assistant", "content": "public", "reasoning_content": "thought"}
+    )
+    candidate = build_prepared_durable_provider_assistant_replay(
+        session_id=session_id,
+        workspace_id="workspace:visualization-replay",
+        assistant_entry_id=assistant_entry_id,
+        target=target,
+        public_projection_fingerprint=(
+            provider_assistant_message_public_projection_fingerprint(assistant)
+        ),
+        ordered_items=(frozen_item,),
+    )
+    manifest = freeze_provider_replay_manifest(
+        replay_id=candidate.replay_id,
+        assistant_entry_id=assistant_entry_id,
+        wire_api=candidate.wire_api,
+        codec_kind=candidate.codec_kind.value,
+        provider_replay_contract_fingerprint=(
+            candidate.provider_replay_contract_fingerprint
+        ),
+        replay_target_fingerprint=candidate.replay_target_fingerprint,
+        public_projection_fingerprint=candidate.public_projection_fingerprint,
+        payload_digest=candidate.payload_digest,
+        payload_size=candidate.payload_size,
+        item_count=candidate.item_count,
+        fragment_fingerprint=candidate.fragment_fingerprint,
+    )
+    cut = freeze_provider_replay_manifest_cut(
+        session_id=session_id,
+        scope=ProviderInputContinuityScope(
+            session_id=session_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        ),
+        context_binding_revision_id=revision_id,
+        provider_input_through_sequence=2,
+        manifests=(manifest,),
+    )
+    compiled_input = SimpleNamespace(
+        canonical_input_identity=SimpleNamespace(
+            session_id=session_id,
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+            context_binding_revision_id=revision_id,
+            provider_input_through_sequence=2,
+        ),
+        messages=(assistant, metadata),
+        message_placements=(
+            FrozenCompiledMessagePlacement(
+                message_ordinal=0,
+                origin_entry_id=assistant_entry_id,
+                origin_item_fingerprint="sha256:" + "a" * 64,
+                within_origin_ordinal=0,
+                role=MessageRole.ASSISTANT,
+            ),
+            FrozenCompiledMessagePlacement(
+                message_ordinal=1,
+                origin_entry_id=assistant_entry_id,
+                origin_item_fingerprint="sha256:" + "b" * 64,
+                within_origin_ordinal=1,
+                role=MessageRole.USER,
+            ),
+        ),
+    )
+    return target, cut, compiled_input, candidate.fragment()
+
+
+def test_visualization_metadata_is_not_part_of_native_assistant_replay() -> None:
+    target, cut, compiled_input, fragment = _visualization_metadata_replay_input()
+
+    selected, placements = select_compatible_provider_replay_manifests(
+        manifest_cut=cut,
+        compiled_input=compiled_input,
+        replay_target=target,
+    )
+
+    assert selected == cut.manifests
+    assert placements == compiled_input.message_placements[:1]
+    hydration = freeze_selected_provider_replay_hydration(
+        manifest_cut=cut,
+        compiled_input=compiled_input,
+        replay_target=target,
+        selected_manifests=selected,
+        selected_placements=placements,
+        fragments=(fragment,),
+    )
+    assert hydration.selected_manifests == selected
+
+
+def test_incompatible_replay_is_skipped_before_assistant_shape_validation() -> None:
+    _, cut, compiled_input, _ = _visualization_metadata_replay_input()
+    assistant = compiled_input.messages[0]
+    compiled_input.messages = (*compiled_input.messages, assistant)
+    compiled_input.message_placements = (
+        *compiled_input.message_placements,
+        FrozenCompiledMessagePlacement(
+            message_ordinal=2,
+            origin_entry_id=cut.manifests[0].assistant_entry_id,
+            origin_item_fingerprint="sha256:" + "c" * 64,
+            within_origin_ordinal=2,
+            role=MessageRole.ASSISTANT,
+        ),
+    )
+
+    assert select_compatible_provider_replay_manifests(
+        manifest_cut=cut,
+        compiled_input=compiled_input,
+        replay_target=_target(endpoint="different"),
+    ) == ((), ())
+    with pytest.raises(ValueError, match="assistant placement group is invalid"):
+        select_compatible_provider_replay_manifests(
+            manifest_cut=cut,
+            compiled_input=compiled_input,
+            replay_target=_target(),
+        )
 
 
 def test_round5a2_dogfood_report_scrubs_only_the_exact_configured_key() -> None:

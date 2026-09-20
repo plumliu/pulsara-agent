@@ -4,7 +4,7 @@
 
 ## 0. 产品形状
 
-这是一个轻量的对话展示工具，不是内置浏览器、网页托管服务或可视化项目系统。模型用现有文件工具写一份自包含 HTML，再调用 `visualization_render` 登记“在接下来一条无工具调用的 assistant message 下展示它”。前端从该消息的 canonical 展示结果得到一个内部展示引用，在对话里用隔离 iframe 渲染；展示标记不由模型写入消息正文，也不进入 provider 输入。
+这是一个轻量的对话展示工具，不是内置浏览器、网页托管服务或可视化项目系统。模型用现有文件工具写一份完整 HTML，再调用 `visualization_render` 登记“在接下来一条无工具调用的 assistant message 下展示它”。前端从该消息的 canonical 展示结果得到一个内部展示引用，在对话里用隔离 iframe 渲染；展示标记不由模型写入消息正文，也不进入 provider 输入。
 
 普通订阅只登记进程内意图，不读取文件、不启动浏览器、不写 HTML blob。模型可以在订阅后继续编辑。目标 assistant message 提交前，runtime 才读取当时的文件并冻结确切 HTML 字节；消息、HTML blob 与有序展示结果在同一 canonical 事务中提交。后续编辑或删除工作文件都不改变历史展示。
 
@@ -27,7 +27,7 @@
 
 工作文件是普通完整 HTML，默认放在 `<workspace_root>/.pulsara/visualizations/<descriptive-name>.html`。它应能由用户直接用普通浏览器打开。这里的相对路径与现有只读文件工具一样锚定本次调用冻结的 `workspace_root`，**不跟随 terminal 的进程 cwd 或先前的 `cd`**；模型若在其他目录创建文件，应传 workspace-relative 或绝对路径。标准目录只是创作约定，不是新权限边界：用户指定的其他本地路径仍走现有路径解析和权限语义，不能仅因绝对路径或 `..` 离开 workspace 就被本工具额外拒绝。
 
-首版嵌入展示要求**自包含 HTML**：样式、脚本、数据与图片随同一个 HTML 文件提供，可使用内联 SVG、Canvas 和 `data:` 图片。需要第三方库时，模型可通过现有授权工具取得并打包进这个文件；`visualization_render` 不安装、注入或映射库。嵌入展示与回看不加载 CDN、开发服务器、工作区配套文件、`file:` URL 或其他外部资源，也不开放 `fetch`、XHR、WebSocket 等网络出口。运行时不为此自造完整的 HTML/JavaScript 静态资源分析器；若作者仍写了外部依赖，请求会在隔离执行时被阻止，该 HTML 不保证正确显示，已提交的 `READY` 不因此倒写成 `FAILED`。用户脱离 Pulsara 手动打开工作文件时，由普通浏览器及用户环境决定其行为；Pulsara 不承诺替用户管理那条路径。
+首版嵌入展示要求**渲染所需资源随 HTML 一起提供**：样式、脚本、数据与图片随同一个 HTML 文件提供，可使用内联 SVG、Canvas 和 `data:` 图片。需要第三方库时，模型可通过现有授权工具取得并打包进这个文件；`visualization_render` 不安装、注入或映射库。嵌入展示与回看不加载 CDN、开发服务器、工作区配套文件、`file:` URL 或其他外部资源，也不开放 `fetch`、XHR、WebSocket 等网络出口。这是对实际资源加载的限制，不是对文件中 URL 字符串的禁令；文本、SVG 元数据或命名空间声明中的 URL 本身无需清理。运行时不为此自造完整的 HTML/JavaScript 静态资源分析器；若作者仍写了外部依赖，请求会在隔离执行时被阻止，该 HTML 不保证正确显示，已提交的 `READY` 不因此倒写成 `FAILED`。用户脱离 Pulsara 手动打开工作文件时，由普通浏览器及用户环境决定其行为；Pulsara 不承诺替用户管理那条路径。
 
 若创作的是图表、卡片或单个组件，作者可在希望展示的**唯一元素**上加 `data-pulsara-visualization-root`，例如 `<main data-pulsara-visualization-root>…</main>`。这是普通浏览器会忽略的可选 HTML 属性，文件仍是完整、可独立打开的网页。若创作的是完整网站页面，则不加标记，展示整页。不能猜测 `<main>`、`body` 或任意最大的元素为主体，也不能把主体选择另存为工具参数、blob metadata 或 canonical 字段。
 
@@ -49,7 +49,7 @@
 - `visualization_ref` 是模型已获知的、已提交 `READY` HTML 内容引用。它不是数据库 row/blob ID；解析时必须验证当前 session/workspace 存在拥有该内容的 canonical `READY` 展示结果，知道摘要本身不授予访问权。
 - `review` 是可选布尔值，默认 `false`。`path` 与 `visualization_ref` 必须恰有一个；顶层不接受其他字段。
 
-模型可见的工具及三个参数说明必须交代实际工作流和分岔：先用现有工具写/改完整的自包含 HTML；组件/图表可标记唯一主体，网站整页不标记；普通调用只预约下一条无工具调用的回复展示，允许继续修改，发布时才取最终文件；删除文件会取消该路径的待展示；`review=true` 当场尝试截图供模型检查，但不是最终版本锁定；无图片能力、读取/截图失败时仅回看失败而订阅仍有效；已发布的引用可在同一会话中重新订阅，不应臆造未知引用。描述只使用模型完成任务所需的概念，不泄露 canonical row、epoch、owner、exact-join 等内部机制。
+模型可见的工具及三个参数说明必须交代实际工作流和分岔：先用现有工具写/改完整 HTML，并内联展示所需的渲染资源，不要求清理不会触发资源加载的 URL 文本；组件/图表可标记唯一主体，网站整页不标记；普通调用只预约下一条无工具调用的回复展示，允许继续修改，发布时才取最终文件；删除文件会取消该路径的待展示；`review=true` 当场尝试截图供模型检查，但不是最终版本锁定；无图片能力、读取/截图失败时仅回看失败而订阅仍有效；已发布的引用可在同一会话中重新订阅，不应臆造未知引用。描述只使用模型完成任务所需的概念，不泄露 canonical row、epoch、owner、exact-join 等内部机制。
 
 普通调用在现有 schema、权限、Hook 与 attempt 流程允许该工具执行后，只生成闭合来源值与进程内待登记 token；被拒绝的调用不生成 token。只有对应 canonical `SUCCESS` ToolResult 已提交或经现有 exact confirmation 确认后，active-turn owner 才原子 install 该 token；失败、取消或未确认时 discard，不提前留下可物化槽位，也不新增持久事实。成功调用只返回简短状态：
 
@@ -114,6 +114,8 @@ Visualization is subscribed for this response.
 
 最终 `visualization_ref` 直到所属 assistant message 提交后才存在。若以后发生 provider call，compiler 首次将该 assistant entry 追加到 provider 历史时，紧随它派生一个不显示于 UI 的稳定 user-role metadata carrier，逐项告知实际 `READY` 引用；没有后续调用则不额外唤醒模型。carrier 不写进 canonical 用户正文、不改变 recent human 或 Hook/Skill 匹配，后续调用保持同一历史位置和字节；compaction 随所属 assistant evidence 取舍，不维护全会话引用清单。`FAILED` 和取消项不产生引用。
 
+该 user-role carrier 与 assistant 消息共享 canonical entry 归属，但不属于 assistant 的 provider-native replay。replay 只选择、校验并替换该 entry 的 assistant placement；紧随其后的 carrier 仍按普通 user 消息保留在原有顺序，不能被 replay 吞掉或误判为 assistant placement 损坏。目标不兼容的 replay 先按现有 target/contract 规则排除，再校验被选中 replay 的 assistant placement；这属于正常模型切换语义，不是旧数据兼容路径。
+
 前端收到的是 assistant entry 所拥有的有序展示结果，效果类似识别一枚内部可视化标记，但**不解析模型正文中的任意路径或伪造标记**。协议在 `CanonicalEntry` 暴露 `READY` / `FAILED` 摘要；HTML 字节沿现有内容读取链路增加窄目标 `(session_id, assistant_entry_id, ordinal)`，读取时重新验证该 `READY` owner，不能用 blob ID 或摘要直接绕过授权。`FAILED` 摘要足以显示占位，无 HTML 读取。
 
 assistant 正文与工具卡仍在普通对话版心；每个 `READY` 结果在它所属消息下独占一行，不继承正文 max-width，但也不强制铺满中央工作区。未标记主体时展示整页，宽度上限 `960px`、高度上限 `min(70dvh, 560px)`，超出部分在 iframe 内滚动。若 HTML 中恰有一个 `data-pulsara-visualization-root`，在独立于外层裁剪尺寸的 iframe 采样视口中量取该元素的实际渲染边界，只在边界有限、可见且完整落于采样视口内时裁出主体；展示宽高取主体尺寸，仍受上述宽高上限约束。主体旁的整页背景不会填满对话区。面板开合、响应式布局、字体或内容变更后重新量取；不能因外层缩小导致 iframe 视口随之缩小，再引起不断重排的反馈环。标记缺失、重复、隐藏、越过采样视口或测量无效时安全退回整页视口，不猜主体、不把它记成 durable 失败。作者应让想单独展示的主体在采样视口内响应式适配；本工具不替任意超宽/超高网页重写布局。面板不能进入侧栏下方或造成应用级横向滚动。`FAILED` 用短占位说明，不伪装为工具卡。
@@ -142,8 +144,8 @@ assistant 正文与工具卡仍在普通对话版心；每个 `READY` 结果在�
 3. 待处理 steer 使 turn 继续时，已提交的无工具调用 assistant message 立即展示并消费订阅，后续消息不重复附着；提交不确定回执的确认重试不重读路径。
 4. `READY` HTML 与所属消息同事务提交，修改/删除原文件不影响历史；数据库或 blob 事务失败不留下孤儿结果。相同字节跨 media type/codec 发布不会碰撞，同类型同字节 exact-reuse，`visualization_ref` 仍按当前 session/workspace 的 `READY` owner 验权。现有图片 `image_ref` 的 canonical refs 校验和 `view_image` 重读在新 blob 身份下仍正确，且无旧 ID 兼容路径。
 5. `review=true` 每次查看当前版本；成功截图通过扩展现有 typed 图片结果、额度 quote/校验、交付和 compiler 来源分支形成可重读的 `image_ref`，不增加独立图片存储。settlement、历史读取和 late outcome 对实际带图片的成功结果要求 FULL；普通订阅、无图片能力模型和回看失败均只有纯文本结果，不伪造图片附件或 FULL 图片语义，订阅仍成立。
-6. 前端从 canonical occurrence 展示而非解析模型正文或可变路径；HTML 不进入 provider 输入，引用 carrier 在下一次真实 provider call 中稳定追加，冷启动、append、compaction、reconnect 不破坏已安装前缀。
-7. 工作文件无需 Pulsara 专用 metadata 即可由普通浏览器打开；Pulsara 嵌入与回看只接受自包含资源策略。浏览器测试覆盖外部请求、`file:`、主应用 DOM/API/凭据、导航/弹窗/下载的阻断，以及无标记整页、唯一标记裁出主体、重复/无效标记安全退回整页、动态尺寸与面板开合后重测、主体外背景消失、超出正文版心但不强制铺满工作区的布局。模型可见工具/参数说明须让模型正确选择组件主体或整页路径，并理解普通订阅、即时回看、继续编辑、删除取消和失败后继续的结果。
+6. 前端从 canonical occurrence 展示而非解析模型正文或可变路径；HTML 不进入 provider 输入，引用 carrier 在下一次真实 provider call 中稳定追加，冷启动、append、compaction、reconnect 不破坏已安装前缀。Chat 与 Responses 的 provider-native replay 只替换 assistant 消息，保留同 entry 的 user-role 引用 carrier 与后续消息；目标不兼容时跳过 replay，不把该 carrier 误判为 canonical 损坏。
+7. 工作文件无需 Pulsara 专用 metadata 即可由普通浏览器打开；Pulsara 嵌入与回看不加载文件外部的渲染资源，但不清理普通 URL 文本。浏览器测试覆盖外部请求、`file:`、主应用 DOM/API/凭据、导航/弹窗/下载的阻断，以及无标记整页、唯一标记裁出主体、重复/无效标记安全退回整页、动态尺寸与面板开合后重测、主体外背景消失、超出正文版心但不强制铺满工作区的布局。模型可见工具/参数说明须让模型正确选择组件主体或整页路径，并理解普通订阅、即时回看、继续编辑、删除取消和失败后继续的结果。
 8. 真实 provider dogfood 覆盖 `write` / `edit` → subscribe → review → edit → 无工具调用 assistant message 展示，并保留实际工具结果、截图 `image_ref`、`READY` HTML blob 和失败/取消边界的可复核证据；证据只排除真实凭据值。
 9. 截图浏览器遇到永不结束的脚本/加载或取消时，单次操作 deadline 与进程终止使物理执行可回收；仍在运行的 turn 获得“订阅已接受、回看未生成”的纯文本结果，Host close 不被卡死页面无限阻塞。
 10. fork 复制范围内的 `READY` / `FAILED` 展示随 assistant entry 导入，归属重映射正确；有效 cut 省略源 tool result 时不伪造执行事实。原会话或 fork 子会话仍引用 HTML 时 GC 不删除 blob，合法移除最后一个 owner 后才可回收。
