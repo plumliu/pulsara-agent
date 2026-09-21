@@ -35,7 +35,10 @@ describe('builtin tool summaries', () => {
     ['memory_search', { memories: [{ statement: 'RAW MEMORY' }] }, { query: '偏好' }, '搜索记忆', '本次找到 1 条相关记忆'],
     ['memory_get', { statement: 'RAW MEMORY' }, { memory_id: 'private-id' }, '读取记忆', '已读取记忆'],
     ['memory_explain', { statement: 'RAW MEMORY', decision: {} }, {}, '查看记忆来源', '已读取记忆的来源与审核记录'],
-    ['remember', { status: 'proposed_for_review', saved_memory_id: null }, {}, '提交记忆', '已提交记忆'],
+    ['remember', { status: 'SAVED', memory_id: 'private-id' }, {}, '提交记忆', '已提交记忆'],
+    ['mark_memory_relation', { status: 'SAVED', relation_kind: 'SUPERSEDES', source_memory_id: 'private-id', target_memory_id: 'private-id' }, {}, '标记记忆关系', '已标记取代关系'],
+    ['mark_memory_relation', { status: 'SAVED', relation_kind: 'CONTRADICTS' }, {}, '标记记忆关系', '已标记冲突关系'],
+    ['mark_memory_relation', { status: 'ALREADY_PRESENT', relation_kind: 'SUPERSEDES' }, {}, '标记记忆关系', '取代关系已存在'],
     ['manage_capability', { status: 'APPLIED', adoption: { status: 'PARTIAL' } }, {}, '管理扩展能力', '配置变更已保存，部分配置尚未生效'],
     ['reload_capabilities', { status: 'PARTIAL' }, {}, '刷新扩展能力', '部分配置未能刷新'],
     ['reload_hooks', { status: 'RELOADED' }, {}, '刷新自动操作', '已刷新自动操作配置'],
@@ -83,6 +86,8 @@ describe('builtin tool summaries', () => {
 
   it('keeps unfinished calls and unconfirmed historical results distinct', () => {
     expect(builtinToolSummary(trace('remember', undefined, {}, { status: 'running' }))?.subtitle).toBe('正在提交记忆');
+    expect(builtinToolSummary(trace('mark_memory_relation', undefined, { relation_kind: 'CONTRADICTS' }, { status: 'running' }))?.subtitle).toBe('正在标记冲突关系');
+    expect(builtinToolSummary(trace('mark_memory_relation', undefined, { relation_kind: 'SUPERSEDES' }, { status: 'running' }))?.subtitle).toBe('正在标记取代关系');
     expect(builtinToolSummary(trace('write_file', undefined, {}, { status: 'cancelled', resultState: undefined }))?.subtitle).toBe('未记录到操作结果');
     expect(builtinToolSummary(trace('write_file', undefined, {}, { status: 'cancelled', resultState: 'CANCELLED_BEFORE_DISPATCH' }))?.subtitle).toBe('操作已取消');
   });

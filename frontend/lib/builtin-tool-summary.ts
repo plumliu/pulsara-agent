@@ -27,6 +27,7 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   memory_get: ['读取记忆', '正在读取已保存的记忆', '已读取记忆'],
   memory_explain: ['查看记忆来源', '正在查看记忆的来源与审核记录', '已读取记忆的来源与审核记录'],
   remember: ['提交记忆', '正在提交记忆', '已提交记忆'],
+  mark_memory_relation: ['标记记忆关系', '正在标记记忆关系', '已处理记忆关系'],
   manage_capability: ['管理扩展能力', '正在处理连接或插件配置', '已处理配置请求'],
   reload_capabilities: ['刷新扩展能力', '正在刷新技能、连接与自动操作', '已刷新技能、连接与自动操作'],
   reload_hooks: ['刷新自动操作', '正在刷新自动操作配置', '已刷新自动操作配置'],
@@ -143,6 +144,10 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
   else if (name === 'memory_search') target = text(args.query);
 
   let detail = label[1];
+  if (name === 'mark_memory_relation' && trace.status === 'running') {
+    detail = args.relation_kind === 'SUPERSEDES' ? '正在标记取代关系'
+      : args.relation_kind === 'CONTRADICTS' ? '正在标记冲突关系' : detail;
+  }
   if (trace.status === 'cancelled') detail = trace.resultState || trace.resultText !== undefined
     ? '操作已取消' : '未记录到操作结果';
   else if (trace.status === 'failed') detail = failure(trace, result);
@@ -233,6 +238,13 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
       case 'memory_search':
         if (Array.isArray(result.memories)) detail = `本次找到 ${result.memories.length} 条相关记忆`;
         break;
+      case 'mark_memory_relation': {
+        const relation = result.relation_kind === 'SUPERSEDES' ? '取代关系'
+          : result.relation_kind === 'CONTRADICTS' ? '冲突关系' : '记忆关系';
+        if (status === 'saved') detail = `已标记${relation}`;
+        else if (status === 'already_present') detail = `${relation}已存在`;
+        break;
+      }
       case 'manage_capability':
         detail = ({ applied: '配置变更已应用', rejected: '配置变更未被接受', conflict: '配置已变化，本次变更未应用',
           cancelled: '已取消配置变更' } as Record<string, string>)[status] ?? detail;

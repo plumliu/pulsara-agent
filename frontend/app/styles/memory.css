@@ -8,6 +8,7 @@
 .memory-view button { transition: background .15s ease, border-color .15s ease, color .15s ease; }
 .memory-view button:disabled { opacity: .5; cursor: default; }
 .memory-view :is(button, input, select):focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; }
+.memory-view :is(.memory-search input, .memory-project select, .memory-state-select select):focus-visible { outline: none; }
 
 .memory-scope-header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; margin-bottom: 18px; }
 .memory-tabs { display: inline-flex; flex: none; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb, var(--paper-deep) 65%, transparent); }
@@ -18,7 +19,7 @@
 .memory-toolbar { padding: 18px 20px 14px; border-bottom: 1px solid var(--line); }
 .memory-controls { display: flex; align-items: center; gap: 12px; }
 .memory-search { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; min-height: 39px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--muted); }
-.memory-search:focus-within { border-color: color-mix(in srgb, var(--amber) 60%, var(--line)); }
+.memory-search:focus-within, .memory-project:focus-within, .memory-state-select:focus-within { border-color: var(--line-strong); box-shadow: 0 0 0 2px color-mix(in srgb, var(--ink) 10%, transparent); }
 .memory-search input { width: 100%; min-width: 0; padding: 9px 0; border: 0; background: transparent; color: var(--ink); }
 .memory-search input::placeholder { color: var(--faint); }
 .memory-search svg { flex: none; }
@@ -71,16 +72,29 @@
 .memory-detail h3 { margin: 24px 0 10px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 14px; font-weight: 600; color: var(--ink); }
 .memory-detail p { overflow-wrap: anywhere; white-space: pre-wrap; }
 .memory-detail-body > p:not(.memory-statement) { color: var(--muted); }
-.memory-source { margin-top: 12px; }
-.memory-relation { margin-top: 10px; padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--paper) 60%, transparent); }
-.memory-relation > strong { color: var(--muted); font-size: 12px; font-weight: 500; }
-.memory-relation > button:not(.memory-source) { display: block; width: 100%; margin-top: 6px; text-align: left; color: var(--ink); background: transparent; }
-.memory-relation button:hover .memory-statement { color: var(--amber); }
-.memory-relation > p { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
-.memory-relation .memory-statement, .memory-impact .memory-statement { font-size: 16px; }
-.memory-relation-origin .memory-source { margin: 0; padding: 4px 7px; font-size: 12px; }
-.memory-relation-origin { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; color: var(--muted); font-size: 12px; }
-.memory-detail-body > button:not(.memory-delete):not(.memory-source) { margin-top: 12px; padding: 6px 0; color: var(--muted); background: transparent; }
+.memory-detail-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.memory-detail-actions .memory-source, .memory-detail-actions .memory-delete { margin-top: 0; }
+.memory-detail-unavailable { color: var(--faint); font-size: 12px; }
+.memory-graph { margin-top: 24px; }
+.memory-graph h3 { margin: 0 0 15px; padding-top: 16px; }
+.memory-graph-current, .memory-graph-node { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); text-align: left; }
+.memory-graph-current { border-color: color-mix(in srgb, var(--amber) 42%, var(--line)); background: color-mix(in srgb, var(--amber-soft) 22%, var(--paper)); }
+.memory-graph-caption { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.memory-graph-current > .memory-graph-caption { color: var(--amber); font-weight: 600; }
+.memory-graph-statement { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; color: var(--ink); font-size: 13px; line-height: 1.55; }
+.memory-graph-branches { margin-left: 18px; border-left: 1px solid var(--line-strong); }
+.memory-graph-branch { position: relative; margin-left: 22px; padding-top: 9px; }
+.memory-graph-branch::before { content: ''; position: absolute; top: 22px; left: -22px; width: 22px; height: 1px; background: var(--line-strong); }
+.memory-graph-branch:last-child::after { content: ''; position: absolute; left: -23px; top: 23px; bottom: 0; width: 3px; background: var(--paper-raised); }
+.memory-graph-edge { position: relative; display: flex; align-items: center; gap: 5px; min-height: 22px; color: var(--muted); font-size: 11px; }
+.memory-graph-edge svg { color: var(--amber); }
+.memory-graph-node { margin-top: 3px; cursor: pointer; }
+.memory-graph-node:hover:not(:disabled) { border-color: var(--amber); background: var(--paper-raised); }
+.memory-graph-origin { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 7px; padding: 5px 2px 8px; color: var(--faint); font-size: 11px; line-height: 1.5; }
+.memory-graph-origin button { display: inline-flex; align-items: center; gap: 2px; padding: 0; background: transparent; color: var(--muted); font-size: 11px; }
+.memory-graph-origin button:hover { color: var(--ink); text-decoration: underline; }
+.memory-graph-empty { margin: 12px 0 0; color: var(--faint); font-size: 12px; }
+.memory-graph-more { margin: 9px 0 0 40px; padding: 5px 0; background: transparent; color: var(--muted); font-size: 12px; }
 .memory-delete { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; margin-top: 22px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--red) 22%, var(--line)); border-radius: 8px; color: var(--red); background: transparent; }
 .memory-delete:hover:not(:disabled) { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
 .memory-error { color: var(--red); font-size: 14px; }
@@ -89,19 +103,59 @@
 .memory-feedback > svg { flex: none; margin-top: 3px; }
 .memory-error.memory-feedback { background: color-mix(in srgb, var(--red-soft) 45%, transparent); }
 .memory-notice > svg { color: var(--green); }
-.memory-confirmation { margin-top: 24px; padding: 16px; border: 1px solid color-mix(in srgb, var(--red) 20%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--paper) 80%, transparent); }
-.memory-confirmation h3 { margin: 0 0 8px; padding: 0; border: 0; }
-.memory-confirmation > p { color: var(--muted); font-size: 14px; }
-.memory-impact { border-top: 1px solid var(--line); padding: 14px 0; }
-.memory-impact > strong { display: block; margin-bottom: 8px; font-size: 12px; font-weight: 600; }
-.memory-impact > p:last-child:not(.memory-statement) { font-size: 12px; color: var(--muted); }
-.memory-confirmation fieldset { min-width: 0; margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
-.memory-confirmation legend { padding: 0 4px; font-size: 14px; }
-.memory-confirmation fieldset label { display: flex; align-items: baseline; gap: 8px; margin: 12px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.memory-confirmation input { accent-color: var(--amber); }
-.memory-confirmation fieldset button, .memory-confirmation footer > button:first-child { min-height: 34px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-raised); color: var(--muted); }
-.memory-confirmation footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
-.memory-confirmation footer .memory-delete { margin-top: 0; }
+.memory-delete-overlay { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 20px; background: rgba(18,17,14,.3); backdrop-filter: blur(3px); }
+.memory-delete-dialog { display: flex; flex-direction: column; width: min(680px,100%); max-height: calc(100dvh - 40px); min-height: 0; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; background: var(--paper-solid); box-shadow: var(--shadow-lg); color: var(--ink); font-family: var(--sans); }
+.memory-delete-dialog :is(button, input, summary):focus-visible { outline: 2px solid var(--ink-soft); outline-offset: 2px; }
+.memory-delete-dialog button { font-size: 14px; }
+.memory-delete-dialog button:disabled { opacity: .48; cursor: default; }
+.memory-delete-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex: none; padding: 21px 25px 18px; border-bottom: 1px solid var(--line); }
+.memory-delete-kicker { color: var(--faint); font-size: 11px; letter-spacing: .04em; }
+.memory-delete-dialog h2 { margin: 4px 0 0; font-family: var(--serif); font-size: 23px; font-weight: 500; }
+.memory-delete-dialog > header button { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: var(--muted); }
+.memory-delete-dialog > header button:hover { background: var(--paper-deep); }
+.memory-delete-body { min-height: 0; overflow: auto; padding: 20px 25px 22px; }
+.memory-delete-explainer { margin: 0 0 15px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.memory-delete-target { display: grid; gap: 8px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--red) 25%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--red-soft) 35%, var(--paper)); }
+.memory-delete-target > strong { color: var(--red); font-size: 12px; }
+.memory-delete-fact { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
+.memory-delete-fact small { color: var(--faint); font-size: 11px; }
+.memory-delete-totals { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 4px; }
+.memory-delete-totals > span { padding: 6px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--muted); font-size: 12px; }
+.memory-delete-totals strong { color: var(--ink); font-weight: 600; }
+.memory-delete-group { margin-top: 21px; }
+.memory-delete-group h3 { display: flex; align-items: baseline; gap: 7px; margin: 0 0 9px; font-size: 14px; font-weight: 600; }
+.memory-delete-group h3 span { color: var(--faint); font-size: 12px; font-weight: 400; }
+.memory-delete-group > p { margin: -3px 0 9px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.memory-delete-group ul, .memory-delete-relations ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.memory-delete-group li { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.memory-delete-conflicts li { display: grid; gap: 5px; border-color: color-mix(in srgb, var(--red) 24%, var(--line)); }
+.memory-delete-conflicts li > strong { color: var(--red); font-size: 12px; }
+.memory-delete-conflicts li > small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.memory-delete-blocked, .memory-delete-alert { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border-radius: 9px; font-size: 13px; line-height: 1.55; }
+.memory-delete-blocked { margin-top: 16px; background: color-mix(in srgb, var(--amber-soft) 55%, var(--paper)); }
+.memory-delete-blocked > svg, .memory-delete-alert > svg { flex: none; margin-top: 2px; }
+.memory-delete-blocked strong, .memory-delete-blocked small { display: block; }
+.memory-delete-blocked small { margin-top: 3px; color: var(--muted); font-size: 12px; }
+.memory-delete-alert { margin: 15px 0 0; background: var(--red-soft); color: var(--red); }
+.memory-delete-choices { min-width: 0; margin: 20px 0 0; padding: 13px; border: 1px solid var(--line); border-radius: 9px; }
+.memory-delete-choices legend { padding: 0 4px; font-size: 13px; font-weight: 600; }
+.memory-delete-choices p { margin: 0 0 11px; color: var(--muted); font-size: 12px; }
+.memory-delete-choices label { display: flex; align-items: flex-start; gap: 9px; margin: 9px 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-delete-choices input { flex: none; margin-top: 3px; accent-color: var(--amber); }
+.memory-delete-choices button, .memory-delete-retry, .memory-delete-dialog > footer button { min-height: 35px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink-soft); }
+.memory-delete-choices button { margin-top: 8px; }
+.memory-delete-retry { margin-top: 10px; }
+.memory-delete-relations { margin-top: 19px; border-top: 1px solid var(--line); padding-top: 13px; }
+.memory-delete-relations summary { width: fit-content; cursor: pointer; color: var(--muted); font-size: 12px; }
+.memory-delete-relations ul { margin-top: 11px; }
+.memory-delete-relations li { padding: 9px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.memory-delete-relations li strong { color: var(--ink-soft); }
+.memory-delete-relation-facts { display: grid; gap: 6px; margin-top: 7px; }
+.memory-delete-relation-facts p { display: grid; grid-template-columns: 64px minmax(0,1fr); gap: 9px; margin: 0; line-height: 1.5; }
+.memory-delete-relation-facts small { color: var(--faint); font-size: 11px; }
+.memory-delete-dialog > footer { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; flex: none; padding: 14px 25px; border-top: 1px solid var(--line); }
+.memory-delete-dialog > footer .memory-delete-confirm { border-color: color-mix(in srgb, var(--red) 40%, var(--line)); background: var(--red); color: white; }
+.memory-delete-dialog > footer .memory-delete-confirm:not(:disabled):hover { filter: brightness(.94); }
 
 @media (max-width: 1000px) {
   .memory-layout { flex-direction: column; max-width: 850px; }
@@ -124,5 +178,9 @@
   .memory-empty { min-height: 300px; padding: 36px 22px; }
   .memory-detail-body { padding: 18px; }
   .memory-feedback { margin: 12px 14px; }
+  .memory-delete-overlay { padding: 10px; }
+  .memory-delete-dialog { max-height: calc(100dvh - 20px); }
+  .memory-delete-dialog > header, .memory-delete-dialog > footer { padding: 14px 16px; }
+  .memory-delete-body { padding: 16px; }
 }
 @media (prefers-reduced-motion: reduce) { .memory-view button { transition: none; } }

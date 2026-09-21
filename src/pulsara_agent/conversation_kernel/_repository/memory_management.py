@@ -230,7 +230,7 @@ class _MemoryManagementOperations:
                     {
                         **asdict(MemoryManagementFact.from_row(row)),
                         "needs_confirmation": row["needs_confirmation"],
-                        "context_label": labels.get(context, "项目"),
+                        "context_label": labels.get(context, "项目记忆"),
                     }
                     for row in selected
                 ],
@@ -245,7 +245,7 @@ class _MemoryManagementOperations:
     @staticmethod
     def _management_labels(c, domain):
         return {
-            CTX_GLOBAL: "跨对话",
+            CTX_GLOBAL: "全局记忆",
             **{
                 r["workspace_id"]: r["label"]
                 for r in c.execute(
@@ -346,7 +346,7 @@ class _MemoryManagementOperations:
                 "fact": {
                     **asdict(MemoryManagementFact.from_row(row)),
                     "needs_confirmation": row["needs_confirmation"],
-                    "context_label": labels.get(context, "项目"),
+                    "context_label": labels.get(context, "项目记忆"),
                 },
                 "formation": "由对话中的 Pulsara 直接保存；请按需核对内容",
                 "source": {

@@ -63,7 +63,7 @@ class MemoryManagementSelection:
         if self.view not in {"global", "project"} or (
             (self.view == "global") != (self.workspace_id is None)
         ):
-            raise ValueError("请选择跨对话或一个项目")
+            raise ValueError("请选择全局记忆，或为项目记忆选择一个项目")
         if self.workspace_id is not None and (
             self.workspace_id == CTX_GLOBAL
             or not is_valid_context_id(self.workspace_id)

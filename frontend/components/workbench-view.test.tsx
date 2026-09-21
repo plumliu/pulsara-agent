@@ -637,6 +637,24 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.getByLabelText('文件差异')).toBeTruthy();
   });
 
+  it('shows a localized memory-relation tool card with a concise result', () => {
+    const view = render(<WorkbenchView {...props({
+      isRunning: false,
+      messages: [{
+        id: 'assistant-relation', role: 'assistant', time: '现在', body: '', status: 'completed',
+        traces: [{
+          id: 'relation', kind: 'artifact', toolName: 'mark_memory_relation',
+          title: '使用工具', subtitle: '已完成', status: 'completed', resultState: 'SUCCESS',
+          argumentsJson: JSON.stringify({ relation_kind: 'SUPERSEDES', source_memory_id: 'private-source', target_memory_id: 'private-target' }),
+          resultText: JSON.stringify({ status: 'SAVED', relation_kind: 'SUPERSEDES', relation_id: 'private-relation' }),
+        }],
+      }],
+    })} />);
+    expect(view.container.querySelector('.trace-summary-title strong')?.textContent).toBe('标记记忆关系');
+    expect(view.container.querySelector('.trace-summary-copy small')?.textContent).toBe('已标记取代关系');
+    expect(view.container.querySelector('.trace-card')?.textContent).not.toMatch(/private-|mark_memory_relation/);
+  });
+
   it('streams terminal output in an expanded card and unwraps only the final terminal envelope', () => {
     const terminalTrace = (resultText: string, status: 'running' | 'completed', resultState?: string) => ({
       id: 'terminal-stream', kind: 'terminal' as const, toolName: 'terminal', title: '运行命令',
