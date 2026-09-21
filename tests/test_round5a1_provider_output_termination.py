@@ -7,14 +7,10 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from threading import Thread
-from types import SimpleNamespace
 
 import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog
-from pulsara_agent.conversation_kernel.auxiliary_model import (
-    DirectKernelAuxiliaryJsonModel,
-)
 from pulsara_agent.conversation_kernel.assistant_settlement import (
     PreparedAssistantMessageSettlement,
 )
@@ -54,9 +50,6 @@ from pulsara_agent.llm.provider import (
     ProviderChatReplayFieldContract,
     RouteWireProfile,
 )
-from pulsara_agent.llm.provider_open import (
-    _issue_confirmed_memory_governance_terminal_fence,
-)
 from pulsara_agent.ports.live_agent_event import (
     ReasoningPresentationKind,
     TextDeltaPayload,
@@ -71,7 +64,6 @@ from pulsara_agent.ports.live_agent_event import (
 from pulsara_agent.ports.provider_stream import (
     ProviderAdapterTerminal,
     ProviderAdapterTerminalKind,
-    ProviderModelOutputIncomplete,
     ProviderNormalizedTerminalKind,
     ProviderOutputIncompleteReason,
     ProviderStreamFailure,
@@ -84,7 +76,6 @@ from pulsara_agent.model_input.contracts import (
     PreparedProviderInputCut,
 )
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
-from pulsara_agent.memory.product_contract import MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3
 from pulsara_agent.llm.request import (
     LLMContext,
     provider_assistant_public_projection_fingerprint,
@@ -3431,88 +3422,6 @@ def test_responses_accepts_message_before_ordered_function_calls() -> None:
     assert fragment is not None
 
 
-def test_auxiliary_valid_partial_json_is_not_parsed_after_incomplete() -> None:
-    runtime = test_model_runtime(
-        api_key="sk-fixture-secret",
-        base_url="https://example.invalid/v1",
-        model_id="test-pro",
-        wire_api="openai_chat_completions",
-    )
-    auxiliary = DirectKernelAuxiliaryJsonModel(runtime)
-    prepared = auxiliary.prepare_json_call(
-        purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
-        messages=(
-            LLMMessage.system(MEMORY_GOVERNANCE_SYSTEM_PROMPT_V3),
-            LLMMessage.user("return a bounded JSON object"),
-        ),
-        maximum_input_tokens=8192,
-        maximum_input_bytes=32768,
-        maximum_output_tokens=32,
-        timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, 5),
-        origin_binding=test_model_binding(runtime),
-    )
-    prepared.call.target.transport._adapter._mock_chunks = [  # type: ignore[attr-defined]
-        {
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"content": '{"would_parse":true}'},
-                    "finish_reason": None,
-                }
-            ]
-        },
-        {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]},
-    ]
-    with pytest.raises(TypeError, match="repository-issued"):
-        asyncio.run(
-            auxiliary.complete_prepared_json(
-                prepared,
-                terminal_fence=object(),  # type: ignore[arg-type]
-                candidate=object(),
-            )
-        )
-    durable_terminal = object()
-    candidate = SimpleNamespace(terminal_fence=durable_terminal)
-    terminal_fence = _issue_confirmed_memory_governance_terminal_fence(
-        candidate=candidate,
-        origin_model_call_binding=prepared.origin_model_call_binding,
-        durable_terminal_fence=durable_terminal,
-    )
-    with pytest.raises(RuntimeError, match="subject drifted"):
-        asyncio.run(
-            auxiliary.complete_prepared_json(
-                prepared,
-                terminal_fence=terminal_fence,
-                candidate=SimpleNamespace(terminal_fence=durable_terminal),
-            )
-        )
-    candidate.terminal_fence = object()
-    with pytest.raises(RuntimeError, match="subject drifted"):
-        asyncio.run(
-            auxiliary.complete_prepared_json(
-                prepared,
-                terminal_fence=terminal_fence,
-                candidate=candidate,
-            )
-        )
-    candidate.terminal_fence = durable_terminal
-    with pytest.raises(ProviderModelOutputIncomplete) as captured:
-        asyncio.run(
-            auxiliary.complete_prepared_json(
-                prepared,
-                terminal_fence=terminal_fence,
-                candidate=candidate,
-            )
-        )
-    assert captured.value.reason is ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT
-    with pytest.raises(RuntimeError, match="already consumed"):
-        asyncio.run(
-            auxiliary.complete_prepared_json(
-                prepared,
-                terminal_fence=terminal_fence,
-                candidate=candidate,
-            )
-        )
 
 
 class _Round5A1SSEHandler(BaseHTTPRequestHandler):

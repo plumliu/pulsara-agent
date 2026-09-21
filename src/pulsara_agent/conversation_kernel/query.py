@@ -302,7 +302,7 @@ class CanonicalConversationQuery:
             sessions = grouped("sessions", "lifecycle")
             queue = grouped("prompt_queue_items", "status")
             task = grouped("subagent_tasks", "status")
-            memory_candidates = grouped("memory_candidates", "status")
+            memory_facts = grouped("memory_facts", "lifecycle")
         return {
             "inspect_kind": "canonical_kernel_health.v3",
             "conversation_authority": "pulsara_v3",
@@ -310,7 +310,7 @@ class CanonicalConversationQuery:
             "sessions": sessions,
             "prompt_queue": queue,
             "subagent_tasks": task,
-            "memory_candidates": memory_candidates,
+            "memory_facts": memory_facts,
             "runtime_limit_contract": "stage2_runtime_limits.v1",
             "runtime_limits": asdict(STAGE2_LIMITS),
             "execution_watchdog_contract": "kernel_execution_watchdogs.v1",

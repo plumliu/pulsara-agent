@@ -33,12 +33,11 @@ from pulsara_agent.primitives.tool_observation import (
 
 
 TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT = (
-    "pulsara.provider-visible-tool-result.logical-projection.v2"
+    "pulsara.provider-visible-tool-result.logical-projection.v3"
 )
 TOOL_RESULT_FULL_DELIVERY_CLASSIFIER_CONTRACT = (
     "pulsara.tool-result-full-delivery-classifier.v1"
 )
-MAXIMUM_TOOL_RESULT_CITATION_HANDLE_UTF8_BYTES = 128
 MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES = 8 * 1024
 MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS = 50
 
@@ -211,7 +210,6 @@ def render_provider_tool_result_logical_message(
     body: str,
     result_state: str,
     timing: FrozenToolObservationTimingFact,
-    citation_handle: str | None,
     model_visible_memory_ids: tuple[str, ...],
 ) -> RenderedProviderToolResultLogicalMessage:
     """Render the exact Round 7 outer carrier and quote its actual scalars."""
@@ -219,18 +217,11 @@ def render_provider_tool_result_logical_message(
     if not tool_call_id or not result_state:
         raise ValueError("tool result logical identity is incomplete")
     body.encode("utf-8")
-    if citation_handle is not None and (
-        not citation_handle.startswith("tool:")
-        or len(citation_handle.encode("utf-8"))
-        > MAXIMUM_TOOL_RESULT_CITATION_HANDLE_UTF8_BYTES
-    ):
-        raise ValueError("tool result citation handle is invalid")
     _validate_model_visible_memory_ids(model_visible_memory_ids)
 
     payload = {
         "pulsara_tool_result": {
             "body": body,
-            "citation_handle": citation_handle,
             "model_visible_memory_ids": list(model_visible_memory_ids),
             "observation": {
                 "duration_disposition": timing.duration_disposition.value,
@@ -296,13 +287,12 @@ def conservative_artifact_page_logical_utf8_bytes(
     """Quote an artifact page under the largest legal call-local augmentation.
 
     The exact call ID and memory provenance are already frozen by the tool
-    invocation.  Timing and citation values use their closed maxima.  Taking
+    invocation. Timing uses its closed maximum. Taking
     the maximum of ordinary and late carriers keeps a cancelled/late exact
     page representable without changing its canonicalized body.
     """
 
     timing = _maximum_artifact_page_timing()
-    citation = "tool:" + ("x" * (MAXIMUM_TOOL_RESULT_CITATION_HANDLE_UTF8_BYTES - 5))
     quotes = tuple(
         render_provider_tool_result_logical_message(
             message_kind=kind,
@@ -310,7 +300,6 @@ def conservative_artifact_page_logical_utf8_bytes(
             body=body,
             result_state="SUCCESS",
             timing=timing,
-            citation_handle=citation,
             model_visible_memory_ids=model_visible_memory_ids,
         ).logical_utf8_bytes
         for kind in ToolResultLogicalMessageKind
@@ -327,7 +316,7 @@ def conservative_tool_result_logical_message(
 
     The normal compiler may select FULL whenever the complete rendered message
     fits ``MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES``.  Before an effect
-    runs the result body, timing, citation and memory provenance are unknown.
+    runs the result body, timing and memory IDs are unknown.
     Their largest scalar values do not maximize the eventual provider wire:
     they consume the same logical budget with mostly unescaped text.  Use the
     smallest legal fixed envelope and spend every remaining byte on a body of
@@ -346,7 +335,6 @@ def conservative_tool_result_logical_message(
             body="\\" * body_chars,
             result_state="SUCCESS",
             timing=timing,
-            citation_handle=None,
             model_visible_memory_ids=(),
         )
 
@@ -377,7 +365,6 @@ def conservative_tool_result_logical_message(
             body=("\\" * high) + ("x" * remaining),
             result_state="SUCCESS",
             timing=timing,
-            citation_handle=None,
             model_visible_memory_ids=(),
         )
         if (
@@ -400,7 +387,6 @@ def decode_provider_tool_result_observation(text: str) -> Mapping[str, object]:
     payload = value["pulsara_tool_result"]
     if not isinstance(payload, dict) or set(payload) != {
         "body",
-        "citation_handle",
         "model_visible_memory_ids",
         "observation",
         "result_state",
@@ -410,14 +396,6 @@ def decode_provider_tool_result_observation(text: str) -> Mapping[str, object]:
         payload["result_state"], str
     ):
         raise ValueError("tool result observation scalar contract is invalid")
-    citation_handle = payload["citation_handle"]
-    if citation_handle is not None and (
-        not isinstance(citation_handle, str)
-        or not citation_handle.startswith("tool:")
-        or len(citation_handle.encode("utf-8"))
-        > MAXIMUM_TOOL_RESULT_CITATION_HANDLE_UTF8_BYTES
-    ):
-        raise ValueError("tool result citation handle is invalid")
     memory_ids = payload["model_visible_memory_ids"]
     if not isinstance(memory_ids, list):
         raise ValueError("tool result memory provenance header is invalid")
@@ -548,7 +526,6 @@ def _validate_model_visible_memory_ids(values: tuple[str, ...]) -> None:
 __all__ = [
     "BEST_AVAILABLE_TOOL_RESULT_DELIVERY",
     "FrozenToolResultDeliveryRequirement",
-    "MAXIMUM_TOOL_RESULT_CITATION_HANDLE_UTF8_BYTES",
     "MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS",
     "MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES",
     "RenderedProviderToolResultLogicalMessage",

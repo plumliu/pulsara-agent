@@ -20,8 +20,11 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     canonical_digest,
 )
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    PreparedMemoryCandidateAcceptance,
+from pulsara_agent.conversation_kernel.memory.writes import (
+    PreparedMemoryMutation,
+    PreparedRememberWrite,
+    PreparedMemoryRelationWrite,
+    memory_mutation_manifest,
 )
 from pulsara_agent.conversation_kernel.limits import (
     PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
@@ -82,10 +85,6 @@ from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection
 from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
 )
-
-
-class _ObservedActiveMemoryDuplicate(Exception):
-    """Internal control-flow signal for the ACTIVE partial-unique winner."""
 
 
 INLINE_CONTENT_LIMIT = STAGE2_LIMITS.inline_content_hard_bytes
@@ -159,6 +158,15 @@ class AcceptedEntry:
     event_sequence: int
     turn_completed: bool = False
     pending_steer_at_settlement: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptedMemoryToolResult(AcceptedEntry):
+    """The writer-determined body and exposure of a direct memory mutation."""
+
+    canonical_body: str = ""
+    result_state: str = "SUCCESS"
+    model_visible_memory_fact_ids: tuple[str, ...] = ()
 
 
 class TurnAdmissionConfirmationKind(StrEnum):
@@ -478,7 +486,7 @@ class PreparedToolRemoteIdentityPublication:
 
 class ToolResultSideBranchKind(StrEnum):
     NONE = "NONE"
-    MEMORY_PROPOSAL = "MEMORY_PROPOSAL"
+    MEMORY_MUTATION = "MEMORY_MUTATION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,16 +495,18 @@ class NoToolResultSideBranch:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedMemoryProposalSideBranch:
-    candidate: PreparedMemoryCandidateAcceptance
-    branch_kind: ToolResultSideBranchKind = ToolResultSideBranchKind.MEMORY_PROPOSAL
+class PreparedMemoryMutationSideBranch:
+    mutation: PreparedMemoryMutation
+    branch_kind: ToolResultSideBranchKind = ToolResultSideBranchKind.MEMORY_MUTATION
 
     def __post_init__(self) -> None:
-        if not isinstance(self.candidate, PreparedMemoryCandidateAcceptance):
-            raise TypeError("memory side branch requires a frozen candidate")
+        if not isinstance(
+            self.mutation, (PreparedRememberWrite, PreparedMemoryRelationWrite)
+        ):
+            raise TypeError("memory side branch requires a frozen mutation")
 
 
-ToolResultSideBranch = NoToolResultSideBranch | PreparedMemoryProposalSideBranch
+ToolResultSideBranch = NoToolResultSideBranch | PreparedMemoryMutationSideBranch
 
 
 @dataclass(frozen=True, slots=True)
@@ -671,17 +681,17 @@ class PreparedToolResultAcceptance:
         if isinstance(self.side_branch, NoToolResultSideBranch):
             if self.side_branch.branch_kind is not ToolResultSideBranchKind.NONE:
                 raise ValueError("prepared no-side-branch discriminator is invalid")
-        elif isinstance(self.side_branch, PreparedMemoryProposalSideBranch):
-            memory = self.side_branch.candidate
+        elif isinstance(self.side_branch, PreparedMemoryMutationSideBranch):
             if (
                 self.side_branch.branch_kind
-                is not ToolResultSideBranchKind.MEMORY_PROPOSAL
-                or memory.origin_session_id != self.session_id
-                or memory.origin_workspace_id != self.workspace_id
-                or memory.producer_entry_id != self.assistant_entry_id
-                or memory.producer_tool_call_id != self.tool_call_id
+                is not ToolResultSideBranchKind.MEMORY_MUTATION
+                or self.result_state != "SUCCESS"
+                or self.attempt_id is None
+                or self.actor_id not in {"remember", "mark_memory_relation"}
+                or (self.actor_id == "remember")
+                != isinstance(self.side_branch.mutation, PreparedRememberWrite)
             ):
-                raise ValueError("prepared memory candidate side branch is not exact")
+                raise ValueError("prepared memory mutation side branch is not exact")
         else:
             raise TypeError("prepared tool result side branch is not closed")
         payload = _prepared_tool_result_manifest(self)
@@ -1551,7 +1561,7 @@ def _prepared_tool_result_manifest(
     else:
         side_payload = {
             "branch_kind": side.branch_kind.value,
-            "candidate_acceptance_digest": (side.candidate.candidate_acceptance_digest),
+            "mutation": memory_mutation_manifest(side.mutation),
         }
     return {
         "session_id": candidate.session_id,
@@ -1639,7 +1649,7 @@ def build_prepared_tool_result_acceptance(
     trusted_tool_reported_duration_microseconds: int | None,
     actor_id: str,
     canonical_prompt: FrozenCanonicalPrompt | None = None,
-    memory_candidate: PreparedMemoryCandidateAcceptance | None = None,
+    memory_mutation: PreparedMemoryMutation | None = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
 ) -> PreparedToolResultAcceptance:
     """Freeze every semantic field before the first canonical write."""
@@ -1655,10 +1665,10 @@ def build_prepared_tool_result_acceptance(
         occurred_at=observed_at,
         payload={"tool_call_id": tool_call_id, "result_state": result_state},
     )
-    if memory_candidate is None:
+    if memory_mutation is None:
         side_branch: ToolResultSideBranch = NoToolResultSideBranch()
     else:
-        side_branch = PreparedMemoryProposalSideBranch(candidate=memory_candidate)
+        side_branch = PreparedMemoryMutationSideBranch(mutation=memory_mutation)
     return PreparedToolResultAcceptance(
         session_id=guard.session_id,
         workspace_id=workspace_id,

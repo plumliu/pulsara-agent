@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from hashlib import sha256
 import json
 import math
@@ -30,16 +31,18 @@ from pulsara_agent.conversation_kernel.context_sources import (
 from pulsara_agent.conversation_kernel.memory.contracts import (
     AutomaticMemoryTriggerDisposition,
     FrozenMemoryTriggerPolicy,
-    FrozenMemoryProposal,
     MemoryFactKind,
-    MemoryKindHint,
+    MemoryRelationKind,
     MemoryUsePolicy,
     PreparedMemoryBasisReference,
-    PreparedMemoryCandidateAcceptance,
     memory_basis_context_allowed,
     memory_context_product_label,
     memory_response_preference_item_payload,
-    prepare_memory_candidate,
+)
+from pulsara_agent.conversation_kernel.memory.writes import (
+    MemoryRelatedPreview,
+    PreparedMemoryRelationWrite,
+    PreparedRememberWrite,
 )
 from pulsara_agent.conversation_kernel.memory.hints import (
     CheapMemoryWriteHintMatcher,
@@ -60,7 +63,7 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceAbsenceKind,
     ContextSourceKind,
 )
-from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
 from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
@@ -80,13 +83,12 @@ from pulsara_agent.retrieval.rerank.protocol import RerankProvider
 from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
 
 if TYPE_CHECKING:
-    from pulsara_agent.conversation_kernel.memory.governor import (
-        AdvisoryMemoryGovernor,
+    from pulsara_agent.conversation_kernel.memory.embedding_maintainer import (
+        MemoryEmbeddingMaintainer,
     )
 
-
 MEMORY_READ_TOOL_NAMES = frozenset({"memory_search", "memory_get", "memory_explain"})
-MEMORY_WRITE_TOOL_NAMES = frozenset({"remember"})
+MEMORY_WRITE_TOOL_NAMES = frozenset({"remember", "mark_memory_relation"})
 MEMORY_TOOL_NAMES = MEMORY_READ_TOOL_NAMES | MEMORY_WRITE_TOOL_NAMES
 MAXIMUM_MEMORY_TOOL_OUTPUT_BYTES = 16 * 1024 * 1024
 MEMORY_POINT_READ_TIMEOUT_SECONDS = 10.0
@@ -102,7 +104,7 @@ MAXIMUM_RERANK_TOKEN_FORMULA = 120_000
 
 
 class KernelMemoryToolPort:
-    """Resolve one model-call capability into a sealed candidate or bounded read."""
+    """Resolve model-call memory tools into direct writes or bounded reads."""
 
     def __init__(
         self,
@@ -141,17 +143,22 @@ class KernelMemoryToolPort:
         self._turn_use_opt_out = TurnMemoryUseOptOut()
         self._write_hint_matcher = CheapMemoryWriteHintMatcher()
         self._closed = False
-        self._governor: AdvisoryMemoryGovernor | None = None
+        self._embedding_maintainer: MemoryEmbeddingMaintainer | None = None
         self._settings = settings
 
     @property
     def tool_names(self) -> frozenset[str]:
         return MEMORY_TOOL_NAMES
 
-    def bind_governor(self, governor: "AdvisoryMemoryGovernor") -> None:
-        if self._governor is not None:
-            raise RuntimeError("memory governor is already bound")
-        self._governor = governor
+    def bind_embedding_maintainer(self, maintainer: MemoryEmbeddingMaintainer) -> None:
+        if self._embedding_maintainer is not None:
+            raise RuntimeError("memory embedding maintainer is already bound")
+        self._embedding_maintainer = maintainer
+
+    def offer_embedding_wake(self) -> None:
+        maintainer = self._embedding_maintainer
+        if maintainer is not None:
+            maintainer.offer_wake()
 
     def bind_deadline_factory(
         self, deadline_factory: KernelExecutionDeadlineFactory
@@ -168,11 +175,6 @@ class KernelMemoryToolPort:
             raise RuntimeError("memory deadline factory was bound after admission")
         self._deadlines = deadline_factory
         self._deadline_factory_bound = True
-
-    def offer_governance_wake(self) -> None:
-        governor = self._governor
-        if governor is not None:
-            governor.offer_governance_wake()
 
     def classify_automatic_trigger(
         self, text: str
@@ -237,6 +239,8 @@ class KernelMemoryToolPort:
         try:
             if tool_name == "remember":
                 return await self._remember(arguments, invocation_context)
+            if tool_name == "mark_memory_relation":
+                return self._mark_memory_relation(arguments, invocation_context)
             if tool_name == "memory_search":
                 return await self._search(arguments)
             if tool_name == "memory_get":
@@ -245,7 +249,7 @@ class KernelMemoryToolPort:
                 return await self._get(arguments, explain=True)
         except (TypeError, ValueError) as exc:
             # invoke runs after a canonical attempt has been admitted. A bad
-            # citation/basis is a known application rejection, not a preflight
+            # basis is a known application rejection, not a preflight
             # INVALID_ARGUMENTS outcome (which must have no attempt).
             return _json_result("APPLICATION_ERROR", {"error": str(exc)})
         raise KeyError(tool_name)
@@ -255,6 +259,14 @@ class KernelMemoryToolPort:
         arguments: Mapping[str, object],
         context: KernelToolInvocationContext,
     ) -> KernelToolResult:
+        if context.conversation_scope_kind != "ROOT":
+            raise ValueError("only the root Agent may write memory")
+        if "kind_hint" in arguments or arguments.get("kind") is None:
+            raise ValueError("remember requires final kind; kind_hint is not supported")
+        if "cited_tool_result_handles" in arguments:
+            raise ValueError("remember does not accept ToolResult citations")
+        if set(arguments) - {"statement", "context_target", "kind", "based_on_memory_ids"}:
+            raise ValueError("remember contains an unsupported argument")
         context_target = str(arguments.get("context_target") or "")
         if context_target == "GLOBAL":
             context_id = CTX_GLOBAL
@@ -267,52 +279,122 @@ class KernelMemoryToolPort:
         else:
             raise ValueError("context_target must be GLOBAL or CURRENT_PROJECT")
         basis_ids = _string_sequence(arguments.get("based_on_memory_ids"))
-        citation_handles = _string_sequence(arguments.get("cited_tool_result_handles"))
-        proposal = FrozenMemoryProposal(
-            statement=str(arguments.get("statement") or ""),
-            context_id=context_id,
-            kind_hint=MemoryKindHint(str(arguments.get("kind_hint") or "AUTO")),
-            based_on_memory_ids=basis_ids,
-            cited_tool_result_handles=citation_handles,
-        )
+        kind = MemoryFactKind(str(arguments["kind"]))
+        statement = str(arguments.get("statement") or "")
         basis_refs = await self._resolve_basis(basis_ids, source_context_id=context_id)
-        citation_refs = context.memory_context.resolve(citation_handles)
-        if context_id == CTX_GLOBAL and any(
-            reference.citation_visibility.value != "GLOBAL_SAFE"
-            for reference in citation_refs
-        ):
-            raise ValueError(
-                "GLOBAL memory cannot cite a current-context-bound ToolResult"
-            )
-        candidate_id = _stable_id(
-            "memory-candidate",
-            context.session_id,
-            context.assistant_entry_id,
-            context.tool_call_id,
-        )
-        candidate = prepare_memory_candidate(
-            candidate_id=candidate_id,
+        admitted = PreparedRememberWrite(
             memory_domain_id=self._read_binding.memory_domain_id,
-            origin_workspace_id=context.workspace_id,
-            origin_session_id=context.session_id,
-            proposal=proposal,
-            producer_entry_id=context.assistant_entry_id,
-            producer_tool_call_id=context.tool_call_id,
-            tool_result_refs=citation_refs,
+            context_id=context_id,
+            kind=kind,
+            statement=statement,
             basis_refs=basis_refs,
-            visible_memory=context.memory_context.visible_memory,
+            related=(),
+            retrieval_summary=freeze_json({"disposition": "NOT_STARTED"}),
+            search_terms=self._query.tokenize_query(statement),
         )
-        return _json_result(
-            "SUCCESS",
-            {
-                "status": "proposed_for_review",
-                "candidate_id": candidate_id,
-                "saved_memory_id": None,
-                "governance_pending": True,
-                "completion_guaranteed": False,
-            },
-            memory_candidate=candidate,
+        related, retrieval_summary = await self._related_for_remember(
+            admitted.statement, context_id=context_id
         )
+        mutation = replace(
+            admitted,
+            related=related,
+            retrieval_summary=freeze_json(retrieval_summary),
+        )
+        return KernelToolResult(
+            state="SUCCESS", content=b"{}", memory_mutation=mutation
+        )
+
+    def _mark_memory_relation(
+        self, arguments: Mapping[str, object], context: KernelToolInvocationContext
+    ) -> KernelToolResult:
+        if context.conversation_scope_kind != "ROOT":
+            raise ValueError("only the root Agent may mark memory relations")
+        mutation = PreparedMemoryRelationWrite(
+            memory_domain_id=self._read_binding.memory_domain_id,
+            source_memory_id=str(arguments.get("source_memory_id") or ""),
+            target_memory_id=str(arguments.get("target_memory_id") or ""),
+            relation_kind=MemoryRelationKind(str(arguments.get("relation_kind") or "")),
+        )
+        return KernelToolResult(
+            state="SUCCESS", content=b"{}", memory_mutation=mutation
+        )
+
+    async def _related_for_remember(
+        self, statement: str, *, context_id: str
+    ) -> tuple[tuple[MemoryRelatedPreview, ...], Mapping[str, object]]:
+        """Best-effort same-context recall; it never owns the write transaction."""
+
+        deadline = self._deadlines.deadline(
+            KernelWatchdogOwner.MEMORY_EXPLICIT_RECALL_TOTAL
+        )
+        embedding = None
+        dense_status = "NOT_REQUESTED"
+        try:
+            provider = await self._embedding_provider()
+            if provider is not None:
+                embedding = await self._run_remote_exact(
+                    provider.embed(statement),
+                    timeout_seconds=self._remaining_for(
+                        deadline, KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING
+                    ),
+                    name="memory-remember-query-embedding",
+                )
+                dense_status = "AVAILABLE"
+        except Exception:
+            dense_status = "UNAVAILABLE"
+        try:
+            related_search = await self._io.run(
+                self._query.related_candidates,
+                read_binding=self._read_binding,
+                context_id=context_id,
+                query=statement,
+                query_embedding=embedding,
+                exclude_fact_id=None,
+                limit=20,
+                deadline_monotonic=deadline,
+            )
+        except Exception:
+            return (), {
+                "disposition": "UNAVAILABLE",
+                "dense": dense_status,
+                "rerank": "NOT_APPLICABLE",
+                "bounded_search_not_exhaustive": True,
+            }
+        if related_search.dense_disposition is MemoryDenseCandidateDisposition.UNAVAILABLE:
+            dense_status = "UNAVAILABLE"
+        elif related_search.dense_disposition is MemoryDenseCandidateDisposition.PARTIAL_BOUNDED_SCAN:
+            dense_status = "PARTIAL"
+        ranked = MemoryQueryResult(
+            disposition=MemoryRetrievalDisposition.COMPLETE,
+            facts=related_search.facts,
+            attempted_stages=(),
+            dense_available=(embedding is not None and dense_status != "UNAVAILABLE"),
+            dense_disposition=related_search.dense_disposition,
+        )
+        ranked = await self._rerank_explicit(
+            statement, ranked, total_deadline=deadline
+        )
+        related = tuple(
+            MemoryRelatedPreview(
+                memory_id=item.fact_id,
+                kind=MemoryFactKind(item.fact_kind),
+                context_id=item.context_id,
+                statement=item.statement,
+                recorded_at=item.recorded_at,
+            )
+            for item in ranked.facts[:3]
+        )
+        return related, {
+            "disposition": (
+                "PARTIAL"
+                if dense_status in {"UNAVAILABLE", "PARTIAL"}
+                or ranked.rerank_disposition == "FAILED_FALLBACK"
+                else "COMPLETE"
+            ),
+            "dense": dense_status,
+            "rerank": ranked.rerank_disposition,
+            "bounded_search_not_exhaustive": True,
+        }
 
     async def _resolve_basis(
         self, fact_ids: Sequence[str], *, source_context_id: str
@@ -501,20 +583,18 @@ class KernelMemoryToolPort:
                 return _json_result("APPLICATION_ERROR", {"error": "memory not found"})
             projection: dict[str, object] = {
                 "disposition": provenance.provenance_disposition,
-                "decision": {
-                    "kind": provenance.decision_kind,
-                    "reason_code": provenance.decision_reason_code,
-                    "public_summary": provenance.decision_public_summary,
-                },
-                "relation_decisions": [
+                "write_tool": provenance.write_tool,
+                "reviewed_by_second_model": False,
+                "relation_owners": [
                     {
                         "relation_id": item.relation_id,
                         "disposition": item.provenance_disposition,
-                        "decision_kind": item.decision_kind,
-                        "reason_code": item.decision_reason_code,
-                        "public_summary": item.decision_public_summary,
+                        "write_tool": item.write_tool,
+                        "owner_session_id": item.owner_session_id,
+                        "owner_entry_id": item.owner_entry_id,
+                        "owner_tool_call_id": item.owner_tool_call_id,
                     }
-                    for item in provenance.relation_decisions
+                    for item in provenance.relation_owners
                 ],
             }
             if provenance.provenance_disposition == "SAME_ORIGIN":
@@ -524,9 +604,6 @@ class KernelMemoryToolPort:
                     "entry_id": provenance.producer_entry_id,
                     "tool_call_id": provenance.producer_tool_call_id,
                 }
-                projection["tool_result_citation_ids"] = list(
-                    provenance.tool_result_ids
-                )
             else:
                 projection["origin_context"] = "WORKSPACE_REDACTED"
             payload["provenance"] = projection
@@ -656,16 +733,12 @@ class KernelMemoryToolPort:
     async def freeze_response_preference_source(
         self,
     ) -> ContextSourceCandidate | ContextSourceAbsentFact:
-        """Freeze one query-independent, complete preference projection."""
+        """Freeze a bounded, query-independent snapshot of current preferences."""
 
         try:
             snapshot = await self._io.run(
                 self._query.response_preference_snapshot,
                 read_binding=self._read_binding,
-                # At most 16 active preferences exist in each of the two
-                # readable contexts. Two complete same-context graphs therefore
-                # contain at most 2 * C(16, 2) = 240 edges.
-                relation_limit=240,
                 deadline_monotonic=self._canonical_deadline(
                     MEMORY_POINT_READ_TIMEOUT_SECONDS
                 ),
@@ -676,45 +749,11 @@ class KernelMemoryToolPort:
                 texts=None,
                 absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
             )
-        rows = snapshot.facts
-        relations = snapshot.contradictions
-        rows_by_context: dict[str, list[object]] = {}
-        for item in rows:
-            rows_by_context.setdefault(item.context_id, []).append(item)
-        for context_rows in rows_by_context.values():
-            context_projection = tuple(
-                memory_response_preference_item_payload(
-                    memory_id=item.fact_id,
-                    context_id=item.context_id,
-                    statement=item.statement,
-                    recorded_at=item.recorded_at,
-                )
-                for item in context_rows
-            )
-            if (
-                len(context_rows) > 16
-                or len(canonical_json_bytes(context_projection)) > 7 * 1024
-            ):
-                return build_memory_context_source(
-                    kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                    texts=None,
-                    absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
-                )
-        contradicted = {
-            value
-            for relation in relations
-            for value in (relation.source_fact_id, relation.target_fact_id)
-        }
-        effective = tuple(item for item in rows if item.fact_id not in contradicted)
-        warnings = tuple(
-            {
-                "kind": "ACTIVE_CONTRADICTION",
-                "memory_id": relation.source_fact_id,
-                "other_memory_id": relation.target_fact_id,
-            }
-            for relation in relations
-        )
-        if not effective and not warnings:
+        if (
+            not snapshot.facts
+            and not snapshot.selection_incomplete
+            and not snapshot.conflicts_omitted
+        ):
             return build_memory_context_source(
                 kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
                 texts=None,
@@ -727,17 +766,18 @@ class KernelMemoryToolPort:
                 statement=item.statement,
                 recorded_at=item.recorded_at,
             )
-            for item in effective
+            for item in snapshot.facts
         )
         body = canonical_json_bytes(
             {
                 "advisory": True,
                 "items": items,
                 "may_be_stale_or_incomplete": True,
-                "relation_warnings": warnings,
+                "selection_incomplete": snapshot.selection_incomplete,
+                "conflicts_omitted": snapshot.conflicts_omitted,
             }
         )
-        if len(body) > 16 * 1024 or len(items) > 32 or len(rows) > 32:
+        if len(body) > 16 * 1024:
             return build_memory_context_source(
                 kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
                 texts=None,
@@ -746,32 +786,14 @@ class KernelMemoryToolPort:
         return build_memory_context_source(
             kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
             texts=(body.decode("utf-8"),),
-            memory_fact_ids=tuple(
-                dict.fromkeys(
-                    [
-                        *(item.fact_id for item in effective),
-                        *(
-                            value
-                            for relation in relations
-                            for value in (
-                                relation.source_fact_id,
-                                relation.target_fact_id,
-                            )
-                        ),
-                    ]
-                )
-            ),
+            memory_fact_ids=tuple(item.fact_id for item in snapshot.facts),
             domain_identity={
                 "items": tuple(
-                    sorted(
-                        (item.fact_id, item.fact_semantic_digest) for item in effective
-                    )
+                    (item.fact_id, item.fact_semantic_digest)
+                    for item in snapshot.facts
                 ),
-                "warnings": tuple(
-                    sorted(
-                        (item.source_fact_id, item.target_fact_id) for item in relations
-                    )
-                ),
+                "selection_incomplete": snapshot.selection_incomplete,
+                "conflicts_omitted": snapshot.conflicts_omitted,
             },
         )
 
@@ -903,14 +925,10 @@ class KernelMemoryToolPort:
         compact_items = full_items[: min(3, len(full_items))]
         ref_items = tuple(
             {
-                "kind": item.fact_kind,
                 "memory_id": item.fact_id,
-                "context_product_label": memory_context_product_label(item.context_id),
-                "current_context": item.context_id != CTX_GLOBAL,
-                "recorded_at": item.recorded_at,
                 "read_with": "memory_get",
             }
-            for item in presentation
+            for item in presentation[:3]
         )
         relation_warnings = tuple(
             {
@@ -1271,7 +1289,6 @@ def _json_result(
     state: str,
     payload: Mapping[str, object],
     *,
-    memory_candidate: PreparedMemoryCandidateAcceptance | None = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
 ) -> KernelToolResult:
     encoded = json.dumps(
@@ -1289,7 +1306,6 @@ def _json_result(
     return KernelToolResult(
         state=state,
         content=encoded,
-        memory_candidate=memory_candidate,
         output_artifact_candidate=ToolOutputArtifactCandidate(
             role="OUTPUT",
             text=text,

@@ -39,7 +39,6 @@ from pulsara_agent.llm.resolution import (
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall, resolve_model_call
 from pulsara_agent.llm.provider_open import (
-    AuxiliaryModelProviderOpenPermit,
     CompactionSummaryProviderOpenPermit,
     ConnectionProbeProviderOpenPermit,
     EpochAgentLoopProviderOpenPermit,
@@ -229,9 +228,6 @@ class ModelRuntime:
             credential_owner = None
         elif isinstance(purpose_permit, CompactionSummaryProviderOpenPermit):
             expected = ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
-            credential_owner = None
-        elif isinstance(purpose_permit, AuxiliaryModelProviderOpenPermit):
-            expected = ModelCallPurpose.MEMORY_GOVERNANCE
             credential_owner = None
         elif isinstance(purpose_permit, ConnectionProbeProviderOpenPermit):
             expected = ModelCallPurpose.CONNECTION_PROBE

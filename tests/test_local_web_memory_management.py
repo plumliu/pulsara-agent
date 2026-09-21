@@ -188,6 +188,33 @@ def test_all_memory_routes_share_readiness_gate(tmp_path, state):
     asyncio.run(run())
 
 
+def test_memory_page_projects_and_source_do_not_read_selected_conversation(tmp_path):
+    async def run():
+        server, core = await server_for(tmp_path)
+        server.sessions.bootstrap_payload = lambda: (_ for _ in ()).throw(
+            AssertionError("memory page must not inspect the selected conversation")
+        )
+        try:
+            async with ClientSession() as client:
+                async with client.get(server.origin + "/api/memories/projects") as response:
+                    assert response.status == 200, await response.text()
+                async with client.get(
+                    server.origin + "/api/memories/memory:root?view=global"
+                ) as response:
+                    assert response.status == 200, await response.text()
+            core.memory_management_projects.assert_awaited_once_with(
+                memory_domain_id="server-owned", limit=40, cursor=None
+            )
+            core.memory_management_detail.assert_awaited_once()
+            detail_args = core.memory_management_detail.await_args.kwargs
+            assert detail_args["memory_domain_id"] == "server-owned"
+            assert "provenance_workspace_id" not in detail_args
+        finally:
+            await server.aclose()
+
+    asyncio.run(run())
+
+
 def test_temp_storage_failure_never_calls_database(tmp_path, monkeypatch):
     import errno
     from pulsara_agent.web_app import memory_controller

@@ -21,7 +21,6 @@ from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.memory.contracts import (
     canonical_json_bytes,
     canonical_memory_recorded_at,
-    memory_response_preference_item_payload,
 )
 from pulsara_agent.conversation_kernel.memory.management import (
     MemoryManagementError,
@@ -77,13 +76,8 @@ def _freeze(value):
 class FrozenMemoryDeletionPlan:
     facts: tuple
     relations: tuple
-    candidates: tuple
-    tool_refs: tuple
-    basis_refs: tuple
-    normalize: tuple
     restore: tuple
     lock_fact_ids: tuple[str, ...]
-    preference_contexts: tuple[str, ...]
     confirmation: tuple[bytes, ...]
 
 
@@ -140,10 +134,15 @@ class _MemoryManagementOperations:
             _remaining(c, deadline_monotonic)
             rows = c.execute(
                 _PROJECTS
-                + """SELECT * FROM projects
-                WHERE (%s::timestamptz IS NULL OR (last_activity_at, workspace_id)<(%s::timestamptz,%s))
-                ORDER BY last_activity_at DESC, workspace_id DESC LIMIT %s""",
+                + """SELECT p.* FROM projects p
+                WHERE EXISTS (
+                    SELECT 1 FROM pulsara_v3.memory_facts f
+                    WHERE f.memory_domain_id=%s AND f.context_id=p.workspace_id
+                )
+                  AND (%s::timestamptz IS NULL OR (p.last_activity_at, p.workspace_id)<(%s::timestamptz,%s))
+                ORDER BY p.last_activity_at DESC, p.workspace_id DESC LIMIT %s""",
                 (
+                    memory_domain_id,
                     memory_domain_id,
                     None if key is None else key[0],
                     None if key is None else key[0],
@@ -261,7 +260,6 @@ class _MemoryManagementOperations:
         memory_domain_id,
         selection,
         fact_id,
-        provenance_workspace_id,
         deadline_monotonic,
         limit=40,
         cursor=None,
@@ -278,19 +276,43 @@ class _MemoryManagementOperations:
             key = decode_cursor(cursor, filters, 3)
             row = c.execute(
                 f"""SELECT f.*, {_ACTIVE_CONFLICT} AS needs_confirmation,
-                candidate.decision_public_summary, candidate.origin_workspace_id,
-                candidate.origin_session_id, candidate.producer_entry_id, e.turn_id, s.lifecycle AS source_session_lifecycle
-                FROM pulsara_v3.memory_facts f JOIN pulsara_v3.memory_candidates candidate ON candidate.id=f.source_candidate_id
-                JOIN pulsara_v3.transcript_entries e ON e.entry_owner_kind='EXECUTED_TURN' AND e.id=candidate.producer_entry_id AND e.session_id=candidate.origin_session_id
-                JOIN pulsara_v3.sessions s ON s.id=candidate.origin_session_id
+                f.source_session_id AS origin_session_id,
+                r.tool_call_entry_id AS producer_entry_id,
+                e.turn_id, s.lifecycle AS source_session_lifecycle
+                FROM pulsara_v3.memory_facts f
+                JOIN pulsara_v3.tool_results r
+                  ON r.session_id=f.source_session_id AND r.id=f.source_tool_result_id
+                JOIN pulsara_v3.transcript_entries e
+                  ON e.entry_owner_kind='EXECUTED_TURN'
+                 AND e.id=r.tool_call_entry_id AND e.session_id=r.session_id
+                JOIN pulsara_v3.sessions s
+                  ON s.id=f.source_session_id AND s.memory_domain_id=f.memory_domain_id
                 WHERE f.memory_domain_id=%s AND f.context_id=%s AND f.id=%s""",
                 (memory_domain_id, context, fact_id),
             ).fetchone()
             if row is None:
                 raise MemoryManagementError("MEMORY_NOT_FOUND", 404, "这条记忆已不存在")
             relations = c.execute(
-                """SELECT r.*, owner.decision_public_summary
-                FROM pulsara_v3.memory_relations r JOIN pulsara_v3.memory_candidates owner ON owner.id=r.decision_candidate_id
+                """SELECT r.*, owner_result.session_id AS owner_source_session_id,
+                       owner_result.tool_call_entry_id AS owner_entry_id,
+                       owner_entry.turn_id AS owner_turn_id,
+                       owner_session.lifecycle AS owner_session_lifecycle,
+                       owner_block.tool_name AS owner_write_tool
+                FROM pulsara_v3.memory_relations r
+                JOIN pulsara_v3.tool_results owner_result
+                  ON owner_result.session_id=r.owner_session_id
+                 AND owner_result.id=r.owner_tool_result_id
+                JOIN pulsara_v3.sessions owner_session
+                  ON owner_session.id=owner_result.session_id
+                 AND owner_session.memory_domain_id=r.memory_domain_id
+                JOIN pulsara_v3.transcript_entries owner_entry
+                  ON owner_entry.session_id=owner_result.session_id
+                 AND owner_entry.id=owner_result.tool_call_entry_id
+                 AND owner_entry.entry_owner_kind='EXECUTED_TURN'
+                JOIN pulsara_v3.assistant_message_blocks owner_block
+                  ON owner_block.session_id=owner_result.session_id
+                 AND owner_block.assistant_entry_id=owner_result.tool_call_entry_id
+                 AND owner_block.tool_call_id=owner_result.tool_call_id
                 WHERE r.memory_domain_id=%s AND (r.source_fact_id=%s OR r.target_fact_id=%s)
                   AND (%s::text IS NULL OR (r.relation_kind,r.accepted_at,r.id)>(%s,%s::timestamptz,%s))
                 ORDER BY r.relation_kind,r.accepted_at,r.id LIMIT %s""",
@@ -326,17 +348,13 @@ class _MemoryManagementOperations:
                     "needs_confirmation": row["needs_confirmation"],
                     "context_label": labels.get(context, "项目"),
                 },
-                "formation": "在对话中记住",
-                "public_summary": row["decision_public_summary"],
+                "formation": "由对话中的 Pulsara 直接保存；请按需核对内容",
                 "source": {
                     "session_id": row["origin_session_id"],
                     "turn_id": row["turn_id"],
                     "entry_id": row["producer_entry_id"],
                 }
-                if row["source_session_lifecycle"] == "OPEN"
-                and row["origin_workspace_id"]
-                == (context if selection.view == "project" else provenance_workspace_id)
-                else None,
+                if row["source_session_lifecycle"] == "OPEN" else None,
                 "relations": [
                     self._management_relation(
                         r,
@@ -363,7 +381,7 @@ class _MemoryManagementOperations:
 
     @staticmethod
     def _management_relation(relation, subject, companion):
-        return {
+        projected = {
             "relation_id": relation["id"],
             "subject": asdict(MemoryManagementFact.from_row(subject)),
             "companion": asdict(MemoryManagementFact.from_row(companion)),
@@ -372,8 +390,18 @@ class _MemoryManagementOperations:
                 selected_is_source=relation["source_fact_id"] == subject["id"],
             ).value,
             "recorded_at": canonical_memory_recorded_at(relation["accepted_at"]),
-            "public_summary": relation.get("decision_public_summary"),
         }
+        if "owner_write_tool" in relation:
+            projected["owner"] = {
+                "write_tool": relation["owner_write_tool"],
+                "source": {
+                    "session_id": relation["owner_source_session_id"],
+                    "turn_id": relation["owner_turn_id"],
+                    "entry_id": relation["owner_entry_id"],
+                }
+                if relation["owner_session_lifecycle"] == "OPEN" else None,
+            }
+        return projected
 
     def memory_deletion_preview(
         self, *, memory_domain_id, selection, fact_id, additional=(), deadline_monotonic
@@ -386,11 +414,6 @@ class _MemoryManagementOperations:
         return plan.confirmation
 
     def _memory_deletion_plan(self, c, domain, selection, root, additional):
-        from .memory import (
-            MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_CONTEXT,
-            MAXIMUM_RESPONSE_PREFERENCE_CONTEXT_PROJECTION_BYTES,
-        )
-
         context = self._management_context(c, domain, selection)
         if (
             c.execute(
@@ -439,52 +462,6 @@ class _MemoryManagementOperations:
         ]
         restores.sort(key=lambda r: (r["context_id"], r["accepted_at"], r["id"]))
         deleted = sorted(graph.delete_ids)
-        candidates = c.execute(
-            """SELECT c.* FROM pulsara_v3.memory_candidates c
-            WHERE c.memory_domain_id=%s AND (
-              c.accepted_fact_id=ANY(%s) OR c.related_target_fact_id=ANY(%s)
-              OR c.duplicate_winner_fact_id=ANY(%s) OR c.applied_existing_fact_id=ANY(%s)
-              OR c.id=ANY(%s) OR c.id IN (SELECT candidate_id FROM pulsara_v3.memory_candidate_basis_refs
-                                        WHERE memory_domain_id=%s AND target_fact_id=ANY(%s)))
-            ORDER BY c.id""",
-            (
-                domain,
-                deleted,
-                deleted,
-                deleted,
-                deleted,
-                [r["decision_candidate_id"] for r in removed],
-                domain,
-                deleted,
-            ),
-        ).fetchall()
-        normalize = [
-            r
-            for r in candidates
-            if r["accepted_fact_id"] is not None
-            and r["accepted_fact_id"] not in graph.delete_ids
-        ]
-        for candidate in normalize:
-            if (
-                candidate["status"] != "ACCEPTED"
-                or candidate["decision_kind"]
-                not in {"ACCEPT_AND_SUPERSEDE", "ACCEPT_AND_CONTRADICT"}
-                or candidate["related_target_fact_id"] not in graph.delete_ids
-            ):
-                raise RuntimeError(
-                    "surviving candidate cannot be normalized under the deletion contract"
-                )
-        normalize_ids = {r["id"] for r in normalize}
-        candidate_deletes = [r for r in candidates if r["id"] not in normalize_ids]
-        candidate_ids = [r["id"] for r in candidate_deletes]
-        tool_refs = c.execute(
-            "SELECT * FROM pulsara_v3.memory_candidate_tool_result_refs WHERE candidate_id=ANY(%s) ORDER BY candidate_id,ordinal",
-            (candidate_ids,),
-        ).fetchall()
-        basis_refs = c.execute(
-            "SELECT * FROM pulsara_v3.memory_candidate_basis_refs WHERE candidate_id=ANY(%s) ORDER BY candidate_id,ordinal",
-            (candidate_ids,),
-        ).fetchall()
         conflicts = []
 
         def conflict(reason, subject, companion=None, group=None):
@@ -506,7 +483,7 @@ class _MemoryManagementOperations:
         active = c.execute(
             """SELECT * FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s
             AND context_id=ANY(%s) AND lifecycle='ACTIVE' AND NOT(id=ANY(%s))
-            AND (fact_kind='RESPONSE_PREFERENCE' OR fact_semantic_digest=ANY(%s)) ORDER BY accepted_at,id""",
+            AND fact_semantic_digest=ANY(%s) ORDER BY accepted_at,id""",
             (domain, contexts, deleted, [r["fact_semantic_digest"] for r in restores]),
         ).fetchall()
         active_by_key = {
@@ -523,50 +500,6 @@ class _MemoryManagementOperations:
                 anchor = min(r["id"] for r in group)
                 for r in group:
                     conflict("RESTORATION_SEMANTIC_COLLISION", r, group=anchor)
-        preference_contexts = sorted(
-            {
-                r["context_id"]
-                for r in restores
-                if r["fact_kind"] == "RESPONSE_PREFERENCE"
-            }
-        )
-        for pref_context in preference_contexts:
-            preferences = sorted(
-                [
-                    r
-                    for r in (*active, *restores)
-                    if r["fact_kind"] == "RESPONSE_PREFERENCE"
-                    and r["context_id"] == pref_context
-                ],
-                key=lambda r: (r["accepted_at"], r["id"]),
-            )
-            payload = [
-                memory_response_preference_item_payload(
-                    memory_id=r["id"],
-                    context_id=r["context_id"],
-                    statement=r["statement"],
-                    recorded_at=canonical_memory_recorded_at(r["accepted_at"]),
-                )
-                for r in preferences
-            ]
-            if (
-                len(payload) > MAXIMUM_ACTIVE_RESPONSE_PREFERENCES_PER_CONTEXT
-                or len(canonical_json_bytes(payload))
-                > MAXIMUM_RESPONSE_PREFERENCE_CONTEXT_PROJECTION_BYTES
-            ):
-                for r in restores:
-                    if (
-                        r["fact_kind"] == "RESPONSE_PREFERENCE"
-                        and r["context_id"] == pref_context
-                    ):
-                        conflict("RESPONSE_PREFERENCE_CAPACITY", r, group=pref_context)
-        owners = {
-            r["id"]: r
-            for r in c.execute(
-                "SELECT id,decision_public_summary FROM pulsara_v3.memory_candidates WHERE id=ANY(%s)",
-                ([r["decision_candidate_id"] for r in relations],),
-            ).fetchall()
-        }
         effects = []
         final_active = {
             r["id"]
@@ -591,12 +524,6 @@ class _MemoryManagementOperations:
             )
             if effect is None:
                 continue
-            relation = {
-                **relation,
-                "decision_public_summary": owners[relation["decision_candidate_id"]][
-                    "decision_public_summary"
-                ],
-            }
             effects.append(
                 {
                     "type": "RELATION_EFFECT",
@@ -646,13 +573,8 @@ class _MemoryManagementOperations:
         return FrozenMemoryDeletionPlan(
             _frozen_rows(delete_rows),
             _frozen_rows(removed),
-            _frozen_rows(candidate_deletes),
-            _frozen_rows(tool_refs),
-            _frozen_rows(basis_refs),
-            _frozen_rows(normalize),
             _frozen_rows(restores),
             tuple(sorted(set(facts) | {r["id"] for r in active})),
-            tuple(preference_contexts),
             records,
         )
 
@@ -666,21 +588,10 @@ class _MemoryManagementOperations:
         expected_records,
         deadline_monotonic,
     ):
-        from .memory import _MemoryOperations
-
         # Only concrete memory FK/unique conflicts can mean a concurrently added reference.
         reference_conflicts = {
-            "memory_candidate_fact_fk",
-            "memory_candidate_related_target_fk",
-            "memory_candidate_duplicate_winner_fk",
-            "memory_candidate_applied_existing_fk",
-            "memory_candidate_basis_refs_memory_domain_id_target_contex_fkey",
-            "memory_candidate_basis_refs_candidate_id_memory_domain_id__fkey",
-            "memory_candidate_tool_result__candidate_id_origin_session__fkey",
             "memory_relations_memory_domain_id_source_context_id_source_fkey",
             "memory_relations_memory_domain_id_target_context_id_target_fkey",
-            "memory_relations_decision_candidate_id_memory_domain_id_fkey",
-            "memory_facts_source_candidate_id_id_fkey",
             "uq_pulsara_v3_memory_active_semantic",
         }
         while True:
@@ -702,42 +613,16 @@ class _MemoryManagementOperations:
                         "SELECT id FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
                         (memory_domain_id, list(plan.lock_fact_ids)),
                     ).fetchall()
-                    for table, rows in (
-                        ("memory_relations", plan.relations),
-                        ("memory_candidates", (*plan.candidates, *plan.normalize)),
-                    ):
-                        c.execute(
-                            sql.SQL(
-                                "SELECT id FROM pulsara_v3.{} WHERE id=ANY(%s) ORDER BY id FOR UPDATE"
-                            ).format(sql.Identifier(table)),
-                            ([dict(r)["id"] for r in rows],),
-                        ).fetchall()
-                    for table in (
-                        "memory_candidate_tool_result_refs",
-                        "memory_candidate_basis_refs",
-                    ):
-                        c.execute(
-                            sql.SQL(
-                                "SELECT candidate_id FROM pulsara_v3.{} WHERE candidate_id=ANY(%s) ORDER BY candidate_id,ordinal FOR UPDATE"
-                            ).format(sql.Identifier(table)),
-                            ([dict(r)["id"] for r in plan.candidates],),
-                        ).fetchall()
+                    c.execute(
+                        "SELECT id FROM pulsara_v3.memory_relations WHERE id=ANY(%s::text[]) ORDER BY id FOR UPDATE",
+                        ([dict(r)["id"] for r in plan.relations],),
+                    ).fetchall()
                     fresh = self._memory_deletion_plan(
                         c, memory_domain_id, selection, fact_id, additional
                     )
                     if fresh.lock_fact_ids != plan.lock_fact_ids:
                         c.rollback()
                         continue
-                    for context in fresh.preference_contexts:
-                        # Reuse governance's exact lock key and owner boundary.
-                        from types import SimpleNamespace
-
-                        _MemoryOperations._lock_response_preference_context(
-                            c,
-                            SimpleNamespace(
-                                memory_domain_id=memory_domain_id, context_id=context
-                            ),
-                        )
                     plan = self._memory_deletion_plan(
                         c, memory_domain_id, selection, fact_id, additional
                     )
@@ -761,29 +646,12 @@ class _MemoryManagementOperations:
                             preview=plan.confirmation,
                         )
                     _remaining(c, deadline_monotonic)
-                    for table, rows in (
-                        ("memory_candidate_tool_result_refs", plan.tool_refs),
-                        ("memory_candidate_basis_refs", plan.basis_refs),
-                        ("memory_relations", plan.relations),
-                    ):
+                    for table, rows in (("memory_relations", plan.relations),):
                         self._memory_exact_delete(c, table, rows)
-                    for frozen in plan.normalize:
-                        old = dict(frozen)
-                        row = c.execute(
-                            """UPDATE pulsara_v3.memory_candidates SET decision_kind='ACCEPT', related_target_fact_id=NULL
-                            WHERE id=%s RETURNING *""",
-                            (old["id"],),
-                        ).fetchone()
-                        expected = {
-                            **old,
-                            "decision_kind": "ACCEPT",
-                            "related_target_fact_id": None,
-                        }
-                        if _freeze(row) != _freeze(expected):
-                            raise RuntimeError(
-                                "memory candidate normalization changed unexpected fields"
-                            )
-                    self._memory_exact_delete(c, "memory_candidates", plan.candidates)
+                    c.execute(
+                        "DELETE FROM pulsara_v3.memory_embeddings WHERE memory_domain_id=%s AND fact_id=ANY(%s::text[])",
+                        (memory_domain_id, [dict(r)["id"] for r in plan.facts]),
+                    )
                     self._memory_exact_delete(c, "memory_facts", plan.facts)
                     operation_at = datetime.now(timezone.utc)
                     for frozen in plan.restore:
@@ -829,7 +697,7 @@ class _MemoryManagementOperations:
     def _memory_exact_delete(c, table, rows):
         for frozen in rows:
             old = dict(frozen)
-            keys = ("candidate_id", "ordinal") if table.endswith("_refs") else ("id",)
+            keys = ("fact_id", "ordinal") if table.endswith("_refs") else ("id",)
             statement = sql.SQL(
                 "DELETE FROM pulsara_v3.{} WHERE {} RETURNING *"
             ).format(

@@ -189,13 +189,11 @@ class LocalMemoryController:
 
     async def detail(self, request):
         q = self.query(request, {"view", "workspace_id", "limit", "cursor"})
-        workspace = self.sessions.bootstrap_payload()["workspace"]["id"]
         return web.json_response(
             await self.sessions.core.memory_management_detail(
                 memory_domain_id=self.domain,
                 selection=self.selection(q),
                 fact_id=request.match_info["fact_id"],
-                provenance_workspace_id=workspace,
                 limit=int(q.get("limit", 40)),
                 cursor=q.get("cursor"),
             )

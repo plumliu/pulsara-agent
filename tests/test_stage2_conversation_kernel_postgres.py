@@ -25,11 +25,6 @@ from pulsara_agent.conversation_kernel.blob import (
     PostgresCanonicalBlobStore,
 )
 from pulsara_agent.conversation_kernel.memory import PostgresMemoryQuery
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    FrozenMemoryProposal,
-    MemoryKindHint,
-    prepare_memory_candidate,
-)
 from tests.support.round3 import new_test_provider_input_continuity_owner
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     COMPACTION_MODEL_CONTRACT,
@@ -66,7 +61,6 @@ from pulsara_agent.conversation_kernel.repository import (
     ToolRemoteIdentityConfirmationKind,
     build_prepared_root_turn_intent,
     build_prepared_tool_remote_identity_publication,
-    build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
@@ -85,11 +79,6 @@ from pulsara_agent.conversation_kernel.steer import (
     build_steer_consumption_candidate,
     build_steer_resource_rejection,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolResultDisplayKind,
-)
-from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.model_input.continuity import (
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
@@ -106,8 +95,6 @@ from pulsara_agent.model_input.contracts import (
     provider_input_item_text,
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
-from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.memory.scope import CTX_GLOBAL
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -756,8 +743,8 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
     # Fork spec §7.6 adds groups, genesis, and irreducible historical closures.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 27
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
@@ -1368,10 +1355,10 @@ def test_stage2_unqualified_product_sql_cannot_resolve_a_product_relation(
 # the Host-owned compaction settlement coverage in the Round 5B suite.
 
 
-def test_stage2_memory_governance_is_async_and_postgres_only(
+def test_stage2_direct_memory_has_no_candidate_or_job_tables(
     stage2_migrated_postgres_database,
 ) -> None:
-    """Round 8 successor: governance owns rows but no durable execution."""
+    """Direct memory owns canonical facts and references, not review jobs."""
 
     repository = _repository(stage2_migrated_postgres_database)
     with repository.connection_provider.connection(
@@ -1388,9 +1375,6 @@ def test_stage2_memory_governance_is_async_and_postgres_only(
             ).fetchall()
         }
     assert relations == {
-        "memory_candidates",
-        "memory_candidate_tool_result_refs",
-        "memory_candidate_basis_refs",
         "memory_facts",
         "memory_relations",
         "memory_embeddings",
@@ -2710,194 +2694,4 @@ def test_stage2_prompt_cancel_is_single_terminal_cas(
             WHERE session_id = %s AND event_type = 'PromptCancelled'
             """,
             (session_id,),
-        ).fetchone() == (1,)
-
-
-def test_stage2_memory_candidate_and_tool_result_are_one_transaction(
-    stage2_migrated_postgres_database,
-) -> None:
-    repository = _repository(stage2_migrated_postgres_database)
-    deadline = monotonic() + 30
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = repository.acquire_host_writer(
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=deadline,
-    )
-    turn_id = _name("turn")
-    _start_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("revision"),
-        content=FrozenPromptContent.text('remember this'),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    cut = repository.prepare_provider_input_cut(
-        lease.guard, turn_id=turn_id, deadline_monotonic=deadline
-    )
-    assistant_entry_id = _name("entry")
-    first_call = _name("call")
-    second_call = _name("call")
-    repository.commit_assistant_message(
-        lease.guard,
-        cut=cut,
-        entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"memory proposals"),
-        blocks=(
-            AssistantToolCallBlock(
-                _name("block"),
-                first_call,
-                "remember_claim",
-                freeze_json({"statement": "a"}),
-            ),
-            AssistantToolCallBlock(
-                _name("block"),
-                second_call,
-                "remember_claim",
-                freeze_json({"statement": "b"}),
-            ),
-        ),
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="model:test",
-        deadline_monotonic=deadline,
-    )
-    first_attempt = _accept_tool_attempt(
-        repository,
-        lease.guard,
-        attempt_id=_name("attempt"),
-        assistant_entry_id=assistant_entry_id,
-        tool_call_id=first_call,
-        authorization_kind="policy",
-        authorization_reference="allow",
-        actor_kind="runtime",
-        actor_id="tool",
-        remote_idempotency_key=None,
-        retry_of_attempt_id=None,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    candidate_id = _name("candidate")
-    memory_candidate = prepare_memory_candidate(
-        candidate_id=candidate_id,
-        memory_domain_id="u_local",
-        origin_workspace_id=workspace_id,
-        origin_session_id=session_id,
-        producer_entry_id=assistant_entry_id,
-        producer_tool_call_id=first_call,
-        proposal=FrozenMemoryProposal(
-            statement="a",
-            context_id=CTX_GLOBAL,
-            kind_hint=MemoryKindHint.FACT,
-        ),
-    )
-    first_result_entry_id = _name("entry")
-    first_candidate = build_prepared_tool_result_acceptance(
-        guard=lease.guard,
-        workspace_id=workspace_id,
-        result_id=_name("result"),
-        result_entry_id=first_result_entry_id,
-        turn_id=turn_id,
-        assistant_entry_id=assistant_entry_id,
-        tool_call_id=first_call,
-        attempt_id=first_attempt.attempt_id,
-        result_state="SUCCESS",
-        canonical_preview_content=InlineContent.from_bytes(b"proposed"),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-        artifact_id=None,
-        artifact_blob_descriptor=None,
-        source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE,
-        source_coverage_reason=None,
-        artifact_unavailability_reason=None,
-        observed_at=datetime.now(timezone.utc),
-        observation_duration_microseconds=None,
-        observation_origin_kind=ToolObservationOrigin.BUILTIN,
-        trusted_tool_reported_duration_microseconds=None,
-        actor_id="remember_claim",
-        memory_candidate=memory_candidate,
-    )
-    repository.accept_tool_result(
-        lease.guard,
-        candidate=first_candidate,
-        deadline_monotonic=deadline,
-    )
-    second_attempt = _accept_tool_attempt(
-        repository,
-        lease.guard,
-        attempt_id=_name("attempt"),
-        assistant_entry_id=assistant_entry_id,
-        tool_call_id=second_call,
-        authorization_kind="policy",
-        authorization_reference="allow",
-        actor_kind="runtime",
-        actor_id="tool",
-        remote_idempotency_key=None,
-        retry_of_attempt_id=None,
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=deadline,
-    )
-    rolled_back_candidate = candidate_id
-    conflicting_memory_candidate = prepare_memory_candidate(
-        candidate_id=rolled_back_candidate,
-        memory_domain_id="u_local",
-        origin_workspace_id=workspace_id,
-        origin_session_id=session_id,
-        producer_entry_id=assistant_entry_id,
-        producer_tool_call_id=second_call,
-        proposal=FrozenMemoryProposal(
-            statement="b",
-            context_id=CTX_GLOBAL,
-            kind_hint=MemoryKindHint.FACT,
-        ),
-    )
-    rolled_back_result = _name("result")
-    rollback_candidate = build_prepared_tool_result_acceptance(
-        guard=lease.guard,
-        workspace_id=workspace_id,
-        result_id=rolled_back_result,
-        result_entry_id=_name("entry"),
-        turn_id=turn_id,
-        assistant_entry_id=assistant_entry_id,
-        tool_call_id=second_call,
-        attempt_id=second_attempt.attempt_id,
-        result_state="SUCCESS",
-        canonical_preview_content=InlineContent.from_bytes(b"must rollback"),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-        artifact_id=None,
-        artifact_blob_descriptor=None,
-        source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE,
-        source_coverage_reason=None,
-        artifact_unavailability_reason=None,
-        observed_at=datetime.now(timezone.utc),
-        observation_duration_microseconds=None,
-        observation_origin_kind=ToolObservationOrigin.BUILTIN,
-        trusted_tool_reported_duration_microseconds=None,
-        actor_id="remember_claim",
-        memory_candidate=conflicting_memory_candidate,
-    )
-    with pytest.raises(Exception):
-        repository.accept_tool_result(
-            lease.guard,
-            candidate=rollback_candidate,
-            deadline_monotonic=deadline,
-        )
-    with repository.connection_provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=deadline,
-    ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_results WHERE id = %s",
-            (rolled_back_result,),
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.memory_candidates WHERE id = %s",
-            (candidate_id,),
         ).fetchone() == (1,)

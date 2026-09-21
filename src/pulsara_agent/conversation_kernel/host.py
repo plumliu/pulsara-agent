@@ -99,10 +99,6 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 from pulsara_agent.conversation_kernel.assistant_settlement import (
     AssistantMessageSettlementOwner,
 )
-from pulsara_agent.conversation_kernel.auxiliary_model import (
-    DirectKernelAuxiliaryJsonModel,
-)
-from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.conversation_kernel.extensions import (
     ExtensionPlane,
     ExtensionPrincipal,
@@ -122,7 +118,9 @@ from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
-from pulsara_agent.conversation_kernel.memory.governor import AdvisoryMemoryGovernor
+from pulsara_agent.conversation_kernel.memory.embedding_maintainer import (
+    MemoryEmbeddingMaintainer,
+)
 from pulsara_agent.memory.scope import freeze_memory_read_context_binding
 from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
 from pulsara_agent.conversation_kernel.repository import (
@@ -808,20 +806,15 @@ class KernelHostSession:
             settings=model_runtime.settings,
         )
         self._memory_tools.bind_deadline_factory(self._deadlines)
-        self._memory_governor = AdvisoryMemoryGovernor(
+        self._memory_embedding_maintainer = MemoryEmbeddingMaintainer(
             repository=repository,
-            guard=self._lease.guard,
             read_binding=memory_read_binding,
-            model=DirectKernelAuxiliaryJsonModel(model_runtime),
-            input_reader=CanonicalProviderInputReader(
-                repository.connection_provider,
-                blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
-            ),
             io_owner=self._io,
             deadline_factory=self._deadlines,
             embedding_port=self._memory_tools,
+            session_id=session_id,
         )
-        self._memory_tools.bind_governor(self._memory_governor)
+        self._memory_tools.bind_embedding_maintainer(self._memory_embedding_maintainer)
         self._tools.bind_memory_port(self._memory_tools)
         self._mcp_supervisor = McpHostSupervisor(
             session_id=session_id,
@@ -968,7 +961,7 @@ class KernelHostSession:
             self._prompt_delivery_loop(),
             name=f"kernel-prompt-delivery:{session_id}",
         )
-        self._memory_governor.start()
+        self._memory_embedding_maintainer.start()
         self._monitor_task = asyncio.create_task(
             self._terminal_monitor_delivery_loop(),
             name=f"kernel-terminal-monitor-delivery:{session_id}",
@@ -3752,8 +3745,6 @@ class KernelHostSession:
                     PlanContinuationDisposition.HISTORICAL_TERMINAL,
                     PlanContinuationDisposition.NOT_OWNED_BY_CURRENT_WRITER,
                 }:
-                    if disposition is PlanContinuationDisposition.HISTORICAL_TERMINAL:
-                        self._memory_tools.offer_governance_wake()
                     return
             except asyncio.CancelledError:
                 raise
@@ -4129,7 +4120,6 @@ class KernelHostSession:
             except Exception:
                 status = None
             if status is not None and status.value != "RUNNING":
-                self._memory_tools.offer_governance_wake()
                 return
             await asyncio.sleep(delay_seconds)
             delay_seconds = min(delay_seconds * 2, 0.5)
@@ -6831,7 +6821,7 @@ class KernelHostSession:
             self._hook_context.close()
             self._input_continuity.close()
             try:
-                await self._memory_governor.aclose(deadline_monotonic=deadline)
+                await self._memory_embedding_maintainer.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
             try:
@@ -7685,7 +7675,6 @@ class KernelHostCore:
         memory_domain_id,
         selection,
         fact_id,
-        provenance_workspace_id,
         limit=40,
         cursor=None,
     ):
@@ -7695,7 +7684,6 @@ class KernelHostCore:
             memory_domain_id=memory_domain_id,
             selection=selection,
             fact_id=fact_id,
-            provenance_workspace_id=provenance_workspace_id,
             limit=limit,
             cursor=cursor,
             deadline_monotonic=self._canonical_deadline(),

@@ -11,7 +11,7 @@ function setup() {
   const api = new LocalMemoryApi();
   vi.spyOn(api, 'projects').mockResolvedValue({ items: [], next_cursor: null });
   vi.spyOn(api, 'catalog').mockResolvedValue({ items: [fact], next_cursor: null });
-  vi.spyOn(api, 'detail').mockResolvedValue({ fact, formation: '在对话中记住', public_summary: '依据用户表达整理', source: null, relations: [], next_cursor: null });
+  vi.spyOn(api, 'detail').mockResolvedValue({ fact, formation: '由对话中的记忆工具直接保存', source: null, relations: [], next_cursor: null });
   vi.spyOn(api, 'preview').mockResolvedValue(confirmation);
   vi.spyOn(api, 'delete').mockResolvedValue([{ type: 'HEADER', root: fact.fact_id, view: 'global', workspace_id: null, result: 'DELETED' }, { type: 'END', counts: { HEADER: 1 } }]);
   return api;
@@ -62,7 +62,7 @@ describe('MemoryView', () => {
     expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
     expect(screen.getByText('正在读取记忆…')).toBeTruthy();
     expect(document.activeElement).toBe(search);
-    await act(async () => { resolveDetail({ fact, formation: '', source: null, public_summary: '', relations: [], next_cursor: null }); });
+    await act(async () => { resolveDetail({ fact, formation: '', source: null, relations: [], next_cursor: null }); });
     expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
     vi.mocked(api.catalog).mockResolvedValueOnce({ items: [], next_cursor: null });
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
@@ -104,7 +104,7 @@ describe('MemoryView', () => {
   it('keeps the same panel mounted while switching, and ignores repeated selection without scrolling', async () => {
     const api = setup();
     const companion = { ...fact, fact_id: 'memory:b', statement: '散步时喜欢经过河边。' };
-    const initial: MemoryDetail = { fact, formation: '在对话中记住', public_summary: '', source: null, relations: [{ relation_id: 'relation:a', relative_role: 'BASED_ON', subject: fact, companion, recorded_at: fact.recorded_at, public_summary: '' }], next_cursor: null };
+    const initial: MemoryDetail = { fact, formation: '由对话中的记忆工具直接保存', source: null, relations: [{ relation_id: 'relation:a', relative_role: 'BASED_ON', subject: fact, companion, recorded_at: fact.recorded_at, owner: { write_tool: 'remember', source: null } }], next_cursor: null };
     vi.mocked(api.detail).mockResolvedValue(initial);
     vi.mocked(api.catalog).mockResolvedValue({ items: [fact, companion], next_cursor: null });
     const scroll = vi.fn();
@@ -142,6 +142,23 @@ describe('MemoryView', () => {
       else Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
     }
   });
+  it('shows the relation owner separately from the fact creator', async () => {
+    const api = setup();
+    const onOpenSource = vi.fn();
+    const relationOwner = { session_id: 'session:relation', turn_id: 'turn:relation', entry_id: 'entry:relation' };
+    vi.mocked(api.detail).mockResolvedValue({
+      fact, formation: '由对话中的记忆工具直接保存', source: null,
+      relations: [{ relation_id: 'relation:later', relative_role: 'CONFLICTS_WITH', subject: fact, companion: { ...fact, fact_id: 'memory:other', statement: '另一条记忆' }, recorded_at: fact.recorded_at, owner: { write_tool: 'mark_memory_relation', source: relationOwner } }],
+      next_cursor: null,
+    });
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={onOpenSource} />);
+    fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
+    const panel = await screen.findByRole('complementary', { name: '记忆详情' });
+    expect(within(panel).queryByText('保存时引用')).toBeNull();
+    expect(within(panel).getByText('后续标定')).toBeTruthy();
+    fireEvent.click(within(panel).getByRole('button', { name: '查看建立处' }));
+    expect(onOpenSource).toHaveBeenCalledWith(relationOwner);
+  });
   it('retains the loaded detail on read failure, and ignores a response after closing', async () => {
     const api = setup();
     const companion = { ...fact, fact_id: 'memory:b', statement: '另一条记忆' };
@@ -159,7 +176,7 @@ describe('MemoryView', () => {
     vi.mocked(api.detail).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
     fireEvent.click(screen.getByRole('button', { name: /另一条记忆/ }));
     fireEvent.click(screen.getByRole('button', { name: '关闭记忆详情' }));
-    await act(async () => resolve({ fact: companion, formation: '', source: null, public_summary: '', relations: [], next_cursor: null }));
+    await act(async () => resolve({ fact: companion, formation: '', source: null, relations: [], next_cursor: null }));
     expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
   });
   it('only accepts the latest selected detail when reads finish out of order', async () => {
@@ -175,7 +192,7 @@ describe('MemoryView', () => {
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     fireEvent.click(screen.getByRole('button', { name: /另一条记忆/ }));
     const panel = screen.getByRole('complementary', { name: '记忆详情' });
-    const detail = { fact, formation: '', source: null, public_summary: '', relations: [], next_cursor: null };
+    const detail = { fact, formation: '', source: null, relations: [], next_cursor: null };
     await act(async () => first(detail));
     expect(panel.getAttribute('aria-busy')).toBe('true');
     expect(within(panel).queryByText(fact.statement)).toBeNull();
@@ -193,6 +210,35 @@ describe('MemoryView', () => {
     fireEvent.click(screen.getByRole('tab', { name: '项目' }));
     expect(await screen.findByRole('heading', { name: '选择一个项目' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /删除记忆/ })).toBeNull();
+  });
+  it('shows only memory-bearing projects and clears the selection after their last memory is deleted', async () => {
+    const api = setup();
+    const project = { workspace_id: 'ctx:project-a', label: '项目 A', root: '/work/a', last_activity_at: fact.recorded_at };
+    const projectFact = { ...fact, fact_id: 'memory:project-a', context_id: project.workspace_id, context_label: project.label };
+    const projectConfirmation: MemoryRecord[] = [
+      { type: 'HEADER', root: projectFact.fact_id, view: 'project', workspace_id: project.workspace_id, disposition: 'READY' },
+      { type: 'FACT_DELETE', fact: projectFact },
+      { type: 'END', counts: { HEADER: 1, FACT_DELETE: 1 } },
+    ];
+    vi.mocked(api.projects)
+      .mockResolvedValueOnce({ items: [project], next_cursor: null })
+      .mockResolvedValueOnce({ items: [], next_cursor: null });
+    vi.mocked(api.catalog).mockResolvedValue({ items: [projectFact], next_cursor: null });
+    vi.mocked(api.detail).mockResolvedValue({ fact: projectFact, formation: '', source: null, relations: [], next_cursor: null });
+    vi.mocked(api.preview).mockResolvedValue(projectConfirmation);
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    fireEvent.click(screen.getByRole('tab', { name: '项目' }));
+    const selector = screen.getByRole('combobox', { name: '选择项目' });
+    await waitFor(() => expect(within(selector).getByRole('option', { name: /项目 A/ })).toBeTruthy());
+    expect(within(selector).queryByRole('option', { name: /未保存项目/ })).toBeNull();
+    fireEvent.change(selector, { target: { value: project.workspace_id } });
+    fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /删除记忆/ }));
+    fireEvent.click(await screen.findByRole('button', { name: '确认删除' }));
+    await waitFor(() => expect(api.projects).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(within(selector).getByRole('option', { name: '选择有记忆的项目', selected: true })).toBeTruthy());
+    expect(within(selector).queryByRole('option', { name: /项目 A/ })).toBeNull();
+    expect(within(selector).getByRole('option', { name: '选择有记忆的项目' })).toBeTruthy();
   });
   it.each(['database_not_configured', 'database_configured_unverified', 'database_unavailable', 'database_schema_action_required'] as const)('gates %s without reading memories', async databaseState => {
     const api = setup();

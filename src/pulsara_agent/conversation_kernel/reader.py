@@ -25,9 +25,6 @@ from pulsara_agent.conversation_kernel.visualization import (
     VISUALIZATION_CODEC,
     VISUALIZATION_MEDIA_TYPE,
 )
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    FrozenMemoryGovernanceProducerCut,
-)
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     SUBAGENT_COMPLETION_MEDIA_TYPE,
     project_subagent_completion_for_provider,
@@ -223,11 +220,6 @@ class OwnerIssuedCanonicalDispatchObservation:
             raise RuntimeError("canonical dispatch observation is already consumed")
         object.__setattr__(self, "_consumed", True)
         return self.canonical_read
-
-
-@dataclass(frozen=True, slots=True)
-class _HistoricalMemoryGovernanceReadAuthority:
-    producer_cut: FrozenMemoryGovernanceProducerCut
 
 
 class CanonicalBlobReader(Protocol):
@@ -619,65 +611,6 @@ class CanonicalProviderInputReader:
                 safe_head_range=canonical_range,
             )
 
-    def read_memory_governance_historical_snapshot(
-        self,
-        producer_cut: FrozenMemoryGovernanceProducerCut,
-        *,
-        deadline_monotonic: float,
-    ) -> CanonicalModelInputSnapshot:
-        """Read only the exact semantic cut authorized by its producer entry.
-
-        Foreground reads still require the current binding revision.  This
-        narrow seam admits an older revision only after the assistant entry
-        itself proves every member of the cut inside the same repeatable-read
-        transaction.
-        """
-
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            row = connection.execute(
-                """
-                SELECT entry_sequence, entry_kind, turn_id,
-                       context_binding_revision_id,
-                       provider_input_through_sequence
-                FROM pulsara_v3.transcript_entries
-                WHERE session_id=%s AND id=%s AND entry_owner_kind='EXECUTED_TURN'
-                """,
-                (producer_cut.session_id, producer_cut.producer_entry_id),
-            ).fetchone()
-            if row is None or (
-                str(row["entry_kind"])
-                not in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}
-                or str(row["turn_id"]) != producer_cut.turn_id
-                or int(row["entry_sequence"]) != producer_cut.producer_entry_sequence
-                or str(row["context_binding_revision_id"])
-                != producer_cut.context_binding_revision_id
-                or int(row["provider_input_through_sequence"])
-                != producer_cut.provider_input_through_sequence
-            ):
-                raise ConversationKernelConflict(
-                    "memory governance producer no longer proves its historical cut"
-                )
-            cut = PreparedProviderInputCut(
-                session_id=producer_cut.session_id,
-                turn_id=producer_cut.turn_id,
-                context_binding_revision_id=(producer_cut.context_binding_revision_id),
-                provider_input_through_sequence=(
-                    producer_cut.provider_input_through_sequence
-                ),
-            )
-            authority = _HistoricalMemoryGovernanceReadAuthority(producer_cut)
-            return self.read_frozen_dispatch(
-                cut,
-                deadline_monotonic=deadline_monotonic,
-                _connection=connection,
-                _historical_memory_authority=authority,
-            ).compile_snapshot.canonical_input
-
     def read_prospective_root_dispatch(
         self,
         candidate: PreparedRootProviderInputCandidate,
@@ -707,9 +640,6 @@ class CanonicalProviderInputReader:
         *,
         deadline_monotonic: float,
         _connection: object | None = None,
-        _historical_memory_authority: (
-            _HistoricalMemoryGovernanceReadAuthority | None
-        ) = None,
         _prospective_root_candidate: PreparedRootProviderInputCandidate | None = None,
     ) -> FrozenCanonicalProviderDispatchRead:
         from contextlib import nullcontext
@@ -777,7 +707,6 @@ class CanonicalProviderInputReader:
                     != candidate.exact_context_binding_revision_id
                     or cut.provider_input_through_sequence
                     != candidate.exact_initial_entry_sequence
-                    or _historical_memory_authority is not None
                 ):
                     raise ValueError("prospective ROOT read cut is invalid")
                 binding = {
@@ -822,23 +751,8 @@ class CanonicalProviderInputReader:
                 }
             if binding is None:
                 raise ConversationKernelConflict("provider binding is absent")
-            if (
-                binding["current_context_binding_revision_id"]
-                != cut.context_binding_revision_id
-                and _historical_memory_authority is None
-            ):
+            if binding["current_context_binding_revision_id"] != cut.context_binding_revision_id:
                 raise ConversationKernelConflict("provider binding revision is stale")
-            if _historical_memory_authority is not None and (
-                _historical_memory_authority.producer_cut.session_id != cut.session_id
-                or _historical_memory_authority.producer_cut.turn_id != cut.turn_id
-                or _historical_memory_authority.producer_cut.context_binding_revision_id
-                != cut.context_binding_revision_id
-                or _historical_memory_authority.producer_cut.provider_input_through_sequence
-                != cut.provider_input_through_sequence
-            ):
-                raise ConversationKernelConflict(
-                    "historical memory authority does not name the provider cut"
-                )
             if cut.provider_input_through_sequence > int(
                 binding["latest_entry_sequence"]
             ):

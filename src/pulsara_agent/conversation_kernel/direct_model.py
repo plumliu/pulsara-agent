@@ -120,8 +120,6 @@ from pulsara_agent.primitives.context import (
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
-    FrozenModelVisibleMemoryProvenance,
-    ModelVisibleMemoryProvenanceDisposition,
 )
 
 
@@ -284,12 +282,7 @@ class KernelModelExecutionRequest:
     cut: PreparedProviderInputCut
     surface_borrow: ProcessLocalToolSurfaceBorrow = field(repr=False)
     memory_context: FrozenModelCallMemoryContext = field(
-        default_factory=lambda: FrozenModelCallMemoryContext(
-            FrozenModelVisibleMemoryProvenance(
-                ModelVisibleMemoryProvenanceDisposition.COMPLETE, ()
-            )
-        ),
-        repr=False,
+        default_factory=FrozenModelCallMemoryContext, repr=False
     )
 
     def __post_init__(self) -> None:

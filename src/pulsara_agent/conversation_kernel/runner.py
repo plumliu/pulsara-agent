@@ -146,9 +146,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.conversation_kernel.mcp.contracts import (
     MAXIMUM_MCP_CATALOG_FULL_BYTES,
 )
-from pulsara_agent.conversation_kernel.memory.citations import (
-    ProcessLocalMemoryCallContextOwner,
-)
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
     ToolOutputArtifactProcessor,
@@ -1023,14 +1020,10 @@ class ConversationKernelRunner:
                 deadline_factory=self._deadlines,
             )
         )
-        self._memory_contexts = ProcessLocalMemoryCallContextOwner(
-            session_id=writer_lease.guard.session_id
-        )
         self._extensions = extensions
         self._memory_dispatch = MemoryDispatchSupport(
             compiler=resolved_compiler,
             io_owner=self._io,
-            memory_context_owner=self._memory_contexts,
             memory_projection=memory_projection,
             input_reader=resolved_input_reader,
             deadline_factory=self._deadlines,
@@ -1103,7 +1096,6 @@ class ConversationKernelRunner:
             content_publisher=self._content_publisher,
             tool_output_processor=self._tool_output_processor,
             continuity_owner=self._continuity,
-            memory_context_owner=self._memory_contexts,
             memory_projection=memory_projection,
             extensions=extensions,
             subagent_runtime=subagent_runtime,
@@ -1273,7 +1265,6 @@ class ConversationKernelRunner:
             )
         finally:
             self._continuity.retire_terminal_subagent_scope(scope)
-            self._memory_contexts.discard_scope(scope)
 
     async def _run_turn(
         self,
@@ -2496,7 +2487,6 @@ class ConversationKernelRunner:
                 if not calls and accepted.turn_completed:
                     active_surface_borrow.close()
                     active_surface_borrow = None
-                    self._memory_dispatch.offer_governance_wake()
                     return KernelRunResult(
                         turn_id=turn_id,
                         final_entry_id=accepted.entry_id,
@@ -2550,7 +2540,6 @@ class ConversationKernelRunner:
                         # Idempotent enter_plan against the already-active
                         # workflow settles the batch but keeps this exact run.
                         continue
-                    self._memory_dispatch.offer_governance_wake()
                     return KernelRunResult(
                         turn_id=turn_id,
                         final_entry_id=(
@@ -2585,7 +2574,6 @@ class ConversationKernelRunner:
                 )
                 tool_call_count += batch.tool_call_count
                 if batch.terminal is not None:
-                    self._memory_dispatch.offer_governance_wake()
                     return KernelRunResult(
                         turn_id=turn_id,
                         final_entry_id=batch.terminal.final_entry_id,
@@ -2675,7 +2663,6 @@ class ConversationKernelRunner:
                     else "FOREGROUND_EXECUTION_INTERRUPTED"
                 )
             await self._turn_admission.interrupt_turn(turn_id, reason=reason)
-            self._memory_dispatch.offer_governance_wake()
             raise
         finally:
             self._tools.discard_visualization_subscriptions(turn_id)

@@ -53,8 +53,8 @@ def test_stage3_5_final_oracles_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 27
 
 
 def test_stage3_5_obsolete_authority_paths_are_physically_absent() -> None:
@@ -145,7 +145,7 @@ def test_stage3_5_clean_migration_universe_is_the_only_packaged_universe() -> No
     )
 
     baseline = (sql_root / BASELINE_RESOURCE).read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 29
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 27
     assert "CREATE TABLE public.pulsara_schema_migrations" in baseline
     assert "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public" in baseline
     for token in (
@@ -206,7 +206,7 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/conversation_kernel/interaction.py",
         "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
         "src/pulsara_agent/conversation_kernel/mcp/supervisor.py",
-        "src/pulsara_agent/conversation_kernel/memory/governor.py",
+        "src/pulsara_agent/conversation_kernel/memory/embedding_maintainer.py",
         "src/pulsara_agent/conversation_kernel/memory_tools.py",
         "src/pulsara_agent/conversation_kernel/plan_runtime.py",
         "src/pulsara_agent/conversation_kernel/steer_consumption.py",

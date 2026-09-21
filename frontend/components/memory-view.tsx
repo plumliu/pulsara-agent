@@ -72,16 +72,19 @@ function MemoryContent({ api, onOpenSource }: Props) {
     let active = true;
     void (async () => {
       let next: string | undefined;
+      const loaded: MemoryProject[] = [];
       do {
         const p = await api.projects(next);
         if (!active) return;
+        loaded.push(...p.items);
         const first = next === undefined;
         setProjects(old => first ? p.items : [...old, ...p.items]);
         next = p.next_cursor ?? undefined;
       } while (next);
+      setWorkspace(current => current && !loaded.some(p => p.workspace_id === current) ? '' : current);
     })().catch(e => { if (active) setError(errorText(e)); });
     return () => { active = false; };
-  }, [api]);
+  }, [api, revision]);
   useEffect(() => {
     let active = true;
     detailRequest.current++;
@@ -141,14 +144,14 @@ function MemoryContent({ api, onOpenSource }: Props) {
   const restores = confirmation?.filter((r): r is Extract<MemoryRecord, { type: 'FACT_RESTORE' }> => r.type === 'FACT_RESTORE') ?? [];
   const filtered = Boolean(search || kind);
   const emptyTitle = view === 'project' && !workspace ? '选择一个项目' : filtered ? '没有找到匹配的记忆' : lifecycle === 'updated' ? '还没有已更新的记忆' : view === 'global' ? '还没有跨对话记忆' : '这个项目还没有记忆';
-  const emptyCopy = view === 'project' && !workspace ? '同一个目录下的会话，共享这里的项目记忆。' : filtered ? '试试其他关键词，或切换记忆类别。' : lifecycle === 'updated' ? '被新内容替代的记忆，会保留在这里供你查看。' : '在对话中告诉 Pulsara 值得记住的背景或偏好，整理后会出现在这里。';
+  const emptyCopy = view === 'project' && !workspace ? '同一个目录下的会话，共享这里的项目记忆。' : filtered ? '试试其他关键词，或切换记忆类别。' : lifecycle === 'updated' ? '被新内容替代的记忆，会保留在这里供你查看。' : '在对话中告诉 Pulsara 值得记住的背景或偏好，保存后会出现在这里。';
   const detailBusy = busy || Boolean(pendingDetail);
   return <div className={`memory-layout${detail || pendingDetail ? ' has-detail' : ''}`}>
     <div className="memory-main">
       <div className="memory-scope-header"><div className="memory-tabs" role="tablist" aria-label="记忆范围">{(['global', 'project'] as const).map(v => <button role="tab" aria-selected={view === v} disabled={busy} key={v} onClick={() => setView(v)}>{v === 'global' ? <Globe2 size={15} aria-hidden="true" /> : <FolderOpen size={15} aria-hidden="true" />}{v === 'global' ? '跨对话' : '项目'}</button>)}</div><span className="memory-scope-note">{view === 'global' ? '在不同会话间延续的背景与偏好' : '仅在所选目录中共享'}</span></div>
       <div className="memory-collection">
       <div className="memory-toolbar">
-      {view === 'project' && <div className="memory-project"><FolderOpen size={16} aria-hidden="true" /><select aria-label="选择项目" value={workspace} disabled={busy} onChange={e => setWorkspace(e.target.value)}><option value="">选择曾打开的项目目录</option>{projects.map(p => <option key={p.workspace_id} value={p.workspace_id}>{p.label} · {p.root}</option>)}</select><ChevronDown size={14} aria-hidden="true" /></div>}
+      {view === 'project' && <div className="memory-project"><FolderOpen size={16} aria-hidden="true" /><select aria-label="选择项目" value={workspace} disabled={busy} onChange={e => setWorkspace(e.target.value)}><option value="">选择有记忆的项目</option>{projects.map(p => <option key={p.workspace_id} value={p.workspace_id}>{p.label} · {p.root}</option>)}</select><ChevronDown size={14} aria-hidden="true" /></div>}
       <div className="memory-controls"><label className="memory-search"><Search size={16} aria-hidden="true" /><input aria-label="搜索记忆" placeholder="搜索记忆正文…" value={search} disabled={busy} onChange={e => setSearch(e.target.value)} /></label><div className="memory-state-select"><History size={15} aria-hidden="true" /><select aria-label="记忆状态" value={lifecycle} disabled={busy} onChange={e => setLifecycle(e.target.value)}><option value="active">正在使用</option><option value="updated">已更新</option></select><ChevronDown size={13} aria-hidden="true" /></div></div>
       <div className="memory-filters" aria-label="记忆类别"><SlidersHorizontal size={14} aria-hidden="true" />{[['', '全部'], ...Object.entries(memoryKindLabels)].map(([value, title]) => <button key={value} disabled={busy} aria-pressed={kind === value} onClick={() => setKind(value)}>{title}</button>)}</div>
       </div>
@@ -163,16 +166,16 @@ function MemoryContent({ api, onOpenSource }: Props) {
     {(detail || pendingDetail) && <aside className="memory-detail" aria-label="记忆详情" aria-busy={Boolean(pendingDetail)}><header><span className="memory-detail-heading"><Brain size={17} aria-hidden="true" /><h2>记忆详情</h2></span>{pendingDetail && <span className="memory-detail-loading" role="status">正在读取…</span>}<button aria-label="关闭记忆详情" disabled={busy} onClick={() => { detailRequest.current++; setDetail(null); setPendingDetail(null); setConfirmation(null); setAdditional([]); }}><X size={17} /></button></header>{detail && <div className="memory-detail-body">
       {card(detail.fact)}<p className="memory-usage">记录于 {date(detail.fact.recorded_at)}</p><h3>适用条件与例外</h3><p>以正文中的条件、时间和例外为准；适用于{label(detail.fact)}。</p>
       {detail.fact.needs_confirmation && detail.fact.kind === 'RESPONSE_PREFERENCE' && <p>需要确认：冲突解决前暂不作为回答偏好使用。</p>}
-      <h3>形成与整理</h3><p>{detail.formation}</p>{detail.public_summary && <p>{detail.public_summary}</p>}
+      <h3>保存方式</h3><p>{detail.formation}</p>
       {detail.source && <button className="memory-source" disabled={detailBusy} onClick={() => onOpenSource(detail.source!)}>在对话中查看<ArrowUpRight size={14} aria-hidden="true" /></button>}
-      {!!detail.relations.length && <h3>依据、更新与冲突</h3>}{detail.relations.map(r => <div className="memory-relation" key={r.relation_id}><strong>{relationLabels[r.relative_role]}</strong><button disabled={detailBusy} onClick={() => void openFact(r.companion)}>{card(r.companion)}</button>{r.public_summary && <p>{r.public_summary}</p>}</div>)}
+      {!!detail.relations.length && <h3>依据、更新与冲突</h3>}{detail.relations.map(r => <div className="memory-relation" key={r.relation_id}><strong>{relationLabels[r.relative_role]}</strong><button disabled={detailBusy} onClick={() => void openFact(r.companion)}>{card(r.companion)}</button><span className="memory-relation-origin">{r.owner.write_tool === 'remember' ? '保存时建立' : '后续标定'}{r.owner.source ? <button className="memory-source" disabled={detailBusy} onClick={() => onOpenSource(r.owner.source!)}>查看建立处<ArrowUpRight size={14} aria-hidden="true" /></button> : ' · 来源对话已关闭'}</span></div>)}
       {detail.next_cursor && <button disabled={detailBusy} onClick={() => void openFact(detail.fact, true)}>更多关系</button>}
       {!confirmation && <button className="memory-delete" disabled={detailBusy} onClick={() => void preview()}><Trash2 size={14} />{busy ? '正在读取…' : '删除记忆…'}</button>}
       {confirmation && <section className="memory-confirmation" aria-label="删除影响"><h3>确认删除影响</h3><p>删除无法撤销。依赖这些内容的记忆也会一并删除；对话原文不变。</p>
         {confirmation.map((r, i) => {
           if (r.type === 'FACT_DELETE') return <div className="memory-impact" key={i}><strong>将删除</strong>{card(r.fact)}</div>;
           if (r.type === 'FACT_RESTORE') return <div className="memory-impact" key={i}><strong>{ready ? '将恢复为正在使用' : '待确认的恢复项'}</strong>{card(r.fact)}</div>;
-          if (r.type === 'RELATION_EFFECT') return <div className="memory-impact" key={i}><strong>{r.effect === 'REMOVED' ? '移除关系' : '恢复后需要确认'} · {relationLabels[r.relative_role]}</strong>{card(r.subject)}<span>与</span>{card(r.companion)}{r.public_summary && <p>{r.public_summary}</p>}</div>;
+          if (r.type === 'RELATION_EFFECT') return <div className="memory-impact" key={i}><strong>{r.effect === 'REMOVED' ? '移除关系' : '恢复后需要确认'} · {relationLabels[r.relative_role]}</strong>{card(r.subject)}<span>与</span>{card(r.companion)}</div>;
           if (r.type === 'RESTORATION_CONFLICT') return <div className="memory-impact memory-error" key={i}><strong>{conflictLabels[r.reason] ?? '旧记忆需要你确认'}</strong>{card(r.subject)}{r.companion && card(r.companion)}</div>;
           return null;
         })}

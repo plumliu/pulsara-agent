@@ -22,8 +22,6 @@ class KernelWatchdogOwner(StrEnum):
     TERMINAL_FOREGROUND_DECISION = "TERMINAL_FOREGROUND_DECISION"
     HOST_SESSION_CLOSE = "HOST_SESSION_CLOSE"
     BLOB_GC_CLOSE = "BLOB_GC_CLOSE"
-    MEMORY_GOVERNANCE_ATTEMPT = "MEMORY_GOVERNANCE_ATTEMPT"
-    MEMORY_GOVERNOR_CLOSE = "MEMORY_GOVERNOR_CLOSE"
     MEMORY_AUTO_QUERY_EMBEDDING = "MEMORY_AUTO_QUERY_EMBEDDING"
     MEMORY_EXPLICIT_QUERY_EMBEDDING = "MEMORY_EXPLICIT_QUERY_EMBEDDING"
     MEMORY_EXPLICIT_RERANK = "MEMORY_EXPLICIT_RERANK"
@@ -46,8 +44,6 @@ class KernelExecutionWatchdogPolicy:
     terminal_foreground_decision_seconds: float = 120.0
     host_session_close_join_seconds: float = 120.0
     blob_gc_close_seconds: float = 120.0
-    memory_governance_attempt_seconds: float = 300.0
-    memory_governor_close_seconds: float = 120.0
     memory_auto_query_embedding_seconds: float = 3.0
     memory_explicit_query_embedding_seconds: float = 4.0
     memory_explicit_rerank_seconds: float = 4.0
@@ -80,8 +76,6 @@ class KernelExecutionWatchdogPolicy:
             self.terminal_foreground_decision_seconds,
             self.host_session_close_join_seconds,
             self.blob_gc_close_seconds,
-            self.memory_governance_attempt_seconds,
-            self.memory_governor_close_seconds,
             self.memory_auto_query_embedding_seconds,
             self.memory_explicit_query_embedding_seconds,
             self.memory_explicit_rerank_seconds,
@@ -113,27 +107,6 @@ class KernelExecutionWatchdogPolicy:
             total_seconds=None,
         )
 
-    def bounded_auxiliary_transport(
-        self, remaining_attempt_seconds: float
-    ) -> OpenAITransportTimeoutPolicy:
-        """Bind wire fields to one finite process-local auxiliary attempt."""
-
-        if remaining_attempt_seconds <= 0:
-            raise ValueError("auxiliary model attempt has no transport budget")
-        return OpenAITransportTimeoutPolicy(
-            connect_seconds=min(
-                self.provider_connect_seconds, remaining_attempt_seconds
-            ),
-            write_seconds=min(
-                self.provider_write_seconds, remaining_attempt_seconds
-            ),
-            pool_seconds=min(self.provider_pool_seconds, remaining_attempt_seconds),
-            read_idle_seconds=min(
-                self.provider_stream_idle_seconds, remaining_attempt_seconds
-            ),
-            total_seconds=remaining_attempt_seconds,
-        )
-
     def seconds_for(self, owner: KernelWatchdogOwner) -> float:
         mapping = {
             KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING: self.provider_dispatch_planning_attempt_seconds,
@@ -143,8 +116,6 @@ class KernelExecutionWatchdogPolicy:
             KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION: self.terminal_foreground_decision_seconds,
             KernelWatchdogOwner.HOST_SESSION_CLOSE: self.host_session_close_join_seconds,
             KernelWatchdogOwner.BLOB_GC_CLOSE: self.blob_gc_close_seconds,
-            KernelWatchdogOwner.MEMORY_GOVERNANCE_ATTEMPT: self.memory_governance_attempt_seconds,
-            KernelWatchdogOwner.MEMORY_GOVERNOR_CLOSE: self.memory_governor_close_seconds,
             KernelWatchdogOwner.MEMORY_AUTO_QUERY_EMBEDDING: self.memory_auto_query_embedding_seconds,
             KernelWatchdogOwner.MEMORY_EXPLICIT_QUERY_EMBEDDING: self.memory_explicit_query_embedding_seconds,
             KernelWatchdogOwner.MEMORY_EXPLICIT_RERANK: self.memory_explicit_rerank_seconds,

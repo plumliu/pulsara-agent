@@ -329,28 +329,83 @@ _ASYNC_SUBAGENT_COMPLETION_CHANGED_METHODS = {
 _ASYNC_SUBAGENT_COMPLETION_ADDED_RUNTIME_DATACLASSES = {
     "AcceptedSubagentCompletion",
 }
-_MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS = {
-    "_memory_governance_entry_is_human",
-    "_memory_governance_entry_product_kind",
-    "_memory_governance_incomplete_human_marker",
-    "_memory_governance_source_role_and_label",
-    "_memory_governance_terminal_fence",
-    "_read_memory_governance_terminal_candidate",
-}
+_MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS = set()
 _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS = {
     "_governance_public_text",
+    "_decode_governance_projection",
 }
-_MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS = {
-    "_read_assistant_public_blocks",
-    "_read_memory_governance_producer_cut",
-    "_read_memory_governance_producer_output",
-    "_read_memory_governance_source_item",
-    "_read_memory_governance_terminal_suffix",
-    "confirm_memory_governance_terminal_fence",
-}
+_MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS = set()
 _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS = {
     "_read_assistant_public_body",
     "_read_memory_governance_turn_projection",
+}
+_DIRECT_MEMORY_REMOVED_SYMBOLS = {
+    "AcceptedMemoryGovernance",
+    "PreparedMemoryProposalSideBranch",
+}
+_DIRECT_MEMORY_ADDED_OBSERVED_IMPORTS = {"AcceptedMemoryToolResult"}
+_DIRECT_MEMORY_REMOVED_OBSERVED_IMPORTS = {"PreparedMemoryProposalSideBranch"}
+_DIRECT_MEMORY_ADDED_ALL = {
+    "AcceptedMemoryToolResult",
+    "PreparedMemoryMutationSideBranch",
+}
+_DIRECT_MEMORY_ADDED_TOP_LEVEL_CLASSES = {
+    "AcceptedMemoryToolResult",
+    "DirectMemoryOutcome",
+    "PreparedMemoryMutationSideBranch",
+    "_MemoryInputRejected",
+}
+_DIRECT_MEMORY_ADDED_TOP_LEVEL_FUNCTIONS = {"_body", "_fact_id"}
+_DIRECT_MEMORY_ADDED_METHODS = {
+    "_confirm_direct_memory_result_shape",
+    "_lock_remember_basis",
+    "_settle_direct_memory_mutation",
+    "_settle_memory_relation",
+    "_settle_remember",
+}
+_DIRECT_MEMORY_REMOVED_METHODS = {
+    "_accept_memory_governance_once",
+    "_active_semantic_winner",
+    "_candidate_owns_no_memory_rows",
+    "_confirm_existing_relation",
+    "_confirm_memory_proposal_side_branch",
+    "_confirm_processing_existing_source_settlement",
+    "_expected_relation_tuple",
+    "_fact_draft_row",
+    "_find_exact_relation",
+    "_freeze_existing_source_relation_settlement",
+    "_governance_relations_match",
+    "_insert_governance_relations",
+    "_insert_memory_fact",
+    "_insert_prepared_memory_candidate",
+    "_insert_relation",
+    "_lock_basis_targets",
+    "_lock_governance_target",
+    "_lock_processing_candidate",
+    "_lock_response_preference_context",
+    "_memory_fact_matches",
+    "_memory_fact_settlement_identity",
+    "_memory_settlement_identity_matches",
+    "_prepare_memory_duplicate_outcome",
+    "_prepared_governance_inputs_still_match",
+    "_read_entry_public_body",
+    "_read_governance_target_for_confirmation",
+    "_read_memory_governance_tool_evidence",
+    "_read_memory_public_facts",
+    "_read_prepared_memory_candidate",
+    "_read_prompt_public_body",
+    "_relation_tuple",
+    "_response_preference_capacity_allows",
+    "_settle_existing_source_memory_relation_once",
+    "abandon_memory_candidate",
+    "accept_memory_governance",
+    "claim_memory_candidate_for_governance",
+    "confirm_memory_candidate_intake",
+    "confirm_memory_governance_winner",
+    "prepare_existing_source_memory_relation_settlement",
+    "read_memory_candidate_for_governance",
+    "read_memory_governance_evidence",
+    "settle_existing_source_memory_relation",
 }
 _ROUND7_ADDED_TOP_LEVEL_FUNCTIONS = {"_plan_question_response"}
 _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS = {
@@ -398,9 +453,9 @@ _ROUND7_REPOSITORY_DELTA_SHA256 = (
 # immutable and describe that evolution as a closed delta: anything outside
 # these sets must remain byte-for-byte equivalent to the modularization
 # checkpoint.
-_ROUND8_ADDED_ALL = {"AcceptedMemoryGovernance"}
+_ROUND8_ADDED_ALL = set()
 _ROUND8_REMOVED_ALL = {"MemoryVectorFactSource", "MemoryVectorSource"}
-_ROUND8_ADDED_TOP_LEVEL_CLASSES = {"_ObservedActiveMemoryDuplicate"}
+_ROUND8_ADDED_TOP_LEVEL_CLASSES = set()
 _ROUND8_REMOVED_TOP_LEVEL_CLASSES = {
     "AcceptedMemoryCandidate",
     "MemoryVectorFactSource",
@@ -473,7 +528,7 @@ _ROUND8_CHANGED_METHODS = {
     "read_memory_candidate_for_governance",
     "renew_host_writer",
 }
-_ROUND8_RUNTIME_ADDED_EXCEPTIONS = {"_ObservedActiveMemoryDuplicate"}
+_ROUND8_RUNTIME_ADDED_EXCEPTIONS = set()
 _ROUND8_RUNTIME_REMOVED_DATACLASSES = {
     "AcceptedMemoryCandidate",
     "MemoryVectorFactSource",
@@ -893,10 +948,12 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             set(baseline["observed_imports"])
             - _ROUND5B_REMOVED_OBSERVED_IMPORTS
             - _MODEL_UNIVERSE_REMOVED_OBSERVED_IMPORTS
+            - _DIRECT_MEMORY_REMOVED_OBSERVED_IMPORTS
         )
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
         | (_MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS)
         | _KERNEL_IMAGE_K3_ADDED_OBSERVED_IMPORTS
+        | _DIRECT_MEMORY_ADDED_OBSERVED_IMPORTS
     )
     for key in ("closed_owner_renames", "override_seams"):
         assert current[key] == baseline[key], key
@@ -907,11 +964,13 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             - _ROUND8_REMOVED_ALL
             - _ROUND5B_REMOVED_ALL
             - _MODEL_UNIVERSE_REMOVED_ALL
+            - _DIRECT_MEMORY_REMOVED_SYMBOLS
         )
         | _ROUND8_ADDED_ALL
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_ALL
         | _MODEL_UNIVERSE_ADDED_ALL
         | _KERNEL_IMAGE_K3_ADDED_ALL
+        | _DIRECT_MEMORY_ADDED_ALL
     )
     assert (
         set(current["top_level_classes"])
@@ -919,12 +978,14 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             set(baseline["top_level_classes"])
             - _ROUND8_REMOVED_TOP_LEVEL_CLASSES
             - _ROUND5B_REMOVED_TOP_LEVEL_CLASSES
+            - _DIRECT_MEMORY_REMOVED_SYMBOLS
         )
         | _ROUND8_ADDED_TOP_LEVEL_CLASSES
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_TOP_LEVEL_CLASSES
         | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_CLASSES
         | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_CLASSES
         | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation"}
+        | _DIRECT_MEMORY_ADDED_TOP_LEVEL_CLASSES
     )
     for key, added, changed in (
         (
@@ -941,7 +1002,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | {"_freeze", "_frozen_rows", "_remaining", "_insert"}
             )
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
-            | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS,
+            | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS
+            | _DIRECT_MEMORY_ADDED_TOP_LEVEL_FUNCTIONS,
             (
                 _ROUND7_CHANGED_TOP_LEVEL_FUNCTIONS
                 | _FINGERPRINT_HARD_CUT_CHANGED_TOP_LEVEL_FUNCTIONS
@@ -984,7 +1046,9 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 }
             )
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
-            | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS,
+            - _DIRECT_MEMORY_REMOVED_METHODS
+            | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
+            | _DIRECT_MEMORY_ADDED_METHODS,
             _ROUND7_CHANGED_METHODS
             | _ROUND8_CHANGED_METHODS
             | _ROUND5A2_CHANGED_METHODS
@@ -1006,6 +1070,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND10_REMOVED_METHODS
             | _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
             | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
+            | _DIRECT_MEMORY_REMOVED_METHODS
             | _MODEL_UNIVERSE_REMOVED_METHODS
             if key == "methods"
             else (
@@ -1035,10 +1100,16 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 set(baseline_runtime[key])
                 - _ROUND5B_REMOVED_OBSERVED_IMPORTS
                 - _MODEL_UNIVERSE_REMOVED_OBSERVED_IMPORTS
+                - _DIRECT_MEMORY_REMOVED_OBSERVED_IMPORTS
             )
             | _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
             | (_MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS)
             | _KERNEL_IMAGE_K3_ADDED_OBSERVED_IMPORTS
+            | (
+                _DIRECT_MEMORY_ADDED_OBSERVED_IMPORTS
+                if key == "observed_symbols"
+                else set()
+            )
         )
         if isinstance(current_runtime[key], dict):
             for name in (
@@ -1046,12 +1117,14 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 - _ASYNC_SUBAGENT_COMPLETION_ADDED_OBSERVED_IMPORTS
                 - _MODEL_UNIVERSE_ADDED_OBSERVED_IMPORTS
                 - _KERNEL_IMAGE_K3_ADDED_OBSERVED_IMPORTS
+                - _DIRECT_MEMORY_ADDED_OBSERVED_IMPORTS
             ):
                 assert current_runtime[key][name] == baseline_runtime[key][name]
     assert (
         set(current_runtime["exceptions"])
         == (set(baseline_runtime["exceptions"]) - _ROUND5B_RUNTIME_REMOVED_EXCEPTIONS)
         | _ROUND8_RUNTIME_ADDED_EXCEPTIONS
+        | {"_MemoryInputRejected"}
     )
     for name in (
         set(baseline_runtime["exceptions"]) - _ROUND5B_RUNTIME_REMOVED_EXCEPTIONS
@@ -1063,15 +1136,21 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         set(baseline_runtime["dataclasses"])
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
         - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
+        - _DIRECT_MEMORY_REMOVED_SYMBOLS
     ) | _ASYNC_SUBAGENT_COMPLETION_ADDED_RUNTIME_DATACLASSES | (
         _MODEL_UNIVERSE_RUNTIME_ADDED_DATACLASSES
         | _KERNEL_IMAGE_K3_ADDED_RUNTIME_DATACLASSES
-        | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation"}
+        | {
+            "FrozenMemoryDeletionPlan", "CanonicalForkCreation",
+            "DirectMemoryOutcome", "AcceptedMemoryToolResult",
+            "PreparedMemoryMutationSideBranch",
+        }
     )
     for name in (
         set(baseline_runtime["dataclasses"])
         - _ROUND8_RUNTIME_REMOVED_DATACLASSES
         - _ROUND5B_RUNTIME_REMOVED_DATACLASSES
+        - _DIRECT_MEMORY_REMOVED_SYMBOLS
         - _MODEL_UNIVERSE_REMOVED_ALL
         - _ROUND8_RUNTIME_CHANGED_DATACLASSES
         - _ROUND9_2_RUNTIME_CHANGED_DATACLASSES
@@ -1090,6 +1169,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             - _ROUND10_REMOVED_METHODS
             - _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
+            - _DIRECT_MEMORY_REMOVED_METHODS
             - _MODEL_UNIVERSE_REMOVED_METHODS
         )
         | (
@@ -1123,8 +1203,10 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             }
         )
         - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
+        - _DIRECT_MEMORY_REMOVED_METHODS
         - _MODEL_UNIVERSE_REMOVED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
+        | _DIRECT_MEMORY_ADDED_METHODS
     )
     for name in (
         set(baseline_runtime["methods"])
@@ -1141,6 +1223,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _ROUND10_REMOVED_METHODS
         - _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
         - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
+        - _DIRECT_MEMORY_REMOVED_METHODS
         - _MODEL_UNIVERSE_REMOVED_METHODS
         - _MODEL_UNIVERSE_CHANGED_METHODS
         - _PR03_CHANGED_METHODS
@@ -1194,6 +1277,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ASYNC_SUBAGENT_COMPLETION_REMOVED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
+        | _DIRECT_MEMORY_ADDED_METHODS
+        | _DIRECT_MEMORY_REMOVED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS
         | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
         | _ROUND9_2_ADDED_METHODS
@@ -1238,6 +1323,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | _ROUND5B_REMOVED_OBSERVED_IMPORTS
             | _MODEL_UNIVERSE_REMOVED_ALL
             | _MODEL_UNIVERSE_REMOVED_OBSERVED_IMPORTS
+            | _DIRECT_MEMORY_REMOVED_SYMBOLS
         ):
             continue
         value = getattr(repository, name)
@@ -1262,6 +1348,11 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
         | _MODEL_UNIVERSE_HARD_CUT_RETIRED_PYTEST_NODES
         | _KERNEL_IMAGE_K3_RETIRED_PYTEST_NODES
         | _PROVIDER_EPOCH_HARD_CUT_RETIRED_PYTEST_NODES
+        | {
+            "tests/test_round1_tool_output_artifact.py::test_round1_memory_side_branch_confirmation_is_all_or_none",
+            "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_memory_candidate_and_tool_result_are_one_transaction",
+            "tests/test_stage2_conversation_kernel_postgres.py::test_stage2_memory_governance_is_async_and_postgres_only",
+        }
         # SDK transport owns buffering. The capability hard-cut §6.3 explicitly
         # retires the old per-slot raw byte reservation, rather than keeping an
         # unused implementation merely to retain this historical unit test.
@@ -1319,7 +1410,7 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
 
 
 def test_repository_modularization_internal_package_is_not_a_second_public_api() -> (

@@ -11,37 +11,20 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
     freeze_compaction_summary_output,
 )
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    FrozenMemoryGovernanceEvidence,
-    FrozenMemoryGovernanceProducerCut,
-    FrozenMemoryGovernanceSourceCoverage,
-    FrozenMemoryGovernanceTerminalFence,
-)
-from pulsara_agent.conversation_kernel.memory.governor import (
-    _causal_source_item,
-    _finalize_governance_source_envelope,
-)
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMImagePart,
     LLMTextPart,
-    llm_content_logical_bytes,
 )
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
-    CanonicalModelInputIdentity,
-    CanonicalModelInputSnapshot,
     CompactionActiveRequestLocation,
     CompactionContinuationMode,
     CompactionSnapshotCarrier,
     FrozenCompactionActiveRequest,
-    FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     FrozenRetainedHistoricalRequest,
-    ModelInputScopeKind,
-    canonical_model_input_identity_fingerprint,
-    canonical_model_input_snapshot_fingerprint,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
 
@@ -153,117 +136,6 @@ def test_snapshot_canonical_expanded_bytes_counts_each_image_occurrence() -> Non
     )
 
 
-def test_memory_causal_projection_marks_omitted_image_content_incomplete() -> None:
-    item = FrozenProviderInputItem(
-        item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id="entry:user",
-        source_entry_sequence=1,
-        source_turn_id="turn:test",
-        content=_mixed_content().parts,
-        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-    )
-    projected = _causal_source_item(item)
-
-    assert projected is not None
-    assert projected.blocks[0].text == "before\nafter"
-    assert projected.blocks[0].truncated
-    assert projected.item_omitted_after == 0
-
-    identity = CanonicalModelInputIdentity(
-        session_id="session:test",
-        turn_id="turn:test",
-        initial_entry_id="entry:user",
-        context_binding_revision_id="revision:test",
-        provider_input_through_sequence=1,
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        identity_fingerprint=canonical_model_input_identity_fingerprint(
-            session_id="session:test",
-            turn_id="turn:test",
-            initial_entry_id="entry:user",
-            context_binding_revision_id="revision:test",
-            provider_input_through_sequence=1,
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-        ),
-    )
-    assert isinstance(item.content, tuple)
-    expanded_bytes = llm_content_logical_bytes(item.content)
-    historical = CanonicalModelInputSnapshot(
-        identity=identity,
-        items=(item,),
-        canonical_expanded_bytes=expanded_bytes,
-        snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
-            identity=identity,
-            items=(item,),
-            canonical_expanded_bytes=expanded_bytes,
-            closures=(),
-            late_outcomes=(),
-        ),
-    )
-    evidence = FrozenMemoryGovernanceEvidence(
-        origin_workspace_id="workspace:test",
-        terminal_fence=FrozenMemoryGovernanceTerminalFence(
-            source_turn_id="turn:test",
-            source_entry_id="entry:producer",
-            source_entry_event_id="event:producer",
-            source_entry_event_sequence=2,
-            terminal_status="COMPLETED",
-            terminal_outcome="entry:final",
-            terminal_event_id="event:terminal",
-            terminal_event_sequence=3,
-        ),
-        producer_cut=FrozenMemoryGovernanceProducerCut(
-            session_id="session:test",
-            turn_id="turn:test",
-            producer_entry_id="entry:producer",
-            producer_entry_sequence=2,
-            context_binding_revision_id="revision:test",
-            provider_input_through_sequence=1,
-        ),
-        producer_call_context=(),
-        producer_public_output=(),
-        post_proposal_turn_suffix=(),
-        tool_result_evidence=(),
-        basis_items=(),
-        model_visible_items=(),
-        model_visible_complete=True,
-        source_coverage=FrozenMemoryGovernanceSourceCoverage(
-            causal_context_complete=True,
-            origin_turn_human_source_complete=True,
-            post_proposal_human_source_complete=True,
-            relation_authority=True,
-        ),
-    )
-
-    finalized = _finalize_governance_source_envelope(evidence, historical=historical)
-    assert not finalized.source_coverage.causal_context_complete
-    assert not finalized.source_coverage.origin_turn_human_source_complete
-    assert not finalized.source_coverage.relation_authority
-
-
-def test_memory_causal_projection_consumes_typed_snapshot_without_raw_json() -> None:
-    carrier = _idle_carrier(
-        FrozenRetainedHistoricalRequest(
-            item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-            content=_mixed_content(),
-        )
-    )
-    item = FrozenProviderInputItem(
-        item_kind=FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
-        source_entry_id=None,
-        source_entry_sequence=0,
-        source_turn_id=None,
-        content=carrier,
-    )
-
-    projected = _causal_source_item(item)
-    assert projected is not None
-    assert "earlier summary" in projected.blocks[0].text
-    assert projected.blocks[0].truncated
-    assert projected.item_omitted_after == 0
-    assert carrier.body.decode("utf-8") not in projected.blocks[0].text
 
 
 def test_blob_exact_read_guards_body_projection_with_expected_metadata() -> None:

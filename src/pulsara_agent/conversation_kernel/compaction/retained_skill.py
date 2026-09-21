@@ -315,12 +315,6 @@ def _was_installed_full(
         )
     except ValueError:
         return False
-    # Citation handles are sealed process-local references.  They can differ
-    # between the historical call that installed the message and this pure
-    # proof reconstruction without changing the delivered result body or any
-    # canonical provenance.  Every other typed envelope field remains exact.
-    actual_payload.pop("citation_handle", None)
-    expected_payload.pop("citation_handle", None)
     return actual_payload == expected_payload
 
 

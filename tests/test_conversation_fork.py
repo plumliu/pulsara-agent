@@ -997,14 +997,11 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
             )
             == []
         )
-    assert (
-        rows(
-            repo,
-            "SELECT 1 FROM pulsara_v3.memory_candidates WHERE origin_session_id=%s",
-            (child,),
-        )
-        == []
-    )
+    assert rows(
+        repo,
+        "SELECT 1 FROM pulsara_v3.memory_facts WHERE source_session_id=%s",
+        (child,),
+    ) == []
     source = rows(
         repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (child,)
     )[0]

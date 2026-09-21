@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:a1e41a8702408acfd1cc1a6e6a5d80bd6f8584d3bbdb36f7b81bde58a6d6f17a",
+  "observed_catalog_fingerprint": "sha256:f1980b6a58e88652d96825220bf2ef7d29e03e26e6c1d6b0cf9b951ae930b6fa",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -34,9 +34,6 @@
     "subagent_tasks",
     "subagent_task_dependencies",
     "subagent_task_children",
-    "memory_candidates",
-    "memory_candidate_tool_result_refs",
-    "memory_candidate_basis_refs",
     "memory_facts",
     "memory_relations",
     "memory_embeddings",
@@ -49,7 +46,7 @@
   "required_functions": [
     "pulsara_v3.enforce_conversation_kernel_invariants",
     "pulsara_v3.enforce_imported_history_invariants",
-    "pulsara_v3.enforce_memory_candidate_lineage",
+    "pulsara_v3.enforce_direct_memory_lineage",
     "pulsara_v3.memory_terms_to_tsquery",
     "pulsara_v3.seal_memory_fact_search_document"
   ]

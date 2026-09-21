@@ -114,6 +114,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "reload_capabilities": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
     "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "remember": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
+    "mark_memory_relation": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "report_agent_result": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "search_files": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "spawn_agent": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
@@ -349,11 +350,10 @@ _MEMORY_CONTEXT_GUIDE = MEMORY_CONTEXT_PRODUCT_GUIDE
 
 _MEMORY_KIND_GUIDE = memory_kind_product_guide()
 
-_MEMORY_KIND_HINT_GUIDE = (
-    "AUTO lets the memory system choose when you are uncertain. "
-    + _MEMORY_KIND_GUIDE
-    + " The hint is not authoritative. Every final kind may name meaningful supporting "
-    "memories in based_on_memory_ids."
+_MEMORY_FINAL_KIND_GUIDE = (
+    _MEMORY_KIND_GUIDE
+    + " Choose the final kind yourself; if genuinely uncertain, use FACT. "
+    "This choice is advisory and never grants execution authority."
 )
 
 
@@ -365,13 +365,10 @@ def _remember_parameters() -> dict[str, Any]:
                 "minLength": 1,
                 "maxLength": 8192,
                 "description": (
-                    "One source-faithful, cohesive, durable advisory memory using at most "
-                    "8192 UTF-8 bytes. Rewrite references or omissions into a natural, "
-                    "self-contained statement when the visible source supports it. Prefer "
-                    "a clear What and Who/subject plus necessary context, retaining Where, "
-                    "When, Why, How, quantity, negation, modality, and uncertainty when "
-                    "material; these are soft authoring cues, not required fields. Do not "
-                    "use template labels or invent missing detail."
+                    "One reusable memory, at most 8192 UTF-8 bytes. Write it in natural "
+                    "language so it makes sense later without this conversation. Include "
+                    "the subject and any important project, date, condition, quantity, "
+                    "negation, or uncertainty. Do not invent missing details."
                 ),
             },
             "context_target": {
@@ -380,17 +377,15 @@ def _remember_parameters() -> dict[str, Any]:
                 "description": "Where the item should be readable. "
                 + _MEMORY_CONTEXT_GUIDE,
             },
-            "kind_hint": {
+            "kind": {
                 "type": "string",
                 "enum": [
-                    "AUTO",
                     "USER_PROFILE",
                     "RESPONSE_PREFERENCE",
                     "FACT",
                     "DECISION",
                 ],
-                "default": "AUTO",
-                "description": _MEMORY_KIND_HINT_GUIDE,
+                "description": _MEMORY_FINAL_KIND_GUIDE,
             },
             "based_on_memory_ids": {
                 "type": "array",
@@ -398,38 +393,21 @@ def _remember_parameters() -> dict[str, Any]:
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "Exact memory_id copied from memory_search or memory_get."
+                    "Exact memory_id returned by remember, memory_search, or memory_get."
                     ),
                 },
                 "maxItems": 8,
                 "description": (
-                    "For any kind: up to 8 exact saved-memory IDs that are meaningful "
-                    "reasons, background, motivations, or dependencies for this entire "
-                    "item, in dependency order. Do not use merely related items or invent "
-                    "IDs. Deleting any cited basis later also deletes this dependent item."
-                ),
-            },
-            "cited_tool_result_handles": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 128,
-                    "description": (
-                        "Exact citation_handle copied from a supporting tool result "
-                        "currently visible to you."
-                    ),
-                },
-                "maxItems": 8,
-                "description": (
-                    "Up to 8 visible tool-result citation handles that directly support "
-                    "statement. Do not use artifact IDs, tool-call IDs, or memory IDs. "
-                    "When an earlier saved memory is the basis, use "
-                    "based_on_memory_ids instead."
+                    "Up to 8 exact saved-memory IDs that this new item genuinely depends "
+                    "on. Do not use merely related items, synonymous rewrites, or a "
+                    "wider-scope copy; do not invent IDs. A GLOBAL item may use only "
+                    "GLOBAL bases; a CURRENT_PROJECT item may use GLOBAL or the same "
+                    "project's memories. Deleting any basis later also deletes this "
+                    "dependent item."
                 ),
             },
         },
-        required=["statement", "context_target"],
+        required=["statement", "context_target", "kind"],
     )
     return schema
 
@@ -505,6 +483,27 @@ _MEMORY_EXPLAIN_PARAMETERS = object_schema(
     required=["memory_id"],
 )
 _REMEMBER_PARAMETERS = _remember_parameters()
+_MARK_MEMORY_RELATION_PARAMETERS = object_schema(
+    properties={
+        "source_memory_id": {
+            "type": "string", "minLength": 1,
+            "description": "Exact saved memory ID that remains current; copy it from a memory result.",
+        },
+        "target_memory_id": {
+            "type": "string", "minLength": 1,
+            "description": "Exact saved memory ID to relate to the source, never a guessed ID.",
+        },
+        "relation_kind": {
+            "type": "string", "enum": ["CONTRADICTS", "SUPERSEDES"],
+            "description": (
+                "CONTRADICTS keeps two incompatible same-kind memories active when no "
+                "winner is justified. SUPERSEDES makes an older same-context memory "
+                "inactive when the source is the supported newer state. This is not deletion."
+            ),
+        },
+    },
+    required=["source_memory_id", "target_memory_id", "relation_kind"],
+)
 
 _SUBAGENT_TASK_DESCRIPTION = (
     "A self-contained objective for one delegated agent. State what to inspect or "
@@ -1997,7 +1996,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "usually from memory_search or a memory reference. Returns the stored "
             "statement, kind, context, recorded time, lifecycle, and direct relations. It "
             "does not search by meaning or explain why the item was saved. Use "
-            "memory_explain only when its origin or review history matters."
+            "memory_explain only when its origin matters."
         ),
         input_schema=_MEMORY_GET_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
@@ -2010,8 +2009,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "Audit one visible saved-memory item by exact memory_id. Returns the same core "
             "record and direct relations as memory_get, plus available information about "
-            "where it came from, how it was reviewed, and how later relations were "
-            "accepted; some origin details may be unavailable outside their project. Use "
+            "where it came from and which direct relation tools marked it; some origin "
+            "details may be unavailable outside their project. Use "
             "this when the user asks why something is remembered, when source quality "
             "matters, or when resolving a contradiction or replacement. Use memory_get "
             "for ordinary exact reads and memory_search for discovery."
@@ -2025,10 +2024,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "remember": _descriptor(
         name="remember",
         description=(
-            "Submit one durable, reusable advisory memory for possible use in future "
+            "Save one durable, reusable advisory memory for possible use in future "
             "conversations. Use it for a user profile, response preference, declarative "
             "fact, or decision. When the user explicitly asks to remember safe declarative "
-            "content whose kind is ambiguous, still submit it with AUTO. A lightweight, "
+            "content whose kind is ambiguous, choose FACT. A lightweight, "
             "source-faithful inference from visible conversation, behavior, tool choice, "
             "or planning is allowed; direct self-report, repeated observations, and high "
             "confidence are not required. A runtime memory hint only asks you to reconsider "
@@ -2046,12 +2045,42 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "or safety/permission overrides. Implementation facts directly readable from "
             "current code, config, schema, lockfiles, tests, or authoritative project docs "
             "should normally be reread instead of remembered; reread current workspace "
-            "truth before using a recalled coding fact. A successful call confirms only "
-            "submission for review: "
-            "the item may be accepted, rejected, or remain unresolved, so never claim it "
-            "was permanently saved."
+            "truth before using a recalled coding fact. A tool result can inspire a "
+            "natural-language FACT with its subject, scope, date, and uncertainty, but "
+            "this tool does not preserve or verify the original result. Do not create a "
+            "FACT mechanically for every tool call. Use based_on_memory_ids only when "
+            "a distinct new memory truly depends on an existing saved memory, not for "
+            "a synonym or a broader-scope copy. For example, if project notes say a "
+            "review is Tuesday, you may save that as a FACT. If the team separately "
+            "decides to prepare slides on Monday because of that schedule, that DECISION "
+            "may depend on the FACT's returned memory_id. Saving 'the review is on "
+            "Tuesday' again in other words and linking the two would be wrong. This "
+            "example is illustrative, not content to remember. "
+            "SAVED means the memory is already "
+            "stored; ALREADY_PRESENT returns the existing ID without changing its source. "
+            "The result also lists up to three related old memories as hints only. You "
+            "may then call mark_memory_relation when a real conflict or replacement is "
+            "clear; a relatedness score is not proof. If the user wants a saved memory "
+            "deleted, direct them to the Memory page; this tool cannot undo a saved item."
         ),
         input_schema=_REMEMBER_PARAMETERS,
+        provider_kind=BuiltinToolDomainKind.MEMORY,
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="memory_write",
+    ),
+    "mark_memory_relation": _descriptor(
+        name="mark_memory_relation",
+        description=(
+            "Mark a relationship between two exact saved-memory IDs after inspecting "
+            "them. Use CONTRADICTS only for incompatible same-kind, same-context items "
+            "without a justified winner; both stay active. Use SUPERSEDES only when the "
+            "source is the supported newer state and the target should leave active "
+            "recall. A successful mark does not delete either memory. Related results "
+            "from remember are hints, not an obligation to mark. If uncertain, inspect "
+            "the memories or ask the user. Users delete memory in the Memory page."
+        ),
+        input_schema=_MARK_MEMORY_RELATION_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=False,
         is_concurrency_safe=False,
@@ -2063,7 +2092,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
 class BuiltinToolBindingKind(StrEnum):
     FILESYSTEM = "filesystem"
     ARTIFACT_READ = "artifact_read"
-    MEMORY_PROPOSAL = "memory_proposal"
+    MEMORY_MUTATION = "memory_mutation"
     MEMORY_RECALL = "memory_recall"
     MEMORY_QUERY = "memory_query"
     PLAN_WORKFLOW = "plan_workflow"
@@ -2080,7 +2109,7 @@ class BuiltinToolBindingKind(StrEnum):
 class BuiltinToolAvailabilityKind(StrEnum):
     ALWAYS = "always"
     REQUIRES_ARTIFACT_READ_PORT = "requires_artifact_read_port"
-    REQUIRES_MEMORY_PROPOSAL_PORT = "requires_memory_proposal_port"
+    REQUIRES_MEMORY_MUTATION_PORT = "requires_memory_mutation_port"
     REQUIRES_MEMORY_RECALL_PORT = "requires_memory_recall_port"
     REQUIRES_MEMORY_QUERY_PORT = "requires_memory_query_port"
     REQUIRES_TERMINAL_PORTS = "requires_terminal_ports"
@@ -2156,7 +2185,7 @@ class BuiltinToolCatalogEntry:
 _FILESYSTEM = frozenset(
     {"edit_file", "read_file", "search_files", "view_image", "visualization_render", "write_file"}
 )
-_MEMORY_PROPOSAL = frozenset({"remember"})
+_MEMORY_MUTATION = frozenset({"remember", "mark_memory_relation"})
 _MEMORY_QUERY = frozenset({"memory_explain", "memory_get"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
 _SUBAGENT_PARENT = frozenset(
@@ -2425,10 +2454,10 @@ def _catalog_shape(name: str):
             both,
             "memory_read",
         )
-    if name in _MEMORY_PROPOSAL:
+    if name in _MEMORY_MUTATION:
         return (
-            BuiltinToolBindingKind.MEMORY_PROPOSAL,
-            BuiltinToolAvailabilityKind.REQUIRES_MEMORY_PROPOSAL_PORT,
+            BuiltinToolBindingKind.MEMORY_MUTATION,
+            BuiltinToolAvailabilityKind.REQUIRES_MEMORY_MUTATION_PORT,
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "memory_write",
         )

@@ -1,4 +1,4 @@
-"""Rejected memory proposals are model-visible attempted outcomes, not turn failures."""
+"""Rejected direct memory writes are attempted ToolResults, not turn failures."""
 
 import asyncio
 import json
@@ -21,8 +21,8 @@ from pulsara_agent.settings import LocalSettingsStore
 @pytest.mark.parametrize(
     "case,expected_state,error",
     [
-        ("unknown_handle", "APPLICATION_ERROR", "citation handle is not visible"),
-        ("context_bound", "APPLICATION_ERROR", "GLOBAL memory cannot cite"),
+        ("old_handle", "APPLICATION_ERROR", "does not accept ToolResult citations"),
+        ("old_kind", "APPLICATION_ERROR", "kind_hint is not supported"),
         ("missing_basis", "APPLICATION_ERROR", "based_on memory is absent"),
         ("closed", "SYSTEM_ERROR", "memory owner is closed"),
     ],
@@ -44,35 +44,23 @@ def test_memory_rejections_after_admission_have_attempted_states(
             settings=LocalSettingsStore(tmp_path / "settings.yaml"),
         )
         port._query = SimpleNamespace(get=lambda **kwargs: None)
-        citation = memory.FrozenMemoryCitationHandle(
-            "tool:2",
-            memory.PreparedMemoryToolResultReference(
-                "session:test",
-                "result:search",
-                0,
-                memory.MemoryCitationEvidenceKind.MEMORY_READ_EXPOSURE,
-                memory.MemoryCitationVisibility.CURRENT_CONTEXT_BOUND,
-            ),
-        )
         context = SimpleNamespace(
             session_id="session:test",
             workspace_id="workspace:test",
             assistant_entry_id="entry:test",
             tool_call_id="call:test",
-            memory_context=memory.FrozenModelCallMemoryContext(
-                memory.FrozenModelVisibleMemoryProvenance(
-                    memory.ModelVisibleMemoryProvenanceDisposition.COMPLETE, ()
-                ),
-                (citation,) if case == "context_bound" else (),
-            ),
+            conversation_scope_kind="ROOT",
+            memory_context=memory.FrozenModelCallMemoryContext(),
         )
         args = {
             "statement": "A test decision",
             "context_target": "GLOBAL",
-            "kind_hint": "DECISION",
+            "kind": "DECISION",
         }
-        if case in {"unknown_handle", "context_bound"}:
+        if case == "old_handle":
             args["cited_tool_result_handles"] = ["tool:2"]
+        if case == "old_kind":
+            args["kind_hint"] = "AUTO"
         if case == "missing_basis":
             args["based_on_memory_ids"] = ["memory:missing"]
         try:
@@ -83,7 +71,7 @@ def test_memory_rejections_after_admission_have_attempted_states(
             )
             assert result.state == expected_state
             assert error in json.loads(result.content)["error"]
-            assert result.memory_candidate is None
+            assert result.memory_mutation is None
         finally:
             await port.aclose()
             await io.aclose(deadline_monotonic=monotonic() + 10)

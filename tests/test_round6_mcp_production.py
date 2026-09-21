@@ -43,8 +43,6 @@ from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.live_control import SessionLiveControlOwner
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
-    FrozenModelVisibleMemoryProvenance,
-    ModelVisibleMemoryProvenanceDisposition,
 )
 from pulsara_agent.conversation_kernel.mcp.input_required import (
     McpInputRequiredFailure,
@@ -173,12 +171,7 @@ LEGACY_FIXTURE = Path(__file__).parent / "fixtures" / "round6_legacy_mcp_server.
 
 
 def _enabled_memory_context() -> FrozenModelCallMemoryContext:
-    return FrozenModelCallMemoryContext(
-        FrozenModelVisibleMemoryProvenance(
-            ModelVisibleMemoryProvenanceDisposition.COMPLETE,
-            (),
-        )
-    )
+    return FrozenModelCallMemoryContext()
 
 
 HTTP_FIXTURE = Path(__file__).parent / "fixtures" / "round6_mcp_http_server.py"
@@ -4215,7 +4208,7 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

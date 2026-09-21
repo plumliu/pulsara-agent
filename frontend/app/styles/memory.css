@@ -74,10 +74,12 @@
 .memory-source { margin-top: 12px; }
 .memory-relation { margin-top: 10px; padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: color-mix(in srgb, var(--paper) 60%, transparent); }
 .memory-relation > strong { color: var(--muted); font-size: 12px; font-weight: 500; }
-.memory-relation button { display: block; width: 100%; margin-top: 6px; text-align: left; color: var(--ink); background: transparent; }
+.memory-relation > button:not(.memory-source) { display: block; width: 100%; margin-top: 6px; text-align: left; color: var(--ink); background: transparent; }
 .memory-relation button:hover .memory-statement { color: var(--amber); }
 .memory-relation > p { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 .memory-relation .memory-statement, .memory-impact .memory-statement { font-size: 16px; }
+.memory-relation-origin .memory-source { margin: 0; padding: 4px 7px; font-size: 12px; }
+.memory-relation-origin { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 9px; color: var(--muted); font-size: 12px; }
 .memory-detail-body > button:not(.memory-delete):not(.memory-source) { margin-top: 12px; padding: 6px 0; color: var(--muted); background: transparent; }
 .memory-delete { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 34px; margin-top: 22px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--red) 22%, var(--line)); border-radius: 8px; color: var(--red); background: transparent; }
 .memory-delete:hover:not(:disabled) { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }

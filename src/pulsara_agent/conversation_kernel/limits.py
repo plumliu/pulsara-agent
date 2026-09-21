@@ -60,8 +60,6 @@ class Stage2RuntimeLimits:
     content_hydrate_timeout_ms: int = 12_000
     foreground_io_hard_concurrency: int = 8
     foreground_io_timeout_ms: int = 30_000
-    memory_governance_sla_ms: int = 30_000
-    memory_governance_batch_hard_items: int = 32
     memory_index_lag_warning_generations: int = 2
     memory_index_lag_error_generations: int = 10
     provider_output_tokens_per_call_hard: int = 16_384

@@ -1100,7 +1100,6 @@ class _PolicyMemoryProjection:
         self._hint = CheapMemoryWriteHintMatcher()
         self.preference_calls = 0
         self.recall_calls = 0
-        self.governance_wakes = 0
 
     def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy:
         if self._all.excludes(text):
@@ -1146,10 +1145,6 @@ class _PolicyMemoryProjection:
                 '{"items":[]}',
             ),
         )
-
-    def offer_governance_wake(self) -> None:
-        self.governance_wakes += 1
-
 
 class _DelayedPreparedExecution:
     def __init__(
@@ -1243,7 +1238,6 @@ class _HeadroomOrderingReader(CanonicalProviderInputReader):
         *,
         deadline_monotonic: float,
         _connection=None,
-        _historical_memory_authority=None,
         _prospective_root_candidate=None,
     ):
         self.operations.append("dispatch")
@@ -1251,7 +1245,6 @@ class _HeadroomOrderingReader(CanonicalProviderInputReader):
             cut,
             deadline_monotonic=deadline_monotonic,
             _connection=_connection,
-            _historical_memory_authority=_historical_memory_authority,
             _prospective_root_candidate=_prospective_root_candidate,
         )
 
@@ -6229,7 +6222,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert prospective_family_calls == 3
     assert prospective_candidate_calls == (4 if retry_recent else 3)
     assert pending_root_freezes == 3
-    assert memory_projection.preference_calls == 4
+    assert memory_projection.preference_calls == 5
     assert memory_projection.recall_calls == 3
     # The predecessor remains executable by itself; the exact predecessor plus
     # unpublished next request is the candidate that crosses the hard budget.
@@ -6641,11 +6634,152 @@ def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
         ).fetchall() == [("COMPLETED",), ("COMPLETED",)]
         assert (
             c.execute(
-                "SELECT count(*) FROM pulsara_v3.memory_candidates WHERE origin_session_id=%s",
+                "SELECT count(*) FROM pulsara_v3.memory_facts WHERE source_session_id=%s",
                 (session_id,),
             ).fetchone()[0]
             == 0
         )
+
+
+def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
+    stage2_migrated_postgres_database,
+    tmp_path,
+) -> None:
+    from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
+    from pulsara_agent.conversation_kernel.io import KernelSessionIO
+    from pulsara_agent.memory.scope import (
+        MemoryDomainContext,
+        freeze_memory_read_context_binding,
+    )
+    from pulsara_agent.retrieval.config import EmbeddingBackendConfig
+    from pulsara_agent.settings import LocalSettingsStore
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, workspace_id = _name("session"), _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    io = KernelSessionIO()
+    memory = KernelMemoryToolPort(
+        repository=repository,
+        session_id=session_id,
+        read_binding=freeze_memory_read_context_binding(
+            domain=MemoryDomainContext("u_local", "project", workspace_id),
+            host_workspace_id=workspace_id,
+        ),
+        embedding_config=EmbeddingBackendConfig(),
+        io_owner=io,
+        settings=LocalSettingsStore(tmp_path / "settings.yaml"),
+    )
+
+    class MemoryDelegate(_AssertingTool):
+        async def invoke(self, *, tool_name, arguments, invocation_context, **kwargs):
+            return await memory.invoke(
+                tool_name=tool_name,
+                arguments=arguments,
+                invocation_context=invocation_context,
+            )
+
+    calls = 0
+
+    class MemoryStructuredToolPort(StructuredToolPort):
+        def offer_memory_embedding_wake(self) -> None:
+            pass
+
+    async def stream(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            items = _named_tool_stream(
+                tool_name="remember",
+                tool_call_id="call:remember-first",
+                arguments={
+                    "statement": "The design review is on Tuesday.",
+                    "context_target": "CURRENT_PROJECT",
+                    "kind": "FACT",
+                },
+            )
+        elif calls == 2:
+            result_messages = [
+                json.loads(text_part_values(message.content)[0])["pulsara_tool_result"]
+                for message in request.compiled_input.messages
+                if message.content
+                and "pulsara_tool_result" in join_text_content(message.content)
+            ]
+            assert len(result_messages) == 1
+            observed = result_messages[0]
+            assert "citation_handle" not in observed
+            basis_id = json.loads(observed["body"])["memory_id"]
+            assert observed["model_visible_memory_ids"] == [basis_id]
+            items = _named_tool_stream(
+                tool_name="remember",
+                tool_call_id="call:remember-second",
+                arguments={
+                    "statement": "The design review needs a slide deck.",
+                    "context_target": "CURRENT_PROJECT",
+                    "kind": "FACT",
+                    "based_on_memory_ids": [basis_id],
+                },
+            )
+        else:
+            items = _text_stream("两条记忆已保存。")
+        for item in items:
+            yield item
+
+    model = CallbackScriptedKernelModel(stream)
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=MemoryStructuredToolPort(
+            MemoryDelegate(provider, session_id), tool_names=("remember",)
+        ),
+        live_bus=LiveAgentEventBus(),
+        context_source_collector=StaticContextSourceCollector(),
+    )
+
+    async def exercise():
+        try:
+            result = await runner.run_turn(
+                frozen_test_prompt("Remember both review facts")
+            )
+            assert result.final_text == "两条记忆已保存。"
+        finally:
+            await memory.aclose()
+            await io.aclose(deadline_monotonic=monotonic() + 10)
+
+    asyncio.run(exercise())
+    assert calls == 3
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        rows = connection.execute(
+            "SELECT id, statement FROM pulsara_v3.memory_facts "
+            "WHERE source_session_id=%s ORDER BY statement",
+            (session_id,),
+        ).fetchall()
+        relations = connection.execute(
+            "SELECT source_fact_id, target_fact_id FROM pulsara_v3.memory_relations "
+            "WHERE relation_kind='BASED_ON' "
+            "AND source_fact_id IN ("
+            "SELECT id FROM pulsara_v3.memory_facts WHERE source_session_id=%s) "
+            "ORDER BY source_fact_id",
+            (session_id,),
+        ).fetchall()
+    assert len(rows) == 2
+    by_statement = {statement: fact_id for fact_id, statement in rows}
+    assert relations == [(
+        by_statement["The design review needs a slide deck."],
+        by_statement["The design review is on Tuesday."],
+    )]
 
 
 def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
@@ -6708,7 +6842,6 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         )
         assert projection.preference_calls == 1
         assert projection.recall_calls == 1
-        assert projection.governance_wakes == 1
 
         second_command = _name("command")
         second_turn = _stable_id("turn", session_id, second_command)
@@ -6745,7 +6878,6 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         )
         assert projection.preference_calls == 1
         assert projection.recall_calls == 1
-        assert projection.governance_wakes == 2
 
         await runner.run_turn(frozen_test_prompt("normal next root message"))
         assert model.requests[2].memory_context.memory_use_policy is (
@@ -6753,7 +6885,6 @@ def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
         )
         assert projection.preference_calls == 2
         assert projection.recall_calls == 2
-        assert projection.governance_wakes == 3
 
     asyncio.run(exercise())
     first_input, second_input, third_input = (

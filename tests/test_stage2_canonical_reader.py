@@ -49,9 +49,6 @@ from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionWatchdogPolicy,
 )
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    FrozenMemoryGovernanceProducerCut,
-)
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
@@ -1243,101 +1240,6 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
     assert provider_input_item_text(materialized.items[1]) == "current question"
 
 
-def test_memory_governance_historical_cut_uses_producer_authority_without_weakening_foreground(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    lease = repository.acquire_host_writer(
-        session_id=_id("session"),
-        workspace_id=_id("workspace"),
-        writer_owner_id=_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    turn_id = _start_turn(repository, lease, b"exact producer input")
-    cut = repository.prepare_provider_input_cut(
-        lease.guard,
-        turn_id=turn_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-    producer_entry_id = _id("entry")
-    accepted = repository.commit_assistant_message(
-        lease.guard,
-        cut=cut,
-        entry_id=producer_entry_id,
-        parent_content=InlineContent.from_bytes(b"producer output"),
-        blocks=(
-            AssistantTextBlock(
-                block_id=_id("block"),
-                text=InlineContent.from_bytes(b"producer output"),
-            ),
-        ),
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="model:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    producer_cut = FrozenMemoryGovernanceProducerCut(
-        session_id=lease.guard.session_id,
-        turn_id=turn_id,
-        producer_entry_id=producer_entry_id,
-        producer_entry_sequence=accepted.entry_sequence,
-        context_binding_revision_id=cut.context_binding_revision_id,
-        provider_input_through_sequence=cut.provider_input_through_sequence,
-    )
-
-    # Fault-inject only the already-covered outcome of an adopted successor:
-    # the turn's current revision advances while the producer entry continues
-    # to freeze its older exact input cut.
-    successor_revision = _id("revision")
-    with provider.connection(
-        lane=PostgresConnectionLane.BACKGROUND_WORK,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        connection.execute(
-            """INSERT INTO pulsara_v3.turn_context_binding_revisions (
-                   id, session_id, turn_id, revision_ordinal, base_kind,
-                   context_snapshot_id, source_through_sequence
-               ) VALUES (%s,%s,%s,1,'FULL_HISTORY',NULL,0)""",
-            (successor_revision, lease.guard.session_id, turn_id),
-        )
-        connection.execute(
-            """UPDATE pulsara_v3.turns SET current_context_binding_revision_id=%s
-               WHERE session_id=%s AND id=%s""",
-            (successor_revision, lease.guard.session_id, turn_id),
-        )
-
-    reader = CanonicalProviderInputReader(provider)
-    with pytest.raises(ConversationKernelConflict, match="binding revision is stale"):
-        reader.read_frozen_snapshot(cut, deadline_monotonic=monotonic() + 30)
-    historical = reader.read_memory_governance_historical_snapshot(
-        producer_cut,
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert tuple(provider_input_item_text(item) for item in historical.items) == (
-        "exact producer input",
-    )
-    assert historical.identity.context_binding_revision_id == (
-        cut.context_binding_revision_id
-    )
-
-    with pytest.raises(
-        ConversationKernelConflict,
-        match="producer no longer proves its historical cut",
-    ):
-        reader.read_memory_governance_historical_snapshot(
-            FrozenMemoryGovernanceProducerCut(
-                session_id=producer_cut.session_id,
-                turn_id=producer_cut.turn_id,
-                producer_entry_id=producer_cut.producer_entry_id,
-                producer_entry_sequence=producer_cut.producer_entry_sequence,
-                context_binding_revision_id=successor_revision,
-                provider_input_through_sequence=(
-                    producer_cut.provider_input_through_sequence
-                ),
-            ),
-            deadline_monotonic=monotonic() + 30,
-        )
 
 
 def test_subagent_completion_linearizes_at_provider_safe_point(

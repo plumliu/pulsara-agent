@@ -22,7 +22,7 @@ DEFAULT_DASHSCOPE_RERANK_BASE_URL = "https://dashscope.aliyuncs.com"
 class DenseRecallPurpose(StrEnum):
     AUTOMATIC_ROOT = "AUTOMATIC_ROOT"
     EXPLICIT_SEARCH = "EXPLICIT_SEARCH"
-    GOVERNANCE_RELATEDNESS = "GOVERNANCE_RELATEDNESS"
+    RELATION_CANDIDATES = "RELATION_CANDIDATES"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,14 +80,14 @@ class DenseEligibilityPolicy:
     policy_id: str = "pulsara.memory-dense-eligibility.coarse-v1"
     automatic_minimum_similarity: float = 0.55
     explicit_minimum_similarity: float = 0.20
-    governance_minimum_similarity: float = 0.40
+    relation_candidate_minimum_similarity: float = 0.40
 
     def minimum_similarity(self, purpose: DenseRecallPurpose) -> float:
         return {
             DenseRecallPurpose.AUTOMATIC_ROOT: self.automatic_minimum_similarity,
             DenseRecallPurpose.EXPLICIT_SEARCH: self.explicit_minimum_similarity,
-            DenseRecallPurpose.GOVERNANCE_RELATEDNESS: (
-                self.governance_minimum_similarity
+            DenseRecallPurpose.RELATION_CANDIDATES: (
+                self.relation_candidate_minimum_similarity
             ),
         }[purpose]
 
@@ -98,7 +98,7 @@ class DenseEligibilityPolicy:
                 "policy_id": self.policy_id,
                 "automatic": self.automatic_minimum_similarity,
                 "explicit": self.explicit_minimum_similarity,
-                "governance": self.governance_minimum_similarity,
+                "relation_candidates": self.relation_candidate_minimum_similarity,
             },
             sort_keys=True,
             separators=(",", ":"),

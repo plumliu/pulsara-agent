@@ -17,7 +17,6 @@ from pulsara_agent.llm.frozen_target import (
 )
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.llm.model_connections import ModelConnectionConfig
-from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 
 if TYPE_CHECKING:
@@ -26,10 +25,8 @@ if TYPE_CHECKING:
 
 _EPOCH_PERMIT_SEAL = object()
 _SUMMARY_PERMIT_SEAL = object()
-_AUXILIARY_PERMIT_SEAL = object()
 _PROBE_PERMIT_SEAL = object()
 _SUMMARY_PROMOTION_AUTHORITY_SEAL = object()
-_MEMORY_TERMINAL_FENCE_SEAL = object()
 
 
 @dataclass(slots=True, init=False)
@@ -95,79 +92,6 @@ class CompactionSummaryPromotionAuthority:
             self._consumed = True
 
 
-@dataclass(slots=True, init=False)
-class ConfirmedMemoryGovernanceTerminalFence:
-    """Repository-issued, one-shot authority for one exact auxiliary open."""
-
-    candidate: object = field(repr=False)
-    origin_model_call_binding: ModelCallBinding
-    durable_terminal_fence: object = field(repr=False)
-    _consumed: bool = field(repr=False)
-    _bound_subject: tuple[object, ...] | None = field(repr=False)
-    _lock: Lock = field(repr=False)
-
-    def __init__(
-        self,
-        *,
-        candidate: object,
-        origin_model_call_binding: ModelCallBinding,
-        durable_terminal_fence: object,
-        _seal: object,
-    ) -> None:
-        if (
-            _seal is not _MEMORY_TERMINAL_FENCE_SEAL
-            or candidate is None
-            or durable_terminal_fence is None
-        ):
-            raise TypeError("memory terminal fence is repository-issued")
-        self.candidate = candidate
-        self.origin_model_call_binding = origin_model_call_binding
-        self.durable_terminal_fence = durable_terminal_fence
-        self._consumed = False
-        self._bound_subject = None
-        self._lock = Lock()
-
-    def _consume_for(
-        self,
-        *,
-        candidate: object,
-        durable_terminal_fence: object,
-        origin_model_call_binding: ModelCallBinding,
-        call_target: FrozenProviderPhysicalCallTarget,
-        resolved_model_call_id: str,
-        context: object,
-        estimated_input_tokens: int,
-        final_wire_utf8_bytes: int,
-        maximum_result_bytes: int,
-        timeout_policy_fingerprint: str,
-    ) -> None:
-        with self._lock:
-            if self._consumed:
-                raise RuntimeError("memory terminal fence is already consumed")
-            if (
-                candidate is not self.candidate
-                or durable_terminal_fence != self.durable_terminal_fence
-                or origin_model_call_binding != self.origin_model_call_binding
-                or call_target.purpose is not ModelCallPurpose.MEMORY_GOVERNANCE
-                or not resolved_model_call_id
-                or estimated_input_tokens < 1
-                or final_wire_utf8_bytes < 1
-                or maximum_result_bytes < 1
-                or not timeout_policy_fingerprint
-            ):
-                raise RuntimeError("memory terminal fence subject drifted")
-            self._bound_subject = (
-                call_target,
-                resolved_model_call_id,
-                context,
-                estimated_input_tokens,
-                final_wire_utf8_bytes,
-                maximum_result_bytes,
-                timeout_policy_fingerprint,
-            )
-            self._consumed = True
-
-
 def _issue_compaction_summary_promotion_authority(
     *,
     attempt_id: str,
@@ -187,20 +111,6 @@ def _issue_compaction_summary_promotion_authority(
         decision=decision,
         successor_destination=successor_destination,
         _seal=_SUMMARY_PROMOTION_AUTHORITY_SEAL,
-    )
-
-
-def _issue_confirmed_memory_governance_terminal_fence(
-    *,
-    candidate: object,
-    origin_model_call_binding: ModelCallBinding,
-    durable_terminal_fence: object,
-) -> ConfirmedMemoryGovernanceTerminalFence:
-    return ConfirmedMemoryGovernanceTerminalFence(
-        candidate=candidate,
-        origin_model_call_binding=origin_model_call_binding,
-        durable_terminal_fence=durable_terminal_fence,
-        _seal=_MEMORY_TERMINAL_FENCE_SEAL,
     )
 
 
@@ -294,45 +204,6 @@ class CompactionSummaryProviderOpenPermit(_OneShotPermit):
         return self.summary_call_target
 
 
-@dataclass(slots=True, init=False)
-class AuxiliaryModelProviderOpenPermit(_OneShotPermit):
-    auxiliary_call_target: FrozenProviderPhysicalCallTarget
-    resolved_model_call_id: str
-    timeout_policy: OpenAITransportTimeoutPolicy = field(repr=False)
-    _terminal_fence: ConfirmedMemoryGovernanceTerminalFence = field(repr=False)
-
-    def __init__(
-        self,
-        *,
-        auxiliary_call_target: FrozenProviderPhysicalCallTarget,
-        resolved_model_call_id: str,
-        timeout_policy: OpenAITransportTimeoutPolicy,
-        terminal_fence: ConfirmedMemoryGovernanceTerminalFence,
-        _seal: object,
-    ) -> None:
-        if (
-            _seal is not _AUXILIARY_PERMIT_SEAL
-            or auxiliary_call_target.purpose
-            is not ModelCallPurpose.MEMORY_GOVERNANCE
-            or not resolved_model_call_id
-            or not isinstance(
-                terminal_fence, ConfirmedMemoryGovernanceTerminalFence
-            )
-            or not terminal_fence._consumed
-            or terminal_fence._bound_subject is None
-        ):
-            raise TypeError("auxiliary provider-open permit is owner-issued")
-        _OneShotPermit.__init__(self)
-        self.auxiliary_call_target = auxiliary_call_target
-        self.resolved_model_call_id = resolved_model_call_id
-        self.timeout_policy = timeout_policy
-        self._terminal_fence = terminal_fence
-
-    @property
-    def call_target(self) -> FrozenProviderPhysicalCallTarget:
-        return self.auxiliary_call_target
-
-
 class EphemeralProbeCredentialOwner:
     """One-shot secret owner used only by an unpublished connection probe."""
 
@@ -407,7 +278,6 @@ class ConnectionProbeProviderOpenPermit(_OneShotPermit):
 ProviderOpenPurposePermit = (
     EpochAgentLoopProviderOpenPermit
     | CompactionSummaryProviderOpenPermit
-    | AuxiliaryModelProviderOpenPermit
     | ConnectionProbeProviderOpenPermit
 )
 
@@ -457,46 +327,6 @@ def _issue_compaction_summary_provider_open_permit(
     )
 
 
-def _issue_auxiliary_model_provider_open_permit(
-    *,
-    auxiliary_call_target: FrozenProviderPhysicalCallTarget,
-    resolved_model_call_id: str,
-    timeout_policy: OpenAITransportTimeoutPolicy,
-    terminal_fence: ConfirmedMemoryGovernanceTerminalFence,
-    candidate: object,
-    durable_terminal_fence: object,
-    origin_model_call_binding: ModelCallBinding,
-    context: object,
-    estimated_input_tokens: int,
-    final_wire_utf8_bytes: int,
-    maximum_result_bytes: int,
-    timeout_policy_fingerprint: str,
-) -> AuxiliaryModelProviderOpenPermit:
-    if not isinstance(
-        terminal_fence, ConfirmedMemoryGovernanceTerminalFence
-    ):
-        raise TypeError("memory terminal fence is not repository-issued")
-    terminal_fence._consume_for(
-        candidate=candidate,
-        durable_terminal_fence=durable_terminal_fence,
-        origin_model_call_binding=origin_model_call_binding,
-        call_target=auxiliary_call_target,
-        resolved_model_call_id=resolved_model_call_id,
-        context=context,
-        estimated_input_tokens=estimated_input_tokens,
-        final_wire_utf8_bytes=final_wire_utf8_bytes,
-        maximum_result_bytes=maximum_result_bytes,
-        timeout_policy_fingerprint=timeout_policy_fingerprint,
-    )
-    return AuxiliaryModelProviderOpenPermit(
-        auxiliary_call_target=auxiliary_call_target,
-        resolved_model_call_id=resolved_model_call_id,
-        timeout_policy=timeout_policy,
-        terminal_fence=terminal_fence,
-        _seal=_AUXILIARY_PERMIT_SEAL,
-    )
-
-
 def _issue_connection_probe_provider_open_permit(
     *,
     probe_call_target: FrozenProviderPhysicalCallTarget,
@@ -514,10 +344,8 @@ def _issue_connection_probe_provider_open_permit(
 
 
 __all__ = [
-    "AuxiliaryModelProviderOpenPermit",
     "CompactionSummaryPromotionAuthority",
     "CompactionSummaryProviderOpenPermit",
-    "ConfirmedMemoryGovernanceTerminalFence",
     "ConnectionProbeProviderOpenPermit",
     "EpochAgentLoopProviderOpenPermit",
     "ProviderOpenPurposePermit",

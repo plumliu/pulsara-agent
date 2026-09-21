@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from hashlib import sha256
+import json
 
 
 from threading import Lock
@@ -95,15 +96,6 @@ from pulsara_agent.conversation_kernel.extensions import (
 )
 
 
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    MemoryCitationEvidenceKind,
-    MemoryCitationVisibility,
-)
-
-from pulsara_agent.conversation_kernel.memory.citations import (
-    ProcessLocalMemoryCallContextOwner,
-)
-
 from pulsara_agent.conversation_kernel.tool_artifacts import (
     ToolOutputArtifactProcessor,
 )
@@ -127,6 +119,7 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
 
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
+    AcceptedMemoryToolResult,
     ConversationKernelRepository,
     ConversationKernelConflict,
     PreparedToolRemoteIdentityPublication,
@@ -365,7 +358,6 @@ class ToolBatchExecutor:
         content_publisher: CanonicalContentPublisher,
         tool_output_processor: ToolOutputArtifactProcessor,
         continuity_owner: HostProviderInputContinuityOwner,
-        memory_context_owner: ProcessLocalMemoryCallContextOwner,
         memory_projection: MemoryContextProjectionPort | None,
         extensions: KernelExtensionHost | None,
         subagent_runtime: SubagentRuntimePort | None,
@@ -382,7 +374,6 @@ class ToolBatchExecutor:
         self._content_publisher = content_publisher
         self._tool_output_processor = tool_output_processor
         self._continuity = continuity_owner
-        self._memory_contexts = memory_context_owner
         self._memory_projection = memory_projection
         self._extensions = extensions
         self._subagent_runtime = subagent_runtime
@@ -819,24 +810,6 @@ class ToolBatchExecutor:
                         live_sink=None,
                         tool_result_block_id=None,
                         live_attribution=None,
-                        continuity_scope=continuity_scope,
-                        memory_citation_visibility=MemoryCitationVisibility(
-                            getattr(
-                                binding,
-                                "memory_citation_visibility",
-                                "CURRENT_CONTEXT_BOUND",
-                            )
-                        ),
-                        memory_citation_evidence_kind=MemoryCitationEvidenceKind(
-                            getattr(
-                                binding,
-                                "memory_citation_evidence_kind",
-                                "PRIMARY_OBSERVATION",
-                            )
-                        ),
-                        execution_binding_fingerprint=(
-                            binding.executor_binding_fingerprint
-                        ),
                     )
                     if rejected_view is not None and hook_scope is not None:
                         await self._dispatch_post_tool(
@@ -1704,31 +1677,6 @@ class ToolBatchExecutor:
                         live_sink=live_sink,
                         tool_result_block_id=tool_result_block_id,
                         live_attribution=live_attribution,
-                        continuity_scope=continuity_scope,
-                        memory_citation_visibility=(
-                            MemoryCitationVisibility(
-                                getattr(
-                                    binding,
-                                    "memory_citation_visibility",
-                                    "CURRENT_CONTEXT_BOUND",
-                                )
-                            )
-                        ),
-                        memory_citation_evidence_kind=(
-                            MemoryCitationEvidenceKind.MEMORY_READ_EXPOSURE
-                            if call.tool_name == "artifact_read"
-                            and result.model_visible_memory_fact_ids
-                            else MemoryCitationEvidenceKind(
-                                getattr(
-                                    binding,
-                                    "memory_citation_evidence_kind",
-                                    "PRIMARY_OBSERVATION",
-                                )
-                            )
-                        ),
-                        execution_binding_fingerprint=(
-                            binding.executor_binding_fingerprint
-                        ),
                     ),
                     name=f"kernel-tool-result-settlement:{result_entry_id}",
                 )
@@ -2227,10 +2175,6 @@ class ToolBatchExecutor:
         live_sink: _ToolResultLiveSink | None,
         tool_result_block_id: str | None,
         live_attribution: Mapping[str, object] | None,
-        continuity_scope: ProviderInputContinuityScope,
-        memory_citation_visibility: MemoryCitationVisibility,
-        memory_citation_evidence_kind: MemoryCitationEvidenceKind,
-        execution_binding_fingerprint: str,
     ) -> _KnownToolResultSettlementOutcome:
         if live_sink is not None:
             await asyncio.shield(live_sink.close())
@@ -2244,7 +2188,22 @@ class ToolBatchExecutor:
             )
             await self._publish_tool_remote_identity_exact(remote_identity_candidate)
         canonical_prompt = None
-        if isinstance(result.content, FrozenPromptContent):
+        direct_memory = result.memory_mutation is not None
+        if direct_memory:
+            if result.state != "SUCCESS" or result.output_artifact_candidate is not None:
+                raise ValueError("direct memory write cannot publish a provisional artifact")
+            canonical_preview = InlineContent.from_bytes(
+                b"{}", media_type="text/plain", codec="utf-8"
+            )
+            artifact_disposition = ToolOutputArtifactDisposition.NOT_REQUIRED
+            artifact_id = None
+            artifact_blob = None
+            source_coverage = ToolOutputSourceCoverage.COMPLETE
+            display_kind = ToolResultDisplayKind.COMPLETE
+            source_coverage_reason = None
+            artifact_unavailability_reason = None
+            result_text = ""
+        elif isinstance(result.content, FrozenPromptContent):
             if result.output_artifact_candidate is not None or result.artifact_source_read:
                 raise ValueError("image ToolResult cannot enter text artifact handling")
             canonical_prompt = freeze_canonical_prompt(result.content)
@@ -2282,7 +2241,7 @@ class ToolBatchExecutor:
                 prepared_output.artifact_unavailability_reason
             )
             result_text = canonical_preview.canonical_bytes.decode("utf-8")
-        if attempt_id is not None:
+        if attempt_id is not None and not direct_memory:
             if tool_result_block_id is None or live_attribution is None:
                 raise RuntimeError("physical tool settlement lost live attribution")
             if result_text and (live_sink is None or not live_sink.emitted):
@@ -2346,7 +2305,7 @@ class ToolBatchExecutor:
                 else result.trusted_observation.duration_microseconds
             ),
             actor_id=tool_name,
-            memory_candidate=result.memory_candidate,
+            memory_mutation=result.memory_mutation,
             model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
         )
         try:
@@ -2371,18 +2330,47 @@ class ToolBatchExecutor:
                 )
             )
             raise
-        epoch = self._continuity.current_view(continuity_scope)
-        if epoch is None:
-            raise RuntimeError("accepted ToolResult lost its provider-input epoch")
-        self._memory_contexts.register_result(
-            scope=continuity_scope,
-            epoch_nonce=epoch.epoch_nonce,
-            result_id=result_id,
-            result_entry_sequence=accepted.entry_sequence,
-            visibility=memory_citation_visibility,
-            evidence_kind=memory_citation_evidence_kind,
-            execution_binding_fingerprint=execution_binding_fingerprint,
-        )
+        if direct_memory:
+            if not isinstance(accepted, AcceptedMemoryToolResult):
+                raise RuntimeError("direct memory writer returned no canonical result")
+            result_text = accepted.canonical_body
+            if (
+                tool_name == "remember"
+                and accepted.result_state == "SUCCESS"
+                and json.loads(result_text).get("status") == "SAVED"
+            ):
+                self._tools.offer_memory_embedding_wake()
+            if attempt_id is not None:
+                assert tool_result_block_id is not None and live_attribution is not None
+                if result_text:
+                    self._live_bus.offer_nowait(
+                        event_type=LiveEventType.TOOL_RESULT_DELTA,
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        draft_identity=result_entry_id,
+                        payload=ToolResultDeltaPayload(tool_result_block_id, result_text),
+                        block_id=tool_result_block_id,
+                        block_ordinal=0,
+                        block_kind=LiveBlockKind.TOOL_RESULT,
+                        **live_attribution,
+                    )
+                self._live_bus.offer_nowait(
+                    event_type=LiveEventType.TOOL_RESULT_END,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    draft_identity=result_entry_id,
+                    payload=ToolResultEndPayload(
+                        tool_result_block_id,
+                        accepted.result_state,
+                        result_text,
+                        len(result_text.encode("utf-8")),
+                        live_digest(result_text),
+                    ),
+                    block_id=tool_result_block_id,
+                    block_ordinal=0,
+                    block_kind=LiveBlockKind.TOOL_RESULT,
+                    **live_attribution,
+                )
         effect_committed = False
         if result.process_local_settlement is not None:
             local_settlement = await self._tools.settle_process_local_effect(
@@ -2442,7 +2430,11 @@ class ToolBatchExecutor:
             result_id=result_id,
             result_entry_id=result_entry_id,
             accepted_entry_sequence=accepted.entry_sequence,
-            result_state=prepared_acceptance.result_state,
+            result_state=(
+                accepted.result_state
+                if isinstance(accepted, AcceptedMemoryToolResult)
+                else prepared_acceptance.result_state
+            ),
             result_origin_kind=(
                 "PHYSICAL_ATTEMPT"
                 if prepared_acceptance.attempt_id is not None
@@ -2466,7 +2458,9 @@ class ToolBatchExecutor:
                 prepared_acceptance.artifact_unavailability_reason
             ),
             model_visible_memory_fact_ids=(
-                prepared_acceptance.model_visible_memory_fact_ids
+                accepted.model_visible_memory_fact_ids
+                if isinstance(accepted, AcceptedMemoryToolResult)
+                else prepared_acceptance.model_visible_memory_fact_ids
             ),
             canonical_content=(
                 result.content

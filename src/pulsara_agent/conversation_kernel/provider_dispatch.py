@@ -3276,15 +3276,6 @@ class ProviderDispatchCoordinator:
                         compile_binding=prepared_call.compile_binding,
                         sources=sources,
                         dispatch_anchor_entry_id=anchor.source_entry_id,
-                        memory_citation_handles=(
-                            memory_snapshot := self._memory_support.freeze_call_context(
-                                scope=scope,
-                                planning=planning,
-                                canonical_facts=prospective,
-                                sources=sources,
-                                memory_use_policy=memory_use_policy,
-                            )
-                        )[1],
                     )
                     try:
                         steer_new_epoch = (
@@ -3415,10 +3406,6 @@ class ProviderDispatchCoordinator:
                         write_hint=write_hint,
                     )
                     final_memory = self._memory_support.freeze_call_context(
-                        scope=scope,
-                        planning=planning,
-                        canonical_facts=prospective,
-                        sources=final_sources,
                         memory_use_policy=memory_use_policy,
                     )
                     final_request = StructuredModelInputCompileRequest(
@@ -3437,7 +3424,6 @@ class ProviderDispatchCoordinator:
                         dispatch_anchor_entry_id=(
                             prospective_input.items[-1].source_entry_id
                         ),
-                        memory_citation_handles=final_memory[1],
                     )
                     try:
                         (
@@ -3469,10 +3455,6 @@ class ProviderDispatchCoordinator:
                         self._continuity.abort_planning(planning)
                         continue
                     final_memory = self._memory_support.freeze_call_context(
-                        scope=scope,
-                        planning=planning,
-                        canonical_facts=prospective,
-                        sources=final_sources,
                         memory_use_policy=memory_use_policy,
                     )
                     prospective_read = _prospective_steer_dispatch_read(
@@ -3484,7 +3466,6 @@ class ProviderDispatchCoordinator:
                         cold_request = replace(
                             final_request,
                             sources=final_sources,
-                            memory_citation_handles=final_memory[1],
                         )
                         trial_cold_semantic = await self._io.run(
                             self._cold_epoch_assembler.prepare_semantic,
@@ -3511,7 +3492,7 @@ class ProviderDispatchCoordinator:
                         cold_semantic=trial_cold_semantic,
                         sources=final_sources,
                         tool_exposure_plan=tool_exposure_plan,
-                        memory_context=final_memory[0],
+                        memory_context=final_memory,
                     )
                     trial_wire = await self.measure_prepared_wire_candidate(
                         trial_candidate,
@@ -3525,7 +3506,7 @@ class ProviderDispatchCoordinator:
                     selected_sources = final_sources
                     selected_append = final_append
                     selected_cold_semantic = trial_cold_semantic
-                    selected_memory_context = final_memory[0]
+                    selected_memory_context = final_memory
                     selected_dispatch_read = prospective_read
                     break
 
@@ -3743,6 +3724,27 @@ class ProviderDispatchCoordinator:
                         ),
                     ),
                 )
+            elif (
+                self._memory_support.available
+                and activation_subject is None
+                and scope.scope_kind is ModelInputScopeKind.ROOT
+            ):
+                # A same-turn tool continuation is not a new activation, but
+                # canonical preferences may have changed since the last call
+                # (including writes from another Host or memory-page deletion).
+                refreshed = (
+                    build_memory_context_source(
+                        kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+                        texts=None,
+                        absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+                    )
+                    if memory_use_policy is MemoryUsePolicy.ALL_DISABLED_BY_USER
+                    else await self._memory_support.freeze_response_preference_source()
+                )
+                if self._memory_support.preference_changed_since_installed(
+                    scope=scope, planning=planning, desired=refreshed
+                ):
+                    preference_source = refreshed
             if prospective_root_candidate is not None:
                 if borrow is None or not isinstance(
                     prepared_call, PreparedKernelModelCall
@@ -3790,15 +3792,6 @@ class ProviderDispatchCoordinator:
                     if isinstance(base_anchor, NewTriggerAnchor)
                     else None
                 ),
-                memory_citation_handles=(
-                    memory_snapshot := self._memory_support.freeze_call_context(
-                        scope=scope,
-                        planning=planning,
-                        canonical_facts=base_facts,
-                        sources=base_sources,
-                        memory_use_policy=memory_use_policy,
-                    )
-                )[1],
             )
             cold_seed = cold_seed_override
             if cold_seed is not None and cold_seed.dispatch_read != base_read:
@@ -3830,16 +3823,11 @@ class ProviderDispatchCoordinator:
                         write_hint=write_hint,
                     )
                 projection_memory = self._memory_support.freeze_call_context(
-                    scope=scope,
-                    planning=planning,
-                    canonical_facts=base_facts,
-                    sources=projection_sources,
                     memory_use_policy=memory_use_policy,
                 )
                 projection_request = replace(
                     compile_request,
                     sources=projection_sources,
-                    memory_citation_handles=projection_memory[1],
                 )
                 projection_method = (
                     project_structured_new_epoch
@@ -3881,7 +3869,7 @@ class ProviderDispatchCoordinator:
                         tool_exposure_plan=tool_exposure_plan,
                         sources=projection_sources,
                         projection=projection,
-                        memory_context=projection_memory[0],
+                        memory_context=projection_memory,
                         wire_candidate=wire_candidate,
                         _wire_measurement=wire_measurement,
                     )
@@ -3949,16 +3937,11 @@ class ProviderDispatchCoordinator:
                     write_hint=write_hint,
                 )
                 final_memory = self._memory_support.freeze_call_context(
-                    scope=scope,
-                    planning=planning,
-                    canonical_facts=base_facts,
-                    sources=final_sources,
                     memory_use_policy=memory_use_policy,
                 )
                 final_request = replace(
                     compile_request,
                     sources=final_sources,
-                    memory_citation_handles=final_memory[1],
                 )
                 (
                     append,
@@ -3980,15 +3963,57 @@ class ProviderDispatchCoordinator:
                     final_request = replace(
                         final_request,
                         sources=final_sources,
-                        memory_citation_handles=(
-                            self._memory_support.freeze_call_context(
-                                scope=scope,
-                                planning=planning,
-                                canonical_facts=base_facts,
-                                sources=final_sources,
-                                memory_use_policy=memory_use_policy,
-                            )[1]
-                        ),
+                    )
+                    cold_semantic = await self._io.run(
+                        self._cold_epoch_assembler.prepare_semantic,
+                        seed=cold_seed,
+                        compile_request=final_request,
+                        planning=planning,
+                        prepared_call=prepared_call,
+                        capability_dispatch_cut=capability_dispatch_cut,
+                        tool_view=tool_view,
+                        skill_view=skill_view,
+                        tool_exposure_plan=tool_exposure_plan,
+                        non_trigger_sources=frozen_sources,
+                        replay_target=replay_target,
+                        deadline_monotonic=deadline,
+                    )
+                    append = cold_semantic.compiled_result
+            elif preference_source is not None:
+                preference_reservation = (
+                    self._memory_support.planning_preference_refresh_reservation(
+                        planning=planning,
+                        desired=preference_source,
+                        compiled=base_append.compiled_input,
+                        prepared_call=prepared_call,
+                    )
+                )
+                final_sources = replace_memory_context_sources(
+                    base_sources, (preference_source,)
+                )
+                final_request = replace(
+                    compile_request,
+                    sources=final_sources,
+                )
+                append, final_sources = (
+                    await self._memory_support.compile_with_fallback(
+                        request=final_request,
+                        planning=planning,
+                        new_epoch=cold_seed is not None,
+                        canonical_facts=base_facts,
+                        sources=final_sources,
+                        preference_source=preference_source,
+                        recall_reservation=None,
+                        preference_reservation=preference_reservation,
+                        scope=scope,
+                        memory_use_policy=memory_use_policy,
+                        deadline=deadline,
+                    )
+                )
+                if cold_seed is not None:
+                    final_request = replace(
+                        final_request,
+                        sources=final_sources,
                     )
                     cold_semantic = await self._io.run(
                         self._cold_epoch_assembler.prepare_semantic,
@@ -4006,10 +4031,6 @@ class ProviderDispatchCoordinator:
                     )
                     append = cold_semantic.compiled_result
             memory_snapshot = self._memory_support.freeze_call_context(
-                scope=scope,
-                planning=planning,
-                canonical_facts=base_facts,
-                sources=final_sources,
                 memory_use_policy=memory_use_policy,
             )
             assert handle is not None
@@ -4024,7 +4045,7 @@ class ProviderDispatchCoordinator:
                     cold_semantic=cold_semantic,
                     sources=final_sources,
                     tool_exposure_plan=tool_exposure_plan,
-                    memory_context=memory_snapshot[0],
+                    memory_context=memory_snapshot,
                 )
                 completion_wire = await self.measure_prepared_wire_candidate(
                     completion_wire_candidate,
@@ -4081,7 +4102,7 @@ class ProviderDispatchCoordinator:
                 tool_exposure_plan=tool_exposure_plan,
                 sources=final_sources,
                 append_result=append,
-                memory_context=memory_snapshot[0],
+                memory_context=memory_snapshot,
                 compaction_headroom_preflight=headroom_preflight,
                 cold_semantic=cold_semantic,
                 retained_skill_selection=retained_skill_selection,
@@ -4147,13 +4168,6 @@ class ProviderDispatchCoordinator:
                 dispatch_anchor=anchor,
             )
         )
-        base_memory = self._memory_support.freeze_call_context(
-            scope=planning.scope,
-            planning=planning,
-            canonical_facts=facts,
-            sources=family.base_sources,
-            memory_use_policy=family.memory_use_policy,
-        )
         compile_request = StructuredModelInputCompileRequest(
             context_id=f"model-context-prospective-root:{uuid4().hex}",
             model_call_index=1,
@@ -4164,7 +4178,6 @@ class ProviderDispatchCoordinator:
             dispatch_anchor_entry_id=(
                 anchor.source_entry_id if isinstance(anchor, NewTriggerAnchor) else None
             ),
-            memory_citation_handles=base_memory[1],
         )
         if context_base_changed and family.compaction_seed is None:
             raise StructuredModelInputCompileError(
@@ -4253,17 +4266,9 @@ class ProviderDispatchCoordinator:
                 )
                 family.bind_resolved_sources(resolved_sources)
             final_sources = resolved_sources
-            final_memory = self._memory_support.freeze_call_context(
-                scope=planning.scope,
-                planning=planning,
-                canonical_facts=facts,
-                sources=final_sources,
-                memory_use_policy=family.memory_use_policy,
-            )
             final_request = replace(
                 compile_request,
                 sources=final_sources,
-                memory_citation_handles=final_memory[1],
             )
             append, final_sources = await self._memory_support.compile_with_fallback(
                 request=final_request,
@@ -4279,17 +4284,9 @@ class ProviderDispatchCoordinator:
                 deadline=deadline,
             )
             if cold_seed is not None:
-                final_memory = self._memory_support.freeze_call_context(
-                    scope=planning.scope,
-                    planning=planning,
-                    canonical_facts=facts,
-                    sources=final_sources,
-                    memory_use_policy=family.memory_use_policy,
-                )
                 final_request = replace(
                     final_request,
                     sources=final_sources,
-                    memory_citation_handles=final_memory[1],
                 )
                 cold_semantic = await self._io.run(
                     self._cold_epoch_assembler.prepare_semantic,
@@ -4307,10 +4304,6 @@ class ProviderDispatchCoordinator:
                 )
                 append = cold_semantic.compiled_result
         memory = self._memory_support.freeze_call_context(
-            scope=planning.scope,
-            planning=planning,
-            canonical_facts=facts,
-            sources=final_sources,
             memory_use_policy=family.memory_use_policy,
         )
         wire_candidate = PreparedProviderWireCandidate(
@@ -4323,7 +4316,7 @@ class ProviderDispatchCoordinator:
             cold_semantic=cold_semantic,
             sources=final_sources,
             tool_exposure_plan=family.tool_exposure_plan,
-            memory_context=memory[0],
+            memory_context=memory,
         )
         wire_decision = await self.measure_prepared_wire_candidate(
             wire_candidate,
@@ -4343,7 +4336,7 @@ class ProviderDispatchCoordinator:
             planning=planning,
             sources=final_sources,
             append_result=append,
-            memory_context=memory[0],
+            memory_context=memory,
             cold_semantic=cold_semantic,
             wire_decision=wire_decision,
         )
@@ -4459,10 +4452,6 @@ class ProviderDispatchCoordinator:
         non_trigger_sources = family.non_trigger_sources
         retained_skill_selection = family.retained_skill_selection
         memory = self._memory_support.freeze_call_context(
-            scope=planning.scope,
-            planning=planning,
-            canonical_facts=facts,
-            sources=sources,
             memory_use_policy=family.memory_use_policy,
         )
         compile_request = StructuredModelInputCompileRequest(
@@ -4475,7 +4464,6 @@ class ProviderDispatchCoordinator:
             dispatch_anchor_entry_id=(
                 anchor.source_entry_id if isinstance(anchor, NewTriggerAnchor) else None
             ),
-            memory_citation_handles=memory[1],
         )
         semantic = await self._io.run(
             self._cold_epoch_assembler.prepare_semantic,
@@ -4524,16 +4512,11 @@ class ProviderDispatchCoordinator:
                     non_trigger_sources, (retained_source,)
                 )
                 memory = self._memory_support.freeze_call_context(
-                    scope=planning.scope,
-                    planning=planning,
-                    canonical_facts=facts,
-                    sources=sources,
                     memory_use_policy=family.memory_use_policy,
                 )
                 compile_request = replace(
                     compile_request,
                     sources=sources,
-                    memory_citation_handles=memory[1],
                 )
                 semantic = await self._io.run(
                     self._cold_epoch_assembler.prepare_semantic,
@@ -4560,10 +4543,6 @@ class ProviderDispatchCoordinator:
                         ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
                     )
         memory = self._memory_support.freeze_call_context(
-            scope=planning.scope,
-            planning=planning,
-            canonical_facts=facts,
-            sources=sources,
             memory_use_policy=family.memory_use_policy,
         )
         wire_candidate = PreparedProviderWireCandidate(
@@ -4576,7 +4555,7 @@ class ProviderDispatchCoordinator:
             cold_semantic=semantic,
             sources=sources,
             tool_exposure_plan=family.tool_exposure_plan,
-            memory_context=memory[0],
+            memory_context=memory,
         )
         return PreparedCompactionCandidate(
             wire_candidate=wire_candidate,
@@ -4741,10 +4720,6 @@ class ProviderDispatchCoordinator:
                     anchor.source_entry_id
                     if isinstance(anchor, NewTriggerAnchor)
                     else None
-                ),
-                memory_citation_handles=tuple(
-                    (item.reference.tool_result_id, item.handle)
-                    for item in base.memory_context.citation_handles
                 ),
             )
             if semantic is None:
@@ -5378,6 +5353,11 @@ class ProviderDispatchCoordinator:
             dispatch.seal_installed_open(
                 prepared_wire=prepared_wire,
                 installed_open=installed_open,
+            )
+            self._memory_support.note_installed_preference(
+                scope=permit.scope,
+                epoch_nonce=permit.epoch_nonce,
+                sources=dispatch.sources,
             )
             return installed_open
         except BaseException:

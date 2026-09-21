@@ -109,7 +109,7 @@ def test_round5a1_responses_allowlist_and_oracles_remain_closed() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
 
 
 def test_round5a1_terminal_path_does_not_import_compaction_or_recovery() -> None:

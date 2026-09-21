@@ -60,7 +60,7 @@ def test_stage2_registry_schema_and_removed_job_universe_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
 
     policy = build_postgres_runtime_grant_policy()
     assert policy.relation_privileges == CONVERSATION_KERNEL_RUNTIME_PRIVILEGES
@@ -246,7 +246,7 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
     # model-call count/deadline admission caps; Round 5B removes the final
     # durable-job family, its four now-ownerless limits, and the independent
     # 128K provider-input cap.  The resolved model target now owns input budget.
-    assert len(fields(Stage2RuntimeLimits)) == 55
+    assert len(fields(Stage2RuntimeLimits)) == 53
     assert all(value > 0 for value in asdict(STAGE2_LIMITS).values())
     assert report["structural_budgets"] == {
         "contract": "stage2_structural_budgets.v1",
@@ -553,27 +553,18 @@ def test_stage2_cleanup_dead_symbols_and_compatibility_paths_cannot_return() -> 
 
 def test_stage2_provider_admission_and_blob_gc_are_physical_not_heuristic() -> None:
     direct = (KERNEL / "direct_model.py").read_text(encoding="utf-8")
-    auxiliary = (KERNEL / "auxiliary_model.py").read_text(encoding="utf-8")
     reader = (KERNEL / "reader.py").read_text(encoding="utf-8")
     blob = (KERNEL / "blob.py").read_text(encoding="utf-8")
     host = (KERNEL / "host.py").read_text(encoding="utf-8")
 
     # Foreground model input is estimated by the pure structured compiler and
-    # exact-joined to the transport-aware final validator. Auxiliary advisory
-    # calls retain the semantic estimate for telemetry only: shape/binding is
-    # validated separately, while admission uses the adapter's final-wire
-    # materialization and the single local estimator.
+    # exact-joined to the transport-aware final validator. The direct-memory
+    # hard cut removes the auxiliary governance model entirely.
     assert "validate_model_context_for_call" in direct
     assert "validated.estimate != compiled.final_estimate" in direct
     assert "estimate_model_context_for_call" not in direct
-    assert "estimate_model_context_for_call" in auxiliary
-    assert "validate_model_context_shape_for_call" in auxiliary
-    assert "materialize_chat_context_bearing_wire_projection" in auxiliary
-    assert "materialize_responses_context_bearing_wire_projection" in auxiliary
-    assert "estimate_final_wire_json_components" in auxiliary
-    assert "validate_model_context_for_call(" not in auxiliary
-    for source in (direct, auxiliary):
-        assert "canonical_bytes / 4" not in source
+    assert not (KERNEL / "auxiliary_model.py").exists()
+    assert "canonical_bytes / 4" not in direct
     assert "CanonicalProviderContinuityError" in reader
     assert "delete_orphans" in blob
     assert "kernel-blob-orphan-gc" in host

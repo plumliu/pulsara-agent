@@ -33,6 +33,8 @@ class _Connection:
             return _Result(one={**self.entry, "executed_status": "RUNNING", "executed_final": None})
         if "FROM pulsara_v3.assistant_message_blocks" in sql:
             return _Result(many=())
+        if "FROM pulsara_v3.assistant_visualizations" in sql:
+            return _Result(many=())
         if "FROM pulsara_v3.provider_assistant_replay_fragments" in sql:
             return _Result(one=self.replay)
         if "FROM pulsara_v3.transcript_entries" in sql:

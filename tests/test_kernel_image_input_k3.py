@@ -1173,7 +1173,6 @@ def test_tool_result_full_upper_bounds_escaping_body_wire_and_d1(
             body="\\" * body_chars,
             result_state="SUCCESS",
             timing=timing,
-            citation_handle=None,
             model_visible_memory_ids=(),
         )
 

@@ -864,6 +864,11 @@ class DirectKernelToolPort:
             self._memory = port
             self._surface_generation += 1
 
+    def offer_memory_embedding_wake(self) -> None:
+        memory = self._memory
+        if memory is not None:
+            memory.offer_embedding_wake()
+
     def bind_interaction_port(self, port: KernelToolInteractionPort) -> None:
         with self._surface_lock:
             self._require_builtin_composition_preparing_locked()
@@ -944,6 +949,7 @@ class DirectKernelToolPort:
                     if item.tool_name
                     not in {
                         "remember",
+                        "mark_memory_relation",
                         "terminal_monitor",
                         "enter_plan",
                         "ask_plan_question",
@@ -1472,13 +1478,6 @@ class DirectKernelToolPort:
                                 )
                             ),
                             execution_policy=policy,
-                            memory_citation_visibility="CURRENT_CONTEXT_BOUND",
-                            memory_citation_evidence_kind=(
-                                "MEMORY_READ_EXPOSURE"
-                                if spec.name
-                                in {"memory_search", "memory_get", "memory_explain"}
-                                else "PRIMARY_OBSERVATION"
-                            ),
                         )
                     )
                     continue
@@ -1814,11 +1813,11 @@ class DirectKernelToolPort:
             )
         if memory and (
             (
-                tool_name == "remember"
+                tool_name in {"remember", "mark_memory_relation"}
                 and not memory_context.memory_use_policy.allows_writes
             )
             or (
-                tool_name != "remember"
+                tool_name not in {"remember", "mark_memory_relation"}
                 and not memory_context.memory_use_policy.allows_reads
             )
         ):

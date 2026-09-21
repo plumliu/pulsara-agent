@@ -19,16 +19,10 @@ import pytest
 
 from pulsara_agent.conversation_kernel.contracts import BlobContent, InlineContent
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    FrozenMemoryProposal,
-    MemoryKindHint,
-    prepare_memory_candidate,
-)
 from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelConflict,
     ConversationKernelRepository,
-    PreparedMemoryProposalSideBranch,
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.runner import (
@@ -101,7 +95,6 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverageReason,
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from pulsara_agent.memory.scope import CTX_GLOBAL
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.terminal_process.output import TerminalOutputOwner
@@ -162,7 +155,7 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 
 
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
@@ -1617,86 +1610,6 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
     assert missing_payload["error_code"] == "artifact_content_missing"
 
 
-@pytest.mark.postgres
-def test_round1_memory_side_branch_confirmation_is_all_or_none(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    workspace_id = _name("workspace")
-    lease, turn_id, assistant_entry_id, tool_call_id, attempt_id = _install_tool_call(
-        repository, workspace_id
-    )
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        memory_domain_id = str(
-            connection.execute(
-                "SELECT memory_domain_id FROM pulsara_v3.sessions WHERE id=%s",
-                (lease.guard.session_id,),
-            ).fetchone()[0]
-        )
-    memory_candidate = prepare_memory_candidate(
-        candidate_id=_name("candidate"),
-        memory_domain_id=memory_domain_id,
-        origin_workspace_id=workspace_id,
-        origin_session_id=lease.guard.session_id,
-        producer_entry_id=assistant_entry_id,
-        producer_tool_call_id=tool_call_id,
-        proposal=FrozenMemoryProposal(
-            statement="remember",
-            context_id=CTX_GLOBAL,
-            kind_hint=MemoryKindHint.FACT,
-        ),
-    )
-    candidate = build_prepared_tool_result_acceptance(
-        guard=lease.guard,
-        workspace_id=workspace_id,
-        result_id=_name("result"),
-        result_entry_id=_name("entry"),
-        turn_id=turn_id,
-        assistant_entry_id=assistant_entry_id,
-        tool_call_id=tool_call_id,
-        attempt_id=attempt_id,
-        result_state="SUCCESS",
-        canonical_preview_content=InlineContent.from_bytes(b"proposed"),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-        artifact_id=None,
-        artifact_blob_descriptor=None,
-        source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE,
-        source_coverage_reason=None,
-        artifact_unavailability_reason=None,
-        actor_id="remember_claim",
-        observed_at=datetime.now(timezone.utc),
-        observation_duration_microseconds=None,
-        observation_origin_kind=ToolObservationOrigin.BUILTIN,
-        trusted_tool_reported_duration_microseconds=None,
-        memory_candidate=memory_candidate,
-    )
-    assert isinstance(candidate.side_branch, PreparedMemoryProposalSideBranch)
-    repository.accept_tool_result(
-        lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
-    )
-    assert (
-        repository.confirm_tool_result_winner(
-            lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
-        )
-        is not None
-    )
-    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-        connection.execute(
-            "DELETE FROM pulsara_v3.memory_candidates WHERE id = %s",
-            (candidate.side_branch.candidate.candidate_id,),
-        )
-        connection.commit()
-    with pytest.raises(
-        ConversationKernelConflict, match="memory candidate side branch"
-    ):
-        repository.confirm_tool_result_winner(
-            lease.guard, candidate=candidate, deadline_monotonic=monotonic() + 30
-        )
 
 
 def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:

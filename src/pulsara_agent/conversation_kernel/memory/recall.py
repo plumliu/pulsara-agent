@@ -56,6 +56,12 @@ class MemoryDenseCandidateBatch:
 
 
 @dataclass(frozen=True, slots=True)
+class MemoryRelatedSearchResult:
+    facts: tuple["MemoryQueryRow", ...]
+    dense_disposition: MemoryDenseCandidateDisposition
+
+
+@dataclass(frozen=True, slots=True)
 class MemorySearchStageResult:
     ordinal: int
     context_coverage: str
@@ -98,33 +104,32 @@ class MemoryRelationRow:
 
 @dataclass(frozen=True, slots=True)
 class MemoryResponsePreferenceSnapshot:
-    """One bounded RR cut of active preferences and their contradictions."""
+    """One bounded RR cut of effective active preferences."""
 
     facts: tuple[MemoryQueryRow, ...]
-    contradictions: tuple[MemoryRelationRow, ...]
+    selection_incomplete: bool
+    conflicts_omitted: bool
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryRelationDecisionProjection:
+class MemoryRelationOwnerProjection:
     relation_id: str
     provenance_disposition: str
-    decision_kind: str
-    decision_reason_code: str | None
-    decision_public_summary: str | None
+    write_tool: str
+    owner_session_id: str | None
+    owner_entry_id: str | None
+    owner_tool_call_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class MemoryProvenanceProjection:
     provenance_disposition: str
-    decision_kind: str
-    decision_reason_code: str | None
-    decision_public_summary: str | None
+    write_tool: str
     producer_session_id: str | None
     producer_turn_id: str | None
     producer_entry_id: str | None
     producer_tool_call_id: str | None
-    tool_result_ids: tuple[str, ...]
-    relation_decisions: tuple[MemoryRelationDecisionProjection, ...]
+    relation_owners: tuple[MemoryRelationOwnerProjection, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,68 +319,105 @@ class PostgresMemoryQuery:
             ).fetchone()
         return None if row is None else _row(row)
 
-    def response_preferences(
-        self,
-        *,
-        read_binding: FrozenMemoryReadContextBinding,
-        deadline_monotonic: float,
-    ) -> tuple[MemoryQueryRow, ...]:
-        with self._provider.connection(
-            lane=PostgresConnectionLane.MEMORY_QUERY,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-        ) as connection:
-            return self._response_preferences_in_connection(
-                connection, read_binding=read_binding
-            )
-
     def response_preference_snapshot(
         self,
         *,
         read_binding: FrozenMemoryReadContextBinding,
-        relation_limit: int = 240,
         deadline_monotonic: float,
     ) -> MemoryResponsePreferenceSnapshot:
-        """Read the complete preference head from one repeatable-read cut."""
+        """Select a stable bounded head without imposing a storage total cap."""
 
-        bounded_limit = max(1, min(int(relation_limit), 256))
+        from pulsara_agent.conversation_kernel.memory.contracts import (
+            memory_response_preference_item_payload,
+        )
+        from pulsara_agent.primitives.context import canonical_json_bytes
+
+        visible = sorted(
+            read_binding.readable_context_ids,
+            key=lambda value: (value != "ctx:global", value),
+        )
+        chosen: list[MemoryQueryRow] = []
+        incomplete = False
+        conflicts_omitted = False
         with self._provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
-            facts = self._response_preferences_in_connection(
-                connection, read_binding=read_binding
-            )
-            contradictions = self._active_contradictions_in_connection(
-                connection,
-                read_binding=read_binding,
-                fact_ids=tuple(item.fact_id for item in facts),
-                bounded_limit=bounded_limit,
-            )
-        return MemoryResponsePreferenceSnapshot(facts, contradictions)
-
-    @staticmethod
-    def _response_preferences_in_connection(
-        connection,
-        *,
-        read_binding: FrozenMemoryReadContextBinding,
-    ) -> tuple[MemoryQueryRow, ...]:
-        conditions, parameters = _visibility_sql(read_binding, "RESPONSE_PREFERENCE")
-        rows = connection.execute(
-            f"""
-            SELECT id, memory_domain_id, context_id, fact_kind,
-                   lifecycle, statement, accepted_at, fact_semantic_digest
-            FROM pulsara_v3.memory_facts
-            WHERE memory_domain_id=%s AND lifecycle='ACTIVE' AND ({conditions})
-            ORDER BY CASE context_id WHEN 'ctx:global' THEN 0 ELSE 1 END,
-                     fact_semantic_digest, id
-            LIMIT 33
-            """,
-            (read_binding.memory_domain_id, *parameters),
-        ).fetchall()
-        return tuple(_row(row) for row in rows)
+            for context_id in visible:
+                eligible = connection.execute(
+                    """
+                    SELECT f.id, f.memory_domain_id, f.context_id, f.fact_kind,
+                           f.lifecycle, f.statement, f.accepted_at,
+                           f.fact_semantic_digest
+                    FROM pulsara_v3.memory_facts AS f
+                    WHERE f.memory_domain_id=%s AND f.context_id=%s
+                      AND f.fact_kind='RESPONSE_PREFERENCE' AND f.lifecycle='ACTIVE'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM pulsara_v3.memory_relations AS r
+                          JOIN pulsara_v3.memory_facts AS other
+                            ON other.memory_domain_id=r.memory_domain_id
+                           AND other.id=CASE WHEN r.source_fact_id=f.id
+                                             THEN r.target_fact_id
+                                             ELSE r.source_fact_id END
+                          WHERE r.memory_domain_id=f.memory_domain_id
+                            AND r.relation_kind='CONTRADICTS'
+                            AND (r.source_fact_id=f.id OR r.target_fact_id=f.id)
+                            AND other.lifecycle='ACTIVE'
+                            AND other.context_id=f.context_id
+                            AND other.fact_kind='RESPONSE_PREFERENCE'
+                      )
+                    ORDER BY f.accepted_at DESC, f.id DESC LIMIT 17
+                    """,
+                    (read_binding.memory_domain_id, context_id),
+                ).fetchall()
+                selected: list[MemoryQueryRow] = []
+                for row in eligible[:16]:
+                    item = _row(row)
+                    proposed = (*selected, item)
+                    serialized = tuple(
+                        memory_response_preference_item_payload(
+                            memory_id=value.fact_id,
+                            context_id=value.context_id,
+                            statement=value.statement,
+                            recorded_at=value.recorded_at,
+                        )
+                        for value in proposed
+                    )
+                    if len(canonical_json_bytes(serialized)) > 7 * 1024:
+                        incomplete = True
+                        break
+                    selected.append(item)
+                incomplete = incomplete or len(eligible) > len(selected)
+                chosen.extend(selected)
+                conflicted = connection.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM pulsara_v3.memory_facts AS f
+                        JOIN pulsara_v3.memory_relations AS r
+                          ON r.memory_domain_id=f.memory_domain_id
+                         AND r.relation_kind='CONTRADICTS'
+                         AND (r.source_fact_id=f.id OR r.target_fact_id=f.id)
+                        JOIN pulsara_v3.memory_facts AS other
+                          ON other.memory_domain_id=r.memory_domain_id
+                         AND other.id=CASE WHEN r.source_fact_id=f.id
+                                           THEN r.target_fact_id
+                                           ELSE r.source_fact_id END
+                        WHERE f.memory_domain_id=%s AND f.context_id=%s
+                          AND f.fact_kind='RESPONSE_PREFERENCE'
+                          AND f.lifecycle='ACTIVE'
+                          AND other.lifecycle='ACTIVE'
+                          AND other.context_id=f.context_id
+                          AND other.fact_kind='RESPONSE_PREFERENCE'
+                    ) AS found
+                    """,
+                    (read_binding.memory_domain_id, context_id),
+                ).fetchone()
+                conflicts_omitted = conflicts_omitted or bool(conflicted["found"])
+        return MemoryResponsePreferenceSnapshot(
+            tuple(chosen), incomplete, conflicts_omitted
+        )
 
     def find_active_semantic(
         self,
@@ -410,7 +452,7 @@ class PostgresMemoryQuery:
             ).fetchone()
         return None if row is None else _row(row)
 
-    def governance_related(
+    def related_candidates(
         self,
         *,
         read_binding: FrozenMemoryReadContextBinding,
@@ -418,14 +460,16 @@ class PostgresMemoryQuery:
         query: str,
         query_embedding: Sequence[float] | None,
         exclude_fact_id: str | None,
-        limit: int = 8,
+        limit: int = 20,
         deadline_monotonic: float,
-    ) -> tuple[MemoryQueryRow, ...]:
-        """Bounded exact-context relatedness; never relax context or call rerank."""
+    ) -> MemoryRelatedSearchResult:
+        """Bounded exact-context recall for a direct remember result."""
 
         if context_id not in read_binding.readable_context_ids:
-            return ()
-        bounded_limit = max(1, min(int(limit), 8))
+            return MemoryRelatedSearchResult(
+                (), MemoryDenseCandidateDisposition.NOT_REQUESTED
+            )
+        bounded_limit = max(1, min(int(limit), 20))
         terms = self._tokenizer.tokenize(query)
         sparse = self._sparse(
             read_binding=read_binding,
@@ -437,88 +481,37 @@ class PostgresMemoryQuery:
             deadline_monotonic=deadline_monotonic,
         )
         dense: tuple[MemoryQueryRow, ...] = ()
+        dense_disposition = MemoryDenseCandidateDisposition.NOT_REQUESTED
         if query_embedding is not None:
-            dense = self._dense(
+            try:
+                dense_batch = self._dense(
+                    read_binding=read_binding,
+                    vector=query_embedding,
+                    context_filter=context_id,
+                    kind_filter=None,
+                    limit=20,
+                    purpose=DenseRecallPurpose.RELATION_CANDIDATES,
+                    automatic=False,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            except Exception:
+                dense_disposition = MemoryDenseCandidateDisposition.UNAVAILABLE
+            else:
+                dense = dense_batch.facts
+                dense_disposition = dense_batch.disposition
+        exact_context = tuple(
+            item
+            for item in _rrf(sparse, dense)
+            if item.context_id == context_id and item.fact_id != exclude_fact_id
+        )[:bounded_limit]
+        return MemoryRelatedSearchResult(
+            facts=self._canonical_refetch(
                 read_binding=read_binding,
-                vector=query_embedding,
-                context_filter=context_id,
-                kind_filter=None,
-                limit=20,
-                purpose=DenseRecallPurpose.GOVERNANCE_RELATEDNESS,
+                ranked=exact_context,
                 automatic=False,
                 deadline_monotonic=deadline_monotonic,
-            ).facts
-        exact_context = tuple(
-            item
-            for item in _rrf(sparse, dense)
-            if item.context_id == context_id and item.fact_id != exclude_fact_id
-        )[:bounded_limit]
-        return self._canonical_refetch(
-            read_binding=read_binding,
-            ranked=exact_context,
-            automatic=False,
-            deadline_monotonic=deadline_monotonic,
-        )
-
-    def governance_sparse_candidates(
-        self,
-        *,
-        read_binding: FrozenMemoryReadContextBinding,
-        context_id: str,
-        query: str,
-        deadline_monotonic: float,
-    ) -> tuple[MemoryQueryRow, ...]:
-        return self._sparse(
-            read_binding=read_binding,
-            terms=self._tokenizer.tokenize(query),
-            context_filter=context_id,
-            kind_filter=None,
-            limit=30,
-            automatic=False,
-            deadline_monotonic=deadline_monotonic,
-        )
-
-    def governance_dense_candidates(
-        self,
-        *,
-        read_binding: FrozenMemoryReadContextBinding,
-        context_id: str,
-        query_embedding: Sequence[float],
-        deadline_monotonic: float,
-    ) -> MemoryDenseCandidateBatch:
-        return self._dense(
-            read_binding=read_binding,
-            vector=query_embedding,
-            context_filter=context_id,
-            kind_filter=None,
-            limit=30,
-            purpose=DenseRecallPurpose.GOVERNANCE_RELATEDNESS,
-            automatic=False,
-            deadline_monotonic=deadline_monotonic,
-        )
-
-    def finalize_governance_related(
-        self,
-        *,
-        read_binding: FrozenMemoryReadContextBinding,
-        context_id: str,
-        sparse: Sequence[MemoryQueryRow],
-        dense: Sequence[MemoryQueryRow],
-        exclude_fact_id: str | None,
-        limit: int,
-        deadline_monotonic: float,
-    ) -> tuple[MemoryQueryRow, ...]:
-        bounded_limit = max(1, min(int(limit), 8))
-        exact_context = tuple(
-            item
-            for item in _rrf(sparse, dense)
-            if item.context_id == context_id and item.fact_id != exclude_fact_id
-        )[:bounded_limit]
-        return self._canonical_refetch(
-            read_binding=read_binding,
-            ranked=exact_context,
-            automatic=False,
-            deadline_monotonic=deadline_monotonic,
+            ),
+            dense_disposition=dense_disposition,
         )
 
     def active_contradictions(
@@ -641,7 +634,7 @@ class PostgresMemoryQuery:
         relation_ids: Sequence[str] = (),
         deadline_monotonic: float,
     ) -> MemoryProvenanceProjection | None:
-        """Project producer/decision lineage with an exact workspace fence."""
+        """Project direct ToolResult owners without exposing cross-workspace history."""
 
         contexts = read_binding.readable_context_ids
         bounded_relation_ids = tuple(dict.fromkeys(relation_ids))[:100]
@@ -652,60 +645,47 @@ class PostgresMemoryQuery:
         ) as connection:
             row = connection.execute(
                 """
-                SELECT c.origin_workspace_id, c.origin_session_id,
-                       c.producer_entry_id, c.producer_tool_call_id,
-                       c.decision_kind, c.decision_reason_code,
-                       c.decision_public_summary, e.turn_id AS producer_turn_id
+                SELECT s.workspace_id AS origin_workspace_id,
+                       s.lifecycle AS source_session_lifecycle,
+                       f.source_session_id,
+                       tr.tool_call_entry_id, tr.tool_call_id,
+                       e.turn_id AS producer_turn_id
                 FROM pulsara_v3.memory_facts AS f
-                JOIN pulsara_v3.memory_candidates AS c
-                  ON c.id=f.source_candidate_id
+                JOIN pulsara_v3.tool_results AS tr
+                  ON tr.session_id=f.source_session_id
+                 AND tr.id=f.source_tool_result_id
+                JOIN pulsara_v3.sessions AS s ON s.id=f.source_session_id
                 LEFT JOIN pulsara_v3.transcript_entries AS e
-                  ON e.entry_owner_kind='EXECUTED_TURN' AND e.session_id=c.origin_session_id
-                 AND e.id=c.producer_entry_id
+                  ON e.session_id=tr.session_id AND e.id=tr.tool_call_entry_id
+                 AND e.entry_owner_kind='EXECUTED_TURN'
                 WHERE f.memory_domain_id=%s AND f.id=%s
                   AND f.context_id=ANY(%s::text[])
                 """,
-                (
-                    read_binding.memory_domain_id,
-                    fact_id,
-                    list(contexts),
-                ),
+                (read_binding.memory_domain_id, fact_id, list(contexts)),
             ).fetchone()
             if row is None:
                 return None
             same_origin = (
-                str(row["origin_workspace_id"])
-                == read_binding.host_workspace_id
+                str(row["origin_workspace_id"]) == read_binding.host_workspace_id
             )
-            citations = ()
-            if same_origin:
-                citations = tuple(
-                    str(item["tool_result_id"])
-                    for item in connection.execute(
-                        """
-                        SELECT tool_result_id
-                        FROM pulsara_v3.memory_candidate_tool_result_refs
-                        WHERE candidate_id=(
-                            SELECT source_candidate_id
-                            FROM pulsara_v3.memory_facts
-                            WHERE memory_domain_id=%s AND id=%s
-                        )
-                        ORDER BY ordinal LIMIT 8
-                        """,
-                        (read_binding.memory_domain_id, fact_id),
-                    ).fetchall()
-                )
-            relation_decisions: list[MemoryRelationDecisionProjection] = []
+            locator_visible = same_origin and row["source_session_lifecycle"] == "OPEN"
+            relation_owners: list[MemoryRelationOwnerProjection] = []
             if bounded_relation_ids:
-                decision_rows = connection.execute(
+                owners = connection.execute(
                     """
-                    SELECT r.id, c.origin_workspace_id, c.decision_kind,
-                           c.decision_reason_code, c.decision_public_summary
+                    SELECT r.id, s.workspace_id, s.lifecycle,
+                           tr.session_id, tr.tool_call_entry_id, tr.tool_call_id,
+                           b.tool_name
                     FROM pulsara_v3.memory_relations AS r
-                    JOIN pulsara_v3.memory_candidates AS c
-                      ON c.memory_domain_id=r.memory_domain_id
-                     AND c.id=r.decision_candidate_id
-                    WHERE r.memory_domain_id=%s AND r.id=ANY(%s)
+                    JOIN pulsara_v3.tool_results AS tr
+                      ON tr.session_id=r.owner_session_id
+                     AND tr.id=r.owner_tool_result_id
+                    JOIN pulsara_v3.sessions AS s ON s.id=tr.session_id
+                    JOIN pulsara_v3.assistant_message_blocks AS b
+                      ON b.session_id=tr.session_id
+                     AND b.assistant_entry_id=tr.tool_call_entry_id
+                     AND b.tool_call_id=tr.tool_call_id
+                    WHERE r.memory_domain_id=%s AND r.id=ANY(%s::text[])
                       AND r.source_context_id=ANY(%s::text[])
                       AND r.target_context_id=ANY(%s::text[])
                     ORDER BY r.id
@@ -717,64 +697,47 @@ class PostgresMemoryQuery:
                         list(contexts),
                     ),
                 ).fetchall()
-                relation_decisions.extend(
-                    MemoryRelationDecisionProjection(
-                        relation_id=str(item["id"]),
-                        provenance_disposition=(
-                            "SAME_ORIGIN"
-                            if str(item["origin_workspace_id"])
-                            == read_binding.host_workspace_id
-                            else "CROSS_ORIGIN_REDACTED"
-                        ),
-                        decision_kind=str(item["decision_kind"]),
-                        decision_reason_code=(
-                            None
-                            if item["decision_reason_code"] is None
-                            else str(item["decision_reason_code"])
-                        ),
-                        decision_public_summary=(
-                            None
-                            if item["decision_public_summary"] is None
-                            else str(item["decision_public_summary"])
-                        ),
+                for item in owners:
+                    visible = (
+                        str(item["workspace_id"]) == read_binding.host_workspace_id
+                        and item["lifecycle"] == "OPEN"
                     )
-                    for item in decision_rows
-                )
+                    relation_owners.append(
+                        MemoryRelationOwnerProjection(
+                            relation_id=str(item["id"]),
+                            provenance_disposition=(
+                                "SAME_ORIGIN" if visible else "CROSS_ORIGIN_REDACTED"
+                            ),
+                            write_tool=str(item["tool_name"]),
+                            owner_session_id=str(item["session_id"]) if visible else None,
+                            owner_entry_id=(
+                                str(item["tool_call_entry_id"]) if visible else None
+                            ),
+                            owner_tool_call_id=(
+                                str(item["tool_call_id"]) if visible else None
+                            ),
+                        )
+                    )
         return MemoryProvenanceProjection(
             provenance_disposition=(
-                "SAME_ORIGIN" if same_origin else "CROSS_ORIGIN_REDACTED"
+                "SAME_ORIGIN" if locator_visible else "CROSS_ORIGIN_REDACTED"
             ),
-            decision_kind=str(row["decision_kind"]),
-            decision_reason_code=(
-                None
-                if row["decision_reason_code"] is None
-                else str(row["decision_reason_code"])
-            ),
-            decision_public_summary=(
-                None
-                if row["decision_public_summary"] is None
-                else str(row["decision_public_summary"])
-            ),
+            write_tool="remember",
             producer_session_id=(
-                str(row["origin_session_id"]) if same_origin else None
+                str(row["source_session_id"]) if locator_visible else None
             ),
             producer_turn_id=(
-                None
-                if not same_origin or row["producer_turn_id"] is None
-                else str(row["producer_turn_id"])
+                str(row["producer_turn_id"])
+                if locator_visible and row["producer_turn_id"] is not None
+                else None
             ),
             producer_entry_id=(
-                None
-                if not same_origin
-                else str(row["producer_entry_id"])
+                str(row["tool_call_entry_id"]) if locator_visible else None
             ),
             producer_tool_call_id=(
-                None
-                if not same_origin or row["producer_tool_call_id"] is None
-                else str(row["producer_tool_call_id"])
+                str(row["tool_call_id"]) if locator_visible else None
             ),
-            tool_result_ids=citations,
-            relation_decisions=tuple(relation_decisions),
+            relation_owners=tuple(relation_owners),
         )
 
     def _sparse(

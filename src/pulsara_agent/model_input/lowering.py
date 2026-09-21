@@ -169,7 +169,6 @@ def lower_canonical_item(
     *,
     artifact_read_available: bool,
     limits: StructuredModelInputLimits,
-    memory_citation_handles: Mapping[str, str] | None = None,
 ) -> LoweredCanonicalItem:
     kind = item.item_kind
     if kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
@@ -203,11 +202,6 @@ def lower_canonical_item(
                 item,
                 artifact_read_available=artifact_read_available,
                 limits=limits,
-                citation_handle=(memory_citation_handles or {}).get(
-                    item.tool_result_context.result_id
-                    if item.tool_result_context is not None
-                    else ""
-                ),
             ),
         )
     text = provider_input_item_text(item)
@@ -409,7 +403,6 @@ def _tool_result_variants(
     *,
     artifact_read_available: bool,
     limits: StructuredModelInputLimits,
-    citation_handle: str | None,
 ) -> tuple[LoweredToolResultVariant, ...]:
     metadata = item.tool_result_context
     body = item.tool_result_body_text
@@ -423,9 +416,7 @@ def _tool_result_variants(
         *,
         maximum_message_bytes: int | None = None,
     ) -> bool:
-        message = _tool_result_message(
-            item, rendered_body, citation_handle=citation_handle
-        )
+        message = _tool_result_message(item, rendered_body)
         logical_bytes = provider_neutral_message_logical_bytes(message)
         if maximum_message_bytes is not None and logical_bytes > maximum_message_bytes:
             return False
@@ -449,7 +440,6 @@ def _tool_result_variants(
         item,
         maximum_message_bytes=limits.maximum_tool_result_compact_bytes,
         artifact_read_available=artifact_read_available,
-        citation_handle=citation_handle,
     )
     if compact is not None and compact != body:
         append(
@@ -481,8 +471,6 @@ def _tool_result_variants(
 def _tool_result_message(
     item: FrozenProviderInputItem,
     body: str,
-    *,
-    citation_handle: str | None,
 ) -> LLMMessage:
     assert item.tool_call_id is not None
     metadata = item.tool_result_context
@@ -500,7 +488,6 @@ def _tool_result_message(
         body=projected_body,
         result_state=metadata.result_state,
         timing=metadata.timing,
-        citation_handle=citation_handle,
         model_visible_memory_ids=metadata.model_visible_memory_fact_ids,
     )
     return rendered.message
@@ -722,7 +709,6 @@ def _bounded_compact_tool_result_body(
     *,
     maximum_message_bytes: int,
     artifact_read_available: bool,
-    citation_handle: str | None,
 ) -> str | None:
     """Choose the largest deterministic body budget whose final carrier fits."""
 
@@ -743,9 +729,7 @@ def _bounded_compact_tool_result_body(
         if candidate is None:
             low = middle + 1
             continue
-        message = _tool_result_message(
-            item, candidate, citation_handle=citation_handle
-        )
+        message = _tool_result_message(item, candidate)
         if (
             provider_neutral_message_logical_bytes(message)
             <= maximum_message_bytes

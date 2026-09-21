@@ -31,10 +31,8 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
-    FrozenModelVisibleMemoryProvenance,
-    ModelVisibleMemoryProvenanceDisposition,
-    PreparedMemoryCandidateAcceptance,
 )
+from pulsara_agent.conversation_kernel.memory.writes import PreparedMemoryMutation
 from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
     ProcessLocalToolSurfaceBorrow,
@@ -87,7 +85,7 @@ from pulsara_agent.conversation_kernel.visualization import VisualizationSource
 class KernelToolResult:
     state: str
     content: bytes | FrozenPromptContent
-    memory_candidate: PreparedMemoryCandidateAcceptance | None = None
+    memory_mutation: PreparedMemoryMutation | None = None
     remote_identity: str | None = None
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     artifact_source_read: bool = False
@@ -163,13 +161,7 @@ class KernelToolInvocationContext:
         field(default=None, repr=False)
     )
     memory_context: FrozenModelCallMemoryContext = field(
-        default_factory=lambda: FrozenModelCallMemoryContext(
-            FrozenModelVisibleMemoryProvenance(
-                ModelVisibleMemoryProvenanceDisposition.COMPLETE,
-                (),
-            )
-        ),
-        repr=False,
+        default_factory=FrozenModelCallMemoryContext, repr=False
     )
 
     def __post_init__(self) -> None:

@@ -25,9 +25,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryUsePolicy,
 )
 from pulsara_agent.conversation_kernel.memory.hints import MEMORY_WRITE_HINT_BODY
-from pulsara_agent.conversation_kernel.memory.citations import (
-    ProcessLocalMemoryCallContextOwner,
-)
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
 )
@@ -84,7 +81,6 @@ class MemoryContextProjectionPort(Protocol):
 
     def classify_memory_trigger(self, text: str) -> FrozenMemoryTriggerPolicy: ...
 
-    def offer_governance_wake(self) -> None: ...
 
 
 class MemoryDispatchSupport:
@@ -95,22 +91,21 @@ class MemoryDispatchSupport:
         *,
         compiler: StructuredModelInputCompiler,
         io_owner: KernelSessionIO,
-        memory_context_owner: ProcessLocalMemoryCallContextOwner,
         memory_projection: MemoryContextProjectionPort | None,
         input_reader: CanonicalProviderInputReader,
         deadline_factory: KernelExecutionDeadlineFactory,
     ) -> None:
         self._compiler = compiler
         self._io = io_owner
-        self._memory_contexts = memory_context_owner
         self._memory_projection = memory_projection
         self._input_reader = input_reader
         self._deadlines = deadline_factory
-
-    def offer_governance_wake(self) -> None:
-        projection = self._memory_projection
-        if projection is not None:
-            projection.offer_governance_wake()
+        # Complete typed source values for the latest installed ROOT epoch.
+        # Continuity heads intentionally carry only presence/fingerprint.
+        self._installed_preference: dict[
+            ProviderInputContinuityScope,
+            tuple[str, ContextSourceCandidate | ContextSourceAbsentFact],
+        ] = {}
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -131,6 +126,65 @@ class MemoryDispatchSupport:
             raise RuntimeError("memory projection is not installed")
         return await self._memory_projection.freeze_response_preference_source()
 
+    def preference_changed_since_installed(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        planning: FrozenProviderInputAppendPlanningInput,
+        desired: ContextSourceCandidate | ContextSourceAbsentFact,
+    ) -> bool:
+        predecessor = planning.predecessor_view
+        installed = self._installed_preference.get(scope)
+        return (
+            predecessor is None
+            or installed is None
+            or installed[0] != predecessor.epoch_nonce
+            or installed[1] != desired
+        )
+
+    def note_installed_preference(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        epoch_nonce: str,
+        sources: CollectedContextSources,
+    ) -> None:
+        current = next(
+            (
+                item
+                for item in (*sources.candidates, *sources.absent_facts)
+                if item.source_kind is ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
+                and not (
+                    isinstance(item, ContextSourceAbsentFact)
+                    and item.absence_kind is ContextSourceAbsenceKind.NOT_APPLICABLE
+                )
+            ),
+            None,
+        )
+        if current is not None:
+            self._installed_preference[scope] = (epoch_nonce, current)
+
+    def planning_preference_refresh_reservation(
+        self,
+        *,
+        planning: FrozenProviderInputAppendPlanningInput,
+        desired: ContextSourceCandidate | ContextSourceAbsentFact,
+        compiled: FrozenCompiledModelInput,
+        prepared_call: PreparedKernelModelCall,
+    ) -> MemorySourceInvalidationReservation | None:
+        prior = self._memory_source_head(
+            planning, ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
+        )
+        if prior is None or prior.presence is not SourceObservationPresence.VALUE:
+            return None
+        return self._memory_invalidation_reservation(
+            source_kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+            prior=prior,
+            desired=desired,
+            compiled=compiled,
+            prepared_call=prepared_call,
+        )
+
     async def _read_compile_snapshot(
         self, cut: PreparedProviderInputCut, *, deadline: float
     ) -> FrozenCanonicalCompileSnapshot:
@@ -143,24 +197,9 @@ class MemoryDispatchSupport:
     def freeze_call_context(
         self,
         *,
-        scope: ProviderInputContinuityScope,
-        planning: FrozenProviderInputAppendPlanningInput,
-        canonical_facts: FrozenCanonicalCompileSnapshot,
-        sources: CollectedContextSources,
         memory_use_policy: MemoryUsePolicy,
-    ) -> tuple[FrozenModelCallMemoryContext, tuple[tuple[str, str], ...]]:
-        epoch_nonce = (
-            planning.predecessor_view.epoch_nonce
-            if planning.predecessor_view is not None
-            else f"cold:{planning.planning_nonce}"
-        )
-        return self._memory_contexts.freeze_call(
-            scope=scope,
-            epoch_nonce=epoch_nonce,
-            canonical_facts=canonical_facts,
-            sources=sources.candidates,
-            memory_use_policy=memory_use_policy,
-        )
+    ) -> FrozenModelCallMemoryContext:
+        return FrozenModelCallMemoryContext(memory_use_policy)
 
     @staticmethod
     def _memory_source_head(
@@ -454,18 +493,7 @@ class MemoryDispatchSupport:
         def request_for(
             selected_sources: CollectedContextSources,
         ) -> StructuredModelInputCompileRequest:
-            memory = self.freeze_call_context(
-                scope=scope,
-                planning=planning,
-                canonical_facts=canonical_facts,
-                sources=selected_sources,
-                memory_use_policy=memory_use_policy,
-            )
-            return replace(
-                request,
-                sources=selected_sources,
-                memory_citation_handles=memory[1],
-            )
+            return replace(request, sources=selected_sources)
 
         async def compile_one(selected_sources: CollectedContextSources):
             selected_request = request_for(selected_sources)

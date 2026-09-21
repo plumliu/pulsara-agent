@@ -718,7 +718,7 @@ def test_frozen_target_rejects_executable_projection_strategy_drift(
     call = resolve_model_call(
         target=target,
         binding=binding,
-        purpose=ModelCallPurpose.MEMORY_GOVERNANCE,
+        purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
     )
     bundle = _freeze_provider_physical_call_target(
         target=target,

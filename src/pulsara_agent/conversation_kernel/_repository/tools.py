@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
+import json
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, canonical_digest
@@ -12,15 +14,18 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
     materialize_canonical_prompt,
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
+from pulsara_agent.conversation_kernel.memory.writes import PreparedRememberWrite
+from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
     AcceptedCapabilityDecision,
     AcceptedEntry,
+    AcceptedMemoryToolResult,
     AcceptedInteractionDecision,
     AcceptedToolAttempt,
     ConversationKernelConflict,
-    PreparedMemoryProposalSideBranch,
+    PreparedMemoryMutationSideBranch,
     PreparedToolRemoteIdentityPublication,
     PreparedToolResultAcceptance,
     ToolRemoteIdentityConfirmationKind,
@@ -477,7 +482,7 @@ class _ToolOperations:
         *,
         candidate: PreparedToolResultAcceptance,
         deadline_monotonic: float,
-    ) -> AcceptedEntry:
+    ) -> AcceptedEntry | AcceptedMemoryToolResult:
         if candidate.session_id != guard.session_id:
             raise ValueError("prepared tool result belongs to another session")
         with self._writer_transaction(
@@ -501,7 +506,25 @@ class _ToolOperations:
                     workspace_id=candidate.workspace_id,
                     expected=candidate.artifact_blob_descriptor,
                 )
-            canonical_entry_content = candidate.canonical_preview_content
+            memory_outcome = (
+                self._settle_direct_memory_mutation(
+                    connection,
+                    candidate=candidate,
+                    mutation=candidate.side_branch.mutation,
+                    deadline_monotonic=deadline_monotonic,
+                )
+                if isinstance(candidate.side_branch, PreparedMemoryMutationSideBranch)
+                else None
+            )
+            canonical_entry_content = (
+                InlineContent.from_bytes(
+                    memory_outcome.canonical_body.encode("utf-8"),
+                    media_type="text/plain",
+                    codec="utf-8",
+                )
+                if memory_outcome is not None
+                else candidate.canonical_preview_content
+            )
             canonical_image_blob_ids: tuple[str, ...] = ()
             if candidate.canonical_prompt is not None:
                 publication = materialize_canonical_prompt(
@@ -561,7 +584,11 @@ class _ToolOperations:
                         else "POLICY_NO_ATTEMPT"
                     ),
                     candidate.result_entry_id,
-                    candidate.result_state,
+                    (
+                        memory_outcome.result_state
+                        if memory_outcome is not None
+                        else candidate.result_state
+                    ),
                     str(turn["permission_snapshot_fingerprint"]),
                     candidate.artifact_disposition.value,
                     candidate.artifact_id,
@@ -582,7 +609,11 @@ class _ToolOperations:
                         if candidate.artifact_unavailability_reason is None
                         else candidate.artifact_unavailability_reason.value
                     ),
-                    list(candidate.model_visible_memory_fact_ids),
+                    list(
+                        memory_outcome.visible_memory_fact_ids
+                        if memory_outcome is not None
+                        else candidate.model_visible_memory_fact_ids
+                    ),
                     candidate.observed_at,
                     candidate.observation_duration_microseconds,
                     candidate.observation_origin_kind.value,
@@ -597,22 +628,37 @@ class _ToolOperations:
                     image_blob_ids=canonical_image_blob_ids,
                     transcript_entry_id=candidate.result_entry_id,
                 )
-            event_drafts = [candidate.tool_result_occurrence]
-            side = candidate.side_branch
-            if isinstance(side, PreparedMemoryProposalSideBranch):
-                self._insert_prepared_memory_candidate(connection, side)
+            event_drafts = [
+                replace(
+                    candidate.tool_result_occurrence,
+                    payload={
+                        "tool_call_id": candidate.tool_call_id,
+                        "result_state": memory_outcome.result_state,
+                    },
+                )
+                if memory_outcome is not None
+                else candidate.tool_result_occurrence
+            ]
             event = self._append_events(
                 connection,
                 guard,
                 workspace_id=candidate.workspace_id,
                 drafts=tuple(event_drafts),
             )[0]
-            return AcceptedEntry(
+            accepted_fields = dict(
                 entry_id=candidate.result_entry_id,
                 turn_id=candidate.turn_id,
                 entry_sequence=entry_sequence,
                 event_sequence=event.event_sequence,
             )
+            if memory_outcome is not None:
+                return AcceptedMemoryToolResult(
+                    **accepted_fields,
+                    canonical_body=memory_outcome.canonical_body,
+                    result_state=memory_outcome.result_state,
+                    model_visible_memory_fact_ids=memory_outcome.visible_memory_fact_ids,
+                )
+            return AcceptedEntry(**accepted_fields)
 
     def confirm_tool_result_winner(
         self,
@@ -620,7 +666,7 @@ class _ToolOperations:
         *,
         candidate: PreparedToolResultAcceptance,
         deadline_monotonic: float,
-    ) -> AcceptedEntry | None:
+    ) -> AcceptedEntry | AcceptedMemoryToolResult | None:
         """Stateless exact confirmation after an ambiguous canonical ACK."""
 
         if candidate.session_id != guard.session_id:
@@ -661,17 +707,45 @@ class _ToolOperations:
                     "tool result winner is only partially installed"
                 )
             blob = candidate.artifact_blob_descriptor
+            dynamic_memory = isinstance(
+                candidate.side_branch, PreparedMemoryMutationSideBranch
+            )
+            observed_content = self._content_from_row(entry)
+            if dynamic_memory:
+                if (
+                    not isinstance(observed_content, InlineContent)
+                    or observed_content.media_type != "text/plain"
+                    or observed_content.codec != "utf-8"
+                ):
+                    raise ConversationKernelConflict(
+                        "direct memory ToolResult body is not inline text"
+                    )
+                observed_body = observed_content.canonical_bytes.decode("utf-8")
+                observed_state = str(result["result_state"])
+                visible_ids = tuple(result["model_visible_memory_fact_ids"])
+                self._confirm_direct_memory_result_shape(
+                    candidate,
+                    body=observed_body,
+                    result_state=observed_state,
+                    visible_ids=visible_ids,
+                )
             if (
                 str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != candidate.turn_id
                 or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                or self._content_from_row(entry) != candidate.canonical_preview_content
+                or (
+                    not dynamic_memory
+                    and observed_content != candidate.canonical_preview_content
+                )
                 or str(result["workspace_id"]) != candidate.workspace_id
                 or str(result["tool_call_entry_id"]) != candidate.assistant_entry_id
                 or str(result["tool_call_id"]) != candidate.tool_call_id
                 or result["attempt_id"] != candidate.attempt_id
                 or str(result["result_entry_id"]) != candidate.result_entry_id
-                or str(result["result_state"]) != candidate.result_state
+                or (
+                    not dynamic_memory
+                    and str(result["result_state"]) != candidate.result_state
+                )
                 or str(result["permission_snapshot_fingerprint"])
                 != str(turn["permission_snapshot_fingerprint"])
                 or str(result["output_artifact_disposition"])
@@ -694,8 +768,11 @@ class _ToolOperations:
                     if candidate.artifact_unavailability_reason is None
                     else candidate.artifact_unavailability_reason.value
                 )
-                or tuple(result["model_visible_memory_fact_ids"])
-                != candidate.model_visible_memory_fact_ids
+                or (
+                    not dynamic_memory
+                    and tuple(result["model_visible_memory_fact_ids"])
+                    != candidate.model_visible_memory_fact_ids
+                )
                 or result["observed_at"] != candidate.observed_at
                 or result["observation_duration_microseconds"]
                 != candidate.observation_duration_microseconds
@@ -716,9 +793,20 @@ class _ToolOperations:
                 raise ConversationKernelConflict(
                     "tool result image body or refs name a different winner"
                 )
+            expected_event = (
+                replace(
+                    candidate.tool_result_occurrence,
+                    payload={
+                        "tool_call_id": candidate.tool_call_id,
+                        "result_state": observed_state,
+                    },
+                )
+                if dynamic_memory
+                else candidate.tool_result_occurrence
+            )
             result_event = self._exact_event_for_confirmation(
                 connection,
-                candidate.tool_result_occurrence,
+                expected_event,
                 session_id=candidate.session_id,
                 workspace_id=candidate.workspace_id,
             )
@@ -728,9 +816,16 @@ class _ToolOperations:
                     workspace_id=candidate.workspace_id,
                     expected=blob,
                 )
-            side = candidate.side_branch
-            if isinstance(side, PreparedMemoryProposalSideBranch):
-                self._confirm_memory_proposal_side_branch(connection, candidate, side)
+            if dynamic_memory:
+                return AcceptedMemoryToolResult(
+                    entry_id=candidate.result_entry_id,
+                    turn_id=candidate.turn_id,
+                    entry_sequence=int(entry["entry_sequence"]),
+                    event_sequence=int(result_event["event_sequence"]),
+                    canonical_body=observed_body,
+                    result_state=observed_state,
+                    model_visible_memory_fact_ids=visible_ids,
+                )
             return AcceptedEntry(
                 entry_id=candidate.result_entry_id,
                 turn_id=candidate.turn_id,
@@ -768,167 +863,67 @@ class _ToolOperations:
                 "prepared tool artifact descriptor names a different blob"
             )
 
-    def _confirm_memory_proposal_side_branch(
-        self,
-        connection: Connection,
-        candidate: PreparedToolResultAcceptance,
-        side: PreparedMemoryProposalSideBranch,
-    ) -> None:
-        prepared = side.candidate
-        memory = connection.execute(
-            """
-            SELECT * FROM pulsara_v3.memory_candidates
-            WHERE memory_domain_id = %s AND id = %s
-            """,
-            (prepared.memory_domain_id, prepared.candidate_id),
-        ).fetchone()
-        if memory is None:
-            raise ConversationKernelConflict(
-                "prepared memory candidate side branch is absent"
-            )
-        proposal = prepared.proposal
-        if (
-            str(memory["origin_workspace_id"]) != prepared.origin_workspace_id
-            or str(memory["origin_session_id"]) != prepared.origin_session_id
-            or memory["producer_entry_id"] != prepared.producer_entry_id
-            or memory["producer_tool_call_id"] != prepared.producer_tool_call_id
-            or str(memory["context_id"]) != proposal.context_id
-            or str(memory["kind_hint"]) != proposal.kind_hint.value
-            or str(memory["statement"]) != proposal.statement
-            or str(memory["candidate_acceptance_digest"])
-            != prepared.candidate_acceptance_digest
-            or str(memory["model_visible_memory_provenance_disposition"])
-            != prepared.visible_memory.disposition.value
-            or tuple(memory["model_visible_memory_fact_ids"])
-            != prepared.visible_memory.fact_ids
-            or str(memory["status"]) != "PENDING"
-        ):
-            raise ConversationKernelConflict(
-                "prepared memory candidate side branch names a different winner"
-            )
-        refs = connection.execute(
-            """
-            SELECT origin_session_id, tool_result_id, ordinal, evidence_kind,
-                   citation_visibility
-            FROM pulsara_v3.memory_candidate_tool_result_refs
-            WHERE candidate_id = %s ORDER BY ordinal
-            """,
-            (prepared.candidate_id,),
-        ).fetchall()
-        basis = connection.execute(
-            """
-            SELECT target_fact_id, target_context_id, ordinal
-            FROM pulsara_v3.memory_candidate_basis_refs
-            WHERE candidate_id = %s ORDER BY ordinal
-            """,
-            (prepared.candidate_id,),
-        ).fetchall()
-        if tuple(
-            (
-                str(row["origin_session_id"]),
-                str(row["tool_result_id"]),
-                int(row["ordinal"]),
-                str(row["evidence_kind"]),
-                str(row["citation_visibility"]),
-            )
-            for row in refs
-        ) != tuple(
-            (
-                ref.origin_session_id,
-                ref.tool_result_id,
-                ref.ordinal,
-                ref.evidence_kind.value,
-                ref.citation_visibility.value,
-            )
-            for ref in prepared.tool_result_refs
-        ) or tuple(
-            (
-                str(row["target_fact_id"]),
-                str(row["target_context_id"]),
-                int(row["ordinal"]),
-            )
-            for row in basis
-        ) != tuple(
-            (
-                ref.target_fact_id,
-                ref.target_context_id,
-                ref.ordinal,
-            )
-            for ref in prepared.basis_refs
-        ):
-            raise ConversationKernelConflict(
-                "prepared memory candidate references name a different winner"
-            )
-
     @staticmethod
-    def _insert_prepared_memory_candidate(
-        connection: Connection, side: PreparedMemoryProposalSideBranch
+    def _confirm_direct_memory_result_shape(
+        candidate: PreparedToolResultAcceptance,
+        *,
+        body: str,
+        result_state: str,
+        visible_ids: tuple[str, ...],
     ) -> None:
-        prepared = side.candidate
-        proposal = prepared.proposal
-        connection.execute(
-            """
-            INSERT INTO pulsara_v3.memory_candidates (
-                id, memory_domain_id, origin_workspace_id, origin_session_id,
-                producer_entry_id, producer_tool_call_id,
-                context_id, kind_hint, statement, candidate_acceptance_digest,
-                model_visible_memory_provenance_disposition,
-                model_visible_memory_fact_ids, status
-            ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, 'PENDING'
-            )
-            """,
-            (
-                prepared.candidate_id,
-                prepared.memory_domain_id,
-                prepared.origin_workspace_id,
-                prepared.origin_session_id,
-                prepared.producer_entry_id,
-                prepared.producer_tool_call_id,
-                proposal.context_id,
-                proposal.kind_hint.value,
-                proposal.statement,
-                prepared.candidate_acceptance_digest,
-                prepared.visible_memory.disposition.value,
-                list(prepared.visible_memory.fact_ids),
-            ),
-        )
-        for ref in prepared.tool_result_refs:
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.memory_candidate_tool_result_refs (
-                    candidate_id, origin_session_id, tool_result_id,
-                    ordinal, evidence_kind, citation_visibility
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    prepared.candidate_id,
-                    ref.origin_session_id,
-                    ref.tool_result_id,
-                    ref.ordinal,
-                    ref.evidence_kind.value,
-                    ref.citation_visibility.value,
-                ),
-            )
-        for ref in prepared.basis_refs:
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.memory_candidate_basis_refs (
-                    candidate_id, memory_domain_id,
-                    source_context_id,
-                    target_context_id, target_fact_id, ordinal
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    prepared.candidate_id,
-                    prepared.memory_domain_id,
-                    proposal.context_id,
-                    ref.target_context_id,
-                    ref.target_fact_id,
-                    ref.ordinal,
-                ),
-            )
+        """Confirm a committed result without requiring its fact to still exist."""
+
+        if result_state not in {"SUCCESS", "APPLICATION_ERROR"}:
+            raise ConversationKernelConflict("direct memory result state is invalid")
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError) as exc:
+            raise ConversationKernelConflict("direct memory result body is invalid") from exc
+        if not isinstance(payload, dict):
+            raise ConversationKernelConflict("direct memory result body is not an object")
+        if result_state == "APPLICATION_ERROR":
+            if not isinstance(payload.get("error"), str) or visible_ids:
+                raise ConversationKernelConflict("direct memory rejection body drifted")
+            return
+        status = payload.get("status")
+        if status not in {"SAVED", "ALREADY_PRESENT"}:
+            raise ConversationKernelConflict("direct memory success status drifted")
+        mutation = candidate.side_branch.mutation
+        if isinstance(mutation, PreparedRememberWrite):
+            memory_id = payload.get("memory_id")
+            related = payload.get("related_memories")
+            if (
+                not isinstance(memory_id, str)
+                or not memory_id.startswith("memory:")
+                or not isinstance(related, list)
+                or len(related) > 3
+                or any(not isinstance(item, dict) or
+                       not isinstance(item.get("memory_id"), str)
+                       for item in related)
+            ):
+                raise ConversationKernelConflict("remember result shape drifted")
+            expected_ids = tuple(dict.fromkeys(
+                (memory_id, *(item["memory_id"] for item in related))
+            ))
+            if visible_ids != expected_ids:
+                raise ConversationKernelConflict("remember exposure drifted")
+            if status == "SAVED":
+                from .memory import _fact_id
+                if memory_id != _fact_id(candidate.session_id, candidate.result_id):
+                    raise ConversationKernelConflict("remember fact identity drifted")
+            if payload.get("retrieval_summary") != thaw_json(mutation.retrieval_summary):
+                raise ConversationKernelConflict("remember retrieval cut drifted")
+        else:
+            if (
+                payload.get("source_memory_id") != mutation.source_memory_id
+                or payload.get("target_memory_id") != mutation.target_memory_id
+                or payload.get("relation_kind") != mutation.relation_kind.value
+                or not isinstance(payload.get("relation_id"), str)
+                or visible_ids != (
+                    mutation.source_memory_id, mutation.target_memory_id
+                )
+            ):
+                raise ConversationKernelConflict("relation result shape drifted")
 
     def accept_tool_interaction_decision(
         self,

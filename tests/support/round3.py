@@ -67,8 +67,6 @@ from pulsara_agent.conversation_kernel.contracts import (
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
-    FrozenModelVisibleMemoryProvenance,
-    ModelVisibleMemoryProvenanceDisposition,
 )
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
@@ -1826,12 +1824,7 @@ async def authorize_direct_tool(
 
 
 def _enabled_memory_context() -> FrozenModelCallMemoryContext:
-    return FrozenModelCallMemoryContext(
-        FrozenModelVisibleMemoryProvenance(
-            ModelVisibleMemoryProvenanceDisposition.COMPLETE,
-            (),
-        )
-    )
+    return FrozenModelCallMemoryContext()
 
 
 def _candidate(

@@ -79,8 +79,6 @@ from pulsara_agent.conversation_kernel.input_continuity import (
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
     FrozenModelCallMemoryContext,
-    FrozenModelVisibleMemoryProvenance,
-    ModelVisibleMemoryProvenanceDisposition,
 )
 from pulsara_agent.conversation_kernel.memory.hints import MEMORY_WRITE_HINT_BODY
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -3607,12 +3605,7 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
                 assistant_entry_id="entry:assistant",
                 surface_borrow=borrow,
                 permission_snapshot=_permission_snapshot(),
-                memory_context=FrozenModelCallMemoryContext(
-                    FrozenModelVisibleMemoryProvenance(
-                        ModelVisibleMemoryProvenanceDisposition.COMPLETE,
-                        (),
-                    )
-                ),
+                memory_context=FrozenModelCallMemoryContext(),
             )
             assert authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
             invocation = KernelToolInvocationContext(

@@ -2077,7 +2077,6 @@ class StructuredModelInputCompileRequest:
     compile_binding: ModelInputCompileBinding = field(repr=False)
     sources: CollectedContextSources = field(repr=False)
     dispatch_anchor_entry_id: str | None = None
-    memory_citation_handles: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if not self.context_id or self.model_call_index < 1:
@@ -2097,17 +2096,6 @@ class StructuredModelInputCompileRequest:
             for item in self.canonical_input.items
         ):
             raise ValueError("compile request dispatch anchor is not canonical")
-        result_ids = tuple(item[0] for item in self.memory_citation_handles)
-        handles = tuple(item[1] for item in self.memory_citation_handles)
-        if (
-            len(result_ids) != len(set(result_ids))
-            or len(handles) != len(set(handles))
-            or any(
-                not result_id or not handle
-                for result_id, handle in self.memory_citation_handles
-            )
-        ):
-            raise ValueError("compile request memory citation handles are invalid")
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,7 +16,6 @@ from pulsara_agent.llm.model_connections import ModelCallBinding
 class ModelCallPurpose(StrEnum):
     AGENT_MODEL_LOOP = "agent_model_loop"
     CONTEXT_COMPACTION_SUMMARY = "context_compaction_summary"
-    MEMORY_GOVERNANCE = "memory_governance"
     CONNECTION_PROBE = "connection_probe"
 
 

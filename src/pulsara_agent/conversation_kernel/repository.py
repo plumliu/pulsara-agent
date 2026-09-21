@@ -16,10 +16,6 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     PromptDeliveryMode,
 )
-from pulsara_agent.conversation_kernel.memory.contracts import (
-    MemoryCandidateStatus,
-    PreparedMemoryCandidateAcceptance,
-)
 from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
@@ -46,10 +42,12 @@ from pulsara_agent.primitives.plan_workflow import (
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
+from pulsara_agent.conversation_kernel.memory.writes import PreparedMemoryMutation
 
 from ._repository.contracts import (
     AcceptedCapabilityDecision,
     AcceptedEntry,
+    AcceptedMemoryToolResult,
     AcceptedSubagentCompletion,
     AcceptedInteractionDecision,
     AcceptedPlanResolution,
@@ -70,7 +68,7 @@ from ._repository.contracts import (
     PlanToolBatchDisposition,
     PlanToolControlKind,
     PreparedAutomaticSubagentCompletion,
-    PreparedMemoryProposalSideBranch,
+    PreparedMemoryMutationSideBranch,
     PreparedPlanBatchCall,
     PreparedPlanToolBatch,
     PreparedRootTurnIntent,
@@ -98,7 +96,7 @@ from ._repository.conversation import _ConversationOperations
 from ._repository.completions import _SubagentCompletionOperations
 from ._repository.kernel import _RepositoryKernel
 from ._repository.matching import _MatchingOperations
-from ._repository.memory import AcceptedMemoryGovernance, _MemoryOperations
+from ._repository.memory import _MemoryOperations
 from ._repository.plans import _PlanOperations
 from ._repository.prompts import _PromptOperations
 from ._repository.subagents import _SubagentOperations
@@ -136,7 +134,6 @@ _FACADE_OWNED_SYMBOLS = (
     "AssistantTextBlock",
     "AssistantToolCallBlock",
     "ConversationKernelConflict",
-    "AcceptedMemoryGovernance",
     "NoToolResultSideBranch",
     "PreparedAutomaticSubagentCompletion",
     "PlanContinuationDisposition",
@@ -145,7 +142,7 @@ _FACADE_OWNED_SYMBOLS = (
     "PlanQuestionAnswer",
     "PlanToolBatchDisposition",
     "PlanToolControlKind",
-    "PreparedMemoryProposalSideBranch",
+    "PreparedMemoryMutationSideBranch",
     "PreparedPlanBatchCall",
     "PreparedPlanToolBatch",
     "PreparedRootTurnIntent",
@@ -187,10 +184,10 @@ __all__ = [
     "AssistantToolCallBlock",
     "ConversationKernelConflict",
     "ConversationKernelRepository",
-    "AcceptedMemoryGovernance",
+    "AcceptedMemoryToolResult",
     "NoToolResultSideBranch",
     "PreparedAutomaticSubagentCompletion",
-    "PreparedMemoryProposalSideBranch",
+    "PreparedMemoryMutationSideBranch",
     "PreparedToolResultAcceptance",
     "PlanDraftIdentityConflict",
     "PlanContinuationDisposition",

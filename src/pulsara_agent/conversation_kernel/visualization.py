@@ -20,6 +20,11 @@ from pulsara_agent.conversation_kernel.blob import (
     PostgresCanonicalBlobStore,
 )
 from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
+from pulsara_agent.model_input.visualization_source import (
+    VisualizationSource,
+    VisualizationSourceKind,
+    parse_visualization_source,
+)
 from pulsara_agent.storage.postgres_connection_provider import (
     PostgresConnectionLane,
     VerifiedPostgresConnectionProviderProtocol,
@@ -29,28 +34,6 @@ from pulsara_agent.tools.builtins.filesystem import IMAGE_REFERENCE_PATTERN
 
 VISUALIZATION_MEDIA_TYPE = "text/html"
 VISUALIZATION_CODEC = "utf-8"
-
-
-class VisualizationSourceKind(StrEnum):
-    PATH = "path"
-    VISUALIZATION_REF = "visualization_ref"
-
-
-@dataclass(frozen=True, slots=True)
-class VisualizationSource:
-    kind: VisualizationSourceKind
-    value: str
-
-    def __post_init__(self) -> None:
-        if not self.value:
-            raise ValueError("visualization source is empty")
-        if self.kind is VisualizationSourceKind.VISUALIZATION_REF and (
-            IMAGE_REFERENCE_PATTERN.fullmatch(self.value) is None
-        ):
-            raise ValueError("visualization reference is invalid")
-
-    def provider_value(self) -> dict[str, str]:
-        return {self.kind.value: self.value}
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,27 +62,6 @@ class FrozenVisualizationOccurrence:
                 raise ValueError("READY visualization has invalid content")
         elif self.html is not None or not self.failure_code or not self.failure_detail:
             raise ValueError("FAILED visualization has invalid content")
-
-
-def parse_visualization_source(arguments: dict[str, object]) -> tuple[VisualizationSource, bool]:
-    if set(arguments) - {"path", "visualization_ref", "review"}:
-        raise ValueError("visualization_render has unsupported arguments")
-    path = arguments.get("path")
-    reference = arguments.get("visualization_ref")
-    review = arguments.get("review", False)
-    if not isinstance(review, bool):
-        raise ValueError("visualization_render review must be a boolean")
-    if (isinstance(path, str) and bool(path)) == (
-        isinstance(reference, str) and bool(reference)
-    ):
-        raise ValueError("visualization_render requires exactly one source")
-    if path is not None:
-        if not isinstance(path, str) or not path.strip():
-            raise ValueError("visualization_render path is invalid")
-        return VisualizationSource(VisualizationSourceKind.PATH, path), review
-    if not isinstance(reference, str):
-        raise ValueError("visualization_render reference is invalid")
-    return VisualizationSource(VisualizationSourceKind.VISUALIZATION_REF, reference), review
 
 
 def read_visualization_file(path: Path) -> bytes | None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+import json
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,7 @@ from pulsara_agent.primitives.tool_result_projection import (
     ToolResultFullDeliveryReason,
     ToolResultLogicalMessageKind,
     classify_tool_result_delivery,
+    decode_provider_tool_result_observation,
     full_required_tool_result_delivery,
     render_provider_tool_result_logical_message,
 )
@@ -82,7 +84,6 @@ def _body_with_exact_logical_bytes(
             body=body,
             result_state=metadata.result_state,
             timing=metadata.timing,
-            citation_handle=None,
             model_visible_memory_ids=(),
         ).logical_utf8_bytes
 
@@ -243,7 +244,6 @@ def test_round7_1_fifty_memory_ids_share_the_canonical_eight_kib_bound() -> None
             body="memory search result",
             result_state=metadata.result_state,
             timing=metadata.timing,
-            citation_handle=None,
             model_visible_memory_ids=oversized,
         )
 
@@ -427,7 +427,6 @@ def test_round7_1_logical_quote_is_not_chat_or_responses_wire_bytes() -> None:
         body=item.tool_result_body_text,
         result_state=metadata.result_state,
         timing=metadata.timing,
-        citation_handle=None,
         model_visible_memory_ids=(),
     )
     chat = canonical_json_bytes(
@@ -442,13 +441,34 @@ def test_round7_1_logical_quote_is_not_chat_or_responses_wire_bytes() -> None:
     assert chat != responses
 
 
+def test_tool_result_wire_has_no_citation_handle_or_legacy_null_slot() -> None:
+    item, _body = _body_with_exact_logical_bytes(512, seed="memory")
+    metadata = item.tool_result_context
+    assert metadata is not None and item.tool_call_id is not None
+    rendered = render_provider_tool_result_logical_message(
+        message_kind=ToolResultLogicalMessageKind.TOOL_RESULT,
+        tool_call_id=item.tool_call_id,
+        body=item.tool_result_body_text,
+        result_state=metadata.result_state,
+        timing=metadata.timing,
+        model_visible_memory_ids=("memory:existing",),
+    )
+    payload = json.loads(rendered.content)
+    inner = payload["pulsara_tool_result"]
+    assert "citation_handle" not in inner
+    assert inner["model_visible_memory_ids"] == ["memory:existing"]
+    inner["citation_handle"] = None
+    with pytest.raises(ValueError, match="member contract"):
+        decode_provider_tool_result_observation(json.dumps(payload))
+
+
 def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
-    assert TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT.endswith(".v2")
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
+    assert TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT.endswith(".v3")
 
     production = ROOT / "src/pulsara_agent"
     definitions: list[tuple[Path, int]] = []

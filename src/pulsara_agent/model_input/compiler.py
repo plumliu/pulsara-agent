@@ -93,7 +93,7 @@ from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSource,
     parse_view_image_source,
 )
-from pulsara_agent.conversation_kernel.visualization import (
+from pulsara_agent.model_input.visualization_source import (
     VisualizationSource,
     parse_visualization_source,
 )
@@ -726,7 +726,6 @@ class StructuredModelInputCompiler:
         canonical_items, materialized_plan_bytes = self._materialize_approved_plan(
             request
         )
-        citation_handles = dict(request.memory_citation_handles)
         lowered_items: list[LoweredCanonicalItem] = []
         for item in canonical_items:
             deadline.check()
@@ -735,7 +734,6 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     limits=self._limits,
-                    memory_citation_handles=citation_handles,
                 )
             )
         lowered = tuple(lowered_items)
@@ -1223,7 +1221,6 @@ class StructuredModelInputCompiler:
             for tool in request.compile_binding.tool_surface.tool_specs
         )
         lowered_delta_values: list[LoweredCanonicalItem] = []
-        citation_handles = dict(request.memory_citation_handles)
         for item in delta_items:
             deadline.check()
             lowered_delta_values.append(
@@ -1231,7 +1228,6 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     limits=self._limits,
-                    memory_citation_handles=citation_handles,
                 )
             )
         lowered_delta = tuple(lowered_delta_values)
@@ -1598,7 +1594,6 @@ class StructuredModelInputCompiler:
             for tool in request.compile_binding.tool_surface.tool_specs
         )
         lowered_delta_values: list[LoweredCanonicalItem] = []
-        citation_handles = dict(request.memory_citation_handles)
         for item in delta_items:
             deadline.check()
             lowered_delta_values.append(
@@ -1606,7 +1601,6 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     limits=self._limits,
-                    memory_citation_handles=citation_handles,
                 )
             )
         lowered_delta = tuple(lowered_delta_values)
@@ -2448,9 +2442,14 @@ class StructuredModelInputCompiler:
                 after > before
                 for before, after in zip(selectable_costs, selectable_costs[1:])
             ):
-                raise StructuredModelInputCompileError(
+                failure = StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                 )
+                failure.add_note(
+                    f"source={candidate.source_kind.value} "
+                    f"variant_token_costs={selectable_costs}"
+                )
+                raise failure
         for fact in sources.absent_facts:
             expected = _SOURCE_POLICY.get(fact.source_kind)
             if expected is None:
