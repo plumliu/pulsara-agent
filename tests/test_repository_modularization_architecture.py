@@ -363,6 +363,7 @@ _DIRECT_MEMORY_ADDED_METHODS = {
     "_settle_memory_relation",
     "_settle_remember",
 }
+_MEMORY_EDIT_ADDED_METHODS = {"memory_management_edit_statement"}
 _DIRECT_MEMORY_REMOVED_METHODS = {
     "_accept_memory_governance_once",
     "_active_semantic_winner",
@@ -1048,7 +1049,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
             - _DIRECT_MEMORY_REMOVED_METHODS
             | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
-            | _DIRECT_MEMORY_ADDED_METHODS,
+            | _DIRECT_MEMORY_ADDED_METHODS
+            | _MEMORY_EDIT_ADDED_METHODS,
             _ROUND7_CHANGED_METHODS
             | _ROUND8_CHANGED_METHODS
             | _ROUND5A2_CHANGED_METHODS
@@ -1207,6 +1209,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         - _MODEL_UNIVERSE_REMOVED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
         | _DIRECT_MEMORY_ADDED_METHODS
+        | _MEMORY_EDIT_ADDED_METHODS
     )
     for name in (
         set(baseline_runtime["methods"])
@@ -1278,6 +1281,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
         | _DIRECT_MEMORY_ADDED_METHODS
+        | _MEMORY_EDIT_ADDED_METHODS
         | _DIRECT_MEMORY_REMOVED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS
         | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
