@@ -5,7 +5,11 @@ from pathlib import Path
 from PIL import Image
 
 from pulsara_agent.llm.model_catalog import ModelTargetKey, WireApi
-from pulsara_agent.llm.model_connections import ModelConnectionConfig, ModelConnectionId
+from pulsara_agent.llm.model_connections import (
+    ModelConnectionConfig,
+    ModelConnectionId,
+    ReasoningWireProfile,
+)
 from tools.probe_vision_tokens import (
     Case,
     PROMPT,
@@ -41,6 +45,7 @@ def test_both_wire_shapes_preserve_repeated_images_and_baseline(tmp_path: Path) 
             ModelConnectionId.new(),
             ModelTargetKey("openai", wire, "test-model"),
             "https://example.invalid/v1",
+            ReasoningWireProfile.CATALOG_STANDARD,
         )
         payload = make_payload(connection, fixture, "auto", 256)
         baseline = make_payload(connection, None, "auto", 256)
@@ -106,6 +111,7 @@ def test_multiturn_baseline_removes_only_images_and_summary_matches_layout(
             ModelConnectionId.new(),
             ModelTargetKey("openai", wire, "test-model"),
             "https://example.invalid/v1",
+            ReasoningWireProfile.CATALOG_STANDARD,
         )
         payload = make_payload(connection, fixture, "auto", 1024, turns=3)
         baseline = make_payload(connection, None, "auto", 1024, turns=3)

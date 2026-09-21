@@ -509,15 +509,20 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 assert model["output_modalities"] == ["text"]
                 executable = [item for item in model["wire_apis"] if item["executable"]]
                 assert [item["wire_api"] for item in executable] == ["openai_responses"]
+                assert executable[0]["reasoning_wire_profiles"] == [
+                    "provider_default",
+                    "catalog_standard",
+                ]
 
             async with client.post(
                 f"{server.origin}/api/model-configurations",
                 json={
                     "source": "models_dev",
                     "route_id": "test",
-                    "model_id": "test-model",
-                    "wire_api": "openai_responses",
-                    "api_key": secret,
+                        "model_id": "test-model",
+                        "wire_api": "openai_responses",
+                        "reasoning_wire_profile": "catalog_standard",
+                        "api_key": secret,
                 },
                 headers=mutation_headers,
             ) as response:
@@ -563,6 +568,7 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 assert custom["credential_configured"] is False
                 assert custom["authentication"] == "none"
                 assert custom["input_modalities"] == ["text", "image"]
+                assert custom["reasoning_wire_profile"] == "provider_default"
 
             stored = settings.read()
             assert len(stored.model_connections) == 2
@@ -696,6 +702,7 @@ async def _exercise_model_connection_test(
         resolved = observed["resolved"]
         assert resolved.config.user_declared.configuration_name == "Private Gateway"
         assert resolved.config.user_declared.input_modalities == ("text",)
+        assert resolved.config.reasoning_wire_profile.value == "effort"
         assert observed["api_key"] == "transient-secret"
     finally:
         await server.aclose()

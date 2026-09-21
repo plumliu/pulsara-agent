@@ -110,8 +110,20 @@ export interface ModelConfigurationSummary {
   input_modalities?: string[] | null;
   output_modalities?: string[] | null;
   reasoning: ReasoningControlSummary;
+  reasoning_wire_profile?: ReasoningWireProfile;
   default_reasoning?: ReasoningSelectionPayload | null;
 }
+
+export type CustomReasoningProfile =
+  | 'provider_default'
+  | 'effort'
+  | 'toggle'
+  | 'enable_thinking'
+  | 'thinking_type'
+  | 'thinking_effort'
+  | 'broad_compat';
+
+export type ReasoningWireProfile = CustomReasoningProfile | 'catalog_standard';
 
 export type ModelConfigurationInput =
   | {
@@ -119,6 +131,7 @@ export type ModelConfigurationInput =
     route_id: string;
     model_id: string;
     wire_api: 'openai_chat_completions' | 'openai_responses';
+    reasoning_wire_profile: ReasoningWireProfile;
     api_key: string;
   }
   | {
@@ -136,7 +149,9 @@ export type ModelConfigurationInput =
     reasoning:
       | { kind: 'provider_default' }
       | { kind: 'toggle' }
-      | { kind: 'effort'; values: string[] };
+      | { kind: 'enable_thinking' }
+      | { kind: 'thinking_type' }
+      | { kind: 'effort' | 'thinking_effort' | 'broad_compat'; values: string[] };
   };
 
 export interface ModelCatalogWireApi {
@@ -145,6 +160,7 @@ export interface ModelCatalogWireApi {
   reason: string | null;
   endpoint: string | null;
   reasoning?: ReasoningControlSummary;
+  reasoning_wire_profiles?: ReasoningWireProfile[];
   recommended?: boolean;
 }
 

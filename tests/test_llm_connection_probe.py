@@ -10,6 +10,7 @@ from pulsara_agent.llm.model_catalog import ReasoningProviderDefault, WireApi
 from pulsara_agent.llm.model_connections import (
     ModelConnectionAuthentication,
     ModelConnectionId,
+    ReasoningWireProfile,
     UserDeclaredModelTarget,
 )
 from pulsara_agent.llm.model_target import create_user_declared_model_connection
@@ -73,6 +74,7 @@ def test_no_auth_probe_uses_generic_chat_without_authorization_header() -> None:
             ModelConnectionAuthentication.NONE,
         ),
         route_wires=route_wires,
+        reasoning_wire_profile=ReasoningWireProfile.PROVIDER_DEFAULT,
         connection_id=ModelConnectionId("model-connection:" + "e" * 32),
     )
     try:

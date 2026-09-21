@@ -25,6 +25,7 @@ from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     ModelConnectionConfig,
     ModelConnectionId,
+    ReasoningWireProfile,
 )
 from pulsara_agent.llm.model_target import RouteWireRegistry
 from pulsara_agent.llm.normalized_transport import NormalizedLLMTransportRegistry
@@ -186,6 +187,7 @@ def test_model_runtime(
         connection_id,
         ModelTargetKey("test", parsed_wire_api, model_id),
         base_url,
+        ReasoningWireProfile.CATALOG_STANDARD,
     )
     settings = StaticTestSettingsStore(
         LocalSettings(

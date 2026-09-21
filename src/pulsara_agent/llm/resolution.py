@@ -117,6 +117,7 @@ def resolve_model_target(
         "canonical_endpoint_base_url": canonical_endpoint,
         "transport_binding_id": adapter.transport_binding_id,
         "transport_contract_version": adapter.transport_contract_version,
+        "reasoning_wire_profile": contract.reasoning_wire.profile.value,
         "model_identity_policy": adapter.model_identity_policy.value,
         "input_modalities": contract.target_facts.input_modalities,
         "tool_call_capability": contract.target_facts.tool_call is not False,

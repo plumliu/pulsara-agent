@@ -8,7 +8,9 @@ import {
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   LocalSettingsReadModel, ModelCatalogReadModel,
-  ModelConfigurationInput, ModelConfigurationSummary, RuntimeAdapter, RuntimeBootstrap,
+  CustomReasoningProfile, ModelConfigurationInput, ModelConfigurationSummary,
+  ReasoningWireProfile,
+  RuntimeAdapter, RuntimeBootstrap,
 } from '../lib/runtime-adapter';
 import type { RuntimeStatus } from '../lib/pulsara-types';
 import { RuntimeApiError } from '../lib/runtime-adapter';
@@ -18,7 +20,7 @@ import { ToolResultDisplayContext } from '../lib/tool-result-display';
 type SettingsSection = 'general' | 'models' | 'service';
 type CredentialKind = 'embedding' | 'rerank';
 type ModelConfigurationSource = 'models_dev' | 'user_declared';
-type CustomReasoningKind = 'provider_default' | 'toggle' | 'effort';
+type CustomReasoningKind = CustomReasoningProfile;
 
 interface SettingsViewProps {
   theme: 'light' | 'dark';
@@ -81,6 +83,62 @@ function connectionCredentialLabel(connection: ModelConfigurationSummary): strin
 
 function parseEffortValues(value: string): string[] {
   return [...new Set(value.split(/[,，]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+const effortReasoningProfiles = new Set<CustomReasoningKind>([
+  'effort', 'thinking_effort', 'broad_compat',
+]);
+const chatOnlyReasoningProfiles = new Set<CustomReasoningKind>([
+  'enable_thinking', 'thinking_type', 'thinking_effort', 'broad_compat',
+]);
+
+function reasoningProfileDescription(profile: ReasoningWireProfile): string {
+  return {
+    provider_default: '不发送推理控制字段，由服务端自行决定。',
+    effort: '使用所选协议的标准 effort 字段。',
+    toggle: 'Chat 发送 reasoning.enabled；Responses 映射为 high / none。',
+    enable_thinking: '发送 enable_thinking 布尔值。',
+    thinking_type: '发送 thinking.type 的 enabled / disabled。',
+    thinking_effort: '同时发送 thinking.type 与 reasoning_effort；关闭时只发送 disabled。',
+    broad_compat: '同时发送四种常见兼容字段；严格服务端可能拒绝未知字段。',
+    catalog_standard: '按照目录声明的能力使用所选协议的标准字段。',
+  }[profile];
+}
+
+function reasoningProfileLabel(profile: ReasoningWireProfile): string {
+  return {
+    provider_default: '由服务端决定',
+    effort: '标准 effort',
+    toggle: '推理开关',
+    enable_thinking: 'enable_thinking 开关',
+    thinking_type: 'thinking.type 开关',
+    thinking_effort: 'thinking.type + effort',
+    broad_compat: '多字段兼容组合',
+    catalog_standard: '目录标准映射',
+  }[profile];
+}
+
+function catalogReasoningProfileDescription(
+  profile: ReasoningWireProfile,
+  reasoningKind?: string,
+): string {
+  if (reasoningKind !== 'fixed_on') return reasoningProfileDescription(profile);
+  return {
+    toggle: '目录声明该模型固定开启推理；此连接固定发送启用形状，会话中不显示开关。',
+    enable_thinking: '目录声明该模型固定开启推理；发送 enable_thinking: true，会话中不显示开关。',
+    thinking_type: '目录声明该模型固定开启推理；发送 thinking.type: enabled，会话中不显示开关。',
+  }[profile as 'toggle' | 'enable_thinking' | 'thinking_type']
+    ?? reasoningProfileDescription(profile);
+}
+
+function reasoningProfilePayload(
+  profile: CustomReasoningKind,
+  values: string[],
+): Extract<ModelConfigurationInput, { source: 'user_declared' }>['reasoning'] {
+  if (profile === 'effort' || profile === 'thinking_effort' || profile === 'broad_compat') {
+    return { kind: profile, values };
+  }
+  return { kind: profile };
 }
 
 function DashScopeCredentialRow({ adapter, kind, state, onChanged, onNotify }: {
@@ -174,6 +232,7 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
   const [maxOutputTokens, setMaxOutputTokens] = useState('8192');
   const [toolCall, setToolCall] = useState(true);
   const [imageInput, setImageInput] = useState(false);
+  const [catalogReasoningProfile, setCatalogReasoningProfile] = useState<ReasoningWireProfile>('catalog_standard');
   const [customReasoning, setCustomReasoning] = useState<CustomReasoningKind>('provider_default');
   const [effortValues, setEffortValues] = useState('low, medium, high');
   const [keyPresent, setKeyPresent] = useState(false);
@@ -241,7 +300,8 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
     setConfigurationName(''); setBaseUrl('');
     setAuthentication('bearer_api_key');
     setContextTokens('256000'); setMaxOutputTokens('8192');
-    setToolCall(true); setCustomReasoning('provider_default');
+    setToolCall(true); setCatalogReasoningProfile('catalog_standard');
+    setCustomReasoning('provider_default');
     setImageInput(false);
     setEffortValues('low, medium, high');
   };
@@ -249,8 +309,12 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
   const modelDraft = (): ModelConfigurationInput | undefined => {
     const apiKey = modelKey.current?.value ?? '';
     if (configurationSource === 'models_dev') {
-      if (!routeId || !modelId || !wireApi || !apiKey || !selectedWire?.executable) return undefined;
-      return { source: 'models_dev', route_id: routeId, model_id: modelId, wire_api: wireApi, api_key: apiKey };
+      if (!routeId || !modelId || !wireApi || !apiKey || !selectedWire?.executable
+        || !selectedWire.reasoning_wire_profiles?.includes(catalogReasoningProfile)) return undefined;
+      return {
+        source: 'models_dev', route_id: routeId, model_id: modelId, wire_api: wireApi,
+        reasoning_wire_profile: catalogReasoningProfile, api_key: apiKey,
+      };
     }
     const context = Number(contextTokens);
     const output = Number(maxOutputTokens);
@@ -259,16 +323,14 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
       || !Number.isInteger(context) || context < minimumContextTokens
       || !Number.isInteger(output) || output < 1 || output > context
       || (authentication === 'bearer_api_key' && !apiKey)
-      || (customReasoning === 'effort' && !efforts.length)) return undefined;
+      || (effortReasoningProfiles.has(customReasoning) && !efforts.length)) return undefined;
     return {
       source: 'user_declared', configuration_name: configurationName.trim(),
       base_url: baseUrl.trim(), model_id: modelId.trim(), wire_api: wireApi,
       authentication, api_key: authentication === 'none' ? null : apiKey,
       context_tokens: context, max_output_tokens: output, tool_call: toolCall,
       input_modalities: imageInput ? ['text', 'image'] : ['text'],
-      reasoning: customReasoning === 'effort'
-        ? { kind: 'effort', values: efforts }
-        : { kind: customReasoning },
+      reasoning: reasoningProfilePayload(customReasoning, efforts),
     };
   };
 
@@ -413,10 +475,11 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
     && Number.isInteger(parsedContextTokens) && parsedContextTokens >= minimumContextTokens
     && Number.isInteger(parsedMaxOutputTokens) && parsedMaxOutputTokens >= 1
     && parsedMaxOutputTokens <= parsedContextTokens
-    && (customReasoning !== 'effort' || parseEffortValues(effortValues).length),
+    && (!effortReasoningProfiles.has(customReasoning) || parseEffortValues(effortValues).length),
   );
   const draftReady = configurationSource === 'models_dev'
-    ? Boolean(routeId && modelId && wireApi && selectedWire?.executable && keyPresent)
+    ? Boolean(routeId && modelId && wireApi && selectedWire?.executable && keyPresent
+      && selectedWire.reasoning_wire_profiles?.includes(catalogReasoningProfile))
     : customDeclarationReady && (authentication === 'none' || keyPresent);
 
   return <section className="surface-view settings-view">
@@ -439,36 +502,37 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
         </section>}
         {section === 'models' && <>
           <section className="settings-group model-settings-group"><header><Bot size={16} /><div><h2>模型配置</h2><p>每张卡片是一条可在会话中选择的独立连接。</p></div><button className="settings-header-action" onClick={() => setAdding((value) => !value)}><Plus size={13} />添加配置</button></header>
-            {modelConfigurations.length ? <div className="model-card-list">{modelConfigurations.map((connection) => <article className="model-config-card" key={connection.id}><span className="model-config-card__icon"><Bot size={15} /></span><span><strong>{connectionTitle(connection)}</strong><small>{wireLabel(connection.wire_api)} · {formatTokens(connection.context_tokens)} 上下文 · {connectionCredentialLabel(connection)}</small><small>输入：{formatModalities(connection.input_modalities)}{connection.source === 'models_dev' && <> · 输出：{formatModalities(connection.output_modalities)}</>}</small><code>{connection.model_id}</code></span><div className="model-config-card__actions"><span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : '配置不可用'}</span>{deleteCandidateId === connection.id ? <div className="model-delete-confirmation"><span>删除后，已有会话不会自动改用其他模型。</span><button disabled={deletingModelId === connection.id} onClick={() => setDeleteCandidateId(undefined)}>取消</button><button className="subtle-danger" disabled={deletingModelId === connection.id} onClick={() => void deleteModel(connection)}>{deletingModelId === connection.id ? <LoaderCircle size={13} /> : <Trash2 size={13} />}确认删除</button></div> : <button className="model-delete-trigger subtle-danger" aria-label={`删除模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId)} onClick={() => setDeleteCandidateId(connection.id)}><Trash2 size={13} />删除</button>}</div></article>)}</div>
+            {modelConfigurations.length ? <div className="model-card-list">{modelConfigurations.map((connection) => <article className="model-config-card" key={connection.id}><span className="model-config-card__icon"><Bot size={15} /></span><span><strong>{connectionTitle(connection)}</strong><small>{wireLabel(connection.wire_api)} · {formatTokens(connection.context_tokens)} 上下文 · {connectionCredentialLabel(connection)}</small><small>输入：{formatModalities(connection.input_modalities)}{connection.source === 'models_dev' && <> · 输出：{formatModalities(connection.output_modalities)}</>}</small>{connection.reasoning_wire_profile && <small>推理请求：{reasoningProfileLabel(connection.reasoning_wire_profile)}</small>}<code>{connection.model_id}</code></span><div className="model-config-card__actions"><span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : '配置不可用'}</span>{deleteCandidateId === connection.id ? <div className="model-delete-confirmation"><span>删除后，已有会话不会自动改用其他模型。</span><button disabled={deletingModelId === connection.id} onClick={() => setDeleteCandidateId(undefined)}>取消</button><button className="subtle-danger" disabled={deletingModelId === connection.id} onClick={() => void deleteModel(connection)}>{deletingModelId === connection.id ? <LoaderCircle size={13} /> : <Trash2 size={13} />}确认删除</button></div> : <button className="model-delete-trigger subtle-danger" aria-label={`删除模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId)} onClick={() => setDeleteCandidateId(connection.id)}><Trash2 size={13} />删除</button>}</div></article>)}</div>
               : <div className="settings-empty"><Bot size={18} /><strong>还没有模型配置</strong><span>添加后，在每个会话的输入框下方显式选择要使用的连接。</span></div>}
           </section>
           {adding && <section className="settings-group model-add-panel"><header><Plus size={16} /><div><h2>添加模型配置</h2><p>保存与测试相互独立；只有测试会发送一次极短模型请求。</p></div>{configurationSource === 'models_dev' && <button className="settings-header-action" disabled={catalogRefreshing} onClick={() => void refreshCatalog()}><RefreshCw size={13} />刷新目录</button>}</header>
             <div className="model-source-picker" role="group" aria-label="模型配置来源"><button className={configurationSource === 'models_dev' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('models_dev'); }}>Models.dev 目录</button><button className={configurationSource === 'user_declared' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('user_declared'); }}>自定义服务</button></div>
             {configurationSource === 'models_dev' ? <>
               <div className="settings-form-grid">
-                <label><span>提供方</span><select value={routeId} onChange={(event) => { setRouteId(event.target.value); setModelId(''); setWireApi(''); }}><option value="">选择 Provider</option>{selectableRoutes.map((route) => <option key={route.route_id} value={route.route_id}>{route.display_name}</option>)}</select></label>
-                <label><span>模型</span><select value={modelId} disabled={!selectedRoute} onChange={(event) => { setModelId(event.target.value); setWireApi(''); }}><option value="">选择 Model ID</option>{selectableModels.map((model) => <option key={model.model_id} value={model.model_id}>{model.display_name} · {model.model_id}</option>)}</select></label>
-                <label><span>API 协议</span><select value={wireApi} disabled={!selectedModel || !hasExecutableWire} onChange={(event) => setWireApi(event.target.value as typeof wireApi)}><option value="">选择 Chat 或 Responses</option>{selectedModel?.wire_apis.map((wire) => <option key={wire.wire_api} value={wire.wire_api} disabled={!wire.executable}>{wireLabel(wire.wire_api)}{wire.recommended ? ' · models.dev 建议' : ''}{wire.executable ? '' : ' · 暂不支持'}</option>)}</select></label>
+                <label><span>提供方</span><select value={routeId} onChange={(event) => { setRouteId(event.target.value); setModelId(''); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Provider</option>{selectableRoutes.map((route) => <option key={route.route_id} value={route.route_id}>{route.display_name}</option>)}</select></label>
+                <label><span>模型</span><select value={modelId} disabled={!selectedRoute} onChange={(event) => { setModelId(event.target.value); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Model ID</option>{selectableModels.map((model) => <option key={model.model_id} value={model.model_id}>{model.display_name} · {model.model_id}</option>)}</select></label>
+                <label><span>API 协议</span><select value={wireApi} disabled={!selectedModel || !hasExecutableWire} onChange={(event) => { setWireApi(event.target.value as typeof wireApi); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Chat 或 Responses</option>{selectedModel?.wire_apis.map((wire) => <option key={wire.wire_api} value={wire.wire_api} disabled={!wire.executable}>{wireLabel(wire.wire_api)}{wire.recommended ? ' · models.dev 建议' : ''}{wire.executable ? '' : ' · 暂不支持'}</option>)}</select></label>
+                <label><span>Reasoning 请求形状</span><select aria-label="Reasoning 请求形状" value={catalogReasoningProfile} disabled={!selectedWire} onChange={(event) => setCatalogReasoningProfile(event.target.value as ReasoningWireProfile)}>{selectedWire?.reasoning_wire_profiles?.map((profile) => <option key={profile} value={profile}>{reasoningProfileLabel(profile)}</option>)}</select><small>{catalogReasoningProfileDescription(catalogReasoningProfile, selectedWire?.reasoning?.kind)}</small></label>
                 <label><span>API key</span><input ref={modelKey} type="password" autoComplete="new-password" placeholder="保存到本机配置" onChange={(event) => setKeyPresent(Boolean(event.target.value))} /></label>
               </div>
               {selectedModel && !hasExecutableWire && <p className="inline-warning"><CircleAlert size={13} />该提供方没有声明 OpenAI-compatible 接口，无法使用通用 Chat / Responses adapter。</p>}
-              {selectedModel && <div className="model-confirmation"><strong>确认连接</strong><dl><div><dt>提供方</dt><dd>{selectedRoute?.display_name}</dd></div><div><dt>模型</dt><dd>{selectedModel.model_id}</dd></div><div><dt>协议</dt><dd>{selectedWire ? wireLabel(selectedWire.wire_api) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{selectedWire?.endpoint ?? '目录未提供'}</dd></div><div><dt>上下文</dt><dd>{formatTokens(selectedModel.context_tokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(selectedModel.input_modalities)}</dd></div><div><dt>输出模态</dt><dd>{formatModalities(selectedModel.output_modalities)}</dd></div></dl><p>模态来自 models.dev 中所选提供方与模型的记录。Pulsara 当前支持文字、图片输入和文字回复。</p>{selectedShapeWarning && <p className="inline-warning"><CircleAlert size={13} />所选协议与 models.dev 建议不同；仍可保存，调用失败时请返回这里添加另一配置。</p>}<p>Pulsara 当前只支持与 OpenAI Chat Completions 或 Responses 兼容的接口。模型出现在目录中不代表所选提供方一定支持你选择的 API 协议。</p><div className="form-actions"><button onClick={() => { resetModelDraft(); setAdding(false); }}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}保存配置</button></div></div>}
+              {selectedModel && <div className="model-confirmation"><strong>确认连接</strong><dl><div><dt>提供方</dt><dd>{selectedRoute?.display_name}</dd></div><div><dt>模型</dt><dd>{selectedModel.model_id}</dd></div><div><dt>协议</dt><dd>{selectedWire ? wireLabel(selectedWire.wire_api) : '未选择'}</dd></div><div><dt>推理形状</dt><dd>{selectedWire ? reasoningProfileLabel(catalogReasoningProfile) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{selectedWire?.endpoint ?? '目录未提供'}</dd></div><div><dt>上下文</dt><dd>{formatTokens(selectedModel.context_tokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(selectedModel.input_modalities)}</dd></div><div><dt>输出模态</dt><dd>{formatModalities(selectedModel.output_modalities)}</dd></div></dl><p>模态与推理能力来自 models.dev；请求形状由你显式选择，Pulsara 不会根据服务商或模型名称猜测。</p>{selectedShapeWarning && <p className="inline-warning"><CircleAlert size={13} />所选协议与 models.dev 建议不同；仍可保存，调用失败时请返回这里添加另一配置。</p>}<p>Pulsara 当前只支持与 OpenAI Chat Completions 或 Responses 兼容的接口。模型出现在目录中不代表所选提供方一定支持你选择的 API 协议。</p><div className="form-actions"><button onClick={() => { resetModelDraft(); setAdding(false); }}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}保存配置</button></div></div>}
             </> : <>
               <div className="settings-form-grid">
                 <label><span>配置名称</span><input value={configurationName} onChange={(event) => setConfigurationName(event.target.value)} placeholder="例如：公司内网模型" /></label>
                 <label><span>Base URL</span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://example.com/v1" /></label>
                 <label><span>Model ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="实际发送给 endpoint 的模型 ID" /></label>
-                <label><span>API 协议</span><select value={wireApi} onChange={(event) => { const value = event.target.value as typeof wireApi; setWireApi(value); if (value === 'openai_responses' && customReasoning === 'toggle') setCustomReasoning('provider_default'); }}><option value="">选择 Chat 或 Responses</option><option value="openai_chat_completions">Chat Completions</option><option value="openai_responses">Responses</option></select></label>
+                <label><span>API 协议</span><select value={wireApi} onChange={(event) => { const value = event.target.value as typeof wireApi; setWireApi(value); if (value === 'openai_responses' && chatOnlyReasoningProfiles.has(customReasoning)) setCustomReasoning('provider_default'); }}><option value="">选择 Chat 或 Responses</option><option value="openai_chat_completions">Chat Completions</option><option value="openai_responses">Responses</option></select></label>
                 <label><span>认证方式</span><select value={authentication} onChange={(event) => { const value = event.target.value as typeof authentication; setAuthentication(value); if (value === 'none' && modelKey.current) { modelKey.current.value = ''; setKeyPresent(false); } }}><option value="bearer_api_key">Bearer API key</option><option value="none">无需认证</option></select></label>
                 {authentication === 'bearer_api_key' && <label><span>API key</span><input ref={modelKey} type="password" autoComplete="new-password" placeholder="保存到本机配置" onChange={(event) => setKeyPresent(Boolean(event.target.value))} /></label>}
                 <label><span>Context window</span><input type="number" min={minimumContextTokens} step="1" value={contextTokens} onChange={(event) => setContextTokens(event.target.value)} /></label>
                 <label><span>最大输出长度</span><input type="number" min="1" step="1" value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(event.target.value)} /></label>
-                <label><span>Reasoning 控制</span><select value={customReasoning} onChange={(event) => setCustomReasoning(event.target.value as CustomReasoningKind)}><option value="provider_default">Provider default</option><option value="toggle" disabled={wireApi === 'openai_responses'}>Toggle · 仅 Chat</option><option value="effort">明确 effort 列表</option></select></label>
-                {customReasoning === 'effort' && <label><span>Effort 列表</span><input value={effortValues} onChange={(event) => setEffortValues(event.target.value)} placeholder="low, medium, high" /></label>}
+                <label><span>Reasoning 请求形状</span><select aria-label="Reasoning 请求形状" value={customReasoning} onChange={(event) => setCustomReasoning(event.target.value as CustomReasoningKind)}><option value="provider_default">由服务端决定</option><option value="effort">标准 effort</option><option value="toggle">推理开关</option>{wireApi !== 'openai_responses' && <><option value="enable_thinking">enable_thinking 开关</option><option value="thinking_type">thinking.type 开关</option><option value="thinking_effort">thinking.type + effort</option><option value="broad_compat">多字段兼容组合</option></>}</select><small>{reasoningProfileDescription(customReasoning)}</small></label>
+                {effortReasoningProfiles.has(customReasoning) && <label><span>Effort 列表</span><input value={effortValues} onChange={(event) => setEffortValues(event.target.value)} placeholder="low, medium, high" /></label>}
                 <label className="model-boolean-field"><input type="checkbox" checked={toolCall} onChange={(event) => setToolCall(event.target.checked)} /><span>支持 tool calling</span></label>
                 <label className="model-boolean-field"><input type="checkbox" checked={imageInput} onChange={(event) => setImageInput(event.target.checked)} /><span>支持图像输入</span></label>
               </div>
-              <div className="model-confirmation"><strong>用户声明的连接事实</strong>{customDeclarationReady && <dl><div><dt>配置</dt><dd>{configurationName.trim()}</dd></div><div><dt>模型</dt><dd>{modelId.trim()}</dd></div><div><dt>协议</dt><dd>{wireApi ? wireLabel(wireApi) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{baseUrl.trim()}</dd></div><div><dt>上下文</dt><dd>{formatTokens(parsedContextTokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(imageInput ? ['text', 'image'] : ['text'])}</dd></div><div><dt>认证</dt><dd>{authentication === 'none' ? '无需认证' : 'Bearer API key'}</dd></div></dl>}<p>这些能力由你直接声明，不会在线探测或自动修正。Pulsara 只会使用通用 OpenAI-compatible Chat / Responses adapter；协议选错时会直接报告错误。</p><p>Context window 至少为 256,000。无法确认 reasoning 形状时请选择 Provider default。</p><div className="form-actions"><button onClick={() => { resetModelDraft(); setAdding(false); }}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}保存配置</button></div></div>
+              <div className="model-confirmation"><strong>用户声明的连接事实</strong>{customDeclarationReady && <dl><div><dt>配置</dt><dd>{configurationName.trim()}</dd></div><div><dt>模型</dt><dd>{modelId.trim()}</dd></div><div><dt>协议</dt><dd>{wireApi ? wireLabel(wireApi) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{baseUrl.trim()}</dd></div><div><dt>推理形状</dt><dd>{reasoningProfileLabel(customReasoning)}</dd></div><div><dt>上下文</dt><dd>{formatTokens(parsedContextTokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(imageInput ? ['text', 'image'] : ['text'])}</dd></div><div><dt>认证</dt><dd>{authentication === 'none' ? '无需认证' : 'Bearer API key'}</dd></div></dl>}<p>这些能力由你直接声明，不会根据服务商或模型名称自动判断，也不会在失败后偷偷换参数重试。Pulsara 只使用通用 Chat / Responses adapter。</p><p>Context window 至少为 256,000。拿不准请求形状时请选择“由服务端决定”。</p><div className="form-actions"><button onClick={() => { resetModelDraft(); setAdding(false); }}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}保存配置</button></div></div>
             </>}
           </section>}
           <section className="settings-group"><header><KeyRound size={16} /><div><h2>记忆检索 · 阿里云百炼 DashScope</h2><p>可选的相关性增强；未配置不会阻止对话或基础记忆路径。</p></div></header>{settings && <div className="credential-list"><DashScopeCredentialRow adapter={adapter} kind="embedding" state={settings.local_settings.dashscope_credentials.embedding_configured} onChanged={(state) => updateDashScopeConfigured('embedding', state)} onNotify={onNotify} /><DashScopeCredentialRow adapter={adapter} kind="rerank" state={settings.local_settings.dashscope_credentials.rerank_configured} onChanged={(state) => updateDashScopeConfigured('rerank', state)} onNotify={onNotify} /></div>}</section>

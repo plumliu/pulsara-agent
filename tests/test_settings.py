@@ -16,6 +16,7 @@ from pulsara_agent.llm.model_connections import (
     ModelConnectionAuthentication,
     ModelConnectionConfig,
     ModelConnectionId,
+    ReasoningWireProfile,
     UserDeclaredModelTarget,
 )
 from pulsara_agent.settings import (
@@ -39,6 +40,7 @@ def _connection(suffix: str, *, model: str = "glm-5.3") -> ModelConnectionConfig
         ModelConnectionId(f"model-connection:{suffix * 32}"),
         ModelTargetKey("zhipuai", WireApi.OPENAI_CHAT_COMPLETIONS, model),
         "https://open.bigmodel.cn/api/paas/v4",
+        ReasoningWireProfile.CATALOG_STANDARD,
     )
 
 
@@ -218,6 +220,7 @@ def test_store_publishes_no_auth_connection_without_a_key(
             ModelConnectionId("model-connection:" + "c" * 32),
             ModelTargetKey("user_declared", WireApi.OPENAI_RESPONSES, "local-model"),
             "http://127.0.0.1:11434/v1",
+            ReasoningWireProfile.PROVIDER_DEFAULT,
             UserDeclaredModelTarget(
                 "Local No Auth",
                 256_000,

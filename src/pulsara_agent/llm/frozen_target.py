@@ -14,12 +14,13 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
     openai_native_function_tool_contract_fingerprint,
 )
 from pulsara_agent.llm.model_catalog import ReasoningControlContract
-from pulsara_agent.llm.model_target import ReasoningLowerer
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     ModelConnectionAuthentication,
     ModelConnectionId,
+    ReasoningWireProfile,
 )
+from pulsara_agent.llm.model_target import ReasoningLowerer
 from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
@@ -44,6 +45,7 @@ class FrozenProviderProjectionStrategy:
     transport_binding_id: str
     transport_contract_version: str
     assistant_replay_contract: str
+    reasoning_wire_profile: ReasoningWireProfile
     supported_reasoning_families: frozenset[str]
     lower_reasoning: ReasoningLowerer
     context_materializer: object
@@ -78,6 +80,8 @@ class FrozenEpochModelTargetBundle:
             profile.wire_api != self.target_fact.wire_api
             or profile.model_identity_policy.value
             != self.target_fact.model_identity_policy
+            or self.projection_strategy.reasoning_wire_profile.value
+            != self.target_fact.reasoning_wire_profile
             or self.estimator.fact != self.target_fact.token_estimator
         ):
             raise ValueError("frozen epoch model target bundle drifted")
@@ -189,8 +193,11 @@ def _freeze_provider_projection_strategy(
         transport_binding_id=route.transport_binding_id,
         transport_contract_version=route.transport_contract_version,
         assistant_replay_contract=route.assistant_replay_contract,
-        supported_reasoning_families=frozenset(route.supported_reasoning_families),
-        lower_reasoning=route.lower_reasoning,
+        reasoning_wire_profile=target.contract.reasoning_wire.profile,
+        supported_reasoning_families=frozenset(
+            target.contract.reasoning_wire.supported_reasoning_families
+        ),
+        lower_reasoning=target.contract.reasoning_wire.lower_reasoning,
         context_materializer=context_materializer,
         semantic_wire_group=semantic_wire_group,
     )

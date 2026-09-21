@@ -528,6 +528,7 @@ class FakeAdapter implements RuntimeAdapter {
             endpoint: 'http://localhost',
             recommended: true,
             reasoning: bootstrap.model_configurations[0].reasoning,
+            reasoning_wire_profiles: ['catalog_standard', 'provider_default'],
           }],
         }],
       }],
@@ -2364,9 +2365,12 @@ describe('PulsaraApp', () => {
     fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'test-model' } });
     expect(screen.getByText('文字、图片、音频、视频、PDF')).toBeTruthy();
     expect(screen.getByText('文字、future-output')).toBeTruthy();
-    expect(screen.getByText(/Pulsara 当前支持文字、图片输入和文字回复/)).toBeTruthy();
+    expect(screen.getByText(/模态与推理能力来自 models.dev/)).toBeTruthy();
     await screen.findByRole('option', { name: 'Responses · models.dev 建议' });
     fireEvent.change(screen.getByLabelText('API 协议'), { target: { value: 'openai_responses' } });
+    fireEvent.change(screen.getByLabelText('Reasoning 请求形状'), {
+      target: { value: 'provider_default' },
+    });
     const secret = 'front-end-secret-sentinel';
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: secret } });
     expect(screen.getByText('确认连接')).toBeTruthy();
@@ -2378,6 +2382,7 @@ describe('PulsaraApp', () => {
       route_id: 'test',
       model_id: 'test-model',
       wire_api: 'openai_responses',
+      reasoning_wire_profile: 'provider_default',
       api_key: secret,
     }));
     await waitFor(() => expect(screen.queryByLabelText('API key')).toBeNull());
@@ -2430,7 +2435,7 @@ describe('PulsaraApp', () => {
     fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://127.0.0.1:9000/v1' } });
     fireEvent.change(screen.getByLabelText('Model ID'), { target: { value: 'local-model' } });
     fireEvent.change(screen.getByLabelText('API 协议'), { target: { value: 'openai_chat_completions' } });
-    fireEvent.change(screen.getByLabelText('Reasoning 控制'), { target: { value: 'effort' } });
+    fireEvent.change(screen.getByLabelText('Reasoning 请求形状'), { target: { value: 'effort' } });
     fireEvent.change(screen.getByLabelText('Effort 列表'), { target: { value: 'low, high, high' } });
     const secret = 'custom-front-end-secret';
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: secret } });
@@ -2461,6 +2466,32 @@ describe('PulsaraApp', () => {
       input_modalities: ['text', 'image'],
       api_key: secret,
     })));
+  });
+
+  it('shows only request profiles valid for the selected wire protocol', async () => {
+    const adapter = new FakeAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '模型' }));
+    fireEvent.click(screen.getByRole('button', { name: /添加配置/ }));
+    fireEvent.click(screen.getByRole('button', { name: '自定义服务' }));
+
+    const protocol = screen.getByLabelText('API 协议');
+    const profile = screen.getByLabelText('Reasoning 请求形状') as unknown as HTMLSelectElement;
+    fireEvent.change(protocol, { target: { value: 'openai_responses' } });
+    expect([...profile.options].map((option) => option.value)).toEqual([
+      'provider_default', 'effort', 'toggle',
+    ]);
+
+    fireEvent.change(protocol, { target: { value: 'openai_chat_completions' } });
+    expect([...profile.options].map((option) => option.value)).toEqual([
+      'provider_default', 'effort', 'toggle', 'enable_thinking',
+      'thinking_type', 'thinking_effort', 'broad_compat',
+    ]);
+    fireEvent.change(profile, { target: { value: 'broad_compat' } });
+    expect(screen.getByText(/严格服务端可能拒绝未知字段/)).toBeTruthy();
+    expect(screen.getByLabelText('Effort 列表')).toBeTruthy();
   });
 
   it('allows a user-declared no-auth target without rendering an API key field', async () => {

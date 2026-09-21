@@ -16,8 +16,10 @@ from pulsara_agent.llm.model_catalog import (
     ModelHardLimits,
     ModelTargetKey,
     ReasoningControlContract,
+    ReasoningFixedOn,
     ReasoningProviderDefault,
     ReasoningSelectableControls,
+    ReasoningUnavailable,
     RouteWireDialect,
     SelectableModelCatalog,
     WireApi,
@@ -30,6 +32,7 @@ from pulsara_agent.llm.model_connections import (
     ReasoningEffortSelection,
     ReasoningSelection,
     ReasoningToggleSelection,
+    ReasoningWireProfile,
     USER_DECLARED_MODEL_ROUTE_ID,
     UserDeclaredModelTarget,
 )
@@ -60,8 +63,18 @@ class ReasoningWireFields:
 
 
 ReasoningLowerer = Callable[
-    [ReasoningSelection, ReasoningControlContract], ReasoningWireFields
+    [ReasoningSelection | None, ReasoningControlContract], ReasoningWireFields
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningWireContract:
+    profile: ReasoningWireProfile
+    supported_reasoning_families: frozenset[
+        Literal["effort", "toggle", "budget_tokens"]
+    ]
+    lower_reasoning: ReasoningLowerer
+    supports_fixed_on: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,10 +84,8 @@ class RouteWireContract:
     model_identity_policy: ModelIdentityPolicy
     assistant_replay_contract: str
     profile: RouteWireProfile
-    supported_reasoning_families: frozenset[
-        Literal["effort", "toggle", "budget_tokens"]
-    ]
-    lower_reasoning: ReasoningLowerer
+    reasoning_profiles: Mapping[ReasoningWireProfile, ReasoningWireContract]
+    default_reasoning_profile: ReasoningWireProfile
 
     def __post_init__(self) -> None:
         if not self.transport_binding_id or not self.transport_contract_version:
@@ -83,6 +94,23 @@ class RouteWireContract:
             raise ValueError("route/wire replay contract is incomplete")
         if self.profile.model_identity_policy is not self.model_identity_policy:
             raise ValueError("route/wire model identity policy drifted")
+        profiles = MappingProxyType(dict(self.reasoning_profiles))
+        if self.default_reasoning_profile not in profiles:
+            raise ValueError("route/wire default reasoning profile is unavailable")
+        if any(key is not contract.profile for key, contract in profiles.items()):
+            raise ValueError("route/wire reasoning profile registry drifted")
+        object.__setattr__(self, "reasoning_profiles", profiles)
+
+    def reasoning_contract(
+        self, profile: ReasoningWireProfile
+    ) -> ReasoningWireContract:
+        try:
+            return self.reasoning_profiles[profile]
+        except KeyError as exc:
+            raise KeyError(
+                f"reasoning profile {profile.value!r} is unavailable for "
+                f"{self.profile.wire_api}"
+            ) from exc
 
 
 @dataclass(slots=True)
@@ -145,6 +173,7 @@ class ModelTargetContract:
     key: ModelTargetKey
     target_facts: ModelTargetFacts
     reasoning: ReasoningControlContract
+    reasoning_wire: ReasoningWireContract
     route_wire: RouteWireContract
     canonical_endpoint_base_url: str
 
@@ -231,7 +260,7 @@ def derive_model_context_limits(entry: ModelCatalogEntry) -> ModelContextLimits:
 
 def controls_supported_by_adapter(
     reasoning: ReasoningControlContract,
-    contract: RouteWireContract,
+    contract: ReasoningWireContract,
 ) -> ReasoningControlContract:
     if not isinstance(reasoning, ReasoningSelectableControls):
         return reasoning
@@ -255,6 +284,53 @@ def controls_supported_by_adapter(
     return ReasoningSelectableControls(effort, toggle, budget)
 
 
+def reasoning_profile_compatible(
+    reasoning: ReasoningControlContract,
+    contract: ReasoningWireContract,
+) -> bool:
+    """Whether one catalog reasoning contract can use this wire shape."""
+
+    if contract.profile in {
+        ReasoningWireProfile.CATALOG_STANDARD,
+        ReasoningWireProfile.PROVIDER_DEFAULT,
+    }:
+        return True
+    if isinstance(reasoning, ReasoningFixedOn):
+        return contract.supports_fixed_on
+    if isinstance(reasoning, (ReasoningUnavailable, ReasoningProviderDefault)):
+        return False
+    if not isinstance(reasoning, ReasoningSelectableControls):
+        return False
+    return any(
+        (
+            family == "effort"
+            and reasoning.effort is not None
+        )
+        or (
+            family == "toggle"
+            and reasoning.toggle is not None
+        )
+        or (
+            family == "budget_tokens"
+            and reasoning.budget is not None
+        )
+        for family in contract.supported_reasoning_families
+    )
+
+
+def compatible_reasoning_profiles(
+    reasoning: ReasoningControlContract,
+    route_wire: RouteWireContract,
+) -> tuple[ReasoningWireProfile, ...]:
+    """Return compatible profiles in the route/wire registry's stable order."""
+
+    return tuple(
+        profile
+        for profile, contract in route_wire.reasoning_profiles.items()
+        if reasoning_profile_compatible(reasoning, contract)
+    )
+
+
 def resolve_model_target_contract(
     *,
     catalog: SelectableModelCatalog | None,
@@ -268,7 +344,16 @@ def resolve_model_target_contract(
         raise ModelTargetNotExecutable(str(exc)) from exc
     limits = derive_model_context_limits(entry)
     canonical_endpoint = canonicalize_endpoint(connection.base_url)
-    reasoning = controls_supported_by_adapter(entry.reasoning, route_wire)
+    requested_profile = connection.reasoning_wire_profile
+    try:
+        reasoning_wire = route_wire.reasoning_contract(requested_profile)
+    except KeyError as exc:
+        raise ModelTargetNotExecutable(str(exc)) from exc
+    if not reasoning_profile_compatible(entry.reasoning, reasoning_wire):
+        raise ModelTargetNotExecutable(
+            "selected reasoning request profile is incompatible with this model"
+        )
+    reasoning = controls_supported_by_adapter(entry.reasoning, reasoning_wire)
     if connection.user_declared is not None and reasoning != entry.reasoning:
         raise ModelTargetNotExecutable(
             "custom reasoning control is unsupported by the selected wire API"
@@ -284,6 +369,7 @@ def resolve_model_target_contract(
             input_modalities=entry.input_modalities,
         ),
         reasoning=reasoning,
+        reasoning_wire=reasoning_wire,
         route_wire=route_wire,
         canonical_endpoint_base_url=canonical_endpoint,
     )
@@ -331,6 +417,7 @@ def create_model_connection(
     catalog: SelectableModelCatalog,
     target: ModelTargetKey,
     route_wires: RouteWireRegistry,
+    reasoning_wire_profile: ReasoningWireProfile = ReasoningWireProfile.CATALOG_STANDARD,
     connection_id: ModelConnectionId | None = None,
 ) -> ResolvedModelConnection:
     try:
@@ -340,7 +427,12 @@ def create_model_connection(
     endpoint = route_wires.endpoint_for(entry)
     if endpoint is None:
         raise ModelTargetNotExecutable("model endpoint is unknown")
-    config = ModelConnectionConfig(connection_id or ModelConnectionId.new(), target, endpoint)
+    config = ModelConnectionConfig(
+        connection_id or ModelConnectionId.new(),
+        target,
+        endpoint,
+        reasoning_wire_profile,
+    )
     return ResolvedModelConnection(
         config=config,
         target=resolve_model_target_contract(
@@ -356,6 +448,7 @@ def create_user_declared_model_connection(
     base_url: str,
     declaration: UserDeclaredModelTarget,
     route_wires: RouteWireRegistry,
+    reasoning_wire_profile: ReasoningWireProfile,
     connection_id: ModelConnectionId | None = None,
 ) -> ResolvedModelConnection:
     resolved_id = connection_id or ModelConnectionId.new()
@@ -363,6 +456,7 @@ def create_user_declared_model_connection(
         id=resolved_id,
         target=ModelTargetKey(USER_DECLARED_MODEL_ROUTE_ID, wire_api, model_id),
         base_url=canonicalize_endpoint(base_url),
+        reasoning_wire_profile=reasoning_wire_profile,
         user_declared=declaration,
     )
     return ResolvedModelConnection(
@@ -530,8 +624,13 @@ def reasoning_wire_fields(
 ) -> ReasoningWireFields:
     validate_reasoning_selection(target.reasoning, selection)
     if selection is None:
+        if (
+            isinstance(target.reasoning, ReasoningFixedOn)
+            and target.reasoning_wire.supports_fixed_on
+        ):
+            return target.reasoning_wire.lower_reasoning(None, target.reasoning)
         return ReasoningWireFields({}, {})
-    return target.route_wire.lower_reasoning(selection, target.reasoning)
+    return target.reasoning_wire.lower_reasoning(selection, target.reasoning)
 
 
 __all__ = [
@@ -543,16 +642,19 @@ __all__ = [
     "ModelTargetContract",
     "ModelTargetNotExecutable",
     "ReasoningWireFields",
+    "ReasoningWireContract",
     "ResolvedModelConnection",
     "RouteWireContract",
     "RouteWireRegistry",
     "canonicalize_endpoint",
+    "compatible_reasoning_profiles",
     "controls_supported_by_adapter",
     "create_model_connection",
     "create_user_declared_model_connection",
     "default_reasoning_selection",
     "derive_model_context_limits",
     "reasoning_wire_fields",
+    "reasoning_profile_compatible",
     "reconcile_model_call_binding",
     "resolve_model_target_contract",
     "validate_reasoning_selection",

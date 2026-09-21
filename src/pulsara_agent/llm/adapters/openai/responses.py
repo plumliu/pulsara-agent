@@ -101,7 +101,7 @@ class OpenAIResponsesTransport:
     timeout_policy: OpenAITransportTimeoutPolicy
     api: str = OPENAI_RESPONSES_API
     binding_id: str = "pulsara.openai.responses"
-    contract_version: str = "v6-route-target-reasoning"
+    contract_version: str = "v8-connection-reasoning-profiles"
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
     retry_sleep: Callable[[float], Awaitable[None]] = field(
         default=asyncio.sleep, repr=False
@@ -380,6 +380,7 @@ _RESPONSES_NON_CONTEXT_BEARING_FIELDS = frozenset(
         "reasoning",
         "reasoning_effort",
         "thinking",
+        "enable_thinking",
         "timeout",
         "service_tier",
         "temperature",

@@ -19,11 +19,9 @@ from pulsara_agent.llm.model_catalog import (
     ModelCatalogOwner,
     ModelCatalogUnavailable,
     ModelTargetKey,
-    ReasoningEffortChoices,
     ReasoningFixedOn,
     ReasoningProviderDefault,
     ReasoningSelectableControls,
-    ReasoningToggle,
     ReasoningUnavailable,
     WireApi,
 )
@@ -31,13 +29,16 @@ from pulsara_agent.llm.model_connections import (
     ModelConnectionAuthentication,
     ModelConnectionConfig,
     ModelConnectionId,
+    ReasoningWireProfile,
     UserDeclaredModelTarget,
     model_call_binding_from_dict,
     model_connection_to_dict,
     reasoning_selection_to_dict,
+    user_declared_reasoning_from_dict,
 )
 from pulsara_agent.llm.model_target import (
     ResolvedModelConnection,
+    compatible_reasoning_profiles,
     controls_supported_by_adapter,
     create_model_connection,
     create_user_declared_model_connection,
@@ -114,23 +115,6 @@ def _reasoning_payload(value) -> dict[str, object]:
     raise TypeError(type(value).__name__)
 
 
-def _user_declared_reasoning(value: object):
-    if value == {"kind": "provider_default"}:
-        return ReasoningProviderDefault()
-    if value == {"kind": "toggle"}:
-        return ReasoningSelectableControls(toggle=ReasoningToggle())
-    if isinstance(value, dict) and set(value) == {"kind", "values"}:
-        if value["kind"] != "effort":
-            raise ValueError("custom reasoning kind is invalid")
-        values = value["values"]
-        if not isinstance(values, list) or not all(
-            isinstance(item, str) and item and item == item.strip() for item in values
-        ):
-            raise ValueError("custom reasoning efforts are invalid")
-        return ReasoningSelectableControls(effort=ReasoningEffortChoices(tuple(values)))
-    raise ValueError("custom reasoning has an invalid closed shape")
-
-
 def _catalog_entry_payload(
     entry: ModelCatalogEntry, *, model_runtime: ModelRuntime
 ) -> dict[str, object]:
@@ -164,8 +148,20 @@ def _catalog_entry_payload(
                     )
                 ),
                 "reasoning": _reasoning_payload(
-                    controls_supported_by_adapter(entry.reasoning, route_wire)
+                    controls_supported_by_adapter(
+                        entry.reasoning,
+                        route_wire.reasoning_contract(
+                            route_wire.default_reasoning_profile
+                        ),
+                    )
                 ),
+                "reasoning_wire_profiles": [
+                    profile.value
+                    for profile in compatible_reasoning_profiles(
+                        entry.reasoning,
+                        route_wire,
+                    )
+                ],
                 "recommended": (
                     (
                         entry.wire_shape_hint == "responses"
@@ -945,7 +941,14 @@ class LocalHttpServer:
     ) -> tuple[ResolvedModelConnection, str | None]:
         source = body.get("source")
         if source == "models_dev":
-            expected = {"source", "route_id", "model_id", "wire_api", "api_key"}
+            expected = {
+                "source",
+                "route_id",
+                "model_id",
+                "wire_api",
+                "reasoning_wire_profile",
+                "api_key",
+            }
             if set(body) != expected or not all(
                 isinstance(body[key], str) and body[key] for key in expected
             ):
@@ -960,6 +963,9 @@ class LocalHttpServer:
                     catalog=self.model_runtime.selectable_catalog(),
                     target=target,
                     route_wires=self.model_runtime.route_wires,
+                    reasoning_wire_profile=ReasoningWireProfile(
+                        cast(str, body["reasoning_wire_profile"])
+                    ),
                 ),
                 cast(str, body["api_key"]),
             )
@@ -1011,13 +1017,16 @@ class LocalHttpServer:
                 raise ValueError("custom bearer connection requires an API key")
         elif api_key is not None:
             raise ValueError("custom no-auth connection cannot include an API key")
+        reasoning_profile, reasoning = user_declared_reasoning_from_dict(
+            body["reasoning"]
+        )
         declaration = UserDeclaredModelTarget(
             configuration_name=name,
             total_context_tokens=context_tokens,
             max_output_tokens=max_output_tokens,
             tool_call=tool_call,
             input_modalities=tuple(input_modalities),
-            reasoning=_user_declared_reasoning(body["reasoning"]),
+            reasoning=reasoning,
             authentication=authentication,
         )
         return (
@@ -1027,6 +1036,7 @@ class LocalHttpServer:
                 base_url=base_url,
                 declaration=declaration,
                 route_wires=self.model_runtime.route_wires,
+                reasoning_wire_profile=reasoning_profile,
             ),
             cast(str | None, api_key),
         )
@@ -1248,6 +1258,7 @@ class LocalHttpServer:
                     else None
                 ),
                 "reasoning": _reasoning_payload(contract.reasoning),
+                "reasoning_wire_profile": contract.reasoning_wire.profile.value,
                 "default_reasoning": reasoning_selection_to_dict(
                     default_reasoning_selection(contract.reasoning)
                 ),

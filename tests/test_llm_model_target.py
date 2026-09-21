@@ -44,12 +44,14 @@ from pulsara_agent.llm.model_connections import (
     ReasoningBudgetSelection,
     ReasoningEffortSelection,
     ReasoningToggleSelection,
+    ReasoningWireProfile,
     UserDeclaredModelTarget,
 )
 from pulsara_agent.llm.model_target import (
     ModelReasoningSelectionInvalid,
     ModelTargetNotExecutable,
     canonicalize_endpoint,
+    compatible_reasoning_profiles,
     create_model_connection,
     create_user_declared_model_connection,
     default_reasoning_selection,
@@ -85,6 +87,7 @@ def _resolved_call(
     selection,
     *,
     fixture: dict[str, object] | None = None,
+    profile: ReasoningWireProfile = ReasoningWireProfile.CATALOG_STANDARD,
 ):
     catalog = selectable_catalog(
         parse_models_dev_catalog(fixture or catalog_fixture())
@@ -93,6 +96,7 @@ def _resolved_call(
         catalog=catalog,
         target=ModelTargetKey(route, api, model),
         route_wires=production_route_wire_registry(),
+        reasoning_wire_profile=profile,
         connection_id=ModelConnectionId("model-connection:" + "c" * 32),
     ).config
     binding = ModelCallBinding(connection.id, selection)
@@ -119,6 +123,53 @@ def _resolved_call(
         model_call_index=1,
     )
     return call, context
+
+
+def _user_declared_call(
+    *,
+    api: WireApi,
+    profile: ReasoningWireProfile,
+    reasoning: ReasoningSelectableControls,
+    selection: ReasoningEffortSelection | ReasoningToggleSelection,
+):
+    route_wires = production_route_wire_registry()
+    connection = create_user_declared_model_connection(
+        model_id="profile-model",
+        wire_api=api,
+        base_url="https://profiles.example/v1",
+        declaration=UserDeclaredModelTarget(
+            configuration_name="Typed Profile",
+            total_context_tokens=256_000,
+            max_output_tokens=8_192,
+            tool_call=True,
+            reasoning=reasoning,
+            authentication=ModelConnectionAuthentication.NONE,
+        ),
+        route_wires=route_wires,
+        reasoning_wire_profile=profile,
+        connection_id=ModelConnectionId("model-connection:" + "9" * 32),
+    ).config
+    binding = ModelCallBinding(connection.id, selection)
+    target = resolve_model_target(
+        connection=connection,
+        binding=binding,
+        catalog=None,
+        route_wires=route_wires,
+        registry=test_model_runtime(wire_api=api.value).transport_registry(
+            OpenAITransportTimeoutPolicy(1, 1, 1, 1, None)
+        ),
+    )
+    call = resolve_model_call(
+        target=target,
+        binding=binding,
+        purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+    )
+    return call, LLMContext(
+        messages=(LLMMessage.user("hello"),),
+        context_id="typed-profile",
+        resolved_model_call_id=call.resolved_model_call_id,
+        model_call_index=1,
+    )
 
 
 def test_exact_route_wire_and_model_resolve_to_different_control_domains() -> None:
@@ -313,6 +364,114 @@ def test_generic_chat_toggle_lowers_to_reasoning_enabled(enabled: bool) -> None:
     assert "reasoning" not in project_chat_context_bearing_payload_fields(payload)
 
 
+@pytest.mark.parametrize(
+    ("profile", "selection", "expected_root", "expected_extra"),
+    (
+        (
+            ReasoningWireProfile.ENABLE_THINKING,
+            ReasoningToggleSelection(False),
+            {},
+            {"enable_thinking": False},
+        ),
+        (
+            ReasoningWireProfile.THINKING_TYPE,
+            ReasoningToggleSelection(True),
+            {},
+            {"thinking": {"type": "enabled"}},
+        ),
+        (
+            ReasoningWireProfile.THINKING_EFFORT,
+            ReasoningEffortSelection("disabled"),
+            {},
+            {"thinking": {"type": "disabled"}},
+        ),
+        (
+            ReasoningWireProfile.THINKING_EFFORT,
+            ReasoningEffortSelection("enabled"),
+            {"reasoning_effort": "high"},
+            {"thinking": {"type": "enabled"}},
+        ),
+        (
+            ReasoningWireProfile.BROAD_COMPAT,
+            ReasoningEffortSelection("disabled"),
+            {"reasoning_effort": "none"},
+            {
+                "thinking": {"type": "disabled"},
+                "enable_thinking": False,
+                "reasoning": {"effort": "none"},
+            },
+        ),
+    ),
+)
+def test_user_declared_chat_reasoning_profiles_have_exact_payload_shapes(
+    profile: ReasoningWireProfile,
+    selection: ReasoningEffortSelection | ReasoningToggleSelection,
+    expected_root: dict[str, object],
+    expected_extra: dict[str, object],
+) -> None:
+    reasoning = (
+        ReasoningSelectableControls(toggle=ReasoningToggle())
+        if isinstance(selection, ReasoningToggleSelection)
+        else ReasoningSelectableControls(
+            effort=ReasoningEffortChoices((selection.value,))
+        )
+    )
+    call, context = _user_declared_call(
+        api=WireApi.OPENAI_CHAT_COMPLETIONS,
+        profile=profile,
+        reasoning=reasoning,
+        selection=selection,
+    )
+
+    payload = build_chat_completions_payload(call=call, context=context)
+    for key, value in expected_root.items():
+        assert payload[key] == value
+    assert payload.get("extra_body") == expected_extra
+    projection = project_chat_context_bearing_payload_fields(payload)
+    for key in (*expected_root, *expected_extra):
+        assert key not in projection
+    assert call.target.fact.reasoning_wire_profile == profile.value
+
+
+@pytest.mark.parametrize(("enabled", "effort"), ((False, "none"), (True, "high")))
+def test_user_declared_responses_toggle_profile_has_exact_payload_shape(
+    enabled: bool,
+    effort: str,
+) -> None:
+    call, context = _user_declared_call(
+        api=WireApi.OPENAI_RESPONSES,
+        profile=ReasoningWireProfile.TOGGLE,
+        reasoning=ReasoningSelectableControls(toggle=ReasoningToggle()),
+        selection=ReasoningToggleSelection(enabled),
+    )
+
+    payload = build_responses_payload(call=call, context=context)
+    assert payload["reasoning"] == {"effort": effort, "summary": "auto"}
+    assert "extra_body" not in payload
+    assert "reasoning" not in project_responses_context_bearing_payload_fields(
+        payload
+    )
+
+
+def test_chat_only_reasoning_profile_is_rejected_by_responses() -> None:
+    with pytest.raises(ModelTargetNotExecutable, match="reasoning profile"):
+        create_user_declared_model_connection(
+            model_id="local-model",
+            wire_api=WireApi.OPENAI_RESPONSES,
+            base_url="https://profiles.example/v1",
+            declaration=UserDeclaredModelTarget(
+                configuration_name="Wrong Shape",
+                total_context_tokens=256_000,
+                max_output_tokens=8_192,
+                tool_call=True,
+                reasoning=ReasoningSelectableControls(toggle=ReasoningToggle()),
+                authentication=ModelConnectionAuthentication.NONE,
+            ),
+            route_wires=production_route_wire_registry(),
+            reasoning_wire_profile=ReasoningWireProfile.ENABLE_THINKING,
+        )
+
+
 def test_generic_adapter_exposes_catalog_effort_without_route_specific_controls() -> None:
     gateway = _resolved(
         "openrouter", "z-ai/glm-5.2", WireApi.OPENAI_RESPONSES
@@ -321,12 +480,11 @@ def test_generic_adapter_exposes_catalog_effort_without_route_specific_controls(
     assert isinstance(gateway.target.reasoning, ReasoningSelectableControls)
     assert gateway.target.reasoning.effort is not None
     assert gateway.target.reasoning.effort.values == ("high", "xhigh")
-    assert gateway.target.reasoning.toggle is None
+    assert gateway.target.reasoning.toggle is not None
     assert gateway.target.reasoning.budget is None
-    with pytest.raises(ModelReasoningSelectionInvalid):
-        validate_reasoning_selection(
-            gateway.target.reasoning, ReasoningToggleSelection(False)
-        )
+    validate_reasoning_selection(
+        gateway.target.reasoning, ReasoningToggleSelection(False)
+    )
     with pytest.raises(ModelReasoningSelectionInvalid):
         validate_reasoning_selection(
             gateway.target.reasoning, ReasoningBudgetSelection(2048)
@@ -337,6 +495,11 @@ def test_generic_adapter_exposes_catalog_effort_without_route_specific_controls(
     assert dict(fields.root) == {
         "reasoning": {"effort": "xhigh", "summary": "auto"}
     }
+    assert dict(
+        reasoning_wire_fields(
+            gateway.target, ReasoningToggleSelection(False)
+        ).root
+    ) == {"reasoning": {"effort": "none", "summary": "auto"}}
     assert dict(fields.extra_body) == {}
 
 
@@ -728,13 +891,19 @@ def test_frozen_target_rejects_executable_projection_strategy_drift(
     ).target_bundle
     if drift == "lowerer":
         key, contract = next(iter(runtime.route_wires._dialect_contracts.items()))
+        profile = contract.reasoning_contract(contract.default_reasoning_profile)
 
         def drifted_lowerer(selection, controls):
-            return contract.lower_reasoning(selection, controls)
+            return profile.lower_reasoning(selection, controls)
 
+        profiles = dict(contract.reasoning_profiles)
+        profiles[contract.default_reasoning_profile] = replace(
+            profile,
+            lower_reasoning=drifted_lowerer,
+        )
         runtime.route_wires._dialect_contracts[key] = replace(
             contract,
-            lower_reasoning=drifted_lowerer,
+            reasoning_profiles=profiles,
         )
     else:
         bundle = replace(
@@ -792,6 +961,49 @@ def test_no_selector_targets_omit_reasoning_request_fields(
     assert "extra_body" not in payload
 
 
+def test_models_dev_fixed_on_model_can_select_thinking_type_profile() -> None:
+    fixture = {
+        "moonshotai-cn": {
+            "name": "Moonshot AI CN",
+            "npm": "@ai-sdk/openai-compatible",
+            "api": "https://api.moonshot.cn/v1",
+            "models": {
+                "kimi-k2.7-code": {
+                    "reasoning": True,
+                    "reasoning_options": [],
+                    "tool_call": True,
+                    "limit": {"context": 262_144, "output": 262_144},
+                }
+            },
+        }
+    }
+    call, context = _resolved_call(
+        "moonshotai-cn",
+        "kimi-k2.7-code",
+        WireApi.OPENAI_CHAT_COMPLETIONS,
+        None,
+        fixture=fixture,
+        profile=ReasoningWireProfile.THINKING_TYPE,
+    )
+
+    assert isinstance(call.target.contract.reasoning, ReasoningFixedOn)
+    assert call.target.fact.reasoning_wire_profile == "thinking_type"
+    payload = build_chat_completions_payload(call=call, context=context)
+    assert payload["extra_body"] == {"thinking": {"type": "enabled"}}
+
+    entry = selectable_catalog(parse_models_dev_catalog(fixture)).require(
+        call.target.contract.key.catalog_key
+    )
+    route_wire = production_route_wire_registry().contract_for(
+        entry,
+        WireApi.OPENAI_CHAT_COMPLETIONS,
+    )
+    assert ReasoningWireProfile.THINKING_TYPE in compatible_reasoning_profiles(
+        entry.reasoning,
+        route_wire,
+    )
+
+
 @pytest.mark.parametrize("input_modalities", (None, ("text",), ("text", "image")))
 def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
     input_modalities: tuple[str, ...] | None,
@@ -813,6 +1025,7 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
             authentication=ModelConnectionAuthentication.NONE,
         ),
         route_wires=route_wires,
+        reasoning_wire_profile=ReasoningWireProfile.EFFORT,
         connection_id=ModelConnectionId("model-connection:" + "d" * 32),
     )
     binding = ModelCallBinding(
@@ -866,19 +1079,20 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
         validate_model_context_shape_for_call(call=call, context=image_context)
 
 
-def test_user_declared_reasoning_control_cannot_be_silently_dropped() -> None:
-    with pytest.raises(ModelTargetNotExecutable, match="unsupported"):
-        create_user_declared_model_connection(
-            model_id="local-model",
-            wire_api=WireApi.OPENAI_RESPONSES,
-            base_url="http://127.0.0.1:9000/v1",
-            declaration=UserDeclaredModelTarget(
-                configuration_name="Responses Toggle",
-                total_context_tokens=256_000,
-                max_output_tokens=8_192,
-                tool_call=True,
-                reasoning=ReasoningSelectableControls(toggle=ReasoningToggle()),
-                authentication=ModelConnectionAuthentication.NONE,
-            ),
-            route_wires=production_route_wire_registry(),
-        )
+def test_user_declared_responses_toggle_is_a_typed_profile() -> None:
+    resolved = create_user_declared_model_connection(
+        model_id="local-model",
+        wire_api=WireApi.OPENAI_RESPONSES,
+        base_url="http://127.0.0.1:9000/v1",
+        declaration=UserDeclaredModelTarget(
+            configuration_name="Responses Toggle",
+            total_context_tokens=256_000,
+            max_output_tokens=8_192,
+            tool_call=True,
+            reasoning=ReasoningSelectableControls(toggle=ReasoningToggle()),
+            authentication=ModelConnectionAuthentication.NONE,
+        ),
+        route_wires=production_route_wire_registry(),
+        reasoning_wire_profile=ReasoningWireProfile.TOGGLE,
+    )
+    assert resolved.target.reasoning_wire.profile is ReasoningWireProfile.TOGGLE

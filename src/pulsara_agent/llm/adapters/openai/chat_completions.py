@@ -102,7 +102,7 @@ class OpenAIChatCompletionsTransport:
     timeout_policy: OpenAITransportTimeoutPolicy
     api: str = OPENAI_CHAT_COMPLETIONS_API
     binding_id: str = "pulsara.openai.chat_completions"
-    contract_version: str = "v6-route-target-reasoning-and-tool-correlation"
+    contract_version: str = "v8-connection-reasoning-profiles-and-tool-correlation"
     retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
     retry_sleep: Callable[[float], Awaitable[None]] = field(
         default=asyncio.sleep, repr=False
@@ -382,6 +382,7 @@ _CHAT_NON_CONTEXT_BEARING_FIELDS = frozenset(
         "reasoning",
         "reasoning_effort",
         "thinking",
+        "enable_thinking",
         "timeout",
         "service_tier",
         "seed",

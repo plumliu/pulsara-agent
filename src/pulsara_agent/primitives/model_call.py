@@ -148,13 +148,23 @@ class ModelTokenUsageFact(BaseModel):
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-target:v7"] = "resolved-model-target:v7"
+    contract_version: Literal["resolved-model-target:v8"] = "resolved-model-target:v8"
     route_id: str = Field(min_length=1)
     wire_api: Literal["openai_chat_completions", "openai_responses"]
     model_id: str = Field(min_length=1)
     canonical_endpoint_base_url: str = Field(min_length=1)
     transport_binding_id: str = Field(min_length=1)
     transport_contract_version: str = Field(min_length=1)
+    reasoning_wire_profile: Literal[
+        "provider_default",
+        "effort",
+        "toggle",
+        "enable_thinking",
+        "thinking_type",
+        "thinking_effort",
+        "broad_compat",
+        "catalog_standard",
+    ]
     model_identity_policy: Literal["accept_reported", "exact"]
     input_modalities: tuple[str, ...] | None
     tool_call_capability: bool

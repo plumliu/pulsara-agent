@@ -44,6 +44,19 @@ class ModelConnectionAuthentication(StrEnum):
     NONE = "none"
 
 
+class ReasoningWireProfile(StrEnum):
+    """Explicit reasoning request shape selected for one wire protocol."""
+
+    PROVIDER_DEFAULT = "provider_default"
+    EFFORT = "effort"
+    TOGGLE = "toggle"
+    ENABLE_THINKING = "enable_thinking"
+    THINKING_TYPE = "thinking_type"
+    THINKING_EFFORT = "thinking_effort"
+    BROAD_COMPAT = "broad_compat"
+    CATALOG_STANDARD = "catalog_standard"
+
+
 @dataclass(frozen=True, slots=True)
 class UserDeclaredModelTarget:
     """Closed operator assertion for one OpenAI-compatible custom target."""
@@ -106,6 +119,7 @@ class ModelConnectionConfig:
     id: ModelConnectionId
     target: ModelTargetKey
     base_url: str
+    reasoning_wire_profile: ReasoningWireProfile
     user_declared: UserDeclaredModelTarget | None = None
 
     def __post_init__(self) -> None:
@@ -114,6 +128,13 @@ class ModelConnectionConfig:
         declared_route = self.target.route_id == USER_DECLARED_MODEL_ROUTE_ID
         if declared_route != (self.user_declared is not None):
             raise ValueError("model connection source union is invalid")
+        if not isinstance(self.reasoning_wire_profile, ReasoningWireProfile):
+            raise TypeError("model connection reasoning profile must be typed")
+        if self.user_declared is not None:
+            _validate_declared_reasoning_profile(
+                self.reasoning_wire_profile,
+                self.user_declared.reasoning,
+            )
 
     @property
     def authentication(self) -> ModelConnectionAuthentication:
@@ -124,6 +145,38 @@ class ModelConnectionConfig:
     @property
     def requires_api_key(self) -> bool:
         return self.authentication is ModelConnectionAuthentication.BEARER_API_KEY
+
+
+def _validate_declared_reasoning_profile(
+    profile: ReasoningWireProfile,
+    reasoning: ReasoningControlContract,
+) -> None:
+    if isinstance(reasoning, ReasoningProviderDefault):
+        if profile is not ReasoningWireProfile.PROVIDER_DEFAULT:
+            raise ValueError("provider-default reasoning requires its matching profile")
+        return
+    if not isinstance(reasoning, ReasoningSelectableControls):
+        raise ValueError("custom model reasoning must be provider default or selectable")
+    effort_profiles = {
+        ReasoningWireProfile.EFFORT,
+        ReasoningWireProfile.THINKING_EFFORT,
+        ReasoningWireProfile.BROAD_COMPAT,
+    }
+    toggle_profiles = {
+        ReasoningWireProfile.TOGGLE,
+        ReasoningWireProfile.ENABLE_THINKING,
+        ReasoningWireProfile.THINKING_TYPE,
+    }
+    if (
+        (reasoning.effort is not None) != (profile in effort_profiles)
+        or (reasoning.toggle is not None) != (profile in toggle_profiles)
+        or profile
+        in {
+            ReasoningWireProfile.PROVIDER_DEFAULT,
+            ReasoningWireProfile.CATALOG_STANDARD,
+        }
+    ):
+        raise ValueError("custom model reasoning control and wire profile disagree")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,8 +223,11 @@ def model_connection_to_dict(value: ModelConnectionConfig) -> dict[str, object]:
     }
     if value.user_declared is not None:
         payload["user_declared"] = _user_declared_model_target_to_dict(
-            value.user_declared
+            value.user_declared,
+            value.reasoning_wire_profile,
         )
+    elif value.reasoning_wire_profile is not ReasoningWireProfile.CATALOG_STANDARD:
+        payload["reasoning_wire_profile"] = value.reasoning_wire_profile.value
     return payload
 
 
@@ -186,10 +242,25 @@ def model_connection_from_dict(value: object) -> ModelConnectionConfig:
     if not isinstance(value, dict):
         raise ValueError("model connection metadata has an invalid closed shape")
     keys = frozenset(value)
-    if keys not in {frozenset(common), frozenset((*common, "user_declared"))}:
+    if keys not in {
+        frozenset(common),
+        frozenset((*common, "reasoning_wire_profile")),
+        frozenset((*common, "user_declared")),
+    }:
         raise ValueError("model connection metadata has an invalid closed shape")
     if not all(isinstance(value[key], str) for key in common):
         raise ValueError("model connection metadata fields must be strings")
+    raw_declared = value.get("user_declared")
+    if raw_declared is None:
+        raw_profile = value.get(
+            "reasoning_wire_profile", ReasoningWireProfile.CATALOG_STANDARD.value
+        )
+        if not isinstance(raw_profile, str):
+            raise ValueError("model connection reasoning profile must be text")
+        profile = ReasoningWireProfile(raw_profile)
+        declared = None
+    else:
+        declared, profile = _user_declared_model_target_from_dict(raw_declared)
     return ModelConnectionConfig(
         id=ModelConnectionId(value["id"]),
         target=ModelTargetKey(
@@ -198,23 +269,23 @@ def model_connection_from_dict(value: object) -> ModelConnectionConfig:
             model_id=value["model_id"],
         ),
         base_url=value["base_url"],
-        user_declared=(
-            None
-            if "user_declared" not in value
-            else _user_declared_model_target_from_dict(value["user_declared"])
-        ),
+        reasoning_wire_profile=profile,
+        user_declared=declared,
     )
 
 
 def _user_declared_model_target_to_dict(
     value: UserDeclaredModelTarget,
+    profile: ReasoningWireProfile,
 ) -> dict[str, object]:
     return {
         "configuration_name": value.configuration_name,
         "total_context_tokens": value.total_context_tokens,
         "max_output_tokens": value.max_output_tokens,
         "tool_call": value.tool_call,
-        "reasoning": _user_declared_reasoning_to_dict(value.reasoning),
+        "reasoning": _user_declared_reasoning_to_dict(
+            profile, value.reasoning
+        ),
         "authentication": value.authentication.value,
         **(
             {"input_modalities": list(value.input_modalities)}
@@ -224,7 +295,9 @@ def _user_declared_model_target_to_dict(
     }
 
 
-def _user_declared_model_target_from_dict(value: object) -> UserDeclaredModelTarget:
+def _user_declared_model_target_from_dict(
+    value: object,
+) -> tuple[UserDeclaredModelTarget, ReasoningWireProfile]:
     expected = {
         "configuration_name",
         "total_context_tokens",
@@ -252,45 +325,80 @@ def _user_declared_model_target_from_dict(value: object) -> UserDeclaredModelTar
         or (input_modalities is not None and not isinstance(input_modalities, list))
     ):
         raise ValueError("custom model target fields are invalid")
-    return UserDeclaredModelTarget(
-        configuration_name=name,
-        total_context_tokens=total,
-        max_output_tokens=output,
-        tool_call=tool_call,
-        reasoning=_user_declared_reasoning_from_dict(value["reasoning"]),
-        authentication=ModelConnectionAuthentication(authentication),
-        input_modalities=None if input_modalities is None else tuple(input_modalities),
+    reasoning_profile, reasoning = user_declared_reasoning_from_dict(
+        value["reasoning"]
+    )
+    return (
+        UserDeclaredModelTarget(
+            configuration_name=name,
+            total_context_tokens=total,
+            max_output_tokens=output,
+            tool_call=tool_call,
+            reasoning=reasoning,
+            authentication=ModelConnectionAuthentication(authentication),
+            input_modalities=(
+                None if input_modalities is None else tuple(input_modalities)
+            ),
+        ),
+        reasoning_profile,
     )
 
 
 def _user_declared_reasoning_to_dict(
+    profile: ReasoningWireProfile,
     value: ReasoningControlContract,
 ) -> dict[str, object]:
     if isinstance(value, ReasoningProviderDefault):
-        return {"kind": "provider_default"}
+        if profile is not ReasoningWireProfile.PROVIDER_DEFAULT:
+            raise ValueError("custom model reasoning profile is inconsistent")
+        return {"kind": profile.value}
     if isinstance(value, ReasoningSelectableControls):
         if value.toggle is not None:
-            return {"kind": "toggle"}
+            return {"kind": profile.value}
         if value.effort is not None:
-            return {"kind": "effort", "values": list(value.effort.values)}
+            return {"kind": profile.value, "values": list(value.effort.values)}
     raise ValueError("custom model reasoning contract is invalid")
 
 
-def _user_declared_reasoning_from_dict(value: object) -> ReasoningControlContract:
+def user_declared_reasoning_from_dict(
+    value: object,
+) -> tuple[ReasoningWireProfile, ReasoningControlContract]:
     if value == {"kind": "provider_default"}:
-        return ReasoningProviderDefault()
-    if value == {"kind": "toggle"}:
-        return ReasoningSelectableControls(toggle=ReasoningToggle())
+        return ReasoningWireProfile.PROVIDER_DEFAULT, ReasoningProviderDefault()
+    toggle_profiles = {
+        ReasoningWireProfile.TOGGLE,
+        ReasoningWireProfile.ENABLE_THINKING,
+        ReasoningWireProfile.THINKING_TYPE,
+    }
+    if isinstance(value, dict) and set(value) == {"kind"}:
+        try:
+            profile = ReasoningWireProfile(value["kind"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("custom model reasoning kind is invalid") from exc
+        if profile in toggle_profiles:
+            return profile, ReasoningSelectableControls(toggle=ReasoningToggle())
+        raise ValueError("custom model reasoning kind is invalid")
     if isinstance(value, dict) and set(value) == {"kind", "values"}:
-        if value["kind"] != "effort":
+        try:
+            profile = ReasoningWireProfile(value["kind"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("custom model reasoning kind is invalid") from exc
+        if profile not in {
+            ReasoningWireProfile.EFFORT,
+            ReasoningWireProfile.THINKING_EFFORT,
+            ReasoningWireProfile.BROAD_COMPAT,
+        }:
             raise ValueError("custom model reasoning kind is invalid")
         values = value["values"]
         if not isinstance(values, list) or not all(
             isinstance(item, str) for item in values
         ):
             raise ValueError("custom model reasoning efforts are invalid")
-        return ReasoningSelectableControls(
-            effort=ReasoningEffortChoices(tuple(values))
+        return (
+            profile,
+            ReasoningSelectableControls(
+                effort=ReasoningEffortChoices(tuple(values))
+            ),
         )
     raise ValueError("custom model reasoning has an invalid closed shape")
 
@@ -371,6 +479,7 @@ __all__ = [
     "ReasoningEffortSelection",
     "ReasoningSelection",
     "ReasoningToggleSelection",
+    "ReasoningWireProfile",
     "USER_DECLARED_MODEL_ROUTE_ID",
     "UserDeclaredModelTarget",
     "freeze_binding_json",
@@ -380,4 +489,5 @@ __all__ = [
     "model_connection_to_dict",
     "reasoning_selection_from_dict",
     "reasoning_selection_to_dict",
+    "user_declared_reasoning_from_dict",
 ]

@@ -3873,7 +3873,7 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:07cfa2fc5b5ea7dd26d38ec05c7e29d04889c2efe88c0c5325b03cede8704827"
+        "sha256:8ac9464c66e2db450bbc510547f302640c702f87ff473508601b8057e91b94cd"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
