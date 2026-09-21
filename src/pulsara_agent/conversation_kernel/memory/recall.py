@@ -79,6 +79,7 @@ class MemoryQueryRow:
     statement: str
     recorded_at: str
     fact_semantic_digest: str
+    user_edited_at: str | None = None
     sparse_rank: int | None = None
     dense_rank: int | None = None
     fused_score: float = 0.0
@@ -306,7 +307,8 @@ class PostgresMemoryQuery:
             row = connection.execute(
                 """
                 SELECT id, memory_domain_id, context_id, fact_kind,
-                       lifecycle, statement, accepted_at, fact_semantic_digest
+                       lifecycle, statement, accepted_at, fact_semantic_digest,
+                       user_edited_at
                 FROM pulsara_v3.memory_facts
                 WHERE memory_domain_id = %s AND id = %s
                   AND context_id=ANY(%s::text[])
@@ -317,7 +319,10 @@ class PostgresMemoryQuery:
                     list(read_binding.readable_context_ids),
                 ),
             ).fetchone()
-        return None if row is None else _row(row)
+        return None if row is None else _row(
+            row, user_edited_at=row["user_edited_at"].isoformat()
+            if row["user_edited_at"] is not None else None,
+        )
 
     def response_preference_snapshot(
         self,

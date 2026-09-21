@@ -569,6 +569,11 @@ class KernelMemoryToolPort:
             "advisory": True,
             "may_be_stale_or_incomplete": True,
         }
+        if item.user_edited_at is not None:
+            payload["user_edit"] = {
+                "edited_at": item.user_edited_at,
+                "note": "The user edited this memory's text. Its source is the original save, and existing relations were not re-evaluated.",
+            }
         if explain:
             provenance = await self._io.run(
                 self._query.provenance,

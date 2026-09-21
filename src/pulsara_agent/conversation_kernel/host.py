@@ -7702,6 +7702,36 @@ class KernelHostCore:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    async def memory_management_edit_statement(
+        self, *, memory_domain_id, selection, fact_id, statement, expected_updated_at
+    ):
+        repository = await self._ensure_resources()
+        # A disconnected HTTP client must not detach an in-flight DB commit.
+        task = asyncio.create_task(asyncio.to_thread(
+            repository.memory_management_edit_statement,
+            memory_domain_id=memory_domain_id,
+            selection=selection,
+            fact_id=fact_id,
+            statement=statement,
+            expected_updated_at=expected_updated_at,
+            deadline_monotonic=self._canonical_deadline(),
+        ))
+        cancelled = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        result = task.result()
+        if result["changed"]:
+            async with self._lock:
+                for session in self._sessions.values():
+                    if session._memory_domain_id == memory_domain_id:
+                        session._memory_embedding_maintainer.offer_wake()
+        if cancelled is not None:
+            raise cancelled
+        return result
+
     async def execute_memory_deletion(
         self, *, memory_domain_id, selection, fact_id, additional, expected_records
     ):

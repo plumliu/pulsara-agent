@@ -52,6 +52,9 @@ async def server_for(tmp_path, *, state="ready"):
             return_value={"items": [], "next_cursor": None}
         ),
         memory_management_detail=AsyncMock(return_value={"source": None}),
+        memory_management_edit_statement=AsyncMock(
+            return_value={"fact": {"statement": "new text"}, "changed": True, "user_edited_at": "2026-09-05T01:00:00+00:00"}
+        ),
     )
     sessions = SimpleNamespace(
         core=core,
@@ -174,6 +177,7 @@ def test_all_memory_routes_share_readiness_gate(tmp_path, state):
                     ("GET", "/projects"),
                     ("GET", "/memory:root"),
                     ("POST", "/memory:root/deletion-preview"),
+                    ("PATCH", "/memory:root/statement"),
                     ("DELETE", "/memory:root"),
                 ):
                     async with client.request(
@@ -209,6 +213,46 @@ def test_memory_page_projects_and_source_do_not_read_selected_conversation(tmp_p
             detail_args = core.memory_management_detail.await_args.kwargs
             assert detail_args["memory_domain_id"] == "server-owned"
             assert "provenance_workspace_id" not in detail_args
+        finally:
+            await server.aclose()
+
+    asyncio.run(run())
+
+
+def test_memory_page_text_edit_is_scoped_to_server_owned_domain(tmp_path):
+    async def run():
+        server, core = await server_for(tmp_path)
+        body = {
+            "view": "global", "workspace_id": None,
+            "statement": "new text", "expected_updated_at": "2026-09-05T00:00:00+00:00",
+        }
+        try:
+            async with ClientSession() as client:
+                async with client.patch(
+                    server.origin + "/api/memories/memory:root/statement",
+                    json=body,
+                    headers={"Origin": server.origin},
+                ) as response:
+                    assert response.status == 200, await response.text()
+                    assert (await response.json())["changed"] is True
+                kwargs = core.memory_management_edit_statement.await_args.kwargs
+                assert kwargs["memory_domain_id"] == "server-owned"
+                assert kwargs["selection"].view == "global"
+                assert kwargs["selection"].workspace_id is None
+                assert kwargs["statement"] == "new text"
+                assert kwargs["expected_updated_at"] == body["expected_updated_at"]
+                assert kwargs["fact_id"] == "memory:root"
+                for malformed in (
+                    {**body, "memory_domain_id": "attacker"},
+                    {**body, "view": 123},
+                    {**body, "statement": "x" * 55000},
+                ):
+                    async with client.patch(
+                        server.origin + "/api/memories/memory:root/statement",
+                        json=malformed,
+                    ) as response:
+                        assert response.status == 400, await response.text()
+                assert core.memory_management_edit_statement.await_count == 1
         finally:
             await server.aclose()
 

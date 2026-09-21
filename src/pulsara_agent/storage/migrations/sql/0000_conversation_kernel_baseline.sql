@@ -1403,6 +1403,7 @@ CREATE TABLE pulsara_v3.memory_facts (
     ),
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    user_edited_at timestamptz,
     search_contract_id text NOT NULL CHECK (
         search_contract_id = 'pulsara.memory-retrieval-tokenizer'
     ),
@@ -1558,12 +1559,20 @@ BEGIN
         OLD.source_session_id IS DISTINCT FROM NEW.source_session_id OR
         OLD.source_tool_result_id IS DISTINCT FROM NEW.source_tool_result_id OR
         OLD.fact_kind IS DISTINCT FROM NEW.fact_kind OR
-        OLD.statement IS DISTINCT FROM NEW.statement OR
-        OLD.fact_semantic_digest IS DISTINCT FROM NEW.fact_semantic_digest OR
         OLD.search_contract_id IS DISTINCT FROM NEW.search_contract_id OR
         OLD.search_contract_version IS DISTINCT FROM NEW.search_contract_version OR
-        OLD.search_terms IS DISTINCT FROM NEW.search_terms OR
-        OLD.search_document IS DISTINCT FROM NEW.search_document
+        OLD.search_document IS DISTINCT FROM NEW.search_document OR
+        (OLD.statement IS DISTINCT FROM NEW.statement AND (
+            NEW.user_edited_at IS NULL OR
+            NEW.user_edited_at IS DISTINCT FROM NEW.updated_at OR
+            NEW.updated_at <= OLD.updated_at OR
+            OLD.fact_semantic_digest IS NOT DISTINCT FROM NEW.fact_semantic_digest
+        )) OR
+        (OLD.statement IS NOT DISTINCT FROM NEW.statement AND (
+            OLD.fact_semantic_digest IS DISTINCT FROM NEW.fact_semantic_digest OR
+            OLD.search_terms IS DISTINCT FROM NEW.search_terms OR
+            OLD.user_edited_at IS DISTINCT FROM NEW.user_edited_at
+        ))
     ) THEN
         RAISE EXCEPTION 'memory fact immutable fields changed' USING ERRCODE = '23514';
     END IF;

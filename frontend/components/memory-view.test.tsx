@@ -12,12 +12,61 @@ function setup() {
   vi.spyOn(api, 'projects').mockResolvedValue({ items: [], next_cursor: null });
   vi.spyOn(api, 'catalog').mockResolvedValue({ items: [fact], next_cursor: null });
   vi.spyOn(api, 'detail').mockResolvedValue({ fact, formation: '由对话中的记忆工具直接保存', source: null, relations: [], next_cursor: null });
+  vi.spyOn(api, 'editStatement').mockResolvedValue({ fact, changed: false, user_edited_at: null });
   vi.spyOn(api, 'preview').mockResolvedValue(confirmation);
   vi.spyOn(api, 'delete').mockResolvedValue([{ type: 'HEADER', root: fact.fact_id, view: 'global', workspace_id: null, result: 'DELETED' }, { type: 'END', counts: { HEADER: 1 } }]);
   return api;
 }
 
 describe('MemoryView', () => {
+  it('edits only the selected memory text and keeps source and relations intact', async () => {
+    const api = setup();
+    const source = { session_id: 'session:initial', turn_id: 'turn:initial', entry_id: 'entry:initial' };
+    const companion = { ...fact, fact_id: 'memory:related', statement: '关联的旧安排' };
+    vi.mocked(api.detail).mockResolvedValue({
+      fact, formation: '', source, user_edited_at: null,
+      relations: [{ relation_id: 'relation:related', relative_role: 'UPDATES', subject: fact, companion, recorded_at: fact.recorded_at, owner: { write_tool: 'mark_memory_relation', source: null } }],
+      next_cursor: null,
+    });
+    const changed = { ...fact, statement: '用户更正：晴天沿河散步。', updated_at: '2026-09-05T01:00:00+00:00' };
+    vi.mocked(api.editStatement).mockResolvedValue({ fact: changed, changed: true, user_edited_at: changed.updated_at });
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
+    const panel = await screen.findByRole('complementary', { name: '记忆详情' });
+    const actions = panel.querySelector<HTMLDivElement>('.memory-detail-actions')!;
+    expect(Array.from(actions.querySelectorAll('button')).map(button => button.textContent)).toEqual(['在对话中查看', '编辑记忆', '删除记忆…']);
+    fireEvent.click(within(panel).getByRole('button', { name: '编辑记忆' }));
+    expect((within(panel).getByRole('textbox', { name: '记忆正文' }) as HTMLTextAreaElement).value).toBe(fact.statement);
+    expect(within(panel).getByText(/已有依据、取代和冲突关系不会自动重判/)).toBeTruthy();
+    expect((within(panel).getByRole('button', { name: '删除记忆…' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(within(panel).getByRole('textbox', { name: '记忆正文' }), { target: { value: `  ${changed.statement}  ` } });
+    fireEvent.click(within(panel).getByRole('button', { name: '保存正文' }));
+    await waitFor(() => expect(api.editStatement).toHaveBeenCalledWith(
+      { view: 'global', workspace_id: null }, fact, changed.statement,
+    ));
+    await waitFor(() => expect(within(panel).getByText(changed.statement, { selector: 'p.memory-statement' })).toBeTruthy());
+    expect(within(panel).getByText(/来源对话只记录最初保存的位置/)).toBeTruthy();
+    expect(within(panel).getByRole('button', { name: '查看记忆：关联的旧安排' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /用户更正：晴天沿河散步/ })).toBeTruthy();
+    expect(within(panel).getByRole('button', { name: '在对话中查看' })).toBeTruthy();
+  });
+  it('keeps the edit draft after an optimistic concurrency conflict and cancels without saving', async () => {
+    const api = setup();
+    vi.mocked(api.editStatement).mockRejectedValue(new MemoryApiError('记忆已发生变化，请刷新详情后再编辑', 409));
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
+    const panel = await screen.findByRole('complementary', { name: '记忆详情' });
+    fireEvent.click(within(panel).getByRole('button', { name: '编辑记忆' }));
+    fireEvent.change(within(panel).getByRole('textbox', { name: '记忆正文' }), { target: { value: '用户提出的新正文' } });
+    fireEvent.click(within(panel).getByRole('button', { name: '保存正文' }));
+    expect((await within(panel).findByRole('alert')).textContent).toContain('记忆已发生变化，请刷新详情后再编辑');
+    expect((within(panel).getByRole('textbox', { name: '记忆正文' }) as HTMLTextAreaElement).value).toBe('用户提出的新正文');
+    vi.mocked(api.editStatement).mockRejectedValueOnce(new Error('network interrupted'));
+    fireEvent.click(within(panel).getByRole('button', { name: '保存正文' }));
+    await waitFor(() => expect(within(panel).getByRole('alert').textContent).toContain('重新打开详情核对正文'));
+    fireEvent.click(within(panel).getByRole('button', { name: '取消' }));
+    expect(within(panel).getByText(fact.statement, { selector: 'p.memory-statement' })).toBeTruthy();
+  });
   it.each(['starting', 'reconnecting', 'offline', 'failed'] as const)('shows a connection state instead of reading memories while %s', status => {
     const api = setup();
     const reconnect = vi.fn();

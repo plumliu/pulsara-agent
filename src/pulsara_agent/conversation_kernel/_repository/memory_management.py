@@ -1,4 +1,4 @@
-"""Canonical management queries and user-confirmed transactional memory deletion."""
+"""Canonical memory management queries, user edits, and confirmed deletion."""
 
 from __future__ import annotations
 
@@ -19,8 +19,13 @@ from psycopg.errors import (
 from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.memory.contracts import (
+    MAXIMUM_MEMORY_STATEMENT_BYTES,
+    MAXIMUM_RESPONSE_PREFERENCE_STATEMENT_BYTES,
+    MemoryFactKind,
     canonical_json_bytes,
     canonical_memory_recorded_at,
+    memory_fact_semantic_digest,
+    normalize_memory_text,
 )
 from pulsara_agent.conversation_kernel.memory.management import (
     MemoryManagementError,
@@ -35,6 +40,10 @@ from pulsara_agent.conversation_kernel.memory.management import (
     with_end,
 )
 from pulsara_agent.memory.scope import CTX_GLOBAL
+from pulsara_agent.retrieval.tokenizer import (
+    MemoryRetrievalTokenizerV1,
+    MemoryRetrievalTokenBoundError,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 
@@ -349,6 +358,10 @@ class _MemoryManagementOperations:
                     "context_label": labels.get(context, "项目记忆"),
                 },
                 "formation": "由对话中的 Pulsara 直接保存；请按需核对内容",
+                "user_edited_at": (
+                    row["user_edited_at"].isoformat()
+                    if row["user_edited_at"] is not None else None
+                ),
                 "source": {
                     "session_id": row["origin_session_id"],
                     "turn_id": row["turn_id"],
@@ -378,6 +391,93 @@ class _MemoryManagementOperations:
                 if len(relations) > limit
                 else None,
             }
+
+    def memory_management_edit_statement(
+        self, *, memory_domain_id, selection, fact_id, statement,
+        expected_updated_at, deadline_monotonic,
+    ):
+        if not isinstance(statement, str):
+            raise ValueError("记忆正文必须是文本")
+        normalized = normalize_memory_text(statement)
+        if not isinstance(expected_updated_at, str) or len(expected_updated_at) > 64:
+            raise ValueError("记忆版本无效，请刷新详情")
+        try:
+            parsed = datetime.fromisoformat(expected_updated_at)
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError
+        except ValueError as exc:
+            raise ValueError("记忆版本无效，请刷新详情") from exc
+        # Use the same sealed tokenizer as remember; do not leave stale lexical
+        # search terms or a dense vector representing the pre-edit statement.
+        try:
+            with self._management_connection(
+                deadline_monotonic=deadline_monotonic, execute=True
+            ) as c:
+                _remaining(c, deadline_monotonic)
+                context = self._management_context(c, memory_domain_id, selection)
+                row = c.execute(
+                    "SELECT * FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s "
+                    "AND context_id=%s AND id=%s FOR UPDATE",
+                    (memory_domain_id, context, fact_id),
+                ).fetchone()
+                if row is None:
+                    raise MemoryManagementError("MEMORY_NOT_FOUND", 404, "这条记忆已不存在")
+                if row["updated_at"] != parsed:
+                    raise MemoryManagementError(
+                        "MEMORY_EDIT_DRIFTED", 409, "记忆已发生变化，请刷新详情后再编辑"
+                    )
+                kind = MemoryFactKind(row["fact_kind"])
+                maximum = (
+                    MAXIMUM_RESPONSE_PREFERENCE_STATEMENT_BYTES
+                    if kind is MemoryFactKind.RESPONSE_PREFERENCE
+                    else MAXIMUM_MEMORY_STATEMENT_BYTES
+                )
+                if not 1 <= len(normalized.encode("utf-8")) <= maximum:
+                    raise ValueError(f"记忆正文必须在 1 至 {maximum} UTF-8 字节之间")
+                if row["statement"] == normalized:
+                    return {
+                        "fact": asdict(MemoryManagementFact.from_row(row)),
+                        "user_edited_at": row["user_edited_at"].isoformat()
+                        if row["user_edited_at"] is not None else None,
+                        "changed": False,
+                    }
+                try:
+                    search_terms = MemoryRetrievalTokenizerV1().tokenize(normalized)
+                except MemoryRetrievalTokenBoundError as exc:
+                    raise ValueError("记忆正文超出检索资源边界") from exc
+                edited_at = c.execute(
+                    "SELECT GREATEST(clock_timestamp(), %s::timestamptz + interval '1 microsecond')",
+                    (row["updated_at"],),
+                ).fetchone()["greatest"]
+                digest = memory_fact_semantic_digest(kind=kind, statement=normalized)
+                c.execute(
+                    "DELETE FROM pulsara_v3.memory_embeddings WHERE memory_domain_id=%s AND fact_id=%s",
+                    (memory_domain_id, fact_id),
+                )
+                updated = c.execute(
+                    """UPDATE pulsara_v3.memory_facts
+                       SET statement=%s, fact_semantic_digest=%s, search_terms=%s,
+                           updated_at=%s, user_edited_at=%s
+                       WHERE memory_domain_id=%s AND context_id=%s AND id=%s
+                       RETURNING *""",
+                    (normalized, digest, list(search_terms), edited_at, edited_at,
+                     memory_domain_id, context, fact_id),
+                ).fetchone()
+                c.execute("SET CONSTRAINTS ALL IMMEDIATE")
+                return {
+                    "fact": asdict(MemoryManagementFact.from_row(updated)),
+                    "user_edited_at": edited_at.isoformat(),
+                    "changed": True,
+                }
+        except UniqueViolation as exc:
+            raise MemoryManagementError(
+                "MEMORY_EDIT_DUPLICATE", 409,
+                "相同类别和范围内已有这段正在使用的记忆；未覆盖或合并任何记忆",
+            ) from exc
+        except (SerializationFailure, DeadlockDetected) as exc:
+            raise MemoryManagementError(
+                "MEMORY_EDIT_DRIFTED", 409, "记忆已发生变化，请刷新详情后再编辑"
+            ) from exc
 
     @staticmethod
     def _management_relation(relation, subject, companion):

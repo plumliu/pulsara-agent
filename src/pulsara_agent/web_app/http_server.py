@@ -383,6 +383,9 @@ class LocalHttpServer:
         self._app.router.add_get("/api/memories/projects", memory.projects)
         self._app.router.add_get("/api/memories", memory.catalog)
         self._app.router.add_get("/api/memories/{fact_id}", memory.detail)
+        self._app.router.add_patch(
+            "/api/memories/{fact_id}/statement", memory.edit_statement
+        )
         self._app.router.add_post(
             "/api/memories/{fact_id}/deletion-preview", memory.deletion
         )

@@ -15,7 +15,10 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryRelationKind,
     PreparedMemoryBasisReference,
 )
-from pulsara_agent.conversation_kernel.memory.management import MemoryManagementSelection
+from pulsara_agent.conversation_kernel.memory.management import (
+    MemoryManagementError,
+    MemoryManagementSelection,
+)
 from pulsara_agent.conversation_kernel.memory.recall import PostgresMemoryQuery
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.memory_tools import KernelMemoryToolPort
@@ -188,6 +191,191 @@ def direct_memory_session(stage2_migrated_postgres_database):
         )
 
     return repository, lease, invoke, remember
+
+
+def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval(
+    direct_memory_session, tmp_path,
+):
+    repository, lease, invoke, remember = direct_memory_session
+    _, old, _ = remember("The site is cobalt-hall on Friday.")
+    _, current, _ = remember("The site is amber-hall on Monday.")
+    invoke(
+        "mark_memory_relation",
+        {
+            "source_memory_id": current["memory_id"],
+            "target_memory_id": old["memory_id"],
+            "relation_kind": "SUPERSEDES",
+        },
+        PreparedMemoryRelationWrite(
+            memory_domain_id="u_local",
+            source_memory_id=current["memory_id"],
+            target_memory_id=old["memory_id"],
+            relation_kind=MemoryRelationKind.SUPERSEDES,
+        ),
+    )
+    selection = MemoryManagementSelection()
+
+    def detail(fact_id):
+        return repository.memory_management_detail(
+            memory_domain_id="u_local", selection=selection, fact_id=fact_id,
+            deadline_monotonic=monotonic() + 30,
+        )
+
+    before = detail(current["memory_id"])
+    assert before["user_edited_at"] is None
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        connection.execute(
+            """INSERT INTO pulsara_v3.memory_embeddings
+               (memory_domain_id, fact_id, fact_semantic_digest,
+                embedding_contract_id, embedding_contract_version, embedding)
+               SELECT memory_domain_id, id, fact_semantic_digest, 'test', 1,
+                      ('[' || repeat('0,', 1023) || '0]')::public.vector
+               FROM pulsara_v3.memory_facts WHERE id=%s""",
+            (current["memory_id"],),
+        )
+    changed = repository.memory_management_edit_statement(
+        memory_domain_id="u_local", selection=selection,
+        fact_id=current["memory_id"],
+        statement="  The site is violet-hall on Tuesday.  ",
+        expected_updated_at=before["fact"]["updated_at"],
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert changed["changed"] is True
+    assert changed["fact"]["statement"] == "The site is violet-hall on Tuesday."
+    assert changed["fact"]["fact_id"] == current["memory_id"]
+    assert changed["fact"]["updated_at"] != before["fact"]["updated_at"]
+    after = detail(current["memory_id"])
+    assert after["user_edited_at"] == changed["user_edited_at"]
+    assert after["source"] == before["source"]
+    assert [r["relation_id"] for r in after["relations"]] == [
+        r["relation_id"] for r in before["relations"]
+    ]
+    assert [r["owner"] for r in after["relations"]] == [
+        r["owner"] for r in before["relations"]
+    ]
+    assert after["fact"]["lifecycle"] == "ACTIVE"
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        row = connection.execute(
+            """SELECT f.search_terms,
+                      f.search_document @@ plainto_tsquery('pg_catalog.simple', 'violet') AS new_match,
+                      f.search_document @@ plainto_tsquery('pg_catalog.simple', 'amber') AS old_match,
+                      e.fact_id AS embedding_fact_id
+               FROM pulsara_v3.memory_facts f LEFT JOIN pulsara_v3.memory_embeddings e
+                 ON e.memory_domain_id=f.memory_domain_id AND e.fact_id=f.id
+               WHERE f.id=%s""", (current["memory_id"],),
+        ).fetchone()
+    assert "violet" in row[0] and "amber" not in row[0]
+    assert row[1] is True and row[2] is False
+    assert row[3] is None
+    binding = freeze_memory_read_context_binding(
+        domain=MemoryDomainContext("u_local", "transient"),
+        host_workspace_id="workspace:foreign",
+    )
+    query_row = PostgresMemoryQuery(repository.connection_provider).get(
+        read_binding=binding, fact_id=current["memory_id"],
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert query_row is not None and query_row.user_edited_at == changed["user_edited_at"]
+    assert query_row.statement == changed["fact"]["statement"]
+
+    async def inspect_model_explanation():
+        io = KernelSessionIO()
+        port = KernelMemoryToolPort(
+            repository=repository, session_id=lease.guard.session_id,
+            read_binding=binding, embedding_config=EmbeddingBackendConfig(),
+            io_owner=io, settings=LocalSettingsStore(tmp_path / "settings.yaml"),
+        )
+        try:
+            return json.loads((await port._get(
+                {"memory_id": current["memory_id"]}, explain=True,
+            )).content)
+        finally:
+            await port.aclose()
+            await io.aclose(deadline_monotonic=monotonic() + 10)
+
+    explanation = asyncio.run(inspect_model_explanation())
+    assert explanation["user_edit"]["edited_at"] == changed["user_edited_at"]
+    assert "original save" in explanation["user_edit"]["note"]
+    assert explanation["statement"] == changed["fact"]["statement"]
+    assert repository.memory_management_edit_statement(
+        memory_domain_id="u_local", selection=selection,
+        fact_id=current["memory_id"], statement=changed["fact"]["statement"],
+        expected_updated_at=changed["fact"]["updated_at"],
+        deadline_monotonic=monotonic() + 30,
+    )["changed"] is False
+    with pytest.raises(MemoryManagementError) as stale:
+        repository.memory_management_edit_statement(
+            memory_domain_id="u_local", selection=selection,
+            fact_id=current["memory_id"], statement="A stale edit.",
+            expected_updated_at=before["fact"]["updated_at"],
+            deadline_monotonic=monotonic() + 30,
+        )
+    assert stale.value.status == 409
+    # An active fact cannot take another active fact's semantic identity.
+    _, other, _ = remember("Another active fact.")
+    with pytest.raises(MemoryManagementError) as duplicate:
+        repository.memory_management_edit_statement(
+            memory_domain_id="u_local", selection=selection,
+            fact_id=current["memory_id"], statement="Another active fact.",
+            expected_updated_at=changed["fact"]["updated_at"],
+            deadline_monotonic=monotonic() + 30,
+        )
+    assert duplicate.value.status == 409
+    assert detail(current["memory_id"])["fact"]["statement"] == changed["fact"]["statement"]
+    old_before = detail(old["memory_id"])
+    assert old_before["fact"]["lifecycle"] == "SUPERSEDED"
+    old_edit = repository.memory_management_edit_statement(
+        memory_domain_id="u_local", selection=selection, fact_id=old["memory_id"],
+        statement="The prior site was indigo-hall.",
+        expected_updated_at=old_before["fact"]["updated_at"],
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert old_edit["fact"]["lifecycle"] == "SUPERSEDED"
+    assert other["memory_id"] != current["memory_id"]
+    preview = repository.memory_deletion_preview(
+        memory_domain_id="u_local", selection=selection,
+        fact_id=current["memory_id"], deadline_monotonic=monotonic() + 30,
+    )
+    assert b"The prior site was indigo-hall." in b"\n".join(preview)
+    assert b"The site is violet-hall on Tuesday." in b"\n".join(preview)
+
+
+def test_user_text_edit_obeys_original_scope_and_kind_limits(direct_memory_session):
+    repository, _, _invoke, remember = direct_memory_session
+    _, preference, _ = remember(
+        "Please answer in concise sentences.", kind=MemoryFactKind.RESPONSE_PREFERENCE,
+    )
+    selection = MemoryManagementSelection()
+    before = repository.memory_management_detail(
+        memory_domain_id="u_local", selection=selection,
+        fact_id=preference["memory_id"], deadline_monotonic=monotonic() + 30,
+    )
+    edit_args = dict(
+        memory_domain_id="u_local", selection=selection,
+        fact_id=preference["memory_id"],
+        expected_updated_at=before["fact"]["updated_at"],
+        deadline_monotonic=monotonic() + 30,
+    )
+    with pytest.raises(ValueError, match="2048"):
+        repository.memory_management_edit_statement(statement="x" * 2049, **edit_args)
+    with pytest.raises(MemoryManagementError) as wrong_scope:
+        repository.memory_management_edit_statement(
+            **{**edit_args, "selection": MemoryManagementSelection("project", "ctx:workspace/not-a-project")},
+            statement="Please answer at length.",
+        )
+    assert wrong_scope.value.status == 404
+    after = repository.memory_management_detail(
+        memory_domain_id="u_local", selection=selection,
+        fact_id=preference["memory_id"], deadline_monotonic=monotonic() + 30,
+    )
+    assert after["fact"]["statement"] == before["fact"]["statement"]
+    assert after["user_edited_at"] is None
 
 
 def test_memory_page_projects_fact_creator_and_relation_owner(

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowRight, ArrowUpRight, Brain, Check, ChevronDown, ChevronRight, CircleAlert, FileText, FolderOpen, Globe2, History, Layers3, MessageSquare, Search, SlidersHorizontal, Trash2, UserRound, X } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, Brain, Check, ChevronDown, ChevronRight, CircleAlert, FileText, FolderOpen, Globe2, History, Layers3, MessageSquare, Pencil, Search, SlidersHorizontal, Trash2, UserRound, X } from 'lucide-react';
 import type { DatabaseDataPlaneState } from '../lib/runtime-adapter';
 import type { RuntimeStatus } from '../lib/pulsara-types';
 import { MemoryApiError, type LocalMemoryApi, type MemoryDetail, type MemoryFact, type MemoryKind, type MemoryProject, type MemoryRecord, type MemorySelection } from '../lib/memory-api';
@@ -53,6 +53,8 @@ function MemoryContent({ api, onOpenSource }: Props) {
   const [jumpTarget, setJumpTarget] = useState<MemoryFact | null>(null);
   const [jumpSerial, setJumpSerial] = useState(0);
   const [confirmation, setConfirmation] = useState<MemoryRecord[] | null>(null);
+  const [editDraft, setEditDraft] = useState<string | null>(null);
+  const [editError, setEditError] = useState('');
   const [previewCurrent, setPreviewCurrent] = useState(true);
   const [additional, setAdditional] = useState<string[]>([]);
   const [busy, setBusy] = useState(false); const [loading, setLoading] = useState(true);
@@ -79,7 +81,7 @@ function MemoryContent({ api, onOpenSource }: Props) {
   if (previousQuery.api !== api || previousQuery.key !== key) {
     setPreviousQuery({ api, key });
     setItems([]);
-    if (!activeJump) { setDetail(null); setPendingDetail(null); }
+    if (!activeJump) { setDetail(null); setPendingDetail(null); setEditDraft(null); }
     setConfirmation(null);
     setAdditional([]); setCursor(null); setError('');
     setLoading(view !== 'project' || Boolean(workspace));
@@ -119,7 +121,7 @@ function MemoryContent({ api, onOpenSource }: Props) {
     const requestId = ++detailRequest.current;
     // Keep the mounted panel and its content while reading, so selecting a
     // different memory does not collapse/re-expand the entire page layout.
-    setError(''); setPendingDetail(fact);
+    setError(''); setEditDraft(null); setEditError(''); setPendingDetail(fact);
     try {
       const selected: MemorySelection = fact.context_id === 'ctx:global' ? { view: 'global', workspace_id: null } : { view: 'project', workspace_id: fact.context_id };
       const next = await api.detail(selected, fact.fact_id, append ? detail?.next_cursor ?? undefined : undefined);
@@ -137,6 +139,7 @@ function MemoryContent({ api, onOpenSource }: Props) {
   }, [jumpSerial, activeJump, openFact]);
   function clearJump() { jumpRequest.current = null; setJumpTarget(null); }
   function jumpToFact(fact: MemoryFact) {
+    setEditDraft(null); setEditError('');
     jumpRequest.current = fact;
     setJumpTarget(fact);
     setJumpSerial(value => value + 1);
@@ -171,6 +174,37 @@ function MemoryContent({ api, onOpenSource }: Props) {
       if (e instanceof MemoryApiError && e.status === 404) { setDetail(null); clearJump(); setRevision(v => v + 1); setNotice('这条记忆已不存在，列表已更新。'); }
     } finally { setBusy(false); }
   }
+  async function saveEdit() {
+    if (!detail || editDraft === null || busy || pendingDetail) return;
+    const normalized = editDraft.replace(/\r\n?/gu, '\n').normalize('NFC').trim();
+    const maxBytes = detail.fact.kind === 'RESPONSE_PREFERENCE' ? 2048 : 8192;
+    if (!normalized || new TextEncoder().encode(normalized).length > maxBytes) {
+      setEditError(`记忆正文必须在 1 至 ${maxBytes} UTF-8 字节之间`); return;
+    }
+    setBusy(true); setEditError('');
+    try {
+      const selection: MemorySelection = detail.fact.context_id === 'ctx:global'
+        ? { view: 'global', workspace_id: null }
+        : { view: 'project', workspace_id: detail.fact.context_id };
+      const result = await api.editStatement(selection, detail.fact, normalized);
+      const updated = { ...detail.fact, ...result.fact };
+      setDetail(old => old?.fact.fact_id === updated.fact_id
+        ? { ...old, fact: updated, user_edited_at: result.user_edited_at } : old);
+      setItems(old => old.map(item => item.fact_id === updated.fact_id ? updated : item));
+      if (result.changed) {
+        jumpRequest.current = null; setJumpTarget(updated);
+        setKind(''); setSearch('');
+        setLifecycle(updated.lifecycle === 'SUPERSEDED' ? 'updated' : 'active');
+        setNotice('记忆正文已保存；已有关系未自动更改。');
+      }
+      setEditDraft(null);
+    } catch (e) {
+      setEditError(e instanceof MemoryApiError
+        ? errorText(e)
+        : '提交结果暂时无法确认。请重新打开详情核对正文，再决定是否重试；草稿仍保留。');
+    }
+    finally { setBusy(false); }
+  }
   const label = (fact: MemoryFact) => fact.context_id === 'ctx:global' ? '全局记忆' : fact.context_label ?? projects.find(p => p.workspace_id === fact.context_id)?.label ?? '项目记忆';
   const card = (fact: MemoryFact) => <><p className="memory-statement">{fact.statement}</p><span className="memory-metadata"><span className="memory-kind">{memoryKindLabels[fact.kind]}</span><span>{label(fact)}</span><time dateTime={fact.updated_at}>{date(fact.updated_at)}</time></span></>;
   const filtered = Boolean(search || kind);
@@ -194,12 +228,14 @@ function MemoryContent({ api, onOpenSource }: Props) {
       </div>
       {cursor && <button className="memory-more" disabled={busy} onClick={async () => { const captured = key; setBusy(true); try { const p = await api.catalog(selection, { kind, lifecycle, search, cursor }); if (currentKey.current === captured) { setItems(old => [...old, ...p.items]); setCursor(p.next_cursor); } } catch (e) { setError(errorText(e)); } finally { setBusy(false); } }}>加载更多记忆</button>}
     </div>
-    {(detail || pendingDetail) && <aside className="memory-detail" aria-label="记忆详情" aria-busy={Boolean(pendingDetail)}><header><span className="memory-detail-heading"><Brain size={17} aria-hidden="true" /><h2>记忆详情</h2></span>{pendingDetail && <span className="memory-detail-loading" role="status">正在读取…</span>}<button aria-label="关闭记忆详情" disabled={busy} onClick={() => { detailRequest.current++; clearJump(); setDetail(null); setPendingDetail(null); setConfirmation(null); setAdditional([]); }}><X size={17} /></button></header>{detail && <div className="memory-detail-body">
-      {card(detail.fact)}
+    {(detail || pendingDetail) && <aside className="memory-detail" aria-label="记忆详情" aria-busy={Boolean(pendingDetail)}><header><span className="memory-detail-heading"><Brain size={17} aria-hidden="true" /><h2>记忆详情</h2></span>{pendingDetail && <span className="memory-detail-loading" role="status">正在读取…</span>}<button aria-label="关闭记忆详情" disabled={busy} onClick={() => { detailRequest.current++; clearJump(); setEditDraft(null); setDetail(null); setPendingDetail(null); setConfirmation(null); setAdditional([]); }}><X size={17} /></button></header>{detail && <div className="memory-detail-body">
+      {editDraft === null ? card(detail.fact) : <div className="memory-editor"><label htmlFor="memory-statement-edit">记忆正文</label><textarea id="memory-statement-edit" value={editDraft} disabled={busy} onChange={e => { setEditDraft(e.target.value); setEditError(''); }} /><span className="memory-metadata"><span className="memory-kind">{memoryKindLabels[detail.fact.kind]}</span><span>{label(detail.fact)}</span></span><p>仅修改这条记忆的文字。已有依据、取代和冲突关系不会自动重判；请自行核对。</p>{editError && <p role="alert" className="memory-error">{editError}</p>}<div className="memory-editor-actions"><button disabled={busy} onClick={() => { setEditDraft(null); setEditError(''); }}>取消</button><button disabled={busy} onClick={() => void saveEdit()}>{busy ? '正在保存…' : '保存正文'}</button></div></div>}
+      {detail.user_edited_at && editDraft === null && <p className="memory-edited-note">用户已编辑正文；来源对话只记录最初保存的位置。</p>}
       {detail.fact.needs_confirmation && detail.fact.kind === 'RESPONSE_PREFERENCE' && <p>需要确认：冲突解决前暂不作为回答偏好使用。</p>}
       <div className="memory-detail-actions">
         {detail.source ? <button className="memory-source" disabled={detailBusy} onClick={() => onOpenSource(detail.source!)}>在对话中查看<ArrowUpRight size={14} aria-hidden="true" /></button> : <span className="memory-detail-unavailable">来源对话已关闭</span>}
-        <button ref={deleteButton} className="memory-delete" disabled={detailBusy || Boolean(confirmation)} onClick={() => void preview()}><Trash2 size={14} />{busy ? '正在读取…' : '删除记忆…'}</button>
+        <button className="memory-edit" disabled={detailBusy || editDraft !== null || Boolean(confirmation)} onClick={() => { setEditDraft(detail.fact.statement); setEditError(''); }}><Pencil size={14} aria-hidden="true" />编辑记忆</button>
+        <button ref={deleteButton} className="memory-delete" disabled={detailBusy || editDraft !== null || Boolean(confirmation)} onClick={() => void preview()}><Trash2 size={14} />{busy ? '正在读取…' : '删除记忆…'}</button>
       </div>
       <section className="memory-graph" aria-label="记忆关系图">
         <h3>关系</h3>

@@ -199,6 +199,36 @@ class LocalMemoryController:
             )
         )
 
+    async def edit_statement(self, request):
+        self.query(request, set())
+        if request.content_type != "application/json":
+            raise ValueError("记忆编辑需要 JSON 正文")
+        # One statement is at most 8 KiB of UTF-8, with JSON escaping and
+        # a small fixed envelope. Never read an unbounded request body.
+        raw = await request.content.read(6 * 8192 + 4096 + 1)
+        if len(raw) > 6 * 8192 + 4096 or not request.content.at_eof():
+            raise ValueError("记忆编辑请求超出单条正文边界")
+        body = json.loads(raw)
+        if not isinstance(body, dict) or set(body) != {
+            "view", "workspace_id", "statement", "expected_updated_at"
+        }:
+            raise ValueError("记忆编辑参数无效")
+        if not isinstance(body["view"], str) or not (
+            body["workspace_id"] is None or isinstance(body["workspace_id"], str)
+        ):
+            raise ValueError("记忆范围无效")
+        return web.json_response(
+            await self.sessions.core.memory_management_edit_statement(
+                memory_domain_id=self.domain,
+                selection=MemoryManagementSelection(
+                    body["view"], body["workspace_id"]
+                ),
+                fact_id=request.match_info["fact_id"],
+                statement=body["statement"],
+                expected_updated_at=body["expected_updated_at"],
+            )
+        )
+
     async def deletion(self, request):
         self.query(request, set())
         root = request.match_info["fact_id"]

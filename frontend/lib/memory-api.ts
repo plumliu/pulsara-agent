@@ -15,6 +15,7 @@ export interface MemoryRelation {
 }
 export interface MemoryDetail {
   fact: MemoryFact; formation: string;
+  user_edited_at?: string | null;
   source: MemorySource | null;
   relations: MemoryRelation[]; next_cursor: string | null;
 }
@@ -91,6 +92,16 @@ export class LocalMemoryApi {
   }
   detail(selection: MemorySelection, id: string, cursor?: string) {
     return this.read<MemoryDetail>(`/api/memories/${encodeURIComponent(id)}${query({ ...selection, cursor })}`);
+  }
+  async editStatement(selection: MemorySelection, fact: MemoryFact, statement: string) {
+    const response = await fetch(`/api/memories/${encodeURIComponent(fact.fact_id)}/statement`, {
+      method: 'PATCH', credentials: 'same-origin', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...selection, statement, expected_updated_at: fact.updated_at }),
+    });
+    const result = await response.json() as { fact: MemoryFact; user_edited_at: string | null; changed: boolean; error?: { message?: string } };
+    if (!response.ok) throw new MemoryApiError(result.error?.message ?? '记忆编辑失败，请刷新详情后重试', response.status);
+    return result;
   }
   private async send(id: string, preview: boolean, records: MemoryRecord[]) {
     // Blob parts preserve record boundaries without an aggregate JSON string.

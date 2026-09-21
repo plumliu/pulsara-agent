@@ -4,7 +4,7 @@
 
 ## 1. 目标与非目标
 
-原治理路径曾让 `remember` 只提交待审 candidate，由 Host-local governor 等来源 turn terminal 后再决定是否成为正式记忆；直接写入 hard-cut 已移除该路径。保留的产品核心是 ROOT 主模型决定何时记录及记录什么，`remember` 的 canonical ToolResult 与正式记忆在同一事务提交，返回成功时即可读取。本轮进一步切断对原始观察 ToolResult 的持久引用。用户在记忆页事后查看与删除。记忆始终是可能错误、过期或未召回的 advisory 数据，不是权限、项目真源、执行器或完成保证。
+原治理路径曾让 `remember` 只提交待审 candidate，由 Host-local governor 等来源 turn terminal 后再决定是否成为正式记忆；直接写入 hard-cut 已移除该路径。保留的产品核心是 ROOT 主模型决定何时记录及记录什么，`remember` 的 canonical ToolResult 与正式记忆在同一事务提交，返回成功时即可读取。本轮进一步切断对原始观察 ToolResult 的持久引用。用户在记忆页事后查看、编辑正文与删除。记忆始终是可能错误、过期或未召回的 advisory 数据，不是权限、项目真源、执行器或完成保证。
 
 本次不保留 candidate、governance、terminal claim、辅助审核模型、待审状态或旧数据库兼容路径；不增加 durable job、关系修复器、事件回放、额外回执或后台全库冲突扫描。可重建经核验的本地 disposable clean-v0 数据库，不迁移旧 candidate。
 
@@ -17,7 +17,7 @@
 3. `remember` 必填最终 `kind`，且只能为 `USER_PROFILE`、`RESPONSE_PREFERENCE`、`FACT`、`DECISION`。删除 `kind_hint/AUTO` 和二次分类；ROOT 拿不准可选 `FACT`。类别仍决定检索、回答偏好投影和精确重复身份，但不授予更高指令权威。
 4. 新事实正常提交返回 `SAVED` 和真实 `memory_id`。同一 memory domain、精确 context、最终 kind、规范化 statement 已有 ACTIVE 事实时，返回 `ALREADY_PRESENT` 与既有 ID；这次调用不改变旧来源、不新增 `BASED_ON` 或其它关系。不同 kind 的同文不算精确重复；语义近似重复允许共存。
 5. `BASED_ON` 是 ROOT 在 `remember` 参数中直接声明的**既有正式记忆**依据，与新事实同事务写入；它表示新记忆对旧记忆的真实语义依赖，不是原始工具结果的 provenance 标签，也不是为重复／扩范围副本自动生成的关系。删除依据会按第 6 节级联删除依赖项。`CONTRADICTS`／`SUPERSEDES` 则是在新事实保存后，ROOT 看见 `remember` 结果中的相关旧记忆，或以后实际召回旧记忆时，间接通过 `mark_memory_relation` 显式标定。相关性结果本身不自动建立关系，也不要求模型必须标定。
-6. 用户记忆管理 GUI 只在记忆页：浏览、来源、关系、删除和删除影响预览都在那里；会话页不加记忆管理入口、按钮或关系操作。首版不新增人工关系标定按钮；若将来需要，另立产品路径。会话仍可照常显示模型消息及工具结果，但不承担记忆管理。
+6. 用户记忆管理 GUI 只在记忆页：浏览、来源、关系、正文编辑、删除和删除影响预览都在那里；会话页不加记忆管理入口、按钮或关系操作。首版不新增人工关系标定按钮；若将来需要，另立产品路径。会话仍可照常显示模型消息及工具结果，但不承担记忆管理。
 7. 主模型撰写和关系判断不再有第二模型的语义拒绝保证。从工具输出转写 FACT 时，source fidelity、时效性、prompt injection／记忆回声、秘密／流程取舍、类别判断和未标冲突都是接受的 advisory 风险；确定性验证只声称验证权限、形状、记忆依据身份和事务，不能伪称核实模型摘要与某个原始工具结果一致，或识别所有敏感与错误语义。记忆投影继续明确低权威，使用前应核对可读的当前项目真源。
 
 ## 3. `remember` 的工具与结果合同
@@ -63,7 +63,7 @@ clean-v0 保留 `memory_facts` 到**创建该事实的 canonical `remember` Tool
 
 `memory_explain` 和记忆页只从 fact 的**创建 `remember` 结果**和关系 owner 投影写入来源；不返回原始观察 ToolResult 的 ID、handle、`tool_result_citation_ids` 或“由工具验证”的结论。模型在会话中调用的 `memory_explain` 仍须同源 workspace 才能看到 session／turn／entry／ToolResult 详情；跨源返回 `CROSS_ORIGIN_REDACTED`，GLOBAL 可被召回不意味着模型能读取另一个 workspace 的原始对话。用户直接操作的记忆页则由本地服务按服务端确定的 memory domain 授权，与会话页当前选中的会话／workspace 无关；只要创建来源会话仍可打开，就可从该 domain 的记忆详情导航到保存时的对话，不用当前会话 workspace 决定来源链接的可见性。该链接不宣称定位或证明模型所参考的具体工具输出。记忆正文、kind、时间与关系仍按既有记忆可读范围显示。以上来源字段是产品解释与删除关系的必要数据，不是治理回执。
 
-记忆详情应分开呈现创建 fact 的 `remember` 来源，以及每条 `BASED_ON`／`CONTRADICTS`／`SUPERSEDES` 关系的 owner（`remember` 保存时建立或 `mark_memory_relation` 后续标定）；不得显示已废弃的“保存时引用”“先前记忆结果／工具观察”支持列表，也不得把后补关系说成创建 fact 的独立来源。详情界面保留正文、类别／范围／时间；“在对话中查看”与“删除记忆”同处元信息下方靠右的操作行，不重复渲染正文中已有的适用条件或保存方式说明；关系区以当前事实为第一层节点、关联事实为下一层可点击节点，关系建立来源仍可单独查看。两个层级卡片之间统一使用向右箭头作为阅读引导，**不以箭头表达数据库方向或因果方向**；由当前节点到关联节点的文案分别为 `is based on`、`is the basis of`、`supersedes`、`is superseded by`、`contradicts`，冲突从任一端查看均为 `contradicts`。来源会话 `OPEN` 时可导航到相应写入处；已关闭时保留归属说明但不提供不可打开的定位链接。这只是现有 canonical 写入与关系 owner 的读投影，不新增 durable 来源副本或治理状态。
+记忆详情应分开呈现创建 fact 的 `remember` 来源，以及每条 `BASED_ON`／`CONTRADICTS`／`SUPERSEDES` 关系的 owner（`remember` 保存时建立或 `mark_memory_relation` 后续标定）；不得显示已废弃的“保存时引用”“先前记忆结果／工具观察”支持列表，也不得把后补关系说成创建 fact 的独立来源。详情界面保留正文、类别／范围／时间；“在对话中查看”“编辑记忆”“删除记忆”依次位于元信息下方靠右的操作行，不重复渲染正文中已有的适用条件或保存方式说明；关系区以当前事实为第一层节点、关联事实为下一层可点击节点，关系建立来源仍可单独查看。两个层级卡片之间统一使用向右箭头作为阅读引导，**不以箭头表达数据库方向或因果方向**；由当前节点到关联节点的文案分别为 `is based on`、`is the basis of`、`supersedes`、`is superseded by`、`contradicts`，冲突从任一端查看均为 `contradicts`。来源会话 `OPEN` 时可导航到相应写入处；已关闭时保留归属说明但不提供不可打开的定位链接。这只是现有 canonical 写入与关系 owner 的读投影，不新增 durable 来源副本或治理状态。
 
 点击关联事实卡片应同时切换右侧详情与左侧目录选中项：使用该事实的 global／项目 context，类别归为“全部”，清空搜索，并按其 ACTIVE／SUPERSEDED 生命周期切到“正在使用”／“已被替代”。即使目标不在当前目录第一页，也须在当前筛选下显示并选中该事实，不能只更换右侧详情；用户主动更换筛选或关闭详情后取消这一临时定位。项目选择、搜索与状态选择保留键盘可见焦点，但不使用突兀的橙黄色焦点框。
 
@@ -74,6 +74,14 @@ clean-v0 保留 `memory_facts` 到**创建该事实的 canonical `remember` Tool
 计划和执行继续在记忆管理 owner 中复用同一纯图算法、精确预览确认与事务内重验／锁定，防止并发 `remember`、关系标定或删除使确认漂移。删除执行先移除触及待删事实的关系和 embedding，再删事实、恢复合法旧事实；不再规划、锁定或删除 ToolResult 支持引用。过去的 ToolResult／会话历史不回写也不删除。原 candidate normalization、candidate_deletes 和相关 FK 冲突处理完全移除；幸存 fact 失去指向已删端点的关系后仍是同一个 fact，其创建来源不变。UI 仍展示级联删除、关系移除、恢复项、冲突与额外选择。删除预览使用独立、内部滚动的模态弹窗，不拉长记忆详情页；先展示所选事实和删除／恢复／关系变化数量，再分别列出连带删除及恢复项，关系变化可展开核对。若预览未就绪，明确禁止确认删除，并在弹窗内说明冲突及额外选择、重新计算的步骤；重算期间或失败时保留弹窗，但不得继续使用旧预览确认删除。并发漂移返回的新预览仍在同一弹窗中展示。取消或关闭不执行删除。
 
 记忆页继续提供“全局记忆”／“项目记忆”范围、类别、生命周期筛选、分页、详情、允许展示的来源、关系及删除预览。项目选择列表由本 memory domain 中**当前仍存在**的项目 context 正式 fact 派生，ACTIVE 和 SUPERSEDED 均计入；只有会话、没有项目记忆的目录不出现，删除最后一条项目记忆后目录退出列表。项目元数据来自对应的 canonical project session。列表与详情读取均不接受会话页当前会话作为筛选依据；删除后刷新列表，若所选项目已无记忆则清空选择。普通仍为 `OPEN` 的 Web 会话下，有记忆的项目自然属于会话项目集合；但 CLI 可以正常关闭会话并留下正式项目记忆，而当前 Web 会话列表排除 `CLOSED` 会话，因此“记忆项目始终是会话页可见项目的子集”尚非现有代码可保证的不变量。记忆页不能仅为凑这个子集而隐藏仍存在的项目记忆；若产品要让关闭的会话也出现在会话页，应另定会话页合同。首版用户 GUI 不新增手动关系标定；会话页不加记忆管理控件。可按正式 fact 时间显示最近保存项，不添加 durable 通知。用户删除不能撤回先前发给模型的记忆内容。
+
+### 6.1 用户编辑正文（记忆页专有）
+
+记忆详情的创建来源按钮与删除按钮之间提供“编辑记忆”。只允许本地用户修改当前记忆的 `statement`，不提供模型工具或会话页入口，不改 fact ID、kind、context、ACTIVE／SUPERSEDED 生命周期、创建 ToolResult 与既有关系；不自动重判依赖、冲突或取代。编辑器提示：正文与关系可能不再匹配，用户应自行核对；原始对话及旧工具结果不会改写。“在对话中查看”永远只是**最初保存位置**，不可冒充编辑后正文的证据。`user_edited_at` 只记录最后一次用户改写时间，不保留正文版本或操作日志；读详情及 `memory_get`／`memory_explain` 必须明确其已由用户改写。
+
+请求带原详情的精确 `updated_at` 作乐观并发条件。服务端按原 kind 校验 NFC、换行归一化、trim 后的 UTF-8 非空及 2 KiB／8 KiB 边界，用现有分词器生成新 search terms、原算法生成 kind＋statement semantic digest。未变化的正文不写库；过期时间、已删除事实或不匹配的 context 明确拒绝，不能覆盖另一用户／模型的更新。ACTIVE 编辑撞上同 context 唯一正文时拒绝，不偷偷合并 ID／来源／关系；SUPERSEDED 可改正文，日后恢复仍由既有删除预览的语义冲突逻辑仲裁。单事务锁定事实、检查条件、更新正文／digest／terms／`updated_at`／`user_edited_at` 并移除旧 embedding；search_document 沿用现有触发器重算，事务失败不留部分状态。提交后 best-effort 唤醒可读该事实的 Host-local embedding 维护；没有在线 Host 时下一次启动扫描恢复，sparse 与精确读取立即可用。HTTP 结果不明时前端保留草稿并提示用户重新打开详情核对，不做无条件重复提交或新增 durable 回执。当前轮已投影给模型的内容不回写，只在后续合法追加／读取中生效。
+
+验收覆盖正文编辑、无变化、过期版本与重复正文冲突；ACTIVE／SUPERSEDED 编辑后的原 ID、关系和创建来源不变，搜索词与删除预览采用新正文、旧 embedding 不再可用；模型下次 `memory_get`／`memory_explain` 能分辨用户编辑与原始保存来源。GUI 的编辑按钮、取消／保存、错误保留草稿和关系不自动重判提示均需测试。
 
 ## 7. 召回、偏好投影与 embedding
 
