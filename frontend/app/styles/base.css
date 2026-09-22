@@ -160,18 +160,6 @@ svg { flex: 0 0 auto; }
 .icon-button:hover, .icon-button.is-active { color: var(--ink); background: var(--paper-solid); }
 .small-action { min-height: 26px; padding: 0 9px; border: 1px solid var(--line); background: var(--paper-raised); font-size: var(--type-small); }
 
-.metric-icon {
-  display: grid;
-  place-items: center;
-  width: 31px;
-  height: 31px;
-  border-radius: 9px;
-}
-.metric-icon.amber { color: #9a6726; background: var(--amber-soft); }
-.metric-icon.blue { color: var(--blue); background: var(--blue-soft); }
-.metric-icon.green { color: var(--green); background: var(--green-soft); }
-.metric-icon.violet { color: var(--violet); background: var(--violet-soft); }
-
 .segmented-control {
   display: inline-flex;
   align-items: center;

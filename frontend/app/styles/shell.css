@@ -25,15 +25,8 @@
 }
 .rail-logo { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: 27px; border-radius: 12px; background: transparent; }
 .rail-logo:hover { background: rgba(255,255,255,.06); }
-.brand-mark { position: relative; display: inline-block; width: 48px; height: 48px; border: 1px solid color-mix(in srgb, var(--amber) 48%, var(--line)); border-radius: 50%; }
-.brand-mark.is-compact { width: 30px; height: 30px; border-color: rgba(241,224,190,.38); }
-.brand-mark__orbit { position: absolute; inset: 10px -7px; border: 1px solid var(--amber); border-radius: 50%; transform: rotate(-22deg); }
-.is-compact .brand-mark__orbit { inset: 6px -4px; }
-.brand-mark__star { position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; border-radius: 50%; background: #f2c87d; transform: translate(-50%,-50%); box-shadow: 0 0 13px rgba(242,200,125,.7); }
-.brand-mark__star::before, .brand-mark__star::after { content: ""; position: absolute; left: 50%; top: 50%; background: #f2c87d; transform: translate(-50%,-50%); }
-.brand-mark__star::before { width: 1px; height: 12px; }
-.brand-mark__star::after { width: 12px; height: 1px; }
-.is-compact .brand-mark__star { width: 4px; height: 4px; }
+.brand-mark { display: block; flex: none; width: 48px; height: 48px; object-fit: contain; }
+.brand-mark.is-compact { width: 36px; height: 36px; }
 .rail-nav { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .rail-nav--bottom { margin-top: auto; }
 .rail-button { position: relative; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 11px; background: transparent; color: var(--rail-muted); transition: .16s ease; }
@@ -161,14 +154,9 @@
 
 .surface-view { min-width: 0; min-height: 0; overflow: hidden; background: var(--paper); }
 .surface-view::before { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; background-image: radial-gradient(color-mix(in srgb, var(--ink) 8%, transparent) .65px, transparent .65px); background-size: 19px 19px; mask-image: linear-gradient(to bottom, black, transparent 42%); opacity: .5; }
-.surface-topbar { display: flex; align-items: center; justify-content: space-between; height: 58px; padding: 0 28px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--paper-raised) 84%, transparent); backdrop-filter: blur(16px); }
-.surface-brand { display: flex; align-items: center; gap: 9px; font-family: var(--serif); font-size: var(--type-title); font-weight: 650; }
-.surface-brand .brand-mark { width: 24px; height: 24px; border-color: var(--line-strong); }
-.surface-brand .brand-mark__orbit { inset: 5px -3px; }
 .runtime-health { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: var(--type-label); }
 .runtime-health > span { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 12%, transparent); }
 .runtime-health strong { color: var(--ink); font-weight: 650; }
-.surface-scroll { height: calc(100dvh - 58px); overflow-y: auto; }
 
 .database-workbench-mask {
   position: fixed;

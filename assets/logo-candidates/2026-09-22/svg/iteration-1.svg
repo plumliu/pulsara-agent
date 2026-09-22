@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="logo-title logo-description" color="#20283A">
+  <title id="logo-title">Pulsara — SVG draft 01</title>
+  <desc id="logo-description">Two opposing pulsar beams, a segmented elliptical belt, and two outer circular arcs. A single navy silhouette on a transparent background.</desc>
+
+  <!-- Shared tilt keeps the beam axis perpendicular to the belt's major axis.
+       All three elements fit an invisible circle of radius 192. -->
+  <g id="icon" transform="translate(256 256) rotate(12)">
+    <g id="frame-arcs" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round">
+      <path id="frame-northwest" d="M -179.001 -38.048 A 183 183 0 0 1 -102.332 -151.714"/>
+      <use href="#frame-northwest" transform="rotate(180)"/>
+    </g>
+
+    <!-- Six separately drawn arcs give the belt deliberate, rounded gaps. -->
+    <g id="asteroid-belt" fill="none" stroke="currentColor" stroke-width="18" stroke-linecap="round">
+      <path d="M 158.483 -24.500 A 183 49 0 0 1 158.483 24.500"/>
+      <path d="M 135.996 32.787 A 183 49 0 0 1 38.048 47.929"/>
+      <path d="M -38.048 47.929 A 183 49 0 0 1 -135.996 32.787"/>
+      <path d="M -158.483 24.500 A 183 49 0 0 1 -158.483 -24.500"/>
+      <path d="M -135.996 -32.787 A 183 49 0 0 1 -38.048 -47.929"/>
+      <path d="M 38.048 -47.929 A 183 49 0 0 1 135.996 -32.787"/>
+    </g>
+
+    <!-- Edit one beam; its opposite stays precisely rotationally symmetric. -->
+    <g id="beams" fill="currentColor">
+      <path id="beam-north" d="M -5 -7
+        C -11 -82 -28 -127 -74 -158
+        C -85.5 -165.75 -88.527 -170.762 -78 -175.442
+        A 192 192 0 0 1 78 -175.442
+        C 88.527 -170.762 85.5 -165.75 74 -158
+        C 28 -127 11 -82 5 -7
+        Q 0 -4 -5 -7 Z"/>
+      <use href="#beam-north" transform="rotate(180)"/>
+    </g>
+  </g>
+</svg>

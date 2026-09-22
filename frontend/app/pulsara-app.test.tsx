@@ -2286,7 +2286,7 @@ describe('PulsaraApp', () => {
     render(<PulsaraApp adapter={new FakeAdapter()} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
-    expect(screen.getByText(/准备好继续/)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '工作总览' })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: '设置' }));
     expect(screen.getByRole('heading', { name: '设置' })).toBeTruthy();
@@ -2297,7 +2297,7 @@ describe('PulsaraApp', () => {
     adapter.sessions = [];
     render(<PulsaraApp adapter={adapter} />);
 
-    await screen.findByText(/准备好继续/);
+    await screen.findByRole('heading', { name: '工作总览' });
     fireEvent.click(screen.getByRole('button', { name: '会话' }));
 
     expect(await screen.findByText('创建或选择会话后开始')).toBeTruthy();
@@ -2459,7 +2459,7 @@ describe('PulsaraApp', () => {
     await screen.findByRole('heading', { name: 'PostgreSQL 当前无法连接' });
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
 
-    expect(await screen.findByText(/先准备好/)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: '准备工作环境' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'PostgreSQL 当前无法连接' })).toBeTruthy();
     expect(screen.getByText('保存连接')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: '最近会话' })).toBeNull();
@@ -2518,7 +2518,7 @@ describe('PulsaraApp', () => {
       name: /删除模型配置 Local Test · test-model/,
     });
     fireEvent.click(deleteButton);
-    expect(screen.getByText('删除后，已有会话不会自动改用其他模型。')).toBeTruthy();
+    expect(screen.queryByText('删除后，已有会话不会自动改用其他模型。')).toBeNull();
     expect(remove).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
@@ -2890,7 +2890,8 @@ describe('PulsaraApp', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
 
-    expect(screen.getAllByText('最近会话')).toHaveLength(2);
+    expect(screen.getByRole('heading', { name: /^最近会话/ })).toBeTruthy();
+    expect(screen.getByLabelText('共 3 个会话').textContent).toBe('3');
     expect(screen.queryByText('最近工作')).toBeNull();
     const runtimeHealth = container.querySelector('.runtime-health');
     expect(runtimeHealth?.textContent).toBe('本地服务已连接');
@@ -2899,16 +2900,15 @@ describe('PulsaraApp', () => {
     expect(screen.queryByText('本地运行')).toBeNull();
     expect(container.querySelector('.active-mission-card')).toBeNull();
     expect(container.querySelector('.activity-card')).toBeNull();
-    expect(container.querySelectorAll('.recent-table .session-presence--current')).toHaveLength(1);
-    expect(container.querySelectorAll('.recent-table .session-presence--loaded')).toHaveLength(1);
-    expect(container.querySelectorAll('.recent-table .session-presence--resumable')).toHaveLength(1);
-    expect(Array.from(container.querySelectorAll('.recent-table .table-state'), (node) => node.textContent))
+    expect(container.querySelectorAll('.overview-session-list .session-presence--current')).toHaveLength(1);
+    expect(container.querySelectorAll('.overview-session-list .session-presence--loaded')).toHaveLength(1);
+    expect(container.querySelectorAll('.overview-session-list .session-presence--resumable')).toHaveLength(1);
+    expect(Array.from(container.querySelectorAll('.overview-session__presence'), (node) => node.textContent))
       .toEqual(['当前会话', '已载入', '可恢复']);
-    const systemCard = container.querySelector('.system-card');
-    expect(systemCard?.textContent).toContain('当前配置');
-    expect(systemCard?.textContent).toContain('模型配置1 组可用1 组');
-    expect(systemCard?.textContent).toContain('记忆检索DashScope Embedding未配置');
-    expect(systemCard?.textContent).toContain('结果重排DashScope Rerank未配置');
+    const systemCard = screen.getByRole('region', { name: '运行环境' });
+    expect(systemCard.textContent).toContain('模型配置1 组可用');
+    expect(systemCard.textContent).toContain('记忆检索未配置');
+    expect(systemCard.textContent).toContain('结果重排未配置');
     expect(systemCard?.querySelector('footer')).toBeNull();
   });
 
@@ -2933,14 +2933,14 @@ describe('PulsaraApp', () => {
       model_configurations: adapter.modelConfigurations,
     }));
 
-    const { container } = render(<PulsaraApp adapter={adapter} />);
+    render(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
 
-    const systemCard = container.querySelector('.system-card');
-    expect(systemCard?.textContent).toContain('模型配置2 组可用2 组');
-    expect(systemCard?.textContent).toContain('记忆检索DashScope Embedding已配置');
-    expect(systemCard?.textContent).toContain('结果重排DashScope Rerank已配置');
+    const systemCard = screen.getByRole('region', { name: '运行环境' });
+    expect(systemCard.textContent).toContain('模型配置2 组可用');
+    expect(systemCard.textContent).toContain('记忆检索已配置');
+    expect(systemCard.textContent).toContain('结果重排已配置');
   });
 
   it('refreshes loaded session facts and distinguishes the current page connection', async () => {

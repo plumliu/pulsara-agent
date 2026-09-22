@@ -1,8 +1,6 @@
 .capability-page { overflow-y: auto; }
-.capability-page__inner { width: min(940px,calc(100% - 72px)); margin: 0 auto; padding: 58px 0 34px; }
-.capability-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
-.capability-page-header h1 { margin: 0; font-family: var(--serif); font-size: 30px; font-weight: 600; letter-spacing: -.02em; }
-.capability-page-header p { margin: 7px 0 0; color: var(--muted); font-size: var(--type-label); }
+.capability-page__inner { width: min(940px,calc(100% - 72px)); margin: 0 auto; padding: 24px 0 34px; }
+.capability-page-header { flex-wrap: wrap; }
 .capability-page-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
 .capability-page-actions .secondary-action, .capability-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 0 13px; border-radius: 10px; font-size: var(--type-caption); }
 .capability-page-actions .secondary-action { border: 1px solid var(--line); background: var(--paper-solid); color: var(--ink-soft); }

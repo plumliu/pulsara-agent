@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="logo-title logo-description" color="#20283A">
+  <title id="logo-title">Pulsara — SVG draft 02</title>
+  <desc id="logo-description">Two opposing pulsar beams and a heavier six-segment elliptical belt with equal rounded gaps, without an outer frame. A single navy silhouette on a transparent background.</desc>
+
+  <!-- Shared tilt keeps the beam axis perpendicular to the belt's major axis.
+       The beam caps and belt ends retain the same 192-unit outer radius. -->
+  <g id="icon" transform="translate(256 256) rotate(12)">
+    <!-- 26-unit stroke; every pair of adjacent round-cap centers is 58 units
+         apart, leaving the same 32-unit visible gap. -->
+    <g id="asteroid-belt" fill="none" stroke="currentColor" stroke-width="26" stroke-linecap="round">
+      <path d="M 157.151 -23.460 A 179 49 0 0 1 157.151 23.460"/>
+      <path d="M 101.658 40.331 A 179 49 0 0 1 29.000 48.353"/>
+      <path d="M -29.000 48.353 A 179 49 0 0 1 -101.658 40.331"/>
+      <path d="M -157.151 23.460 A 179 49 0 0 1 -157.151 -23.460"/>
+      <path d="M -101.658 -40.331 A 179 49 0 0 1 -29.000 -48.353"/>
+      <path d="M 29.000 -48.353 A 179 49 0 0 1 101.658 -40.331"/>
+    </g>
+
+    <!-- Beam geometry is unchanged from draft 01. -->
+    <g id="beams" fill="currentColor">
+      <path id="beam-north" d="M -5 -7
+        C -11 -82 -28 -127 -74 -158
+        C -85.5 -165.75 -88.527 -170.762 -78 -175.442
+        A 192 192 0 0 1 78 -175.442
+        C 88.527 -170.762 85.5 -165.75 74 -158
+        C 28 -127 11 -82 5 -7
+        Q 0 -4 -5 -7 Z"/>
+      <use href="#beam-north" transform="rotate(180)"/>
+    </g>
+  </g>
+</svg>

@@ -184,9 +184,8 @@ export function CapabilityView({
 
   return (
     <section className="surface-view capability-page">
-      <div className="capability-page__inner">
-        <header className="capability-page-header">
-          <div><h1>能力</h1><p>管理这台设备上的插件、MCP 与技能。</p></div>
+        <header className="page-header capability-page-header">
+          <div><span className="page-kicker">扩展能力</span><h1>能力</h1><p>管理这台设备上的插件、MCP 与技能。</p></div>
           <div className="capability-page-actions">
             <button className="secondary-action" onClick={() => setAddKind('mcp-import')}><PlugZap size={14} />导入 MCP 配置</button>
             <div className="capability-menu"><button className="secondary-action" onClick={() => { setRootMenuOpen((value) => !value); setAddMenuOpen(false); }}><FolderOpen size={14} /> 浏览目录</button>{rootMenuOpen && <div className="capability-menu__popover"><button onClick={() => { setRootMenuOpen(false); void onOpenRoot('agents'); }}><FolderOpen size={14} /><span><strong>.agents</strong><small>{snapshot?.roots.find((item) => item.kind === 'agents')?.path}</small></span><ExternalLink size={12} /></button><button onClick={() => { setRootMenuOpen(false); void onOpenRoot('pulsara'); }}><FolderOpen size={14} /><span><strong>.pulsara</strong><small>{snapshot?.roots.find((item) => item.kind === 'pulsara')?.path}</small></span><ExternalLink size={12} /></button></div>}</div>
@@ -194,6 +193,7 @@ export function CapabilityView({
           </div>
         </header>
 
+      <div className="capability-page__inner">
         <div className="capability-page-toolbar">
           <div className="capability-tabs" role="tablist">
             <button className={tab === 'plugins' ? 'is-active' : ''} onClick={() => setTab('plugins')} role="tab">插件 <span>{snapshot?.plugins.items.length ?? 0}</span></button>

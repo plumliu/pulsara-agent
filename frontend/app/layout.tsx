@@ -19,6 +19,12 @@ export const metadata: Metadata = {
   description:
     '无需账号登录的本地 Agent 工作台。',
   applicationName: 'Pulsara',
+  icons: {
+    icon: [
+      { url: '/assets/pulsara-icon-32.png', type: 'image/png', sizes: '32x32' },
+      { url: '/assets/pulsara-icon-16.png', type: 'image/png', sizes: '16x16' },
+    ],
+  },
   alternates: {
     canonical: '/',
   },

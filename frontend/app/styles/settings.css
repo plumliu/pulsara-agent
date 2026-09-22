@@ -72,8 +72,7 @@
 .model-edit-notice p { margin: 5px 0 0; color: var(--faint); }
 .model-edit-dialog .settings-form-grid label { align-content: start; }
 .settings-form-grid label > small { color: var(--muted); font-size: var(--type-caption); line-height: 1.5; }
-.model-delete-confirmation { display: flex; flex-wrap: wrap; justify-content: flex-end; justify-self: end; gap: 6px; max-width: 290px; }
-.model-delete-confirmation > span { flex-basis: 100%; color: var(--faint); font-size: var(--type-micro); line-height: 1.45; }
+.model-delete-confirmation { display: flex; justify-content: flex-end; justify-self: end; gap: 6px; }
 .model-config-card__actions .subtle-danger { color: var(--red); }
 .model-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 10px 15px; border-top: 1px solid var(--line); color: var(--faint); font-size: var(--type-caption); }
 .model-pagination > div { display: flex; align-items: center; gap: 10px; margin-left: auto; }

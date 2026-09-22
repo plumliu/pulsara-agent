@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="logo-title logo-description" color="#20283A">
+  <title id="logo-title">Pulsara — SVG draft 04</title>
+  <desc id="logo-description">An upright pulsar perpendicular to a solid elliptical ring, without outer circular arcs. The rear ring passes behind the upper beam, and the front ring passes over the lower beam.</desc>
+
+  <defs>
+    <!-- The four mouth anchors (±78, ±175.442) and ring tips (±192, 0)
+         share an invisible radius-192 circumcircle. -->
+    <path id="beam-north" d="M -5 -7
+      C -11 -82 -28 -127 -74 -158
+      C -85.5 -165.75 -88.527 -170.762 -78 -175.442
+      A 192 192 0 0 1 78 -175.442
+      C 88.527 -170.762 85.5 -165.75 74 -158
+      C 28 -127 11 -82 5 -7
+      Q 0 -4 -5 -7 Z"/>
+
+    <!-- Elliptical band: outer 192 × 47; inner 160 × 32.
+         The solid, unbroken foreground stays wider at the two tips. -->
+    <path id="belt-shape" fill-rule="evenodd" d="
+      M -192 0 A 192 47 0 0 1 192 0 A 192 47 0 0 1 -192 0 Z
+      M -160 0 A 160 32 0 0 1 160 0 A 160 32 0 0 1 -160 0 Z"/>
+    <path id="belt-front" d="
+      M -192 0 A 192 47 0 0 0 192 0
+      L 160 0 A 160 32 0 0 1 -160 0 Z"/>
+
+    <!-- Genuine alpha knockouts, not background-colored outlines.
+         A six-unit clearance makes each over/under crossing readable. -->
+    <mask id="back-ring-clearance" maskUnits="userSpaceOnUse" x="-220" y="-220" width="440" height="440" style="mask-type:luminance">
+      <rect x="-220" y="-220" width="440" height="440" fill="white"/>
+      <use href="#beam-north" fill="black" stroke="black" stroke-width="12" stroke-linejoin="round"/>
+    </mask>
+    <mask id="front-ring-clearance" maskUnits="userSpaceOnUse" x="-220" y="-220" width="440" height="440" style="mask-type:luminance">
+      <rect x="-220" y="-220" width="440" height="440" fill="white"/>
+      <use href="#belt-front" fill="black" stroke="black" stroke-width="12" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+
+  <!-- One shared 12° rotation preserves exact perpendicularity. -->
+  <g id="icon" transform="translate(256 256) rotate(12)">
+    <g id="asteroid-belt" fill="currentColor" mask="url(#back-ring-clearance)">
+      <use href="#belt-shape"/>
+    </g>
+
+    <!-- Cutting the foreground band out of the beams preserves the
+         continuous ring in front while retaining a transparent separation. -->
+    <g id="beams" fill="currentColor" mask="url(#front-ring-clearance)">
+      <use href="#beam-north"/>
+      <use href="#beam-north" transform="rotate(180)"/>
+    </g>
+  </g>
+</svg>

@@ -1,8 +1,17 @@
 export function BrandMark({ compact = false }: { compact?: boolean }) {
+  const size = compact ? 36 : 48;
+
   return (
-    <span className={`brand-mark${compact ? ' is-compact' : ''}`} aria-hidden="true">
-      <span className="brand-mark__orbit" />
-      <span className="brand-mark__star" />
-    </span>
+    // Local static asset: the standalone app has no Next image service.
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      className={`brand-mark${compact ? ' is-compact' : ''}`}
+      src="/assets/pulsara-icon.png"
+      width={size}
+      height={size}
+      alt=""
+      aria-hidden="true"
+      draggable={false}
+    />
   );
 }
