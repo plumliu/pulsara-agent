@@ -468,7 +468,20 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  archived: SessionSummary[] = [];
+  listArchivedSessions = vi.fn(async () => this.archived);
+  archiveSession = vi.fn(async (sessionId: string) => {
+    this.archived.push(...this.sessions.filter(s => s.id === sessionId).map(s => ({ ...s, lifecycle: 'ARCHIVED' as const, live: false })));
+    this.sessions = this.sessions.filter(s => s.id !== sessionId);
+    return { status: 'ARCHIVED' as const, session_id: sessionId };
+  });
+  unarchiveSession = vi.fn(async (sessionId: string) => {
+    this.sessions.push(...this.archived.filter(s => s.id === sessionId).map(s => ({ ...s, lifecycle: 'OPEN' as const })));
+    this.archived = this.archived.filter(s => s.id !== sessionId);
+    return { status: 'OPEN' as const, session_id: sessionId };
+  });
   deleteSession = vi.fn(async (sessionId: string) => {
+    this.archived = this.archived.filter(s => s.id !== sessionId);
     this.sessions = this.sessions.filter(session => session.id !== sessionId);
     return { status: 'DELETED' as const, session_id: sessionId };
   });
@@ -1981,6 +1994,39 @@ describe('PulsaraApp', () => {
 
     expect(await screen.findByText('无法复制回复')).toBeTruthy();
     expect(screen.getByText('浏览器没有授予剪贴板权限')).toBeTruthy();
+  });
+
+  it('archives only eligible sessions, restores from settings without opening, and deletes there', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [{ ...initialSession, canArchive: false }];
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByLabelText(`${initialSession.title} 更多操作`));
+    expect((screen.getByRole('button', { name: '归档会话' }) as HTMLButtonElement).disabled).toBe(true);
+    adapter.sessions = [{ ...initialSession, canArchive: true }];
+    fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
+    fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
+    await waitFor(() => expect((screen.getByRole('button', { name: '归档会话' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: '归档会话' }));
+    await screen.findByText('会话已归档');
+    expect(adapter.archiveSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
+    expect(adapter.createSession).not.toHaveBeenCalled();
+    expect(adapter.lastConnection?.closed).toBe(true);
+    expect(screen.queryByLabelText(`${initialSession.title} 更多操作`)).toBeNull();
+    const connectionsBefore = adapter.connectCalls.length;
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    fireEvent.click(screen.getByRole('button', { name: '已归档会话' }));
+    fireEvent.click(await screen.findByRole('button', { name: '取消归档' }));
+    await screen.findByText('还没有已归档会话');
+    expect(adapter.unarchiveSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
+    expect(adapter.connectCalls).toHaveLength(connectionsBefore);
+    adapter.archived = [{ ...initialSession, lifecycle: 'ARCHIVED' }];
+    adapter.sessions = [];
+    fireEvent.click(screen.getByRole('button', { name: '刷新已归档会话' }));
+    fireEvent.click(await screen.findByRole('button', { name: '永久删除…' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '永久删除' }));
+    await screen.findByText('会话已删除');
+    expect(adapter.deleteSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
+    await screen.findByText('还没有已归档会话');
   });
 
   it('permanently deletes the selected session without creating a replacement', async () => {

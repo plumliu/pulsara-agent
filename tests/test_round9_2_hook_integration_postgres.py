@@ -567,7 +567,7 @@ def test_round9_2_host_sources_stop_and_prefix_continuity(
         )
         continuation = _hook_observations(model.requests[1])
         assert any("STOP_CONTINUE_ONCE" in item.body for item in continuation)
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -658,7 +658,7 @@ def test_round9_2_queued_prompt_context_waits_for_exact_queue_head_full(
         assert "USER_PROMPT_CONTEXT:USER:active-turn-A" in first
         assert "USER_PROMPT_CONTEXT:USER:queued-turn-B" not in followup
         assert "USER_PROMPT_CONTEXT:USER:queued-turn-B" in delivered
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -789,7 +789,7 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
         active = await asyncio.wait_for(running, timeout=10)
         assert active.final_text == "ACTIVE_BEFORE_IMAGE_QUEUE"
         await asyncio.wait_for(model.image_compile_seen.wait(), timeout=10)
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -899,7 +899,7 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
         }
         final_observations = _hook_observations(model.requests[-1])
         assert any("POST_TOOL_CONTEXT:USER" in item.body for item in final_observations)
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -1070,7 +1070,7 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
                 )
             )
         finally:
-            await core.close_session(session.host_session_id, close_conversation=True)
+            await core.close_session(session.host_session_id)
             await core.shutdown()
 
     asyncio.run(scenario())
@@ -1248,7 +1248,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
             "call:barrier-sibling",
             "call:plan-question",
         ]
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -1344,7 +1344,7 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
                 "SUBAGENT_STOP_CONTINUE_ONCE" in item.body for item in second_context
             )
         finally:
-            await core.close_session(session.host_session_id, close_conversation=True)
+            await core.close_session(session.host_session_id)
             await core.shutdown()
 
     asyncio.run(scenario())
@@ -1449,7 +1449,7 @@ def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
             requested_permission_mode=PermissionMode.ACCEPT_EDITS,
         )
         assert after.final_text == "AFTER_IDLE_COMPACTION"
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -1545,7 +1545,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
         prior_ratio = prior_tokens / budget
         trigger_ratio = min(0.8, prior_ratio + 0.005)
         target_ratio = max(0.001, trigger_ratio - 0.001)
-        await core.close_session(first.host_session_id, close_conversation=False)
+        await core.close_session(first.host_session_id)
 
         resumed = await core.resume_session(
             session_id,
@@ -1570,7 +1570,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
         # changed semantic prefix under a stale semantic-token threshold.
         assert model.summary_transport.open_count == 1
         assert len(model.requests) == 8
-        await core.close_session(resumed.host_session_id, close_conversation=True)
+        await core.close_session(resumed.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -1682,7 +1682,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             model.active_provider_release.set()
             if session is not None:
                 await core.close_session(
-                    session.host_session_id, close_conversation=True
+                    session.host_session_id
                 )
             for task in (running, compacting):
                 if task is not None and not task.done():

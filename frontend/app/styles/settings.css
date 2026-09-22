@@ -133,3 +133,15 @@
 .settings-switch[aria-checked="true"] > span { transform: translateX(15px); background: white; }
 .settings-switch:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .settings-switch, .settings-switch > span { transition: none; } }
+.archived-sessions > header > button { margin-left: auto; padding: 6px; color: var(--muted); border-radius: 6px; }
+.archived-sessions > ul { list-style: none; margin: 0; padding: 0 20px; }
+.archived-sessions > ul > li { display: flex; align-items: center; gap: 20px; padding: 18px 0; border-top: 1px solid var(--line); }
+.archived-sessions > ul > li:first-child { border-top: 0; }
+.archived-sessions li > div:first-child { flex: 1; min-width: 0; }
+.archived-sessions strong { font-size: var(--type-control); font-weight: 600; }
+.archived-sessions li p { margin: 5px 0; color: var(--muted); font-size: var(--type-label); overflow-wrap: anywhere; }
+.archived-sessions small { color: var(--faint); font-size: var(--type-caption); }
+.archived-session-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.archived-session-actions button { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: var(--type-label); }
+.archived-sessions-empty { padding: 24px; color: var(--muted); font-size: var(--type-small); text-align: center; }
+@media (max-width: 700px) { .archived-sessions > ul > li { align-items: flex-start; flex-direction: column; gap: 12px; } }

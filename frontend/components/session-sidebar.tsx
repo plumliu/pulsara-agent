@@ -1,4 +1,4 @@
-import { ChevronRight, Ellipsis, Eye, Folder, FolderOpen, GitFork, Plus, Search, Trash2 } from 'lucide-react';
+import { Archive, ChevronRight, Ellipsis, Eye, Folder, FolderOpen, GitFork, Plus, Search, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
@@ -26,6 +26,8 @@ interface SessionSidebarProps {
   onClose: () => void;
   onSelectSession: (id: string) => void;
   onDeleteSession: (session: SessionSummary) => void;
+  onArchiveSession: (session: SessionSummary) => void;
+  onRefreshSessions: () => void;
   onNewSession: () => void;
   canCreateSession: boolean;
   onOpenCommand: () => void;
@@ -85,11 +87,15 @@ function SessionItem({
   activeSessionId,
   onSelectSession,
   onDeleteSession,
+  onArchiveSession,
+  onRefreshSessions,
 }: {
   session: SessionSummary;
   activeSessionId: string;
   onSelectSession: (id: string) => void;
   onDeleteSession: (session: SessionSummary) => void;
+  onArchiveSession: (session: SessionSummary) => void;
+  onRefreshSessions: () => void;
 }) {
   const presence = getSessionPresence(session, activeSessionId);
   return (
@@ -110,12 +116,18 @@ function SessionItem({
       </span>
       {session.unread && <span className="unread-dot" aria-label="有新活动" />}
     </button>
-    <details className="session-row__menu">
+    <details className="session-row__menu" onToggle={event => { if (event.currentTarget.open) onRefreshSessions(); }}>
       <summary aria-label={`${session.title} 更多操作`}><Ellipsis size={15} /></summary>
+      <div className="session-row__menu-actions">
+      <button type="button" disabled={!session.canArchive} title={session.canArchive ? undefined : '会话仍有任务或待处理事项，暂时无法归档'} onClick={event => {
+        event.currentTarget.closest('details')?.removeAttribute('open');
+        onArchiveSession(session);
+      }}><Archive size={13} />归档会话</button>
       <button type="button" onClick={event => {
         event.currentTarget.closest('details')?.removeAttribute('open');
         onDeleteSession(session);
       }}><Trash2 size={13} />删除会话…</button>
+      </div>
     </details>
     </div>
   );
@@ -131,6 +143,8 @@ export function SessionSidebar({
   onClose,
   onSelectSession,
   onDeleteSession,
+  onArchiveSession,
+  onRefreshSessions,
   onNewSession,
   canCreateSession,
   onOpenCommand,
@@ -222,7 +236,7 @@ export function SessionSidebar({
                                 session={session}
                                 activeSessionId={activeSessionId}
                                 onSelectSession={onSelectSession}
-                                onDeleteSession={onDeleteSession}
+                                onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRefreshSessions={onRefreshSessions}
                               />
                             ))}
                           </div>
@@ -252,7 +266,7 @@ export function SessionSidebar({
                       session={session}
                       activeSessionId={activeSessionId}
                       onSelectSession={onSelectSession}
-                      onDeleteSession={onDeleteSession}
+                      onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRefreshSessions={onRefreshSessions}
                     />
                   ))}
                 </div>

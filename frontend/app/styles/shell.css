@@ -77,7 +77,7 @@
 .new-session > svg { color: var(--blue); }
 .new-session span { flex: 1; text-align: left; }
 .session-list { display: flex; flex: 1; min-height: 0; flex-direction: column; margin-top: 17px; }
-.session-list__scroll { min-height: 0; padding-right: 2px; overflow-y: auto; }
+.session-list__scroll { flex: 1; min-height: 0; padding-right: 2px; overflow-y: auto; }
 .session-section + .session-section { margin-top: 11px; }
 .session-section--quick { padding-top: 10px; border-top: 1px solid var(--line); }
 .session-section__toggle { display: flex; align-items: center; gap: 3px; width: 100%; min-height: 29px; padding: 4px 5px; border-radius: 7px; background: transparent; color: var(--faint); text-align: left; }
@@ -121,8 +121,10 @@
 .session-row__menu > summary::-webkit-details-marker { display: none; }
 .session-row:hover summary, .session-row:focus-within summary, .session-row__menu[open] summary { opacity: 1; }
 .session-row__menu[open] { z-index: 4; }
-.session-row__menu > button { position: absolute; right: 0; top: 27px; display: flex; align-items: center; gap: 6px; white-space: nowrap; padding: 4px 10px; background: var(--paper-solid); border: 1px solid var(--line); border-radius: 5px; color: var(--red); font-size: var(--type-label); line-height: 18px; box-shadow: var(--shadow-sm); }
-.session-row__menu > button:hover { background: color-mix(in srgb,var(--red-soft) 35%,var(--paper-solid)); }
+.session-row__menu-actions { position: absolute; right: 0; top: 27px; padding: 3px; background: var(--paper-solid); border: 1px solid var(--line); border-radius: 6px; box-shadow: var(--shadow-sm); }
+.session-row__menu-actions > button { display: flex; align-items: center; gap: 6px; width: 100%; white-space: nowrap; padding: 4px 9px; background: transparent; border-radius: 3px; color: var(--ink-soft); font-size: var(--type-label); line-height: 18px; }
+.session-row__menu-actions > button:last-child { color: var(--red); }
+.session-row__menu-actions > button:not(:disabled):hover { background: var(--paper); }
 .memory-delete-dialog.session-delete-dialog { width: min(520px,100%); outline: none; }
 .memory-delete-dialog.session-delete-dialog > header { align-items: center; gap: 13px; padding: 25px 24px 0; border-bottom: 0; }
 .session-delete-icon { display: grid; place-items: center; flex: none; width: 44px; height: 44px; border-radius: 13px; background: color-mix(in srgb,var(--red-soft) 65%,var(--paper-solid)); color: var(--red); }

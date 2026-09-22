@@ -215,7 +215,7 @@ class _AuthorityOperations:
                     if str(row["memory_domain_id"]) != memory_domain_id:
                         raise ConversationKernelConflict("session memory domain conflict")
                     if str(row["lifecycle"]) != "OPEN":
-                        raise ConversationKernelConflict("session is closed")
+                        raise ConversationKernelConflict("session is archived")
                     same_live_owner = (
                         row["writer_lease_owner_id"] == writer_owner_id
                         and row["writer_lease_expires_at"] is not None

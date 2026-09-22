@@ -171,7 +171,7 @@ def test_cold_domain_lease_closed_existence_and_exact_release(
     sid = lease.guard.session_id
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as c:
         c.execute(
-            "UPDATE pulsara_v3.sessions SET lifecycle='CLOSED',writer_lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=%s",
+            "UPDATE pulsara_v3.sessions SET lifecycle='ARCHIVED',writer_lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=%s",
             (sid,),
         )
     assert exists(repo, sid)

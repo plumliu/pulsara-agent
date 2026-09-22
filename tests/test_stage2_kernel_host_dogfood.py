@@ -250,7 +250,6 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
         assert [item.source_revision for item in committed_deliveries] == [1, 2, 3]
         await core.close_session(
             first.host_session_id,
-            close_conversation=False,
         )
 
         resumed = await core.resume_session(session_id, workspace_input=workspace)
@@ -268,7 +267,6 @@ def test_stage2_public_host_fresh_open_run_and_canonical_rehydrate(
         assert page.through_event_sequence == 3
         await core.close_session(
             resumed.host_session_id,
-            close_conversation=True,
         )
         await core.shutdown()
 
@@ -384,7 +382,6 @@ def test_k2_public_host_validates_image_input_and_reaches_existing_compiler(
         finally:
             await core.close_session(
                 session.host_session_id,
-                close_conversation=False,
             )
             await core.shutdown()
 
@@ -470,7 +467,6 @@ def test_k2_public_host_reports_image_validation_reason_before_hook_or_command(
         finally:
             await core.close_session(
                 session.host_session_id,
-                close_conversation=False,
             )
             await core.shutdown()
 
@@ -562,7 +558,6 @@ def test_k2_root_install_prepares_ordered_image_gap_without_a_child(
         finally:
             await core.close_session(
                 session.host_session_id,
-                close_conversation=True,
             )
             await core.shutdown()
 
@@ -646,7 +641,6 @@ def test_k2_public_host_consumes_typed_image_steer_at_provider_safe_point(
         finally:
             await core.close_session(
                 session.host_session_id,
-                close_conversation=False,
             )
             await core.shutdown()
 
@@ -772,7 +766,6 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
         finally:
             await core.close_session(
                 session.host_session_id,
-                close_conversation=False,
             )
             await core.shutdown()
 
@@ -880,7 +873,6 @@ def _exercise_host_steer(
         assert {row["turn_id"] for row in rows} == {result.turn_id}
         await core.close_session(
             session.host_session_id,
-            close_conversation=True,
         )
         await core.shutdown()
 
@@ -978,7 +970,6 @@ def test_k3_root_output_seal_linearizes_and_cancels_late_steer_waiters(
         finally:
             await core.close_session(
                 session.host_session_id,
-                close_conversation=True,
             )
             await core.shutdown()
 

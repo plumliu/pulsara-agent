@@ -43,7 +43,7 @@ CREATE TABLE pulsara_v3.sessions (
         memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
     ),
     model_call_binding jsonb,
-    lifecycle text NOT NULL CHECK (lifecycle IN ('OPEN', 'CLOSED')),
+    lifecycle text NOT NULL CHECK (lifecycle IN ('OPEN', 'ARCHIVED')),
     writer_generation bigint NOT NULL CHECK (writer_generation >= 1),
     writer_lease_owner_id text,
     writer_lease_expires_at timestamptz,

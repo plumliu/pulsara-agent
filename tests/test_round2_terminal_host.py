@@ -225,7 +225,6 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
         )
         await core.close_session(
             session.host_session_id,
-            close_conversation=True,
         )
         await core.shutdown()
 

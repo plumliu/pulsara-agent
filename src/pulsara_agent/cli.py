@@ -398,7 +398,7 @@ async def _kernel_host_run(args) -> object:
         return await session.run_turn(PromptContent.text(args.prompt))
     finally:
         if session is not None:
-            await core.close_session(session.host_session_id, close_conversation=True)
+            await core.close_session(session.host_session_id)
         await core.shutdown()
 
 
@@ -520,7 +520,7 @@ async def _kernel_host_repl(args) -> None:
                 continue
             if command == ":close":
                 await core.close_session(
-                    session.host_session_id, close_conversation=True
+                    session.host_session_id
                 )
                 print(f"Closed {session.session_id}")
                 return
@@ -532,7 +532,7 @@ async def _kernel_host_repl(args) -> None:
                     active_skill_names=_active_skill_names_from_args(args),
                 )
                 await core.close_session(
-                    session.host_session_id, close_conversation=False
+                    session.host_session_id
                 )
                 session = next_session
                 continue
@@ -544,7 +544,7 @@ async def _kernel_host_repl(args) -> None:
                 )
                 if next_session.host_session_id != session.host_session_id:
                     await core.close_session(
-                        session.host_session_id, close_conversation=False
+                        session.host_session_id
                     )
                     session = next_session
                 continue

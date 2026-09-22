@@ -24,7 +24,7 @@ function setup() {
     modelCatalog: async () => ({ status: 'ready', routes: [] }),
     resetPostgres: reset,
   } as unknown as RuntimeAdapter;
-  render(<SettingsView adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={() => {}} onConfigurationChanged={refresh} onNotify={() => {}} />);
+  render(<SettingsView adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={() => {}} onConfigurationChanged={refresh} onNotify={() => {}} sessionRevision={0} onSessionsChanged={refresh} onDeleteSession={() => {}} />);
   return { reset, refresh, target };
 }
 

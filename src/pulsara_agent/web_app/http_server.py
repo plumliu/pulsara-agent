@@ -515,7 +515,10 @@ class LocalHttpServer:
             self._inspect_session_capabilities,
         )
         self._app.router.add_post("/api/sessions", self._create_session)
+        self._app.router.add_get("/api/sessions/archived", self._list_archived_sessions)
         self._app.router.add_get("/api/sessions/{session_id}", self._read_session)
+        self._app.router.add_post("/api/sessions/{session_id}/archive", self._archive_session)
+        self._app.router.add_post("/api/sessions/{session_id}/unarchive", self._unarchive_session)
         self._app.router.add_post(
             "/api/sessions/{session_id}/fork", self._fork_conversation
         )
@@ -1915,15 +1918,25 @@ class LocalHttpServer:
             request.match_info["session_id"], bridge=self.bridge,
         ))
 
+    async def _list_archived_sessions(self, request: web.Request) -> web.Response:
+        return web.json_response({'sessions': await self.sessions.list_archived_sessions()})
+
+    async def _archive_session(self, request: web.Request) -> web.Response:
+        if await self._json_body(request):
+            raise ValueError('archive accepts an empty object')
+        return web.json_response(await self.sessions.archive_session(request.match_info['session_id'], bridge=self.bridge))
+
+    async def _unarchive_session(self, request: web.Request) -> web.Response:
+        if await self._json_body(request):
+            raise ValueError('unarchive accepts an empty object')
+        return web.json_response(await self.sessions.unarchive_session(request.match_info['session_id']))
+
     async def _close_session(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
         session_id = request.match_info["session_id"]
-        close_conversation = body.get("close_conversation")
-        if set(body) != {"close_conversation"} or not isinstance(close_conversation, bool):
-            raise ValueError("close_conversation must be boolean")
-        operation = await self.sessions.prepare_raw_close(
-            session_id, close_conversation=close_conversation
-        )
+        if body:
+            raise ValueError("runtime close accepts an empty object")
+        operation = await self.sessions.prepare_raw_close(session_id)
         if operation is not None:
             detach = await self.bridge.detach_session_for_raw_close(operation)
             if isinstance(detach, BridgeDetachNotStarted):
@@ -1975,7 +1988,6 @@ class LocalHttpServer:
         return web.json_response(
             {
                 "status": "closed",
-                "canonical_conversation_closed": close_conversation,
             }
         )
 

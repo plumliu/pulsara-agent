@@ -492,6 +492,9 @@ export interface RuntimeAdapter {
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
   forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome>;
   deleteSession(sessionId: string): Promise<{ status: 'DELETED' | 'ABSENT'; session_id: string }>;
+  listArchivedSessions(): Promise<SessionSummary[]>;
+  archiveSession(sessionId: string): Promise<{ status: 'ARCHIVED'; session_id: string }>;
+  unarchiveSession(sessionId: string): Promise<{ status: 'OPEN'; session_id: string }>;
   readSession(sessionId: string): Promise<SessionSummary | null>;
   listSessions(): Promise<SessionSummary[]>;
   listSessionTaskGroups(sessionId: string, cursor?: string): Promise<AgentTaskGroupPage>;
@@ -1820,6 +1823,19 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE', body: JSON.stringify({ confirm_permanent_delete: true }),
     });
+  }
+
+  async listArchivedSessions(): Promise<SessionSummary[]> {
+    const result = await apiRequest<{ sessions: Record<string, unknown>[] }>('/api/sessions/archived');
+    return result.sessions.map(projectSessionSummary);
+  }
+
+  async archiveSession(sessionId: string): Promise<{ status: 'ARCHIVED'; session_id: string }> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, { method: 'POST', body: '{}' });
+  }
+
+  async unarchiveSession(sessionId: string): Promise<{ status: 'OPEN'; session_id: string }> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/unarchive`, { method: 'POST', body: '{}' });
   }
 
   async forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome> {
@@ -3674,6 +3690,8 @@ function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
   return {
     id: String(value.id),
     title: String(value.title ?? 'Pulsara 会话'),
+    lifecycle: lifecycle === 'ARCHIVED' ? 'ARCHIVED' : 'OPEN',
+    canArchive: value.can_archive === true,
     subtitle: String(value.subtitle ?? lifecycle),
     status: Boolean(value.live) ? 'waiting' : 'completed',
     updatedAt: formatRelativeTime(String(value.updated_at ?? '')),

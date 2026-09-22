@@ -1,7 +1,7 @@
 'use client';
 
 import {
-  Bot, Check, ChevronRight, CircleAlert, Database, HardDrive, KeyRound,
+  Archive, Bot, Check, ChevronRight, CircleAlert, Database, HardDrive, KeyRound,
   LoaderCircle, Moon, Palette, Plus, RefreshCw,
   SlidersHorizontal, Sun, Trash2,
 } from 'lucide-react';
@@ -12,17 +12,21 @@ import type {
   ReasoningWireProfile,
   RuntimeAdapter, RuntimeBootstrap,
 } from '../lib/runtime-adapter';
-import type { RuntimeStatus } from '../lib/pulsara-types';
+import type { RuntimeStatus, SessionSummary } from '../lib/pulsara-types';
+import { ArchivedSessions } from './archived-sessions';
 import { RuntimeApiError } from '../lib/runtime-adapter';
 
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 
-type SettingsSection = 'general' | 'models' | 'service';
+type SettingsSection = 'general' | 'models' | 'service' | 'archived';
 type CredentialKind = 'embedding' | 'rerank';
 type ModelConfigurationSource = 'models_dev' | 'user_declared';
 type CustomReasoningKind = CustomReasoningProfile;
 
 interface SettingsViewProps {
+  sessionRevision: number;
+  onSessionsChanged: () => Promise<void>;
+  onDeleteSession: (session: SessionSummary) => void;
   theme: 'light' | 'dark';
   bootstrap?: RuntimeBootstrap;
   runtimeStatus: RuntimeStatus;
@@ -36,6 +40,7 @@ const navItems = [
   { id: 'general' as const, label: '通用', icon: SlidersHorizontal },
   { id: 'models' as const, label: '模型', icon: Bot },
   { id: 'service' as const, label: '本地服务', icon: HardDrive },
+  { id: 'archived' as const, label: '已归档会话', icon: Archive },
 ];
 
 const statusLabels: Record<RuntimeStatus, string> = {
@@ -212,7 +217,7 @@ function DatabaseResetDialog({ target, busy, error, onClose, onConfirm }: {
   </dialog>;
 }
 
-export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify }: SettingsViewProps) {
+export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession }: SettingsViewProps) {
   const { showBuiltinToolResults, onChange: onToolResultDisplayChange } = useContext(ToolResultDisplayContext);
   const [section, setSection] = useState<SettingsSection>(bootstrap?.database_state === 'ready' ? 'general' : 'service');
   const [settings, setSettings] = useState<LocalSettingsReadModel | undefined>(bootstrap);
@@ -492,6 +497,7 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
         <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span><small>运行在这台 Mac 上</small></div>
       </aside>
       <div className="settings-content">
+        {section === 'archived' && <ArchivedSessions adapter={adapter} revision={sessionRevision} onRestored={onSessionsChanged} onDelete={onDeleteSession} />}
         {error && <div className="settings-alert"><CircleAlert size={15} /><span>{error}</span><button onClick={() => void load()}>重试</button></div>}
         {loading && <div className="settings-loading"><LoaderCircle size={15} />正在读取本机设置…</div>}
         {section === 'general' && <section className="settings-group"><header><Palette size={16} /><div><h2>外观</h2><p>控制 Pulsara 在本机的呈现方式。</p></div></header>

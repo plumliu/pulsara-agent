@@ -511,7 +511,7 @@ def test_round4_host_enter_question_approve_and_permission_happy_path(
             "permission_overlay": "NONE",
         }
         assert len(model.requests) == 5
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -554,7 +554,7 @@ def test_round4_queued_root_turn_runs_automatic_plan_successor(
             ).fetchall()
         assert statuses == [{"status": "COMPLETED"}, {"status": "COMPLETED"}]
         assert len(model.requests) == 2
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -637,7 +637,7 @@ def test_round4_detached_waiter_cannot_strand_root_slot_before_plan_review(
                 (session.session_id, approved.continuation_turn_id),
             ).fetchone()
         assert successor_row == {"status": "COMPLETED"}
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -722,7 +722,7 @@ def test_round4_force_exit_fences_full_automatic_continuation_before_bind(
             ).fetchone()
         assert successor_row == {"status": "INTERRUPTED"}
         assert len(model.requests) == 1
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -795,7 +795,6 @@ def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successo
             await asyncio.wait_for(
                 core.close_session(
                     session.host_session_id,
-                    close_conversation=True,
                 ),
                 timeout=5,
             )
@@ -818,7 +817,7 @@ def test_round7_cancel_during_automatic_plan_pending_handoff_interrupts_successo
             "terminal_reason": terminal_reason,
         }
         if operation == "stop":
-            await core.close_session(session.host_session_id, close_conversation=True)
+            await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -867,7 +866,7 @@ def test_round4_stale_force_exit_does_not_cancel_valid_root_turn(
             expected_workflow_revision=entered.plan_workflow_revision,
         )
         assert cancelled.public_code == "PLAN_CANCELLED"
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())
@@ -954,7 +953,7 @@ def test_round4_unbound_successor_retries_terminalization_before_retirement(
             ).fetchone()
         assert successor == {"status": "INTERRUPTED"}
         assert not model.implementation_seen.is_set()
-        await core.close_session(session.host_session_id, close_conversation=True)
+        await core.close_session(session.host_session_id)
         await core.shutdown()
 
     asyncio.run(scenario())

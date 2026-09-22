@@ -67,7 +67,7 @@ class _SessionDeletionOperations:
     def canonical_session_exists(
         self, *, session_id: str, memory_domain_id: str, deadline_monotonic: float
     ) -> bool:
-        """Unlike a resumable summary, this includes CLOSED sessions."""
+        """Unlike a resumable summary, this includes ARCHIVED sessions."""
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             deadline_monotonic=deadline_monotonic,

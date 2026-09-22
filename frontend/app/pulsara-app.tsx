@@ -177,6 +177,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [activeView, setActiveView] = useState<AppView>('workbench');
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
   const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
+  const [sessionRevision, setSessionRevision] = useState(0);
+  const archivingSession = useRef<string | undefined>(undefined);
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary>();
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
@@ -569,6 +571,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         throw new Error('服务器尚未确认删除结果，请重试确认。');
       }
       forgetSession(target.id);
+      setSessionRevision(value => value + 1);
       setDeleteTarget(undefined);
       notify('会话已删除', '记忆、其他分支会话和工作目录已保留。', 'success');
       try { setSessionList(await adapter.listSessions()); } catch { /* deletion is already confirmed */ }
@@ -580,12 +583,28 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   };
 
+  const archiveSession = async (target: SessionSummary) => {
+    if (archivingSession.current) return;
+    archivingSession.current = target.id;
+    try {
+      const result = await adapter.archiveSession(target.id);
+      if (result.status !== 'ARCHIVED' || result.session_id !== target.id) throw new Error('尚未确认归档结果，请刷新查看。');
+      forgetSession(target.id);
+      setSessionRevision(value => value + 1);
+      notify('会话已归档', '可在设置 → 已归档会话中取消归档。', 'success');
+      try { setSessionList(await adapter.listSessions()); }
+      catch { notify('会话已归档', '列表暂时未能刷新，请稍后刷新页面。', 'warning'); }
+    } catch (error) {
+      notify('会话归档未完成', error instanceof Error ? error.message : '请刷新后重试。', 'warning');
+    } finally { archivingSession.current = undefined; }
+  };
+
   const openRuntimeSession = useCallback(async (
     sessionId: string,
     reconnecting = false,
     takeover = false,
   ): Promise<RuntimeConnection | undefined> => {
-    if (deletingSession.current === sessionId) return undefined;
+    if (deletingSession.current === sessionId || archivingSession.current === sessionId) return undefined;
     requestedSession.current = sessionId;
     const attempt = ++connectionAttempt.current;
     taskInventoryAttempt.current += 1;
@@ -2133,6 +2152,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onClose={() => setSidebarOpen(false)}
           onSelectSession={openSession}
           onDeleteSession={session => { setDeleteTarget(session); setDeleteError(undefined); }}
+          onArchiveSession={session => void archiveSession(session)}
+          onRefreshSessions={() => { void adapter.listSessions().then(setSessionList).catch(() => {}); }}
           onNewSession={openNewSession}
           canCreateSession={canCreateSession}
           onOpenCommand={() => setCommandOpen(true)}
@@ -2373,6 +2394,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       )}
       {activeView === 'settings' && (
         <SettingsView
+          sessionRevision={sessionRevision}
+          onSessionsChanged={async () => { setSessionList(await adapter.listSessions()); }}
+          onDeleteSession={session => { setDeleteTarget(session); setDeleteError(undefined); }}
           theme={theme}
           bootstrap={bootstrap}
           runtimeStatus={runtimeStatus}

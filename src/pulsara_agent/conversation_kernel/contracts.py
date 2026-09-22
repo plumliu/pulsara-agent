@@ -34,7 +34,7 @@ def canonical_digest(namespace: str, value: object) -> str:
 
 class SessionLifecycle(StrEnum):
     OPEN = "OPEN"
-    CLOSED = "CLOSED"
+    ARCHIVED = "ARCHIVED"
 
 
 class TurnStatus(StrEnum):

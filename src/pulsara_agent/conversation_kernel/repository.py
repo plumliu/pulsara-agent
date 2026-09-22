@@ -103,10 +103,12 @@ from ._repository.subagents import _SubagentOperations
 from ._repository.tools import _ToolOperations
 from ._repository.fork import _ForkOperations
 from ._repository.deletion import _SessionDeletionOperations
+from ._repository.archive import _SessionArchiveOperations
 
 
 class ConversationKernelRepository(
     _SessionDeletionOperations,
+    _SessionArchiveOperations,
     _ForkOperations,
     _MatchingOperations,
     _AuthorityOperations,

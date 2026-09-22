@@ -428,12 +428,18 @@ def test_midturn_multiple_compactions_copy_only_last_adopted_base_and_retained_s
     )
 
 
-def test_fork_from_closed_source_or_while_later_turn_runs(repo):
+def test_fork_while_later_turn_runs_but_not_from_archived_source(repo):
     lease = new_session(repo)
     _, _, anchor = turn(repo, lease.guard, "past")
-    turn(repo, lease.guard, "running future", finish=False)
+    future, _, _ = turn(repo, lease.guard, "running future", finish=False)
     assert fork(repo, lease.guard.session_id, anchor).created
-    repo.close_session(lease.guard, deadline_monotonic=monotonic() + 30)
+    repo.interrupt_turn(lease.guard, turn_id=future, reason='USER_STOPPED', actor_id='test',
+                        occurred_at=datetime.now(timezone.utc), deadline_monotonic=monotonic() + 30)
+    repo.archive_session(session_id=lease.guard.session_id, memory_domain_id='u_local',
+                         closed_writer=lease.guard, deadline_monotonic=monotonic() + 30)
+    assert not fork(repo, lease.guard.session_id, anchor).created
+    repo.unarchive_session(session_id=lease.guard.session_id, memory_domain_id='u_local',
+                           deadline_monotonic=monotonic() + 30)
     assert fork(repo, lease.guard.session_id, anchor).created
 
 
@@ -671,7 +677,6 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=monotonic() + 30,
         )
-    repo.close_session(lease.guard, deadline_monotonic=monotonic() + 30)
     assert_session_aggregate_deleted(repo, lease.guard)
     PostgresCanonicalBlobStore(repo.connection_provider).delete_orphans(
         grace_seconds=1, maximum_items=100, deadline_monotonic=monotonic() + 30

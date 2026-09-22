@@ -11,14 +11,12 @@ import shlex
 import sys
 from threading import Event
 from time import monotonic
-from typing import Awaitable, Callable
 from uuid import uuid4
 
 import pytest
 
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.host import (
-    HostSessionCloseDecisionFrozen,
     HostSessionCloseState,
     KernelHostCore,
     KernelHostSession,
@@ -393,28 +391,20 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         release = asyncio.Event()
         started = asyncio.Event()
         calls = 0
-        close_conversation_requests = 0
 
         class BlockingSession:
             session_id = "session:blocking"
 
-            def request_close_conversation(self) -> None:
-                nonlocal close_conversation_requests
-                close_conversation_requests += 1
-
             async def aclose(
                 self,
                 *,
-                close_conversation: bool,
                 deadline_monotonic: float,
-                freeze_close_conversation_decision: Callable[[], Awaitable[bool]],
             ) -> None:
                 nonlocal calls
-                del close_conversation, deadline_monotonic
+                del deadline_monotonic
                 calls += 1
                 started.set()
                 await release.wait()
-                await freeze_close_conversation_decision()
 
         core = object.__new__(KernelHostCore)
         core._lock = asyncio.Lock()  # type: ignore[attr-defined]
@@ -425,7 +415,7 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         core._extension_routes = {}  # type: ignore[attr-defined]
 
         first = asyncio.create_task(
-            core.close_session("host:blocking", close_conversation=False)
+            core.close_session("host:blocking")
         )
         await started.wait()
         first.cancel()
@@ -435,7 +425,7 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         assert calls == 1
 
         second = asyncio.create_task(
-            core.close_session("host:blocking", close_conversation=True)
+            core.close_session("host:blocking")
         )
         await asyncio.sleep(0)
         assert calls == 1
@@ -443,7 +433,6 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         await second
         assert core._sessions == {}  # type: ignore[attr-defined]  # noqa: SLF001
         assert calls == 1
-        assert close_conversation_requests == 1
         assert core._close_attempts == {}  # type: ignore[attr-defined]  # noqa: SLF001
 
     asyncio.run(scenario())
@@ -469,21 +458,14 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         class BlockingSession:
             session_id = "session:deadline"
 
-            def request_close_conversation(self) -> None:
-                return
-
             async def aclose(
                 self,
                 *,
-                close_conversation: bool,
                 deadline_monotonic: float,
-                freeze_close_conversation_decision: Callable[[], Awaitable[bool]],
             ) -> None:
-                assert close_conversation is False
                 received_deadlines.append(deadline_monotonic)
                 started.set()
                 await release.wait()
-                await freeze_close_conversation_decision()
 
         core = object.__new__(KernelHostCore)
         core._lock = asyncio.Lock()  # type: ignore[attr-defined]
@@ -496,7 +478,7 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         core._extension_routes = {}  # type: ignore[attr-defined]
 
         first = asyncio.create_task(
-            core.close_session("host:deadline", close_conversation=False)
+            core.close_session("host:deadline")
         )
         await started.wait()
         assert received_deadlines == [10_037.0]
@@ -505,7 +487,7 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         # waiter must not mint or extend the installed close deadline.
         now[0] += 10_000.0
         second = asyncio.create_task(
-            core.close_session("host:deadline", close_conversation=False)
+            core.close_session("host:deadline")
         )
         await asyncio.sleep(0)
         assert deadline_factory_calls == 1
@@ -519,60 +501,10 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
     asyncio.run(scenario())
 
 
-def test_round5_canonical_close_upgrade_after_decision_fence_is_rejected() -> None:
-    async def scenario() -> None:
-        decision_frozen = asyncio.Event()
-        release = asyncio.Event()
-
-        class FencedSession:
-            session_id = "session:fenced"
-            canonical_closed = False
-
-            def request_close_conversation(self) -> None:
-                return
-
-            async def aclose(
-                self,
-                *,
-                close_conversation: bool,
-                deadline_monotonic: float,
-                freeze_close_conversation_decision: Callable[[], Awaitable[bool]],
-            ) -> None:
-                del close_conversation, deadline_monotonic
-                self.canonical_closed = await freeze_close_conversation_decision()
-                decision_frozen.set()
-                await release.wait()
-
-        core = object.__new__(KernelHostCore)
-        core._lock = asyncio.Lock()  # type: ignore[attr-defined]
-        core._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
-        core._close_attempts = {}  # type: ignore[attr-defined]
-        session = FencedSession()
-        core._sessions = {"host:fenced": session}  # type: ignore[attr-defined]
-        core._extension_routes = {}  # type: ignore[attr-defined]
-
-        first = asyncio.create_task(
-            core.close_session("host:fenced", close_conversation=False)
-        )
-        await decision_frozen.wait()
-        with pytest.raises(
-            HostSessionCloseDecisionFrozen,
-            match="already frozen",
-        ):
-            await core.close_session("host:fenced", close_conversation=True)
-        release.set()
-        await first
-        assert not session.canonical_closed
-        assert core._close_attempts == {}  # type: ignore[attr-defined]  # noqa: SLF001
-        with pytest.raises(
-            HostSessionCloseDecisionFrozen,
-            match="owner was retired",
-        ):
-            await core.close_session("host:fenced", close_conversation=True)
-        # Repeated detach remains idempotent without retaining a tombstone.
-        await core.close_session("host:fenced", close_conversation=False)
-
-    asyncio.run(scenario())
+def test_runtime_close_has_no_canonical_lifecycle_switch() -> None:
+    assert 'close_conversation' not in inspect.signature(KernelHostCore.close_session).parameters
+    assert 'close_conversation' not in inspect.signature(KernelHostSession.aclose).parameters
+    assert not hasattr(KernelHostSession, 'request_close_conversation')
 
 
 def test_round5_writer_renewal_uses_its_short_owner_deadline_during_long_turn() -> None:
@@ -654,18 +586,12 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
             session_id = "session:failing"
             physically_terminal = False
 
-            def request_close_conversation(self) -> None:
-                return
-
             async def aclose(
                 self,
                 *,
-                close_conversation: bool,
                 deadline_monotonic: float,
-                freeze_close_conversation_decision: Callable[[], Awaitable[bool]],
             ) -> None:
-                del close_conversation, deadline_monotonic
-                await freeze_close_conversation_decision()
+                del deadline_monotonic
                 self.physically_terminal = True
                 raise TimeoutError("physical owner exited after close deadline")
 
@@ -678,12 +604,12 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
         core._extension_routes = {}  # type: ignore[attr-defined]
 
         with pytest.raises(TimeoutError, match="physical owner"):
-            await core.close_session("host:failing", close_conversation=False)
+            await core.close_session("host:failing")
         attempt = core._close_attempts["host:failing"]  # type: ignore[attr-defined]  # noqa: SLF001
         assert attempt.state is HostSessionCloseState.CLOSE_FAILED_QUARANTINED
         assert session.physically_terminal
         assert core._sessions == {"host:failing": session}  # type: ignore[attr-defined]  # noqa: SLF001
         with pytest.raises(TimeoutError, match="physical owner"):
-            await core.close_session("host:failing", close_conversation=False)
+            await core.close_session("host:failing")
 
     asyncio.run(scenario())

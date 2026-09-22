@@ -14,7 +14,7 @@ import sys
 from typing import Literal, Mapping
 from uuid import uuid4
 from pulsara_agent.conversation_kernel.session_deletion import (
-    KernelSessionDeletion, SessionDeleteRejected,
+    KernelSessionRetirement, SessionDeleteRejected,
 )
 from pulsara_agent.conversation_kernel._repository.deletion import SessionDeletionBusy
 
@@ -228,7 +228,6 @@ RuntimeReopenOperation = PreparedRuntimeReopenOperation | PreparedRuntimeResumeO
 class PreparedRawCloseOperation:
     session_id: str
     handle: HostSessionHandle
-    close_conversation: bool
     operation_nonce: str
     _owner: "LocalSessionController"
 
@@ -237,7 +236,6 @@ class PreparedRawCloseOperation:
         *,
         session_id: str,
         handle: HostSessionHandle,
-        close_conversation: bool,
         operation_nonce: str,
         owner: "LocalSessionController",
         _seal: object,
@@ -250,7 +248,6 @@ class PreparedRawCloseOperation:
             raise TypeError("raw-close operation is controller-issued")
         object.__setattr__(self, "session_id", session_id)
         object.__setattr__(self, "handle", handle)
-        object.__setattr__(self, "close_conversation", close_conversation)
         object.__setattr__(self, "operation_nonce", operation_nonce)
         object.__setattr__(self, "_owner", owner)
 
@@ -321,18 +318,20 @@ class _Quarantined:
 
 
 @dataclass(eq=False, slots=True)
-class SessionDeleteOperation:
+class SessionRetirementOperation:
     session_id: str
     owner: "LocalSessionController"
     task: asyncio.Task | None = None
     prior_resume: asyncio.Task | None = None
-    core_operation: KernelSessionDeletion | None = None
+    core_operation: KernelSessionRetirement | None = None
     detach: object | None = None
     unconfirmed: bool = False
+    action: Literal['delete', 'archive', 'unarchive'] = 'delete'
+    archive_ready: bool = False
 
 
 _SessionOperation = (
-    _ResumeInFlight | _RawCloseInFlight | _RuntimeReopenInFlight | _Quarantined | SessionDeleteOperation
+    _ResumeInFlight | _RawCloseInFlight | _RuntimeReopenInFlight | _Quarantined | SessionRetirementOperation
 )
 
 
@@ -404,14 +403,69 @@ class LocalSessionController:
     async def list_sessions(self) -> list[dict[str, object]]:
         summaries = await self.core.list_resumable_sessions_across_workspaces(
             memory_domain_id=self.workspace_input.memory_domain_id,
-            include_closed=False,
+            include_archived=False,
         )
         async with self._lock:
             live_ids = frozenset(self._by_session)
-        return [
-            self._summary_payload(item, item.session_id in live_ids)
-            for item in summaries
-        ]
+            handles = dict(self._by_session)
+            busy_ids = frozenset(self._operations)
+        idle_ids = await self.core.idle_session_ids(self.workspace_input.memory_domain_id)
+        result = []
+        for item in summaries:
+            payload = self._summary_payload(item, item.session_id in live_ids)
+            idle = item.session_id in idle_ids and item.session_id not in busy_ids
+            if idle and item.session_id in handles:
+                idle = await handles[item.session_id].session.inspect_archive_idle()
+            payload['can_archive'] = idle
+            result.append(payload)
+        return result
+
+    async def list_archived_sessions(self):
+        summaries = await self.core.list_resumable_sessions_across_workspaces(
+            memory_domain_id=self.workspace_input.memory_domain_id, include_archived=True,
+        )
+        return [self._summary_payload(item, False) for item in summaries if item.lifecycle == 'ARCHIVED']
+
+    async def archive_session(self, session_id: str, *, bridge):
+        return await self.delete_session(session_id, bridge=bridge, action='archive')
+
+    async def unarchive_session(self, session_id: str):
+        async with self._lock:
+            current = self._operations.get(session_id)
+            if self._closing or (current is not None and not (
+                isinstance(current, SessionRetirementOperation) and current.action == 'unarchive'
+            )):
+                raise SessionControlRejected('SESSION_ARCHIVE_BUSY', '会话正在处理另一项操作。')
+            operation = current or SessionRetirementOperation(session_id, self, action='unarchive')
+            if operation.task is None or (operation.task.done() and operation.unconfirmed):
+                self._operations[session_id] = operation
+                operation.task = asyncio.create_task(self._unarchive_owner(operation))
+        return await asyncio.shield(operation.task)
+
+    async def _unarchive_owner(self, operation):
+        try:
+            if not operation.unconfirmed:
+                try:
+                    await self.core.unarchive_session(operation.session_id, self.workspace_input.memory_domain_id)
+                    return {'status': 'OPEN', 'session_id': operation.session_id}
+                except KeyError:
+                    raise
+                except Exception:
+                    operation.unconfirmed = True
+            try:
+                status = await self.core.read_session_lifecycle(operation.session_id, self.workspace_input.memory_domain_id)
+            except Exception as exc:
+                raise SessionDeleteRejected('SESSION_ARCHIVE_UNCONFIRMED', '暂时无法确认操作结果，请恢复数据库连接后重试确认。', 503) from exc
+            operation.unconfirmed = False
+            if status is None:
+                raise KeyError(operation.session_id)
+            if status != 'OPEN':
+                raise SessionDeleteRejected('SESSION_ARCHIVE_FAILED', '取消归档未完成，可以重试。', 500)
+            return {'status': 'OPEN', 'session_id': operation.session_id}
+        finally:
+            async with self._lock:
+                if not operation.unconfirmed and self._operations.get(operation.session_id) is operation:
+                    self._operations.pop(operation.session_id)
 
     async def list_session_tasks(
         self,
@@ -1558,7 +1612,7 @@ class LocalSessionController:
             return handle
         except BaseException:
             await self.core.close_session(
-                session.host_session_id, close_conversation=False
+                session.host_session_id
             )
             raise
 
@@ -1715,7 +1769,7 @@ class LocalSessionController:
                     if self._closing:
                         raise KernelHostCoreClosing("Local Web application is draining")
                     current = self._operations.get(session_id)
-                    deleting = isinstance(current, SessionDeleteOperation) and current.prior_resume is task
+                    deleting = isinstance(current, SessionRetirementOperation) and current.prior_resume is task
                     if not deleting and (
                         not isinstance(current, _ResumeInFlight) or current.task is not task
                     ):
@@ -1729,13 +1783,13 @@ class LocalSessionController:
                     self._by_host[handle.host_session_id] = handle
                 if raced is not None:
                     await self.core.close_session(
-                        session.host_session_id, close_conversation=False
+                        session.host_session_id
                     )
                     return raced
                 return handle
             except BaseException:
                 await self.core.close_session(
-                    session.host_session_id, close_conversation=False
+                    session.host_session_id
                 )
                 raise
         finally:
@@ -1829,12 +1883,14 @@ class LocalSessionController:
             "reasoning_preference_reset": accepted != binding,
         }
 
-    async def delete_session(self, session_id: str, *, bridge) -> dict[str, object]:
+    async def delete_session(self, session_id: str, *, bridge, action: Literal['delete', 'archive'] = 'delete') -> dict[str, object]:
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Local Web application is draining")
             current = self._operations.get(session_id)
-            if isinstance(current, SessionDeleteOperation):
+            if isinstance(current, SessionRetirementOperation):
+                if current.action != action:
+                    raise SessionControlRejected('SESSION_CONTROL_BUSY', '会话正在处理另一项操作。')
                 operation = current
                 if operation.unconfirmed and operation.task is not None and operation.task.done():
                     operation.task = asyncio.create_task(self._confirm_session_deletion(operation, bridge))
@@ -1842,18 +1898,19 @@ class LocalSessionController:
                 if current is not None and not isinstance(current, _ResumeInFlight):
                     raise SessionDeleteRejected(
                         "SESSION_DELETE_QUARANTINED" if isinstance(current, _Quarantined) else "SESSION_DELETE_BUSY",
-                        "会话尚不能删除，请等待当前操作结束；若已隔离，请重启 Pulsara。",
+                        "会话正在处理另一项操作，请等待操作结束；若已隔离，请重启 Pulsara。",
                     )
-                operation = SessionDeleteOperation(
+                operation = SessionRetirementOperation(
                     session_id, self, prior_resume=current.task if isinstance(current, _ResumeInFlight) else None,
+                    action=action,
                 )
                 self._operations[session_id] = operation
                 operation.task = asyncio.create_task(
-                    self._delete_session_owner(operation, bridge), name=f"session-delete:{session_id}",
+                    self._delete_session_owner(operation, bridge), name=f"session-{action}:{session_id}",
                 )
         return await asyncio.shield(operation.task)
 
-    async def confirm_session_delete_operation(self, operation: SessionDeleteOperation) -> None:
+    async def confirm_session_retirement_operation(self, operation: SessionRetirementOperation) -> None:
         async with self._lock:
             if operation.owner is not self or self._operations.get(operation.session_id) is not operation:
                 raise RuntimeError("session delete operation is stale")
@@ -1862,7 +1919,7 @@ class LocalSessionController:
         from pulsara_agent.web_app.browser_bridge import BridgeSettlementFailed
         if operation.detach is not None:
             try:
-                result = await bridge.settle_session_delete_detach(operation.detach, close_full=not quarantine)
+                result = await bridge.settle_session_retirement_detach(operation.detach, close_full=not quarantine)
                 quarantine = quarantine or isinstance(result, BridgeSettlementFailed)
             except Exception:
                 logging.getLogger(__name__).exception("session deletion bridge cleanup failed")
@@ -1870,7 +1927,7 @@ class LocalSessionController:
             operation.detach = None
         if operation.core_operation is not None:
             try:
-                await self.core.finish_session_deletion(operation.core_operation, quarantine=quarantine)
+                await self.core.finish_session_retirement(operation.core_operation, quarantine=quarantine)
             except Exception:
                 logging.getLogger(__name__).exception("session deletion core cleanup failed")
                 quarantine = True
@@ -1883,21 +1940,26 @@ class LocalSessionController:
 
     async def _confirm_session_deletion(self, operation, bridge) -> dict[str, object]:
         try:
-            exists = await self.core.canonical_session_exists(
-                operation.session_id, self.workspace_input.memory_domain_id,
-            )
+            if operation.action == 'archive':
+                lifecycle = await self.core.read_session_lifecycle(operation.session_id, self.workspace_input.memory_domain_id)
+                exists = lifecycle != 'ARCHIVED'
+            else:
+                exists = await self.core.canonical_session_exists(
+                    operation.session_id, self.workspace_input.memory_domain_id,
+                )
         except Exception as exc:
             operation.unconfirmed = True
             if operation.core_operation is not None:
-                await self.core.finish_session_deletion(operation.core_operation, quarantine=True)
+                await self.core.finish_session_retirement(operation.core_operation, quarantine=True)
             raise SessionDeleteRejected(
-                "SESSION_DELETE_UNCONFIRMED", "暂时无法确认删除结果，请恢复数据库连接后重试确认。", 503,
+                "SESSION_ARCHIVE_UNCONFIRMED" if operation.action == 'archive' else "SESSION_DELETE_UNCONFIRMED",
+                "暂时无法确认操作结果，请恢复数据库连接后重试确认。", 503,
             ) from exc
         operation.unconfirmed = False
         await self._finish_session_delete(operation, bridge, quarantine=False)
         if exists:
-            raise SessionDeleteRejected("SESSION_DELETE_FAILED", "会话仍在，尚未删除，可以重试。", 500)
-        return {"status": "ABSENT", "session_id": operation.session_id}
+            raise SessionDeleteRejected('SESSION_ARCHIVE_FAILED' if operation.action == 'archive' else "SESSION_DELETE_FAILED", "操作未完成，可以重试。", 500)
+        return {"status": 'ARCHIVED' if operation.action == 'archive' else "ABSENT", "session_id": operation.session_id}
 
     async def _delete_session_owner(self, operation, bridge) -> dict[str, object]:
         from pulsara_agent.web_app.browser_bridge import BridgeDetachFull, BridgeDetachFailed
@@ -1919,26 +1981,35 @@ class LocalSessionController:
                 handle = self._by_session.get(operation.session_id)
             if not exists and handle is None:
                 await self._finish_session_delete(operation, bridge, quarantine=False)
+                if operation.action == 'archive':
+                    raise KeyError(operation.session_id)
                 return {"status": "ABSENT", "session_id": operation.session_id}
             if handle is not None and handle.workspace_input.memory_domain_id != self.workspace_input.memory_domain_id:
                 raise RuntimeError("session delete domain mismatch")
-            operation.core_operation = await self.core.begin_session_deletion(
+            operation.core_operation = await self.core.begin_session_retirement(
                 operation.session_id, self.workspace_input.memory_domain_id,
             )
-            detach = await bridge.detach_session_for_delete(operation)
+            if operation.action == 'archive':
+                try:
+                    await self.core.prepare_session_archive(operation.core_operation)
+                except (SessionDeletionBusy, RuntimeError) as exc:
+                    raise SessionDeleteRejected('SESSION_NOT_IDLE', '会话仍有任务、后台进程或待处理事项，暂时无法归档。') from exc
+                operation.archive_ready = True
+            detach = await bridge.detach_session_for_retirement(operation)
             if isinstance(detach, (BridgeDetachFull, BridgeDetachFailed)):
                 operation.detach = detach.token
             if not isinstance(detach, BridgeDetachFull):
-                raise SessionDeleteRejected("SESSION_DELETE_QUARANTINED", "未能安全断开会话，会话尚未删除。")
-            await self.core.quiesce_session_deletion(operation.core_operation)
+                raise SessionDeleteRejected("SESSION_ARCHIVE_QUARANTINED" if operation.action == 'archive' else "SESSION_DELETE_QUARANTINED", "未能安全断开会话，操作尚未完成。")
+            await self.core.quiesce_session_retirement(operation.core_operation)
             async with self._lock:
                 handle = self._by_session.pop(operation.session_id, None)
                 if handle is not None:
                     self._by_host.pop(handle.host_session_id, None)
             try:
-                status = await self.core.commit_session_deletion(operation.core_operation)
+                status = await (self.core.commit_session_archive(operation.core_operation)
+                                if operation.action == 'archive' else self.core.commit_session_deletion(operation.core_operation))
             except SessionDeletionBusy as exc:
-                raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话的运行权已改变，或仍被另一进程使用，请稍后重试。") from exc
+                raise SessionDeleteRejected("SESSION_ARCHIVE_BUSY" if operation.action == 'archive' else "SESSION_DELETE_BUSY", "会话的运行权已改变，或仍被另一进程使用，请稍后重试。") from exc
             except Exception:
                 logging.getLogger(__name__).exception("session deletion commit needs confirmation")
                 return await self._confirm_session_deletion(operation, bridge)
@@ -1949,23 +2020,17 @@ class LocalSessionController:
             if operation.unconfirmed:
                 raise
             if self._operations.get(operation.session_id) is operation:
-                quarantine = operation.core_operation is not None and not operation.core_operation.physical_full
+                quarantine = (operation.core_operation is not None and not operation.core_operation.physical_full
+                              and (operation.action != 'archive' or operation.archive_ready))
                 await self._finish_session_delete(operation, bridge, quarantine=quarantine)
             if committed:
                 logging.getLogger(__name__).exception("session deleted; local cleanup needs refresh")
-                return {"status": "DELETED", "session_id": operation.session_id}
-            if isinstance(exc, SessionDeleteRejected):
+                return {"status": "ARCHIVED" if operation.action == 'archive' else "DELETED", "session_id": operation.session_id}
+            if isinstance(exc, (SessionDeleteRejected, KeyError)):
                 raise
-            raise SessionDeleteRejected("SESSION_DELETE_QUARANTINED", "未能安全停止，会话尚未删除，请重启 Pulsara 后重试。") from exc
+            raise SessionDeleteRejected("SESSION_ARCHIVE_QUARANTINED" if operation.action == 'archive' else "SESSION_DELETE_QUARANTINED", "未能安全关闭运行时，操作尚未完成，请重启 Pulsara 后重试。") from exc
 
-    async def prepare_raw_close(
-        self, session_id: str, *, close_conversation: bool
-    ) -> PreparedRawCloseOperation | None:
-        if close_conversation:
-            async with self._lock:
-                needs_resume = self._by_session.get(session_id) is None
-            if needs_resume:
-                await self.resume_session(session_id)
+    async def prepare_raw_close(self, session_id: str) -> PreparedRawCloseOperation | None:
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Local Web application is draining")
@@ -1985,7 +2050,6 @@ class LocalSessionController:
             operation = PreparedRawCloseOperation(
                 session_id=session_id,
                 handle=handle,
-                close_conversation=close_conversation,
                 operation_nonce=f"raw-close:{uuid4().hex}",
                 owner=self,
                 _seal=_RAW_CLOSE_OPERATION_SEAL,
@@ -2025,7 +2089,6 @@ class LocalSessionController:
         try:
             await self.core.close_session(
                 operation.handle.host_session_id,
-                close_conversation=operation.close_conversation,
             )
         except BaseException:
             async with self._lock:
@@ -2282,7 +2345,6 @@ class LocalSessionController:
         try:
             await self.core.close_session(
                 operation.old_handle.host_session_id,
-                close_conversation=False,
             )
         except BaseException:
             await self.quarantine_runtime_reopen(
@@ -2354,7 +2416,7 @@ class LocalSessionController:
                 *(
                     operation.task
                     for operation in self._operations.values()
-                    if isinstance(operation, (_ResumeInFlight, SessionDeleteOperation)) and operation.task is not None
+                    if isinstance(operation, (_ResumeInFlight, SessionRetirementOperation)) and operation.task is not None
                 ),
                 *self._forks,
             )
@@ -2369,7 +2431,7 @@ class LocalSessionController:
             self._operations.clear()
         for handle in handles:
             await self.core.close_session(
-                handle.host_session_id, close_conversation=False
+                handle.host_session_id
             )
 
     @staticmethod

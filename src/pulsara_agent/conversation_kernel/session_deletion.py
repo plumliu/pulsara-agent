@@ -1,4 +1,4 @@
-"""Process-local deletion admission, never a durable recovery record."""
+"""Shared archive/deletion admission, never a durable recovery record."""
 
 import asyncio
 from dataclasses import dataclass
@@ -7,7 +7,7 @@ from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 
 
 @dataclass(eq=False, slots=True)
-class KernelSessionDeletion:
+class KernelSessionRetirement:
     session_id: str
     memory_domain_id: str
     owner: object

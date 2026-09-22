@@ -1524,7 +1524,7 @@ def test_round9_2_architecture_has_one_independent_engine_and_no_new_durability(
         encoding="utf-8"
     )
     close_start = host_source.index(
-        "    async def aclose(\n        self,\n        *,\n        close_conversation"
+        "    async def aclose(\n        self,\n        *,\n        deadline_monotonic"
     )
     close_end = host_source.index("    async def _renew_writer", close_start)
     close_source = host_source[close_start:close_end]

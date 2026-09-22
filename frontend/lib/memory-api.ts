@@ -8,7 +8,7 @@ export interface MemoryFact {
 export interface MemoryProject { workspace_id: string; label: string; root: string; last_activity_at: string }
 export interface MemoryPage<T> { items: T[]; next_cursor: string | null }
 export interface MemorySource { session_id: string; turn_id: string; entry_id: string }
-export interface MemorySourceProjection { availability: 'OPEN' | 'CLOSED' | 'DELETED'; locator: MemorySource | null }
+export interface MemorySourceProjection { availability: 'OPEN' | 'ARCHIVED' | 'DELETED'; locator: MemorySource | null }
 export interface MemoryRelation {
   relation_id: string; subject: MemoryFact; companion: MemoryFact;
   relative_role: 'BASED_ON' | 'BASIS_FOR' | 'UPDATES' | 'UPDATED_BY' | 'CONFLICTS_WITH';

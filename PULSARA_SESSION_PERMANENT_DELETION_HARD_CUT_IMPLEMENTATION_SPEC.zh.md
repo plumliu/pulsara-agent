@@ -17,7 +17,7 @@
 - HTTP fork 由服务器生成 child ID，不再接受浏览器指定 child ID。
 - 会话 aggregate 的归属 FK 改为级联删除，内部语义引用使用可延迟检查。
 
-本轮不提供批量删除、会话归档、自动保留期限、项目删除、目录物理清理、同时删除记忆选项或模型删除会话工具。不得顺带更改记忆治理、召回、关系语义或 provider prefix 边界。
+本稿不提供批量删除、自动保留期限、项目删除、目录物理清理、同时删除记忆选项或模型删除会话工具。会话归档另见《空闲会话归档 Hard-cut 实施规格》。不得顺带更改记忆治理、召回、关系语义或 provider prefix 边界。
 
 ## 2. 用户语义
 
@@ -65,7 +65,7 @@ NULL 继续投影为“最初保存位置已删除”，不显示来源导航。
 
 ### 3.1 不新增持久对象
 
-产品表仍为 28 张：新增 0，移除 0。不增加列、删除墓碑、删除任务表、receipt、operation 表、清理队列或持久删除状态。不新增 committed event kind、subject、append guard 或 durable job。`sessions.lifecycle` 仍只有 `OPEN / CLOSED`；不得增加 `DELETING / DELETED`。
+产品表仍为 28 张：新增 0，移除 0。不增加列、删除墓碑、删除任务表、receipt、operation 表、清理队列或持久删除状态。不新增 committed event kind、subject、append guard 或 durable job。`sessions.lifecycle` 仍只有 `OPEN / ARCHIVED`；不得增加 `DELETING / DELETED`。
 
 执行中的删除属于 typed process-local control operation，可在已有 owner 中增加变体和必要的短期任务索引。它不是重放恢复权威；进程退出后依靠数据库存在性重新判断。
 
@@ -158,7 +158,7 @@ repository 只提供整会话 aggregate 删除入口。普通工具、后台清�
 1. 校验 same-origin 本地请求、严格请求体；在任何 detach／close 之前以 canonical row 或现有 exact handle 确认目标属于本服务的 memory domain，repo 在事务内再次校验。在 controller 的现有互斥范围登记目标 session 的删除 operation；相同删除请求加入同一个任务，其它该 session 变更返回明确 busy。
 2. 在 Host core 现有 admission owner 下冻结针对该 ID 的 resume／reopen／fork；把已有 `_open_attempts` 与 fork owner 关联到具体 session，fork 同时关联 source 与本次 server-issued child ID。删除等待此前已经获准的目标操作结算，再重新识别实际 handle，覆盖 child 已提交但尚在打开的窗口。不得只看 `_by_session` 的瞬时空值。登记／查询使用短期互斥，等待任何 owner 时不持有 controller／core 的全局锁，不能造成被等待者无法发布／结算。
 3. bridge 持有该 session gate，detach 全部 controller／spectator 连接。失败则隔离该操作，不进入 DELETE。冷会话没有连接也须持有 gate；不得返回 None 后失去 admission fence。
-4. 若有本进程 handle，调用现有 Host close，`close_conversation=False`，等待完整 physical close。包括关停过程中已经提交的合法工具结算；随后都由删除事务一起移除。没有 handle 且没有未结算 owner 时走冷分支。
+4. 若有本进程 handle，调用现有 Host close，等待完整 physical close（不改变 canonical lifecycle）。包括关停过程中已经提交的合法工具结算；随后都由删除事务一起移除。没有 handle 且没有未结算 owner 时走冷分支。
 5. repository 执行第 4.3 节事务。数据库事务不得跨越 bridge detach、Host shutdown 或网络调用。
 6. 明确提交／确认不存在后，清理 controller／Host 中的短期句柄和连接索引，完成 bridge settlement，释放本次删除 fence。前端随后刷新。失败按第 4.4 节处理，不提前放行重开。
 
@@ -168,7 +168,7 @@ repository 只提供整会话 aggregate 删除入口。普通工具、后台清�
 
 ### 4.3 repository 事务授权
 
-请求的 session 必须属于当前服务的 memory domain。不存在／不属于该 domain 一律返回 `ABSENT`，不得泄漏其他 domain 数据。查询包含 OPEN 与 CLOSED，不使用“可恢复会话查询”代替 canonical 存在性。
+请求的 session 必须属于当前服务的 memory domain。不存在／不属于该 domain 一律返回 `ABSENT`，不得泄漏其他 domain 数据。查询包含 OPEN 与 ARCHIVED，不使用“可恢复会话查询”代替 canonical 存在性。
 
 `SELECT ... FOR UPDATE` 取得目标行后，采用精确分支：
 
@@ -185,7 +185,7 @@ repository 只提供整会话 aggregate 删除入口。普通工具、后台清�
 - 请求已由服务器接纳：HTTP 断开只移除 waiter，现有 process-local owner shield 并加入真实工作；不能取消数据库线程后就释放 gate。
 - bridge／Host physical close 不完整：不执行 DELETE，保留数据并隔离。显示“未能安全停止，会话尚未删除，请重启 Pulsara 后重试”。已有外部副作用不能回滚。
 - 运行时已关闭，但数据库明确回滚：会话仍在，可能由“已载入”变为可重新打开；不自动 resume。安全释放 fence，允许用户重试。
-- 数据库提交 ACK 不确定：先加入实际数据库 worker，再按 exact domain＋session ID 读取包括 CLOSED 的 canonical 存在性。不存在即可报告 ABSENT；仍存在则报告未删除并保留记录。数据库不可读时报告 `SESSION_DELETE_UNCONFIRMED`，不能以网络失败断言回滚；在本进程保留隔离，重试只重新确认／加入同一 owner，不启动平行删除。
+- 数据库提交 ACK 不确定：先加入实际数据库 worker，再按 exact domain＋session ID 读取包括 ARCHIVED 的 canonical 存在性。不存在即可报告 ABSENT；仍存在则报告未删除并保留记录。数据库不可读时报告 `SESSION_DELETE_UNCONFIRMED`，不能以网络失败断言回滚；在本进程保留隔离，重试只重新确认／加入同一 owner，不启动平行删除。
 - 数据库已确认提交，随后 bridge gate／内存索引清理失败：保留已确认的 DELETED／ABSENT 结果；对无法安全释放的本地 owner 做隔离并提示刷新，不得改报“会话尚未删除”，更不能补偿重建 canonical row。
 - 服务崩溃：数据库保证全删或全保留；重新启动后允许按冷分支处理。没有持久删除恢复流程，不要求记住是哪个旧请求完成了删除。
 
@@ -257,11 +257,11 @@ repository 的 child ID 参数保留为服务器 trusted one-shot 操作内部�
 | 数据库明确回滚／约束失败 | 500 `SESSION_DELETE_FAILED`，会话保留；诊断记录具体原因 |
 | 数据库／网络导致无法确认 | 503 `SESSION_DELETE_UNCONFIRMED`，保留“不确定”语义 |
 | 永久删除 body 为空、false、多余字段或旧 close body | 400，不做删除 |
-| 原关闭功能 | 移至 `POST /api/sessions/{id}/close`；严格 `{ "close_conversation": boolean }`，保留原运行时／canonical close 语义 |
+| 运行时关闭 | `POST /api/sessions/{id}/close`；严格 `{}`，只关闭运行时；canonical lifecycle 由显式归档／取消归档管理 |
 
 现有 `DELETE /api/connections/{id}` 仍只断开该窗口，不删除会话。`POST .../runtime/reopen` 继续仅重开已有会话。旧 DELETE close 路由与调用方一并移除，不保留别名、字段探测或双模式。
 
-GET 可恢复会话返回 null 不足以确认永久删除（CLOSED 也可能返回 null）；服务器删除确认使用新的 repository canonical existence read，而不是这个 UI 查询。前端网络失败后可由用户“重试确认”重新提交同一目标 DELETE；服务器加入已有操作或重新按 canonical 现状处理，禁止浏览器直接判定原事务失败。
+GET 可恢复会话返回 null 不足以确认永久删除（ARCHIVED 也可能返回 null）；服务器删除确认使用新的 repository canonical existence read，而不是这个 UI 查询。前端网络失败后可由用户“重试确认”重新提交同一目标 DELETE；服务器加入已有操作或重新按 canonical 现状处理，禁止浏览器直接判定原事务失败。
 
 本地服务原有 same-origin／认证／请求校验边界继续使用；删除是记忆 domain 内的管理操作，不依赖当前聊天窗口是否 controller，也不得接受请求体覆盖 domain 或 workspace。
 
@@ -313,7 +313,7 @@ GET 可恢复会话返回 null 不足以确认永久删除（CLOSED 也可能返
 6. 源 fork 与 delete 两种锁顺序、child 开启延迟、child 删除后旧 HTTP 请求再次抵达：父子完整性保留，无相同 child ID 复活，无重复自动 fork。
 7. 同一 blob 由父子／两个会话引用，删任一 session 后另一会话读图、可视化和 artifact 正常；删除事务不删 blob；旧 session 的资源 URL 不绕过 canonical ref 授权。
 8. 删除与记忆编辑／删除／remember 并发，按锁序与 fresh replan 收敛，无半删、来源重绑、图误恢复或空 workspace 误清；锁集合漂移回滚后插入一次跨 Host takeover，确认下一轮重新验证 writer 并拒绝沿用旧授权。
-9. 请求断开、数据库 worker 尚未完成、提交 ACK 丢失、数据库不可读、重复 DELETE：不会提前释放 fence、重建 session 或把不确定说成已失败。存在性查询包含 CLOSED 且验证 domain。
+9. 请求断开、数据库 worker 尚未完成、提交 ACK 丢失、数据库不可读、重复 DELETE：不会提前释放 fence、重建 session 或把不确定说成已失败。存在性查询包含 ARCHIVED 且验证 domain。
 10. 前端当前／非当前会话、等待期间切换、多窗口、双击、旧 close body、键盘与模态滚动：确认和结果正确。保留原“关闭”和“重载”能力但无旧 DELETE 兼容路径。
 11. oracle 检查产品表仍 28 张；无新增事件／subject／guard／job／墓碑；现有 epoch 内 provider SYSTEM／tools／message prefix 不因别的会话删除被改写。
 

@@ -22,7 +22,7 @@ from uuid import uuid4
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.session_deletion import (
-    KernelSessionDeletion, SessionDeleteRejected,
+    KernelSessionRetirement, SessionDeleteRejected,
 )
 
 from pulsara_agent.conversation_kernel.direct_model import (
@@ -567,10 +567,6 @@ class HostSessionCloseState(StrEnum):
     CLOSE_FAILED_QUARANTINED = "CLOSE_FAILED_QUARANTINED"
 
 
-class HostSessionCloseDecisionFrozen(RuntimeError):
-    """A canonical-close upgrade arrived after its linearization fence."""
-
-
 class KernelHostCoreClosing(RuntimeError):
     """A new Host session was rejected after process shutdown won admission."""
 
@@ -582,29 +578,8 @@ class HostSessionCloseAttempt:
     host_session_id: str
     session: "KernelHostSession"
     deadline_monotonic: float
-    close_conversation_requested: bool
     task: asyncio.Task[None]
     state: HostSessionCloseState = HostSessionCloseState.TASK_INSTALLED
-    close_decision_frozen: bool = False
-
-    def merge_close_conversation(self, requested: bool) -> None:
-        if requested and not self.close_conversation_requested:
-            if self.close_decision_frozen:
-                raise HostSessionCloseDecisionFrozen(
-                    "canonical close decision is already frozen"
-                )
-            if self.state is not HostSessionCloseState.TASK_INSTALLED:
-                raise RuntimeError(
-                    "canonical close cannot be added after the Host close settled"
-                )
-            self.close_conversation_requested = True
-            self.session.request_close_conversation()
-
-    def freeze_close_conversation(self) -> bool:
-        if self.close_decision_frozen:
-            raise RuntimeError("canonical close decision was frozen twice")
-        self.close_decision_frozen = True
-        return self.close_conversation_requested
 
 
 class KernelHostSession:
@@ -955,7 +930,6 @@ class KernelHostSession:
         self._close_async_lock = asyncio.Lock()
         self._closing = False
         self._closed = False
-        self._close_conversation_requested = False
         self._queue_wake = asyncio.Event()
         self._renewal_task = asyncio.create_task(
             self._renew_writer(), name=f"kernel-writer-renew:{session_id}"
@@ -4427,6 +4401,31 @@ class KernelHostSession:
         task = self._active_task
         return self._active_turn_id if task is not None and not task.done() else None
 
+    def _has_runtime_work(self) -> bool:
+        manual_tasks = tuple(
+            task
+            for _turn_id, task in self._manual_compaction_command_attempts.values()
+        )
+        return (
+            (self._active_task is not None and not self._active_task.done())
+            or self._external_new_turn_accepting
+            or self._pending_root_successor is not None
+            or self._control_completion_sealed_turn_id is not None
+            or self._control_completion_write_reservation is not None
+            or self._plan_exit_fence
+            or self._compaction_write_reservations
+            or any(not task.done() for task in manual_tasks)
+            or self._ingress_hook_attempts
+            or any(
+                attempt.task is not None and not attempt.task.done()
+                for attempt in self._user_control_attempts.values()
+            )
+            or self._capability_reload_settlement_lock.locked()
+            or self._compaction.has_active_work()
+            or self._subagents.has_active_work()
+            or not self._runner._safe_point.is_idle()
+        )
+
     async def prepare_safe_runtime_reopen(self) -> KernelRuntimeReopenQuiescence:
         """Gate new admission and prove no accepted process-local work remains."""
 
@@ -4434,29 +4433,7 @@ class KernelHostSession:
             self._require_open()
             self._retire_done_active_root_locked()
             self._retire_control_attempts_locked()
-            manual_tasks = tuple(
-                task
-                for _turn_id, task in self._manual_compaction_command_attempts.values()
-            )
-            if (
-                self._active_task is not None
-                or self._external_new_turn_accepting
-                or self._pending_root_successor is not None
-                or self._control_completion_sealed_turn_id is not None
-                or self._control_completion_write_reservation is not None
-                or self._plan_exit_fence
-                or self._compaction_write_reservations
-                or any(not task.done() for task in manual_tasks)
-                or self._ingress_hook_attempts
-                or any(
-                    attempt.task is not None and not attempt.task.done()
-                    for attempt in self._user_control_attempts.values()
-                )
-                or self._capability_reload_settlement_lock.locked()
-                or self._compaction.has_active_work()
-                or self._subagents.has_active_work()
-                or not self._runner._safe_point.is_idle()
-            ):
+            if self._has_runtime_work():
                 raise RuntimeError("HostSession is not quiescent for runtime reopen")
             quiescence = KernelRuntimeReopenQuiescence(
                 session_id=self.session_id,
@@ -4468,6 +4445,19 @@ class KernelHostSession:
             )
             self._runtime_reopen_quiescence = quiescence
             return quiescence
+
+    def archive_has_terminal_work(self) -> bool:
+        return (
+            any(p.physical_state in ('RUNNING', 'TERMINALIZING') for p in self._tools.list_background_terminal_processes())
+            or bool(self._tools.terminal_monitor_coordinator.list_current())
+            or bool(self._tools.terminal_monitor_coordinator.pending_monitor_ids())
+        )
+
+    async def inspect_archive_idle(self) -> bool:
+        """Read-only UI hint; archive itself takes the admission gate."""
+        async with self._lock:
+            return not (self._closing or self._closed or self._runtime_reopen_quiescence
+                        or self._has_runtime_work() or self.archive_has_terminal_work())
 
     async def abort_safe_runtime_reopen(
         self, quiescence: KernelRuntimeReopenQuiescence
@@ -6602,19 +6592,10 @@ class KernelHostSession:
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
 
-    def request_close_conversation(self) -> None:
-        """Monotonically merge the canonical-close bit into an installed close."""
-
-        self._close_conversation_requested = True
-
     async def aclose(
         self,
         *,
-        close_conversation: bool,
         deadline_monotonic: float | None = None,
-        freeze_close_conversation_decision: (
-            Callable[[], Awaitable[bool]] | None
-        ) = None,
     ) -> None:
         async with self._close_async_lock:
             if self._closed:
@@ -6630,9 +6611,6 @@ class KernelHostSession:
                 self._tools.todo_owner.mark_closing(
                     scope_kind=ModelInputScopeKind.ROOT,
                     scope_subagent_task_id=None,
-                )
-                self._close_conversation_requested = (
-                    self._close_conversation_requested or close_conversation
                 )
                 self._queue_wake.set()
                 self._monitor_wake.set()
@@ -6855,22 +6833,6 @@ class KernelHostSession:
                 await self.extensions.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
-            canonical_close = self._close_conversation_requested
-            if freeze_close_conversation_decision is not None:
-                try:
-                    canonical_close = await freeze_close_conversation_decision()
-                except BaseException as exc:
-                    close_error = close_error or exc
-                    canonical_close = False
-            if canonical_close:
-                try:
-                    await self._io.run(
-                        self.repository.close_session,
-                        self._lease.guard,
-                        deadline_monotonic=deadline,
-                    )
-                except BaseException as exc:
-                    close_error = close_error or exc
             self.live_bus.close()
             self.live_control.close()
             try:
@@ -7043,7 +7005,7 @@ def _list_resumable_session_rows(
     repository: ConversationKernelRepository,
     workspace_id: str,
     memory_domain_id: str,
-    include_closed: bool,
+    include_archived: bool,
     limit: int,
     deadline_monotonic: float,
 ):
@@ -7058,13 +7020,13 @@ def _list_resumable_session_rows(
             SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
-                   GREATEST(s.created_at, (
+                   CASE WHEN s.lifecycle='ARCHIVED' THEN s.updated_at ELSE GREATEST(s.created_at, (
                        SELECT e.accepted_at
                        FROM pulsara_v3.transcript_entries AS e
                        WHERE e.session_id = s.id
                        ORDER BY e.entry_sequence DESC
                        LIMIT 1
-                   )) AS updated_at,
+                   )) END AS updated_at,
                    s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
@@ -7086,14 +7048,14 @@ def _list_resumable_session_rows(
             -- user-facing list by canonical conversation activity instead.
             ORDER BY updated_at DESC, s.id LIMIT %s
             """,
-            (workspace_id, memory_domain_id, include_closed, limit),
+            (workspace_id, memory_domain_id, include_archived, limit),
         ).fetchall()
 
 
 def _list_resumable_session_rows_across_workspaces(
     repository: ConversationKernelRepository,
     memory_domain_id: str,
-    include_closed: bool,
+    include_archived: bool,
     deadline_monotonic: float,
 ):
     with repository.connection_provider.connection(
@@ -7107,13 +7069,13 @@ def _list_resumable_session_rows_across_workspaces(
             SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
-                   GREATEST(s.created_at, (
+                   CASE WHEN s.lifecycle='ARCHIVED' THEN s.updated_at ELSE GREATEST(s.created_at, (
                        SELECT e.accepted_at
                        FROM pulsara_v3.transcript_entries AS e
                        WHERE e.session_id = s.id
                        ORDER BY e.entry_sequence DESC
                        LIMIT 1
-                   )) AS updated_at,
+                   )) END AS updated_at,
                    s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
@@ -7134,7 +7096,7 @@ def _list_resumable_session_rows_across_workspaces(
             -- user-facing list by canonical conversation activity instead.
             ORDER BY updated_at DESC, s.id
             """,
-            (memory_domain_id, include_closed),
+            (memory_domain_id, include_archived),
         ).fetchall()
 
 
@@ -7142,7 +7104,7 @@ def _read_resumable_session_row(
     repository: ConversationKernelRepository,
     session_id: str,
     memory_domain_id: str,
-    include_closed: bool,
+    include_archived: bool,
     deadline_monotonic: float,
 ):
     with repository.connection_provider.connection(
@@ -7156,9 +7118,9 @@ def _read_resumable_session_row(
             SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
-                   GREATEST(s.created_at, (SELECT e.accepted_at
+                   CASE WHEN s.lifecycle='ARCHIVED' THEN s.updated_at ELSE GREATEST(s.created_at, (SELECT e.accepted_at
                        FROM pulsara_v3.transcript_entries AS e WHERE e.session_id = s.id
-                       ORDER BY e.entry_sequence DESC LIMIT 1)) AS updated_at,
+                       ORDER BY e.entry_sequence DESC LIMIT 1)) END AS updated_at,
                    s.model_call_binding,
                    count(t.id) AS subagent_task_total,
                    count(t.id) FILTER (WHERE t.status = 'ACTIVE')
@@ -7177,7 +7139,7 @@ def _read_resumable_session_row(
               AND (%s OR s.lifecycle = 'OPEN')
             GROUP BY s.id, w.memory_domain_id, w.id
             """,
-            (session_id, memory_domain_id, include_closed),
+            (session_id, memory_domain_id, include_archived),
         ).fetchone()
 
 
@@ -7225,7 +7187,7 @@ class KernelHostCore:
         self._sessions: dict[str, KernelHostSession] = {}
         self._workspace_capability_revisions: dict[Path, int] = {}
         self._open_attempts: dict[asyncio.Future[None], frozenset[str]] = {}
-        self._session_deletions: dict[str, KernelSessionDeletion] = {}
+        self._session_retirements: dict[str, KernelSessionRetirement] = {}
         self._close_attempts: dict[str, HostSessionCloseAttempt] = {}
         self._extension_routes: dict[str, tuple[str, KernelExtensionHost]] = {}
         self._event_loop: asyncio.AbstractEventLoop | None = None
@@ -7491,7 +7453,7 @@ class KernelHostCore:
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Kernel Host core is closing")
-            if any(s in self._session_deletions for s in session_ids):
+            if any(s in self._session_retirements for s in session_ids):
                 raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话正在删除。")
             settlement = asyncio.get_running_loop().create_future()
             self._open_attempts[settlement] = frozenset(session_ids)
@@ -7807,7 +7769,7 @@ class KernelHostCore:
         self,
         *,
         workspace_input: HostWorkspaceInput,
-        include_closed: bool = False,
+        include_archived: bool = False,
         limit: int = 20,
     ) -> list[KernelSessionSummary]:
         if not 1 <= limit <= 100:
@@ -7819,7 +7781,7 @@ class KernelHostCore:
             repository,
             workspace.workspace_key,
             workspace.memory_domain.memory_domain_id,
-            include_closed,
+            include_archived,
             limit,
             self._canonical_deadline(),
         )
@@ -7829,7 +7791,7 @@ class KernelHostCore:
         self,
         *,
         memory_domain_id: str = "u_local",
-        include_closed: bool = False,
+        include_archived: bool = False,
     ) -> list[KernelSessionSummary]:
         """Cold-list every resumable Session in one local memory domain."""
 
@@ -7838,7 +7800,7 @@ class KernelHostCore:
             _list_resumable_session_rows_across_workspaces,
             repository,
             memory_domain_id,
-            include_closed,
+            include_archived,
             self._canonical_deadline(),
         )
         return [_kernel_session_summary(row) for row in rows]
@@ -7848,7 +7810,7 @@ class KernelHostCore:
         session_id: str,
         *,
         memory_domain_id: str = "u_local",
-        include_closed: bool = False,
+        include_archived: bool = False,
     ) -> KernelSessionSummary | None:
         """Cold-read one Session together with its exact workspace input."""
 
@@ -7860,7 +7822,7 @@ class KernelHostCore:
             repository,
             session_id,
             memory_domain_id,
-            include_closed,
+            include_archived,
             self._canonical_deadline(),
         )
         return None if row is None else _kernel_session_summary(row)
@@ -7962,38 +7924,105 @@ class KernelHostCore:
             memory_domain_id=memory_domain_id, deadline_monotonic=self._canonical_deadline(),
         )
 
-    async def begin_session_deletion(
-        self, session_id: str, memory_domain_id: str,
-    ) -> KernelSessionDeletion:
+    async def idle_session_ids(self, memory_domain_id: str):
+        repository = await self._ensure_resources()
         async with self._lock:
-            if self._closing or session_id in self._session_deletions:
+            local_session_ids = tuple(s.session_id for s in self._sessions.values())
+        return await asyncio.to_thread(repository.idle_session_ids, memory_domain_id=memory_domain_id,
+                                       local_session_ids=local_session_ids,
+                                       deadline_monotonic=self._canonical_deadline())
+
+    async def read_session_lifecycle(self, session_id: str, memory_domain_id: str):
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(repository.read_session_lifecycle, session_id=session_id,
+                                       memory_domain_id=memory_domain_id, deadline_monotonic=self._canonical_deadline())
+
+    async def prepare_session_archive(self, operation: KernelSessionRetirement):
+        """Freeze existing Host admission before checking canonical idle; do not stop work."""
+        from ._repository.deletion import SessionDeletionBusy
+        if operation.owner is not self or self._session_retirements.get(operation.session_id) is not operation:
+            raise RuntimeError('session archive lacks admission authority')
+        repository = await self._ensure_resources()
+        async with self._lock:
+            sessions = tuple(s for s in self._sessions.values() if s.session_id == operation.session_id)
+        gates = []
+        try:
+            if len(sessions) > 1:
+                raise SessionDeletionBusy('multiple Host owners have not settled')
+            for session in sessions:
+                gate = await session.prepare_safe_runtime_reopen()
+                gates.append((session, gate))
+                if session.archive_has_terminal_work():
+                    raise SessionDeletionBusy('session has terminal work')
+            await asyncio.to_thread(
+                repository.archive_session, session_id=operation.session_id,
+                memory_domain_id=operation.memory_domain_id,
+                closed_writer=sessions[0]._lease.guard if sessions else None,
+                check_only=True, deadline_monotonic=self._canonical_deadline(),
+            )
+            for session, gate in gates:
+                await session.commit_safe_runtime_reopen(gate)
+        except Exception:
+            for session, gate in gates:
+                await session.abort_safe_runtime_reopen(gate)
+            raise
+
+    async def commit_session_archive(self, operation: KernelSessionRetirement) -> str:
+        if (operation.owner is not self or not operation.physical_full or operation.quarantined
+            or self._session_retirements.get(operation.session_id) is not operation):
+            raise RuntimeError('session archive lacks close authority')
+        repository = await self._ensure_resources()
+        deadline = self._canonical_deadline()
+        worker = asyncio.create_task(asyncio.to_thread(
+            repository.archive_session, session_id=operation.session_id,
+            memory_domain_id=operation.memory_domain_id, closed_writer=operation.closed_writer,
+            deadline_monotonic=deadline,
+        ))
+        await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
+        return worker.result()
+
+    async def unarchive_session(self, session_id: str, memory_domain_id: str):
+        repository = await self._ensure_resources()
+        deadline = self._canonical_deadline()
+        worker = asyncio.create_task(asyncio.to_thread(
+            repository.unarchive_session, session_id=session_id, memory_domain_id=memory_domain_id,
+            deadline_monotonic=deadline,
+        ))
+        await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
+        return worker.result()
+
+    async def begin_session_retirement(
+        self, session_id: str, memory_domain_id: str,
+    ) -> KernelSessionRetirement:
+        async with self._lock:
+            if self._closing or session_id in self._session_retirements:
                 raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话正在处理另一项操作。")
             pending = tuple(f for f, ids in self._open_attempts.items() if session_id in ids)
-            operation = KernelSessionDeletion(
+            operation = KernelSessionRetirement(
                 session_id, memory_domain_id, self, asyncio.get_running_loop().create_future(),
             )
-            self._session_deletions[session_id] = operation
+            self._session_retirements[session_id] = operation
             self._open_attempts[operation.settlement] = frozenset((session_id,))
         if pending:
             await asyncio.gather(*(asyncio.shield(f) for f in pending))
         return operation
 
-    async def quiesce_session_deletion(self, operation: KernelSessionDeletion) -> None:
+    async def quiesce_session_retirement(self, operation: KernelSessionRetirement) -> None:
         async with self._lock:
-            if self._session_deletions.get(operation.session_id) is not operation:
+            if self._session_retirements.get(operation.session_id) is not operation:
                 raise RuntimeError("session deletion owner is stale")
             sessions = tuple(s for s in self._sessions.values() if s.session_id == operation.session_id)
         for session in sorted(sessions, key=lambda s: s._lease.guard.writer_generation):
             if session.workspace.memory_domain.memory_domain_id != operation.memory_domain_id:
                 raise RuntimeError("session deletion domain mismatch")
-            await self.close_session(session.host_session_id, close_conversation=False)
+            await self.close_session(session.host_session_id)
             operation.closed_writer = session._lease.guard
         operation.physical_full = True
 
-    async def commit_session_deletion(self, operation: KernelSessionDeletion) -> str:
+    async def commit_session_deletion(self, operation: KernelSessionRetirement) -> str:
         if (operation.owner is not self or not operation.physical_full
             or operation.quarantined
-            or self._session_deletions.get(operation.session_id) is not operation):
+            or self._session_retirements.get(operation.session_id) is not operation):
             raise RuntimeError("session deletion has no physical close authority")
         repository = await self._ensure_resources()
         deadline = self._canonical_deadline()
@@ -8005,35 +8034,26 @@ class KernelHostCore:
         await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
         return worker.result()
 
-    async def finish_session_deletion(
-        self, operation: KernelSessionDeletion, *, quarantine: bool,
+    async def finish_session_retirement(
+        self, operation: KernelSessionRetirement, *, quarantine: bool,
     ) -> None:
         async with self._lock:
-            if self._session_deletions.get(operation.session_id) is not operation:
+            if self._session_retirements.get(operation.session_id) is not operation:
                 raise RuntimeError("session deletion settlement is stale")
             operation.quarantined = quarantine
             if not quarantine:
-                self._session_deletions.pop(operation.session_id)
+                self._session_retirements.pop(operation.session_id)
             self._open_attempts.pop(operation.settlement, None)
             if not operation.settlement.done():
                 operation.settlement.set_result(None)
 
-    async def close_session(
-        self, host_session_id: str, *, close_conversation: bool
-    ) -> None:
+    async def close_session(self, host_session_id: str) -> None:
         async with self._lock:
             session = self._sessions.get(host_session_id)
             attempt = self._close_attempts.get(host_session_id)
             if attempt is None:
                 if session is None:
-                    if close_conversation:
-                        raise HostSessionCloseDecisionFrozen(
-                            "canonical close cannot be added after the Host session "
-                            "owner was retired"
-                        )
                     return
-                if close_conversation:
-                    session.request_close_conversation()
                 deadline = self._deadlines.deadline(
                     KernelWatchdogOwner.HOST_SESSION_CLOSE
                 )
@@ -8049,12 +8069,9 @@ class KernelHostCore:
                     host_session_id=host_session_id,
                     session=session,
                     deadline_monotonic=deadline,
-                    close_conversation_requested=close_conversation,
                     task=task,
                 )
                 self._close_attempts[host_session_id] = attempt
-            else:
-                attempt.merge_close_conversation(close_conversation)
         # The Host owns the close operation.  Request/gateway cancellation
         # detaches only this waiter; later callers and shutdown join the exact
         # same physical close task.
@@ -8069,14 +8086,7 @@ class KernelHostCore:
     ) -> None:
         try:
             await session.aclose(
-                close_conversation=False,
                 deadline_monotonic=deadline_monotonic,
-                freeze_close_conversation_decision=(
-                    lambda: self._freeze_close_conversation_decision(
-                        host_session_id=host_session_id,
-                        session=session,
-                    )
-                ),
             )
         except BaseException:
             async with self._lock:
@@ -8111,20 +8121,6 @@ class KernelHostCore:
             # remain quarantined above; successful attempts retire immediately.
             if self._close_attempts.get(host_session_id) is attempt:
                 self._close_attempts.pop(host_session_id, None)
-
-    async def _freeze_close_conversation_decision(
-        self,
-        *,
-        host_session_id: str,
-        session: KernelHostSession,
-    ) -> bool:
-        """Linearize the last point at which canonical close can be upgraded."""
-
-        async with self._lock:
-            attempt = self._close_attempts.get(host_session_id)
-            if attempt is None or attempt.session is not session:
-                raise RuntimeError("Host close decision owner is absent")
-            return attempt.freeze_close_conversation()
 
     async def shutdown(self) -> None:
         async with self._lock:
@@ -8163,7 +8159,7 @@ class KernelHostCore:
         async with self._lock:
             session_ids = tuple(self._sessions)
         for host_session_id in session_ids:
-            await self.close_session(host_session_id, close_conversation=False)
+            await self.close_session(host_session_id)
         await self._image_validator.aclose()
         async with self._lock:
             self._extension_routes.clear()
@@ -8347,5 +8343,4 @@ __all__ = [
     "KernelHostSession",
     "KernelMcpToolCatalogItem",
     "KernelSessionSummary",
-    "HostSessionCloseDecisionFrozen",
 ]

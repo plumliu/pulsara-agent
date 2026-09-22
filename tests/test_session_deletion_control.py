@@ -21,16 +21,16 @@ def control(tmp_path, *, close_fails=False, connection_fails=False):
     controller._fork_sessions = {}
     operation = SimpleNamespace(physical_full=False)
     core.canonical_session_exists = AsyncMock(return_value=True)
-    core.begin_session_deletion = AsyncMock(return_value=operation)
+    core.begin_session_retirement = AsyncMock(return_value=operation)
 
     async def stop(_):
         if close_fails:
             raise RuntimeError("physical owner still running")
         operation.physical_full = True
 
-    core.quiesce_session_deletion = AsyncMock(side_effect=stop)
+    core.quiesce_session_retirement = AsyncMock(side_effect=stop)
     core.commit_session_deletion = AsyncMock(return_value="DELETED")
-    core.finish_session_deletion = AsyncMock()
+    core.finish_session_retirement = AsyncMock()
     bridge = LocalBrowserBridge(sessions=controller, protocol_server=object())
     connection = _RuntimeReopenConnection(
         "connection:delete", old.session_id, fail=connection_fails
@@ -122,7 +122,7 @@ def test_unreadable_database_retry_confirms_only_and_retains_gate(tmp_path):
         assert b._session_locks[s.session_id].locked()
         assert (await c.delete_session(s.session_id, bridge=b))["status"] == "ABSENT"
         core.commit_session_deletion.assert_awaited_once()
-        core.quiesce_session_deletion.assert_awaited_once()
+        core.quiesce_session_retirement.assert_awaited_once()
         assert not b._session_locks
 
     asyncio.run(run())
@@ -131,13 +131,13 @@ def test_unreadable_database_retry_confirms_only_and_retains_gate(tmp_path):
 def test_postcommit_cleanup_failure_does_not_report_rollback(tmp_path):
     async def run():
         c, core, b, s, _ = control(tmp_path)
-        b.settle_session_delete_detach = AsyncMock(
+        b.settle_session_retirement_detach = AsyncMock(
             side_effect=RuntimeError("cleanup failed")
         )
         assert (await c.delete_session(s.session_id, bridge=b))["status"] == "DELETED"
         assert s.session_id in c._operations
-        core.finish_session_deletion.assert_awaited_once()
-        assert core.finish_session_deletion.await_args.kwargs["quarantine"]
+        core.finish_session_retirement.assert_awaited_once()
+        assert core.finish_session_retirement.await_args.kwargs["quarantine"]
 
     asyncio.run(run())
 
@@ -154,6 +154,9 @@ def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
                 return_value={"status": "DELETED", "session_id": "target"}
             ),
             prepare_raw_close=AsyncMock(return_value=None),
+            archive_session=AsyncMock(return_value={"status": "ARCHIVED", "session_id": "target"}),
+            unarchive_session=AsyncMock(return_value={"status": "OPEN", "session_id": "target"}),
+            list_archived_sessions=AsyncMock(return_value=[{"session_id": "target", "lifecycle": "ARCHIVED"}]),
         )
         bridge = _Bridge()
         server = LocalHttpServer(
@@ -194,12 +197,27 @@ def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
                     "target", bridge=bridge
                 )
                 async with client.post(
-                    url + "/close", json={"close_conversation": False}
+                    url + "/close", json={}
                 ) as response:
                     assert response.status == 200
                 sessions.prepare_raw_close.assert_awaited_once_with(
-                    "target", close_conversation=False
+                    "target"
                 )
+                async with client.post(url + '/close', json={'close_conversation': True}) as response:
+                    assert response.status == 400
+                for action, status in (('archive', 'ARCHIVED'), ('unarchive', 'OPEN')):
+                    async with client.post(url + '/' + action, json={'force': True}) as response:
+                        assert response.status == 400
+                    async with client.post(url + '/' + action, json={}, headers={'Origin': 'https://elsewhere.example'}) as response:
+                        assert response.status == 403
+                    async with client.post(url + '/' + action, json={}) as response:
+                        assert response.status == 200
+                        assert (await response.json())['status'] == status
+                sessions.archive_session.assert_awaited_once_with('target', bridge=bridge)
+                sessions.unarchive_session.assert_awaited_once_with('target')
+                async with client.get(server.origin + '/api/sessions/archived') as response:
+                    assert response.status == 200
+                    assert (await response.json())['sessions'][0]['lifecycle'] == 'ARCHIVED'
         finally:
             await server.aclose()
 
@@ -214,17 +232,17 @@ def test_core_deletion_waits_admitted_open_and_rejects_new_admission():
         core._lock = asyncio.Lock()
         core._closing = False
         core._open_attempts = {}
-        core._session_deletions = {}
+        core._session_retirements = {}
         admitted = await core._admit_session_open("parent", "child")
-        pending = asyncio.create_task(core.begin_session_deletion("child", "u_local"))
+        pending = asyncio.create_task(core.begin_session_retirement("child", "u_local"))
         await asyncio.sleep(0)
         assert not pending.done()
         with pytest.raises(SessionDeleteRejected):
             await core._admit_session_open("child")
         await core._settle_session_open(admitted)
         operation = await pending
-        await core.finish_session_deletion(operation, quarantine=False)
-        assert not core._open_attempts and not core._session_deletions
+        await core.finish_session_retirement(operation, quarantine=False)
+        assert not core._open_attempts and not core._session_retirements
 
     asyncio.run(run())
 
@@ -233,7 +251,7 @@ def test_core_commit_joins_physical_database_worker_even_after_waiter_cancel():
     from threading import Event
     from time import monotonic
     from pulsara_agent.conversation_kernel.host import KernelHostCore
-    from pulsara_agent.conversation_kernel.session_deletion import KernelSessionDeletion
+    from pulsara_agent.conversation_kernel.session_deletion import KernelSessionRetirement
 
     async def run():
         core = object.__new__(KernelHostCore)
@@ -248,14 +266,14 @@ def test_core_commit_joins_physical_database_worker_even_after_waiter_cancel():
             return_value=SimpleNamespace(delete_session=delete)
         )
         core._canonical_deadline = lambda: monotonic() + 0.05
-        op = KernelSessionDeletion(
+        op = KernelSessionRetirement(
             "target",
             "u_local",
             core,
             asyncio.get_running_loop().create_future(),
             physical_full=True,
         )
-        core._session_deletions = {"target": op}
+        core._session_retirements = {"target": op}
         pending = asyncio.create_task(core.commit_session_deletion(op))
         assert await asyncio.to_thread(entered.wait, 10)
         pending.cancel()

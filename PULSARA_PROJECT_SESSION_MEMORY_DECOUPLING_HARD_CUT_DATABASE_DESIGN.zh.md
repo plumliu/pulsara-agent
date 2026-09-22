@@ -193,7 +193,7 @@ CREATE TABLE pulsara_v3.sessions (
         memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
     ),
     model_call_binding jsonb,
-    lifecycle text NOT NULL CHECK (lifecycle IN ('OPEN', 'CLOSED')),
+    lifecycle text NOT NULL CHECK (lifecycle IN ('OPEN', 'ARCHIVED')),
     writer_generation bigint NOT NULL CHECK (writer_generation >= 1),
     writer_lease_owner_id text,
     writer_lease_expires_at timestamptz,
@@ -427,10 +427,10 @@ relation 行没有合法的普通 UPDATE 路径。新增 BEFORE UPDATE canonical
 共同的 availability 只有：
 
 ```text
-availability = OPEN | CLOSED | DELETED
+availability = OPEN | ARCHIVED | DELETED
 
 owner 非空且 exact-join OPEN session   -> OPEN
-owner 非空且 exact-join CLOSED session -> CLOSED
+owner 非空且 exact-join ARCHIVED session -> ARCHIVED
 owner 为 NULL                          -> DELETED
 ```
 
@@ -444,10 +444,10 @@ visibility   = SAME_ORIGIN | CROSS_ORIGIN_REDACTED | null
 OPEN + SAME_ORIGIN
     -> 返回允许的 session／turn／entry locator
 
-CLOSED + SAME_ORIGIN
-    -> 说明来源已关闭，locator=null
+ARCHIVED + SAME_ORIGIN
+    -> 说明来源已归档，locator=null
 
-OPEN/CLOSED + CROSS_ORIGIN_REDACTED
+OPEN/ARCHIVED + CROSS_ORIGIN_REDACTED
     -> 保留 availability，但隐藏 session／turn／entry locator
 
 DELETED
@@ -458,7 +458,7 @@ DELETED
 
 ```text
 OPEN    -> 返回可导航 locator
-CLOSED  -> 显示来源已关闭，locator=null
+ARCHIVED  -> 显示来源已归档，locator=null
 DELETED -> 显示“最初保存位置已删除”，locator=null
 ```
 
@@ -548,7 +548,7 @@ session row（既有 Host writer／session control 事务涉及 session 时）
 5. `memory_facts` 删除 `source_session_id/source_tool_result_id`，改为单列 `created_by_tool_result_id`；
 6. `memory_relations` 删除 `owner_session_id/owner_tool_result_id`，改为单列 `created_by_tool_result_id`；
 7. 所有 lineage trigger、writer、memory detail、`memory_explain`、删除预览和测试改用新列；
-8. 来源查询 hard-cut 为 LEFT JOIN；共享 availability，但分别实现模型工具的同源 visibility 与用户记忆页的 domain 授权投影，不保留用 `null source` 混合 CLOSED／遮蔽／删除的旧 wire；
+8. 来源查询 hard-cut 为 LEFT JOIN；共享 availability，但分别实现模型工具的同源 visibility 与用户记忆页的 domain 授权投影，不保留用 `null source` 混合 ARCHIVED／遮蔽／删除的旧 wire；
 9. 更新 `storage/migrations/manifest.py`、expected catalog 与 runtime grants：新增 `workspaces: SELECT, INSERT, DELETE`，并把 `memory_relations` 收窄为 `SELECT, INSERT, DELETE`；同步更新 schema relation oracle 与 27-table 固定断言；
 10. 不保留旧列、可空别名、兼容 view、双写、回填 migration、旧新查询 fallback 或 session-derived project projection；
 11. 重建 clean-v0，并按 `AGENTS.md` 核验后重置本地 disposable 生产数据库。
@@ -597,8 +597,8 @@ product-relation oracle 由当前 27 张净增 `workspaces` 一张，目标固�
 
 - 来源存在时，fact／relation 可经 ToolResult 间接定位 session；
 - 来源 ID 为 NULL 时，只投影“最初保存位置已删除”；
-- `memory_explain` 的 availability 与同源 visibility 独立表达；跨 workspace 遮蔽不能伪装成 CLOSED 或 DELETED；
-- 用户记忆页只按 memory domain 授权：OPEN 来源可导航，CLOSED／DELETED 无 locator，不依赖当前会话 workspace；
+- `memory_explain` 的 availability 与同源 visibility 独立表达；跨 workspace 遮蔽不能伪装成 ARCHIVED 或 DELETED；
+- 用户记忆页只按 memory domain 授权：OPEN 来源可导航，ARCHIVED／DELETED 无 locator，不依赖当前会话 workspace；
 - fact／relation owner 删除后，`write_tool` 仍由 fact／relation kind 确定性派生，不需要来源墓碑；
 - 来源已删除的 fact 仍可检索、解释、编辑和参与关系图；
 - owner 已删除的既有 relation 再次标定时，在端点及历史效果一致的前提下返回 `ALREADY_PRESENT` 且不改绑；
@@ -625,7 +625,7 @@ product-relation oracle 由当前 27 张净增 `workspaces` 一张，目标固�
 5. relation owner 删除后详情仍显示关系；`SUPERSEDES` 按有向端点、`CONTRADICTS` 按无序端点重复标定并返回 `ALREADY_PRESENT`，端点或 `SUPERSEDES` 历史效果漂移则报完整性冲突；owner 非空和 NULL 两种状态下，修改 relation identity 的 SQL 均失败；
 6. 仍有项目 fact、但没有任何 session 时，项目列表仍显示 canonical root／label，并按 fact `updated_at` 稳定分页；
 7. 一个 global basis 同时被多个 project workspace 的 facts 依赖时，级联删除锁定所有受影响 workspace；纯 GLOBAL 图增长、同一 project workspace 内新增 dependent fact／relation，以及跨多个 project 的增长，均因完整 workspace／fact／relation 锁集合变化而整事务重试；与并发 `remember`／session create 按冻结集合锁序串行化，不丢 fact、不误删或遗留 orphan workspace、不增加 repair job；
-8. 同一 OPEN 跨 workspace 来源在 `memory_explain` 中为 `CROSS_ORIGIN_REDACTED`，在同 domain 用户记忆页中仍可导航；两种投影分别覆盖 OPEN／CLOSED／DELETED，非空断链必须报完整性错误；
+8. 同一 OPEN 跨 workspace 来源在 `memory_explain` 中为 `CROSS_ORIGIN_REDACTED`，在同 domain 用户记忆页中仍可导航；两种投影分别覆盖 OPEN／ARCHIVED／DELETED，非空断链必须报完整性错误；
 9. schema manifest、expected catalog、runtime grant 与 relation oracle 精确为 28；`workspaces` 有且仅有 SELECT／INSERT／DELETE，`memory_relations` 无 UPDATE；catalog 精确包含 sessions/workspace、project-fact/workspace、relation/ToolResult 三个新增反向索引和 fact owner unique partial index；不存在 `memory_contexts`、旧 session owner 列或兼容 view；
 10. 项目 A session 使用项目 B 的端点 ID 标定关系必须失败；GLOBAL 两端在同 domain 下仍按合同可由任意 workspace session 标定；
 11. 真实 provider dogfood 证明原始 ToolResult、related candidates 与创建 ToolResult 三者未被混淆。

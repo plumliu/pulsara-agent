@@ -655,10 +655,7 @@ class _RuntimeReopenCore:
             memory_domain_id="u_local",
         )
 
-    async def close_session(
-        self, host_session_id: str, *, close_conversation: bool
-    ) -> None:
-        assert not close_conversation
+    async def close_session(self, host_session_id: str) -> None:
         self.closed_host_ids.append(host_session_id)
 
     async def resume_session(self, session_id: str, **_kwargs: object):

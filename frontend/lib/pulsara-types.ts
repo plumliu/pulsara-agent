@@ -287,6 +287,8 @@ export type SessionWorkspaceSelection =
   | { kind: 'project'; path: string };
 
 export interface SessionSummary {
+  canArchive?: boolean;
+  lifecycle?: 'OPEN' | 'ARCHIVED';
   id: string;
   title: string;
   subtitle: string;

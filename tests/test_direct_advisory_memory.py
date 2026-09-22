@@ -1609,8 +1609,15 @@ def test_direct_source_provenance_is_visible_only_in_its_origin_workspace(
     assert page_detail["source"]["availability"] == "OPEN"
     assert page_detail["source"]["locator"]["session_id"] == lease.guard.session_id
 
-    repository.close_session(
-        lease.guard,
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        turn_id = connection.execute("SELECT id FROM pulsara_v3.turns WHERE session_id=%s AND status='RUNNING'",
+                                     (lease.guard.session_id,)).fetchone()[0]
+    repository.interrupt_turn(lease.guard, turn_id=turn_id, reason='USER_STOPPED', actor_id='test',
+                              occurred_at=datetime.now(timezone.utc), deadline_monotonic=monotonic() + 30)
+    repository.archive_session(
+        session_id=lease.guard.session_id, memory_domain_id='u_local', closed_writer=lease.guard,
         deadline_monotonic=monotonic() + 30,
     )
     closed = query.provenance(
@@ -1622,7 +1629,7 @@ def test_direct_source_provenance_is_visible_only_in_its_origin_workspace(
         deadline_monotonic=monotonic() + 30,
     )
     assert closed is not None
-    assert closed.source_availability == "CLOSED"
+    assert closed.source_availability == "ARCHIVED"
     assert closed.provenance_disposition == "SAME_ORIGIN"
     assert closed.producer_session_id is None
     closed_page = repository.memory_management_detail(
@@ -1632,7 +1639,7 @@ def test_direct_source_provenance_is_visible_only_in_its_origin_workspace(
         deadline_monotonic=monotonic() + 30,
     )
     assert closed_page["source"] == {
-        "availability": "CLOSED",
+        "availability": "ARCHIVED",
         "locator": None,
     }
 
