@@ -48,7 +48,7 @@ def pg_owner(database):
     deadline = monotonic() + 30
     lease = repository.acquire_host_writer(
         session_id=session_id,
-        workspace_id="workspace:" + identity,
+        workspace_id="ctx:workspace/" + identity,
         writer_owner_id="host:" + identity,
         lease_seconds=30,
         deadline_monotonic=deadline,

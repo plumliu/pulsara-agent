@@ -10,6 +10,7 @@ from pulsara_agent.storage.migrations.contracts import postgres_schema_fingerpri
 
 
 CONVERSATION_KERNEL_RELATIONS = (
+    "workspaces",
     "sessions",
     "session_commands",
     "turns",
@@ -40,6 +41,7 @@ CONVERSATION_KERNEL_RELATIONS = (
 )
 
 CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
+    "workspaces": ("SELECT", "INSERT", "DELETE"),
     "sessions": ("SELECT", "INSERT", "UPDATE"),
     "session_commands": ("SELECT", "INSERT"),
     "turns": ("SELECT", "INSERT", "UPDATE"),
@@ -63,7 +65,7 @@ CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
     "subagent_task_dependencies": ("SELECT", "INSERT"),
     "subagent_task_children": ("SELECT", "INSERT"),
     "memory_facts": ("SELECT", "INSERT", "UPDATE", "DELETE"),
-    "memory_relations": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    "memory_relations": ("SELECT", "INSERT", "DELETE"),
     "memory_embeddings": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "blobs": ("SELECT", "INSERT", "DELETE"),
     "agent_events": ("SELECT", "INSERT"),

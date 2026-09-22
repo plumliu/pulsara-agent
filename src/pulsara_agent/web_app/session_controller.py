@@ -1670,7 +1670,11 @@ class LocalSessionController:
                     "project" if summary.workspace_kind == "project" else "transient"
                 ),
                 workspace_root=summary.workspace_root,
-                display_label=summary.workspace_label,
+                display_label=(
+                    None
+                    if summary.workspace_kind == "project"
+                    else summary.workspace_label
+                ),
                 memory_domain_id=summary.memory_domain_id,
                 cleanup_workspace_root_on_close=False,
                 trust_workspace_mcp_config=(

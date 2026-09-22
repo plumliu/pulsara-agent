@@ -30,13 +30,13 @@ from pulsara_agent.conversation_kernel.memory.writes import (
 from pulsara_agent.memory.scope import (
     CTX_GLOBAL,
     FrozenMemoryReadContextBinding,
-    workspace_context_id,
 )
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.retrieval.embedding.validation import freeze_v1_embedding_vector
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import ConversationKernelConflict, PreparedToolResultAcceptance
+from .locking import lock_canonical_identities
 from .memory_management import _MemoryManagementOperations
 
 
@@ -74,8 +74,11 @@ class _MemoryOperations(_MemoryManagementOperations):
         if candidate.result_state != "SUCCESS" or candidate.attempt_id is None:
             raise ConversationKernelConflict("memory mutation needs a successful tool attempt")
         owner = connection.execute(
-            "SELECT memory_domain_id, workspace_id, workspace_kind, workspace_root "
-            "FROM pulsara_v3.sessions WHERE id=%s",
+            "SELECT s.memory_domain_id, s.workspace_id, w.workspace_kind, "
+            "w.workspace_root, w.workspace_label FROM pulsara_v3.sessions AS s "
+            "JOIN pulsara_v3.workspaces AS w "
+            "ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id "
+            "WHERE s.id=%s",
             (candidate.session_id,),
         ).fetchone()
         if owner is None or (
@@ -83,6 +86,12 @@ class _MemoryOperations(_MemoryManagementOperations):
             or str(owner["workspace_id"]) != candidate.workspace_id
         ):
             raise ConversationKernelConflict("memory mutation owner domain drifted")
+        lock_canonical_identities(
+            connection,
+            namespace="workspace",
+            memory_domain_id=str(owner["memory_domain_id"]),
+            identities=(str(owner["workspace_id"]),),
+        )
         call = connection.execute(
             """
             SELECT b.tool_name, b.tool_arguments, t.conversation_scope_kind
@@ -186,7 +195,7 @@ class _MemoryOperations(_MemoryManagementOperations):
     ) -> DirectMemoryOutcome:
         if write.context_id != CTX_GLOBAL and (
             str(owner["workspace_kind"]) != "project"
-            or write.context_id != workspace_context_id(str(owner["workspace_root"]))
+            or write.context_id != str(owner["workspace_id"])
         ):
             raise _MemoryInputRejected("remember crosses current project context")
         basis = self._lock_remember_basis(connection, write)
@@ -216,12 +225,12 @@ class _MemoryOperations(_MemoryManagementOperations):
                 """
                 INSERT INTO pulsara_v3.memory_facts (
                     id, memory_domain_id, context_id,
-                    source_session_id, source_tool_result_id,
+                    created_by_tool_result_id,
                     lifecycle, fact_kind, statement, fact_semantic_digest,
                     accepted_at, updated_at, search_contract_id,
                     search_contract_version, search_terms
                 ) VALUES (
-                    %s,%s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s,%s,%s,%s
+                    %s,%s,%s,%s,'ACTIVE',%s,%s,%s,%s,%s,%s,%s,%s
                 )
                 ON CONFLICT (memory_domain_id, context_id, fact_semantic_digest)
                     WHERE lifecycle='ACTIVE' DO NOTHING
@@ -229,7 +238,7 @@ class _MemoryOperations(_MemoryManagementOperations):
                 """,
                 (
                     new_id, write.memory_domain_id, write.context_id,
-                    candidate.session_id, candidate.result_id,
+                    candidate.result_id,
                     write.kind.value, write.statement, write.semantic_digest,
                     accepted_at, accepted_at, *write.search_contract,
                     list(write.search_terms),
@@ -259,28 +268,41 @@ class _MemoryOperations(_MemoryManagementOperations):
         else:
             raise TimeoutError("memory uniqueness arbitration exceeded writer deadline")
         if status == "SAVED":
-            for ref, target in zip(write.basis_refs, basis, strict=True):
-                relation_id = memory_relation_id(
-                    memory_domain_id=write.memory_domain_id,
-                    source_context_id=write.context_id,
-                    source_fact_id=memory_id,
-                    relation_kind=MemoryRelationKind.BASED_ON,
-                    target_context_id=ref.target_context_id,
-                    target_fact_id=ref.target_fact_id,
-                    supersede_mode=None,
+            relation_rows = tuple(
+                (
+                    memory_relation_id(
+                        memory_domain_id=write.memory_domain_id,
+                        source_context_id=write.context_id,
+                        source_fact_id=memory_id,
+                        relation_kind=MemoryRelationKind.BASED_ON,
+                        target_context_id=ref.target_context_id,
+                        target_fact_id=ref.target_fact_id,
+                        supersede_mode=None,
+                    ),
+                    ref,
+                    target,
                 )
+                for ref, target in zip(write.basis_refs, basis, strict=True)
+            )
+            lock_canonical_identities(
+                connection,
+                namespace="memory-relation",
+                memory_domain_id=write.memory_domain_id,
+                identities=(row[0] for row in relation_rows),
+            )
+            for relation_id, ref, target in relation_rows:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.memory_relations (
-                        id, memory_domain_id, owner_session_id, owner_tool_result_id,
+                        id, memory_domain_id, created_by_tool_result_id,
                         source_context_id, source_fact_id, source_fact_kind,
                         relation_kind, target_context_id, target_fact_id,
                         target_fact_kind, supersede_mode, ordinal, accepted_at
-                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,'BASED_ON',%s,%s,%s,NULL,%s,%s)
+                    ) VALUES (%s,%s,%s,%s,%s,%s,'BASED_ON',%s,%s,%s,NULL,%s,%s)
                     """,
                     (
-                        relation_id, write.memory_domain_id, candidate.session_id,
-                        candidate.result_id, write.context_id, memory_id, write.kind.value,
+                        relation_id, write.memory_domain_id, candidate.result_id,
+                        write.context_id, memory_id, write.kind.value,
                         ref.target_context_id, ref.target_fact_id,
                         str(target["fact_kind"]), ref.ordinal, accepted_at,
                     ),
@@ -308,6 +330,9 @@ class _MemoryOperations(_MemoryManagementOperations):
             write.source_memory_id, write.target_memory_id, write.relation_kind
         )
         def require_existing_owner(existing):
+            owner_id = existing["created_by_tool_result_id"]
+            if owner_id is None:
+                return
             owner = connection.execute(
                 """
                 SELECT r.result_record_kind, r.result_state,
@@ -317,19 +342,33 @@ class _MemoryOperations(_MemoryManagementOperations):
                   ON b.session_id=r.session_id
                  AND b.assistant_entry_id=r.tool_call_entry_id
                  AND b.tool_call_id=r.tool_call_id
-                WHERE r.session_id=%s AND r.id=%s
+                WHERE r.id=%s
                 """,
-                (existing["owner_session_id"], existing["owner_tool_result_id"]),
+                (owner_id,),
             ).fetchone()
             arguments = None if owner is None else owner["tool_arguments"]
+            owner_source = None if not isinstance(arguments, dict) else arguments.get(
+                "source_memory_id"
+            )
+            owner_target = None if not isinstance(arguments, dict) else arguments.get(
+                "target_memory_id"
+            )
+            owner_endpoints_match = (
+                {owner_source, owner_target}
+                == {str(existing["source_fact_id"]), str(existing["target_fact_id"])}
+                if kind is MemoryRelationKind.CONTRADICTS
+                else (
+                    owner_source == existing["source_fact_id"]
+                    and owner_target == existing["target_fact_id"]
+                )
+            )
             if (
                 owner is None
                 or owner["result_record_kind"] != "EXECUTED"
                 or owner["result_state"] != "SUCCESS"
                 or owner["tool_name"] != "mark_memory_relation"
                 or not isinstance(arguments, dict)
-                or arguments.get("source_memory_id") != existing["source_fact_id"]
-                or arguments.get("target_memory_id") != existing["target_fact_id"]
+                or not owner_endpoints_match
                 or arguments.get("relation_kind") != kind.value
             ):
                 raise ConversationKernelConflict("existing memory relation owner drifted")
@@ -342,7 +381,6 @@ class _MemoryOperations(_MemoryManagementOperations):
                     WHERE memory_domain_id=%s AND relation_kind='CONTRADICTS'
                       AND least(source_fact_id,target_fact_id)=least(%s,%s)
                       AND greatest(source_fact_id,target_fact_id)=greatest(%s,%s)
-                    FOR UPDATE
                     """,
                     (write.memory_domain_id, source_id, target_id, source_id, target_id),
                 ).fetchone()
@@ -350,33 +388,11 @@ class _MemoryOperations(_MemoryManagementOperations):
                 """
                 SELECT * FROM pulsara_v3.memory_relations
                 WHERE memory_domain_id=%s AND relation_kind='SUPERSEDES'
-                  AND source_fact_id=%s AND target_fact_id=%s FOR UPDATE
+                  AND source_fact_id=%s AND target_fact_id=%s
                 """,
                 (write.memory_domain_id, source_id, target_id),
             ).fetchone()
 
-        existing = existing_relation()
-        if existing is not None:
-            require_existing_owner(existing)
-            if kind is MemoryRelationKind.SUPERSEDES:
-                target = connection.execute(
-                    "SELECT lifecycle FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s AND id=%s",
-                    (write.memory_domain_id, target_id),
-                ).fetchone()
-                if target is None or str(target["lifecycle"]) != "SUPERSEDED":
-                    raise ConversationKernelConflict("existing supersede lifecycle drifted")
-            return DirectMemoryOutcome(
-                "SUCCESS",
-                _body({
-                    "status": "ALREADY_PRESENT",
-                    "relation_id": str(existing["id"]),
-                    "source_memory_id": source_id,
-                    "target_memory_id": target_id,
-                    "relation_kind": kind.value,
-                    "advisory": True,
-                }),
-                (source_id, target_id),
-            )
         rows = connection.execute(
             """
             SELECT * FROM pulsara_v3.memory_facts
@@ -387,8 +403,39 @@ class _MemoryOperations(_MemoryManagementOperations):
         ).fetchall()
         by_id = {str(row["id"]): row for row in rows}
         source, target = by_id.get(source_id), by_id.get(target_id)
-        # The first probe preceded endpoint locks. A concurrent writer may
-        # have installed this relation while we waited for those locks.
+        if source is None or target is None:
+            raise _MemoryInputRejected("relation memory is absent or outside this domain")
+        source_context = str(source["context_id"])
+        target_context = str(target["context_id"])
+        if source_context != target_context:
+            raise _MemoryInputRejected("new relation requires same-context memories")
+        if source_context != CTX_GLOBAL and source_context != candidate.workspace_id:
+            raise _MemoryInputRejected("relation crosses current project context")
+        if kind is MemoryRelationKind.CONTRADICTS and (
+            (target_context, target_id) < (source_context, source_id)
+        ):
+            source_id, target_id = target_id, source_id
+            source, target = target, source
+            source_context, target_context = target_context, source_context
+        mode = (
+            None if kind is MemoryRelationKind.CONTRADICTS else
+            (MemorySupersedeMode.SAME_KIND_REPLACEMENT
+             if str(source["fact_kind"]) == str(target["fact_kind"])
+             else MemorySupersedeMode.TAXONOMY_CORRECTION)
+        )
+        relation_id = memory_relation_id(
+            memory_domain_id=write.memory_domain_id,
+            source_context_id=str(source["context_id"]),
+            source_fact_id=source_id, relation_kind=kind,
+            target_context_id=str(target["context_id"]),
+            target_fact_id=target_id, supersede_mode=mode,
+        )
+        lock_canonical_identities(
+            connection,
+            namespace="memory-relation",
+            memory_domain_id=write.memory_domain_id,
+            identities=(relation_id,),
+        )
         existing = existing_relation()
         if existing is not None:
             require_existing_owner(existing)
@@ -408,31 +455,15 @@ class _MemoryOperations(_MemoryManagementOperations):
                 }),
                 (source_id, target_id),
             )
-        if source is None or target is None:
-            raise _MemoryInputRejected("relation memory is absent or outside this domain")
         if (
             str(source["lifecycle"]) != "ACTIVE"
             or str(target["lifecycle"]) != "ACTIVE"
-            or str(source["context_id"]) != str(target["context_id"])
         ):
             raise _MemoryInputRejected("new relation requires active same-context memories")
         if kind is MemoryRelationKind.CONTRADICTS and (
             str(source["fact_kind"]) != str(target["fact_kind"])
         ):
             raise _MemoryInputRejected("contradiction requires the same memory kind")
-        mode = (
-            None if kind is MemoryRelationKind.CONTRADICTS else
-            (MemorySupersedeMode.SAME_KIND_REPLACEMENT
-             if str(source["fact_kind"]) == str(target["fact_kind"])
-             else MemorySupersedeMode.TAXONOMY_CORRECTION)
-        )
-        relation_id = memory_relation_id(
-            memory_domain_id=write.memory_domain_id,
-            source_context_id=str(source["context_id"]),
-            source_fact_id=source_id, relation_kind=kind,
-            target_context_id=str(target["context_id"]),
-            target_fact_id=target_id, supersede_mode=mode,
-        )
         result_body = _body({
             "status": "SAVED", "relation_id": relation_id,
             "source_memory_id": source_id, "target_memory_id": target_id,
@@ -441,15 +472,15 @@ class _MemoryOperations(_MemoryManagementOperations):
         connection.execute(
             """
             INSERT INTO pulsara_v3.memory_relations (
-                id, memory_domain_id, owner_session_id, owner_tool_result_id,
+                id, memory_domain_id, created_by_tool_result_id,
                 source_context_id, source_fact_id, source_fact_kind, relation_kind,
                 target_context_id, target_fact_id, target_fact_kind,
                 supersede_mode, ordinal, accepted_at
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,%s)
             """,
             (
-                relation_id, write.memory_domain_id, candidate.session_id,
-                candidate.result_id, str(source["context_id"]), source_id,
+                relation_id, write.memory_domain_id, candidate.result_id,
+                str(source["context_id"]), source_id,
                 str(source["fact_kind"]), kind.value, str(target["context_id"]),
                 target_id, str(target["fact_kind"]),
                 None if mode is None else mode.value, candidate.observed_at,

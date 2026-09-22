@@ -46,19 +46,19 @@ from pulsara_agent.retrieval.tokenizer import (
 )
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
+from .locking import lock_canonical_identities
+
 
 _PROJECTS = """
-WITH activity AS (
-    SELECT s.workspace_id, s.workspace_label, s.workspace_root, s.id,
-           GREATEST((SELECT e.accepted_at FROM pulsara_v3.transcript_entries e
-                     WHERE e.session_id=s.id ORDER BY e.entry_sequence DESC LIMIT 1),
-                    s.created_at) AS last_activity_at
-    FROM pulsara_v3.sessions s
-    WHERE s.memory_domain_id=%s AND s.workspace_kind='project'
-), projects AS (
-    SELECT DISTINCT ON (workspace_id) workspace_id, workspace_label AS label,
-           workspace_root AS root, last_activity_at
-    FROM activity ORDER BY workspace_id, last_activity_at DESC, id DESC
+WITH projects AS (
+    SELECT w.id AS workspace_id, w.workspace_label AS label,
+           w.workspace_root AS root, MAX(f.updated_at) AS last_activity_at
+    FROM pulsara_v3.workspaces AS w
+    JOIN pulsara_v3.memory_facts AS f
+      ON f.memory_domain_id=w.memory_domain_id
+     AND f.project_workspace_id=w.id
+    WHERE w.memory_domain_id=%s AND w.workspace_kind='project'
+    GROUP BY w.memory_domain_id, w.id
 )
 """
 
@@ -86,7 +86,9 @@ class FrozenMemoryDeletionPlan:
     facts: tuple
     relations: tuple
     restore: tuple
+    lock_workspace_ids: tuple[str, ...]
     lock_fact_ids: tuple[str, ...]
+    lock_relation_ids: tuple[str, ...]
     confirmation: tuple[bytes, ...]
 
 
@@ -114,7 +116,10 @@ class _MemoryManagementOperations:
             else PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.SERIALIZABLE
+            # The executor replans after waiting for its complete lock set.
+            # READ COMMITTED gives that second statement a fresh snapshot;
+            # stronger snapshot isolation would make the comparison stale.
+            isolation_level=IsolationLevel.READ_COMMITTED
             if execute
             else IsolationLevel.REPEATABLE_READ,
         )
@@ -144,14 +149,9 @@ class _MemoryManagementOperations:
             rows = c.execute(
                 _PROJECTS
                 + """SELECT p.* FROM projects p
-                WHERE EXISTS (
-                    SELECT 1 FROM pulsara_v3.memory_facts f
-                    WHERE f.memory_domain_id=%s AND f.context_id=p.workspace_id
-                )
-                  AND (%s::timestamptz IS NULL OR (p.last_activity_at, p.workspace_id)<(%s::timestamptz,%s))
+                WHERE (%s::timestamptz IS NULL OR (p.last_activity_at, p.workspace_id)<(%s::timestamptz,%s))
                 ORDER BY p.last_activity_at DESC, p.workspace_id DESC LIMIT %s""",
                 (
-                    memory_domain_id,
                     memory_domain_id,
                     None if key is None else key[0],
                     None if key is None else key[0],
@@ -285,43 +285,50 @@ class _MemoryManagementOperations:
             key = decode_cursor(cursor, filters, 3)
             row = c.execute(
                 f"""SELECT f.*, {_ACTIVE_CONFLICT} AS needs_confirmation,
-                f.source_session_id AS origin_session_id,
+                owner_result.id AS owner_result_id,
+                owner_result.session_id AS origin_session_id,
                 r.tool_call_entry_id AS producer_entry_id,
                 e.turn_id, s.lifecycle AS source_session_lifecycle
                 FROM pulsara_v3.memory_facts f
-                JOIN pulsara_v3.tool_results r
-                  ON r.session_id=f.source_session_id AND r.id=f.source_tool_result_id
-                JOIN pulsara_v3.transcript_entries e
+                LEFT JOIN pulsara_v3.tool_results owner_result
+                  ON owner_result.id=f.created_by_tool_result_id
+                LEFT JOIN pulsara_v3.tool_results r
+                  ON r.id=owner_result.id
+                LEFT JOIN pulsara_v3.transcript_entries e
                   ON e.entry_owner_kind='EXECUTED_TURN'
                  AND e.id=r.tool_call_entry_id AND e.session_id=r.session_id
-                JOIN pulsara_v3.sessions s
-                  ON s.id=f.source_session_id AND s.memory_domain_id=f.memory_domain_id
+                LEFT JOIN pulsara_v3.sessions s
+                  ON s.id=owner_result.session_id
+                 AND s.memory_domain_id=f.memory_domain_id
                 WHERE f.memory_domain_id=%s AND f.context_id=%s AND f.id=%s""",
                 (memory_domain_id, context, fact_id),
             ).fetchone()
             if row is None:
                 raise MemoryManagementError("MEMORY_NOT_FOUND", 404, "这条记忆已不存在")
+            fact_source = self._management_source(
+                created_by_tool_result_id=row["created_by_tool_result_id"],
+                owner_result_id=row["owner_result_id"],
+                session_id=row["origin_session_id"],
+                session_lifecycle=row["source_session_lifecycle"],
+                turn_id=row["turn_id"],
+                entry_id=row["producer_entry_id"],
+            )
             relations = c.execute(
-                """SELECT r.*, owner_result.session_id AS owner_source_session_id,
+                """SELECT r.*, owner_result.id AS owner_result_id,
+                       owner_result.session_id AS owner_source_session_id,
                        owner_result.tool_call_entry_id AS owner_entry_id,
                        owner_entry.turn_id AS owner_turn_id,
-                       owner_session.lifecycle AS owner_session_lifecycle,
-                       owner_block.tool_name AS owner_write_tool
+                       owner_session.lifecycle AS owner_session_lifecycle
                 FROM pulsara_v3.memory_relations r
-                JOIN pulsara_v3.tool_results owner_result
-                  ON owner_result.session_id=r.owner_session_id
-                 AND owner_result.id=r.owner_tool_result_id
-                JOIN pulsara_v3.sessions owner_session
+                LEFT JOIN pulsara_v3.tool_results owner_result
+                  ON owner_result.id=r.created_by_tool_result_id
+                LEFT JOIN pulsara_v3.sessions owner_session
                   ON owner_session.id=owner_result.session_id
                  AND owner_session.memory_domain_id=r.memory_domain_id
-                JOIN pulsara_v3.transcript_entries owner_entry
+                LEFT JOIN pulsara_v3.transcript_entries owner_entry
                   ON owner_entry.session_id=owner_result.session_id
                  AND owner_entry.id=owner_result.tool_call_entry_id
                  AND owner_entry.entry_owner_kind='EXECUTED_TURN'
-                JOIN pulsara_v3.assistant_message_blocks owner_block
-                  ON owner_block.session_id=owner_result.session_id
-                 AND owner_block.assistant_entry_id=owner_result.tool_call_entry_id
-                 AND owner_block.tool_call_id=owner_result.tool_call_id
                 WHERE r.memory_domain_id=%s AND (r.source_fact_id=%s OR r.target_fact_id=%s)
                   AND (%s::text IS NULL OR (r.relation_kind,r.accepted_at,r.id)>(%s,%s::timestamptz,%s))
                 ORDER BY r.relation_kind,r.accepted_at,r.id LIMIT %s""",
@@ -362,12 +369,7 @@ class _MemoryManagementOperations:
                     row["user_edited_at"].isoformat()
                     if row["user_edited_at"] is not None else None
                 ),
-                "source": {
-                    "session_id": row["origin_session_id"],
-                    "turn_id": row["turn_id"],
-                    "entry_id": row["producer_entry_id"],
-                }
-                if row["source_session_lifecycle"] == "OPEN" else None,
+                "source": fact_source,
                 "relations": [
                     self._management_relation(
                         r,
@@ -480,6 +482,31 @@ class _MemoryManagementOperations:
             ) from exc
 
     @staticmethod
+    def _management_source(
+        *, created_by_tool_result_id, owner_result_id, session_id,
+        session_lifecycle, turn_id, entry_id,
+    ):
+        if created_by_tool_result_id is None:
+            return {"availability": "DELETED", "locator": None}
+        if (
+            owner_result_id is None
+            or session_id is None
+            or session_lifecycle is None
+        ):
+            raise RuntimeError("memory owner lineage is broken")
+        availability = str(session_lifecycle)
+        locator = None
+        if availability == "OPEN":
+            if turn_id is None or entry_id is None:
+                raise RuntimeError("open memory owner locator is broken")
+            locator = {
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "entry_id": entry_id,
+            }
+        return {"availability": availability, "locator": locator}
+
+    @staticmethod
     def _management_relation(relation, subject, companion):
         projected = {
             "relation_id": relation["id"],
@@ -491,15 +518,20 @@ class _MemoryManagementOperations:
             ).value,
             "recorded_at": canonical_memory_recorded_at(relation["accepted_at"]),
         }
-        if "owner_write_tool" in relation:
+        if "owner_result_id" in relation:
             projected["owner"] = {
-                "write_tool": relation["owner_write_tool"],
-                "source": {
-                    "session_id": relation["owner_source_session_id"],
-                    "turn_id": relation["owner_turn_id"],
-                    "entry_id": relation["owner_entry_id"],
-                }
-                if relation["owner_session_lifecycle"] == "OPEN" else None,
+                "write_tool": (
+                    "remember" if relation["relation_kind"] == "BASED_ON"
+                    else "mark_memory_relation"
+                ),
+                "source": _MemoryManagementOperations._management_source(
+                    created_by_tool_result_id=relation["created_by_tool_result_id"],
+                    owner_result_id=relation["owner_result_id"],
+                    session_id=relation["owner_source_session_id"],
+                    session_lifecycle=relation["owner_session_lifecycle"],
+                    turn_id=relation["owner_turn_id"],
+                    entry_id=relation["owner_entry_id"],
+                ),
             }
         return projected
 
@@ -674,7 +706,13 @@ class _MemoryManagementOperations:
             _frozen_rows(delete_rows),
             _frozen_rows(removed),
             _frozen_rows(restores),
+            tuple(sorted({
+                str(r["context_id"])
+                for r in (*facts.values(), *active)
+                if r["context_id"] != CTX_GLOBAL
+            })),
             tuple(sorted(set(facts) | {r["id"] for r in active})),
+            tuple(sorted(str(r["id"]) for r in relations)),
             records,
         )
 
@@ -709,23 +747,46 @@ class _MemoryManagementOperations:
                     plan = self._memory_deletion_plan(
                         c, memory_domain_id, selection, fact_id, additional
                     )
+                    if plan.lock_workspace_ids:
+                        lock_canonical_identities(
+                            c,
+                            namespace="workspace",
+                            memory_domain_id=memory_domain_id,
+                            identities=plan.lock_workspace_ids,
+                        )
+                        workspace_rows = c.execute(
+                            "SELECT id, workspace_kind, workspace_root, workspace_label "
+                            "FROM pulsara_v3.workspaces "
+                            "WHERE memory_domain_id=%s AND id=ANY(%s::text[]) "
+                            "ORDER BY id",
+                            (memory_domain_id, list(plan.lock_workspace_ids)),
+                        ).fetchall()
+                        if tuple(str(row["id"]) for row in workspace_rows) != (
+                            plan.lock_workspace_ids
+                        ):
+                            c.rollback()
+                            continue
                     c.execute(
                         "SELECT id FROM pulsara_v3.memory_facts WHERE memory_domain_id=%s AND id=ANY(%s) ORDER BY id FOR UPDATE",
                         (memory_domain_id, list(plan.lock_fact_ids)),
                     ).fetchall()
-                    c.execute(
-                        "SELECT id FROM pulsara_v3.memory_relations WHERE id=ANY(%s::text[]) ORDER BY id FOR UPDATE",
-                        ([dict(r)["id"] for r in plan.relations],),
-                    ).fetchall()
+                    lock_canonical_identities(
+                        c,
+                        namespace="memory-relation",
+                        memory_domain_id=memory_domain_id,
+                        identities=plan.lock_relation_ids,
+                    )
                     fresh = self._memory_deletion_plan(
                         c, memory_domain_id, selection, fact_id, additional
                     )
-                    if fresh.lock_fact_ids != plan.lock_fact_ids:
+                    if (
+                        fresh.lock_workspace_ids != plan.lock_workspace_ids
+                        or fresh.lock_fact_ids != plan.lock_fact_ids
+                        or fresh.lock_relation_ids != plan.lock_relation_ids
+                    ):
                         c.rollback()
                         continue
-                    plan = self._memory_deletion_plan(
-                        c, memory_domain_id, selection, fact_id, additional
-                    )
+                    plan = fresh
                     if any(
                         a != b
                         for a, b in zip_longest(plan.confirmation, expected_records())
@@ -766,6 +827,25 @@ class _MemoryManagementOperations:
                             raise RuntimeError(
                                 "memory restoration changed unexpected fields"
                             )
+                    if plan.lock_workspace_ids:
+                        c.execute(
+                            """
+                            DELETE FROM pulsara_v3.workspaces AS w
+                            WHERE w.memory_domain_id=%s
+                              AND w.id=ANY(%s::text[])
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM pulsara_v3.sessions AS s
+                                  WHERE s.memory_domain_id=w.memory_domain_id
+                                    AND s.workspace_id=w.id
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM pulsara_v3.memory_facts AS f
+                                  WHERE f.memory_domain_id=w.memory_domain_id
+                                    AND f.project_workspace_id=w.id
+                              )
+                            """,
+                            (memory_domain_id, list(plan.lock_workspace_ids)),
+                        )
                     _remaining(c, deadline_monotonic)
                     c.execute("SET CONSTRAINTS ALL IMMEDIATE")
                     result = []

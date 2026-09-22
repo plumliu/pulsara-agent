@@ -262,7 +262,11 @@ def _add_database_args(
 def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--workspace", default=None)
     parser.add_argument("--workspace-kind", choices=("project", "transient"))
-    parser.add_argument("--display-label", default=None)
+    parser.add_argument(
+        "--transient-display-label",
+        default=None,
+        help="Optional label for a transient workspace; project labels come from the root.",
+    )
     parser.add_argument("--memory-domain-id", default=None)
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument(
@@ -2220,7 +2224,7 @@ def _workspace_input_from_args(args) -> HostWorkspaceInput:
     return HostWorkspaceInput(
         workspace_kind=normalize_workspace_kind(args.workspace_kind or "project"),
         workspace_root=Path(args.workspace or "."),
-        display_label=args.display_label,
+        display_label=args.transient_display_label,
         memory_domain_id=args.memory_domain_id or "u_local",
         trust_workspace_mcp_config=bool(getattr(args, "trust_workspace_mcp", False)),
     )

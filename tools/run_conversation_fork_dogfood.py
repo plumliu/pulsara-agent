@@ -34,7 +34,6 @@ from run_model_switch_handover_dogfood import (
     _binding,
     _create_database,
     _drop_database,
-    _find_connection,
     _RecordingModelRuntime,
     _RecordingTransport,
 )
@@ -49,11 +48,31 @@ class _ForkTransport(_RecordingTransport):
         return execution
 
 
+class _ForkBorrowedTransport:
+    def __init__(self, delegate, records):
+        self._delegate = delegate
+        self.call = delegate.call
+        self._transport = _ForkTransport(
+            delegate.call.target.transport, records, None
+        )
+
+    def open_stream(self, *, context):
+        return self._transport.open_stream(call=self.call, context=context)
+
+    def close(self):
+        self._delegate.close()
+
+
 class _ForkRuntime(_RecordingModelRuntime):
     def resolve_target(self, binding, *, timeout_policy):
         target = self._delegate.resolve_target(binding, timeout_policy=timeout_policy)
         return replace(
             target, transport=_ForkTransport(target.transport, self._records, None)
+        )
+
+    def borrow_transport(self, purpose_permit):
+        return _ForkBorrowedTransport(
+            self._delegate.borrow_transport(purpose_permit), self._records
         )
 
 
@@ -71,9 +90,29 @@ def _anchor(session):
         )
 
 
-async def run(model_id, report):
+def _find_connection(settings, model_id, wire_api):
+    matches = tuple(
+        item
+        for item in settings.model_connections
+        if item.target.model_id == model_id
+        and item.target.wire_api.value == wire_api
+    )
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"expected one saved connection for model {model_id!r} "
+            f"and wire API {wire_api!r}"
+        )
+    connection = matches[0]
+    if settings.model_api_key(connection.id) is None:
+        raise RuntimeError(
+            f"saved connection {model_id!r} / {wire_api!r} has no API key"
+        )
+    return connection
+
+
+async def run(model_id, wire_api, report):
     saved = LocalSettingsStore().read()
-    selected = _find_connection(saved, model_id)
+    selected = _find_connection(saved, model_id, wire_api)
     database, _, admin, dsn = _create_database(saved)
     try:
         settings = _ReadOnlySettingsStore(
@@ -102,7 +141,7 @@ async def run(model_id, report):
                 parent._compaction.policy = ResolvedCompactionPolicy(
                     automatic_enabled=False,
                     minimum_reclaim_tokens=1,
-                    maximum_recent_human_utf8_bytes=1024,
+                    maximum_recent_human_text_utf8_bytes=1024,
                 )
                 prompt = (
                     "The project token is FORK_ALPHA_812. Remember it. Reply with that token only. The following is irrelevant historical filler, never reproduce it:\n"
@@ -175,14 +214,21 @@ async def run(model_id, report):
                     outcome = await child.run_turn(
                         PromptContent.text(question), command_id=f"command:{uuid4().hex}"
                     )
+                    branch_records = records[begin:]
+                    agent_records = [
+                        item
+                        for item in branch_records
+                        if item["purpose"] == "agent_model_loop"
+                    ]
+                    assert len(agent_records) == 1, (label, branch_records)
                     actual = json.dumps(
-                        [item["wire_input"] for item in records[begin:]],
+                        agent_records[0]["wire_input"],
                         ensure_ascii=False,
                     )
-                    assert records[begin:] and required in actual
+                    assert required in actual
                     for marker in forbidden:
                         assert marker not in actual, (label, marker)
-                    assert expected_reply in outcome.final_text, outcome
+                    assert outcome.final_text.strip() == expected_reply, outcome
                     if label == "compacted":
                         with child.repository.connection_provider.connection(
                             lane=PostgresConnectionLane.INSPECTOR,
@@ -265,17 +311,19 @@ async def run(model_id, report):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="openai/gpt-5.6-luna")
+    parser.add_argument("--wire-api", default="openai_responses")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     report = {
         "schema_version": "conversation-fork-dogfood.v1",
         "model_id": args.model,
+        "wire_api": args.wire_api,
         "provider_calls": [],
         "source_replies": [],
         "branches": [],
     }
     try:
-        asyncio.run(run(args.model, report))
+        asyncio.run(run(args.model, args.wire_api, report))
         report["status"] = "passed"
     except BaseException as error:
         import traceback

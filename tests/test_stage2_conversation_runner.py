@@ -207,6 +207,8 @@ pytestmark = pytest.mark.postgres
 
 
 def _name(prefix: str) -> str:
+    if prefix == "workspace":
+        return f"ctx:workspace/{uuid4().hex}"
     return f"{prefix}:{uuid4().hex}"
 
 
@@ -6634,7 +6636,9 @@ def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
         ).fetchall() == [("COMPLETED",), ("COMPLETED",)]
         assert (
             c.execute(
-                "SELECT count(*) FROM pulsara_v3.memory_facts WHERE source_session_id=%s",
+                "SELECT count(*) FROM pulsara_v3.memory_facts AS f "
+                "JOIN pulsara_v3.tool_results AS r "
+                "ON r.id=f.created_by_tool_result_id WHERE r.session_id=%s",
                 (session_id,),
             ).fetchone()[0]
             == 0
@@ -6650,17 +6654,21 @@ def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
     from pulsara_agent.memory.scope import (
         MemoryDomainContext,
         freeze_memory_read_context_binding,
+        workspace_context_id,
     )
     from pulsara_agent.retrieval.config import EmbeddingBackendConfig
     from pulsara_agent.settings import LocalSettingsStore
 
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    session_id, workspace_id = _name("session"), _name("workspace")
+    session_id = _name("session")
+    workspace_root = _name("workspace-root")
+    workspace_id = workspace_context_id(workspace_root)
     lease = _acquire_bound_host_writer(
         repository,
         session_id=session_id,
         workspace_id=workspace_id,
+        workspace_root=workspace_root,
         writer_owner_id=_name("host"),
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -6670,7 +6678,7 @@ def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
         repository=repository,
         session_id=session_id,
         read_binding=freeze_memory_read_context_binding(
-            domain=MemoryDomainContext("u_local", "project", workspace_id),
+            domain=MemoryDomainContext("u_local", "project", workspace_root),
             host_workspace_id=workspace_id,
         ),
         embedding_config=EmbeddingBackendConfig(),
@@ -6762,15 +6770,19 @@ def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
         deadline_monotonic=monotonic() + 30,
     ) as connection:
         rows = connection.execute(
-            "SELECT id, statement FROM pulsara_v3.memory_facts "
-            "WHERE source_session_id=%s ORDER BY statement",
+            "SELECT f.id, f.statement FROM pulsara_v3.memory_facts AS f "
+            "JOIN pulsara_v3.tool_results AS r "
+            "ON r.id=f.created_by_tool_result_id "
+            "WHERE r.session_id=%s ORDER BY f.statement",
             (session_id,),
         ).fetchall()
         relations = connection.execute(
             "SELECT source_fact_id, target_fact_id FROM pulsara_v3.memory_relations "
             "WHERE relation_kind='BASED_ON' "
             "AND source_fact_id IN ("
-            "SELECT id FROM pulsara_v3.memory_facts WHERE source_session_id=%s) "
+            "SELECT f.id FROM pulsara_v3.memory_facts AS f "
+            "JOIN pulsara_v3.tool_results AS r "
+            "ON r.id=f.created_by_tool_result_id WHERE r.session_id=%s) "
             "ORDER BY source_fact_id",
             (session_id,),
         ).fetchall()

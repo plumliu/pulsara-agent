@@ -232,8 +232,12 @@ def read_fork_historical_material(
     if anchor is None:
         raise ConversationKernelConflict("FORK_ANCHOR_INELIGIBLE")
     session = connection.execute(
-        "SELECT workspace_id, workspace_kind, workspace_root, workspace_label, memory_domain_id "
-        "FROM pulsara_v3.sessions WHERE id = %s",
+        "SELECT s.workspace_id, w.workspace_kind, w.workspace_root, "
+        "w.workspace_label, s.memory_domain_id "
+        "FROM pulsara_v3.sessions AS s "
+        "JOIN pulsara_v3.workspaces AS w "
+        "ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id "
+        "WHERE s.id = %s",
         (source_session_id,),
     ).fetchone()
     if session is None:

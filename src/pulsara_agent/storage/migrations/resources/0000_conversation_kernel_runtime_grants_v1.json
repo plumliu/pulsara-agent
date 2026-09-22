@@ -5,6 +5,7 @@
     "public.pulsara_schema_migrations": ["SELECT"]
   },
   "relation_grants": {
+    "workspaces": ["SELECT", "INSERT", "DELETE"],
     "agent_events": ["SELECT", "INSERT"],
     "assistant_message_blocks": ["SELECT", "INSERT"],
     "assistant_visualizations": ["SELECT", "INSERT"],
@@ -19,7 +20,7 @@
     "plan_workflows": ["SELECT", "INSERT", "UPDATE"],
     "plan_interactions": ["SELECT", "INSERT", "UPDATE"],
     "memory_facts": ["SELECT", "INSERT", "UPDATE", "DELETE"],
-    "memory_relations": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+    "memory_relations": ["SELECT", "INSERT", "DELETE"],
     "memory_embeddings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
     "prompt_queue_items": ["SELECT", "INSERT", "UPDATE"],
     "session_commands": ["SELECT", "INSERT"],
@@ -38,7 +39,8 @@
     "enforce_imported_history_invariants()": ["EXECUTE"],
     "enforce_direct_memory_lineage()": ["EXECUTE"],
     "memory_terms_to_tsquery(text[])": ["EXECUTE"],
-    "seal_memory_fact_search_document()": ["EXECUTE"]
+    "seal_memory_fact_search_document()": ["EXECUTE"],
+    "seal_memory_relation()": ["EXECUTE"]
   },
   "forbidden_runtime_grants": [
     "CREATE ON SCHEMA public",

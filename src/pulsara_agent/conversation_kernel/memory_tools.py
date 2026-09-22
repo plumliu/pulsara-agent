@@ -587,12 +587,14 @@ class KernelMemoryToolPort:
             if provenance is None:
                 return _json_result("APPLICATION_ERROR", {"error": "memory not found"})
             projection: dict[str, object] = {
+                "availability": provenance.source_availability,
                 "disposition": provenance.provenance_disposition,
                 "write_tool": provenance.write_tool,
                 "reviewed_by_second_model": False,
                 "relation_owners": [
                     {
                         "relation_id": item.relation_id,
+                        "availability": item.source_availability,
                         "disposition": item.provenance_disposition,
                         "write_tool": item.write_tool,
                         "owner_session_id": item.owner_session_id,
@@ -602,15 +604,22 @@ class KernelMemoryToolPort:
                     for item in provenance.relation_owners
                 ],
             }
-            if provenance.provenance_disposition == "SAME_ORIGIN":
+            if (
+                provenance.source_availability == "OPEN"
+                and provenance.provenance_disposition == "SAME_ORIGIN"
+            ):
                 projection["producer_locator"] = {
                     "session_id": provenance.producer_session_id,
                     "turn_id": provenance.producer_turn_id,
                     "entry_id": provenance.producer_entry_id,
                     "tool_call_id": provenance.producer_tool_call_id,
                 }
-            else:
+            elif provenance.source_availability == "DELETED":
+                projection["origin_context"] = "SOURCE_DELETED"
+            elif provenance.provenance_disposition == "CROSS_ORIGIN_REDACTED":
                 projection["origin_context"] = "WORKSPACE_REDACTED"
+            else:
+                projection["origin_context"] = "SOURCE_SESSION_CLOSED"
             payload["provenance"] = projection
         return _json_result(
             "SUCCESS", payload, model_visible_memory_fact_ids=(item.fact_id,)

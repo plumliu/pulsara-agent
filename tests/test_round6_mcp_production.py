@@ -803,7 +803,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
     lease = acquire_bound_test_writer(
         repository,
         session_id=session_id,
-        workspace_id=f"workspace:{uuid4().hex}",
+        workspace_id=f"ctx:workspace/{uuid4().hex}",
         writer_owner_id=f"host:{uuid4().hex}",
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -2801,7 +2801,7 @@ def _exercise_postgres_mcp_effect_and_reconnect(
     lease = acquire_bound_test_writer(
         repository,
         session_id=session_id,
-        workspace_id=f"workspace:{uuid4().hex}",
+        workspace_id=f"ctx:workspace/{uuid4().hex}",
         writer_owner_id=f"host:{uuid4().hex}",
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -2934,7 +2934,7 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
     lease = acquire_bound_test_writer(
         repository,
         session_id=session_id,
-        workspace_id=f"workspace:{uuid4().hex}",
+        workspace_id=f"ctx:workspace/{uuid4().hex}",
         writer_owner_id=f"host:{uuid4().hex}",
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
@@ -4208,7 +4208,7 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

@@ -128,6 +128,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _id(prefix: str) -> str:
+    if prefix == "workspace":
+        return f"ctx:workspace/{uuid4().hex}"
     return f"{prefix}:{uuid4().hex}"
 
 

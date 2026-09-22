@@ -11,6 +11,7 @@ from pulsara_agent.conversation_kernel.host import (
     _list_resumable_session_rows_across_workspaces,
 )
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+from pulsara_agent.workspace_identity import HostWorkspaceInput, resolve_workspace
 from tests.support.postgres import verified_postgres_provider
 
 
@@ -19,6 +20,7 @@ pytestmark = pytest.mark.postgres
 
 def test_session_catalog_order_ignores_writer_lease_maintenance(
     stage2_migrated_postgres_database,
+    tmp_path,
 ) -> None:
     repository = ConversationKernelRepository(
         verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -28,12 +30,20 @@ def test_session_catalog_order_ignores_writer_lease_maintenance(
     older_id = f"session:older-{suffix}"
     newer_id = f"session:newer-{suffix}"
     for session_id in (older_id, newer_id):
+        workspace = resolve_workspace(
+            HostWorkspaceInput(
+                workspace_kind="transient",
+                workspace_root=tmp_path / session_id,
+                display_label="快速开始",
+                memory_domain_id=memory_domain_id,
+            )
+        )
         repository.acquire_host_writer(
             session_id=session_id,
-            workspace_id=f"workspace:{session_id}",
+            workspace_id=workspace.workspace_key,
             workspace_kind="transient",
-            workspace_root=f"/tmp/{session_id}",
-            workspace_label="快速开始",
+            workspace_root=str(workspace.workspace_root),
+            workspace_label=workspace.display_label,
             memory_domain_id=memory_domain_id,
             writer_owner_id=f"host:{session_id}",
             lease_seconds=60,

@@ -11,7 +11,7 @@ function setup() {
   const api = new LocalMemoryApi();
   vi.spyOn(api, 'projects').mockResolvedValue({ items: [], next_cursor: null });
   vi.spyOn(api, 'catalog').mockResolvedValue({ items: [fact], next_cursor: null });
-  vi.spyOn(api, 'detail').mockResolvedValue({ fact, formation: '由对话中的记忆工具直接保存', source: null, relations: [], next_cursor: null });
+  vi.spyOn(api, 'detail').mockResolvedValue({ fact, formation: '由对话中的记忆工具直接保存', source: { availability: 'DELETED', locator: null }, relations: [], next_cursor: null });
   vi.spyOn(api, 'editStatement').mockResolvedValue({ fact, changed: false, user_edited_at: null });
   vi.spyOn(api, 'preview').mockResolvedValue(confirmation);
   vi.spyOn(api, 'delete').mockResolvedValue([{ type: 'HEADER', root: fact.fact_id, view: 'global', workspace_id: null, result: 'DELETED' }, { type: 'END', counts: { HEADER: 1 } }]);
@@ -24,8 +24,8 @@ describe('MemoryView', () => {
     const source = { session_id: 'session:initial', turn_id: 'turn:initial', entry_id: 'entry:initial' };
     const companion = { ...fact, fact_id: 'memory:related', statement: '关联的旧安排' };
     vi.mocked(api.detail).mockResolvedValue({
-      fact, formation: '', source, user_edited_at: null,
-      relations: [{ relation_id: 'relation:related', relative_role: 'UPDATES', subject: fact, companion, recorded_at: fact.recorded_at, owner: { write_tool: 'mark_memory_relation', source: null } }],
+      fact, formation: '', source: { availability: 'OPEN', locator: source }, user_edited_at: null,
+      relations: [{ relation_id: 'relation:related', relative_role: 'UPDATES', subject: fact, companion, recorded_at: fact.recorded_at, owner: { write_tool: 'mark_memory_relation', source: { availability: 'DELETED', locator: null } } }],
       next_cursor: null,
     });
     const changed = { ...fact, statement: '用户更正：晴天沿河散步。', updated_at: '2026-09-05T01:00:00+00:00' };
@@ -111,7 +111,7 @@ describe('MemoryView', () => {
     expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
     expect(screen.getByText('正在读取记忆…')).toBeTruthy();
     expect(document.activeElement).toBe(search);
-    await act(async () => { resolveDetail({ fact, formation: '', source: null, relations: [], next_cursor: null }); });
+    await act(async () => { resolveDetail({ fact, formation: '', source: { availability: 'DELETED', locator: null }, relations: [], next_cursor: null }); });
     expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
     vi.mocked(api.catalog).mockResolvedValueOnce({ items: [], next_cursor: null });
     await act(async () => { await vi.advanceTimersByTimeAsync(180); });
@@ -153,7 +153,7 @@ describe('MemoryView', () => {
   it('keeps the same panel mounted while switching, and ignores repeated selection without scrolling', async () => {
     const api = setup();
     const companion = { ...fact, fact_id: 'memory:b', statement: '散步时喜欢经过河边。' };
-    const initial: MemoryDetail = { fact, formation: '由对话中的记忆工具直接保存', source: null, relations: [{ relation_id: 'relation:a', relative_role: 'BASED_ON', subject: fact, companion, recorded_at: fact.recorded_at, owner: { write_tool: 'remember', source: null } }], next_cursor: null };
+    const initial: MemoryDetail = { fact, formation: '由对话中的记忆工具直接保存', source: { availability: 'DELETED', locator: null }, relations: [{ relation_id: 'relation:a', relative_role: 'BASED_ON', subject: fact, companion, recorded_at: fact.recorded_at, owner: { write_tool: 'remember', source: { availability: 'DELETED', locator: null } } }], next_cursor: null };
     vi.mocked(api.detail).mockResolvedValue(initial);
     vi.mocked(api.catalog).mockResolvedValue({ items: [fact, companion], next_cursor: null });
     const scroll = vi.fn();
@@ -197,7 +197,7 @@ describe('MemoryView', () => {
     const api = setup();
     const old = { ...fact, fact_id: 'memory:old', kind: 'FACT' as const, lifecycle: 'SUPERSEDED' as const, statement: '已被替代的旧记忆' };
     const other = { ...old, fact_id: 'memory:other', statement: '第一页的另一条旧记忆' };
-    const initial: MemoryDetail = { fact, formation: '', source: null, relations: [{ relation_id: 'relation:old', relative_role: 'UPDATES', subject: fact, companion: old, recorded_at: fact.recorded_at, owner: { write_tool: 'mark_memory_relation', source: null } }], next_cursor: null };
+    const initial: MemoryDetail = { fact, formation: '', source: { availability: 'DELETED', locator: null }, relations: [{ relation_id: 'relation:old', relative_role: 'UPDATES', subject: fact, companion: old, recorded_at: fact.recorded_at, owner: { write_tool: 'mark_memory_relation', source: { availability: 'DELETED', locator: null } } }], next_cursor: null };
     vi.mocked(api.catalog).mockImplementation(async (_selection, filters) => filters.lifecycle === 'updated'
       ? { items: [other], next_cursor: 'next-page' }
       : { items: [fact], next_cursor: null });
@@ -224,7 +224,7 @@ describe('MemoryView', () => {
     const api = setup();
     const project = { workspace_id: 'ctx:project-a', label: '项目 A', root: '/work/a', last_activity_at: fact.recorded_at };
     const projectFact = { ...fact, fact_id: 'memory:project-a', context_id: project.workspace_id, context_label: project.label, kind: 'DECISION' as const, statement: '项目中的关联记忆' };
-    const initial: MemoryDetail = { fact, formation: '', source: null, relations: [{ relation_id: 'relation:project', relative_role: 'BASED_ON', subject: fact, companion: projectFact, recorded_at: fact.recorded_at, owner: { write_tool: 'remember', source: null } }], next_cursor: null };
+    const initial: MemoryDetail = { fact, formation: '', source: { availability: 'DELETED', locator: null }, relations: [{ relation_id: 'relation:project', relative_role: 'BASED_ON', subject: fact, companion: projectFact, recorded_at: fact.recorded_at, owner: { write_tool: 'remember', source: { availability: 'DELETED', locator: null } } }], next_cursor: null };
     vi.mocked(api.projects).mockResolvedValue({ items: [project], next_cursor: null });
     vi.mocked(api.catalog).mockImplementation(async (selection) => ({ items: selection.view === 'global' ? [fact] : [projectFact], next_cursor: null }));
     vi.mocked(api.detail).mockImplementation(async (_selection, id) => id === fact.fact_id ? initial : { ...initial, fact: projectFact, relations: [] });
@@ -246,8 +246,8 @@ describe('MemoryView', () => {
     const creationSource = { session_id: 'session:fact', turn_id: 'turn:fact', entry_id: 'entry:fact' };
     const relationOwner = { session_id: 'session:relation', turn_id: 'turn:relation', entry_id: 'entry:relation' };
     vi.mocked(api.detail).mockResolvedValue({
-      fact, formation: '由对话中的记忆工具直接保存', source: creationSource,
-      relations: [{ relation_id: 'relation:later', relative_role: 'CONFLICTS_WITH', subject: fact, companion: { ...fact, fact_id: 'memory:other', statement: '另一条记忆' }, recorded_at: fact.recorded_at, owner: { write_tool: 'mark_memory_relation', source: relationOwner } }],
+      fact, formation: '由对话中的记忆工具直接保存', source: { availability: 'OPEN', locator: creationSource },
+      relations: [{ relation_id: 'relation:later', relative_role: 'CONFLICTS_WITH', subject: fact, companion: { ...fact, fact_id: 'memory:other', statement: '另一条记忆' }, recorded_at: fact.recorded_at, owner: { write_tool: 'mark_memory_relation', source: { availability: 'OPEN', locator: relationOwner } } }],
       next_cursor: null,
     });
     render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={onOpenSource} />);
@@ -278,8 +278,8 @@ describe('MemoryView', () => {
   ] as const)('reads %s from the current card toward the related card', async (relative_role, phrase) => {
     const api = setup();
     vi.mocked(api.detail).mockResolvedValue({
-      fact, formation: '', source: null,
-      relations: [{ relation_id: 'relation:test', relative_role, subject: fact, companion: { ...fact, fact_id: 'memory:other', statement: '另一条记忆' }, recorded_at: fact.recorded_at, owner: { write_tool: 'remember', source: null } }],
+      fact, formation: '', source: { availability: 'DELETED', locator: null },
+      relations: [{ relation_id: 'relation:test', relative_role, subject: fact, companion: { ...fact, fact_id: 'memory:other', statement: '另一条记忆' }, recorded_at: fact.recorded_at, owner: { write_tool: 'remember', source: { availability: 'DELETED', locator: null } } }],
       next_cursor: null,
     });
     render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
@@ -322,7 +322,7 @@ describe('MemoryView', () => {
     vi.mocked(api.detail).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
     fireEvent.click(screen.getByRole('button', { name: /另一条记忆/ }));
     fireEvent.click(screen.getByRole('button', { name: '关闭记忆详情' }));
-    await act(async () => resolve({ fact: companion, formation: '', source: null, relations: [], next_cursor: null }));
+    await act(async () => resolve({ fact: companion, formation: '', source: { availability: 'DELETED', locator: null }, relations: [], next_cursor: null }));
     expect(screen.queryByRole('complementary', { name: '记忆详情' })).toBeNull();
   });
   it('only accepts the latest selected detail when reads finish out of order', async () => {
@@ -338,7 +338,7 @@ describe('MemoryView', () => {
     fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
     fireEvent.click(screen.getByRole('button', { name: /另一条记忆/ }));
     const panel = screen.getByRole('complementary', { name: '记忆详情' });
-    const detail = { fact, formation: '', source: null, relations: [], next_cursor: null };
+    const detail: MemoryDetail = { fact, formation: '', source: { availability: 'DELETED', locator: null }, relations: [], next_cursor: null };
     await act(async () => first(detail));
     expect(panel.getAttribute('aria-busy')).toBe('true');
     expect(within(panel).queryByText(fact.statement, { selector: 'p.memory-statement' })).toBeNull();
@@ -374,7 +374,7 @@ describe('MemoryView', () => {
       .mockResolvedValueOnce({ items: [project], next_cursor: null })
       .mockResolvedValueOnce({ items: [], next_cursor: null });
     vi.mocked(api.catalog).mockResolvedValue({ items: [projectFact], next_cursor: null });
-    vi.mocked(api.detail).mockResolvedValue({ fact: projectFact, formation: '', source: null, relations: [], next_cursor: null });
+    vi.mocked(api.detail).mockResolvedValue({ fact: projectFact, formation: '', source: { availability: 'DELETED', locator: null }, relations: [], next_cursor: null });
     vi.mocked(api.preview).mockResolvedValue(projectConfirmation);
     render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={vi.fn()} />);
     fireEvent.click(screen.getByRole('tab', { name: '项目记忆' }));

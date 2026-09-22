@@ -50,11 +50,11 @@ def resolve_workspace(
 ) -> ResolvedWorkspace:
     kind = normalize_workspace_kind(workspace.workspace_kind)
     if kind == "project":
+        if workspace.display_label is not None:
+            raise ValueError("project workspace does not accept display_label")
         root = _resolve_project_root(workspace.workspace_root)
         stable_key = root.as_posix()
-        label = _display_label(
-            workspace.display_label, default=root.name or root.as_posix()
-        )
+        label = root.name or root.as_posix()
         domain = MemoryDomainContext(
             memory_domain_id=workspace.memory_domain_id,
             workspace_kind="project",

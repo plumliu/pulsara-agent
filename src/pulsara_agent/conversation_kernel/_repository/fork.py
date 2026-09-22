@@ -31,6 +31,7 @@ from pulsara_agent.llm.provider_replay import rebind_durable_provider_assistant_
 from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from .contracts import ConversationKernelConflict, _id
+from .locking import lock_canonical_identities
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,15 +127,50 @@ class _ForkOperations:
                 model = model_call_binding_to_dict(
                     material.anchor.anchor_model_call_binding
                 )
+                lock_canonical_identities(
+                    connection,
+                    namespace="workspace",
+                    memory_domain_id=material.memory_domain_id,
+                    identities=(material.workspace_id,),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO pulsara_v3.workspaces (
+                        memory_domain_id, id, workspace_kind,
+                        workspace_root, workspace_label
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (
+                        material.memory_domain_id,
+                        material.workspace_id,
+                        material.workspace_kind,
+                        material.workspace_root,
+                        material.workspace_label,
+                    ),
+                )
+                workspace = connection.execute(
+                    """
+                    SELECT workspace_kind, workspace_root, workspace_label
+                    FROM pulsara_v3.workspaces
+                    WHERE memory_domain_id=%s AND id=%s
+                    """,
+                    (material.memory_domain_id, material.workspace_id),
+                ).fetchone()
+                if workspace is None or (
+                    str(workspace["workspace_kind"]) != material.workspace_kind
+                    or str(workspace["workspace_root"]) != material.workspace_root
+                    or str(workspace["workspace_label"]) != material.workspace_label
+                ):
+                    raise ConversationKernelConflict(
+                        "workspace canonical metadata conflict"
+                    )
                 _insert(
                     connection,
                     "sessions",
                     {
                         "id": child_session_id,
                         "workspace_id": material.workspace_id,
-                        "workspace_kind": material.workspace_kind,
-                        "workspace_root": material.workspace_root,
-                        "workspace_label": material.workspace_label,
                         "memory_domain_id": material.memory_domain_id,
                         "model_call_binding": Jsonb(model),
                         "lifecycle": "OPEN",

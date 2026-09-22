@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from pathlib import Path
 from psycopg.types.json import Jsonb
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.contracts import (
@@ -22,6 +23,7 @@ from .contracts import (
     StaleHostWriter,
     _utcnow,
 )
+from .locking import lock_canonical_identities
 
 class _AuthorityOperations:
     def validate_host_writer(
@@ -108,9 +110,17 @@ class _AuthorityOperations:
         if workspace_kind not in {"project", "transient"}:
             raise ValueError("workspace kind is invalid")
         normalized_workspace_root = workspace_root or workspace_id
-        normalized_workspace_label = workspace_label or workspace_id
+        if workspace_kind == "project":
+            root_path = Path(normalized_workspace_root)
+            canonical_label = root_path.name or root_path.as_posix()
+            normalized_workspace_label = workspace_label or canonical_label
+        else:
+            normalized_workspace_label = workspace_label or workspace_id
         if not normalized_workspace_root or not normalized_workspace_label:
             raise ValueError("workspace metadata is incomplete")
+        if workspace_kind == "project":
+            if normalized_workspace_label != canonical_label:
+                raise ValueError("project workspace label must be derived from its root")
         expires_at = _utcnow() + timedelta(seconds=lease_seconds)
         self._begin_event_batch()
         try:
@@ -121,8 +131,7 @@ class _AuthorityOperations:
             ) as connection:
                 row = connection.execute(
                     """
-                    SELECT id, workspace_id, workspace_kind, workspace_root,
-                           workspace_label, memory_domain_id, lifecycle, writer_generation,
+                    SELECT id, workspace_id, memory_domain_id, lifecycle, writer_generation,
                            writer_lease_owner_id, writer_lease_expires_at
                     FROM pulsara_v3.sessions
                     WHERE id = %s
@@ -130,21 +139,61 @@ class _AuthorityOperations:
                     """,
                     (session_id,),
                 ).fetchone()
+                # For an existing Session this follows the frozen
+                # session -> workspace order; for first creation there is no
+                # Session row to lock yet. The workspace is immutable and the
+                # runtime role intentionally has no UPDATE grant, so all
+                # workspace owners share this transaction-local identity lock.
+                lock_canonical_identities(
+                    connection,
+                    namespace="workspace",
+                    memory_domain_id=memory_domain_id,
+                    identities=(workspace_id,),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO pulsara_v3.workspaces (
+                        memory_domain_id, id, workspace_kind,
+                        workspace_root, workspace_label
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (
+                        memory_domain_id,
+                        workspace_id,
+                        workspace_kind,
+                        normalized_workspace_root,
+                        normalized_workspace_label,
+                    ),
+                )
+                workspace = connection.execute(
+                    """
+                    SELECT id, workspace_kind, workspace_root, workspace_label
+                    FROM pulsara_v3.workspaces
+                    WHERE memory_domain_id=%s AND id=%s
+                    """,
+                    (memory_domain_id, workspace_id),
+                ).fetchone()
+                if workspace is None or (
+                    str(workspace["workspace_kind"]) != workspace_kind
+                    or str(workspace["workspace_root"]) != normalized_workspace_root
+                    or str(workspace["workspace_label"]) != normalized_workspace_label
+                ):
+                    raise ConversationKernelConflict(
+                        "workspace canonical metadata conflict"
+                    )
                 if row is None:
                     connection.execute(
                         """
                         INSERT INTO pulsara_v3.sessions (
-                            id, workspace_id, workspace_kind, workspace_root,
-                            workspace_label, memory_domain_id, lifecycle, writer_generation,
+                            id, workspace_id, memory_domain_id,
+                            lifecycle, writer_generation,
                             writer_lease_owner_id, writer_lease_expires_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, 'OPEN', 1, %s, %s)
+                        ) VALUES (%s, %s, %s, 'OPEN', 1, %s, %s)
                         """,
                         (
                             session_id,
                             workspace_id,
-                            workspace_kind,
-                            normalized_workspace_root,
-                            normalized_workspace_label,
                             memory_domain_id,
                             writer_owner_id,
                             expires_at,
@@ -155,14 +204,6 @@ class _AuthorityOperations:
                 else:
                     if str(row["workspace_id"]) != workspace_id:
                         raise ConversationKernelConflict("session workspace conflict")
-                    if (
-                        str(row["workspace_kind"]) != workspace_kind
-                        or str(row["workspace_root"]) != normalized_workspace_root
-                        or str(row["workspace_label"]) != normalized_workspace_label
-                    ):
-                        raise ConversationKernelConflict(
-                            "session workspace metadata conflict"
-                        )
                     if str(row["memory_domain_id"]) != memory_domain_id:
                         raise ConversationKernelConflict("session memory domain conflict")
                     if str(row["lifecycle"]) != "OPEN":

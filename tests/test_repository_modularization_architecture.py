@@ -355,7 +355,11 @@ _DIRECT_MEMORY_ADDED_TOP_LEVEL_CLASSES = {
     "PreparedMemoryMutationSideBranch",
     "_MemoryInputRejected",
 }
-_DIRECT_MEMORY_ADDED_TOP_LEVEL_FUNCTIONS = {"_body", "_fact_id"}
+_DIRECT_MEMORY_ADDED_TOP_LEVEL_FUNCTIONS = {
+    "_body",
+    "_fact_id",
+    "lock_canonical_identities",
+}
 _DIRECT_MEMORY_ADDED_METHODS = {
     "_confirm_direct_memory_result_shape",
     "_lock_remember_basis",
@@ -1034,9 +1038,10 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | {
                     "_management_connection",
                     "fork_conversation",
-                    "_management_context",
-                    "_management_labels",
-                    "_management_relation",
+                        "_management_context",
+                        "_management_labels",
+                        "_management_relation",
+                        "_management_source",
                     "memory_management_projects",
                     "memory_management_catalog",
                     "memory_management_detail",
@@ -1192,10 +1197,11 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             | {
                 "_management_connection",
                 "fork_conversation",
-                "_management_context",
-                "_management_labels",
-                "_management_relation",
-                "memory_management_projects",
+                    "_management_context",
+                    "_management_labels",
+                    "_management_relation",
+                    "_management_source",
+                    "memory_management_projects",
                 "memory_management_catalog",
                 "memory_management_detail",
                 "memory_deletion_preview",
@@ -1307,10 +1313,10 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _KERNEL_IMAGE_K2_CHANGED_TOP_LEVEL_FUNCTIONS
         | _KERNEL_IMAGE_K3_ADDED_METHODS
         | _KERNEL_IMAGE_K3_CHANGED_METHODS
-        | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_FUNCTIONS
-        | _KERNEL_IMAGE_K3_CHANGED_TOP_LEVEL_FUNCTIONS
-        | {"fork_conversation", "_insert"}
-    )
+            | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_FUNCTIONS
+            | _KERNEL_IMAGE_K3_CHANGED_TOP_LEVEL_FUNCTIONS
+            | {"fork_conversation", "_insert", "lock_canonical_identities"}
+        )
     for key in ("database_calls", "physical_checkouts"):
         current_unchanged = _without_source_modules(
             [item for item in current[key] if item["owner"] not in changed_owners]
@@ -1414,7 +1420,7 @@ def test_repository_modularization_facade_and_internal_owner_shape() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
 
 
 def test_repository_modularization_internal_package_is_not_a_second_public_api() -> (

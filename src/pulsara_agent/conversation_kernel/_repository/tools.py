@@ -914,14 +914,20 @@ class _ToolOperations:
             if payload.get("retrieval_summary") != thaw_json(mutation.retrieval_summary):
                 raise ConversationKernelConflict("remember retrieval cut drifted")
         else:
+            expected_relation_endpoints = (
+                tuple(sorted((
+                    mutation.source_memory_id,
+                    mutation.target_memory_id,
+                )))
+                if mutation.relation_kind.value == "CONTRADICTS"
+                else (mutation.source_memory_id, mutation.target_memory_id)
+            )
             if (
-                payload.get("source_memory_id") != mutation.source_memory_id
-                or payload.get("target_memory_id") != mutation.target_memory_id
+                payload.get("source_memory_id") != expected_relation_endpoints[0]
+                or payload.get("target_memory_id") != expected_relation_endpoints[1]
                 or payload.get("relation_kind") != mutation.relation_kind.value
                 or not isinstance(payload.get("relation_id"), str)
-                or visible_ids != (
-                    mutation.source_memory_id, mutation.target_memory_id
-                )
+                or visible_ids != expected_relation_endpoints
             ):
                 raise ConversationKernelConflict("relation result shape drifted")
 

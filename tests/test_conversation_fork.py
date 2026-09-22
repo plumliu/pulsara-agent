@@ -15,6 +15,10 @@ import pytest
 
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.fork_history import read_fork_anchor
+from pulsara_agent.conversation_kernel.memory.recall import PostgresMemoryQuery
+from pulsara_agent.conversation_kernel.memory.management import (
+    MemoryManagementSelection,
+)
 from pulsara_agent.conversation_kernel.prompt_content import (
     hydrate_canonical_prompt_body,
 )
@@ -44,6 +48,11 @@ from pulsara_agent.conversation_kernel.repository import (
 from pulsara_agent.conversation_kernel.steer import PreparedActiveRootInputAdmission
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.memory.scope import (
+    MemoryDomainContext,
+    freeze_memory_read_context_binding,
+    workspace_context_id,
+)
 from tests.support.model_config import (
     start_test_root_turn,
     test_model_binding as model_binding,
@@ -76,6 +85,8 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 
 
 def identity(prefix):
+    if prefix == "workspace":
+        return f"ctx:workspace/{uuid4().hex}"
     return f"{prefix}:{uuid4().hex}"
 
 
@@ -999,7 +1010,9 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
         )
     assert rows(
         repo,
-        "SELECT 1 FROM pulsara_v3.memory_facts WHERE source_session_id=%s",
+        "SELECT 1 FROM pulsara_v3.memory_facts AS f "
+        "JOIN pulsara_v3.tool_results AS r "
+        "ON r.id=f.created_by_tool_result_id WHERE r.session_id=%s",
         (child,),
     ) == []
     source = rows(
@@ -1021,6 +1034,96 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
         "first final",
         "continue child",
     ]
+
+
+def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
+    repo, request: pytest.FixtureRequest
+):
+    from tests.test_direct_advisory_memory import _open_direct_memory_session
+
+    workspace_root = f"/tmp/{identity('fork-memory-root')}"
+    workspace_id = workspace_context_id(workspace_root)
+    lease, _invoke, remember = _open_direct_memory_session(
+        repo, workspace_root=workspace_root
+    )
+    _, saved, _ = remember(
+        "The forked project uses the shared release checklist.", project=True
+    )
+
+    def cleanup_memory() -> None:
+        selection = MemoryManagementSelection("project", workspace_id)
+        preview = repo.memory_deletion_preview(
+            memory_domain_id="u_local",
+            selection=selection,
+            fact_id=saved["memory_id"],
+            deadline_monotonic=monotonic() + 30,
+        )
+        repo.execute_memory_deletion(
+            memory_domain_id="u_local",
+            selection=selection,
+            fact_id=saved["memory_id"],
+            additional=(),
+            expected_records=lambda: iter(preview),
+            deadline_monotonic=monotonic() + 30,
+        )
+
+    request.addfinalizer(cleanup_memory)
+    active_turn = rows(
+        repo,
+        "SELECT id FROM pulsara_v3.turns WHERE session_id=%s "
+        "ORDER BY accepted_at DESC LIMIT 1",
+        (lease.guard.session_id,),
+    )[0]["id"]
+    anchor = final(repo, lease.guard, str(active_turn), "Memory saved.")
+    created = fork(repo, lease.guard.session_id, anchor)
+    assert created.created, created.public_code
+
+    workspace_rows = rows(
+        repo,
+        "SELECT w.workspace_root,w.workspace_label,s.id AS session_id "
+        "FROM pulsara_v3.workspaces w JOIN pulsara_v3.sessions s "
+        "ON s.memory_domain_id=w.memory_domain_id AND s.workspace_id=w.id "
+        "WHERE w.memory_domain_id='u_local' AND w.id=%s ORDER BY s.id",
+        (workspace_id,),
+    )
+    assert {row["session_id"] for row in workspace_rows} == {
+        lease.guard.session_id,
+        created.child_session_id,
+    }
+    assert {
+        (row["workspace_root"], row["workspace_label"])
+        for row in workspace_rows
+    } == {(workspace_root, workspace_root.rsplit("/", 1)[-1])}
+
+    owners = rows(
+        repo,
+        "SELECT r.session_id FROM pulsara_v3.memory_facts f "
+        "JOIN pulsara_v3.tool_results r ON r.id=f.created_by_tool_result_id "
+        "WHERE f.id=%s",
+        (saved["memory_id"],),
+    )
+    assert [row["session_id"] for row in owners] == [lease.guard.session_id]
+    read_binding = freeze_memory_read_context_binding(
+        domain=MemoryDomainContext(
+            "u_local", "project", stable_project_key=workspace_root
+        ),
+        host_workspace_id=workspace_id,
+    )
+    memory_query = PostgresMemoryQuery(repo.connection_provider)
+    assert memory_query.get(
+        read_binding=read_binding,
+        fact_id=saved["memory_id"],
+        deadline_monotonic=monotonic() + 30,
+    ) is not None
+    provenance = memory_query.provenance(
+        read_binding=read_binding,
+        fact_id=saved["memory_id"],
+        deadline_monotonic=monotonic() + 30,
+    )
+    assert provenance is not None
+    assert provenance.provenance_disposition == "SAME_ORIGIN"
+    assert provenance.producer_session_id == lease.guard.session_id
+    assert provenance.producer_session_id != created.child_session_id
 
 
 def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(repo):

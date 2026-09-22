@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from time import monotonic
@@ -110,6 +111,7 @@ from tests.support.model_config import (
     test_model_binding,
     test_model_runtime,
 )
+from pulsara_agent.workspace_identity import HostWorkspaceInput, resolve_workspace
 
 
 pytestmark = pytest.mark.postgres
@@ -422,7 +424,7 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = f"session:{uuid4().hex}"
-    workspace_id = f"workspace:{uuid4().hex}"
+    workspace_id = f"ctx:workspace/{uuid4().hex}"
     lease = repository.acquire_host_writer(
         session_id=session_id,
         workspace_id=workspace_id,
@@ -486,6 +488,8 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
 
 
 def _name(prefix: str) -> str:
+    if prefix == "workspace":
+        return f"ctx:workspace/{uuid4().hex}"
     return f"{prefix}:{uuid4().hex}"
 
 
@@ -501,6 +505,85 @@ def _repository(stage2_migrated_postgres_database) -> ConversationKernelReposito
     return ConversationKernelRepository(
         verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     )
+
+
+def test_canonical_workspace_is_shared_and_transient_first_label_wins(
+    stage2_migrated_postgres_database,
+    tmp_path,
+) -> None:
+    repository = _repository(stage2_migrated_postgres_database)
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    project = resolve_workspace(
+        HostWorkspaceInput(
+            workspace_kind="project",
+            workspace_root=project_root,
+            memory_domain_id="u_local",
+        )
+    )
+
+    def acquire_project(index: int):
+        return repository.acquire_host_writer(
+            session_id=f"session:{uuid4().hex}",
+            workspace_id=project.workspace_key,
+            workspace_kind=project.workspace_kind,
+            workspace_root=str(project.workspace_root),
+            workspace_label=project.display_label,
+            memory_domain_id="u_local",
+            writer_owner_id=f"host:{index}:{uuid4().hex}",
+            lease_seconds=30,
+            deadline_monotonic=monotonic() + 30,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        leases = tuple(executor.map(acquire_project, range(2)))
+    assert len({lease.guard.session_id for lease in leases}) == 2
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT workspace_kind,workspace_root,workspace_label "
+            "FROM pulsara_v3.workspaces WHERE memory_domain_id=%s AND id=%s",
+            ("u_local", project.workspace_key),
+        ).fetchone() == (
+            "project",
+            str(project.workspace_root),
+            project_root.name,
+        )
+
+    transient_root = tmp_path / "scratch"
+    first = resolve_workspace(
+        HostWorkspaceInput(
+            workspace_kind="transient",
+            workspace_root=transient_root,
+            display_label="First label",
+            memory_domain_id="u_local",
+        )
+    )
+    repository.acquire_host_writer(
+        session_id=f"session:{uuid4().hex}",
+        workspace_id=first.workspace_key,
+        workspace_kind="transient",
+        workspace_root=str(first.workspace_root),
+        workspace_label=first.display_label,
+        memory_domain_id="u_local",
+        writer_owner_id=f"host:{uuid4().hex}",
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    with pytest.raises(ConversationKernelConflict, match="metadata conflict"):
+        repository.acquire_host_writer(
+            session_id=f"session:{uuid4().hex}",
+            workspace_id=first.workspace_key,
+            workspace_kind="transient",
+            workspace_root=str(first.workspace_root),
+            workspace_label="Second label",
+            memory_domain_id="u_local",
+            writer_owner_id=f"host:{uuid4().hex}",
+            lease_seconds=30,
+            deadline_monotonic=monotonic() + 30,
+        )
 
 
 class _FailingSteerRejectionRepository(ConversationKernelRepository):
@@ -743,8 +826,8 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
     # Fork spec §7.6 adds groups, genesis, and irreducible historical closures.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 27
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 28
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11

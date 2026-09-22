@@ -7052,8 +7052,8 @@ def _list_resumable_session_rows(
     ) as connection:
         return connection.execute(
             """
-            SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
-                   s.workspace_label, s.memory_domain_id, s.lifecycle,
+            SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
+                   w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
                    GREATEST(s.created_at, (
                        SELECT e.accepted_at
@@ -7073,10 +7073,12 @@ def _list_resumable_session_rows(
                        'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
                    )) AS subagent_task_attention
             FROM pulsara_v3.sessions AS s
+            JOIN pulsara_v3.workspaces AS w
+              ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id
             LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
             WHERE s.workspace_id = %s AND s.memory_domain_id = %s
               AND (%s OR s.lifecycle = 'OPEN')
-            GROUP BY s.id
+            GROUP BY s.id, w.memory_domain_id, w.id
             -- sessions.updated_at includes writer-lease maintenance.  Order the
             -- user-facing list by canonical conversation activity instead.
             ORDER BY updated_at DESC, s.id LIMIT %s
@@ -7099,8 +7101,8 @@ def _list_resumable_session_rows_across_workspaces(
     ) as connection:
         return connection.execute(
             """
-            SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
-                   s.workspace_label, s.memory_domain_id, s.lifecycle,
+            SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
+                   w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
                    GREATEST(s.created_at, (
                        SELECT e.accepted_at
@@ -7120,9 +7122,11 @@ def _list_resumable_session_rows_across_workspaces(
                        'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
                    )) AS subagent_task_attention
             FROM pulsara_v3.sessions AS s
+            JOIN pulsara_v3.workspaces AS w
+              ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id
             LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
             WHERE s.memory_domain_id = %s AND (%s OR s.lifecycle = 'OPEN')
-            GROUP BY s.id
+            GROUP BY s.id, w.memory_domain_id, w.id
             -- sessions.updated_at includes writer-lease maintenance.  Order the
             -- user-facing list by canonical conversation activity instead.
             ORDER BY updated_at DESC, s.id
@@ -7146,8 +7150,8 @@ def _read_resumable_session_row(
     ) as connection:
         return connection.execute(
             """
-            SELECT s.id, s.workspace_id, s.workspace_kind, s.workspace_root,
-                   s.workspace_label, s.memory_domain_id, s.lifecycle,
+            SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
+                   w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
                    GREATEST(s.created_at, (SELECT e.accepted_at
                        FROM pulsara_v3.transcript_entries AS e WHERE e.session_id = s.id
@@ -7163,10 +7167,12 @@ def _read_resumable_session_row(
                        'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
                    )) AS subagent_task_attention
             FROM pulsara_v3.sessions AS s
+            JOIN pulsara_v3.workspaces AS w
+              ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id
             LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
             WHERE s.id = %s AND s.memory_domain_id = %s
               AND (%s OR s.lifecycle = 'OPEN')
-            GROUP BY s.id
+            GROUP BY s.id, w.memory_domain_id, w.id
             """,
             (session_id, memory_domain_id, include_closed),
         ).fetchone()

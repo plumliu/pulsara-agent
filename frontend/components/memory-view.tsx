@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { ArrowRight, ArrowUpRight, Brain, Check, ChevronDown, ChevronRight, CircleAlert, FileText, FolderOpen, Globe2, History, Layers3, MessageSquare, Pencil, Search, SlidersHorizontal, Trash2, UserRound, X } from 'lucide-react';
 import type { DatabaseDataPlaneState } from '../lib/runtime-adapter';
 import type { RuntimeStatus } from '../lib/pulsara-types';
-import { MemoryApiError, type LocalMemoryApi, type MemoryDetail, type MemoryFact, type MemoryKind, type MemoryProject, type MemoryRecord, type MemorySelection } from '../lib/memory-api';
+import { MemoryApiError, type LocalMemoryApi, type MemoryDetail, type MemoryFact, type MemoryKind, type MemoryProject, type MemoryRecord, type MemorySelection, type MemorySource } from '../lib/memory-api';
 import { DatabaseSetupGuide } from './database-setup-guide';
 
 export const memoryKindLabels: Record<MemoryKind, string> = { FACT: '事实', USER_PROFILE: '关于你', RESPONSE_PREFERENCE: '回答偏好', DECISION: '决策' };
@@ -23,7 +23,7 @@ function errorText(error: unknown) { return error instanceof Error ? error.messa
 interface Props {
   api: LocalMemoryApi; databaseState: DatabaseDataPlaneState | undefined;
   runtimeStatus: RuntimeStatus; onReconnect: () => void;
-  onOpenSettings: () => void; onOpenSource: (source: NonNullable<MemoryDetail['source']>) => void;
+  onOpenSettings: () => void; onOpenSource: (source: MemorySource) => void;
 }
 
 export function MemoryView(props: Props) {
@@ -233,7 +233,7 @@ function MemoryContent({ api, onOpenSource }: Props) {
       {detail.user_edited_at && editDraft === null && <p className="memory-edited-note">用户已编辑正文；来源对话只记录最初保存的位置。</p>}
       {detail.fact.needs_confirmation && detail.fact.kind === 'RESPONSE_PREFERENCE' && <p>需要确认：冲突解决前暂不作为回答偏好使用。</p>}
       <div className="memory-detail-actions">
-        {detail.source ? <button className="memory-source" disabled={detailBusy} onClick={() => onOpenSource(detail.source!)}>在对话中查看<ArrowUpRight size={14} aria-hidden="true" /></button> : <span className="memory-detail-unavailable">来源对话已关闭</span>}
+        {detail.source.locator ? <button className="memory-source" disabled={detailBusy} onClick={() => onOpenSource(detail.source.locator!)}>在对话中查看<ArrowUpRight size={14} aria-hidden="true" /></button> : <span className="memory-detail-unavailable">{detail.source.availability === 'DELETED' ? '最初保存位置已删除' : '来源对话已关闭'}</span>}
         <button className="memory-edit" disabled={detailBusy || editDraft !== null || Boolean(confirmation)} onClick={() => { setEditDraft(detail.fact.statement); setEditError(''); }}><Pencil size={14} aria-hidden="true" />编辑记忆</button>
         <button ref={deleteButton} className="memory-delete" disabled={detailBusy || editDraft !== null || Boolean(confirmation)} onClick={() => void preview()}><Trash2 size={14} />{busy ? '正在读取…' : '删除记忆…'}</button>
       </div>
@@ -243,7 +243,7 @@ function MemoryContent({ api, onOpenSource }: Props) {
         {detail.relations.length ? <div className="memory-graph-branches">{detail.relations.map(r => <div className="memory-graph-branch" key={r.relation_id}>
             <div className="memory-graph-edge"><ArrowRight size={15} aria-hidden="true" /><span>{relationPhrases[r.relative_role]}</span></div>
             <button className="memory-graph-node" disabled={detailBusy} onClick={() => jumpToFact(r.companion)} aria-label={`查看记忆：${r.companion.statement}`}><span className="memory-graph-statement">{r.companion.statement}</span><span className="memory-graph-caption">{memoryKindLabels[r.companion.kind]} · {label(r.companion)}{r.companion.lifecycle === 'SUPERSEDED' ? ' · 已被替代' : ''}</span></button>
-            <div className="memory-graph-origin"><span>{r.owner.write_tool === 'remember' ? '保存时建立' : '后续标定'}</span>{r.owner.source ? <button disabled={detailBusy} onClick={() => onOpenSource(r.owner.source!)}>查看建立处<ArrowUpRight size={12} aria-hidden="true" /></button> : <span>· 来源对话已关闭</span>}</div>
+            <div className="memory-graph-origin"><span>{r.owner.write_tool === 'remember' ? '保存时建立' : '后续标定'}</span>{r.owner.source.locator ? <button disabled={detailBusy} onClick={() => onOpenSource(r.owner.source.locator!)}>查看建立处<ArrowUpRight size={12} aria-hidden="true" /></button> : <span>· {r.owner.source.availability === 'DELETED' ? '最初保存位置已删除' : '来源对话已关闭'}</span>}</div>
           </div>)}</div> : <p className="memory-graph-empty">暂无关联记忆</p>}
         {detail.next_cursor && <button className="memory-graph-more" disabled={detailBusy} onClick={() => void openFact(detail.fact, true)}>更多关系</button>}
       </section>

@@ -130,9 +130,18 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                     deadline_monotonic=monotonic() + 30,
                 ) as database:
                     observed_facts = database.execute(
-                        "SELECT f.id, f.statement, s.workspace_id FROM pulsara_v3.memory_facts f "
-                        "JOIN pulsara_v3.sessions s ON s.id=f.source_session_id "
-                        "WHERE f.source_session_id=%s AND f.fact_kind='FACT' "
+                        "SELECT f.id, f.statement, s.workspace_id, b.tool_name "
+                        "FROM pulsara_v3.memory_facts f "
+                        "JOIN pulsara_v3.tool_results tr "
+                        "ON tr.id=f.created_by_tool_result_id "
+                        "JOIN pulsara_v3.sessions s "
+                        "ON s.id=tr.session_id "
+                        "AND s.memory_domain_id=f.memory_domain_id "
+                        "JOIN pulsara_v3.assistant_message_blocks b "
+                        "ON b.session_id=tr.session_id "
+                        "AND b.assistant_entry_id=tr.tool_call_entry_id "
+                        "AND b.tool_call_id=tr.tool_call_id "
+                        "WHERE tr.session_id=%s AND f.fact_kind='FACT' "
                         "AND f.context_id<>'ctx:global' ORDER BY f.accepted_at",
                         (session_id,),
                     ).fetchall()
@@ -145,6 +154,10 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                     item[0] == "read_file" for item in observed_tool_calls
                 ):
                     raise RuntimeError("real model did not read the file and save one project FACT")
+                if str(observed_facts[0][3]) != "remember":
+                    raise RuntimeError(
+                        "project FACT was not owned by its canonical remember ToolResult"
+                    )
                 project_source_id = str(observed_facts[0][0])
                 project_workspace_id = str(observed_facts[0][2])
                 if marker not in str(observed_facts[0][1]) or "A 楼" not in str(observed_facts[0][1]):
@@ -185,14 +198,19 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                     deadline_monotonic=monotonic() + 30,
                 ) as database:
                     facts = database.execute(
-                        "SELECT id, lifecycle, fact_kind, statement FROM "
-                        "pulsara_v3.memory_facts WHERE source_session_id=%s "
-                        "ORDER BY accepted_at, id",
+                        "SELECT f.id, f.lifecycle, f.fact_kind, f.statement "
+                        "FROM pulsara_v3.memory_facts f "
+                        "JOIN pulsara_v3.tool_results tr "
+                        "ON tr.id=f.created_by_tool_result_id "
+                        "WHERE tr.session_id=%s ORDER BY f.accepted_at, f.id",
                         (session_id,),
                     ).fetchall()
                     relations = database.execute(
-                        "SELECT relation_kind, source_fact_id, target_fact_id "
-                        "FROM pulsara_v3.memory_relations WHERE owner_session_id=%s",
+                        "SELECT mr.relation_kind, mr.source_fact_id, "
+                        "mr.target_fact_id FROM pulsara_v3.memory_relations mr "
+                        "JOIN pulsara_v3.tool_results tr "
+                        "ON tr.id=mr.created_by_tool_result_id "
+                        "WHERE tr.session_id=%s",
                         (session_id,),
                     ).fetchall()
                     q4_remember = database.execute(

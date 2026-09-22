@@ -60,7 +60,7 @@ def test_stage2_registry_schema_and_removed_job_universe_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
 
     policy = build_postgres_runtime_grant_policy()
     assert policy.relation_privileges == CONVERSATION_KERNEL_RUNTIME_PRIVILEGES

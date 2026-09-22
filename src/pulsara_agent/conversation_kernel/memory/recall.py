@@ -115,7 +115,8 @@ class MemoryResponsePreferenceSnapshot:
 @dataclass(frozen=True, slots=True)
 class MemoryRelationOwnerProjection:
     relation_id: str
-    provenance_disposition: str
+    source_availability: str
+    provenance_disposition: str | None
     write_tool: str
     owner_session_id: str | None
     owner_entry_id: str | None
@@ -124,7 +125,8 @@ class MemoryRelationOwnerProjection:
 
 @dataclass(frozen=True, slots=True)
 class MemoryProvenanceProjection:
-    provenance_disposition: str
+    source_availability: str
+    provenance_disposition: str | None
     write_tool: str
     producer_session_id: str | None
     producer_turn_id: str | None
@@ -650,16 +652,19 @@ class PostgresMemoryQuery:
         ) as connection:
             row = connection.execute(
                 """
-                SELECT s.workspace_id AS origin_workspace_id,
+                SELECT f.created_by_tool_result_id,
+                       tr.id AS owner_result_id,
+                       tr.session_id AS source_session_id,
+                       s.workspace_id AS origin_workspace_id,
                        s.lifecycle AS source_session_lifecycle,
-                       f.source_session_id,
                        tr.tool_call_entry_id, tr.tool_call_id,
                        e.turn_id AS producer_turn_id
                 FROM pulsara_v3.memory_facts AS f
-                JOIN pulsara_v3.tool_results AS tr
-                  ON tr.session_id=f.source_session_id
-                 AND tr.id=f.source_tool_result_id
-                JOIN pulsara_v3.sessions AS s ON s.id=f.source_session_id
+                LEFT JOIN pulsara_v3.tool_results AS tr
+                  ON tr.id=f.created_by_tool_result_id
+                LEFT JOIN pulsara_v3.sessions AS s
+                  ON s.id=tr.session_id
+                 AND s.memory_domain_id=f.memory_domain_id
                 LEFT JOIN pulsara_v3.transcript_entries AS e
                   ON e.session_id=tr.session_id AND e.id=tr.tool_call_entry_id
                  AND e.entry_owner_kind='EXECUTED_TURN'
@@ -670,23 +675,41 @@ class PostgresMemoryQuery:
             ).fetchone()
             if row is None:
                 return None
-            same_origin = (
+            source_deleted = row["created_by_tool_result_id"] is None
+            if not source_deleted and (
+                row["owner_result_id"] is None
+                or row["source_session_id"] is None
+                or row["origin_workspace_id"] is None
+                or row["source_session_lifecycle"] is None
+            ):
+                raise RuntimeError("memory fact owner lineage is broken")
+            availability = (
+                "DELETED" if source_deleted else str(row["source_session_lifecycle"])
+            )
+            same_origin = not source_deleted and (
                 str(row["origin_workspace_id"]) == read_binding.host_workspace_id
             )
-            locator_visible = same_origin and row["source_session_lifecycle"] == "OPEN"
+            disposition = (
+                None if source_deleted else
+                ("SAME_ORIGIN" if same_origin else "CROSS_ORIGIN_REDACTED")
+            )
+            locator_visible = availability == "OPEN" and same_origin
             relation_owners: list[MemoryRelationOwnerProjection] = []
             if bounded_relation_ids:
                 owners = connection.execute(
                     """
-                    SELECT r.id, s.workspace_id, s.lifecycle,
+                    SELECT r.id, r.relation_kind, r.created_by_tool_result_id,
+                           tr.id AS owner_result_id,
+                           s.workspace_id, s.lifecycle,
                            tr.session_id, tr.tool_call_entry_id, tr.tool_call_id,
                            b.tool_name
                     FROM pulsara_v3.memory_relations AS r
-                    JOIN pulsara_v3.tool_results AS tr
-                      ON tr.session_id=r.owner_session_id
-                     AND tr.id=r.owner_tool_result_id
-                    JOIN pulsara_v3.sessions AS s ON s.id=tr.session_id
-                    JOIN pulsara_v3.assistant_message_blocks AS b
+                    LEFT JOIN pulsara_v3.tool_results AS tr
+                      ON tr.id=r.created_by_tool_result_id
+                    LEFT JOIN pulsara_v3.sessions AS s
+                      ON s.id=tr.session_id
+                     AND s.memory_domain_id=r.memory_domain_id
+                    LEFT JOIN pulsara_v3.assistant_message_blocks AS b
                       ON b.session_id=tr.session_id
                      AND b.assistant_entry_id=tr.tool_call_entry_id
                      AND b.tool_call_id=tr.tool_call_id
@@ -703,17 +726,35 @@ class PostgresMemoryQuery:
                     ),
                 ).fetchall()
                 for item in owners:
-                    visible = (
-                        str(item["workspace_id"]) == read_binding.host_workspace_id
-                        and item["lifecycle"] == "OPEN"
+                    deleted = item["created_by_tool_result_id"] is None
+                    if not deleted and (
+                        item["owner_result_id"] is None
+                        or item["session_id"] is None
+                        or item["workspace_id"] is None
+                        or item["lifecycle"] is None
+                        or item["tool_name"] is None
+                    ):
+                        raise RuntimeError("memory relation owner lineage is broken")
+                    item_availability = (
+                        "DELETED" if deleted else str(item["lifecycle"])
                     )
+                    item_same_origin = not deleted and (
+                        str(item["workspace_id"]) == read_binding.host_workspace_id
+                    )
+                    visible = item_availability == "OPEN" and item_same_origin
                     relation_owners.append(
                         MemoryRelationOwnerProjection(
                             relation_id=str(item["id"]),
+                            source_availability=item_availability,
                             provenance_disposition=(
-                                "SAME_ORIGIN" if visible else "CROSS_ORIGIN_REDACTED"
+                                None if deleted else
+                                ("SAME_ORIGIN" if item_same_origin
+                                 else "CROSS_ORIGIN_REDACTED")
                             ),
-                            write_tool=str(item["tool_name"]),
+                            write_tool=(
+                                "remember" if item["relation_kind"] == "BASED_ON"
+                                else "mark_memory_relation"
+                            ),
                             owner_session_id=str(item["session_id"]) if visible else None,
                             owner_entry_id=(
                                 str(item["tool_call_entry_id"]) if visible else None
@@ -724,9 +765,8 @@ class PostgresMemoryQuery:
                         )
                     )
         return MemoryProvenanceProjection(
-            provenance_disposition=(
-                "SAME_ORIGIN" if locator_visible else "CROSS_ORIGIN_REDACTED"
-            ),
+            source_availability=availability,
+            provenance_disposition=disposition,
             write_tool="remember",
             producer_session_id=(
                 str(row["source_session_id"]) if locator_visible else None

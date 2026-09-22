@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:e1ebdd00f003834782fb25598a17d955c768d24716dab4a1e69227f8e289cfca",
+  "observed_catalog_fingerprint": "sha256:9b222e254caef5256a98c4ff28389a378d4fe92c8622251350817f1a7f74ea30",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -12,6 +12,7 @@
   ],
   "product_schema": "pulsara_v3",
   "product_relations": [
+    "workspaces",
     "sessions",
     "session_commands",
     "turns",
@@ -48,6 +49,7 @@
     "pulsara_v3.enforce_imported_history_invariants",
     "pulsara_v3.enforce_direct_memory_lineage",
     "pulsara_v3.memory_terms_to_tsquery",
-    "pulsara_v3.seal_memory_fact_search_document"
+    "pulsara_v3.seal_memory_fact_search_document",
+    "pulsara_v3.seal_memory_relation"
   ]
 }

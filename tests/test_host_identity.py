@@ -22,23 +22,32 @@ def test_host_workspace_project_resolution_couples_memory_domain(tmp_path) -> No
         HostWorkspaceInput(
             workspace_kind="project",
             workspace_root=repo,
-            display_label="Repo",
             memory_domain_id="u_test",
         )
     )
 
     assert resolved.workspace_kind == "project"
     assert resolved.workspace_root == repo.resolve()
-    assert resolved.display_label == "Repo"
+    assert resolved.display_label == "repo"
     assert resolved.memory_domain == MemoryDomainContext(
         memory_domain_id="u_test",
         workspace_kind="project",
         stable_project_key=repo.resolve().as_posix(),
-        workspace_label="Repo",
+        workspace_label="repo",
     )
     assert resolved.workspace_context_id == workspace_context_id(repo.resolve().as_posix())
     assert resolved.workspace_context_id in resolved.memory_domain.read_context_ids
     assert resolved.memory_domain.graph_id == "graph:user/u_test"
+
+    with pytest.raises(ValueError, match="does not accept display_label"):
+        resolve_workspace(
+            HostWorkspaceInput(
+                workspace_kind="project",
+                workspace_root=repo,
+                display_label="Repo",
+                memory_domain_id="u_test",
+            )
+        )
 
 
 def test_host_workspace_transient_resolution_uses_global_context_only(tmp_path) -> None:

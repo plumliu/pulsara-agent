@@ -110,6 +110,8 @@ from tests.support.model_config import (
 
 
 def _name(prefix: str) -> str:
+    if prefix == "workspace":
+        return f"ctx:workspace/{uuid4().hex}"
     return f"{prefix}:{uuid4().hex}"
 
 
@@ -155,7 +157,7 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 
 
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 27
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
     assert len(LIVE_EVENT_TYPES) == 24
