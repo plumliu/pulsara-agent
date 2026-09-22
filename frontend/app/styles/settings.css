@@ -53,19 +53,34 @@
 .settings-empty strong { color: var(--muted); font-size: var(--type-small); }
 .settings-empty span { font-size: var(--type-caption); }
 .model-card-list, .credential-list { display: grid; }
-.model-config-card { display: grid; grid-template-columns: 32px minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 13px 15px; border-bottom: 1px solid var(--line); }
+.model-config-card { display: grid; grid-template-columns: 32px minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 10px 15px; border-bottom: 1px solid var(--line); }
 .model-config-card:last-child { border-bottom: 0; }
 .model-config-card__icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--paper-deep); color: var(--muted); }
 .model-config-card > span:nth-child(2) { min-width: 0; }
 .model-config-card strong, .model-config-card small, .model-config-card code { display: block; }
 .model-config-card strong { overflow: hidden; font-size: var(--type-small); text-overflow: ellipsis; white-space: nowrap; }
-.model-config-card small { margin-top: 4px; color: var(--faint); font-size: var(--type-caption); }
-.model-config-card code { margin-top: 4px; color: var(--muted); font-family: var(--mono); font-size: var(--type-micro); }
+.model-config-card small { margin-top: 3px; color: var(--faint); font-size: var(--type-caption); }
+.model-config-card code { overflow: hidden; margin-top: 3px; color: var(--muted); font-family: var(--mono); font-size: var(--type-micro); text-overflow: ellipsis; white-space: nowrap; }
 .model-config-card__actions { display: grid; justify-items: end; gap: 7px; }
-.model-config-card__actions .model-delete-trigger { min-height: 26px; padding: 0 7px; border-color: transparent; background: transparent; }
-.model-delete-confirmation { display: grid; grid-template-columns: auto auto; justify-items: end; gap: 6px; max-width: 290px; }
-.model-delete-confirmation > span { grid-column: 1 / -1; color: var(--faint); font-size: var(--type-micro); line-height: 1.45; }
+.model-config-card__buttons { display: flex; gap: 2px; }
+.model-config-card__actions .model-delete-trigger, .model-config-card__actions .model-edit-trigger { min-height: 26px; padding: 0 7px; border-color: transparent; background: transparent; }
+.model-editor-fields { min-width: 0; margin: 0; padding: 0; border: 0; }
+.model-edit-dialog { margin: auto; width: min(720px,calc(100% - 32px)); max-height: calc(100dvh - 64px); padding: 0; overflow-y: auto; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--paper-solid); color: var(--ink); box-shadow: var(--shadow-lg); }
+.model-edit-dialog::backdrop { background: #0006; backdrop-filter: blur(3px); }
+.model-edit-dialog .model-add-panel { border: 0; border-radius: 0; box-shadow: none; }
+.model-edit-notice { margin: 15px 15px 0; color: var(--muted); font-size: var(--type-caption); line-height: 1.6; }
+.model-edit-notice p { margin: 5px 0 0; color: var(--faint); }
+.model-edit-dialog .settings-form-grid label { align-content: start; }
+.settings-form-grid label > small { color: var(--muted); font-size: var(--type-caption); line-height: 1.5; }
+.model-delete-confirmation { display: flex; flex-wrap: wrap; justify-content: flex-end; justify-self: end; gap: 6px; max-width: 290px; }
+.model-delete-confirmation > span { flex-basis: 100%; color: var(--faint); font-size: var(--type-micro); line-height: 1.45; }
 .model-config-card__actions .subtle-danger { color: var(--red); }
+.model-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 10px 15px; border-top: 1px solid var(--line); color: var(--faint); font-size: var(--type-caption); }
+.model-pagination > div { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.model-pagination > div > span { font-family: var(--mono); font-size: var(--type-micro); font-variant-numeric: tabular-nums; }
+.model-pagination button { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font-size: var(--type-caption); }
+.model-pagination button:hover:not(:disabled) { border-color: var(--line-strong); background: var(--paper-deep); color: var(--ink); }
+.model-pagination button:disabled { opacity: .4; cursor: default; }
 .credential-state, .database-state { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-family: var(--mono); font-size: var(--type-micro); white-space: nowrap; }
 .credential-state i, .database-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); }
 .credential-state--present, .database-state--ready { color: var(--green); }
@@ -108,7 +123,6 @@
   .settings-form-grid, .model-confirmation dl { grid-template-columns: 1fr; }
   .model-config-card { grid-template-columns: 32px minmax(0,1fr); }
   .model-config-card__actions { grid-column: 2; justify-items: start; }
-  .model-delete-confirmation { justify-items: start; }
   .credential-row { grid-template-columns: 1fr; }
   .credential-actions { grid-column: 1; justify-content: flex-start; flex-wrap: wrap; }
   .database-state-row { display: grid; }

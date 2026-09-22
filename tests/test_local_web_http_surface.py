@@ -640,6 +640,128 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
         await server.aclose()
 
 
+def test_model_configuration_edit_round_trip_and_draft_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asyncio.run(_exercise_model_configuration_edit(tmp_path, monkeypatch))
+
+
+async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "index.html").write_text("Pulsara settings", encoding="utf-8")
+    from pulsara_agent.llm.model_catalog import ReasoningEffortChoices, ReasoningSelectableControls
+    from pulsara_agent.llm.model_connections import ModelConnectionId
+    from pulsara_agent.llm.route_wires import production_route_wire_registry
+
+    base = test_model_runtime(reasoning=ReasoningSelectableControls(effort=ReasoningEffortChoices(("low", "high"))))
+    store = LocalSettingsStore(tmp_path / "settings" / "local-settings.yaml")
+    runtime = ModelRuntime(store, base.catalog, production_route_wire_registry())
+    probes: list[dict[str, object]] = []
+
+    async def probe(**kwargs: object) -> None:
+        probes.append(kwargs)
+
+    monkeypatch.setattr(http_server_module, "probe_model_connection", probe)
+    server = LocalHttpServer(
+        sessions=cast(LocalSessionController, _Sessions()), bridge=cast(LocalBrowserBridge, _Bridge()),
+        static_root=tmp_path, requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+        **_model_server_dependencies_for_runtime(runtime),
+    )
+    await server.start()
+    headers = {"Origin": server.origin, "Sec-Fetch-Site": "same-origin"}
+    try:
+        async with ClientSession(cookie_jar=DummyCookieJar()) as client:
+            for source in ("models_dev", "user_declared"):
+                if source == "models_dev":
+                    draft = {
+                        "source": source, "route_id": "test", "model_id": "test-model",
+                        "wire_api": "openai_chat_completions", "reasoning_wire_profile": "catalog_standard",
+                        "api_key": "edit-secret",
+                    }
+                else:
+                    draft = {
+                        "source": source, "configuration_name": "Private", "base_url": "https://private.example/v1",
+                        "model_id": "private-model", "wire_api": "openai_chat_completions",
+                        "authentication": "bearer_api_key", "api_key": "edit-secret", "context_tokens": 300_000,
+                        "max_output_tokens": 16_384, "tool_call": False, "input_modalities": None,
+                        "reasoning": {"kind": "thinking_effort", "values": ["none", "high"]},
+                    }
+                async with client.post(f"{server.origin}/api/model-configurations", json=draft, headers=headers) as response:
+                    assert response.status == 201
+                    connection_id = (await response.json())["model_configuration"]["id"]
+                url = f"{server.origin}/api/model-configurations/{connection_id}"
+                before = store.read()
+                async with client.get(url) as response:
+                    assert response.status == 200
+                    detail = await response.json()
+                    assert "edit-secret" not in str(detail)
+                    assert detail["configuration"] == {**draft, "api_key": None}
+                    assert detail["credential_configured"] is True
+                    edited = detail["configuration"]
+                if source == "models_dev":
+                    edited["reasoning_wire_profile"] = "effort"
+                else:
+                    edited["configuration_name"] = "Renamed Private"
+                    edited["reasoning"] = {"kind": "broad_compat", "values": ["none", "high"]}
+                async with client.post(f"{url}/test", json=edited, headers=headers) as response:
+                    assert response.status == 200
+                assert store.read() == before
+                assert probes[-1]["api_key"] == "edit-secret"
+                assert probes[-1]["resolved"].config.id.value == connection_id
+                async with client.put(url, json=edited, headers=headers) as response:
+                    assert response.status == 200
+                    summary = (await response.json())["model_configuration"]
+                    assert summary["id"] == connection_id
+                    assert summary["reasoning_wire_profile"] == ("effort" if source == "models_dev" else "broad_compat")
+                    assert "edit-secret" not in str(summary)
+                assert store.read().model_api_key(ModelConnectionId(connection_id)) == "edit-secret"
+                async with client.get(url) as response:
+                    assert (await response.json())["configuration"] == edited
+                # The same draft cannot borrow credentials via the new-connection path.
+                for suffix in ("", "/test"):
+                    async with client.post(f"{server.origin}/api/model-configurations{suffix}", json=edited, headers=headers) as response:
+                        assert response.status == 400
+                before_invalid = store.read()
+                invalid = {**edited, "wire_api": "openai_responses"}
+                if source == "models_dev":
+                    invalid["reasoning_wire_profile"] = "thinking_effort"
+                for method, suffix in ((client.put, ""), (client.post, "/test")):
+                    async with method(f"{url}{suffix}", json=invalid, headers=headers) as response:
+                        assert response.status == 400
+                assert store.read() == before_invalid
+                if source == "user_declared":
+                    changed_endpoint = {**edited, "base_url": "https://different.example/v1"}
+                    for method, suffix in ((client.put, ""), (client.post, "/test")):
+                        async with method(f"{url}{suffix}", json=changed_endpoint, headers=headers) as response:
+                            assert response.status == 400
+                            assert (await response.json())["error"]["code"] == "MODEL_CONFIGURATION_EDIT_INVALID"
+                    assert store.read() == before_invalid
+                    assert len(probes) == 2
+                    # Rotating an address requires an explicit new credential.
+                    async with client.put(url, json={**changed_endpoint, "api_key": "new-endpoint-secret"}, headers=headers) as response:
+                        assert response.status == 200
+                    assert store.read().model_api_key(ModelConnectionId(connection_id)) == "new-endpoint-secret"
+                    no_auth = {**changed_endpoint, "authentication": "none"}
+                    async with client.put(url, json=no_auth, headers=headers) as response:
+                        assert response.status == 200
+                    assert store.read().model_api_key(ModelConnectionId(connection_id)) is None
+                    # Invalid/unresolvable saved declarations still have a readable editor.
+                    from dataclasses import replace
+                    saved = store.read().connection(ModelConnectionId(connection_id))
+                    await store.update_model_connection(connection=replace(saved, target=replace(saved.target, wire_api=http_server_module.WireApi.OPENAI_RESPONSES)), api_key=None)
+                    async with client.get(url) as response:
+                        assert response.status == 200
+                        assert (await response.json())["configuration"]["reasoning"] == edited["reasoning"]
+                async with client.delete(url, headers=headers) as response:
+                    assert response.status == 200
+                async with client.put(url, json=edited, headers=headers) as response:
+                    assert response.status == 404
+                async with client.get(url) as response:
+                    assert response.status == 404
+                assert store.read().model_connections == ()
+    finally:
+        await server.aclose()
+
+
 def test_model_connection_test_is_independent_from_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

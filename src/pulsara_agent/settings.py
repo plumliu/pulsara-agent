@@ -19,6 +19,7 @@ from pulsara_agent.llm.model_connections import (
     model_connection_from_dict,
     model_connection_to_dict,
 )
+from pulsara_agent.llm.model_target import canonicalize_endpoint
 from pulsara_agent.local_source_binding import (
     open_absolute_directory_nofollow,
     open_or_create_absolute_directory_nofollow,
@@ -650,6 +651,56 @@ class LocalSettingsStore:
             ),
             name="delete-model-connection",
         )
+
+    @staticmethod
+    def replacement_model_api_key(
+        current: LocalSettings,
+        connection: ModelConnectionConfig,
+        api_key: str | None,
+    ) -> str | None:
+        """Resolve a draft credential without lending an old key to a new endpoint."""
+        previous = current.connection(connection.id)
+        if previous is None:
+            raise KeyError("model connection does not exist")
+        if (previous.user_declared is None) != (connection.user_declared is None):
+            raise ValueError("模型配置来源不可更改，请添加另一条配置。")
+        if not connection.requires_api_key:
+            if api_key is not None:
+                raise ValueError("无需认证的配置不能包含 API key。")
+            return None
+        if api_key is not None:
+            if not api_key:
+                raise ValueError("API key 不能为空。")
+            return api_key
+        if (
+            not previous.requires_api_key
+            or canonicalize_endpoint(previous.base_url)
+            != canonicalize_endpoint(connection.base_url)
+        ):
+            raise ValueError("服务地址或认证方式已改变，请重新填写 API key。")
+        return current.model_api_key(connection.id)
+
+    async def update_model_connection(
+        self, *, connection: ModelConnectionConfig, api_key: str | None
+    ) -> LocalSettings:
+        def mutation(current: LocalSettings) -> tuple[LocalSettings, None]:
+            key = self.replacement_model_api_key(current, connection, api_key)
+            return replace(
+                current,
+                model_connections=tuple(
+                    connection if item.id == connection.id else item
+                    for item in current.model_connections
+                ),
+                model_api_keys=tuple(
+                    item for item in current.model_api_keys
+                    if item.connection_id != connection.id
+                ) + (() if key is None else (LocalModelApiKey(connection.id, key),)),
+            ), None
+
+        updated, _ = await self._run_mutation(
+            mutation, name="update-model-connection", repair=False
+        )
+        return updated
 
     async def save_dashscope_api_key(
         self, kind: DashScopeCredentialKind, api_key: str

@@ -1,14 +1,14 @@
 'use client';
 
 import {
-  Archive, Bot, Check, ChevronRight, CircleAlert, Database, HardDrive, KeyRound,
-  LoaderCircle, Moon, Palette, Plus, RefreshCw,
-  SlidersHorizontal, Sun, Trash2,
+  Archive, Bot, Check, ChevronLeft, ChevronRight, CircleAlert, Database, HardDrive, KeyRound,
+  LoaderCircle, Moon, Palette, Pencil, Plus, RefreshCw,
+  SlidersHorizontal, Sun, Trash2, X,
 } from 'lucide-react';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   LocalSettingsReadModel, ModelCatalogReadModel,
-  CustomReasoningProfile, ModelConfigurationInput, ModelConfigurationSummary,
+  CustomReasoningProfile, ModelConfigurationDetail, ModelConfigurationInput, ModelConfigurationSummary,
   ReasoningWireProfile,
   RuntimeAdapter, RuntimeBootstrap,
 } from '../lib/runtime-adapter';
@@ -49,6 +49,8 @@ const statusLabels: Record<RuntimeStatus, string> = {
 };
 
 const minimumContextTokens = 256_000;
+// Presentation batch only; every saved connection remains available across pages.
+const modelPageSize = 5;
 
 const alphabeticalCollator = new Intl.Collator('en', {
   numeric: true,
@@ -217,6 +219,15 @@ function DatabaseResetDialog({ target, busy, error, onClose, onConfirm }: {
   </dialog>;
 }
 
+function ModelFormContainer({ editing, busy, onClose, children }: {
+  editing: boolean; busy: boolean; onClose: () => void; children: React.ReactNode;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => { if (editing) dialog.current?.showModal(); }, [editing]);
+  const content = <fieldset className="model-editor-fields" disabled={busy}>{children}</fieldset>;
+  return editing ? <dialog ref={dialog} className="model-edit-dialog" aria-label="修改模型配置" onClose={onClose} onCancel={(event) => { if (busy) event.preventDefault(); else onClose(); }}>{content}</dialog> : content;
+}
+
 export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession }: SettingsViewProps) {
   const { showBuiltinToolResults, onChange: onToolResultDisplayChange } = useContext(ToolResultDisplayContext);
   const [section, setSection] = useState<SettingsSection>(bootstrap?.database_state === 'ready' ? 'general' : 'service');
@@ -226,6 +237,9 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
   const [catalogRefreshing, setCatalogRefreshing] = useState(false);
   const [error, setError] = useState<string>();
   const [adding, setAdding] = useState(false);
+  const [editingConfiguration, setEditingConfiguration] = useState<ModelConfigurationDetail & { id: string }>();
+  const [loadingModelId, setLoadingModelId] = useState<string>();
+  const [modelFormError, setModelFormError] = useState<string>();
   const [configurationSource, setConfigurationSource] = useState<ModelConfigurationSource>('models_dev');
   const [routeId, setRouteId] = useState('');
   const [modelId, setModelId] = useState('');
@@ -236,7 +250,7 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
   const [contextTokens, setContextTokens] = useState('256000');
   const [maxOutputTokens, setMaxOutputTokens] = useState('8192');
   const [toolCall, setToolCall] = useState(true);
-  const [imageInput, setImageInput] = useState(false);
+  const [inputModalities, setInputModalities] = useState<string[] | null>(['text']);
   const [catalogReasoningProfile, setCatalogReasoningProfile] = useState<ReasoningWireProfile>('catalog_standard');
   const [customReasoning, setCustomReasoning] = useState<CustomReasoningKind>('provider_default');
   const [effortValues, setEffortValues] = useState('low, medium, high');
@@ -246,6 +260,7 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
   const [testingModel, setTestingModel] = useState(false);
   const [deleteCandidateId, setDeleteCandidateId] = useState<string>();
   const [deletingModelId, setDeletingModelId] = useState<string>();
+  const [modelPage, setModelPage] = useState(0);
   const [runtimeDsn, setRuntimeDsn] = useState(bootstrap?.local_settings?.postgres?.runtime_dsn ?? '');
   const [adminDsn, setAdminDsn] = useState(bootstrap?.local_settings?.postgres?.admin_dsn ?? '');
   const [databaseBusy, setDatabaseBusy] = useState<'save' | 'check' | 'migrate' | 'reset'>();
@@ -297,6 +312,19 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
   const selectedWire = selectedModel?.wire_apis.find((wire) => wire.wire_api === wireApi);
   const hasExecutableWire = selectedModel?.wire_apis.some((wire) => wire.executable) ?? false;
   const modelConfigurations = settings?.model_configurations ?? [];
+  const modelPageCount = Math.max(1, Math.ceil(modelConfigurations.length / modelPageSize));
+  const currentModelPage = Math.min(modelPage, modelPageCount - 1);
+  const modelPageStart = currentModelPage * modelPageSize;
+  const visibleModelConfigurations = modelConfigurations.slice(modelPageStart, modelPageStart + modelPageSize);
+  const draftEndpoint = configurationSource === 'models_dev' ? selectedWire?.endpoint : baseUrl.trim();
+  const canKeepModelKey = Boolean(editingConfiguration?.credential_configured && draftEndpoint
+    && draftEndpoint.replace(/\/+$/, '') === editingConfiguration.base_url.replace(/\/+$/, ''));
+  const incompatibleCustomProfile = wireApi === 'openai_responses' && chatOnlyReasoningProfiles.has(customReasoning);
+
+  const changeModelPage = (page: number) => {
+    setModelPage(page);
+    setDeleteCandidateId(undefined);
+  };
 
   const resetModelDraft = () => {
     if (modelKey.current) modelKey.current.value = '';
@@ -307,14 +335,43 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
     setContextTokens('256000'); setMaxOutputTokens('8192');
     setToolCall(true); setCatalogReasoningProfile('catalog_standard');
     setCustomReasoning('provider_default');
-    setImageInput(false);
+    setInputModalities(['text']);
     setEffortValues('low, medium, high');
+    setModelFormError(undefined);
+  };
+
+  const closeModelForm = () => {
+    if (savingModel || testingModel) return;
+    resetModelDraft(); setEditingConfiguration(undefined); setAdding(false);
+  };
+
+  const editModel = async (connection: ModelConfigurationSummary) => {
+    setLoadingModelId(connection.id);
+    try {
+      const detail = await adapter.modelConfiguration(connection.id);
+      const value = detail.configuration;
+      resetModelDraft(); setDeleteCandidateId(undefined);
+      setEditingConfiguration({ ...detail, id: connection.id });
+      setConfigurationSource(value.source); setModelId(value.model_id); setWireApi(value.wire_api);
+      if (value.source === 'models_dev') {
+        setRouteId(value.route_id); setCatalogReasoningProfile(value.reasoning_wire_profile);
+      } else {
+        setConfigurationName(value.configuration_name); setBaseUrl(value.base_url);
+        setAuthentication(value.authentication); setContextTokens(String(value.context_tokens));
+        setMaxOutputTokens(String(value.max_output_tokens)); setToolCall(value.tool_call);
+        setInputModalities(value.input_modalities); setCustomReasoning(value.reasoning.kind);
+        if ('values' in value.reasoning) setEffortValues(value.reasoning.values.join(', '));
+      }
+      setAdding(true);
+    } catch (loadError) {
+      onNotify('模型配置无法读取', loadError instanceof Error ? loadError.message : '请刷新列表后重试。', 'warning');
+    } finally { setLoadingModelId(undefined); }
   };
 
   const modelDraft = (): ModelConfigurationInput | undefined => {
-    const apiKey = modelKey.current?.value ?? '';
+    const apiKey = modelKey.current?.value || null;
     if (configurationSource === 'models_dev') {
-      if (!routeId || !modelId || !wireApi || !apiKey || !selectedWire?.executable
+      if (!routeId || !modelId || !wireApi || (!apiKey && !canKeepModelKey) || !selectedWire?.executable
         || !selectedWire.reasoning_wire_profiles?.includes(catalogReasoningProfile)) return undefined;
       return {
         source: 'models_dev', route_id: routeId, model_id: modelId, wire_api: wireApi,
@@ -324,17 +381,17 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
     const context = Number(contextTokens);
     const output = Number(maxOutputTokens);
     const efforts = parseEffortValues(effortValues);
-    if (!configurationName.trim() || !baseUrl.trim() || !modelId.trim() || !wireApi
+    if (!configurationName.trim() || !baseUrl.trim() || !modelId.trim() || !wireApi || incompatibleCustomProfile
       || !Number.isInteger(context) || context < minimumContextTokens
       || !Number.isInteger(output) || output < 1 || output > context
-      || (authentication === 'bearer_api_key' && !apiKey)
+      || (authentication === 'bearer_api_key' && !apiKey && !canKeepModelKey)
       || (effortReasoningProfiles.has(customReasoning) && !efforts.length)) return undefined;
     return {
       source: 'user_declared', configuration_name: configurationName.trim(),
       base_url: baseUrl.trim(), model_id: modelId.trim(), wire_api: wireApi,
       authentication, api_key: authentication === 'none' ? null : apiKey,
       context_tokens: context, max_output_tokens: output, tool_call: toolCall,
-      input_modalities: imageInput ? ['text', 'image'] : ['text'],
+      input_modalities: inputModalities,
       reasoning: reasoningProfilePayload(customReasoning, efforts),
     };
   };
@@ -349,26 +406,44 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
   const saveModel = async () => {
     const draft = modelDraft();
     if (!draft) return;
-    setSavingModel(true);
+    setSavingModel(true); setModelFormError(undefined);
+    const editingId = editingConfiguration?.id;
     try {
-      const result = await adapter.addModelConfiguration(draft);
-      setSettings(await adapter.localSettings());
-      resetModelDraft(); setAdding(false);
-      await onConfigurationChanged();
-      onNotify('模型配置已添加', connectionTitle(result.model_configuration), 'success');
+      const result = editingId
+        ? await adapter.updateModelConfiguration(editingId, draft)
+        : await adapter.addModelConfiguration(draft);
+      const savedModels = editingId
+        ? modelConfigurations.map((connection) => connection.id === editingId ? result.model_configuration : connection)
+        : [...modelConfigurations, result.model_configuration];
+      setSettings((current) => current ? { ...current, model_configurations: savedModels } : current);
+      const savedIndex = savedModels.findIndex((connection) => connection.id === result.model_configuration.id);
+      changeModelPage(Math.floor(Math.max(0, savedIndex) / modelPageSize));
+      resetModelDraft(); setEditingConfiguration(undefined); setAdding(false);
+      onNotify(editingId ? '模型配置已修改' : '模型配置已添加', connectionTitle(result.model_configuration), 'success');
+      try {
+        const nextSettings = await adapter.localSettings();
+        setSettings(nextSettings);
+        const refreshedIndex = nextSettings.model_configurations.findIndex((connection) => connection.id === result.model_configuration.id);
+        changeModelPage(Math.floor(Math.max(0, refreshedIndex) / modelPageSize));
+        await onConfigurationChanged();
+      } catch { onNotify('配置已保存，但页面刷新失败', '请重新打开页面读取最新状态。', 'warning'); }
     } catch (saveError) {
-      onNotify('模型配置未添加', saveError instanceof Error ? saveError.message : '请检查所选模型与本机配置。', 'warning');
+      const detail = saveError instanceof Error ? saveError.message : '请检查所选模型与本机配置。';
+      setModelFormError(detail);
+      onNotify(editingId ? '模型配置未修改' : '模型配置未添加', detail, 'warning');
     } finally { setSavingModel(false); }
   };
 
   const testModel = async () => {
     const draft = modelDraft();
     if (!draft) return;
-    setTestingModel(true);
+    setTestingModel(true); setModelFormError(undefined);
     try {
-      await adapter.testModelConfiguration(draft);
+      if (editingConfiguration) await adapter.testModelConfiguration(draft, editingConfiguration.id);
+      else await adapter.testModelConfiguration(draft);
       onNotify('连接测试通过', '所选 endpoint、模型与 API 协议完成了一次极短请求。', 'success');
     } catch (testError) {
+      setModelFormError(testError instanceof Error ? testError.message : '请检查连接信息。');
       onNotify('连接测试未通过', testError instanceof Error ? testError.message : '请检查连接信息。', 'warning');
     } finally { setTestingModel(false); }
   };
@@ -381,6 +456,7 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
         ...current,
         model_configurations: result.model_configurations,
       } : current);
+      setModelPage((current) => Math.min(current, Math.max(0, Math.ceil(result.model_configurations.length / modelPageSize) - 1)));
       setDeleteCandidateId(undefined);
       onNotify(
         result.deleted ? '模型配置已删除' : '模型配置已经不存在',
@@ -483,9 +559,9 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
     && (!effortReasoningProfiles.has(customReasoning) || parseEffortValues(effortValues).length),
   );
   const draftReady = configurationSource === 'models_dev'
-    ? Boolean(routeId && modelId && wireApi && selectedWire?.executable && keyPresent
+    ? Boolean(routeId && modelId && wireApi && selectedWire?.executable && (keyPresent || canKeepModelKey)
       && selectedWire.reasoning_wire_profiles?.includes(catalogReasoningProfile))
-    : customDeclarationReady && (authentication === 'none' || keyPresent);
+    : customDeclarationReady && !incompatibleCustomProfile && (authentication === 'none' || keyPresent || canKeepModelKey);
 
   return <section className="surface-view settings-view">
     {resetTarget && <DatabaseResetDialog target={resetTarget} busy={databaseBusy === 'reset'} error={resetError} onClose={() => { if (!databaseBusy) setResetTarget(undefined); }} onConfirm={() => void resetDatabase()} />}
@@ -507,22 +583,36 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
           </SettingRow>
         </section>}
         {section === 'models' && <>
-          <section className="settings-group model-settings-group"><header><Bot size={16} /><div><h2>模型配置</h2><p>每张卡片是一条可在会话中选择的独立连接。</p></div><button className="settings-header-action" onClick={() => setAdding((value) => !value)}><Plus size={13} />添加配置</button></header>
-            {modelConfigurations.length ? <div className="model-card-list">{modelConfigurations.map((connection) => <article className="model-config-card" key={connection.id}><span className="model-config-card__icon"><Bot size={15} /></span><span><strong>{connectionTitle(connection)}</strong><small>{wireLabel(connection.wire_api)} · {formatTokens(connection.context_tokens)} 上下文 · {connectionCredentialLabel(connection)}</small><small>输入：{formatModalities(connection.input_modalities)}{connection.source === 'models_dev' && <> · 输出：{formatModalities(connection.output_modalities)}</>}</small>{connection.reasoning_wire_profile && <small>推理请求：{reasoningProfileLabel(connection.reasoning_wire_profile)}</small>}<code>{connection.model_id}</code></span><div className="model-config-card__actions"><span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : '配置不可用'}</span>{deleteCandidateId === connection.id ? <div className="model-delete-confirmation"><span>删除后，已有会话不会自动改用其他模型。</span><button disabled={deletingModelId === connection.id} onClick={() => setDeleteCandidateId(undefined)}>取消</button><button className="subtle-danger" disabled={deletingModelId === connection.id} onClick={() => void deleteModel(connection)}>{deletingModelId === connection.id ? <LoaderCircle size={13} /> : <Trash2 size={13} />}确认删除</button></div> : <button className="model-delete-trigger subtle-danger" aria-label={`删除模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId)} onClick={() => setDeleteCandidateId(connection.id)}><Trash2 size={13} />删除</button>}</div></article>)}</div>
+          <section className="settings-group model-settings-group"><header><Bot size={16} /><div><h2>模型配置</h2><p>每张卡片是一条可在会话中选择的独立连接。</p></div><button className="settings-header-action" disabled={Boolean(loadingModelId) || savingModel || testingModel} onClick={() => { if (adding) closeModelForm(); else { resetModelDraft(); setEditingConfiguration(undefined); setAdding(true); } }}><Plus size={13} />添加配置</button></header>
+            {modelConfigurations.length ? <>
+              <div className="model-card-list">{visibleModelConfigurations.map((connection) => <article className="model-config-card" key={connection.id}>
+                <span className="model-config-card__icon"><Bot size={15} /></span>
+                <span><strong title={connectionTitle(connection)}>{connectionTitle(connection)}</strong><small>{wireLabel(connection.wire_api)} · {formatTokens(connection.context_tokens)} 上下文</small><code title={connection.model_id}>{connection.model_id}</code></span>
+                <div className="model-config-card__actions">
+                  <span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : '配置不可用'}</span>
+                  {deleteCandidateId === connection.id ? <div className="model-delete-confirmation"><span>删除后，已有会话不会自动改用其他模型。</span><button disabled={deletingModelId === connection.id} onClick={() => setDeleteCandidateId(undefined)}>取消</button><button className="subtle-danger" disabled={deletingModelId === connection.id} onClick={() => void deleteModel(connection)}>{deletingModelId === connection.id ? <LoaderCircle size={13} /> : <Trash2 size={13} />}确认删除</button></div> : <div className="model-config-card__buttons"><button className="model-edit-trigger" aria-label={`修改模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId || loadingModelId) || savingModel || testingModel} onClick={() => void editModel(connection)}>{loadingModelId === connection.id ? <LoaderCircle size={13} /> : <Pencil size={13} />}修改</button><button className="model-delete-trigger subtle-danger" aria-label={`删除模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId || loadingModelId) || savingModel || testingModel} onClick={() => setDeleteCandidateId(connection.id)}><Trash2 size={13} />删除</button></div>}
+                </div>
+              </article>)}</div>
+              {modelPageCount > 1 && <nav className="model-pagination" aria-label="模型配置分页">
+                <span aria-live="polite">{modelPageStart + 1}–{modelPageStart + visibleModelConfigurations.length} / 共 {modelConfigurations.length} 项</span>
+                <div><button disabled={currentModelPage === 0 || Boolean(deletingModelId)} onClick={() => changeModelPage(currentModelPage - 1)}><ChevronLeft size={13} />上一页</button><span>{currentModelPage + 1} / {modelPageCount}</span><button disabled={currentModelPage === modelPageCount - 1 || Boolean(deletingModelId)} onClick={() => changeModelPage(currentModelPage + 1)}>下一页<ChevronRight size={13} /></button></div>
+              </nav>}
+            </>
               : <div className="settings-empty"><Bot size={18} /><strong>还没有模型配置</strong><span>添加后，在每个会话的输入框下方显式选择要使用的连接。</span></div>}
           </section>
-          {adding && <section className="settings-group model-add-panel"><header><Plus size={16} /><div><h2>添加模型配置</h2><p>保存与测试相互独立；只有测试会发送一次极短模型请求。</p></div>{configurationSource === 'models_dev' && <button className="settings-header-action" disabled={catalogRefreshing} onClick={() => void refreshCatalog()}><RefreshCw size={13} />刷新目录</button>}</header>
-            <div className="model-source-picker" role="group" aria-label="模型配置来源"><button className={configurationSource === 'models_dev' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('models_dev'); }}>Models.dev 目录</button><button className={configurationSource === 'user_declared' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('user_declared'); }}>自定义服务</button></div>
+          {adding && <ModelFormContainer editing={Boolean(editingConfiguration)} busy={savingModel || testingModel} onClose={closeModelForm}><section className="settings-group model-add-panel"><header>{editingConfiguration ? <Pencil size={16} /> : <Plus size={16} />}<div><h2>{editingConfiguration ? '修改模型配置' : '添加模型配置'}</h2><p>保存与测试相互独立；只有测试会发送一次极短模型请求。</p></div>{configurationSource === 'models_dev' && <button className="settings-header-action" disabled={catalogRefreshing} onClick={() => void refreshCatalog()}><RefreshCw size={13} />刷新目录</button>}{editingConfiguration && <button className="settings-header-action" aria-label="关闭修改模型配置" onClick={closeModelForm}><X size={15} /></button>}</header>
+            {editingConfiguration ? <div className="model-edit-notice"><strong>{configurationSource === 'models_dev' ? 'Models.dev 目录' : '自定义服务'}</strong><p>修改后会保留这条配置。更改模型、地址、协议、能力或推理请求形状后，请在相关会话空闲时重新载入运行时；已有会话不会自动切换，后续请求可能因配置不匹配而停止。</p></div> : <div className="model-source-picker" role="group" aria-label="模型配置来源"><button className={configurationSource === 'models_dev' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('models_dev'); }}>Models.dev 目录</button><button className={configurationSource === 'user_declared' ? 'is-active' : ''} onClick={() => { resetModelDraft(); setConfigurationSource('user_declared'); }}>自定义服务</button></div>}
+            {modelFormError && <p role="alert" className="settings-alert settings-alert--inside">{modelFormError}</p>}
             {configurationSource === 'models_dev' ? <>
               <div className="settings-form-grid">
-                <label><span>提供方</span><select value={routeId} onChange={(event) => { setRouteId(event.target.value); setModelId(''); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Provider</option>{selectableRoutes.map((route) => <option key={route.route_id} value={route.route_id}>{route.display_name}</option>)}</select></label>
-                <label><span>模型</span><select value={modelId} disabled={!selectedRoute} onChange={(event) => { setModelId(event.target.value); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Model ID</option>{selectableModels.map((model) => <option key={model.model_id} value={model.model_id}>{model.display_name} · {model.model_id}</option>)}</select></label>
+                <label><span>提供方</span><select value={routeId} onChange={(event) => { setRouteId(event.target.value); setModelId(''); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Provider</option>{routeId && !selectedRoute && <option value={routeId}>{routeId} · 当前目录不可用</option>}{selectableRoutes.map((route) => <option key={route.route_id} value={route.route_id}>{route.display_name}</option>)}</select></label>
+                <label><span>模型</span><select value={modelId} disabled={!selectedRoute} onChange={(event) => { setModelId(event.target.value); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Model ID</option>{modelId && !selectedModel && <option value={modelId}>{modelId} · 当前目录不可用</option>}{selectableModels.map((model) => <option key={model.model_id} value={model.model_id}>{model.display_name} · {model.model_id}</option>)}</select></label>
                 <label><span>API 协议</span><select value={wireApi} disabled={!selectedModel || !hasExecutableWire} onChange={(event) => { setWireApi(event.target.value as typeof wireApi); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Chat 或 Responses</option>{selectedModel?.wire_apis.map((wire) => <option key={wire.wire_api} value={wire.wire_api} disabled={!wire.executable}>{wireLabel(wire.wire_api)}{wire.recommended ? ' · models.dev 建议' : ''}{wire.executable ? '' : ' · 暂不支持'}</option>)}</select></label>
-                <label><span>Reasoning 请求形状</span><select aria-label="Reasoning 请求形状" value={catalogReasoningProfile} disabled={!selectedWire} onChange={(event) => setCatalogReasoningProfile(event.target.value as ReasoningWireProfile)}>{selectedWire?.reasoning_wire_profiles?.map((profile) => <option key={profile} value={profile}>{reasoningProfileLabel(profile)}</option>)}</select><small>{catalogReasoningProfileDescription(catalogReasoningProfile, selectedWire?.reasoning?.kind)}</small></label>
-                <label><span>API key</span><input ref={modelKey} type="password" autoComplete="new-password" placeholder="保存到本机配置" onChange={(event) => setKeyPresent(Boolean(event.target.value))} /></label>
+                <label><span>Reasoning 请求形状</span><select aria-label="Reasoning 请求形状" value={catalogReasoningProfile} disabled={!selectedWire} onChange={(event) => setCatalogReasoningProfile(event.target.value as ReasoningWireProfile)}>{!selectedWire?.reasoning_wire_profiles?.includes(catalogReasoningProfile) && <option value={catalogReasoningProfile}>{reasoningProfileLabel(catalogReasoningProfile)} · 当前不可用</option>}{selectedWire?.reasoning_wire_profiles?.map((profile) => <option key={profile} value={profile}>{reasoningProfileLabel(profile)}</option>)}</select><small>{catalogReasoningProfileDescription(catalogReasoningProfile, selectedWire?.reasoning?.kind)}</small></label>
+                <label><span>API key</span><input ref={modelKey} aria-label="API key" type="password" autoComplete="new-password" placeholder={canKeepModelKey ? '留空保留现有密钥' : '保存到本机配置'} onChange={(event) => setKeyPresent(Boolean(event.target.value))} />{editingConfiguration && <small>{canKeepModelKey ? '留空保留现有密钥，填写则替换。' : '服务地址已改变或没有现有密钥，请重新填写。'}</small>}</label>
               </div>
               {selectedModel && !hasExecutableWire && <p className="inline-warning"><CircleAlert size={13} />该提供方没有声明 OpenAI-compatible 接口，无法使用通用 Chat / Responses adapter。</p>}
-              {selectedModel && <div className="model-confirmation"><strong>确认连接</strong><dl><div><dt>提供方</dt><dd>{selectedRoute?.display_name}</dd></div><div><dt>模型</dt><dd>{selectedModel.model_id}</dd></div><div><dt>协议</dt><dd>{selectedWire ? wireLabel(selectedWire.wire_api) : '未选择'}</dd></div><div><dt>推理形状</dt><dd>{selectedWire ? reasoningProfileLabel(catalogReasoningProfile) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{selectedWire?.endpoint ?? '目录未提供'}</dd></div><div><dt>上下文</dt><dd>{formatTokens(selectedModel.context_tokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(selectedModel.input_modalities)}</dd></div><div><dt>输出模态</dt><dd>{formatModalities(selectedModel.output_modalities)}</dd></div></dl><p>模态与推理能力来自 models.dev；请求形状由你显式选择，Pulsara 不会根据服务商或模型名称猜测。</p>{selectedShapeWarning && <p className="inline-warning"><CircleAlert size={13} />所选协议与 models.dev 建议不同；仍可保存，调用失败时请返回这里添加另一配置。</p>}<p>Pulsara 当前只支持与 OpenAI Chat Completions 或 Responses 兼容的接口。模型出现在目录中不代表所选提供方一定支持你选择的 API 协议。</p><div className="form-actions"><button onClick={() => { resetModelDraft(); setAdding(false); }}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}保存配置</button></div></div>}
+              {selectedModel && <div className="model-confirmation"><strong>确认连接</strong><dl><div><dt>提供方</dt><dd>{selectedRoute?.display_name}</dd></div><div><dt>模型</dt><dd>{selectedModel.model_id}</dd></div><div><dt>协议</dt><dd>{selectedWire ? wireLabel(selectedWire.wire_api) : '未选择'}</dd></div><div><dt>推理形状</dt><dd>{selectedWire ? reasoningProfileLabel(catalogReasoningProfile) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{selectedWire?.endpoint ?? '目录未提供'}</dd></div><div><dt>上下文</dt><dd>{formatTokens(selectedModel.context_tokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(selectedModel.input_modalities)}</dd></div><div><dt>输出模态</dt><dd>{formatModalities(selectedModel.output_modalities)}</dd></div></dl><p>模态与推理能力来自 models.dev；请求形状由你显式选择，Pulsara 不会根据服务商或模型名称猜测。</p>{selectedShapeWarning && <p className="inline-warning"><CircleAlert size={13} />所选协议与 models.dev 建议不同；仍可保存，调用失败时请返回这里添加另一配置。</p>}<p>Pulsara 当前只支持与 OpenAI Chat Completions 或 Responses 兼容的接口。模型出现在目录中不代表所选提供方一定支持你选择的 API 协议。</p><div className="form-actions"><button onClick={closeModelForm}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}{editingConfiguration ? '保存修改' : '保存配置'}</button></div></div>}
             </> : <>
               <div className="settings-form-grid">
                 <label><span>配置名称</span><input value={configurationName} onChange={(event) => setConfigurationName(event.target.value)} placeholder="例如：公司内网模型" /></label>
@@ -530,17 +620,17 @@ export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onTheme
                 <label><span>Model ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="实际发送给 endpoint 的模型 ID" /></label>
                 <label><span>API 协议</span><select value={wireApi} onChange={(event) => { const value = event.target.value as typeof wireApi; setWireApi(value); if (value === 'openai_responses' && chatOnlyReasoningProfiles.has(customReasoning)) setCustomReasoning('provider_default'); }}><option value="">选择 Chat 或 Responses</option><option value="openai_chat_completions">Chat Completions</option><option value="openai_responses">Responses</option></select></label>
                 <label><span>认证方式</span><select value={authentication} onChange={(event) => { const value = event.target.value as typeof authentication; setAuthentication(value); if (value === 'none' && modelKey.current) { modelKey.current.value = ''; setKeyPresent(false); } }}><option value="bearer_api_key">Bearer API key</option><option value="none">无需认证</option></select></label>
-                {authentication === 'bearer_api_key' && <label><span>API key</span><input ref={modelKey} type="password" autoComplete="new-password" placeholder="保存到本机配置" onChange={(event) => setKeyPresent(Boolean(event.target.value))} /></label>}
+                {authentication === 'bearer_api_key' && <label><span>API key</span><input ref={modelKey} aria-label="API key" type="password" autoComplete="new-password" placeholder={canKeepModelKey ? '留空保留现有密钥' : '保存到本机配置'} onChange={(event) => setKeyPresent(Boolean(event.target.value))} />{editingConfiguration && <small>{canKeepModelKey ? '留空保留现有密钥，填写则替换。' : '服务地址或认证方式已改变，请填写密钥。'}</small>}</label>}
                 <label><span>Context window</span><input type="number" min={minimumContextTokens} step="1" value={contextTokens} onChange={(event) => setContextTokens(event.target.value)} /></label>
                 <label><span>最大输出长度</span><input type="number" min="1" step="1" value={maxOutputTokens} onChange={(event) => setMaxOutputTokens(event.target.value)} /></label>
-                <label><span>Reasoning 请求形状</span><select aria-label="Reasoning 请求形状" value={customReasoning} onChange={(event) => setCustomReasoning(event.target.value as CustomReasoningKind)}><option value="provider_default">由服务端决定</option><option value="effort">标准 effort</option><option value="toggle">推理开关</option>{wireApi !== 'openai_responses' && <><option value="enable_thinking">enable_thinking 开关</option><option value="thinking_type">thinking.type 开关</option><option value="thinking_effort">thinking.type + effort</option><option value="broad_compat">多字段兼容组合</option></>}</select><small>{reasoningProfileDescription(customReasoning)}</small></label>
+                <label><span>Reasoning 请求形状</span><select aria-label="Reasoning 请求形状" value={incompatibleCustomProfile ? '' : customReasoning} onChange={(event) => setCustomReasoning(event.target.value as CustomReasoningKind)}>{incompatibleCustomProfile && <option value="" disabled>原请求形状不支持此协议，请重新选择</option>}<option value="provider_default">由服务端决定</option><option value="effort">标准 effort</option><option value="toggle">推理开关</option>{wireApi !== 'openai_responses' && <><option value="enable_thinking">enable_thinking 开关</option><option value="thinking_type">thinking.type 开关</option><option value="thinking_effort">thinking.type + effort</option><option value="broad_compat">多字段兼容组合</option></>}</select><small>{reasoningProfileDescription(customReasoning)}</small></label>
                 {effortReasoningProfiles.has(customReasoning) && <label><span>Effort 列表</span><input value={effortValues} onChange={(event) => setEffortValues(event.target.value)} placeholder="low, medium, high" /></label>}
                 <label className="model-boolean-field"><input type="checkbox" checked={toolCall} onChange={(event) => setToolCall(event.target.checked)} /><span>支持 tool calling</span></label>
-                <label className="model-boolean-field"><input type="checkbox" checked={imageInput} onChange={(event) => setImageInput(event.target.checked)} /><span>支持图像输入</span></label>
+                <label className="model-boolean-field"><input type="checkbox" checked={inputModalities?.includes('image') ?? false} onChange={(event) => { const checked = event.target.checked; setInputModalities((values) => checked ? [...(values ?? ['text']), 'image'] : (values ?? ['text']).filter((value) => value !== 'image')); }} /><span>支持图像输入</span></label>
               </div>
-              <div className="model-confirmation"><strong>用户声明的连接事实</strong>{customDeclarationReady && <dl><div><dt>配置</dt><dd>{configurationName.trim()}</dd></div><div><dt>模型</dt><dd>{modelId.trim()}</dd></div><div><dt>协议</dt><dd>{wireApi ? wireLabel(wireApi) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{baseUrl.trim()}</dd></div><div><dt>推理形状</dt><dd>{reasoningProfileLabel(customReasoning)}</dd></div><div><dt>上下文</dt><dd>{formatTokens(parsedContextTokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(imageInput ? ['text', 'image'] : ['text'])}</dd></div><div><dt>认证</dt><dd>{authentication === 'none' ? '无需认证' : 'Bearer API key'}</dd></div></dl>}<p>这些能力由你直接声明，不会根据服务商或模型名称自动判断，也不会在失败后偷偷换参数重试。Pulsara 只使用通用 Chat / Responses adapter。</p><p>Context window 至少为 256,000。拿不准请求形状时请选择“由服务端决定”。</p><div className="form-actions"><button onClick={() => { resetModelDraft(); setAdding(false); }}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}保存配置</button></div></div>
+              <div className="model-confirmation"><strong>用户声明的连接事实</strong>{customDeclarationReady && <dl><div><dt>配置</dt><dd>{configurationName.trim()}</dd></div><div><dt>模型</dt><dd>{modelId.trim()}</dd></div><div><dt>协议</dt><dd>{wireApi ? wireLabel(wireApi) : '未选择'}</dd></div><div><dt>Endpoint</dt><dd>{baseUrl.trim()}</dd></div><div><dt>推理形状</dt><dd>{reasoningProfileLabel(customReasoning)}</dd></div><div><dt>上下文</dt><dd>{formatTokens(parsedContextTokens)}</dd></div><div><dt>输入模态</dt><dd>{formatModalities(inputModalities)}</dd></div><div><dt>认证</dt><dd>{authentication === 'none' ? '无需认证' : 'Bearer API key'}</dd></div></dl>}<p>这些能力由你直接声明，不会根据服务商或模型名称自动判断，也不会在失败后偷偷换参数重试。Pulsara 只使用通用 Chat / Responses adapter。</p><p>Context window 至少为 256,000。拿不准请求形状时请选择“由服务端决定”。</p><div className="form-actions"><button onClick={closeModelForm}>取消</button><button disabled={!draftReady || savingModel || testingModel} onClick={() => void testModel()}>{testingModel ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}测试连接</button><button className="primary-action" disabled={!draftReady || savingModel || testingModel} onClick={() => void saveModel()}>{savingModel ? <LoaderCircle size={13} /> : <Check size={13} />}{editingConfiguration ? '保存修改' : '保存配置'}</button></div></div>
             </>}
-          </section>}
+          </section></ModelFormContainer>}
           <section className="settings-group"><header><KeyRound size={16} /><div><h2>记忆检索 · 阿里云百炼 DashScope</h2><p>可选的相关性增强；未配置不会阻止对话或基础记忆路径。</p></div></header>{settings && <div className="credential-list"><DashScopeCredentialRow adapter={adapter} kind="embedding" state={settings.local_settings.dashscope_credentials.embedding_configured} onChanged={(state) => updateDashScopeConfigured('embedding', state)} onNotify={onNotify} /><DashScopeCredentialRow adapter={adapter} kind="rerank" state={settings.local_settings.dashscope_credentials.rerank_configured} onChanged={(state) => updateDashScopeConfigured('rerank', state)} onNotify={onNotify} /></div>}</section>
         </>}
         {section === 'service' && <>

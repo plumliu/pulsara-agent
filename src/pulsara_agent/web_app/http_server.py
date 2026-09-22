@@ -409,6 +409,15 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/model-configurations/test", self._test_model_configuration
         )
+        self._app.router.add_get(
+            "/api/model-configurations/{connection_id}", self._model_configuration
+        )
+        self._app.router.add_put(
+            "/api/model-configurations/{connection_id}", self._update_model_configuration
+        )
+        self._app.router.add_post(
+            "/api/model-configurations/{connection_id}/test", self._test_model_configuration
+        )
         self._app.router.add_get("/api/local-settings", self._local_settings)
         self._app.router.add_put(
             "/api/local-settings/postgres", self._save_postgres_settings
@@ -924,9 +933,74 @@ class LocalHttpServer:
             }
         )
 
+    async def _model_configuration(self, request: web.Request) -> web.Response:
+        connection = self.settings.read().connection(
+            ModelConnectionId(request.match_info["connection_id"])
+        )
+        if connection is None:
+            raise KeyError("model connection does not exist")
+        # Read saved declarations, even when the current catalog cannot resolve them.
+        configuration: dict[str, object] = {
+            "model_id": connection.target.model_id,
+            "wire_api": connection.target.wire_api.value,
+            "api_key": None,
+        }
+        declared = connection.user_declared
+        if declared is None:
+            configuration.update(
+                source="models_dev",
+                route_id=connection.target.route_id,
+                reasoning_wire_profile=connection.reasoning_wire_profile.value,
+            )
+        else:
+            raw = cast(dict[str, object], model_connection_to_dict(connection)["user_declared"])
+            configuration.update(
+                source="user_declared",
+                configuration_name=declared.configuration_name,
+                base_url=connection.base_url,
+                authentication=declared.authentication.value,
+                context_tokens=declared.total_context_tokens,
+                max_output_tokens=declared.max_output_tokens,
+                tool_call=declared.tool_call,
+                input_modalities=declared.input_modalities,
+                reasoning=raw["reasoning"],
+            )
+        return web.json_response({
+            "configuration": configuration,
+            "base_url": connection.base_url,
+            "credential_configured": connection.requires_api_key,
+        })
+
+    async def _update_model_configuration(self, request: web.Request) -> web.Response:
+        connection_id = ModelConnectionId(request.match_info["connection_id"])
+        if self.settings.read().connection(connection_id) is None:
+            raise KeyError("model connection does not exist")
+        resolved, api_key = self._resolve_model_configuration_body(
+            await self._json_body(request), connection_id=connection_id
+        )
+        try:
+            await self.settings.update_model_connection(connection=resolved.config, api_key=api_key)
+        except ValueError as exc:
+            raise HttpPublicError("MODEL_CONFIGURATION_EDIT_INVALID", str(exc), status=400) from exc
+        return web.json_response({
+            "model_configuration": await self._connection_summary(resolved.config),
+            "wire_shape_warning": _wire_shape_warning(
+                resolved.target.target_facts.wire_shape_hint, resolved.config.target.wire_api,
+            ),
+        })
+
     async def _test_model_configuration(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        resolved, api_key = self._resolve_model_configuration_body(body)
+        raw_id = request.match_info.get("connection_id")
+        connection_id = None if raw_id is None else ModelConnectionId(raw_id)
+        resolved, api_key = self._resolve_model_configuration_body(body, connection_id=connection_id)
+        if connection_id is not None:
+            try:
+                api_key = self.settings.replacement_model_api_key(
+                    self.settings.read(), resolved.config, api_key
+                )
+            except ValueError as exc:
+                raise HttpPublicError("MODEL_CONFIGURATION_EDIT_INVALID", str(exc), status=400) from exc
         try:
             await probe_model_connection(
                 resolved=resolved,
@@ -944,7 +1018,7 @@ class LocalHttpServer:
         return web.json_response({"status": "ready"})
 
     def _resolve_model_configuration_body(
-        self, body: dict[str, object]
+        self, body: dict[str, object], *, connection_id: ModelConnectionId | None = None
     ) -> tuple[ResolvedModelConnection, str | None]:
         source = body.get("source")
         if source == "models_dev":
@@ -957,9 +1031,14 @@ class LocalHttpServer:
                 "api_key",
             }
             if set(body) != expected or not all(
-                isinstance(body[key], str) and body[key] for key in expected
+                isinstance(body[key], str) and body[key] for key in expected - {"api_key"}
             ):
                 raise ValueError("catalog model configuration has an invalid shape")
+            api_key = body["api_key"]
+            if not (isinstance(api_key, str) and api_key) and not (
+                connection_id is not None and api_key is None
+            ):
+                raise ValueError("catalog model configuration requires an API key")
             target = ModelTargetKey(
                 route_id=cast(str, body["route_id"]),
                 wire_api=WireApi(cast(str, body["wire_api"])),
@@ -967,6 +1046,7 @@ class LocalHttpServer:
             )
             return (
                 create_model_connection(
+                    connection_id=connection_id,
                     catalog=self.model_runtime.selectable_catalog(),
                     target=target,
                     route_wires=self.model_runtime.route_wires,
@@ -974,7 +1054,7 @@ class LocalHttpServer:
                         cast(str, body["reasoning_wire_profile"])
                     ),
                 ),
-                cast(str, body["api_key"]),
+                cast(str | None, api_key),
             )
         if source != "user_declared":
             raise ValueError("model configuration source is invalid")
@@ -1014,13 +1094,15 @@ class LocalHttpServer:
             or isinstance(max_output_tokens, bool)
             or not isinstance(max_output_tokens, int)
             or not isinstance(tool_call, bool)
-            or not isinstance(input_modalities, list)
+            or (input_modalities is not None and not isinstance(input_modalities, list))
         ):
             raise ValueError("custom model configuration fields are invalid")
         authentication = ModelConnectionAuthentication(raw_authentication)
         api_key = body["api_key"]
         if authentication is ModelConnectionAuthentication.BEARER_API_KEY:
-            if not isinstance(api_key, str) or not api_key:
+            if not (isinstance(api_key, str) and api_key) and not (
+                connection_id is not None and api_key is None
+            ):
                 raise ValueError("custom bearer connection requires an API key")
         elif api_key is not None:
             raise ValueError("custom no-auth connection cannot include an API key")
@@ -1032,12 +1114,13 @@ class LocalHttpServer:
             total_context_tokens=context_tokens,
             max_output_tokens=max_output_tokens,
             tool_call=tool_call,
-            input_modalities=tuple(input_modalities),
+            input_modalities=None if input_modalities is None else tuple(input_modalities),
             reasoning=reasoning,
             authentication=authentication,
         )
         return (
             create_user_declared_model_connection(
+                connection_id=connection_id,
                 model_id=model_id,
                 wire_api=WireApi(raw_wire_api),
                 base_url=base_url,

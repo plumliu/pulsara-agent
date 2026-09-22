@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -383,6 +384,74 @@ def test_cancellation_joins_single_document_settlement(tmp_path: Path) -> None:
             await task
         assert store.read().connection(connection.id) == connection
         assert store.read().model_api_key(connection.id) == "secret"
+
+    asyncio.run(scenario())
+
+
+def test_update_model_connection_preserves_identity_order_and_other_settings(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = LocalSettingsStore(tmp_path / "local-settings.yaml")
+        first, second = _connection("a"), _connection("b")
+        original = _settings_with(first, second, dashscope=LocalDashScopeCredentials("embedding", None))
+        write_local_settings(store.path, original)
+        changed = replace(first, reasoning_wire_profile=ReasoningWireProfile.EFFORT)
+        await asyncio.gather(
+            store.update_model_connection(connection=changed, api_key=None),
+            store.save_dashscope_api_key("rerank", "rerank"),
+        )
+        observed = store.read()
+        assert observed.model_connections == (changed, second)
+        assert observed.model_api_key(first.id) == "secret-0"
+        assert observed.model_api_key(second.id) == "secret-1"
+        assert observed.dashscope_credentials == LocalDashScopeCredentials("embedding", "rerank")
+        await store.update_model_connection(connection=changed, api_key="rotated")
+        assert store.read().model_api_key(first.id) == "rotated"
+        await store.delete_model_connection(first.id)
+        with pytest.raises(KeyError):
+            await store.update_model_connection(connection=changed, api_key="no-resurrection")
+        assert store.read().model_connections == (second,)
+
+    asyncio.run(scenario())
+
+
+def test_update_model_connection_requires_explicit_key_for_new_endpoint(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = LocalSettingsStore(tmp_path / "local-settings.yaml")
+        original = _connection("a")
+        await store.add_model_connection(connection=original, api_key="original")
+        changed = replace(original, base_url="https://another.example/v1")
+        with pytest.raises(ValueError, match="重新填写 API key"):
+            await store.update_model_connection(connection=changed, api_key=None)
+        assert store.read().connection(original.id) == original
+        assert store.read().model_api_key(original.id) == "original"
+        await store.update_model_connection(connection=changed, api_key="new-service-key")
+        assert store.read().connection(original.id) == changed
+        assert store.read().model_api_key(original.id) == "new-service-key"
+
+    asyncio.run(scenario())
+
+
+def test_update_model_authentication_removes_or_requires_its_key(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = LocalSettingsStore(tmp_path / "local-settings.yaml")
+        declared = UserDeclaredModelTarget(
+            "Custom", 256_000, 8192, True, ReasoningProviderDefault(),
+            ModelConnectionAuthentication.BEARER_API_KEY,
+        )
+        original = ModelConnectionConfig(
+            ModelConnectionId.new(), ModelTargetKey("user_declared", WireApi.OPENAI_RESPONSES, "custom"),
+            "https://example.test/v1", ReasoningWireProfile.PROVIDER_DEFAULT, declared,
+        )
+        await store.add_model_connection(connection=original, api_key="original")
+        no_auth = replace(original, user_declared=replace(declared, authentication=ModelConnectionAuthentication.NONE))
+        await store.update_model_connection(connection=no_auth, api_key=None)
+        assert store.read().model_api_keys == ()
+        with pytest.raises(ValueError, match="重新填写 API key"):
+            await store.update_model_connection(connection=original, api_key=None)
+        await store.update_model_connection(connection=original, api_key="restored")
+        assert store.read().model_api_key(original.id) == "restored"
+        with pytest.raises(ValueError, match="来源不可更改"):
+            await store.update_model_connection(connection=replace(_connection("a"), id=original.id), api_key="another")
 
     asyncio.run(scenario())
 

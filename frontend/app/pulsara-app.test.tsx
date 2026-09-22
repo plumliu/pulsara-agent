@@ -565,6 +565,14 @@ class FakeAdapter implements RuntimeAdapter {
     return { model_configuration: bootstrap.model_configurations[0], wire_shape_warning: false };
   }
 
+  async modelConfiguration(): Promise<import('../lib/runtime-adapter').ModelConfigurationDetail> {
+    throw new Error('unexpected model configuration read');
+  }
+
+  async updateModelConfiguration(): Promise<Awaited<ReturnType<RuntimeAdapter['updateModelConfiguration']>>> {
+    throw new Error('unexpected model configuration update');
+  }
+
   async deleteModelConfiguration(connectionId: string) {
     const before = this.modelConfigurations.length;
     this.modelConfigurations = this.modelConfigurations.filter((item) => item.id !== connectionId);

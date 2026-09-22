@@ -132,7 +132,7 @@ export type ModelConfigurationInput =
     model_id: string;
     wire_api: 'openai_chat_completions' | 'openai_responses';
     reasoning_wire_profile: ReasoningWireProfile;
-    api_key: string;
+    api_key: string | null;
   }
   | {
     source: 'user_declared';
@@ -145,7 +145,7 @@ export type ModelConfigurationInput =
     context_tokens: number;
     max_output_tokens: number;
     tool_call: boolean;
-    input_modalities: string[];
+    input_modalities: string[] | null;
     reasoning:
       | { kind: 'provider_default' }
       | { kind: 'toggle' }
@@ -153,6 +153,12 @@ export type ModelConfigurationInput =
       | { kind: 'thinking_type' }
       | { kind: 'effort' | 'thinking_effort' | 'broad_compat'; values: string[] };
   };
+
+export interface ModelConfigurationDetail {
+  configuration: ModelConfigurationInput;
+  base_url: string;
+  credential_configured: boolean;
+}
 
 export interface ModelCatalogWireApi {
   wire_api: 'openai_chat_completions' | 'openai_responses';
@@ -471,12 +477,14 @@ export interface RuntimeAdapter {
   modelCatalog(refresh?: boolean): Promise<ModelCatalogReadModel>;
   localSettings(): Promise<LocalSettingsReadModel>;
   addModelConfiguration(input: ModelConfigurationInput): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
+  modelConfiguration(connectionId: string): Promise<ModelConfigurationDetail>;
+  updateModelConfiguration(connectionId: string, input: ModelConfigurationInput): Promise<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>;
   deleteModelConfiguration(connectionId: string): Promise<{
     model_configuration_id: string;
     deleted: boolean;
     model_configurations: ModelConfigurationSummary[];
   }>;
-  testModelConfiguration(input: ModelConfigurationInput): Promise<{ status: 'ready' }>;
+  testModelConfiguration(input: ModelConfigurationInput, connectionId?: string): Promise<{ status: 'ready' }>;
   savePostgres(runtimeDsn: string, adminDsn: string | null): Promise<LocalSettingsReadModel & { restart_required: boolean }>;
   checkPostgres(): Promise<Record<string, unknown>>;
   migratePostgres(): Promise<Record<string, unknown>>;
@@ -1307,8 +1315,20 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     });
   }
 
-  async testModelConfiguration(input: ModelConfigurationInput) {
-    return apiRequest<{ status: 'ready' }>('/api/model-configurations/test', {
+  async modelConfiguration(connectionId: string) {
+    return apiRequest<ModelConfigurationDetail>(`/api/model-configurations/${encodeURIComponent(connectionId)}`);
+  }
+
+  async updateModelConfiguration(connectionId: string, input: ModelConfigurationInput) {
+    return apiRequest<{ model_configuration: ModelConfigurationSummary; wire_shape_warning: boolean }>(
+      `/api/model-configurations/${encodeURIComponent(connectionId)}`, { method: 'PUT', body: JSON.stringify(input) },
+    );
+  }
+
+  async testModelConfiguration(input: ModelConfigurationInput, connectionId?: string) {
+    return apiRequest<{ status: 'ready' }>(connectionId
+      ? `/api/model-configurations/${encodeURIComponent(connectionId)}/test`
+      : '/api/model-configurations/test', {
       method: 'POST',
       body: JSON.stringify(input),
     });

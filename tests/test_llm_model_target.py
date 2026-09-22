@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -868,6 +870,43 @@ def test_input_modalities_are_part_of_the_frozen_target_identity() -> None:
     assert text_call.target.fact.input_modalities == ("text",)
     assert image_call.target.fact.input_modalities == ("text", "image")
     assert text_call.target.fact != image_call.target.fact
+
+
+@pytest.mark.parametrize("change", ("profile", "endpoint", "key"))
+def test_editing_saved_connection_preserves_frozen_epoch_boundary(tmp_path: Path, change: str) -> None:
+    from pulsara_agent.settings import LocalSettingsStore, write_local_settings
+
+    runtime = test_model_runtime(
+        wire_api="openai_chat_completions",
+        reasoning=ReasoningSelectableControls(effort=ReasoningEffortChoices(("low", "high"))),
+    )
+    store = LocalSettingsStore(tmp_path / "local-settings.yaml")
+    write_local_settings(store.path, runtime.settings.read())
+    runtime.settings = store
+    binding = replace(test_model_binding(runtime), reasoning=ReasoningEffortSelection("high"))
+    timeout = OpenAITransportTimeoutPolicy(1, 1, 1, 1, 5)
+    target = runtime.resolve_target(binding, timeout_policy=timeout)
+    call = resolve_model_call(target=target, binding=binding, purpose=ModelCallPurpose.AGENT_MODEL_LOOP)
+    bundle = _freeze_provider_physical_call_target(
+        target=target, call=call,
+        maximum_input_tokens=target.context_budget.input_budget_tokens,
+        maximum_output_tokens=target.context_budget.effective_output_tokens,
+    ).target_bundle
+    connection = runtime.connection(binding)
+    changed = (
+        replace(connection, reasoning_wire_profile=ReasoningWireProfile.EFFORT) if change == "profile"
+        else replace(connection, base_url="https://changed.example/v1") if change == "endpoint"
+        else connection
+    )
+    asyncio.run(store.update_model_connection(connection=changed, api_key="edited-secret"))
+    assert runtime.connection(binding).id == connection.id
+    assert bundle.target_fact == target.fact
+    if change == "key":
+        assert runtime.resolve_frozen_target_bundle(bundle, binding=binding, timeout_policy=timeout).fact == target.fact
+    else:
+        with pytest.raises(ModelRuntimeUnavailable, match="cannot reproduce"):
+            runtime.resolve_frozen_target_bundle(bundle, binding=binding, timeout_policy=timeout)
+        assert runtime.resolve_target(binding, timeout_policy=timeout).fact != target.fact
 
 
 @pytest.mark.parametrize("drift", ("lowerer", "estimator"))
