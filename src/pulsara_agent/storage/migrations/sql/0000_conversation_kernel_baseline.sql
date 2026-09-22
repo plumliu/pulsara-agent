@@ -102,7 +102,7 @@ CREATE TABLE pulsara_v3.context_snapshots (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK ((inline_content IS NULL) <> (blob_id IS NULL)),
@@ -138,7 +138,7 @@ CREATE TABLE pulsara_v3.subagent_tasks (
     UNIQUE (session_id, id),
     UNIQUE (session_id, parent_turn_id, batch_id, task_key),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     CHECK (octet_length(objective) BETWEEN 1 AND 65536),
     CHECK (task_key IS NULL OR task_key ~ '^[a-z][a-z0-9_-]{0,63}$'),
     CHECK (label IS NULL OR octet_length(label) BETWEEN 1 AND 256),
@@ -183,9 +183,9 @@ CREATE TABLE pulsara_v3.subagent_task_dependencies (
     PRIMARY KEY (session_id, task_id, dependency_task_id),
     UNIQUE (session_id, task_id, dependency_ordinal),
     FOREIGN KEY (session_id, task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, dependency_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (task_id <> dependency_task_id),
     CHECK (dependency_ordinal < 16)
 );
@@ -231,10 +231,9 @@ CREATE TABLE pulsara_v3.turns (
     terminal_at timestamptz,
     UNIQUE (session_id, id),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, scope_subagent_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT
-        DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((conversation_scope_kind = 'ROOT') = (scope_subagent_task_id IS NULL)),
     CHECK (
         jsonb_typeof(model_call_binding) = 'object'
@@ -290,8 +289,7 @@ CREATE UNIQUE INDEX uq_pulsara_v3_running_task_turn
 
 ALTER TABLE pulsara_v3.subagent_tasks ADD CONSTRAINT subagent_tasks_parent_turn_fk
     FOREIGN KEY (session_id, parent_turn_id)
-    REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT
-    DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.turn_context_binding_revisions (
     id text PRIMARY KEY,
@@ -305,15 +303,14 @@ CREATE TABLE pulsara_v3.turn_context_binding_revisions (
     UNIQUE (session_id, id),
     UNIQUE (turn_id, revision_ordinal),
     FOREIGN KEY (session_id, turn_id)
-        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, context_snapshot_id)
-        REFERENCES pulsara_v3.context_snapshots (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.context_snapshots (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((base_kind = 'FULL_HISTORY') = (context_snapshot_id IS NULL))
 );
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_current_context_revision_fk
     FOREIGN KEY (session_id, current_context_binding_revision_id)
-    REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.session_commands (
     session_id text NOT NULL,
@@ -338,7 +335,7 @@ CREATE TABLE pulsara_v3.session_commands (
     target_plan_interaction_id text,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (session_id, command_id),
-    FOREIGN KEY (session_id) REFERENCES pulsara_v3.sessions (id) ON DELETE RESTRICT,
+    FOREIGN KEY (session_id) REFERENCES pulsara_v3.sessions (id) ON DELETE CASCADE,
     CHECK (num_nonnulls(
         target_turn_id, target_entry_id, target_queue_item_id,
         target_interaction_decision_id,
@@ -376,7 +373,7 @@ CREATE TABLE pulsara_v3.imported_history_groups (
     terminal_at timestamptz,
     UNIQUE (session_id, id),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE
 );
 
 CREATE TABLE pulsara_v3.transcript_entries (
@@ -425,15 +422,15 @@ CREATE TABLE pulsara_v3.transcript_entries (
     UNIQUE (session_id, id, imported_history_group_id),
     UNIQUE (session_id, entry_sequence),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, turn_id)
-        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, imported_history_group_id)
-        REFERENCES pulsara_v3.imported_history_groups (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.imported_history_groups (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, scope_subagent_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, context_binding_revision_id)
-        REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK ((conversation_scope_kind = 'ROOT') = (scope_subagent_task_id IS NULL)),
@@ -557,17 +554,14 @@ CREATE UNIQUE INDEX uq_pulsara_v3_plan_handoff_with_interaction
           AND source_plan_interaction_id IS NOT NULL;
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_initial_entry_fk
     FOREIGN KEY (session_id, initial_entry_id)
-    REFERENCES pulsara_v3.transcript_entries (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_final_entry_fk
     FOREIGN KEY (session_id, final_entry_id)
-    REFERENCES pulsara_v3.transcript_entries (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE pulsara_v3.imported_history_groups ADD CONSTRAINT imported_group_final_fk
     FOREIGN KEY (session_id, final_entry_id)
-    REFERENCES pulsara_v3.transcript_entries (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.session_context_genesis (
     session_id text PRIMARY KEY,
@@ -578,11 +572,11 @@ CREATE TABLE pulsara_v3.session_context_genesis (
     source_through_sequence bigint NOT NULL CHECK (source_through_sequence >= 0),
     context_snapshot_id text,
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, anchor_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, context_snapshot_id)
-        REFERENCES pulsara_v3.context_snapshots (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.context_snapshots (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((base_kind = 'FULL_HISTORY' AND context_snapshot_id IS NULL AND source_through_sequence = 0)
         OR (base_kind = 'SNAPSHOT' AND context_snapshot_id IS NOT NULL)),
     CHECK (jsonb_typeof(model_call_binding) = 'object'
@@ -611,9 +605,9 @@ CREATE TABLE pulsara_v3.assistant_message_blocks (
     UNIQUE (assistant_entry_id, block_ordinal),
     UNIQUE (session_id, assistant_entry_id, tool_call_id),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, assistant_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK (
@@ -654,10 +648,9 @@ CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
     UNIQUE (session_id, assistant_entry_id),
     UNIQUE (session_id, assistant_entry_id, id),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, assistant_entry_id, assistant_entry_kind)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((wire_api = 'openai_chat_completions') =
            (codec_kind = 'CHAT_CLOSED_REASONING_FIELDS')),
     CHECK (payload_size = octet_length(payload_bytes)),
@@ -695,10 +688,9 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
     UNIQUE (session_id, assistant_entry_id, tool_call_id),
     UNIQUE (session_id, id, assistant_entry_id, tool_call_id),
     FOREIGN KEY (session_id, assistant_entry_id, tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, retry_of_attempt_id)
-        REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((remote_identity IS NULL) = (remote_identity_published_at IS NULL))
 );
 
@@ -760,16 +752,15 @@ CREATE TABLE pulsara_v3.tool_results (
     UNIQUE (session_id, tool_call_entry_id, tool_call_id),
     UNIQUE (session_id, result_entry_id),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, tool_call_entry_id, tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id)
-        ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, attempt_id, tool_call_entry_id, tool_call_id)
         REFERENCES pulsara_v3.tool_execution_attempts (
             session_id, id, assistant_entry_id, tool_call_id
-        ) ON DELETE RESTRICT,
+        ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, result_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (output_artifact_blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK (
@@ -879,7 +870,7 @@ CREATE TABLE pulsara_v3.imported_tool_call_closures (
     )),
     PRIMARY KEY (session_id, assistant_entry_id, tool_call_id),
     FOREIGN KEY (session_id, assistant_entry_id, tool_call_id)
-        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE RESTRICT
+        REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE CASCADE
 );
 
 CREATE TABLE pulsara_v3.prompt_queue_items (
@@ -936,13 +927,13 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     UNIQUE (session_id, id),
     UNIQUE (session_id, queue_sequence),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, command_id)
-        REFERENCES pulsara_v3.session_commands (session_id, command_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.session_commands (session_id, command_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, target_turn_id)
-        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, consumed_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK ((delivery_mode = 'NEW_TURN') = (target_turn_id IS NULL)),
@@ -1016,7 +1007,7 @@ CREATE TABLE pulsara_v3.canonical_image_refs (
     ref_ordinal integer NOT NULL CHECK (ref_ordinal >= 0),
     blob_id text NOT NULL,
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id),
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, queue_item_id)
         REFERENCES pulsara_v3.prompt_queue_items (session_id, id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, transcript_entry_id)
@@ -1043,6 +1034,8 @@ CREATE UNIQUE INDEX uq_pulsara_v3_image_ref_snapshot_ordinal
     ) WHERE context_snapshot_id IS NOT NULL;
 CREATE INDEX ix_pulsara_v3_image_ref_blob
     ON pulsara_v3.canonical_image_refs (blob_id, workspace_id);
+CREATE INDEX ix_pulsara_v3_image_ref_session
+    ON pulsara_v3.canonical_image_refs (session_id, workspace_id);
 
 -- One immutable user-visible HTML/failed-placeholder result owned by an
 -- assistant message.  This is not a subscription log or execution receipt.
@@ -1064,7 +1057,7 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
     failure_detail text,
     PRIMARY KEY (session_id, assistant_entry_id, ordinal),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, assistant_entry_id, assistant_entry_kind)
         REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind)
         ON DELETE CASCADE,
@@ -1076,15 +1069,13 @@ CREATE TABLE pulsara_v3.assistant_visualizations (
             session_id, id, imported_history_group_id
         ) ON DELETE CASCADE,
     FOREIGN KEY (session_id, source_result_entry_id, source_result_entry_kind)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind)
-        ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id, entry_kind) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, source_result_entry_id, turn_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id, turn_id)
-        ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id, turn_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, source_result_entry_id, imported_history_group_id)
         REFERENCES pulsara_v3.transcript_entries (
             session_id, id, imported_history_group_id
-        ) ON DELETE RESTRICT,
+        ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK (
@@ -1125,16 +1116,15 @@ CREATE TABLE pulsara_v3.interaction_decisions (
     ),
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
-    FOREIGN KEY (session_id) REFERENCES pulsara_v3.sessions (id) ON DELETE RESTRICT,
+    FOREIGN KEY (session_id) REFERENCES pulsara_v3.sessions (id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, command_id)
-        REFERENCES pulsara_v3.session_commands (session_id, command_id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.session_commands (session_id, command_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_tool_call_entry_id, subject_tool_call_id)
         REFERENCES pulsara_v3.assistant_message_blocks (
             session_id, assistant_entry_id, tool_call_id
-        ) ON DELETE RESTRICT,
+        ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_turn_id)
-        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((subject_tool_call_entry_id IS NULL) = (subject_tool_call_id IS NULL)),
     CHECK (num_nonnulls(subject_tool_call_entry_id, subject_turn_id) = 1),
     CHECK (
@@ -1188,16 +1178,15 @@ CREATE TABLE pulsara_v3.plan_workflows (
     UNIQUE (session_id, id),
     UNIQUE (session_id, workflow_ordinal),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, entry_command_id)
-        REFERENCES pulsara_v3.session_commands (session_id, command_id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.session_commands (session_id, command_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, entry_turn_id)
-        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, entry_assistant_entry_id, entry_tool_call_id)
         REFERENCES pulsara_v3.assistant_message_blocks (
             session_id, assistant_entry_id, tool_call_id
-        ) ON DELETE RESTRICT,
+        ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((status = 'ACTIVE') = (terminal_at IS NULL)),
     CHECK ((status = 'APPROVED') = (accepted_plan_interaction_id IS NOT NULL)),
     CHECK (
@@ -1250,24 +1239,21 @@ CREATE TABLE pulsara_v3.plan_interactions (
     UNIQUE (plan_workflow_id, interaction_ordinal),
     UNIQUE (session_id, assistant_entry_id, tool_call_id),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, plan_workflow_id)
-        REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, origin_turn_id)
-        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, assistant_entry_id, tool_call_id)
         REFERENCES pulsara_v3.assistant_message_blocks (
             session_id, assistant_entry_id, tool_call_id
-        ) ON DELETE RESTRICT,
+        ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, control_tool_result_id)
-        REFERENCES pulsara_v3.tool_results (session_id, id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.tool_results (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, resolution_command_id)
-        REFERENCES pulsara_v3.session_commands (session_id, command_id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.session_commands (session_id, command_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, decision_continuation_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (
         (kind = 'QUESTION' AND status IN ('OPEN', 'ANSWERED', 'ABORTED')) OR
         (kind = 'DRAFT_REVIEW' AND status IN (
@@ -1320,40 +1306,37 @@ CREATE UNIQUE INDEX uq_pulsara_v3_open_plan_interaction
 
 ALTER TABLE pulsara_v3.plan_workflows ADD CONSTRAINT plan_workflows_accepted_interaction_fk
     FOREIGN KEY (session_id, accepted_plan_interaction_id)
-    REFERENCES pulsara_v3.plan_interactions (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_permission_plan_workflow_fk
     FOREIGN KEY (session_id, permission_plan_workflow_id)
-    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE RESTRICT;
+    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_permission_inherited_turn_fk
     FOREIGN KEY (session_id, permission_inherited_from_turn_id)
-    REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT;
+    REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_plan_workflow_fk
     FOREIGN KEY (session_id, source_plan_workflow_id)
-    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE RESTRICT;
+    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_plan_interaction_fk
     FOREIGN KEY (session_id, source_plan_interaction_id)
-    REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE RESTRICT;
+    REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 CREATE UNIQUE INDEX uq_pulsara_v3_entry_plan_terminal_handoff_claim
     ON pulsara_v3.transcript_entries (session_id, source_plan_workflow_id)
     WHERE entry_owner_kind = 'EXECUTED_TURN' AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN');
 ALTER TABLE pulsara_v3.tool_results ADD CONSTRAINT tool_results_plan_workflow_fk
     FOREIGN KEY (session_id, control_plan_workflow_id)
-    REFERENCES pulsara_v3.plan_workflows (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.tool_results ADD CONSTRAINT tool_results_plan_interaction_fk
     FOREIGN KEY (session_id, control_plan_interaction_id)
-    REFERENCES pulsara_v3.plan_interactions (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.prompt_queue_items ADD CONSTRAINT queue_permission_plan_workflow_fk
     FOREIGN KEY (session_id, permission_plan_workflow_id)
-    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE RESTRICT;
+    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.prompt_queue_items ADD CONSTRAINT queue_handoff_plan_workflow_fk
     FOREIGN KEY (session_id, pending_plan_handoff_workflow_id)
-    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE RESTRICT;
+    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.prompt_queue_items ADD CONSTRAINT queue_handoff_plan_interaction_fk
     FOREIGN KEY (session_id, pending_plan_handoff_interaction_id)
-    REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE RESTRICT;
+    REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.subagent_task_children (
     id text PRIMARY KEY,
@@ -1372,9 +1355,9 @@ CREATE TABLE pulsara_v3.subagent_task_children (
     UNIQUE (session_id, id, child_kind),
     UNIQUE (task_id, child_ordinal),
     FOREIGN KEY (session_id, task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (
         (child_kind = 'MESSAGE' AND result_source IS NULL AND summary IS NULL
             AND output_preview IS NULL AND diagnostics IS NULL
@@ -1395,14 +1378,12 @@ CREATE UNIQUE INDEX uq_pulsara_v3_subagent_task_terminal_result
 
 ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_source_subagent_task_fk
     FOREIGN KEY (session_id, source_subagent_task_id)
-    REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT
-    DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE pulsara_v3.transcript_entries
 ADD CONSTRAINT transcript_entries_source_inter_agent_attempt_fk
     FOREIGN KEY (session_id, source_inter_agent_tool_attempt_id)
-    REFERENCES pulsara_v3.tool_execution_attempts (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.memory_facts (
     id text PRIMARY KEY,
@@ -1835,33 +1816,29 @@ CREATE TABLE pulsara_v3.agent_events (
     subject_plan_interaction_id text,
     UNIQUE (session_id, event_sequence),
     FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE RESTRICT,
+        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, subject_turn_id)
-        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_tool_attempt_id)
-        REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_queue_item_id)
-        REFERENCES pulsara_v3.prompt_queue_items (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.prompt_queue_items (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_interaction_decision_id)
-        REFERENCES pulsara_v3.interaction_decisions (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.interaction_decisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_context_binding_revision_id)
-        REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_subagent_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_subagent_message_id, subject_subagent_child_kind)
-        REFERENCES pulsara_v3.subagent_task_children (session_id, id, child_kind)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.subagent_task_children (session_id, id, child_kind) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_subagent_result_id, subject_subagent_child_kind)
-        REFERENCES pulsara_v3.subagent_task_children (session_id, id, child_kind)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.subagent_task_children (session_id, id, child_kind) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_plan_workflow_id)
-        REFERENCES pulsara_v3.plan_workflows (session_id, id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_plan_interaction_id)
-        REFERENCES pulsara_v3.plan_interactions (session_id, id)
-        ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+        REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (num_nonnulls(
         subject_turn_id, subject_entry_id, subject_tool_attempt_id,
         subject_queue_item_id, subject_interaction_decision_id,
@@ -1903,25 +1880,19 @@ CREATE TABLE pulsara_v3.agent_events (
 );
 
 ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_turn_fk
-    FOREIGN KEY (session_id, target_turn_id) REFERENCES pulsara_v3.turns (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    FOREIGN KEY (session_id, target_turn_id) REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_entry_fk
-    FOREIGN KEY (session_id, target_entry_id) REFERENCES pulsara_v3.transcript_entries (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    FOREIGN KEY (session_id, target_entry_id) REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_queue_fk
-    FOREIGN KEY (session_id, target_queue_item_id) REFERENCES pulsara_v3.prompt_queue_items (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    FOREIGN KEY (session_id, target_queue_item_id) REFERENCES pulsara_v3.prompt_queue_items (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_interaction_fk
-    FOREIGN KEY (session_id, target_interaction_decision_id) REFERENCES pulsara_v3.interaction_decisions (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    FOREIGN KEY (session_id, target_interaction_decision_id) REFERENCES pulsara_v3.interaction_decisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_plan_workflow_fk
     FOREIGN KEY (session_id, target_plan_workflow_id)
-    REFERENCES pulsara_v3.plan_workflows (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.session_commands ADD CONSTRAINT session_commands_target_plan_interaction_fk
     FOREIGN KEY (session_id, target_plan_interaction_id)
-    REFERENCES pulsara_v3.plan_interactions (session_id, id)
-    ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;
+    REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants()
 RETURNS trigger

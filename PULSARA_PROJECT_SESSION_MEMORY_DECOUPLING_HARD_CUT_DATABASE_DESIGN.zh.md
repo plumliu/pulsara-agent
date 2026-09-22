@@ -511,9 +511,9 @@ session row（既有 Host writer／session control 事务涉及 session 时）
 
 这既覆盖从一个 global fact 级联到多个项目，也覆盖纯 GLOBAL 图和同一 project workspace 内在预览后新增 dependent fact／relation 的竞态，并避免 `fact -> workspace` 与 `workspace -> fact` 反序。并发 `remember`／关系标定／新 session 由同一组 workspace、fact 和 relation 锁串行化；序列化失败、死锁、任一锁集合变化或 FK 竞争沿现有有界单次操作 deadline 做确定重算，不引入 retry-count 上限或 durable cleanup job。
 
-## 7. 会话删除的预留边界
+## 7. 会话删除边界（由后续冻结规格接管）
 
-本稿不实现会话永久删除，但 schema 必须使未来路径能够在一笔事务中获得以下结果：
+会话永久删除现由 `PULSARA_SESSION_PERMANENT_DELETION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md` 负责。该规格扩展本稿的 schema，在一笔事务中获得以下结果：
 
 ```text
 删除 session aggregate
@@ -526,16 +526,16 @@ session row（既有 Host writer／session control 事务涉及 session 时）
 └── project workspace 在仍有 session 或项目记忆时继续存在
 ```
 
-未来删除规格仍需另行冻结：
+后续删除规格已冻结以下责任：
 
 - Host／browser bridge 的 quiesce 与不确定结算；
 - session aggregate 内部 FK 的 CASCADE／deferred NO ACTION 形状；
 - 共享 blob 的精确回收；
 - 当前会话删除后的前端选择；
-- transient 工作目录是否另给显式物理删除选项；
-- 是否以及如何提供“同时删除该会话产生的记忆”。
+- 所有工作目录均保留，不提供物理目录删除选项；
+- 已保存记忆一律保留，不提供同时删除记忆选项。
 
-这些内容不得提前塞进本轮 memory decoupling repository。
+这些责任由会话删除 owner 承担，不扩展记忆删除／编辑的职责。
 
 ## 8. Hard-cut 删除清单
 

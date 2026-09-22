@@ -297,6 +297,14 @@ export class PromptDraftStore {
     return true;
   }
 
+  removeSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.releaseSession(session);
+    this.sessions.delete(sessionId);
+    this.changed();
+  }
+
   destroy(): void {
     for (const session of this.sessions.values()) this.releaseSession(session);
     this.sessions.clear();

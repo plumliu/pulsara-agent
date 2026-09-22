@@ -12,7 +12,6 @@ from time import monotonic
 
 import psycopg
 import pytest
-from psycopg import sql
 from psycopg.errors import CheckViolation, ForeignKeyViolation, InsufficientPrivilege
 
 from pulsara_agent.conversation_kernel.contracts import InlineContent
@@ -56,7 +55,6 @@ from pulsara_agent.retrieval.tokenizer import MemoryRetrievalTokenizerV1
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig
 from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.conversation_kernel._repository import authority as authority_repository
 from pulsara_agent.conversation_kernel._repository.locking import (
     lock_canonical_identities,
@@ -76,6 +74,7 @@ def _open_direct_memory_session(repository, *, workspace_root: str | None = None
     workspace_root = workspace_root or _name("workspace")
     workspace_id = workspace_context_id(workspace_root)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_name("session"),
         workspace_id=workspace_id,
         workspace_root=workspace_root,
@@ -213,59 +212,6 @@ def direct_memory_session(stage2_migrated_postgres_database):
     repository = _repository(stage2_migrated_postgres_database)
     lease, invoke, remember = _open_direct_memory_session(repository)
     return repository, lease, invoke, remember
-
-
-def _delete_test_session_aggregates(admin_dsn: str, session_ids: tuple[str, ...]) -> None:
-    """Project a completed future session deletion for this read-model test.
-
-    Session deletion itself is explicitly outside the active implementation
-    scope. This fixture removes every row in the isolated test aggregates and
-    applies the already-frozen owner-null result without pretending to test a
-    not-yet-existing product delete service.
-    """
-
-    with psycopg.connect(admin_dsn) as connection:
-        connection.execute("SET LOCAL session_replication_role='replica'")
-        connection.execute(
-            "UPDATE pulsara_v3.memory_facts SET created_by_tool_result_id=NULL "
-            "WHERE created_by_tool_result_id IN "
-            "(SELECT id FROM pulsara_v3.tool_results WHERE session_id=ANY(%s))",
-            (list(session_ids),),
-        )
-        connection.execute(
-            "UPDATE pulsara_v3.memory_relations SET created_by_tool_result_id=NULL "
-            "WHERE created_by_tool_result_id IN "
-            "(SELECT id FROM pulsara_v3.tool_results WHERE session_id=ANY(%s))",
-            (list(session_ids),),
-        )
-        for table in reversed(CONVERSATION_KERNEL_RELATIONS):
-            if table in {
-                "workspaces",
-                "sessions",
-                "memory_facts",
-                "memory_relations",
-                "memory_embeddings",
-                "blobs",
-            }:
-                continue
-            has_session_id = connection.execute(
-                "SELECT 1 FROM information_schema.columns "
-                "WHERE table_schema='pulsara_v3' AND table_name=%s "
-                "AND column_name='session_id'",
-                (table,),
-            ).fetchone()
-            if has_session_id is not None:
-                connection.execute(
-                    sql.SQL("DELETE FROM pulsara_v3.{} WHERE session_id=ANY(%s)").format(
-                        sql.Identifier(table)
-                    ),
-                    (list(session_ids),),
-                )
-        connection.execute(
-            "DELETE FROM pulsara_v3.sessions WHERE id=ANY(%s)",
-            (list(session_ids),),
-        )
-        connection.execute("SET LOCAL session_replication_role='origin'")
 
 
 def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval(
@@ -519,6 +465,7 @@ def test_memory_project_list_contains_only_projects_with_persisted_facts(
         ).fetchone()[0]
     other_workspace = _name("workspace")
     repository.acquire_host_writer(
+        intent="NEW",
         session_id=_name("session"),
         workspace_id=other_workspace,
         writer_owner_id=_name("host"),
@@ -580,11 +527,11 @@ def test_project_memory_directory_survives_zero_sessions_and_pages_stably(
         )
         workspace_id = workspace_context_id(workspace_root)
         created.append((lease.guard.session_id, workspace_id, fact["memory_id"]))
-
-    _delete_test_session_aggregates(
-        stage2_migrated_postgres_database.admin_dsn,
-        tuple(item[0] for item in created),
-    )
+        repository.release_host_writer(lease.guard, deadline_monotonic=monotonic() + 30)
+        assert repository.delete_session(
+            session_id=lease.guard.session_id, memory_domain_id="u_local",
+            closed_writer=lease.guard, deadline_monotonic=monotonic() + 30,
+        ) == "DELETED"
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.sessions WHERE id=ANY(%s)",
@@ -1266,6 +1213,7 @@ def test_orphan_workspace_cleanup_serializes_with_new_session_creation(
 
     def create_session():
         return repository.acquire_host_writer(
+            intent="NEW",
             session_id=_name("session-after-orphan-cleanup"),
             workspace_id=workspace_id,
             workspace_root=workspace_root,
@@ -1370,6 +1318,7 @@ def test_new_session_commit_prevents_stale_orphan_workspace_cleanup(
 
     def create_session():
         return repository.acquire_host_writer(
+            intent="NEW",
             session_id=_name("session-before-orphan-cleanup"),
             workspace_id=workspace_id,
             workspace_root=workspace_root,

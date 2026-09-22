@@ -9,6 +9,7 @@ import { InspectorPanel } from '../components/inspector-panel';
 import { CommandPalette, NewSessionDialog, ToastStack } from '../components/overlays';
 import { OverviewView } from '../components/overview-view';
 import { SessionSidebar } from '../components/session-sidebar';
+import { SessionDeletionDialog } from '../components/session-deletion-dialog';
 import { SettingsView } from '../components/settings-view';
 import { WorkbenchView } from '../components/workbench-view';
 import { ToolResultDisplayContext, readSavedToolResultDisplay } from '../lib/tool-result-display';
@@ -176,6 +177,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [activeView, setActiveView] = useState<AppView>('workbench');
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
   const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<SessionSummary>();
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string>();
+  const deletingSession = useRef<string | undefined>(undefined);
+  const requestedSession = useRef('');
   const [activeSessionId, setActiveSessionId] = useState('');
   const [focusMemoryEntry, setFocusMemoryEntry] = useState<{ sessionId: string; entryId: string }>();
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
@@ -513,11 +519,74 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
   }, [adapter]);
 
+  const forgetSession = useCallback((sessionId: string) => {
+    setSessionList(current => current.filter(s => s.id !== sessionId));
+    promptDraftStore.removeSession(sessionId);
+    setLocalSubmissions(current => current.filter(item => item.sessionId !== sessionId));
+    setQueueActions(current => current.filter(item => item.sessionId !== sessionId));
+    for (const item of toolDecisionsRef.current) {
+      if (item.sessionId === sessionId) toolDecisionQueries.current.delete(item.commandId);
+    }
+    for (const key of promptReconciliationInFlight.current) {
+      if (key.startsWith(`${sessionId}:`)) promptReconciliationInFlight.current.delete(key);
+    }
+    toolDecisionsRef.current = toolDecisionsRef.current.filter(item => item.sessionId !== sessionId);
+    setToolDecisions(toolDecisionsRef.current);
+    setFocusMemoryEntry(current => current?.sessionId === sessionId ? undefined : current);
+    if (readSavedSessionId() === sessionId) saveSessionId('');
+    if (activeSessionIdRef.current !== sessionId || requestedSession.current !== sessionId) return;
+    const previous = connectionRef.current;
+    connectionAttempt.current += 1;
+    taskInventoryAttempt.current += 1;
+    capabilityAttempt.current += 1;
+    connectionRef.current = undefined;
+    activeSessionIdRef.current = '';
+    requestedSession.current = '';
+    setConnection(undefined);
+    setActiveSessionId('');
+    setProjection(emptyProjection);
+    setTaskInventory([]);
+    setTaskInventorySessionId('');
+    setTaskInventoryLoading(false);
+    setTaskInventoryError(undefined);
+    setCapabilities(undefined);
+    setCapabilityLoading(false);
+    setCapabilityError(undefined);
+    setRuntimeStatus('online');
+    setRuntimeError(undefined);
+    if (previous) void previous.close().catch(() => {});
+  }, [promptDraftStore]);
+
+  const confirmSessionDelete = async () => {
+    if (!deleteTarget || deletingSession.current) return;
+    const target = deleteTarget;
+    deletingSession.current = target.id;
+    setDeleteBusy(true);
+    setDeleteError(undefined);
+    try {
+      const outcome = await adapter.deleteSession(target.id);
+      if (outcome.session_id !== target.id || !['DELETED', 'ABSENT'].includes(outcome.status)) {
+        throw new Error('服务器尚未确认删除结果，请重试确认。');
+      }
+      forgetSession(target.id);
+      setDeleteTarget(undefined);
+      notify('会话已删除', '记忆、其他分支会话和工作目录已保留。', 'success');
+      try { setSessionList(await adapter.listSessions()); } catch { /* deletion is already confirmed */ }
+    } catch (error) {
+      setDeleteError(productMessage(error instanceof Error ? error.message : undefined, '暂时无法确认删除结果，请重试确认。'));
+    } finally {
+      deletingSession.current = undefined;
+      setDeleteBusy(false);
+    }
+  };
+
   const openRuntimeSession = useCallback(async (
     sessionId: string,
     reconnecting = false,
     takeover = false,
   ): Promise<RuntimeConnection | undefined> => {
+    if (deletingSession.current === sessionId) return undefined;
+    requestedSession.current = sessionId;
     const attempt = ++connectionAttempt.current;
     taskInventoryAttempt.current += 1;
     capabilityAttempt.current += 1;
@@ -566,6 +635,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       return next;
     } catch (error) {
       if (attempt !== connectionAttempt.current) return undefined;
+      try {
+        if (!(await adapter.readSession(sessionId)) && attempt === connectionAttempt.current) {
+          forgetSession(sessionId);
+          setRuntimeStatus('online');
+          setRuntimeError(undefined);
+          return undefined;
+        }
+      } catch { /* an unavailable server is not evidence of a missing session */ }
       const message = productMessage(error instanceof Error ? error.message : undefined, '无法连接本地服务。');
       setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
       setRuntimeError(message);
@@ -573,7 +650,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       setCapabilityLoading(false);
       return undefined;
     }
-  }, [adapter, publishProjection]);
+  }, [adapter, publishProjection, forgetSession]);
 
   const recoverConnectionAfterOperation = useCallback(async (
     error: unknown,
@@ -586,6 +663,25 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const recovered = await openRuntimeSession(expectedConnection.sessionId, true);
     return recovered && ownsConnection(recovered) ? recovered : undefined;
   }, [openRuntimeSession, ownsConnection]);
+
+  useEffect(() => {
+    const refreshSessions = () => {
+      if (document.visibilityState !== 'visible' || databaseState !== 'ready') return;
+      void adapter.listSessions().then(sessions => {
+        setSessionList(sessions);
+        const selected = activeSessionIdRef.current;
+        if (selected && deletingSession.current !== selected && !sessions.some(s => s.id === selected)) {
+          forgetSession(selected);
+        }
+      }).catch(() => {});
+    };
+    window.addEventListener('focus', refreshSessions);
+    document.addEventListener('visibilitychange', refreshSessions);
+    return () => {
+      window.removeEventListener('focus', refreshSessions);
+      document.removeEventListener('visibilitychange', refreshSessions);
+    };
+  }, [adapter, databaseState, forgetSession]);
 
   const refreshConfiguration = useCallback(async () => {
     const boot = await adapter.bootstrap();
@@ -994,23 +1090,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const forkConversation = async (entryId: string): Promise<void> => {
     const sourceId = activeSessionIdRef.current;
     if (!sourceId) return;
-    const childId = `session:${crypto.randomUUID().replaceAll('-', '')}`;
     let outcome;
     try {
-      outcome = await adapter.forkConversation(sourceId, entryId, childId);
+      outcome = await adapter.forkConversation(sourceId, entryId);
     } catch {
-      // Resolve the preselected identity; never replay an uncertain creation.
-      try {
-        const child = await adapter.readSession(childId);
-        if (!child) {
-          notify('尚未确认分叉结果', `请刷新会话列表后确认。新会话 ID：${childId}`, 'warning');
-          return;
-        }
-        outcome = { outcome: 'CREATED_OPEN_DEFERRED' as const };
-      } catch {
-        notify('尚未确认分叉结果', `请恢复连接后查询会话 ${childId}；不会自动重复创建。`, 'warning');
-        return;
-      }
+      try { setSessionList(await adapter.listSessions()); } catch { /* keep uncertainty */ }
+      notify('尚未确认分叉结果', '请刷新会话列表查看；不会自动重复创建。', 'warning');
+      return;
     }
     if (outcome.outcome === 'NOT_CREATED') {
       notify('未创建分叉', outcome.public_code ?? '请选择已完成的最终回复。', 'warning');
@@ -1022,7 +1108,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       return;
     }
     setActiveView('workbench');
-    if (await openRuntimeSession(childId)) {
+    if (await openRuntimeSession(outcome.child_session_id)) {
       setTurnPermission('bypass-permissions');
       notify('分叉已打开', '已保留选定回复处的有效上下文。', 'success');
     }
@@ -2046,6 +2132,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
           onSelectSession={openSession}
+          onDeleteSession={session => { setDeleteTarget(session); setDeleteError(undefined); }}
           onNewSession={openNewSession}
           canCreateSession={canCreateSession}
           onOpenCommand={() => setCommandOpen(true)}
@@ -2318,6 +2405,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         toasts={toasts}
         onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}
       />
+      {deleteTarget && <SessionDeletionDialog session={deleteTarget} busy={deleteBusy} error={deleteError}
+        onConfirm={() => void confirmSessionDelete()} onClose={() => { if (!deleteBusy) setDeleteTarget(undefined); }} />}
     </main>
     </ToolResultDisplayContext.Provider>
   );

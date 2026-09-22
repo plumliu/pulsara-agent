@@ -7,11 +7,16 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import logging
 from pathlib import Path
 import shlex
 import sys
 from typing import Literal, Mapping
 from uuid import uuid4
+from pulsara_agent.conversation_kernel.session_deletion import (
+    KernelSessionDeletion, SessionDeleteRejected,
+)
+from pulsara_agent.conversation_kernel._repository.deletion import SessionDeletionBusy
 
 from pulsara_agent.capability.local_skill_management import (
     InstallLooseLocalSkillRequest,
@@ -315,8 +320,19 @@ class _Quarantined:
     public_code: str
 
 
+@dataclass(eq=False, slots=True)
+class SessionDeleteOperation:
+    session_id: str
+    owner: "LocalSessionController"
+    task: asyncio.Task | None = None
+    prior_resume: asyncio.Task | None = None
+    core_operation: KernelSessionDeletion | None = None
+    detach: object | None = None
+    unconfirmed: bool = False
+
+
 _SessionOperation = (
-    _ResumeInFlight | _RawCloseInFlight | _RuntimeReopenInFlight | _Quarantined
+    _ResumeInFlight | _RawCloseInFlight | _RuntimeReopenInFlight | _Quarantined | SessionDeleteOperation
 )
 
 
@@ -357,6 +373,7 @@ class LocalSessionController:
         self._by_host: dict[str, HostSessionHandle] = {}
         self._operations: dict[str, _SessionOperation] = {}
         self._forks: set[asyncio.Task[dict[str, object]]] = set()
+        self._fork_sessions: dict[asyncio.Task, frozenset[str]] = {}
         self._lock = asyncio.Lock()
         self._capability_mutation_lock = core.mcp_management.lane
         self._closing = False
@@ -1561,17 +1578,21 @@ class LocalSessionController:
         source_session_id: str,
         *,
         anchor_entry_id: str,
-        child_session_id: str,
     ) -> dict[str, object]:
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Local Web application is draining")
+            if source_session_id in self._operations:
+                raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
+            child_session_id = f"session:{uuid4().hex}"
             task = asyncio.create_task(
                 self._fork_owner(source_session_id, anchor_entry_id, child_session_id),
                 name=f"local-web-fork:{child_session_id}",
             )
             self._forks.add(task)
+            self._fork_sessions[task] = frozenset((source_session_id, child_session_id))
             task.add_done_callback(self._forks.discard)
+            task.add_done_callback(lambda done: self._fork_sessions.pop(done, None))
         # A disconnected browser must not cancel a commit or turn an open failure
         # into a false NOT_CREATED. Shutdown joins this same settlement owner.
         return await asyncio.shield(task)
@@ -1694,16 +1715,18 @@ class LocalSessionController:
                     if self._closing:
                         raise KernelHostCoreClosing("Local Web application is draining")
                     current = self._operations.get(session_id)
-                    if (
-                        not isinstance(current, _ResumeInFlight)
-                        or current.task is not task
+                    deleting = isinstance(current, SessionDeleteOperation) and current.prior_resume is task
+                    if not deleting and (
+                        not isinstance(current, _ResumeInFlight) or current.task is not task
                     ):
                         raise RuntimeError("Session resume is no longer current")
                     raced = self._by_session.get(session_id)
                     if raced is not None:
                         raise RuntimeError("Session resume raced with live publication")
-                    self._operations.pop(session_id, None)
-                    self._publish_locked(handle)
+                    if not deleting:
+                        self._operations.pop(session_id, None)
+                    self._by_session[handle.session_id] = handle
+                    self._by_host[handle.host_session_id] = handle
                 if raced is not None:
                     await self.core.close_session(
                         session.host_session_id, close_conversation=False
@@ -1737,10 +1760,10 @@ class LocalSessionController:
         )
 
     def _publish_locked(self, handle: HostSessionHandle) -> None:
+        if handle.session_id in self._operations:
+            raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
         if handle.session_id in self._by_session:
             raise RuntimeError("canonical Session already has a live local owner")
-        if handle.session_id in self._operations:
-            raise RuntimeError("canonical Session has a current control operation")
         if handle.host_session_id in self._by_host:
             raise RuntimeError("HostSession identity collision")
         self._by_session[handle.session_id] = handle
@@ -1805,6 +1828,135 @@ class LocalSessionController:
             "model_call_binding": model_call_binding_to_dict(accepted),
             "reasoning_preference_reset": accepted != binding,
         }
+
+    async def delete_session(self, session_id: str, *, bridge) -> dict[str, object]:
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Local Web application is draining")
+            current = self._operations.get(session_id)
+            if isinstance(current, SessionDeleteOperation):
+                operation = current
+                if operation.unconfirmed and operation.task is not None and operation.task.done():
+                    operation.task = asyncio.create_task(self._confirm_session_deletion(operation, bridge))
+            else:
+                if current is not None and not isinstance(current, _ResumeInFlight):
+                    raise SessionDeleteRejected(
+                        "SESSION_DELETE_QUARANTINED" if isinstance(current, _Quarantined) else "SESSION_DELETE_BUSY",
+                        "会话尚不能删除，请等待当前操作结束；若已隔离，请重启 Pulsara。",
+                    )
+                operation = SessionDeleteOperation(
+                    session_id, self, prior_resume=current.task if isinstance(current, _ResumeInFlight) else None,
+                )
+                self._operations[session_id] = operation
+                operation.task = asyncio.create_task(
+                    self._delete_session_owner(operation, bridge), name=f"session-delete:{session_id}",
+                )
+        return await asyncio.shield(operation.task)
+
+    async def confirm_session_delete_operation(self, operation: SessionDeleteOperation) -> None:
+        async with self._lock:
+            if operation.owner is not self or self._operations.get(operation.session_id) is not operation:
+                raise RuntimeError("session delete operation is stale")
+
+    async def _finish_session_delete(self, operation, bridge, *, quarantine: bool) -> None:
+        from pulsara_agent.web_app.browser_bridge import BridgeSettlementFailed
+        if operation.detach is not None:
+            try:
+                result = await bridge.settle_session_delete_detach(operation.detach, close_full=not quarantine)
+                quarantine = quarantine or isinstance(result, BridgeSettlementFailed)
+            except Exception:
+                logging.getLogger(__name__).exception("session deletion bridge cleanup failed")
+                quarantine = True
+            operation.detach = None
+        if operation.core_operation is not None:
+            try:
+                await self.core.finish_session_deletion(operation.core_operation, quarantine=quarantine)
+            except Exception:
+                logging.getLogger(__name__).exception("session deletion core cleanup failed")
+                quarantine = True
+        async with self._lock:
+            if self._operations.get(operation.session_id) is operation:
+                if quarantine:
+                    self._operations[operation.session_id] = _Quarantined("SESSION_DELETE_QUARANTINED")
+                else:
+                    self._operations.pop(operation.session_id)
+
+    async def _confirm_session_deletion(self, operation, bridge) -> dict[str, object]:
+        try:
+            exists = await self.core.canonical_session_exists(
+                operation.session_id, self.workspace_input.memory_domain_id,
+            )
+        except Exception as exc:
+            operation.unconfirmed = True
+            if operation.core_operation is not None:
+                await self.core.finish_session_deletion(operation.core_operation, quarantine=True)
+            raise SessionDeleteRejected(
+                "SESSION_DELETE_UNCONFIRMED", "暂时无法确认删除结果，请恢复数据库连接后重试确认。", 503,
+            ) from exc
+        operation.unconfirmed = False
+        await self._finish_session_delete(operation, bridge, quarantine=False)
+        if exists:
+            raise SessionDeleteRejected("SESSION_DELETE_FAILED", "会话仍在，尚未删除，可以重试。", 500)
+        return {"status": "ABSENT", "session_id": operation.session_id}
+
+    async def _delete_session_owner(self, operation, bridge) -> dict[str, object]:
+        from pulsara_agent.web_app.browser_bridge import BridgeDetachFull, BridgeDetachFailed
+        committed = False
+        try:
+            if operation.prior_resume is not None:
+                await asyncio.gather(asyncio.shield(operation.prior_resume), return_exceptions=True)
+            async with self._lock:
+                pending = tuple(t for t, ids in self._fork_sessions.items() if operation.session_id in ids)
+            # A trusted child ID may already be admitted but not yet committed.
+            # Join its creator before interpreting an absent canonical row.
+            if pending:
+                await asyncio.gather(*(asyncio.shield(t) for t in pending), return_exceptions=True)
+            # Do not touch another domain's runtime even if an ID is guessed.
+            exists = await self.core.canonical_session_exists(
+                operation.session_id, self.workspace_input.memory_domain_id,
+            )
+            async with self._lock:
+                handle = self._by_session.get(operation.session_id)
+            if not exists and handle is None:
+                await self._finish_session_delete(operation, bridge, quarantine=False)
+                return {"status": "ABSENT", "session_id": operation.session_id}
+            if handle is not None and handle.workspace_input.memory_domain_id != self.workspace_input.memory_domain_id:
+                raise RuntimeError("session delete domain mismatch")
+            operation.core_operation = await self.core.begin_session_deletion(
+                operation.session_id, self.workspace_input.memory_domain_id,
+            )
+            detach = await bridge.detach_session_for_delete(operation)
+            if isinstance(detach, (BridgeDetachFull, BridgeDetachFailed)):
+                operation.detach = detach.token
+            if not isinstance(detach, BridgeDetachFull):
+                raise SessionDeleteRejected("SESSION_DELETE_QUARANTINED", "未能安全断开会话，会话尚未删除。")
+            await self.core.quiesce_session_deletion(operation.core_operation)
+            async with self._lock:
+                handle = self._by_session.pop(operation.session_id, None)
+                if handle is not None:
+                    self._by_host.pop(handle.host_session_id, None)
+            try:
+                status = await self.core.commit_session_deletion(operation.core_operation)
+            except SessionDeletionBusy as exc:
+                raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话的运行权已改变，或仍被另一进程使用，请稍后重试。") from exc
+            except Exception:
+                logging.getLogger(__name__).exception("session deletion commit needs confirmation")
+                return await self._confirm_session_deletion(operation, bridge)
+            committed = True
+            await self._finish_session_delete(operation, bridge, quarantine=False)
+            return {"status": status, "session_id": operation.session_id}
+        except Exception as exc:
+            if operation.unconfirmed:
+                raise
+            if self._operations.get(operation.session_id) is operation:
+                quarantine = operation.core_operation is not None and not operation.core_operation.physical_full
+                await self._finish_session_delete(operation, bridge, quarantine=quarantine)
+            if committed:
+                logging.getLogger(__name__).exception("session deleted; local cleanup needs refresh")
+                return {"status": "DELETED", "session_id": operation.session_id}
+            if isinstance(exc, SessionDeleteRejected):
+                raise
+            raise SessionDeleteRejected("SESSION_DELETE_QUARANTINED", "未能安全停止，会话尚未删除，请重启 Pulsara 后重试。") from exc
 
     async def prepare_raw_close(
         self, session_id: str, *, close_conversation: bool
@@ -2202,7 +2354,7 @@ class LocalSessionController:
                 *(
                     operation.task
                     for operation in self._operations.values()
-                    if isinstance(operation, _ResumeInFlight)
+                    if isinstance(operation, (_ResumeInFlight, SessionDeleteOperation)) and operation.task is not None
                 ),
                 *self._forks,
             )

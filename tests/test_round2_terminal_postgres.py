@@ -660,6 +660,7 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
 
     second = acquire_bound_test_writer(
         repository,
+        intent="EXISTING",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),

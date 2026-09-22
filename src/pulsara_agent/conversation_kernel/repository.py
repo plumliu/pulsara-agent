@@ -102,9 +102,11 @@ from ._repository.prompts import _PromptOperations
 from ._repository.subagents import _SubagentOperations
 from ._repository.tools import _ToolOperations
 from ._repository.fork import _ForkOperations
+from ._repository.deletion import _SessionDeletionOperations
 
 
 class ConversationKernelRepository(
+    _SessionDeletionOperations,
     _ForkOperations,
     _MatchingOperations,
     _AuthorityOperations,

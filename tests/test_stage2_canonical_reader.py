@@ -163,6 +163,7 @@ def test_reader_dispatch_carrier_requires_real_read_and_is_one_shot(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -206,6 +207,7 @@ def test_protocol_reader_reauthorizes_only_pending_queue_content_in_session(
     deadline = monotonic() + 30
     workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -246,6 +248,7 @@ def test_protocol_reader_reauthorizes_only_pending_queue_content_in_session(
     assert reference["content_size"] == len(canonical_prompt.body)
 
     other = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -299,6 +302,7 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
     deadline = monotonic() + 30
     workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -463,6 +467,7 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
     repository = ConversationKernelRepository(provider)
     workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -609,6 +614,7 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -667,6 +673,7 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
     repository = ConversationKernelRepository(provider)
     workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -783,6 +790,7 @@ def test_reader_rejects_declared_bytes_before_loading_any_payload(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -823,6 +831,7 @@ def test_reader_preflights_plan_continuation_before_loading_any_payload(
     repository = ConversationKernelRepository(provider)
     workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -935,6 +944,7 @@ def test_reader_has_an_independent_bounded_assistant_block_query(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -983,6 +993,7 @@ def test_round3_reader_uses_ordered_semantic_blocks_not_parent_manifest(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -1066,6 +1077,7 @@ def test_mid_turn_snapshot_revision_keeps_current_user_as_exact_delta(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -1250,6 +1262,7 @@ def test_subagent_completion_linearizes_at_provider_safe_point(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),
@@ -1451,6 +1464,7 @@ def test_failed_completion_automatic_manual_and_ack_retry_share_one_writer(
     repository = ConversationKernelRepository(provider)
     workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -1605,6 +1619,7 @@ def test_automatic_completion_suffix_publishes_as_one_transaction(
     repository = ConversationKernelRepository(provider)
     workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),
@@ -1723,6 +1738,7 @@ def test_inspector_reads_canonical_rows_and_selective_events_from_one_kernel(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=_id("workspace"),
         writer_owner_id=_id("host"),

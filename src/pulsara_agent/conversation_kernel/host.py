@@ -21,6 +21,9 @@ from uuid import uuid4
 
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
+from pulsara_agent.conversation_kernel.session_deletion import (
+    KernelSessionDeletion, SessionDeleteRejected,
+)
 
 from pulsara_agent.conversation_kernel.direct_model import (
     DirectKernelModelPort,
@@ -7221,7 +7224,8 @@ class KernelHostCore:
         self._blob_gc_task: asyncio.Task[None] | None = None
         self._sessions: dict[str, KernelHostSession] = {}
         self._workspace_capability_revisions: dict[Path, int] = {}
-        self._open_attempts: set[asyncio.Future[None]] = set()
+        self._open_attempts: dict[asyncio.Future[None], frozenset[str]] = {}
+        self._session_deletions: dict[str, KernelSessionDeletion] = {}
         self._close_attempts: dict[str, HostSessionCloseAttempt] = {}
         self._extension_routes: dict[str, tuple[str, KernelExtensionHost]] = {}
         self._event_loop: asyncio.AbstractEventLoop | None = None
@@ -7388,7 +7392,7 @@ class KernelHostCore:
         memory_domain_id: str,
     ):
         """Canonical copy only. Opening the committed child uses ordinary resume."""
-        settlement = await self._admit_session_open()
+        settlement = await self._admit_session_open(source_session_id, child_session_id)
         try:
             repository = await self._ensure_resources()
             deadline = self._canonical_deadline()
@@ -7470,7 +7474,7 @@ class KernelHostCore:
         active_skill_names: frozenset[str],
         session_start_source: str,
     ) -> KernelHostSession:
-        settlement = await self._admit_session_open()
+        settlement = await self._admit_session_open(session_id)
         try:
             return await self._open_admitted(
                 workspace_input,
@@ -7483,17 +7487,19 @@ class KernelHostCore:
         finally:
             await self._settle_session_open(settlement)
 
-    async def _admit_session_open(self) -> asyncio.Future[None]:
+    async def _admit_session_open(self, *session_ids: str) -> asyncio.Future[None]:
         async with self._lock:
             if self._closing:
                 raise KernelHostCoreClosing("Kernel Host core is closing")
+            if any(s in self._session_deletions for s in session_ids):
+                raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话正在删除。")
             settlement = asyncio.get_running_loop().create_future()
-            self._open_attempts.add(settlement)
+            self._open_attempts[settlement] = frozenset(session_ids)
             return settlement
 
     async def _settle_session_open(self, settlement: asyncio.Future[None]) -> None:
         async with self._lock:
-            self._open_attempts.discard(settlement)
+            self._open_attempts.pop(settlement, None)
             if not settlement.done():
                 settlement.set_result(None)
 
@@ -7579,6 +7585,7 @@ class KernelHostCore:
         try:
             writer_lease = await io_owner.run(
                 repository.acquire_host_writer,
+                intent="NEW" if session_start_source == "startup" else "EXISTING",
                 session_id=session_id,
                 workspace_id=workspace.workspace_key,
                 workspace_kind=workspace.workspace_kind,
@@ -7948,6 +7955,69 @@ class KernelHostCore:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    async def canonical_session_exists(self, session_id: str, memory_domain_id: str) -> bool:
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.canonical_session_exists, session_id=session_id,
+            memory_domain_id=memory_domain_id, deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def begin_session_deletion(
+        self, session_id: str, memory_domain_id: str,
+    ) -> KernelSessionDeletion:
+        async with self._lock:
+            if self._closing or session_id in self._session_deletions:
+                raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话正在处理另一项操作。")
+            pending = tuple(f for f, ids in self._open_attempts.items() if session_id in ids)
+            operation = KernelSessionDeletion(
+                session_id, memory_domain_id, self, asyncio.get_running_loop().create_future(),
+            )
+            self._session_deletions[session_id] = operation
+            self._open_attempts[operation.settlement] = frozenset((session_id,))
+        if pending:
+            await asyncio.gather(*(asyncio.shield(f) for f in pending))
+        return operation
+
+    async def quiesce_session_deletion(self, operation: KernelSessionDeletion) -> None:
+        async with self._lock:
+            if self._session_deletions.get(operation.session_id) is not operation:
+                raise RuntimeError("session deletion owner is stale")
+            sessions = tuple(s for s in self._sessions.values() if s.session_id == operation.session_id)
+        for session in sorted(sessions, key=lambda s: s._lease.guard.writer_generation):
+            if session.workspace.memory_domain.memory_domain_id != operation.memory_domain_id:
+                raise RuntimeError("session deletion domain mismatch")
+            await self.close_session(session.host_session_id, close_conversation=False)
+            operation.closed_writer = session._lease.guard
+        operation.physical_full = True
+
+    async def commit_session_deletion(self, operation: KernelSessionDeletion) -> str:
+        if (operation.owner is not self or not operation.physical_full
+            or operation.quarantined
+            or self._session_deletions.get(operation.session_id) is not operation):
+            raise RuntimeError("session deletion has no physical close authority")
+        repository = await self._ensure_resources()
+        deadline = self._canonical_deadline()
+        worker = asyncio.create_task(asyncio.to_thread(
+            repository.delete_session, session_id=operation.session_id,
+            memory_domain_id=operation.memory_domain_id,
+            closed_writer=operation.closed_writer, deadline_monotonic=deadline,
+        ))
+        await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
+        return worker.result()
+
+    async def finish_session_deletion(
+        self, operation: KernelSessionDeletion, *, quarantine: bool,
+    ) -> None:
+        async with self._lock:
+            if self._session_deletions.get(operation.session_id) is not operation:
+                raise RuntimeError("session deletion settlement is stale")
+            operation.quarantined = quarantine
+            if not quarantine:
+                self._session_deletions.pop(operation.session_id)
+            self._open_attempts.pop(operation.settlement, None)
+            if not operation.settlement.done():
+                operation.settlement.set_result(None)
+
     async def close_session(
         self, host_session_id: str, *, close_conversation: bool
     ) -> None:
@@ -8014,6 +8084,18 @@ class KernelHostCore:
                 if attempt is not None:
                     attempt.state = HostSessionCloseState.CLOSE_FAILED_QUARANTINED
             raise
+        # Physical completion is independent of a best-effort exact lease
+        # release. A failure here never turns full close into false uncertainty.
+        try:
+            repository = self._repository
+            if repository is None:
+                raise RuntimeError("closed session lost its shared repository")
+            await asyncio.to_thread(
+                repository.release_host_writer, session._lease.guard,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("clean Host writer release was not confirmed")
         async with self._lock:
             attempt = self._close_attempts.get(host_session_id)
             if attempt is not None:

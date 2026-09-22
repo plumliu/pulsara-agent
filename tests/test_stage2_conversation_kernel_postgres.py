@@ -186,6 +186,7 @@ def test_model_binding_freezes_per_queue_command_and_idempotent_retry(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_name("session"),
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -274,6 +275,7 @@ def test_direct_root_retry_confirms_turn_binding_not_later_session_choice(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_name("session"),
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -356,6 +358,7 @@ def test_permanently_invalid_queued_binding_rejects_without_turn(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_name("session"),
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -426,6 +429,7 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
     session_id = f"session:{uuid4().hex}"
     workspace_id = f"ctx:workspace/{uuid4().hex}"
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=f"host:{uuid4().hex}",
@@ -524,6 +528,7 @@ def test_canonical_workspace_is_shared_and_transient_first_label_wins(
 
     def acquire_project(index: int):
         return repository.acquire_host_writer(
+            intent="NEW",
             session_id=f"session:{uuid4().hex}",
             workspace_id=project.workspace_key,
             workspace_kind=project.workspace_kind,
@@ -562,6 +567,7 @@ def test_canonical_workspace_is_shared_and_transient_first_label_wins(
         )
     )
     repository.acquire_host_writer(
+        intent="NEW",
         session_id=f"session:{uuid4().hex}",
         workspace_id=first.workspace_key,
         workspace_kind="transient",
@@ -574,6 +580,7 @@ def test_canonical_workspace_is_shared_and_transient_first_label_wins(
     )
     with pytest.raises(ConversationKernelConflict, match="metadata conflict"):
         repository.acquire_host_writer(
+            intent="NEW",
             session_id=f"session:{uuid4().hex}",
             workspace_id=first.workspace_key,
             workspace_kind="transient",
@@ -686,6 +693,7 @@ def test_stage2_orphan_blob_gc_deletes_only_unreferenced_content_after_grace(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -857,6 +865,7 @@ def test_stage2_snapshot_and_history_page_are_bounded_by_final_wire_bytes(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_name("session"),
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -927,6 +936,7 @@ def test_stage2_text_turn_is_canonical_and_sequences_rollback_without_gaps(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -989,6 +999,7 @@ def test_stage2_stale_writer_cannot_mutate_after_takeover(
     session_id = _name("session")
     workspace_id = _name("workspace")
     first = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -996,6 +1007,7 @@ def test_stage2_stale_writer_cannot_mutate_after_takeover(
         deadline_monotonic=deadline,
     )
     second = repository.acquire_host_writer(
+        intent="EXISTING",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1025,6 +1037,7 @@ def test_round9_host_writer_renewal_accepts_unconstrained_memory_domain(
     repository = _repository(stage2_migrated_postgres_database)
     deadline = monotonic() + 30
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_name("session"),
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -1051,6 +1064,7 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
     session_id = _name("session")
     workspace_id = _name("workspace")
     first = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1085,6 +1099,7 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
     )
 
     second = repository.acquire_host_writer(
+        intent="EXISTING",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1128,6 +1143,7 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1259,6 +1275,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1410,6 +1427,7 @@ def test_stage2_unqualified_product_sql_cannot_resolve_a_product_relation(
     repository = _repository(stage2_migrated_postgres_database)
     session_id = _name("session")
     repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -1498,6 +1516,7 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     deadline = monotonic() + 30
     session_id = _name("session")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -1633,6 +1652,7 @@ def test_stage2_interrupt_turn_immediately_rejects_steer_without_future_turn(
     deadline = monotonic() + 30
     session_id = _name("session")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -1709,6 +1729,7 @@ def test_round3_1_future_new_turn_lane_does_not_block_active_steer_cut(
     deadline = monotonic() + 30
     session_id = _name("session")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -1778,6 +1799,7 @@ def test_round3_1_prompt_ingress_confirmation_is_semantically_exact_and_stable(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -1878,6 +1900,7 @@ def test_round3_1_steer_consumption_ack_confirmation_is_exact(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2001,6 +2024,7 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2272,6 +2296,7 @@ def test_round5b_first_compaction_can_cut_before_turn_genesis_marker(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2421,6 +2446,7 @@ def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
     deadline = monotonic() + 30
     session_id = _name("session")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -2498,6 +2524,7 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
     session_id = _name("session")
     workspace_id = _name("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),
@@ -2643,6 +2670,7 @@ def test_round3_1_resource_rejection_is_atomic_and_exactly_confirmable(
     deadline = monotonic() + 30
     session_id = _name("session")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),
@@ -2724,6 +2752,7 @@ def test_stage2_prompt_cancel_is_single_terminal_cas(
     deadline = monotonic() + 30
     session_id = _name("session")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),

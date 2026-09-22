@@ -321,6 +321,8 @@ def test_visualization_publication_fork_and_reference(
     copied = rows(repo, "SELECT * FROM pulsara_v3.assistant_visualizations WHERE session_id=%s", (child.child_session_id,))[0]
     assert copied["blob_id"] == occurrence["blob_id"]
     assert copied["turn_id"] is None and copied["imported_history_group_id"] is not None
+    from tests.test_conversation_fork import assert_session_aggregate_deleted
+    assert_session_aggregate_deleted(repo, lease.guard)
     assert PostgresCanonicalVisualizationReadPort(
         repo.connection_provider, session_id=child.child_session_id,
         workspace_id=workspace_id,

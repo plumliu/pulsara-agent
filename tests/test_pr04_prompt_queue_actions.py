@@ -37,6 +37,7 @@ pytestmark = pytest.mark.postgres
 def queue_case(stage2_migrated_postgres_database):
     repository = _repository(stage2_migrated_postgres_database)
     guard = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_name("session"),
         workspace_id=_name("workspace"),
         writer_owner_id=_name("host"),

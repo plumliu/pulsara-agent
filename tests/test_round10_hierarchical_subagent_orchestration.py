@@ -2183,6 +2183,8 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
         assert len(rows) == 3
         assert all(row["status"] == "COMPLETED" for row in rows)
         await manager.aclose(deadline_monotonic=monotonic() + 2)
+        from tests.test_conversation_fork import assert_session_aggregate_deleted
+        assert_session_aggregate_deleted(repository, lease.guard)
 
     asyncio.run(exercise())
 

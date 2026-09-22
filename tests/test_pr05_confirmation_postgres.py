@@ -47,6 +47,7 @@ def pg_owner(database):
     session_id = "session:pr05:" + identity
     deadline = monotonic() + 30
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id="ctx:workspace/" + identity,
         writer_owner_id="host:" + identity,

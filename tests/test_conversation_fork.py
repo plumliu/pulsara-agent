@@ -99,6 +99,7 @@ def repo(stage2_migrated_postgres_database):
 
 def new_session(repo):
     return repo.acquire_host_writer(
+        intent="NEW",
         session_id=identity("session"),
         workspace_id=identity("workspace"),
         writer_owner_id=identity("host"),
@@ -154,6 +155,20 @@ def rows(repo, query, args=()):
         deadline_monotonic=monotonic() + 30,
     ) as conn:
         return conn.execute(query, args).fetchall()
+
+
+def assert_session_aggregate_deleted(repo, guard):
+    from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
+    assert repo.delete_session(
+        session_id=guard.session_id, memory_domain_id='u_local', closed_writer=guard,
+        deadline_monotonic=monotonic()+30,
+    ) == 'DELETED'
+    independent = {'workspaces', 'blobs', 'memory_facts', 'memory_relations', 'memory_embeddings'}
+    children = set(CONVERSATION_KERNEL_RELATIONS) - independent - {'sessions'}
+    assert len(children) == 22
+    for table in children:
+        assert rows(repo, sql.SQL('SELECT 1 FROM pulsara_v3.{} WHERE session_id=%s').format(
+            sql.Identifier(table)), (guard.session_id,)) == [], table
 
 
 def fork(repo, source, final, child=None):
@@ -313,6 +328,7 @@ def child_lease(repo, child):
         repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (child,)
     )[0]
     return repo.acquire_host_writer(
+        intent="EXISTING",
         session_id=child,
         workspace_id=row["workspace_id"],
         writer_owner_id=identity("host"),
@@ -656,6 +672,7 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
             deadline_monotonic=monotonic() + 30,
         )
     repo.close_session(lease.guard, deadline_monotonic=monotonic() + 30)
+    assert_session_aggregate_deleted(repo, lease.guard)
     PostgresCanonicalBlobStore(repo.connection_provider).delete_orphans(
         grace_seconds=1, maximum_items=100, deadline_monotonic=monotonic() + 30
     )
@@ -770,26 +787,34 @@ def test_fork_native_replay_rebinds_local_metadata_preserving_opaque_payload(
     assert len(read.replay_manifest_cut.manifests) == 1
 
 
-def test_fork_paged_repeatable_read_cannot_mix_in_concurrent_source_appends(
+def test_fork_source_row_lock_blocks_concurrent_source_appends(
     repo, monkeypatch
 ):
     lease = new_session(repo)
     for index in range(130):
         _, _, anchor = turn(repo, lease.guard, f"history {index}")
     original = CanonicalProviderInputReader._read_content
-    changed = False
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+    pool = ThreadPoolExecutor(max_workers=1)
+    pending = None
 
     def append_during_read(reader, row, **kwargs):
-        nonlocal changed
-        if not changed:
-            changed = True
-            turn(repo, lease.guard, "CONCURRENT_FUTURE_ONLY")
+        nonlocal pending
+        if pending is None:
+            pending = pool.submit(turn, repo, lease.guard, "CONCURRENT_FUTURE_ONLY")
+            with pytest.raises(FutureTimeout):
+                pending.result(timeout=0.1)
         return original(reader, row, **kwargs)
 
     monkeypatch.setattr(
         CanonicalProviderInputReader, "_read_content", append_during_read
     )
-    created = fork(repo, lease.guard.session_id, anchor)
+    try:
+        created = fork(repo, lease.guard.session_id, anchor)
+        assert pending is not None
+        pending.result(timeout=30)
+    finally:
+        pool.shutdown(wait=True)
     assert created.created, created.public_code
     copied = rows(
         repo,
@@ -912,8 +937,10 @@ def test_web_fork_outcomes_are_closed_and_open_is_post_commit(
             side_effect=RuntimeError("workspace unavailable") if open_failure else None
         )
         result = await controller.fork_conversation(
-            "parent", anchor_entry_id="anchor", child_session_id=child
+            "parent", anchor_entry_id="anchor"
         )
+        child = core.fork_conversation.await_args.kwargs["child_session_id"]
+        assert child.startswith("session:") and len(child) == 40
         assert result["outcome"] == expected and result["child_session_id"] == child
         assert controller.resume_session.await_count == int(created)
 
@@ -936,6 +963,8 @@ def test_web_fork_disconnected_waiter_does_not_cancel_creation(tmp_path):
         child = identity("session")
 
         async def create(**kwargs):
+            nonlocal child
+            child = kwargs["child_session_id"]
             entered.set()
             await release.wait()
             return CanonicalForkCreation(child, True, "created")
@@ -955,7 +984,7 @@ def test_web_fork_disconnected_waiter_does_not_cancel_creation(tmp_path):
         controller.resume_session = AsyncMock()
         waiter = asyncio.create_task(
             controller.fork_conversation(
-                "parent", anchor_entry_id="anchor", child_session_id=child
+                "parent", anchor_entry_id="anchor"
             )
         )
         await entered.wait()
@@ -1019,6 +1048,7 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
         repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (child,)
     )[0]
     child_lease = repo.acquire_host_writer(
+        intent="EXISTING",
         session_id=child,
         workspace_id=source["workspace_id"],
         writer_owner_id=identity("host"),
@@ -1177,6 +1207,7 @@ def test_fork_republishes_child_local_image_refs_and_preserves_typed_history(rep
         (row["ref_ordinal"], row["blob_id"]) for row in source_refs
     ]
     assert [row["ref_ordinal"] for row in child_refs] == [0, 1]
+    assert_session_aggregate_deleted(repo, lease.guard)
 
     workspace_id = str(
         rows(
@@ -1423,6 +1454,7 @@ def test_fork_imported_anchor_is_only_entry_and_stays_fixed_after_local_turn(rep
     )
     assert not fork(repo, child, copied[1]["id"]).created
     child_lease = repo.acquire_host_writer(
+        intent="EXISTING",
         session_id=child,
         workspace_id=copied[0]["workspace_id"],
         writer_owner_id=identity("host"),
@@ -1583,6 +1615,7 @@ def test_fork_plan_history_retains_origin_and_attribution_without_live_authority
         )
         == []
     )
+    assert_session_aggregate_deleted(repo, lease.guard)
     _, cut, _ = turn(
         repo, child_lease(repo, child).guard, "new independent work", finish=False
     )
@@ -1836,13 +1869,15 @@ def test_fork_http_closed_request_scoped_lookup_and_cross_site_rejection(tmp_pat
         try:
             async with ClientSession() as client:
                 url = f"{server.origin}/api/sessions/parent/fork"
-                body = {"anchor_entry_id": "anchor", "child_session_id": child}
+                body = {"anchor_entry_id": "anchor"}
                 async with client.post(url, json=body) as response:
                     assert response.status == 200
                     assert (await response.json())["outcome"] == "CREATED_OPEN_DEFERRED"
                 async with client.post(
                     url, json={**body, "source_cut": 123}
                 ) as response:
+                    assert response.status == 400
+                async with client.post(url, json={**body, "child_session_id": child}) as response:
                     assert response.status == 400
                 async with client.post(
                     url, json=body, headers={"Origin": "https://untrusted.example"}
@@ -1854,7 +1889,7 @@ def test_fork_http_closed_request_scoped_lookup_and_cross_site_rejection(tmp_pat
                     assert response.status == 200
                     assert (await response.json())["session"]["id"] == child
                 sessions.fork_conversation.assert_awaited_once_with(
-                    "parent", anchor_entry_id="anchor", child_session_id=child
+                    "parent", anchor_entry_id="anchor"
                 )
         finally:
             await server.aclose()

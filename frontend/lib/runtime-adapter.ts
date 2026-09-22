@@ -490,7 +490,8 @@ export interface RuntimeAdapter {
   }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection>;
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
-  forkConversation(sessionId: string, anchorEntryId: string, childSessionId: string): Promise<ForkOutcome>;
+  forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome>;
+  deleteSession(sessionId: string): Promise<{ status: 'DELETED' | 'ABSENT'; session_id: string }>;
   readSession(sessionId: string): Promise<SessionSummary | null>;
   listSessions(): Promise<SessionSummary[]>;
   listSessionTaskGroups(sessionId: string, cursor?: string): Promise<AgentTaskGroupPage>;
@@ -1815,9 +1816,15 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     await apiRequest(`/api/capabilities/roots/${root}/open`, { method: 'POST' });
   }
 
-  async forkConversation(sessionId: string, anchorEntryId: string, childSessionId: string): Promise<ForkOutcome> {
+  async deleteSession(sessionId: string): Promise<{ status: 'DELETED' | 'ABSENT'; session_id: string }> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE', body: JSON.stringify({ confirm_permanent_delete: true }),
+    });
+  }
+
+  async forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome> {
     return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, {
-      method: 'POST', body: JSON.stringify({ anchor_entry_id: anchorEntryId, child_session_id: childSessionId }),
+      method: 'POST', body: JSON.stringify({ anchor_entry_id: anchorEntryId }),
     });
   }
 

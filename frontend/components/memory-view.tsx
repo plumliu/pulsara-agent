@@ -148,6 +148,26 @@ function MemoryContent({ api, onOpenSource }: Props) {
     setKind(''); setSearch('');
     setLifecycle(fact.lifecycle === 'SUPERSEDED' ? 'updated' : 'active');
   }
+  async function openSource(relationId?: string) {
+    if (!detail || busy || pendingDetail) return;
+    const requestId = ++detailRequest.current;
+    const fact = detail.fact;
+    const selected: MemorySelection = { view: fact.context_id === 'ctx:global' ? 'global' : 'project', workspace_id: fact.context_id === 'ctx:global' ? null : fact.context_id };
+    setBusy(true); setError('');
+    try {
+      let fresh = await api.detail(selected, fact.fact_id);
+      while (relationId && !fresh.relations.some(r => r.relation_id === relationId) && fresh.next_cursor) {
+        const page = await api.detail(selected, fact.fact_id, fresh.next_cursor);
+        fresh = { ...page, relations: [...fresh.relations, ...page.relations] };
+      }
+      if (detailRequest.current !== requestId) return;
+      setDetail(fresh);
+      const source = relationId ? fresh.relations.find(r => r.relation_id === relationId)?.owner.source : fresh.source;
+      if (source?.locator) onOpenSource(source.locator);
+      else setNotice(source?.availability === 'DELETED' ? '最初保存位置已删除，记忆仍然保留。' : '来源已不可打开，详情已刷新。');
+    } catch (e) { if (detailRequest.current === requestId) setError(errorText(e)); }
+    finally { setBusy(false); }
+  }
   async function preview(roots = additional) {
     if (!detail || pendingDetail) return;
     const requestId = ++detailRequest.current;
@@ -233,7 +253,7 @@ function MemoryContent({ api, onOpenSource }: Props) {
       {detail.user_edited_at && editDraft === null && <p className="memory-edited-note">用户已编辑正文；来源对话只记录最初保存的位置。</p>}
       {detail.fact.needs_confirmation && detail.fact.kind === 'RESPONSE_PREFERENCE' && <p>需要确认：冲突解决前暂不作为回答偏好使用。</p>}
       <div className="memory-detail-actions">
-        {detail.source.locator ? <button className="memory-source" disabled={detailBusy} onClick={() => onOpenSource(detail.source.locator!)}>在对话中查看<ArrowUpRight size={14} aria-hidden="true" /></button> : <span className="memory-detail-unavailable">{detail.source.availability === 'DELETED' ? '最初保存位置已删除' : '来源对话已关闭'}</span>}
+        {detail.source.locator ? <button className="memory-source" disabled={detailBusy} onClick={() => void openSource()}>在对话中查看<ArrowUpRight size={14} aria-hidden="true" /></button> : <span className="memory-detail-unavailable">{detail.source.availability === 'DELETED' ? '最初保存位置已删除' : '来源对话已关闭'}</span>}
         <button className="memory-edit" disabled={detailBusy || editDraft !== null || Boolean(confirmation)} onClick={() => { setEditDraft(detail.fact.statement); setEditError(''); }}><Pencil size={14} aria-hidden="true" />编辑记忆</button>
         <button ref={deleteButton} className="memory-delete" disabled={detailBusy || editDraft !== null || Boolean(confirmation)} onClick={() => void preview()}><Trash2 size={14} />{busy ? '正在读取…' : '删除记忆…'}</button>
       </div>
@@ -243,7 +263,7 @@ function MemoryContent({ api, onOpenSource }: Props) {
         {detail.relations.length ? <div className="memory-graph-branches">{detail.relations.map(r => <div className="memory-graph-branch" key={r.relation_id}>
             <div className="memory-graph-edge"><ArrowRight size={15} aria-hidden="true" /><span>{relationPhrases[r.relative_role]}</span></div>
             <button className="memory-graph-node" disabled={detailBusy} onClick={() => jumpToFact(r.companion)} aria-label={`查看记忆：${r.companion.statement}`}><span className="memory-graph-statement">{r.companion.statement}</span><span className="memory-graph-caption">{memoryKindLabels[r.companion.kind]} · {label(r.companion)}{r.companion.lifecycle === 'SUPERSEDED' ? ' · 已被替代' : ''}</span></button>
-            <div className="memory-graph-origin"><span>{r.owner.write_tool === 'remember' ? '保存时建立' : '后续标定'}</span>{r.owner.source.locator ? <button disabled={detailBusy} onClick={() => onOpenSource(r.owner.source.locator!)}>查看建立处<ArrowUpRight size={12} aria-hidden="true" /></button> : <span>· {r.owner.source.availability === 'DELETED' ? '最初保存位置已删除' : '来源对话已关闭'}</span>}</div>
+            <div className="memory-graph-origin"><span>{r.owner.write_tool === 'remember' ? '保存时建立' : '后续标定'}</span>{r.owner.source.locator ? <button disabled={detailBusy} onClick={() => void openSource(r.relation_id)}>查看建立处<ArrowUpRight size={12} aria-hidden="true" /></button> : <span>· {r.owner.source.availability === 'DELETED' ? '最初保存位置已删除' : '来源对话已关闭'}</span>}</div>
           </div>)}</div> : <p className="memory-graph-empty">暂无关联记忆</p>}
         {detail.next_cursor && <button className="memory-graph-more" disabled={detailBusy} onClick={() => void openFact(detail.fact, true)}>更多关系</button>}
       </section>

@@ -481,7 +481,7 @@ def bind_test_session(repository, lease, runtime: ModelRuntime | None = None):
 
 
 def acquire_bound_test_writer(repository, **kwargs):
-    lease = repository.acquire_host_writer(**kwargs)
+    lease = repository.acquire_host_writer(intent=kwargs.pop("intent", "NEW"), **kwargs)
     bind_test_session(repository, lease)
     return lease
 

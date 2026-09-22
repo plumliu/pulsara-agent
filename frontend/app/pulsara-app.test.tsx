@@ -303,7 +303,7 @@ class FakeConnection implements RuntimeConnection {
   readonly generation: number;
   private value: RuntimeProjection;
   private observer?: (value: RuntimeProjection) => void;
-  private closed = false;
+  closed = false;
 
   constructor(
     readonly sessionId: string,
@@ -468,7 +468,12 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
-  forkConversation = vi.fn(async (_sessionId: string, _entryId: string, childId: string): Promise<ForkOutcome> => {
+  deleteSession = vi.fn(async (sessionId: string) => {
+    this.sessions = this.sessions.filter(session => session.id !== sessionId);
+    return { status: 'DELETED' as const, session_id: sessionId };
+  });
+  forkConversation = vi.fn(async (_sessionId: string, _entryId: string): Promise<ForkOutcome> => {
+    const childId = `session:${crypto.randomUUID().replaceAll('-', '')}`;
     this.sessions = [{ ...initialSession, id: childId }, ...this.sessions];
     return { outcome: 'CREATED_AND_OPENED' as const, child_session_id: childId };
   });
@@ -1978,7 +1983,63 @@ describe('PulsaraApp', () => {
     expect(screen.getByText('浏览器没有授予剪贴板权限')).toBeTruthy();
   });
 
-  it('forks only server-eligible entries with one preselected identity and leaves the parent running', async () => {
+  it('permanently deletes the selected session without creating a replacement', async () => {
+    const adapter = new FakeAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+    const menu = await screen.findByLabelText(`${initialSession.title} 更多操作`);
+    fireEvent.click(menu);
+    fireEvent.click(screen.getByRole('button', { name: '删除会话…' }));
+    const dialog = screen.getByRole('dialog', { name: '删除这条会话？' });
+    expect(dialog.getAttribute('aria-describedby')).toBe('session-delete-description');
+    expect(dialog.textContent).toContain('会话及其记录将永久删除，无法撤销');
+    const preserved = within(dialog).getByRole('list', { name: '仍会保留的内容' });
+    expect(within(preserved).getAllByRole('listitem').map(item => item.textContent)).toEqual(['已保存的记忆', '其他分支会话', '工作目录']);
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+    expect(adapter.deleteSession).not.toHaveBeenCalled();
+    fireEvent.click(menu);
+    fireEvent.click(screen.getByRole('button', { name: '删除会话…' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ }));
+    await screen.findByText('会话已删除');
+    expect(adapter.deleteSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
+    expect(adapter.createSession).not.toHaveBeenCalled();
+    expect(screen.queryByLabelText(`${initialSession.title} 更多操作`)).toBeNull();
+    expect(adapter.lastConnection?.closed).toBe(true);
+  });
+
+  it('retains a session after an uncertain deletion and offers explicit confirmation retry', async () => {
+    const adapter = new FakeAdapter();
+    let reject!: (error: Error) => void;
+    adapter.deleteSession.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByLabelText(`${initialSession.title} 更多操作`));
+    fireEvent.click(screen.getByRole('button', { name: '删除会话…' }));
+    const button = within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ });
+    fireEvent.click(button); fireEvent.click(button);
+    expect(adapter.deleteSession).toHaveBeenCalledTimes(1);
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect((within(screen.getByRole('dialog')).getByRole('button', { name: '取消' }) as HTMLButtonElement).disabled).toBe(true);
+    reject(new Error('暂时无法确认删除结果'));
+    await screen.findByRole('alert');
+    expect(screen.getByLabelText(`${initialSession.title} 更多操作`)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '重试确认' }));
+    await screen.findByText('会话已删除');
+    expect(adapter.deleteSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('deletes another session without clearing the current conversation', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions.push({ ...initialSession, id: 'session:other', title: '待删除会话' });
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await screen.findByLabelText('待删除会话 更多操作'));
+    fireEvent.click(screen.getAllByRole('button', { name: '删除会话…' }).at(-1)!);
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ }));
+    await screen.findByText('会话已删除');
+    expect(adapter.deleteSession).toHaveBeenCalledExactlyOnceWith('session:other');
+    expect(adapter.lastConnection?.closed).toBe(false);
+    expect(adapter.connectCalls.at(-1)?.sessionId).toBe(initialSession.id);
+  });
+
+  it('forks only server-eligible entries with a server-issued identity and leaves the parent running', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(''), isRunning: true, messages: [
       { id: 'old-intermediate', role: 'assistant', assistantKind: 'terminal', body: '中间正文', time: '18:10', status: 'completed', forkEligible: false },
@@ -1986,7 +2047,8 @@ describe('PulsaraApp', () => {
     ] };
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    adapter.forkConversation.mockImplementationOnce(async (_source, _anchor, child) => {
+    const child = 'session:server-generated-child';
+    adapter.forkConversation.mockImplementationOnce(async () => {
       await gate;
       adapter.sessions = [{ ...initialSession, id: child }, ...adapter.sessions];
       return { outcome: 'CREATED_AND_OPENED', child_session_id: child };
@@ -1997,18 +2059,19 @@ describe('PulsaraApp', () => {
     fireEvent.click(button); fireEvent.click(button);
     expect(button.getAttribute('aria-busy')).toBe('true');
     expect((button as HTMLButtonElement).disabled).toBe(true);
-    expect(adapter.forkConversation).toHaveBeenCalledExactlyOnceWith(initialSession.id, 'canonical-anchor', expect.stringMatching(/^session:[0-9a-f]{32}$/));
+    expect(adapter.forkConversation).toHaveBeenCalledExactlyOnceWith(initialSession.id, 'canonical-anchor');
     release();
     await screen.findByText('分叉已打开');
-    expect(adapter.connectCalls.at(-1)?.sessionId).toBe(adapter.forkConversation.mock.calls[0][2]);
+    expect(adapter.connectCalls.at(-1)?.sessionId).toBe(child);
   });
 
-  it('queries a lost Fork response without replaying the creation and keeps the parent selected', async () => {
+  it('refreshes the list after a lost Fork response without replaying or claiming a known outcome', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(''), initialContextBase: { base_kind: 'SNAPSHOT', display_after_entry_sequence: 0 }, messages: [
       { id: 'imported-anchor', role: 'assistant', assistantKind: 'terminal', body: '继承的回复', time: '18:12', status: 'completed', forkEligible: true, entryOwnerKind: 'IMPORTED_HISTORY' },
     ] };
-    adapter.forkConversation.mockImplementationOnce(async (_source, _anchor, child) => {
+    adapter.forkConversation.mockImplementationOnce(async () => {
+      const child = 'session:server-created-before-response-loss';
       adapter.sessions = [{ ...initialSession, id: child }, ...adapter.sessions];
       throw new Error('response lost');
     });
@@ -2016,9 +2079,9 @@ describe('PulsaraApp', () => {
     const button = await screen.findByRole('button', { name: '从此处分叉' });
     expect(screen.getByRole('separator', { name: '已保留分叉点的有效上下文，压缩前记录请在原会话查看' })).toBeTruthy();
     fireEvent.click(button);
-    await screen.findByText('分叉已创建，暂未打开');
+    await screen.findByText('尚未确认分叉结果');
     expect(adapter.forkConversation).toHaveBeenCalledTimes(1);
-    expect(adapter.readSession).toHaveBeenCalledWith(adapter.forkConversation.mock.calls[0][2]);
+    expect(adapter.readSession).not.toHaveBeenCalled();
     expect(adapter.connectCalls.at(-1)?.sessionId).toBe(initialSession.id);
   });
 

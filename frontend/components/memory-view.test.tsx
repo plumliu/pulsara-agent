@@ -240,6 +240,18 @@ describe('MemoryView', () => {
     const row = screen.getAllByRole('button', { name: /项目中的关联记忆/ }).find(button => button.classList.contains('memory-row'))!;
     expect(row.classList.contains('is-selected')).toBe(true);
   });
+  it('refreshes a stale source before navigation and keeps memory visible after session deletion', async () => {
+    const api = setup(); const onOpenSource = vi.fn();
+    vi.mocked(api.detail).mockResolvedValueOnce({ fact, formation: '', relations: [], next_cursor: null,
+      source: { availability: 'OPEN', locator: { session_id: 'deleted', turn_id: 'turn', entry_id: 'entry' } } });
+    render(<MemoryView runtimeStatus="online" onReconnect={vi.fn()} api={api} databaseState="ready" onOpenSettings={vi.fn()} onOpenSource={onOpenSource} />);
+    fireEvent.click(await screen.findByRole('button', { name: /用户喜欢散步/ }));
+    fireEvent.click(await screen.findByRole('button', { name: '在对话中查看' }));
+    await screen.findByText('最初保存位置已删除，记忆仍然保留。');
+    expect(onOpenSource).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '在对话中查看' })).toBeNull();
+    expect(screen.getByRole('button', { name: '编辑记忆' })).toBeTruthy();
+  });
   it('shows the relation owner separately from the fact creator', async () => {
     const api = setup();
     const onOpenSource = vi.fn();
@@ -256,7 +268,7 @@ describe('MemoryView', () => {
     const actions = panel.querySelector<HTMLDivElement>('.memory-detail-actions')!;
     expect(within(actions).getByRole('button', { name: '删除记忆…' })).toBeTruthy();
     fireEvent.click(within(actions).getByRole('button', { name: '在对话中查看' }));
-    expect(onOpenSource).toHaveBeenCalledWith(creationSource);
+    await waitFor(() => expect(onOpenSource).toHaveBeenCalledWith(creationSource));
     expect(within(panel).queryByText('保存时引用')).toBeNull();
     expect(within(panel).queryByText('适用条件与例外')).toBeNull();
     expect(within(panel).queryByText('保存方式')).toBeNull();
@@ -267,7 +279,7 @@ describe('MemoryView', () => {
     expect(graph.querySelector('.memory-graph-edge svg.lucide-arrow-right')).toBeTruthy();
     expect(within(panel).getByText('后续标定')).toBeTruthy();
     fireEvent.click(within(panel).getByRole('button', { name: '查看建立处' }));
-    expect(onOpenSource).toHaveBeenCalledWith(relationOwner);
+    await waitFor(() => expect(onOpenSource).toHaveBeenCalledWith(relationOwner));
   });
   it.each([
     ['BASED_ON', 'is based on'],

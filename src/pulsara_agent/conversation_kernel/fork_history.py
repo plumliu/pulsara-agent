@@ -223,11 +223,15 @@ def read_fork_historical_material(
         validate_subagent_completion_storage_body,
     )
 
-    if connection.isolation_level is not IsolationLevel.REPEATABLE_READ:
+    if connection.isolation_level is not IsolationLevel.READ_COMMITTED:
         raise ConversationKernelConflict(
-            "Fork requires its single REPEATABLE READ transaction"
+            "Fork requires its single READ COMMITTED transaction with source row lock"
         )
     _deadline(deadline_monotonic)
+    if connection.execute(
+        "SELECT 1 FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE", (source_session_id,)
+    ).fetchone() is None:
+        raise ConversationKernelConflict("Fork source session is absent")
     anchor = read_fork_anchor(connection, source_session_id, anchor_entry_id)
     if anchor is None:
         raise ConversationKernelConflict("FORK_ANCHOR_INELIGIBLE")

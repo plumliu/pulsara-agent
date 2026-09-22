@@ -37,6 +37,7 @@ from pulsara_agent.web_app.session_controller import (
     OldHostCloseFull,
     OldHostCloseQuarantined,
     PreparedRawCloseOperation,
+    SessionDeleteOperation,
     RuntimeReopenOperation,
 )
 from pulsara_agent.primitives.context import thaw_json
@@ -50,7 +51,7 @@ _BROWSER_DETACH_SEAL = object()
 class BrowserSessionDetachToken:
     session_id: str
     detach_nonce: str
-    _operation: RuntimeReopenOperation | PreparedRawCloseOperation
+    _operation: RuntimeReopenOperation | PreparedRawCloseOperation | SessionDeleteOperation
     _owner: "LocalBrowserBridge"
     _gate: object
     _settled: bool
@@ -60,7 +61,7 @@ class BrowserSessionDetachToken:
         *,
         session_id: str,
         detach_nonce: str,
-        operation: RuntimeReopenOperation | PreparedRawCloseOperation,
+        operation: RuntimeReopenOperation | PreparedRawCloseOperation | SessionDeleteOperation,
         gate: object,
         owner: "LocalBrowserBridge",
         _seal: object,
@@ -106,7 +107,7 @@ BridgeDetachOutcome = BridgeDetachNotStarted | BridgeDetachFull | BridgeDetachFa
 @dataclass(frozen=True, slots=True, init=False)
 class BridgeSettlementFull:
     session_id: str
-    _operation: RuntimeReopenOperation | PreparedRawCloseOperation
+    _operation: RuntimeReopenOperation | PreparedRawCloseOperation | SessionDeleteOperation
     _owner: "LocalBrowserBridge"
 
     def __init__(
@@ -305,6 +306,14 @@ class LocalBrowserBridge:
             confirm=lambda: self.sessions.confirm_runtime_reopen_operation(operation),
         )
 
+    async def detach_session_for_delete(self, operation: SessionDeleteOperation) -> BridgeDetachOutcome:
+        return await self._detach_session_for_operation(
+            operation, confirm=lambda: self.sessions.confirm_session_delete_operation(operation),
+        )
+
+    async def settle_session_delete_detach(self, token, *, close_full: bool):
+        return await self.settle_raw_close_detach(token, close_full=close_full)
+
     async def detach_session_for_raw_close(
         self, operation: PreparedRawCloseOperation
     ) -> BridgeDetachOutcome:
@@ -315,7 +324,7 @@ class LocalBrowserBridge:
 
     async def _detach_session_for_operation(
         self,
-        operation: RuntimeReopenOperation | PreparedRawCloseOperation,
+        operation: RuntimeReopenOperation | PreparedRawCloseOperation | SessionDeleteOperation,
         *,
         confirm,
     ) -> BridgeDetachOutcome:

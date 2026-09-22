@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 from psycopg.types.json import Jsonb
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.contracts import (
@@ -95,6 +96,7 @@ class _AuthorityOperations:
     def acquire_host_writer(
         self,
         *,
+        intent: Literal["NEW", "EXISTING"],
         session_id: str,
         workspace_id: str,
         workspace_kind: str = "project",
@@ -105,6 +107,8 @@ class _AuthorityOperations:
         lease_seconds: float,
         deadline_monotonic: float,
     ) -> WriterLease:
+        if intent not in {"NEW", "EXISTING"}:
+            raise ValueError("explicit Host writer acquisition intent is required")
         if lease_seconds <= 0:
             raise ValueError("writer lease must be finite and positive")
         if workspace_kind not in {"project", "transient"}:
@@ -139,6 +143,10 @@ class _AuthorityOperations:
                     """,
                     (session_id,),
                 ).fetchone()
+                if intent == "EXISTING" and row is None:
+                    raise ConversationKernelConflict("session is unavailable")
+                if intent == "NEW" and row is not None:
+                    raise ConversationKernelConflict("new session identity already exists")
                 # For an existing Session this follows the frozen
                 # session -> workspace order; for first creation there is no
                 # Session row to lock yet. The workspace is immutable and the

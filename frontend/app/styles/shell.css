@@ -114,6 +114,40 @@
 .session-item__copy > small { margin-top: 2px; color: var(--muted); font-size: var(--type-label); }
 .session-item__tasks { display: flex; align-items: center; gap: 4px; margin-top: 4px; color: var(--violet); font-size: var(--type-caption); }
 .session-item__tasks.has-attention { color: var(--red); }
+.session-row { position: relative; }
+.session-row > .session-item { padding-right: 33px; }
+.session-row__menu { position: absolute; top: 9px; right: 5px; z-index: 2; }
+.session-row__menu > summary { display: grid; place-items: center; width: 26px; height: 26px; cursor: pointer; border-radius: 6px; color: var(--muted); opacity: 0; list-style: none; }
+.session-row__menu > summary::-webkit-details-marker { display: none; }
+.session-row:hover summary, .session-row:focus-within summary, .session-row__menu[open] summary { opacity: 1; }
+.session-row__menu[open] { z-index: 4; }
+.session-row__menu > button { position: absolute; right: 0; top: 27px; display: flex; align-items: center; gap: 6px; white-space: nowrap; padding: 4px 10px; background: var(--paper-solid); border: 1px solid var(--line); border-radius: 5px; color: var(--red); font-size: var(--type-label); line-height: 18px; box-shadow: var(--shadow-sm); }
+.session-row__menu > button:hover { background: color-mix(in srgb,var(--red-soft) 35%,var(--paper-solid)); }
+.memory-delete-dialog.session-delete-dialog { width: min(520px,100%); outline: none; }
+.memory-delete-dialog.session-delete-dialog > header { align-items: center; gap: 13px; padding: 25px 24px 0; border-bottom: 0; }
+.session-delete-icon { display: grid; place-items: center; flex: none; width: 44px; height: 44px; border-radius: 13px; background: color-mix(in srgb,var(--red-soft) 65%,var(--paper-solid)); color: var(--red); }
+.session-delete-heading { flex: 1; min-width: 0; }
+.session-delete-dialog .session-delete-heading h2 { margin: 0; font-size: var(--type-heading-small); line-height: 1.4; }
+.session-delete-heading p { margin: 5px 0 0; color: var(--muted); font-size: var(--type-small); line-height: 1.6; }
+.session-delete-dialog > header > button { align-self: flex-start; margin: -5px -7px 0 0; }
+.session-delete-body.memory-delete-body { display: grid; gap: 20px; padding: 23px 24px; }
+.session-delete-target { display: flex; align-items: flex-start; gap: 10px; padding: 14px 15px; border: 1px solid var(--line); border-radius: 10px; background: color-mix(in srgb,var(--paper) 72%,var(--paper-solid)); }
+.session-delete-target > svg { flex: none; margin-top: 3px; color: var(--muted); }
+.session-delete-target > div { min-width: 0; }
+.session-delete-target strong { display: block; color: var(--ink-soft); font-size: var(--type-control); font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
+.session-delete-path { display: block; margin-top: 5px; overflow-wrap: anywhere; color: var(--muted); font-size: var(--type-label); line-height: 1.6; }
+.session-delete-preserved p { margin: 0 0 9px; color: var(--ink-soft); font-size: var(--type-small); font-weight: 550; }
+.session-delete-preserved ul { display: flex; flex-wrap: wrap; gap: 9px 19px; margin: 0; padding: 0; list-style: none; }
+.session-delete-preserved li { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: var(--type-label); }
+.session-delete-preserved svg { flex: none; color: var(--green); }
+.session-delete-runtime { display: flex; align-items: flex-start; gap: 7px; margin: 0; color: var(--muted); font-size: var(--type-label); line-height: 1.6; }
+.session-delete-runtime svg { flex: none; margin-top: 2px; }
+.memory-delete-dialog.session-delete-dialog > footer { gap: 9px; padding: 16px 24px; background: color-mix(in srgb,var(--paper) 35%,var(--paper-solid)); }
+.memory-delete-dialog.session-delete-dialog > footer button { min-height: 38px; padding: 8px 16px; }
+.session-delete-dialog > footer button:not(:disabled):hover { background: var(--paper-deep); }
+.session-delete-dialog > footer .is-danger { background: var(--red); color: white; border-color: var(--red); }
+.session-delete-dialog > footer .is-danger:not(:disabled):hover { background: var(--red); filter: brightness(.94); }
+@media (hover: none) { .session-row__menu > summary { opacity: 1; } }
 .unread-dot { width: 5px; height: 5px; margin-top: 5px; border-radius: 50%; background: var(--blue); }
 .sidebar-footer { padding: 12px 6px 2px; border-top: 1px solid var(--line); }
 .connection-line { display: flex; align-items: center; gap: 6px; font-size: var(--type-small); font-weight: 650; }

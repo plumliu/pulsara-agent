@@ -57,6 +57,7 @@ async def _run(args: argparse.Namespace) -> dict[str, object]:
     provider = verified_postgres_provider(os.environ["ROUND5A2_TEST_RUNTIME_DSN"])
     repository = ConversationKernelRepository(provider)
     lease = repository.acquire_host_writer(
+        intent="NEW" if args.mode == "create" else "EXISTING",
         session_id=args.session_id,
         workspace_id=args.workspace_id,
         writer_owner_id=f"round5a2:{args.mode}:{os.getpid()}",

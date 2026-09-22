@@ -520,6 +520,7 @@ def test_round4_user_plan_freezes_permission_and_cancel_handoff_once(
 
     # Writer generation is write-attempt authority, not stable command semantics.
     replacement = repository.acquire_host_writer(
+        intent="EXISTING",
         session_id=lease.guard.session_id,
         workspace_id=repository.read_session_workspace_id(
             lease.guard, deadline_monotonic=monotonic() + 30
@@ -1573,6 +1574,7 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
 
     # Present-empty and absent feedback normalize to the same stable winner.
     replacement = repository.acquire_host_writer(
+        intent="EXISTING",
         session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         writer_owner_id=_id("replacement-host"),

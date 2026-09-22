@@ -1,6 +1,7 @@
 """Loopback-only HTTP surface for Pulsara Web."""
 
 from __future__ import annotations
+from pulsara_agent.conversation_kernel.session_deletion import SessionDeleteRejected
 
 import asyncio
 from pathlib import Path
@@ -572,7 +573,8 @@ class LocalHttpServer:
             "/api/sessions/{session_id}/capabilities/mcp/{server_id}",
             self._remove_session_mcp_server,
         )
-        self._app.router.add_delete("/api/sessions/{session_id}", self._close_session)
+        self._app.router.add_delete("/api/sessions/{session_id}", self._delete_session)
+        self._app.router.add_post("/api/sessions/{session_id}/close", self._close_session)
         self._app.router.add_post(
             "/api/sessions/{session_id}/runtime/reopen",
             self._runtime_reopen_session,
@@ -623,6 +625,8 @@ class LocalHttpServer:
                 status=exc.status,
                 retryable=exc.retryable,
             )
+        except SessionDeleteRejected as exc:
+            return self._error_response(exc.public_code, str(exc), status=exc.status)
         except ProtocolBridgeError as exc:
             return self._error_response(
                 exc.code, exc.public_message, status=409, retryable=True
@@ -1851,19 +1855,18 @@ class LocalHttpServer:
 
     async def _fork_conversation(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
-        if set(body) != {"anchor_entry_id", "child_session_id"} or any(
+        if set(body) != {"anchor_entry_id"} or any(
             not isinstance(body[key], str) or not body[key] for key in body
         ):
             raise HttpPublicError(
                 "FORK_REQUEST_INVALID",
-                "分叉需要消息 ID 和预先确定的新会话 ID。",
+                "分叉需要消息 ID，新会话身份由服务器创建。",
                 status=400,
             )
         return web.json_response(
             await self.sessions.fork_conversation(
                 request.match_info["session_id"],
                 anchor_entry_id=body["anchor_entry_id"],
-                child_session_id=body["child_session_id"],
             )
         )
 
@@ -1904,11 +1907,19 @@ class LocalHttpServer:
         summary = next(item for item in summaries if item["id"] == handle.session_id)
         return web.json_response({"session": summary}, status=201)
 
+    async def _delete_session(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"confirm_permanent_delete"} or body["confirm_permanent_delete"] is not True:
+            raise HttpPublicError("SESSION_DELETE_CONFIRMATION_REQUIRED", "请先确认永久删除这条会话。", status=400)
+        return web.json_response(await self.sessions.delete_session(
+            request.match_info["session_id"], bridge=self.bridge,
+        ))
+
     async def _close_session(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
         session_id = request.match_info["session_id"]
-        close_conversation = body.get("close_conversation", False)
-        if not isinstance(close_conversation, bool):
+        close_conversation = body.get("close_conversation")
+        if set(body) != {"close_conversation"} or not isinstance(close_conversation, bool):
             raise ValueError("close_conversation must be boolean")
         operation = await self.sessions.prepare_raw_close(
             session_id, close_conversation=close_conversation

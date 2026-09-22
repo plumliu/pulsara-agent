@@ -109,6 +109,7 @@ def _bound_session(repository, *, workspace_id: str | None = None):
     runtime = test_model_runtime()
     binding = test_model_binding(runtime)
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id or _id("workspace"),
         writer_owner_id=_id("host"),

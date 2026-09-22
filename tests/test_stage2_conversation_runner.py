@@ -215,7 +215,7 @@ def _name(prefix: str) -> str:
 def _acquire_bound_host_writer(repository, **kwargs):
     """Create/reacquire a session with the one production-shaped test binding."""
 
-    lease = repository.acquire_host_writer(**kwargs)
+    lease = repository.acquire_host_writer(intent=kwargs.pop("intent", "NEW"), **kwargs)
     measured_before = getattr(repository, "host_write_transactions", None)
     repository.update_session_model_call_binding(
         lease.guard,
@@ -4744,6 +4744,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
         runner._continuity.close()
         cold_lease = _acquire_bound_host_writer(
             repository,
+            intent="EXISTING",
             session_id=session_id,
             workspace_id=workspace_id,
             writer_owner_id=_name("cold-host"),
@@ -6324,6 +6325,7 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     replacement_repository = ConversationKernelRepository(provider)
     replacement_lease = _acquire_bound_host_writer(
         replacement_repository,
+        intent="EXISTING",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("replacement-host"),
@@ -9151,6 +9153,7 @@ def test_round5a2_fresh_host_rehydrates_durable_native_replay(
     replacement_repository = ConversationKernelRepository(provider)
     replacement_lease = _acquire_bound_host_writer(
         replacement_repository,
+        intent="EXISTING",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-two"),
@@ -9240,6 +9243,7 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
     exact_repository = ConversationKernelRepository(provider)
     exact_lease = _acquire_bound_host_writer(
         exact_repository,
+        intent="EXISTING",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-two"),
@@ -9266,6 +9270,7 @@ def test_round5a2_selected_corruption_fails_before_open_but_incompatible_target_
     cold_repository = ConversationKernelRepository(provider)
     cold_lease = _acquire_bound_host_writer(
         cold_repository,
+        intent="EXISTING",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-three"),
@@ -9409,6 +9414,7 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
     replacement_repository = ConversationKernelRepository(provider)
     replacement_lease = _acquire_bound_host_writer(
         replacement_repository,
+        intent="EXISTING",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host-two"),

@@ -24,7 +24,7 @@
     "memory_embeddings": ["SELECT", "INSERT", "UPDATE", "DELETE"],
     "prompt_queue_items": ["SELECT", "INSERT", "UPDATE"],
     "session_commands": ["SELECT", "INSERT"],
-    "sessions": ["SELECT", "INSERT", "UPDATE"],
+    "sessions": ["SELECT", "INSERT", "UPDATE", "DELETE"],
     "subagent_task_children": ["SELECT", "INSERT"],
     "subagent_task_dependencies": ["SELECT", "INSERT"],
     "subagent_tasks": ["SELECT", "INSERT", "UPDATE"],

@@ -184,6 +184,7 @@ def test_round5a2_deferred_fk_rejects_replay_without_assistant(
     session_id = _name("session")
     workspace_id = _name("workspace")
     repository.acquire_host_writer(
+        intent="NEW",
         session_id=session_id,
         workspace_id=workspace_id,
         writer_owner_id=_name("host"),

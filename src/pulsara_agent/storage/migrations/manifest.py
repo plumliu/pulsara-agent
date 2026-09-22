@@ -42,7 +42,7 @@ CONVERSATION_KERNEL_RELATIONS = (
 
 CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
     "workspaces": ("SELECT", "INSERT", "DELETE"),
-    "sessions": ("SELECT", "INSERT", "UPDATE"),
+    "sessions": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     "session_commands": ("SELECT", "INSERT"),
     "turns": ("SELECT", "INSERT", "UPDATE"),
     "turn_context_binding_revisions": ("SELECT", "INSERT"),

@@ -39,6 +39,7 @@ def test_session_catalog_order_ignores_writer_lease_maintenance(
             )
         )
         repository.acquire_host_writer(
+            intent="NEW",
             session_id=session_id,
             workspace_id=workspace.workspace_key,
             workspace_kind="transient",

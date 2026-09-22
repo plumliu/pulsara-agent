@@ -735,6 +735,7 @@ def test_pr03_feedback_entry_and_unique_event_commit_together_and_lower_exactly(
     deadline = monotonic() + 30
     workspace_id = _id("workspace")
     lease = repository.acquire_host_writer(
+        intent="NEW",
         session_id=_id("session"),
         workspace_id=workspace_id,
         writer_owner_id=_id("host"),

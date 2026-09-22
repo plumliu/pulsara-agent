@@ -83,7 +83,7 @@ class _ForkOperations:
                 lane=PostgresConnectionLane.HOST_CONTROL,
                 row_factory=dict_row,
                 deadline_monotonic=deadline_monotonic,
-                isolation_level=IsolationLevel.REPEATABLE_READ,
+                isolation_level=IsolationLevel.READ_COMMITTED,
             ) as connection:
                 if connection.execute(
                     "SELECT 1 FROM pulsara_v3.sessions WHERE id = %s",
@@ -93,7 +93,7 @@ class _ForkOperations:
                         child_session_id, False, "CHILD_SESSION_ALREADY_EXISTS"
                     )
                 source = connection.execute(
-                    "SELECT 1 FROM pulsara_v3.sessions WHERE id = %s AND memory_domain_id = %s",
+                    "SELECT 1 FROM pulsara_v3.sessions WHERE id = %s AND memory_domain_id = %s FOR UPDATE",
                     (source_session_id, memory_domain_id),
                 ).fetchone()
                 if source is None:

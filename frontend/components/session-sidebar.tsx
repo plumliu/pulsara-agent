@@ -1,4 +1,4 @@
-import { ChevronRight, Eye, Folder, FolderOpen, GitFork, Plus, Search } from 'lucide-react';
+import { ChevronRight, Ellipsis, Eye, Folder, FolderOpen, GitFork, Plus, Search, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
@@ -25,6 +25,7 @@ interface SessionSidebarProps {
   isOpen: boolean;
   onClose: () => void;
   onSelectSession: (id: string) => void;
+  onDeleteSession: (session: SessionSummary) => void;
   onNewSession: () => void;
   canCreateSession: boolean;
   onOpenCommand: () => void;
@@ -83,13 +84,16 @@ function SessionItem({
   session,
   activeSessionId,
   onSelectSession,
+  onDeleteSession,
 }: {
   session: SessionSummary;
   activeSessionId: string;
   onSelectSession: (id: string) => void;
+  onDeleteSession: (session: SessionSummary) => void;
 }) {
   const presence = getSessionPresence(session, activeSessionId);
   return (
+    <div className="session-row">
     <button
       className={`session-item${presence === 'current' ? ' is-active' : ''}`}
       onClick={() => onSelectSession(session.id)}
@@ -106,6 +110,14 @@ function SessionItem({
       </span>
       {session.unread && <span className="unread-dot" aria-label="有新活动" />}
     </button>
+    <details className="session-row__menu">
+      <summary aria-label={`${session.title} 更多操作`}><Ellipsis size={15} /></summary>
+      <button type="button" onClick={event => {
+        event.currentTarget.closest('details')?.removeAttribute('open');
+        onDeleteSession(session);
+      }}><Trash2 size={13} />删除会话…</button>
+    </details>
+    </div>
   );
 }
 
@@ -118,6 +130,7 @@ export function SessionSidebar({
   isOpen,
   onClose,
   onSelectSession,
+  onDeleteSession,
   onNewSession,
   canCreateSession,
   onOpenCommand,
@@ -209,6 +222,7 @@ export function SessionSidebar({
                                 session={session}
                                 activeSessionId={activeSessionId}
                                 onSelectSession={onSelectSession}
+                                onDeleteSession={onDeleteSession}
                               />
                             ))}
                           </div>
@@ -238,6 +252,7 @@ export function SessionSidebar({
                       session={session}
                       activeSessionId={activeSessionId}
                       onSelectSession={onSelectSession}
+                      onDeleteSession={onDeleteSession}
                     />
                   ))}
                 </div>
