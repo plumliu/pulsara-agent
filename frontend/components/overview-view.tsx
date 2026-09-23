@@ -1,15 +1,13 @@
 import {
   ArrowRight,
-  ArrowUpRight,
-  Blocks,
   Bot,
-  Brain,
   Database,
   ListFilter,
   MessageCircle,
   Plus,
+  Radio,
   Search,
-  Settings2,
+  Sparkles,
 } from 'lucide-react';
 import type {
   AgentTask,
@@ -22,6 +20,7 @@ import type {
   LocalSettingsSummary,
   ModelConfigurationSummary,
 } from '../lib/runtime-adapter';
+import { BrandMark } from './brand-mark';
 import { DatabaseSetupGuide } from './database-setup-guide';
 import {
   getSessionPresence,
@@ -64,7 +63,6 @@ export function OverviewView({
   onNewSession,
   canCreateSession,
 }: OverviewViewProps) {
-  const runningSessions = sessions.filter((session) => session.status === 'running').length;
   const runningTasks = agentTasks.filter((task) => task.status === 'running').length;
   const connected = runtimeStatus === 'online';
   const databaseBlocked = databaseState !== undefined && databaseState !== 'ready';
@@ -75,139 +73,73 @@ export function OverviewView({
 
   return (
     <section className="surface-view overview-view">
-      <header className="page-header">
-        <div>
-          <span className="page-kicker">工作空间</span>
-          <h1>{databaseBlocked ? '准备工作环境' : '工作总览'}</h1>
-          <p>{databaseBlocked ? '连接本地数据库后，即可开始使用。' : '开始新的任务，继续未完成的工作。'}</p>
-        </div>
-        <div className="overview-header-actions">
-          <div className={`runtime-health runtime-health--${runtimeStatus}`}>
-            <span /><strong>{connectionLabels[runtimeStatus]}</strong>
-          </div>
-          {databaseBlocked ? (
-            <button className="secondary-action" onClick={() => onNavigate('settings')}>
-              <Database size={15} />配置 PostgreSQL
-            </button>
-          ) : (
-            <button className="overview-text-action" onClick={() => onNavigate('workbench')}>
-              打开工作台<ArrowUpRight size={16} />
-            </button>
-          )}
+      <header className="surface-topbar">
+        <div className="surface-brand"><BrandMark compact /><span>Pulsara</span></div>
+        <div className={`runtime-health runtime-health--${runtimeStatus}`}>
+          <span /><strong>{connectionLabels[runtimeStatus]}</strong>
         </div>
       </header>
 
-      <div className="overview-content">
-          {databaseBlocked ? (
-            <DatabaseSetupGuide
-              state={databaseState}
-              variant="overview"
-              onOpenSettings={() => onNavigate('settings')}
-            />
-          ) : (
-            <div className="overview-layout">
-              <div className="overview-main">
-                <button
-                  className="overview-create"
-                  aria-label="开始新任务"
-                  disabled={!canCreateSession}
-                  onClick={onNewSession}
-                >
-                  <span className="overview-create__copy">
-                    <strong>开始新任务</strong>
-                    <span>选择工作目录，开始与 Pulsara 协作。</span>
-                  </span>
-                  <span className="overview-create__plus" aria-hidden="true"><Plus size={24} strokeWidth={1.6} /></span>
-                </button>
-
-                <section className="overview-recents" aria-label="最近会话">
-                  <header className="overview-section-heading">
-                    <h2>最近会话<span className="overview-count" aria-label={`共 ${sessions.length} 个会话`}>{sessions.length}</span></h2>
-                    <button className="overview-text-action" onClick={() => onNavigate('workbench')}>
-                      查看全部<ArrowRight size={14} />
-                    </button>
-                  </header>
-                  {sessions.length > 0 ? (
-                    <div className="overview-session-list">
-                      {sessions.slice(0, 4).map((session) => {
-                        const presence = getSessionPresence(session, activeSessionId);
-                        return (
-                          <button className="overview-session" key={session.id} onClick={() => onOpenSession(session.id)}>
-                            <span className="overview-session__icon" aria-hidden="true"><MessageCircle size={18} strokeWidth={1.6} /></span>
-                            <span className="overview-session__copy">
-                              <strong>{session.title}</strong>
-                              <small>{session.subtitle}</small>
-                            </span>
-                            <span className="overview-session__meta">
-                              <time>{session.updatedAt}</time>
-                              <span className={`overview-session__presence is-${presence}`}>
-                                <SessionPresenceGlyph presence={presence} />{sessionPresenceLabels[presence]}
-                              </span>
-                            </span>
-                            <ArrowUpRight className="overview-session__arrow" size={16} />
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="overview-empty">
-                      <span className="overview-empty__icon" aria-hidden="true"><MessageCircle size={24} strokeWidth={1.4} /></span>
-                      <h3>还没有会话</h3>
-                      <p>开始第一个任务，之后可以在这里接着聊。</p>
-                    </div>
-                  )}
-                </section>
-              </div>
-
-              <aside className="overview-aside" aria-label="环境与入口">
-                <section className="overview-environment" aria-label="运行环境">
-                  <header className="overview-section-heading">
-                    <h2>运行环境</h2>
-                    <button className="overview-settings-action" aria-label="管理配置" title="管理配置" onClick={() => onNavigate('settings')}>
-                      <Settings2 size={16} />
-                    </button>
-                  </header>
-                  <dl className="overview-services">
-                    <div>
-                      <dt><Bot size={16} /><span>模型配置{unavailableModelConfigurations > 0 && <small>{unavailableModelConfigurations} 组不可用</small>}</span></dt>
-                      <dd className={readyModelConfigurations > 0 ? 'is-ready' : ''}>{readyModelConfigurations} 组可用</dd>
-                    </div>
-                    <div>
-                      <dt><Search size={16} />记忆检索</dt>
-                      <dd className={embeddingConfigured ? 'is-ready' : ''}>{embeddingConfigured ? '已配置' : '未配置'}</dd>
-                    </div>
-                    <div>
-                      <dt><ListFilter size={16} />结果重排</dt>
-                      <dd className={rerankConfigured ? 'is-ready' : ''}>{rerankConfigured ? '已配置' : '未配置'}</dd>
-                    </div>
-                    <div>
-                      <dt><Database size={16} />本地数据</dt>
-                      <dd className={connected ? 'is-ready' : ''}>{connected ? '就绪' : '等待连接'}</dd>
-                    </div>
-                  </dl>
-                  <section className="overview-activity" aria-label="运行概况">
-                    <dl>
-                      <div><dt>活动会话</dt><dd>{runningSessions}</dd></div>
-                      <div><dt>当前会话运行中任务</dt><dd>{runningTasks}</dd></div>
-                    </dl>
-                  </section>
-                </section>
-
-                <nav className="overview-shortcuts" aria-label="快捷入口">
-                  <button onClick={() => onNavigate('memory')}>
-                    <span className="overview-shortcut-icon"><Brain size={18} strokeWidth={1.6} /></span>
-                    <span><strong>记忆库</strong><small>管理沉淀下来的记忆</small></span>
-                    <ArrowUpRight size={15} />
-                  </button>
-                  <button onClick={() => onNavigate('capabilities')}>
-                    <span className="overview-shortcut-icon"><Blocks size={18} strokeWidth={1.6} /></span>
-                    <span><strong>能力中心</strong><small>工具、技能与连接</small></span>
-                    <ArrowUpRight size={15} />
-                  </button>
-                </nav>
-              </aside>
+      <div className="surface-scroll overview-scroll">
+        <section className="overview-hero">
+          <div>
+            <h1>{databaseBlocked ? <>先准备好<br /><em>本地数据</em></> : <>准备好继续<br /><em>航行</em>了吗？</>}</h1>
+            <p>{databaseBlocked ? '连接 PostgreSQL 后，Pulsara 才能安全保存会话、任务进度和记忆。' : '从一个清晰目标开始，Pulsara 会在这里整理会话、任务进度与需要你处理的事项。'}</p>
+            <div className="hero-actions">
+              {databaseBlocked ? (
+                <button className="primary-action" onClick={() => onNavigate('settings')}><Database size={15} /> 配置 PostgreSQL</button>
+              ) : (
+                <>
+                  <button className="primary-action" disabled={!canCreateSession} onClick={onNewSession}><Plus size={15} /> 开始新任务</button>
+                  <button className="secondary-action" onClick={() => onNavigate('workbench')}><MessageCircle size={14} /> 打开工作台</button>
+                </>
+              )}
             </div>
-          )}
+          </div>
+        </section>
+
+        {databaseBlocked ? (
+          <DatabaseSetupGuide
+            state={databaseState}
+            variant="overview"
+            onOpenSettings={() => onNavigate('settings')}
+          />
+        ) : <>
+        <section className="metric-grid">
+          <article><div className="metric-icon amber"><Radio size={15} /></div><div><strong>{sessions.filter((session) => session.status === 'running').length}</strong><span>活动会话</span></div><small>共 {sessions.length} 个会话</small></article>
+          <article><div className="metric-icon blue"><Bot size={15} /></div><div><strong>{runningTasks}</strong><span>进行中任务</span></div><small>共 {agentTasks.length} 个子任务</small></article>
+          <article><div className="metric-icon green"><Sparkles size={15} /></div><div><strong>{sessions.length}</strong><span>最近会话</span></div><small>可随时继续</small></article>
+          <article><div className="metric-icon violet"><Database size={15} /></div><div><strong>{connected ? '正常' : '—'}</strong><span>本地数据</span></div><small>{connected ? '已经就绪' : '等待连接'}</small></article>
+        </section>
+
+        <div className="overview-columns">
+          <section className="overview-card recent-card">
+            <header className="overview-card__header"><div><span className="page-kicker">最近记录</span><h2>最近会话</h2></div><button onClick={() => onNavigate('workbench')}>查看全部</button></header>
+            <div className="recent-table">
+              {sessions.slice(0, 4).map((session) => {
+                const presence = getSessionPresence(session, activeSessionId);
+                return (
+                  <button key={session.id} onClick={() => onOpenSession(session.id)}>
+                    <SessionPresenceGlyph presence={presence} /><span><strong>{session.title}</strong><small>{session.subtitle}</small></span><span className={`table-state table-state--${presence}`}>{sessionPresenceLabels[presence]}</span><time>{session.updatedAt}</time><ArrowRight size={12} />
+                  </button>
+                );
+              })}
+              {sessions.length === 0 && <div className="empty-state"><MessageCircle size={22} /><h3>会话列表为空</h3><p>创建任务后，它会出现在这里。</p></div>}
+            </div>
+          </section>
+
+          <section className="overview-card system-card">
+            <header className="overview-card__header"><div><span className="page-kicker">本机设置</span><h2>当前配置</h2></div></header>
+            <div className="system-map">
+              <div className="system-node"><Bot size={14} /><span><strong>模型配置</strong><small>{readyModelConfigurations} 组可用{unavailableModelConfigurations > 0 ? ` · ${unavailableModelConfigurations} 组不可用` : ''}</small></span><b className={modelConfigurations.length === 0 ? 'is-inactive' : undefined}>{modelConfigurations.length} 组</b></div>
+              <div className="system-line" />
+              <div className="system-node"><Search size={14} /><span><strong>记忆检索</strong><small>DashScope Embedding</small></span><b className={embeddingConfigured ? undefined : 'is-inactive'}>{embeddingConfigured ? '已配置' : '未配置'}</b></div>
+              <div className="system-line" />
+              <div className="system-node"><ListFilter size={14} /><span><strong>结果重排</strong><small>DashScope Rerank</small></span><b className={rerankConfigured ? undefined : 'is-inactive'}>{rerankConfigured ? '已配置' : '未配置'}</b></div>
+            </div>
+          </section>
+        </div>
+        </>}
       </div>
     </section>
   );

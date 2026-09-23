@@ -1,5 +1,5 @@
 export function BrandMark({ compact = false }: { compact?: boolean }) {
-  const size = compact ? 36 : 48;
+  const size = compact ? 46 : 48;
 
   return (
     // Local static asset: the standalone app has no Next image service.

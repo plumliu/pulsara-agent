@@ -16,7 +16,8 @@ import {
   Sun,
   X,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 import type { AppView, SessionWorkspaceSelection, ToastMessage } from '../lib/pulsara-types';
 
 interface CommandPaletteProps {
@@ -119,10 +120,34 @@ export function NewSessionDialog({ open, canCreateSession, defaultWorkspacePath,
   );
 }
 
+function activeModal(): HTMLDialogElement | null {
+  return typeof document === 'undefined' ? null : document.querySelector<HTMLDialogElement>('dialog[open]');
+}
+
+function subscribeToModalChange(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.body, { attributes: true, attributeFilter: ['open'], childList: true, subtree: true });
+  return () => observer.disconnect();
+}
+
+const noModalSubscription = () => () => {};
+
 export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDismiss: (id: number) => void }) {
-  return (
-    <div className="toast-stack" aria-live="polite">
+  const stackRef = useRef<HTMLDivElement>(null);
+  const hasToasts = toasts.length > 0;
+  const modal = useSyncExternalStore(hasToasts ? subscribeToModalChange : noModalSubscription, activeModal, () => null);
+
+  useLayoutEffect(() => {
+    const stack = stackRef.current;
+    if (!stack || !hasToasts || typeof stack.showPopover !== 'function') return;
+    stack.showPopover();
+    return () => { if (stack.matches(':popover-open')) stack.hidePopover(); };
+  }, [modal, hasToasts]);
+
+  const content = (
+    <div ref={stackRef} className="toast-stack" popover="manual" aria-live="polite">
       {toasts.map((toast) => <button className={`toast toast--${toast.tone ?? 'neutral'}`} key={toast.id} onClick={() => onDismiss(toast.id)}><span className="toast-mark">{toast.tone === 'success' ? <Check size={12} /> : '✦'}</span><span><strong>{toast.title}</strong>{toast.detail && <small>{toast.detail}</small>}</span><X size={11} /></button>)}
     </div>
   );
+  return modal ? createPortal(content, modal) : content;
 }

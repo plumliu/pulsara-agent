@@ -109,6 +109,14 @@ function EmptyState({ children }: { children: React.ReactNode }) {
   return <div className="capability-page-empty"><Sparkles size={18} /><span>{children}</span></div>;
 }
 
+function CapabilityDrawer({ open, children }: { open: boolean; children: React.ReactNode }) {
+  return (
+    <div className={`capability-drawer${open ? ' is-open' : ''}`} aria-hidden={!open} inert={!open}>
+      <div className="capability-drawer__inner">{children}</div>
+    </div>
+  );
+}
+
 
 export function CapabilityView({
   snapshot,
@@ -220,19 +228,27 @@ export function CapabilityView({
                   <button className="capability-row-more" aria-label={`查看 ${plugin.name}`}><MoreHorizontal size={15} /></button>
                   <Toggle checked={plugin.enabled} busy={busyKey === `plugin:${plugin.id}`} label={`${plugin.enabled ? '关闭' : '开启'} ${plugin.name}`} onChange={() => void togglePlugin(plugin)} />
                 </div>
-                {open && <div className="capability-list-detail"><div className="capability-detail-stats"><span><strong>{plugin.skillCount}</strong> 技能</span><span><strong>{plugin.mcpCount}</strong> MCP 服务</span>{plugin.author && <span>作者 {plugin.author}</span>}</div>{plugin.enabled && <div className="capability-success"><Check size={13} /> 已启用；会话将在安全时机采用</div>}{(plugin.mcpConnections ?? []).map((connection) => <div className="capability-detail-actions" key={connection.serverId}><span>{connection.serverId}{!plugin.enabled && ' · 插件已关闭'}</span><button className="secondary-ghost" onClick={() => setEditingPluginConnection({plugin, connection})}><PlugZap size={13} />配置连接</button></div>)}<div className="capability-detail-actions">{removeCandidate === plugin.id ? <><span className="capability-remove-warning">确定从 Pulsara 中移除？</span><button className="secondary-ghost" onClick={() => setRemoveCandidate(undefined)}>取消</button><button className="danger-ghost" disabled={busyKey === `remove:${plugin.id}`} onClick={() => void removePlugin(plugin)}><Trash2 size={13} />确认移除</button></> : <button className="danger-ghost" onClick={() => setRemoveCandidate(plugin.id)}><Trash2 size={13} />移除插件</button>}</div></div>}
+                <CapabilityDrawer open={open}>
+                  <div className="capability-list-detail"><div className="capability-detail-stats"><span><strong>{plugin.skillCount}</strong> 技能</span><span><strong>{plugin.mcpCount}</strong> MCP 服务</span>{plugin.author && <span>作者 {plugin.author}</span>}</div>{plugin.enabled && <div className="capability-success"><Check size={13} /> 已启用；会话将在安全时机采用</div>}{(plugin.mcpConnections ?? []).map((connection) => <div className="capability-detail-actions" key={connection.serverId}><span>{connection.serverId}{!plugin.enabled && ' · 插件已关闭'}</span><button className="secondary-ghost" onClick={() => setEditingPluginConnection({plugin, connection})}><PlugZap size={13} />配置连接</button></div>)}<div className="capability-detail-actions">{removeCandidate === plugin.id ? <><span className="capability-remove-warning">确定从 Pulsara 中移除？</span><button className="secondary-ghost" onClick={() => setRemoveCandidate(undefined)}>取消</button><button className="danger-ghost" disabled={busyKey === `remove:${plugin.id}`} onClick={() => void removePlugin(plugin)}><Trash2 size={13} />确认移除</button></> : <button className="danger-ghost" onClick={() => setRemoveCandidate(plugin.id)}><Trash2 size={13} />移除插件</button>}</div></div>
+                </CapabilityDrawer>
               </article>;
             }) : <EmptyState>{normalizedQuery ? '没有匹配的插件。' : '还没有安装用户插件。'}</EmptyState>
           ) : tab === 'mcp' ? (
             <>
-            {pluginMcp.map(({plugin, connection}) => <article className={`capability-list-item capability-list-item--mcp${plugin.enabled ? '' : ' is-disabled'}`} key={`plugin:${plugin.id}:${connection.serverId}`}>
-              <div className="capability-list-row capability-list-row--connection">
-                <span className="capability-list-icon"><PlugZap size={18} /></span>
-                <span className="capability-list-copy"><strong>{connection.serverId}</strong><small>来自插件 · {plugin.name}</small></span>
-                <span className="capability-source-pill">{plugin.enabled ? '随插件启用' : '插件已关闭'}</span>
-                <button className="secondary-ghost" onClick={() => setEditingPluginConnection({plugin, connection})}>配置连接与凭据</button>
-              </div>
-            </article>)}
+            {pluginMcp.map(({plugin, connection}) => {
+              const open = expanded === `plugin-mcp:${plugin.id}:${connection.serverId}`;
+              return <article className={`capability-list-item capability-list-item--mcp${plugin.enabled ? '' : ' is-disabled'}${open ? ' is-expanded' : ''}`} key={`plugin:${plugin.id}:${connection.serverId}`}>
+                <div className="capability-list-row capability-list-row--connection" onClick={() => setExpanded(open ? undefined : `plugin-mcp:${plugin.id}:${connection.serverId}`)}>
+                  <span className="capability-list-icon"><PlugZap size={18} /></span>
+                  <span className="capability-list-copy"><strong>{connection.serverId}</strong><small>来自插件 · {plugin.name}</small></span>
+                  <span className="capability-source-pill">{plugin.enabled ? '随插件启用' : '插件已关闭'}</span>
+                  <ChevronRight className={open ? 'is-open' : ''} size={14} />
+                </div>
+                <CapabilityDrawer open={open}>
+                  <div className="capability-list-detail"><div className="capability-detail-actions"><button className="secondary-ghost" onClick={() => setEditingPluginConnection({plugin, connection})}>配置连接与凭据</button></div></div>
+                </CapabilityDrawer>
+              </article>;
+            })}
             {mcp.length ? mcp.map((server) => {
               const open = expanded === `mcp:${server.id}`;
               return <article className={`capability-list-item capability-list-item--mcp${open ? ' is-expanded' : ''}`} key={server.id}>
@@ -243,8 +259,9 @@ export function CapabilityView({
                   <ChevronRight className={open ? 'is-open' : ''} size={14} />
                   <Toggle checked={server.enabled} busy={busyKey === `mcp:${server.id}`} label={`${server.enabled ? '关闭' : '开启'} ${server.name}`} onChange={() => void toggleMcp(server)} />
                 </div>
-                {open && <div className="capability-list-detail"><div className="capability-detail-stats"><span><strong>{server.toolCount}</strong> 工具</span><span><strong>{server.resourceCount}</strong> 资源</span><span><Workflow size={12} /> {server.availableToSubagents ? '主任务与子任务' : '仅主任务'}</span><span>{server.transport.kind === 'stdio' ? '本地命令' : 'HTTP'}</span></div>{server.enabled && (server.toolCount > 0 || server.resourceCount > 0) && <div className="capability-success"><Check size={13} /> Pulsara 会按需使用已发现的能力</div>}{server.instructions && <p>{server.instructions}</p>}{server.tools.length > 0 && <div className="capability-tool-grid">{server.tools.map((tool) => <div key={`${server.id}:${tool.remoteName}`}><code>{tool.name}</code><span>{tool.description || '没有说明'}</span></div>)}</div>}</div>}
-                {open && <div className="capability-detail-actions">
+                <CapabilityDrawer open={open}>
+                  <div className="capability-list-detail"><div className="capability-detail-stats"><span><strong>{server.toolCount}</strong> 工具</span><span><strong>{server.resourceCount}</strong> 资源</span><span><Workflow size={12} /> {server.availableToSubagents ? '主任务与子任务' : '仅主任务'}</span><span>{server.transport.kind === 'stdio' ? '本地命令' : 'HTTP'}</span></div>{server.enabled && (server.toolCount > 0 || server.resourceCount > 0) && <div className="capability-success"><Check size={13} /> Pulsara 会按需使用已发现的能力</div>}{server.instructions && <p>{server.instructions}</p>}{server.tools.length > 0 && <div className="capability-tool-grid">{server.tools.map((tool) => <div key={`${server.id}:${tool.remoteName}`}><code>{tool.name}</code><span>{tool.description || '没有说明'}</span></div>)}</div>}</div>
+                  <div className="capability-detail-actions capability-drawer-actions">
                   <button className="secondary-ghost" onClick={() => setEditingMcp(server)}>编辑连接与凭据</button>
                   {(server.config.auth as { type?: string } | undefined)?.type === 'oauth' && <>
                     <button className="secondary-ghost" onClick={() => void onMcpAuthorization(server, 'login')}>登录授权</button>
@@ -260,28 +277,34 @@ export function CapabilityView({
                       try { if (await onRemoveMcp(server)) setRemoveCandidate(undefined); } finally { setBusyKey(undefined); }
                     })()}><Trash2 size={13} />确认移除</button>
                   </> : <button className="danger-ghost" onClick={() => setRemoveCandidate(`mcp:${server.id}`)}><Trash2 size={13} />移除服务</button>}
-                </div>}
+                  </div>
+                </CapabilityDrawer>
               </article>;
             }) : pluginMcp.length ? null : <EmptyState>{normalizedQuery ? '没有匹配的 MCP 服务。' : <>还没有 MCP 服务。配置文件位于 <code>{snapshot?.mcp.configPath}</code>。</>}</EmptyState>}
             </>
           ) : (
-            skills.length ? skills.map((skill) => <article className={`capability-list-item capability-list-item--skill${skill.enabled ? '' : ' is-disabled'}`} key={`${skill.root}:${skill.path}`}>
-              <div className="capability-list-row" onClick={() => setExpanded(expanded === `skill:${skill.path}` ? undefined : `skill:${skill.path}`)}>
-                <span className="capability-list-icon"><BookOpenText size={18} /></span><span className="capability-list-copy"><strong>{skill.name}</strong><small>{skill.description}</small></span>
-                <span className="capability-source-pill">{skill.root === 'agents' ? '.agents' : '.pulsara'}</span>
-                <Toggle checked={skill.enabled} busy={busyKey === `skill:${skill.path}`} label={`${skill.enabled ? '关闭' : '开启'} ${skill.name}`} onChange={() => void toggleSkill(skill)} />
-              </div>
-              {expanded === `skill:${skill.path}` && <div className="capability-list-detail">
-                <p>删除完整安装副本，不影响最初的安装来源。{skill.root === 'agents' ? '此目录由兼容的 Agent 共享，其他应用也可能不再看到这项技能。' : ''}</p>
-                <div className="capability-detail-actions">{removeCandidate === `skill:${skill.path}` ? <>
-                  <button className="secondary-ghost" onClick={() => setRemoveCandidate(undefined)}>取消</button>
-                  <button className="danger-ghost" disabled={busyKey === `remove-skill:${skill.path}`} onClick={() => void (async () => {
-                    setBusyKey(`remove-skill:${skill.path}`);
-                    try { if (await onRemoveSkill(skill)) setRemoveCandidate(undefined); } finally { setBusyKey(undefined); }
-                  })()}><Trash2 size={13} />确认删除技能</button>
-                </> : <button className="danger-ghost" onClick={() => setRemoveCandidate(`skill:${skill.path}`)}><Trash2 size={13} />删除技能</button>}</div>
-              </div>}
-            </article>) : <EmptyState>{normalizedQuery ? '没有匹配的技能。' : '还没有安装用户技能。'}</EmptyState>
+            skills.length ? skills.map((skill) => {
+              const open = expanded === `skill:${skill.path}`;
+              return <article className={`capability-list-item capability-list-item--skill${skill.enabled ? '' : ' is-disabled'}${open ? ' is-expanded' : ''}`} key={`${skill.root}:${skill.path}`}>
+                <div className="capability-list-row" onClick={() => setExpanded(open ? undefined : `skill:${skill.path}`)}>
+                  <span className="capability-list-icon"><BookOpenText size={18} /></span><span className="capability-list-copy"><strong>{skill.name}</strong><small>{skill.description}</small></span>
+                  <span className="capability-source-pill">{skill.root === 'agents' ? '.agents' : '.pulsara'}</span>
+                  <Toggle checked={skill.enabled} busy={busyKey === `skill:${skill.path}`} label={`${skill.enabled ? '关闭' : '开启'} ${skill.name}`} onChange={() => void toggleSkill(skill)} />
+                </div>
+                <CapabilityDrawer open={open}>
+                  <div className="capability-list-detail capability-list-detail--skill">
+                    <p>{skill.root === 'agents' ? '删除后，其他应用也可能无法使用此技能。' : '删除后，Pulsara将不再使用此技能。'}</p>
+                    <div className="capability-detail-actions">{removeCandidate === `skill:${skill.path}` ? <>
+                      <button className="secondary-ghost" onClick={() => setRemoveCandidate(undefined)}>取消</button>
+                      <button className="danger-ghost" disabled={busyKey === `remove-skill:${skill.path}`} onClick={() => void (async () => {
+                        setBusyKey(`remove-skill:${skill.path}`);
+                        try { if (await onRemoveSkill(skill)) setRemoveCandidate(undefined); } finally { setBusyKey(undefined); }
+                      })()}><Trash2 size={13} />确认删除技能</button>
+                    </> : <button className="danger-ghost" onClick={() => setRemoveCandidate(`skill:${skill.path}`)}><Trash2 size={13} />删除技能</button>}</div>
+                  </div>
+                </CapabilityDrawer>
+              </article>;
+            }) : <EmptyState>{normalizedQuery ? '没有匹配的技能。' : '还没有安装用户技能。'}</EmptyState>
           )}
         </div>
 

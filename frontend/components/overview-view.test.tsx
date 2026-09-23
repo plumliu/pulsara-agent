@@ -1,5 +1,5 @@
 import type { ComponentProps } from 'react';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { OverviewView } from './overview-view';
 
@@ -22,23 +22,18 @@ function renderOverview(overrides: Partial<ComponentProps<typeof OverviewView>> 
   );
 }
 
-it('uses the shared page heading without a separate brand bar or large logo', () => {
+it('shows the original hero, brand bar, metrics, and empty recent sessions', () => {
   const { container } = renderOverview();
 
-  expect(screen.getByText('工作空间')).toBeTruthy();
-  expect(screen.getByRole('button', { name: '打开工作台' })).toBeTruthy();
-  expect(screen.queryByText('Pulsara 工作台')).toBeNull();
-  expect(screen.queryByText('你的本地智能工作台')).toBeNull();
-  expect(screen.queryByText('私密 · 仅限本机')).toBeNull();
-  expect(container.querySelector('.surface-topbar')).toBeNull();
-  expect(container.querySelector('.overview-content img')).toBeNull();
-  expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('工作总览');
-  expect(screen.getByRole('heading', { level: 1 }).closest('.page-header')).toBeTruthy();
-  expect(screen.getByRole('region', { name: '运行环境' })).toBeTruthy();
-  expect(container.querySelector('.overview-metrics')).toBeNull();
+  expect(container.querySelector('.surface-topbar')).toBeTruthy();
+  expect(screen.getByText('Pulsara')).toBeTruthy();
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('准备好继续航行了吗？');
+  expect(container.querySelectorAll('.metric-grid article')).toHaveLength(4);
+  expect(screen.getByRole('heading', { name: '最近会话' })).toBeTruthy();
+  expect(screen.getByText('会话列表为空')).toBeTruthy();
 });
 
-it('keeps task and workbench actions and provides a settings shortcut', () => {
+it('opens task creation, workbench, and all sessions from the original actions', () => {
   const onNavigate = vi.fn();
   const onNewSession = vi.fn();
   renderOverview({ onNavigate, onNewSession });
@@ -47,14 +42,10 @@ it('keeps task and workbench actions and provides a settings shortcut', () => {
   expect(onNewSession).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole('button', { name: '打开工作台' }));
   fireEvent.click(screen.getByRole('button', { name: '查看全部' }));
-  fireEvent.click(screen.getByRole('button', { name: '管理配置' }));
-  fireEvent.click(screen.getByRole('button', { name: /记忆库/ }));
-  fireEvent.click(screen.getByRole('button', { name: /能力中心/ }));
-  expect(onNavigate.mock.calls).toEqual([['workbench'], ['workbench'], ['settings'], ['memory'], ['capabilities']]);
-  expect(screen.getByText('还没有会话')).toBeTruthy();
+  expect(onNavigate.mock.calls).toEqual([['workbench'], ['workbench']]);
 });
 
-it('keeps recent session navigation, presence, and the four-row preview', () => {
+it('shows four recent sessions with shared presence and opens the selected session', () => {
   const onOpenSession = vi.fn();
   const sessions: ComponentProps<typeof OverviewView>['sessions'] = Array.from({ length: 5 }, (_, index) => ({
     id: `session-${index}`,
@@ -64,22 +55,20 @@ it('keeps recent session navigation, presence, and the four-row preview', () => 
     updatedAt: '刚刚',
     live: index < 2,
   }));
-  renderOverview({ sessions, activeSessionId: 'session-0', onOpenSession });
+  const { container } = renderOverview({ sessions, activeSessionId: 'session-0', onOpenSession });
 
-  expect(screen.getByText('当前会话')).toBeTruthy();
-  expect(screen.getByText('已载入')).toBeTruthy();
-  expect(screen.getAllByText('可恢复')).toHaveLength(2);
+  expect(container.querySelectorAll('.recent-table > button')).toHaveLength(4);
+  expect(container.querySelectorAll('.recent-table .session-presence--current')).toHaveLength(1);
+  expect(container.querySelectorAll('.recent-table .session-presence--loaded')).toHaveLength(1);
+  expect(container.querySelectorAll('.recent-table .session-presence--resumable')).toHaveLength(2);
   expect(screen.queryByText('任务 4')).toBeNull();
-  expect(screen.queryByText('还没有会话')).toBeNull();
+  expect(screen.getByText('共 5 个会话')).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: /任务 2/ }));
   expect(onOpenSession).toHaveBeenCalledWith('session-2');
-  const metrics = within(screen.getByRole('region', { name: '运行概况' }));
-  expect(screen.getByLabelText('共 5 个会话').textContent).toBe('5');
-  expect(metrics.getByText('1')).toBeTruthy();
 });
 
-it('keeps running task counts scoped to the current session instead of all sessions', () => {
-  renderOverview({
+it('counts running tasks and shows model and retrieval configuration', () => {
+  const { container } = renderOverview({
     agentTasks: (['running', 'completed', 'pending'] as const).map((status) => ({
       id: status,
       label: status,
@@ -90,16 +79,6 @@ it('keeps running task counts scoped to the current session instead of all sessi
       dependencyIds: [],
       color: 'amber',
     })),
-  });
-
-  const activity = within(screen.getByRole('region', { name: '运行概况' }));
-  expect(activity.getByText('当前会话运行中任务')).toBeTruthy();
-  expect(activity.getByText('1')).toBeTruthy();
-  expect(activity.getByText('0')).toBeTruthy();
-});
-
-it('distinguishes available models and configured retrieval services', () => {
-  renderOverview({
     localSettings: {
       postgres: null,
       dashscope_credentials: { embedding_configured: true, rerank_configured: false },
@@ -118,24 +97,25 @@ it('distinguishes available models and configured retrieval services', () => {
     })),
   });
 
-  expect(screen.getByText('1 组可用')).toBeTruthy();
-  expect(screen.getByText('1 组不可用')).toBeTruthy();
+  expect(container.querySelectorAll('.metric-grid article')[1]?.querySelector('strong')?.textContent).toBe('1');
+  expect(screen.getByText('1 组可用 · 1 组不可用')).toBeTruthy();
   expect(screen.getByText('已配置')).toBeTruthy();
   expect(screen.getByText('未配置')).toBeTruthy();
 });
 
-it('still directs an unconfigured database to setup instead of showing ready data', () => {
+it('directs an unconfigured database to setup instead of showing session data', () => {
   const onNavigate = vi.fn();
-  renderOverview({ databaseState: 'database_not_configured', canCreateSession: false, onNavigate });
+  const { container } = renderOverview({ databaseState: 'database_not_configured', canCreateSession: false, onNavigate });
 
+  expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('先准备好本地数据');
   expect(screen.getByRole('region', { name: 'PostgreSQL 配置引导' })).toBeTruthy();
-  expect(screen.queryByRole('region', { name: '运行概况' })).toBeNull();
+  expect(container.querySelector('.metric-grid')).toBeNull();
   expect(screen.queryByRole('button', { name: '开始新任务' })).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: '配置 PostgreSQL' }));
   expect(onNavigate).toHaveBeenCalledWith('settings');
 });
 
-it('disables task creation while offline and does not report local data as ready', () => {
+it('disables task creation while offline and reports the connection state', () => {
   const onNewSession = vi.fn();
   renderOverview({ runtimeStatus: 'offline', canCreateSession: false, onNewSession });
 
@@ -145,5 +125,4 @@ it('disables task creation while offline and does not report local data as ready
   expect(onNewSession).not.toHaveBeenCalled();
   expect(screen.getByText('连接已中断')).toBeTruthy();
   expect(screen.getByText('等待连接')).toBeTruthy();
-  expect(screen.queryByText('就绪')).toBeNull();
 });

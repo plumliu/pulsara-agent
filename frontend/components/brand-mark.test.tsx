@@ -6,7 +6,7 @@ afterEach(cleanup);
 
 it.each([
   { compact: false, size: 48 },
-  { compact: true, size: 36 },
+  { compact: true, size: 46 },
 ])('uses the approved decorative icon with compact=$compact', ({ compact, size }) => {
   const { container } = render(<BrandMark compact={compact} />);
   const image = container.querySelector('img')!;

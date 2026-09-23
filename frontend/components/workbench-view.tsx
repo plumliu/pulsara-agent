@@ -1129,7 +1129,11 @@ function UserMessage({
 function AssistantHeading({ message, response, label = 'Pulsara' }: { message: Message; response: boolean; label?: string }) {
   return (
     <header className={`assistant-heading${response ? ' assistant-heading--response' : ' assistant-heading--run-start'}`}>
-      <div className="assistant-avatar"><span /></div>
+      <div className="assistant-avatar" aria-hidden="true">
+        {/* Local static asset: the standalone app has no Next image service. */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src="/assets/pulsara-icon.png" width={27} height={27} alt="" draggable={false} />
+      </div>
       <div className="assistant-identity">
         <strong>{label}</strong>
         {message.status === 'running' && (

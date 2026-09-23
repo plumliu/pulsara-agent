@@ -23,10 +23,10 @@
   color: #f4efe4;
   box-shadow: inset -1px 0 rgba(255,255,255,.035);
 }
-.rail-logo { display: grid; place-items: center; width: 40px; height: 40px; margin-bottom: 27px; border-radius: 12px; background: transparent; }
+.rail-logo { display: grid; place-items: center; width: 50px; height: 50px; margin-bottom: 17px; border-radius: 12px; background: transparent; }
 .rail-logo:hover { background: rgba(255,255,255,.06); }
 .brand-mark { display: block; flex: none; width: 48px; height: 48px; object-fit: contain; }
-.brand-mark.is-compact { width: 36px; height: 36px; }
+.brand-mark.is-compact { width: 46px; height: 46px; }
 .rail-nav { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .rail-nav--bottom { margin-top: auto; }
 .rail-button { position: relative; display: grid; place-items: center; width: 40px; height: 40px; border-radius: 11px; background: transparent; color: var(--rail-muted); transition: .16s ease; }

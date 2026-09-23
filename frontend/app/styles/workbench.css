@@ -127,8 +127,8 @@
 .assistant-turn--response-with-reasoning > .reasoning-disclosure:first-child { margin-top: 0; }
 .assistant-turn--operational + .assistant-turn--response { margin-top: 10px; }
 .assistant-heading { display: grid; grid-template-columns: 31px minmax(0,1fr) auto; gap: 9px; align-items: center; }
-.assistant-avatar { display: grid; place-items: center; width: 31px; height: 31px; border-radius: 50%; background: var(--ink); }
-.assistant-avatar span { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 0 4px color-mix(in srgb, var(--amber) 14%, transparent); }
+.assistant-avatar { display: grid; place-items: center; width: 31px; height: 31px; }
+.assistant-avatar img { display: block; width: 27px; height: 27px; object-fit: contain; }
 .assistant-identity { min-width: 0; }
 .assistant-identity > strong { font-family: var(--serif); font-size: var(--type-title); }
 .thinking-label { margin-left: 7px; color: var(--muted); font-size: var(--type-label); }
