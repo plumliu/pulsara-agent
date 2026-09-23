@@ -1542,14 +1542,14 @@ describe('PulsaraApp', () => {
         time: '18:12', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-after-steer', kind: 'full', body: '继续检查真实页面。' }],
       }, {
-        id: 'assistant-final', turnId: 'turn-one', role: 'assistant', assistantKind: 'terminal', forkEligible: true,
+        id: 'assistant-final', turnId: 'turn-one', role: 'assistant', assistantKind: 'terminal', rootFinal: true, forkEligible: true,
         time: '18:13', body: '检查已经完成。', status: 'completed',
         reasoning: [{ id: 'reasoning-after-tool', kind: 'summary', body: '整理检查结果。' }],
       }, {
         id: 'user-prompt-two', turnId: 'turn-two', role: 'user', userKind: 'prompt', time: '18:14',
         body: '继续下一项。', status: 'completed',
       }, {
-        id: 'assistant-final-two', turnId: 'turn-two', role: 'assistant', assistantKind: 'terminal', forkEligible: true, time: '18:15',
+        id: 'assistant-final-two', turnId: 'turn-two', role: 'assistant', assistantKind: 'terminal', rootFinal: true, forkEligible: true, time: '18:15',
         body: '第二项也已经完成。', status: 'completed',
       }],
       isRunning: false,
@@ -1891,7 +1891,7 @@ describe('PulsaraApp', () => {
         }],
       }, {
         id: 'assistant-terminal-response', role: 'assistant', assistantKind: 'terminal',
-        forkEligible: true, time: '18:12', body: '最终结果已经准备好。', status: 'completed',
+        rootFinal: true, forkEligible: true, time: '18:12', body: '最终结果已经准备好。', status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -1918,7 +1918,7 @@ describe('PulsaraApp', () => {
       ...projection(''),
       messages: [{
         id: 'assistant-source', role: 'assistant', assistantKind: 'terminal',
-        forkEligible: true, time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
+        rootFinal: true, forkEligible: true, time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -1939,7 +1939,7 @@ describe('PulsaraApp', () => {
       ...projection(''),
       messages: [{
         id: 'assistant-formula', role: 'assistant', assistantKind: 'terminal',
-        forkEligible: true, time: '18:12', body: '能量关系为 $E=mc^2$。', status: 'completed',
+        rootFinal: true, forkEligible: true, time: '18:12', body: '能量关系为 $E=mc^2$。', status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -1991,7 +1991,7 @@ describe('PulsaraApp', () => {
       ...projection(''),
       messages: [{
         id: 'assistant-source', role: 'assistant', assistantKind: 'terminal',
-        forkEligible: true, time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
+        rootFinal: true, forkEligible: true, time: '18:12', body: SOURCE_FIDELITY_MARKDOWN, status: 'completed',
       }],
       isRunning: false,
       activeTurnId: undefined,
@@ -2097,7 +2097,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(''), isRunning: true, messages: [
       { id: 'old-intermediate', role: 'assistant', assistantKind: 'terminal', body: '中间正文', time: '18:10', status: 'completed', forkEligible: false },
-      { id: 'canonical-anchor', role: 'assistant', assistantKind: 'terminal', body: '已结算最终回复', time: '18:12', status: 'completed', forkEligible: true },
+      { id: 'canonical-anchor', role: 'assistant', assistantKind: 'terminal', body: '已结算最终回复', time: '18:12', status: 'completed', rootFinal: true, forkEligible: true },
     ] };
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -2122,7 +2122,7 @@ describe('PulsaraApp', () => {
   it('refreshes the list after a lost Fork response without replaying or claiming a known outcome', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(''), initialContextBase: { base_kind: 'SNAPSHOT', display_after_entry_sequence: 0 }, messages: [
-      { id: 'imported-anchor', role: 'assistant', assistantKind: 'terminal', body: '继承的回复', time: '18:12', status: 'completed', forkEligible: true, entryOwnerKind: 'IMPORTED_HISTORY' },
+      { id: 'imported-anchor', role: 'assistant', assistantKind: 'terminal', body: '继承的回复', time: '18:12', status: 'completed', rootFinal: true, forkEligible: true, entryOwnerKind: 'IMPORTED_HISTORY' },
     ] };
     adapter.forkConversation.mockImplementationOnce(async () => {
       const child = 'session:server-created-before-response-loss';
@@ -2142,7 +2142,7 @@ describe('PulsaraApp', () => {
   it('starts a Fork with empty draft and planning off while retaining the source draft', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(''), isRunning: false, messages: [
-      { id: 'anchor', role: 'assistant', assistantKind: 'terminal', body: '可分叉回复', time: '18:12', status: 'completed', forkEligible: true },
+      { id: 'anchor', role: 'assistant', assistantKind: 'terminal', body: '可分叉回复', time: '18:12', status: 'completed', rootFinal: true, forkEligible: true },
     ] };
     render(<PulsaraApp adapter={adapter} />);
     const textbox = await screen.findByRole('textbox', { name: '发送给 Pulsara' });
@@ -2165,7 +2165,7 @@ describe('PulsaraApp', () => {
   it.each(['CREATED_OPEN_DEFERRED', 'NOT_CREATED'] as const)('keeps the parent selected for %s', async (outcome) => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(''), messages: [
-      { id: 'anchor', role: 'assistant', assistantKind: 'terminal', body: '保留父会话', time: '18:12', status: 'completed', forkEligible: true },
+      { id: 'anchor', role: 'assistant', assistantKind: 'terminal', body: '保留父会话', time: '18:12', status: 'completed', rootFinal: true, forkEligible: true },
     ] };
     adapter.forkConversation.mockResolvedValueOnce({ outcome, child_session_id: 'child' });
     render(<PulsaraApp adapter={adapter} />);

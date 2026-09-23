@@ -543,6 +543,8 @@
 /* One continuous reply, with a quiet disclosure for intermediate activity. */
 .conversation-run { margin: 24px 0 32px; min-width: 0; }
 .conversation-run__toggle { display: flex; align-items: center; gap: 7px; margin: 0 0 12px 40px; padding: 3px 0; background: transparent; color: var(--muted); font-size: var(--type-small); }
+.conversation-run[data-process-expanded="false"] .conversation-run__toggle { margin-bottom: 0; padding-bottom: 0; }
+.conversation-run[data-process-expanded="false"] > .assistant-turn--response .assistant-copy { margin-top: 0; }
 .conversation-run__toggle:hover { color: var(--ink); }
 .conversation-run__toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; border-radius: 3px; }
 .conversation-run__toggle[aria-expanded="true"] svg { transform: rotate(90deg); }

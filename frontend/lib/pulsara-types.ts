@@ -383,6 +383,7 @@ export interface SubagentRun {
 export interface Message {
   id: string;
   forkEligible?: boolean;
+  rootFinal?: boolean;
   entryOwnerKind?: 'EXECUTED_TURN' | 'IMPORTED_HISTORY';
   turnId?: string;
   entrySequence?: number;

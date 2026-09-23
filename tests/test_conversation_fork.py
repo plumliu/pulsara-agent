@@ -887,6 +887,7 @@ def test_protocol_projects_only_anchor_eligibility_and_genesis_without_occurrenc
         ).fetchall()
         projected = protocol._entries(connection, copied)
         assert [row.fork_eligible for row in projected] == [False, False, False, True]
+        assert [row.root_final for row in projected] == [False, True, False, True]
         assert all(row.entry_owner_kind == "IMPORTED_HISTORY" for row in projected)
         assert all(row.turn_id.startswith("history-group:") for row in projected)
         control = protocol._control(

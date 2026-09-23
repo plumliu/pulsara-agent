@@ -687,12 +687,37 @@ class CanonicalProtocolReader:
             """,
             (row["session_id"], entry_id),
         ).fetchall()
+        root_assistant = (
+            row["entry_kind"] == "ASSISTANT_MESSAGE"
+            and row["conversation_scope_kind"] == "ROOT"
+        )
+        root_final = False
+        if root_assistant:
+            final = connection.execute(
+                """SELECT CASE e.entry_owner_kind
+                         WHEN 'EXECUTED_TURN' THEN
+                           t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id = e.id
+                         WHEN 'IMPORTED_HISTORY' THEN
+                           g.status IN ('COMPLETED', 'INTERRUPTED') AND g.final_entry_id = e.id
+                         ELSE FALSE END AS root_final
+                   FROM pulsara_v3.transcript_entries AS e
+                   LEFT JOIN pulsara_v3.turns AS t
+                     ON e.entry_owner_kind = 'EXECUTED_TURN'
+                    AND t.session_id = e.session_id AND t.id = e.turn_id
+                   LEFT JOIN pulsara_v3.imported_history_groups AS g
+                     ON e.entry_owner_kind = 'IMPORTED_HISTORY'
+                    AND g.session_id = e.session_id AND g.id = e.imported_history_group_id
+                   WHERE e.session_id = %s AND e.id = %s""",
+                (row["session_id"], entry_id),
+            ).fetchone()
+            root_final = bool(final and final["root_final"])
         result = wire.CanonicalEntry(
             entry_id=entry_id,
             turn_id=str(row["turn_id"] if row["entry_owner_kind"] == "EXECUTED_TURN" else row["imported_history_group_id"]),
             entry_owner_kind=str(row["entry_owner_kind"]),
+            root_final=root_final,
             fork_eligible=(
-                row["entry_kind"] == "ASSISTANT_MESSAGE"
+                root_assistant
                 and read_fork_anchor(connection, str(row["session_id"]), entry_id) is not None
             ),
             entry_sequence=int(row["entry_sequence"]),

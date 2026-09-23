@@ -2116,6 +2116,7 @@ describe('source text fidelity hard cut', () => {
     const entries = ['CANONICAL', 'IMPORTED_HISTORY'].map((owner, index) => ({
       entry_id: `assistant-${index}`, turn_id: `turn-${index}`, entry_sequence: String(index + 1),
       entry_kind: 'ASSISTANT_MESSAGE', entry_owner_kind: owner, scope_kind: 'ROOT',
+      root_final: true, fork_eligible: index === 0,
       blocks: [{
         block_id: `text-${index}`, block_kind: 'TEXT', content: inlineContent(SOURCE_FIDELITY_TEXT),
       }],
@@ -2129,6 +2130,10 @@ describe('source text fidelity hard cut', () => {
     expect(connection.current().messages.map((message) => message.body)).toEqual([
       SOURCE_FIDELITY_TEXT,
       SOURCE_FIDELITY_TEXT,
+    ]);
+    expect(connection.current().messages.map((message) => [message.rootFinal, message.forkEligible])).toEqual([
+      [true, true],
+      [true, false],
     ]);
   });
 

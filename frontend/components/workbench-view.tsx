@@ -1263,11 +1263,11 @@ function AssistantMessage({
 }
 
 function isCompleteAnswer(message: Message, taskFinalAnswerId?: string): boolean {
-  // ROOT history already carries authoritative terminal-final eligibility.
-  // Task conversations instead identify the message from their accepted result.
+  // Final-answer presentation is independent of whether this historical answer
+  // can serve as a new fork anchor. Task conversations use their accepted result.
   return message.role === 'assistant' && message.assistantKind === 'terminal'
     && message.status !== 'running'
-    && (message.forkEligible === true || message.id === taskFinalAnswerId);
+    && (message.rootFinal === true || message.forkEligible === true || message.id === taskFinalAnswerId);
 }
 
 function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId }: {

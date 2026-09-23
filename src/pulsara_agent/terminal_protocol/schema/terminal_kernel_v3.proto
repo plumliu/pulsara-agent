@@ -222,6 +222,7 @@ message CanonicalEntry {
   string entry_owner_kind = 16;
   CanonicalInputSource input_source = 17;
   repeated CanonicalVisualization visualizations = 18;
+  bool root_final = 19;
 }
 
 message ActiveTurnControl {

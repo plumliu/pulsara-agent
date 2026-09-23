@@ -825,6 +825,32 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
 });
 
 describe('completed reply process disclosure', () => {
+  it('keeps imported final replies visible without granting extra fork actions', () => {
+    const { container } = render(<ConversationMessages
+      messages={[
+        { id: 'user-one', turnId: 'history-one', role: 'user', userKind: 'prompt', time: '09:37', body: 'hello?' },
+        { id: 'tool-one', turnId: 'history-one', role: 'assistant', assistantKind: 'tool-request', time: '09:37', body: '', status: 'completed',
+          traces: [{ id: 'read-one', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: '已完成', status: 'completed' }] },
+        { id: 'final-one', turnId: 'history-one', role: 'assistant', assistantKind: 'terminal', entryOwnerKind: 'IMPORTED_HISTORY',
+          rootFinal: true, forkEligible: false, time: '09:37', body: '历史最终回复', status: 'completed' },
+        { id: 'user-two', turnId: 'history-two', role: 'user', userKind: 'prompt', time: '09:38', body: '继续' },
+        { id: 'tool-two', turnId: 'history-two', role: 'assistant', assistantKind: 'tool-request', time: '09:38', body: '', status: 'completed',
+          traces: [{ id: 'read-two', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: '已完成', status: 'completed' }] },
+        { id: 'final-two', turnId: 'history-two', role: 'assistant', assistantKind: 'terminal', entryOwnerKind: 'IMPORTED_HISTORY',
+          rootFinal: true, forkEligible: true, time: '09:38', body: '分叉锚点回复', status: 'completed' },
+      ]}
+      artifactOwnerKey="fork-session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
+    />);
+
+    expect(screen.getAllByText('处理过程')).toHaveLength(2);
+    expect(screen.queryByText('中间过程')).toBeNull();
+    expect(screen.getByText('历史最终回复').closest('.conversation-run__step')).toBeNull();
+    expect(screen.getByText('分叉锚点回复').closest('.conversation-run__step')).toBeNull();
+    expect(container.querySelectorAll('.conversation-run__step[aria-hidden="true"]')).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: '复制回复' })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: '从此处分叉' })).toHaveLength(1);
+  });
+
   const progress = {
     id: 'progress', turnId: 'turn-one', entrySequence: 2, role: 'assistant' as const,
     assistantKind: 'tool-request' as const, time: '13:01', body: '先检查原始资料。',
@@ -838,19 +864,19 @@ describe('completed reply process disclosure', () => {
   const final = {
     id: 'final', turnId: 'turn-one', entrySequence: 4, role: 'assistant' as const,
     assistantKind: 'terminal' as const, time: '13:03', body: '已完成，并保留原来的配色。',
-    forkEligible: true, status: 'completed' as const,
+    rootFinal: true, forkEligible: true, status: 'completed' as const,
   };
   const hiddenProgress = () => screen.getByText(progress.body).closest('.conversation-run__step')?.getAttribute('aria-hidden') === 'true';
 
   it('keeps streaming and steer in order, closes only on a confirmed final, and preserves manual expansion', () => {
     const view = renderWithRawResults(<WorkbenchView {...props({ messages: [progress, steer] })} />);
     expect(hiddenProgress()).toBe(false);
-    const draft = { ...final, id: 'live-final', assistantKind: 'live' as const, status: 'running' as const, forkEligible: false };
+    const draft = { ...final, id: 'live-final', assistantKind: 'live' as const, status: 'running' as const, rootFinal: false, forkEligible: false };
     view.rerender(<WorkbenchView {...props({ messages: [progress, steer, draft] })} />);
     expect(hiddenProgress()).toBe(false);
     expect(screen.getByText(draft.body).closest('.assistant-markdown')?.classList.contains('assistant-markdown--pretty')).toBe(false);
     // A committed assistant text without terminal-final eligibility is not enough.
-    view.rerender(<WorkbenchView {...props({ messages: [progress, steer, { ...final, forkEligible: false }] })} />);
+    view.rerender(<WorkbenchView {...props({ messages: [progress, steer, { ...final, rootFinal: false, forkEligible: false }] })} />);
     expect(hiddenProgress()).toBe(false);
     expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
     view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [progress, steer, final] })} />);

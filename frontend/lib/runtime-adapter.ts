@@ -919,6 +919,7 @@ interface ProtocolReasoningBlock {
 interface ProtocolEntry {
   entry_id: string;
   fork_eligible?: boolean;
+  root_final?: boolean;
   entry_owner_kind?: 'EXECUTED_TURN' | 'IMPORTED_HISTORY';
   turn_id: string;
   entry_sequence: string | number;
@@ -3804,6 +3805,7 @@ function projectEntries(
         role: 'assistant',
         assistantKind: entry.entry_kind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
         forkEligible: entry.fork_eligible === true,
+        rootFinal: entry.root_final === true,
         entryOwnerKind: entry.entry_owner_kind,
         time: formatTime(entry.accepted_at_utc),
         body: text || (entry.entry_kind === 'ASSISTANT_MESSAGE' ? decodeContent(entry.content) : ''),
