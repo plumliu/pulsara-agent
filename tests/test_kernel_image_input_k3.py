@@ -182,13 +182,11 @@ def _source_upper_collector(
     )
     from tests.test_round3_structured_model_input_compiler import (
         _Capability,
-        _TerminalCwd,
     )
 
     return KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=_Capability(),
         base_system_prompt="BASE",
         display_timezone=display_timezone,

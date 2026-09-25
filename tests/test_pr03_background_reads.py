@@ -27,7 +27,6 @@ def _launch(
     yield_time_ms: int,
 ):
     return registry.exec_with_yield(
-        terminal_session_id="default",
         command=program,
         cwd=tmp_path,
         yield_time_ms=yield_time_ms,
@@ -46,14 +45,14 @@ def test_pr03_background_inventory_uses_adoption_and_retained_log_cursor(
     registry = ProcessRegistry(maximum_host_retained_bytes=64)
     owner = "host:background-read"
     registry.activate_owner(owner)
-    foreground, foreground_yielded, _ = _launch(
+    foreground, foreground_yielded = _launch(
         registry,
         tmp_path,
         owner=owner,
         program="raise SystemExit(0)",
         yield_time_ms=2_000,
     )
-    background, background_yielded, _ = _launch(
+    background, background_yielded = _launch(
         registry,
         tmp_path,
         owner=owner,

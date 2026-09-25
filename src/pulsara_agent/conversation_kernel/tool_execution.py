@@ -448,7 +448,7 @@ class ToolBatchExecutor:
         )
         public_input = PreToolUseInput(
             session_id=request.session_id,
-            cwd=str(self._tools.snapshot_terminal_cwd()),
+            cwd=str(self._tools.snapshot_workspace_root()),
             model=self._hook_model_id(request),
             turn_id=turn_id,
             tool_name=subject.external_primary,
@@ -502,7 +502,7 @@ class ToolBatchExecutor:
         )
         public_input = PermissionRequestInput(
             session_id=request.session_id,
-            cwd=str(self._tools.snapshot_terminal_cwd()),
+            cwd=str(self._tools.snapshot_workspace_root()),
             model=self._hook_model_id(request),
             turn_id=turn_id,
             tool_name=subject.external_primary,
@@ -583,7 +583,7 @@ class ToolBatchExecutor:
         )
         public_input = PostToolUseInput(
             session_id=request.session_id,
-            cwd=str(self._tools.snapshot_terminal_cwd()),
+            cwd=str(self._tools.snapshot_workspace_root()),
             model=self._hook_model_id(request),
             turn_id=settlement.turn_id,
             tool_name=subject.external_primary,
@@ -2570,7 +2570,7 @@ def _tool_effect_class(
         return result_effect_class
     if tool_name == "terminal_process":
         action = arguments.get("action")
-        if action in {"list", "log", "poll", "wait"}:
+        if action in {"list", "poll", "wait"}:
             return "TERMINAL_OBSERVATION"
         if action in {"write", "submit", "close_stdin", "kill"}:
             return "TERMINAL_EFFECT"

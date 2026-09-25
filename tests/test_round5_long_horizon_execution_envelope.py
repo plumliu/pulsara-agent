@@ -606,7 +606,7 @@ def test_round5_terminal_process_actions_have_closed_effect_semantics() -> None:
     assert production_builtin_executor_binding_identity_fingerprint(binding).startswith(
         "sha256:"
     )
-    for action in ("list", "log", "poll", "wait"):
+    for action in ("list", "poll", "wait"):
         assert (
             _physical_effect_class("terminal_process", {"action": action})
             == "TERMINAL_OBSERVATION"
@@ -628,7 +628,6 @@ def _exec_sleeping_terminal(
     yield_time_ms: int,
 ):
     return registry.exec_with_yield(
-        terminal_session_id="default",
         command="sleep",
         cwd=tmp_path,
         yield_time_ms=yield_time_ms,
@@ -647,7 +646,7 @@ def test_round5_terminal_decision_watchdog_during_preparing_kills_only_exact_pro
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = ProcessRegistry(max_live_processes=4)
-    sibling, yielded, _ = _exec_sleeping_terminal(
+    sibling, yielded = _exec_sleeping_terminal(
         registry,
         tmp_path,
         attempt_id="decision:sibling",
@@ -691,7 +690,7 @@ def test_round5_terminal_decision_watchdog_during_preparing_kills_only_exact_pro
     worker.join(3)
     assert not worker.is_alive()
     assert len(outcome) == 1 and not isinstance(outcome[0], BaseException)
-    state, yielded, _cwd = outcome[0]  # type: ignore[misc]
+    state, yielded = outcome[0]  # type: ignore[misc]
     assert yielded is False
     assert state.killed is True
     assert state.physical_completion.is_set()
@@ -711,7 +710,7 @@ def test_round5_terminal_decision_process_installed_and_result_ready_races(
     tmp_path: Path,
 ) -> None:
     registry = ProcessRegistry(max_live_processes=4)
-    timed, yielded, _ = _exec_sleeping_terminal(
+    timed, yielded = _exec_sleeping_terminal(
         registry,
         tmp_path,
         attempt_id="decision:installed",
@@ -724,8 +723,7 @@ def test_round5_terminal_decision_process_installed_and_result_ready_races(
     assert registry.foreground_decision_state("decision:installed") == "RESULT_READY"
     registry.settle_foreground_decision("decision:installed")
 
-    completed, yielded, _ = registry.exec_with_yield(
-        terminal_session_id="default",
+    completed, yielded = registry.exec_with_yield(
         command="true",
         cwd=tmp_path,
         yield_time_ms=1_000,
@@ -776,7 +774,7 @@ def test_round5_terminal_foreground_decision_can_be_aborted_by_exact_attempt(
     worker.join(3)
     assert not worker.is_alive()
     assert len(outcome) == 1 and not isinstance(outcome[0], BaseException)
-    state, yielded, _cwd = outcome[0]  # type: ignore[misc]
+    state, yielded = outcome[0]  # type: ignore[misc]
     assert yielded is False
     assert state.killed is True
     assert state.physical_completion.is_set()

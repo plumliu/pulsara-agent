@@ -279,7 +279,7 @@ class KernelSubagentManager:
         live_bus: LiveAgentEventBus,
         todo_owner: TodoRunStateOwner,
         launch_preparation: SubagentLaunchPreparationPort,
-        terminal_cwd: Callable[[], Path],
+        hook_workspace_root: Callable[[], Path],
         todo_close_projector: Callable[[FrozenTodoCloseProjection | None], None]
         | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
@@ -294,7 +294,7 @@ class KernelSubagentManager:
         self._live_bus = live_bus
         self._todo_owner = todo_owner
         self._launch_preparation = launch_preparation
-        self._terminal_cwd = terminal_cwd
+        self._hook_workspace_root = hook_workspace_root
         self._todo_close_projector = todo_close_projector or (lambda _value: None)
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._runner_factory: (
@@ -1288,7 +1288,7 @@ class KernelSubagentManager:
                     ):
                         public_input = SubagentStartInput(
                             session_id=self._guard.session_id,
-                            cwd=str(self._terminal_cwd()),
+                            cwd=str(self._hook_workspace_root()),
                             model=launch.configured_model_identity,
                             turn_id=launch.child_turn_id,
                             agent_id=task_id,
@@ -2944,7 +2944,7 @@ class KernelSubagentManager:
             return ContinuationOutcome()
         public_input = SubagentStopInput(
             session_id=self._guard.session_id,
-            cwd=str(self._terminal_cwd()),
+            cwd=str(self._hook_workspace_root()),
             model=model_id,
             turn_id=launch.child_turn_id,
             agent_id=launch.task_start.task_id,

@@ -264,7 +264,9 @@ def test_round2_three_terminal_prompts_teach_the_closed_lifecycle_roles() -> Non
     assert "In the main conversation" in TERMINAL_TOOL_DESCRIPTION
     assert "Prefer file tools for file reads and edits" in TERMINAL_TOOL_DESCRIPTION
 
-    assert "Perform one immediate follow-up action" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "Follow commands started by terminal" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "poll checks current status and output without waiting" in TERMINAL_PROCESS_TOOL_DESCRIPTION
+    assert "yield_time_ms waits up to 1000 ms by default" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "since_cursor may be copied" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "do not send another update later" in TERMINAL_PROCESS_TOOL_DESCRIPTION
     assert "Avoid repeated polling" in TERMINAL_PROCESS_TOOL_DESCRIPTION
@@ -286,10 +288,8 @@ def test_round2_three_terminal_prompts_teach_the_closed_lifecycle_roles() -> Non
     assert "environment closes or is replaced" in TERMINAL_MONITOR_TOOL_DESCRIPTION
 
     terminal_properties = terminal_input_schema()["properties"]
-    assert (
-        "this is not a process_id"
-        in terminal_properties["terminal_session_id"]["description"]
-    )
+    assert "terminal_session_id" not in terminal_properties
+    assert "workspace root" in terminal_properties["workdir"]["description"]
     assert (
         "does not stop the command"
         in terminal_properties["yield_time_ms"]["description"]

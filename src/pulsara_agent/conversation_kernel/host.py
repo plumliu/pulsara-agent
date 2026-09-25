@@ -760,7 +760,7 @@ class KernelHostSession:
                 model_runtime=model_runtime,
                 deadline_factory=self._deadlines,
             ),
-            terminal_cwd=self._tools.snapshot_terminal_cwd,
+            hook_workspace_root=self._tools.snapshot_workspace_root,
             todo_close_projector=self._tools.offer_todo_close,
             deadline_factory=self._deadlines,
             hook_dispatcher=self._hooks,
@@ -836,7 +836,6 @@ class KernelHostSession:
         self._context_sources = KernelContextSourceCollector(
             workspace_kind=workspace.workspace_kind,
             workspace_root=workspace.workspace_root,
-            terminal_cwd=self._tools,
             capability_composer=self._capabilities,
             base_system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
             display_timezone=display_timezone,
@@ -1516,7 +1515,7 @@ class KernelHostSession:
         model_call_binding: ModelCallBinding,
     ) -> tuple[str | None, PendingHookContextReservation | None]:
         view = self._hooks.capture_view()
-        cwd = self._tools.snapshot_terminal_cwd()
+        cwd = self._tools.snapshot_workspace_root()
         public_input = UserPromptSubmitInput(
             session_id=self.session_id,
             cwd=str(cwd),
@@ -6615,10 +6614,9 @@ class KernelHostSession:
                 self._queue_wake.set()
                 self._monitor_wake.set()
             # SessionEnd consumes the exact close-attempt carrier.  Freeze the
-            # current owner-held cwd before Terminal process termination can
-            # retire that process-local owner; never reopen or query it from
-            # the later terminal Hook lane.
-            session_end_cwd = self._tools.snapshot_terminal_cwd()
+            # fixed workspace root for this attempt; the later terminal Hook
+            # lane consumes the carrier without reopening any execution owner.
+            session_end_cwd = self._tools.snapshot_workspace_root()
             self._hooks.begin_host_close(deadline_monotonic=deadline)
             self.extensions.stop_admission()
             self._mcp_supervisor.stop_admission()

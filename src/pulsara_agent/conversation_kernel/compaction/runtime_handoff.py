@@ -29,7 +29,6 @@ class CompactionRuntimeHandoffBoundError(ValueError):
 @dataclass(frozen=True, slots=True)
 class FrozenTerminalProcessHandoffFact:
     process_id: str
-    terminal_session_id: str
     status: str
     command_preview: str
     cwd: str
@@ -37,7 +36,6 @@ class FrozenTerminalProcessHandoffFact:
     def __post_init__(self) -> None:
         if (
             not self.process_id
-            or not self.terminal_session_id
             or self.status != "running"
             or not self.cwd
         ):
@@ -270,7 +268,6 @@ def _payload(
         "terminal_processes": tuple(
             {
                 "process_id": item.process_id,
-                "terminal_session_id": item.terminal_session_id,
                 "status": item.status,
                 "command_preview": item.command_preview,
                 "cwd": item.cwd,

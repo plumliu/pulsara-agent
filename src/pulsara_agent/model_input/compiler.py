@@ -123,7 +123,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.EPOCH_ROOT,
     ),
     ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        "pulsara.runtime-environment.v2",
+        "pulsara.runtime-environment.v3",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,

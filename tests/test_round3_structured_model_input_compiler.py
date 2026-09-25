@@ -420,7 +420,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.EPOCH_ROOT,
     ),
     ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        "pulsara.runtime-environment.v2",
+        "pulsara.runtime-environment.v3",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
@@ -1569,7 +1569,6 @@ def test_round3_1_plan_handoff_occurrence_uses_canonical_transition_identity(
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=_Capability(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,
@@ -1743,7 +1742,6 @@ def test_round3_1_two_plan_revisions_in_one_epoch_have_distinct_occurrences(
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=_Capability(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,
@@ -2897,16 +2895,6 @@ def test_round3_4096_tool_result_degradation_uses_bounded_heap_work() -> None:
     assert counting.message_calls < 50_000
 
 
-class _TerminalCwd:
-    def __init__(self, value: Path) -> None:
-        self.value = value
-        self.calls = 0
-
-    def snapshot_terminal_cwd(self) -> Path:
-        self.calls += 1
-        return self.value
-
-
 class _Capability:
     def __init__(self) -> None:
         self.inputs: list[tuple[str, frozenset[str]]] = []
@@ -3078,7 +3066,6 @@ def test_round9_unavailable_skill_catalog_is_not_misreported_as_empty(
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=_UnavailableCapability(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,
@@ -3120,12 +3107,10 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
         clock_calls += 1
         return datetime(2024, 11, 3, 5, 30, tzinfo=timezone.utc)
 
-    terminal = _TerminalCwd(tmp_path)
     capability = _Capability()
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=terminal,
         capability_composer=capability,  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=ZoneInfo("America/New_York"),
@@ -3147,7 +3132,6 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
         canonical_facts=_canonical_facts(),
     )
     assert clock_calls == 1
-    assert terminal.calls == 1
     # Round 9 Skill discovery is independent from the startup Tool allowlist;
     # Tool capability routing is owned by the sibling Tool view.
     assert capability.inputs == [("$skill demo", frozenset())]
@@ -3178,7 +3162,6 @@ def test_round3_unkeyed_timezone_is_frozen_to_opening_offset(tmp_path: Path) -> 
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=_Capability(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=dynamic,
@@ -3222,7 +3205,6 @@ def test_round3_temporal_failure_samples_once_and_omits_clock(tmp_path: Path) ->
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=_Capability(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,
@@ -3266,7 +3248,6 @@ def test_round3_capability_sources_and_public_diagnostics_are_separate(
     collector = KernelContextSourceCollector(
         workspace_kind="transient",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=capability,  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,
@@ -3310,7 +3291,6 @@ def test_round3_large_catalog_renderer_never_inverts_declared_variants(
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=_LargeCatalogCapability(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,
@@ -3353,16 +3333,14 @@ def test_round3_large_catalog_renderer_never_inverts_declared_variants(
     )
 
 
-def test_round3_runtime_path_is_fixed_escaped_and_can_leave_workspace(
+def test_round3_runtime_path_is_fixed_workspace_and_escaped(
     tmp_path: Path,
 ) -> None:
     inside = tmp_path / "目录 with space\nand-newline"
     inside.mkdir()
-    terminal = _TerminalCwd(inside)
     collector = KernelContextSourceCollector(
         workspace_kind="project",
-        workspace_root=tmp_path,
-        terminal_cwd=terminal,
+        workspace_root=inside,
         capability_composer=_Capability(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,
@@ -3395,25 +3373,12 @@ def test_round3_runtime_path_is_fixed_escaped_and_can_leave_workspace(
     assert "\\n" in environment
     assert str(inside).split("\n", 1)[0] in environment
 
-    outside = tmp_path.parent.resolve()
-    terminal.value = outside
-    collected = _collect_context_sources(
-        collector,
-        activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
-        activation_text="hello",
-        tool_surface=surface,
-        canonical_facts=_canonical_facts(),
-    )
-    environment = next(
-        candidate
-        for candidate in collected.candidates
-        if candidate.source_kind is ContextSourceKind.RUNTIME_ENVIRONMENT
-    ).variants[0].text
-    assert json.dumps(str(outside), ensure_ascii=False) in environment
-    assert json.dumps(str(tmp_path.resolve()), ensure_ascii=False) in environment
+    assert json.loads(environment)["workspace_root"] == str(inside)
+    assert "terminal_current_cwd" not in json.loads(environment)
+    assert json.loads(environment)["relative_workdir_base"] == "workspace_root"
 
 
-def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
+def test_round3_runtime_source_keeps_workspace_after_foreground_and_yielded_cd(
     tmp_path: Path,
 ) -> None:
     foreground = tmp_path / "foreground cwd"
@@ -3428,37 +3393,36 @@ def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
     try:
-        session = port._terminal.get_or_create(  # noqa: SLF001
-            owner_host_session_id="host:cwd"
-        )
-        completed = session.execute(
+        terminal = port._terminal  # noqa: SLF001
+        completed = terminal.execute(
             TerminalRequest(
                 command=f"cd {shlex.quote(str(foreground))}",
                 yield_time_ms=2_000,
             ),
+            owner_host_session_id="host:cwd",
             decision_deadline_monotonic=port._deadlines.deadline(  # noqa: SLF001
                 KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
             ),
         )
         assert completed.status is TerminalStatus.SUCCESS
-        assert port.snapshot_terminal_cwd() == foreground.resolve()
-        background = session.execute(
+        assert port.snapshot_workspace_root() == tmp_path.resolve()
+        background = terminal.execute(
             TerminalRequest(
                 command=f"cd {shlex.quote(str(yielded))}; sleep 5",
                 yield_time_ms=5,
                 max_lifetime_seconds=10,
             ),
+            owner_host_session_id="host:cwd",
             decision_deadline_monotonic=port._deadlines.deadline(  # noqa: SLF001
                 KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
             ),
         )
         assert background.status is TerminalStatus.RUNNING
-        assert port.snapshot_terminal_cwd() == foreground.resolve()
+        assert port.snapshot_workspace_root() == tmp_path.resolve()
 
         collector = KernelContextSourceCollector(
             workspace_kind="project",
             workspace_root=tmp_path,
-            terminal_cwd=port,
             capability_composer=_Capability(),  # type: ignore[arg-type]
             base_system_prompt="BASE",
             display_timezone=timezone.utc,
@@ -3480,7 +3444,7 @@ def test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd(
             for item in collected.candidates
             if item.source_kind is ContextSourceKind.RUNTIME_ENVIRONMENT
         )
-        assert json.dumps(str(foreground.resolve()), ensure_ascii=False) in (
+        assert json.dumps(str(tmp_path.resolve()), ensure_ascii=False) in (
             environment.variants[0].text
         )
         assert str(yielded.resolve()) not in environment.variants[0].text
@@ -3681,9 +3645,9 @@ def test_round3_tool_surface_excludes_root_only_monitor_and_schema_is_frozen(
     assert "terminal_monitor" not in {
         tool.name for tool in child.model_surface.tool_specs
     }
-    assert port._terminal._sessions == {}  # noqa: SLF001
-    assert port.snapshot_terminal_cwd() == tmp_path.resolve()
-    assert port._terminal._sessions == {}  # noqa: SLF001
+    assert not hasattr(port._terminal, "_sessions")  # noqa: SLF001
+    assert port.snapshot_workspace_root() == tmp_path.resolve()
+    assert not hasattr(port._terminal, "_sessions")  # noqa: SLF001
     terminal = next(
         tool for tool in root.model_surface.tool_specs if tool.name == "terminal"
     )
@@ -3867,13 +3831,13 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:8bffc2e15fedb236c6c6e7d48a09eecdd03f54f554f694ccb904be7dc1386ec6"
+        "sha256:9ec9771ff3e59c2aa2e643422e08f8428b8851f21694edb42bb377e3ba660afd"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:8ac9464c66e2db450bbc510547f302640c702f87ff473508601b8057e91b94cd"
+        "sha256:f6b93412fab14a44834f5f19346a784c396b987b2f03c183da6bb3ba8b5f0b0c"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -4575,7 +4539,6 @@ def test_round5b_compaction_inherits_exact_installed_active_skill_body(
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=tmp_path,
-        terminal_cwd=_TerminalCwd(tmp_path),
         capability_composer=_Capability(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,

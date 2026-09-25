@@ -1,0 +1,95 @@
+{
+  "phase": "long-monitor-120s",
+  "model": "openai/gpt-6-luna",
+  "status": "completed",
+  "started_at": "2026-09-25T18:09:06.242409+00:00",
+  "cases": [
+    {
+      "case": "monitor_long_wake",
+      "elapsed_seconds": 12.640448958962224,
+      "reply": "The completion-only monitor is registered for process `proc_2a27531317464f17963fdab8e0efb48e`. I’ll wait for it to resume the conversation.",
+      "registered_process_id": "proc_2a27531317464f17963fdab8e0efb48e",
+      "registered_monitor_id": "terminal-monitor:f8e8d49aa7414a4c99bd05cc972fecd7",
+      "manual_followup_turns": 0,
+      "wake_transcript": [
+        {
+          "entry_sequence": 7,
+          "entry_kind": "TERMINAL_OBSERVATION",
+          "content": "{\"available_source_utf8_bytes\":17,\"delivery_coverage\":\"COMPLETE\",\"exit_code\":0,\"gap_before_output\":false,\"host_scoped\":true,\"included_source_utf8_bytes\":17,\"monitor_id\":\"terminal-monitor:f8e8d49aa7414a4c99bd05cc972fecd7\",\"observation_id\":\"terminal-observation:63310ab7f9a841ad97203f38091965c5\",\"observation_kind\":\"COMPLETION\",\"observation_ordinal\":1,\"omitted_by_delivery_bound_utf8_bytes\":0,\"output\":\"MONITOR_LONG_DONE\",\"output_disposition\":\"EXACT_DELTA\",\"process_id\":\"proc_2a27531317464f17963fdab8e0efb48e\",\"process_status\":\"success\",\"schema_version\":\"terminal_observation.v1\"}",
+          "assistant_text": null,
+          "turn_status": "COMPLETED",
+          "final_entry_id": "entry:3c52eb76a0a44578bfd18dc093dd3c3d"
+        },
+        {
+          "entry_sequence": 8,
+          "entry_kind": "ASSISTANT_MESSAGE",
+          "content": "{\"blocks\":[{\"digest\":\"sha256:f608b3eeab4507c26830fd8d820a473f09efdf7d43d22eac171ede21f9782b8d\",\"kind\":\"TEXT\",\"size\":34}],\"draft_identity\":\"entry:3c52eb76a0a44578bfd18dc093dd3c3d\"}",
+          "assistant_text": "MONITOR_LONG_DONE — exit code 0.",
+          "turn_status": "COMPLETED",
+          "final_entry_id": "entry:3c52eb76a0a44578bfd18dc093dd3c3d"
+        }
+      ],
+      "wake_elapsed_seconds": 129.9386083750287,
+      "tool_call_count": 2
+    }
+  ],
+  "trace": [
+    {
+      "request_sequence": 2,
+      "result_sequence": 3,
+      "tool_call_id": "call_hMcZhmLrSe7bvagMVVqbChLo",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120; printf MONITOR_LONG_DONE",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-91w33cnj/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6ImY5ZjljNDU3OTIwZTdhYTk3NjA4MDM2YzZjMDhiOTYwZDI5YjNhOTUwNTdjOGJlZmI0NWU4YjM5Nzc2ZTBjY2EiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDo3NjU3ZGY4YWFhYzU0NTdmODRmZjE1NmU5MTlkNjA1NSIsInByb2Nlc3NfaWQiOiJwcm9jXzJhMjc1MzEzMTc0NjRmMTc5NjNmZGFiOGUwZWZiNDhlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjIyYWE4MjllMTFjNGRhYmE2YmEzMWU0NGI4NzA1ZTgifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_2a27531317464f17963fdab8e0efb48e",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImY5ZjljNDU3OTIwZTdhYTk3NjA4MDM2YzZjMDhiOTYwZDI5YjNhOTUwNTdjOGJlZmI0NWU4YjM5Nzc2ZTBjY2EiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDo3NjU3ZGY4YWFhYzU0NTdmODRmZjE1NmU5MTlkNjA1NSIsInByb2Nlc3NfaWQiOiJwcm9jXzJhMjc1MzEzMTc0NjRmMTc5NjNmZGFiOGUwZWZiNDhlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjIyYWE4MjllMTFjNGRhYmE2YmEzMWU0NGI4NzA1ZTgifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 4,
+      "result_sequence": 5,
+      "tool_call_id": "call_90hCDBQX1kg5qQB2E2tRiRQX",
+      "tool_name": "terminal_monitor",
+      "arguments": {
+        "action": "register",
+        "process_id": "proc_2a27531317464f17963fdab8e0efb48e"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "status": "REGISTERED",
+        "monitor_id": "terminal-monitor:f8e8d49aa7414a4c99bd05cc972fecd7",
+        "process_id": "proc_2a27531317464f17963fdab8e0efb48e",
+        "baseline_cursor": "eyJjaGVja3N1bSI6ImY5ZjljNDU3OTIwZTdhYTk3NjA4MDM2YzZjMDhiOTYwZDI5YjNhOTUwNTdjOGJlZmI0NWU4YjM5Nzc2ZTBjY2EiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDo3NjU3ZGY4YWFhYzU0NTdmODRmZjE1NmU5MTlkNjA1NSIsInByb2Nlc3NfaWQiOiJwcm9jXzJhMjc1MzEzMTc0NjRmMTc5NjNmZGFiOGUwZWZiNDhlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjIyYWE4MjllMTFjNGRhYmE2YmEzMWU0NGI4NzA1ZTgifX0",
+        "expires_at": "2026-09-26T04:09:17.773284+00:00",
+        "policy": {
+          "completion": true,
+          "output": false,
+          "heartbeat_interval_seconds": null
+        }
+      }
+    }
+  ],
+  "saved_home": "/Users/plumliu/.pulsara",
+  "prompts": {
+    "monitor_long_wake": "Start \"sleep 120; printf MONITOR_LONG_DONE\" with yield_time_ms=0. Register a completion-only monitor for its exact process_id, then finish this turn immediately. Do not poll or send another command. When the monitor resumes the conversation, report MONITOR_LONG_DONE and the exit code."
+  }
+}

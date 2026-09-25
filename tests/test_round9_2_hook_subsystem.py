@@ -1529,7 +1529,7 @@ def test_round9_2_architecture_has_one_independent_engine_and_no_new_durability(
     close_end = host_source.index("    async def _renew_writer", close_start)
     close_source = host_source[close_start:close_end]
     ordered_close_markers = (
-        "session_end_cwd = self._tools.snapshot_terminal_cwd()",
+        "session_end_cwd = self._tools.snapshot_workspace_root()",
         "self._hooks.begin_host_close",
         "self._delivery_task.cancel()",
         "await self._settle_active_root_task(task)",
@@ -1546,7 +1546,7 @@ def test_round9_2_architecture_has_one_independent_engine_and_no_new_durability(
         close_source.index("await self._hooks.fence_ordinary()") :
     ]
     assert "cwd=str(session_end_cwd)" in terminal_lane
-    assert "snapshot_terminal_cwd()" not in terminal_lane
+    assert "snapshot_workspace_root()" not in terminal_lane
 
     tool_runtime_source = (
         ROOT / "src/pulsara_agent/conversation_kernel/tool_runtime.py"
@@ -1792,7 +1792,7 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
         runner._writer_lease = SimpleNamespace(
             guard=SimpleNamespace(session_id="session:1")
         )
-        runner._tools = SimpleNamespace(snapshot_terminal_cwd=lambda: tmp_path)
+        runner._tools = SimpleNamespace(snapshot_workspace_root=lambda: tmp_path)
         initial_deadline = monotonic() + 11
         await runner._dispatch_initial_session_start(
             ActiveTurnCancellationIntent(
@@ -1949,7 +1949,7 @@ def test_pending_root_session_start_failure_retires_hook_context(
         runner._writer_lease = SimpleNamespace(
             guard=SimpleNamespace(session_id="session:1")
         )
-        runner._tools = SimpleNamespace(snapshot_terminal_cwd=lambda: tmp_path)
+        runner._tools = SimpleNamespace(snapshot_workspace_root=lambda: tmp_path)
         runner._provider_dispatch = provider_dispatch
         runner._planning_deadline = lambda: monotonic() + 10
         intent = ActiveTurnCancellationIntent(

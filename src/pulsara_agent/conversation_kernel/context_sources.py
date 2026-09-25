@@ -79,10 +79,6 @@ if TYPE_CHECKING:
     from pulsara_agent.conversation_kernel.mcp.contracts import McpCatalogSnapshot
 
 
-class TerminalCurrentCwdSnapshotPort(Protocol):
-    def snapshot_terminal_cwd(self) -> Path: ...
-
-
 class McpCatalogSnapshotPort(Protocol):
     def catalog_snapshot(self) -> "McpCatalogSnapshot": ...
 
@@ -241,14 +237,14 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.RUNTIME_ENVIRONMENT,
-        "pulsara.runtime-environment.v2",
+        "pulsara.runtime-environment.v3",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
         10,
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        "pulsara.runtime-environment-collector.v1",
+        "pulsara.runtime-environment-collector.v2",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
@@ -496,7 +492,6 @@ class KernelContextSourceCollector:
         *,
         workspace_kind: str,
         workspace_root: Path,
-        terminal_cwd: TerminalCurrentCwdSnapshotPort,
         capability_composer: KernelSkillProjectionComposer,
         base_system_prompt: str,
         display_timezone: tzinfo,
@@ -513,7 +508,6 @@ class KernelContextSourceCollector:
             raise ValueError("base system prompt is empty")
         self._workspace_kind = workspace_kind
         self._workspace_root = root
-        self._terminal_cwd = terminal_cwd
         self._capability = capability_composer
         self._mcp_catalog = mcp_catalog
         self._base = (
@@ -1205,11 +1199,9 @@ class KernelContextSourceCollector:
     def _environment_snapshot(
         self, temporal: RuntimeTemporalCapture | None
     ) -> RuntimeEnvironmentSnapshot:
-        cwd = self._terminal_cwd.snapshot_terminal_cwd().expanduser().resolve()
         payload = {
             "workspace_kind": self._workspace_kind,
             "workspace_root": str(self._workspace_root),
-            "terminal_current_cwd": str(cwd),
             "timezone_name": self._timezone_name,
             "utc_offset_minutes": (
                 None if temporal is None else temporal.utc_offset_minutes
@@ -1931,13 +1923,12 @@ def _render_environment(snapshot: RuntimeEnvironmentSnapshot, *, compact: bool) 
     values = {
         "workspace_kind": snapshot.workspace_kind,
         "workspace_root": snapshot.workspace_root,
-        "terminal_current_cwd": snapshot.terminal_current_cwd,
         "timezone": snapshot.timezone_name,
         "utc_offset_minutes": snapshot.utc_offset_minutes,
     }
     payload: dict[str, object] = dict(values)
     if not compact:
-        payload["relative_workdir_base"] = "terminal_current_cwd"
+        payload["relative_workdir_base"] = "workspace_root"
     return json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
@@ -2431,7 +2422,6 @@ __all__ = [
     "ContextSourceRegistry",
     "KernelContextSourceCollector",
     "McpCatalogSnapshotPort",
-    "TerminalCurrentCwdSnapshotPort",
     "build_compaction_context_source",
     "build_memory_context_source",
     "replace_compaction_context_sources",

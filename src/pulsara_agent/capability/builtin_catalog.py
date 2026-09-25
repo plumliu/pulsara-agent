@@ -131,7 +131,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
 _ACTION_PERMISSION_OVERRIDE_SPECS: dict[str, tuple[tuple[str, str, str, bool], ...]] = {
     "terminal_process": tuple(
         ("action", action, "terminal_process_observe", True)
-        for action in ("list", "log", "poll", "wait")
+        for action in ("list", "poll", "wait")
     ),
     "terminal_monitor": (
         ("action", "list", "terminal_process_observe", True),
@@ -2203,7 +2203,6 @@ _TERMINAL_PROCESS_ACTIONS = (
     "close_stdin",
     "kill",
     "list",
-    "log",
     "poll",
     "submit",
     "wait",

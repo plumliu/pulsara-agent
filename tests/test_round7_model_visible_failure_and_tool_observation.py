@@ -993,7 +993,7 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
             model_runtime=test_model_runtime(),
             deadline_factory=KernelExecutionDeadlineFactory(),
         ),
-        terminal_cwd=Path.cwd,
+        hook_workspace_root=Path.cwd,
     )
     manager.bind_runner_factory(lambda _scope: runner)  # type: ignore[arg-type]
 
@@ -1092,7 +1092,7 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
             model_runtime=test_model_runtime(),
             deadline_factory=KernelExecutionDeadlineFactory(),
         ),
-        terminal_cwd=Path.cwd,
+        hook_workspace_root=Path.cwd,
     )
     manager.bind_runner_factory(lambda _scope: runner)  # type: ignore[arg-type]
 

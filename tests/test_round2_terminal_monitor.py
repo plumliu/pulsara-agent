@@ -48,8 +48,7 @@ def _name(prefix: str) -> str:
 
 
 def _spawn_sleeping_process(registry: ProcessRegistry, owner: str, tmp_path: Path):
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="sleep",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -174,7 +173,7 @@ def test_round2_tool_close_terminates_process_before_draining_terminal_thread(
     asyncio.run(scenario())
 
 
-def test_round2_foreground_updates_cwd_but_yielded_process_never_does(
+def test_round2_foreground_and_yielded_cd_leave_workspace_default(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -205,8 +204,8 @@ def test_round2_foreground_updates_cwd_but_yielded_process_never_does(
             return json.loads(result.content)
 
         first = await invoke("cd foreground")
-        assert first["cwd"] == str(tmp_path / "foreground")
-        yielded = await invoke("cd ../background; sleep 0.4", yield_time_ms=0)
+        assert first["cwd"] == str(tmp_path)
+        yielded = await invoke("cd background; sleep 0.4", yield_time_ms=0)
         assert yielded["status"] == "running"
         await invoke_direct_tool(
             port,
@@ -223,8 +222,8 @@ def test_round2_foreground_updates_cwd_but_yielded_process_never_does(
             assistant_entry_id=_name("entry"),
         )
         after = await invoke("pwd")
-        assert after["cwd"] == str(tmp_path / "foreground")
-        assert str(tmp_path / "foreground") in after["output"]
+        assert after["cwd"] == str(tmp_path)
+        assert after["output"].strip() == str(tmp_path)
         await port.aclose(timeout_seconds=5)
 
     asyncio.run(scenario())
@@ -236,8 +235,7 @@ def test_round2_monitor_uses_exact_cursor_and_single_pass_head_tail(
     owner = "host:monitor"
     registry = ProcessRegistry()
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="sleep",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -324,8 +322,7 @@ def test_round2_monitor_registration_cannot_miss_completion_between_snapshot_and
     owner = "host:registration-race"
     registry = ProcessRegistry()
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="race",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -390,8 +387,7 @@ def test_round2_monitor_cancel_after_freeze_preserves_exact_attempt_until_settle
     owner = "host:cancel-after-freeze"
     registry = ProcessRegistry()
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="cancel-race",
         cwd=tmp_path,
         yield_time_ms=0,

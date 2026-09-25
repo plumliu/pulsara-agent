@@ -363,8 +363,7 @@ def test_round2_pipe_and_pty_receive_the_same_bounded_environment(
     outputs: list[str] = []
     command = "printf '%s' \"$CUSTOM_VISIBLE|${OPENAI_API_KEY-unset}\""
     for tty in (False, True):
-        state, yielded, _cwd = registry.exec_with_yield(
-            terminal_session_id="default",
+        state, yielded = registry.exec_with_yield(
             command=command,
             cwd=tmp_path,
             yield_time_ms=2_000,

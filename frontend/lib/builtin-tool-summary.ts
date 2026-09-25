@@ -60,7 +60,7 @@ const taskStates: Record<string, string> = {
   interrupted: '已中断', blocked_dependency_failed: '前置任务失败，暂时无法开始',
 };
 const processActions: Record<string, string> = {
-  list: '查看命令列表', log: '读取命令输出', poll: '查看命令状态', wait: '等待命令结束',
+  list: '查看命令列表', poll: '查看命令状态', wait: '等待命令结束',
   write: '向命令输入内容', submit: '向命令提交输入', close_stdin: '结束命令输入', kill: '停止命令',
 };
 const monitorActions: Record<string, string> = {
@@ -70,7 +70,6 @@ const monitorActions: Record<string, string> = {
 function runningProcessDetail(name: string, action: string): string {
   if (name === 'terminal') return '命令仍在后台运行';
   return ({
-    log: '已读取输出 · 命令仍在运行',
     poll: '命令仍在运行',
     wait: '等待结束，命令仍在运行',
     write: '已发送输入 · 命令仍在运行',
@@ -107,11 +106,11 @@ function failure(trace: ToolTrace, result: Record<string, unknown>): string {
     SYSTEM_ERROR: '本地服务出错，操作未完成',
   };
   if (trace.toolName === 'terminal' || trace.toolName === 'terminal_process') {
-    const process = Object.keys(object(result.process)).length ? object(result.process) : result;
+    const process = result;
     const status = text(process.status).toLowerCase();
     if (process.timed_out === true || process.status === 'timeout') return '命令已超时';
     if (status === 'killed') return '命令已停止';
-    if (status === 'blocked') return '命令未获准执行';
+    if (status === 'blocked') return result.reason === 'PROCESS_CAPACITY_EXHAUSTED' ? '执行容量已满，命令未启动' : '命令未获准执行';
     if (status === 'running') return runningProcessDetail(trace.toolName, text(parse(trace.argumentsJson).action));
     const exitCode = number(process.exit_code);
     if (exitCode === -1) return status === 'error' ? '命令执行失败' : '命令退出状态尚未确定';
@@ -178,11 +177,11 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
       }
       case 'terminal':
       case 'terminal_process': {
-        const process = Object.keys(object(result.process)).length ? object(result.process) : result;
+        const process = result;
         const exitCode = number(process.exit_code);
         // The tool invocation can complete while the managed process keeps running.
         if (name === 'terminal_process') {
-          detail = ({ log: '已读取输出', poll: '已查看命令状态', wait: '已等待命令',
+          detail = ({ poll: '已查看命令状态', wait: '已等待命令',
             write: '已发送输入', submit: '已发送输入', close_stdin: '已结束输入',
           } as Record<string, string>)[action] ?? detail;
         }

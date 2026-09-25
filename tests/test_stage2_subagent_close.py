@@ -90,7 +90,7 @@ def test_host_close_interrupts_subagent_instead_of_user_cancelling_it() -> None:
                 session_id="session:test", owner_epoch="host:test"
             ),
             launch_preparation=StaticSubagentLaunchPreparationPort(),
-            terminal_cwd=Path.cwd,
+            hook_workspace_root=Path.cwd,
         )
         manager.bind_runner_factory(
             lambda _scope: _BlockingRunner()  # type: ignore[arg-type]
@@ -146,7 +146,7 @@ def test_round9_2_subagent_close_deadline_applies_to_first_producer_join() -> No
                 session_id="session:test", owner_epoch="host:test"
             ),
             launch_preparation=StaticSubagentLaunchPreparationPort(),
-            terminal_cwd=Path.cwd,
+            hook_workspace_root=Path.cwd,
         )
         started = asyncio.Event()
         deadline_cancelled = asyncio.Event()

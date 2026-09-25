@@ -263,7 +263,7 @@ def test_host_scoped_writes_and_terminal_cwd_follow_exact_permission_snapshot(
             assert payload["status"] == "success"
             assert payload["cwd"] == str(outside)
             assert str(outside) in payload["output"]
-            assert port.snapshot_terminal_cwd() == outside
+            assert port.snapshot_workspace_root() == workspace.resolve()
         finally:
             await port.aclose(timeout_seconds=2)
 

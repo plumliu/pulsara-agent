@@ -1,0 +1,1189 @@
+{
+  "phase": "candidate",
+  "model": "openai/gpt-6-luna",
+  "status": "completed",
+  "started_at": "2026-09-25T16:04:41.594927+00:00",
+  "cases": [
+    {
+      "case": "directories",
+      "elapsed_seconds": 27.642240458982997,
+      "reply": "Marker reads returned `alpha`, `beta`, then `alpha`. The export command ran in `.../workspace/beta` and printed `COGNITIVE_FLAG=inside`. The final call ran in `.../workspace`; the variable was unset, so the export did not persist."
+    },
+    {
+      "case": "interaction",
+      "elapsed_seconds": 26.6236246250337,
+      "reply": "Exact answer: `ANSWER:helloworld`\n\nI observed it in the `submit(\"world\")` call, after starting the REPL and using `write(\"hello\")` without a newline. Then I submitted `quit`."
+    },
+    {
+      "case": "pty",
+      "elapsed_seconds": 17.237314375001006,
+      "reply": "`ANSWER:delayed`"
+    },
+    {
+      "case": "long",
+      "elapsed_seconds": 13.359709082986228,
+      "reply": "Output: `LONG_DONE`  \nExit code: `0`"
+    },
+    {
+      "case": "truncation",
+      "elapsed_seconds": 19.402480875025503,
+      "reply": "Recovered the exact marker with `artifact_read`: `MIDDLE_7319`"
+    },
+    {
+      "case": "monitor_race",
+      "elapsed_seconds": 20.665437667048536,
+      "reply": "The monitor registration was rejected because the process was already terminal. I polled that process: output `RACE_DONE`, exit code `0`. I did not restart it."
+    },
+    {
+      "case": "monitor",
+      "elapsed_seconds": 16.282938666990958,
+      "reply": "Monitor registration was rejected because the process was already terminal; no completion monitor was set."
+    },
+    {
+      "case": "capacity",
+      "elapsed_seconds": 97.22601479198784,
+      "reply": "`printf SHOULD_NOT_START` was blocked: **terminal process limit reached: max 8** (`PROCESS_CAPACITY_EXHAUSTED`). I listed the processes and killed all eight `sleep 120` processes. I started no replacements."
+    }
+  ],
+  "trace": [
+    {
+      "request_sequence": 2,
+      "result_sequence": 3,
+      "tool_call_id": "call_MYu10UGNehMD8cfystTA5irh",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "cat alpha/marker.txt",
+        "workdir": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "alpha\n",
+        "output_cursor": "eyJjaGVja3N1bSI6Ijg4NTNlMzQ4YjI1NGQ4MDVjMzY4OTAwMDFhODdjOWE1YjQyYTRlYTUxOTYyZGVlNGVkZjZhZTg5ZDk4NGM4MDEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzgzYmY4YmM3MDM0MTQyMWE5MGMwN2VmMjU0NWU2NmJiIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo2LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YTFkMmFiODNiMDYxNDk2NGFlNDkyNzI2Y2MxMjI1ZTkifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_83bf8bc70341421a90c07ef2545e66bb",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjAzNGUzZTI4YjRhMGIwNzZhNjZjYzUzNDYxNzc4MDNiYmQyN2I4OWU4ZmY1ZjljNTg4ODYzNjhkNjg0ZmI3ZmIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzgzYmY4YmM3MDM0MTQyMWE5MGMwN2VmMjU0NWU2NmJiIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YTFkMmFiODNiMDYxNDk2NGFlNDkyNzI2Y2MxMjI1ZTkifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 4,
+      "result_sequence": 5,
+      "tool_call_id": "call_XCKHZ5MDxQrmGS3IkQaYPViz",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "cat beta/marker.txt",
+        "workdir": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "beta\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjBhNTRmZWY0Yzg4ZmE0YzA0ZTlmYjg2N2JhNzBlN2IyNTQ1MDlhOWIwY2U4ZTdiZjRkZTgyODA2MDFkMzk4NTMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzQ2M2Q0ZjAzODJiNjRiYzBiMTc5ODU1YjJjNjZiYWRmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo1LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06N2NmYzBmZDdjOWY1NDI1YWJkZDY0ZjJkMmIwM2E2NTcifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_463d4f0382b64bc0b179855b2c66badf",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImU0NGUzMzE5ZmJlZTI5ODE2NmI4OGJkMjYzODFkOWI0OTRiOGIxNGY1YzIyYzNlNTE4NDlkMjRjOWQyZTQ5MDIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzQ2M2Q0ZjAzODJiNjRiYzBiMTc5ODU1YjJjNjZiYWRmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06N2NmYzBmZDdjOWY1NDI1YWJkZDY0ZjJkMmIwM2E2NTcifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 6,
+      "result_sequence": 7,
+      "tool_call_id": "call_WXbuyaQtTDEoBk9dU9EwGpmQ",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "cat alpha/marker.txt",
+        "workdir": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "alpha\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjcwZGM2M2YxOGQ1NzUyMjAwZDdmMGJlOTA4NTBlNmI0NzVkY2JjY2Q2NmEzYzFjZjU5MDRmYjBmMTU1MzFhM2YiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzEzMTBiZDk5Mjk4ZTQwODY5NWYyZjk2YzUyYWE3NWEwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo2LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OTYzMGJjNzUwMTkwNDVjMjgxNjc1NjJmNjc0NmRhNWYifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_1310bd99298e408695f2f96c52aa75a0",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImYxNGMwMmY2YzM4ZGQ4YWYxODVjMTZiY2RkNTk4MWZhMDRhOGZkNzI3OWY4MGYyOWM4MDM0ZDY0NGYxOTA0MTgiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzEzMTBiZDk5Mjk4ZTQwODY5NWYyZjk2YzUyYWE3NWEwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OTYzMGJjNzUwMTkwNDVjMjgxNjc1NjJmNjc0NmRhNWYifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 8,
+      "result_sequence": 9,
+      "tool_call_id": "call_L3FrpKvuz7FSNaIITW08JZxy",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "cd beta && export COGNITIVE_FLAG=inside && printf 'pwd=%s\\nCOGNITIVE_FLAG=%s\\n' \"$PWD\" \"$COGNITIVE_FLAG\"",
+        "workdir": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "pwd=/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace/beta\nCOGNITIVE_FLAG=inside\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjhhZmI1Njk0NDQ3NjRmMjc1Y2RkZWVmYTg3NmZlMTAwYWEzZGJiM2RhNDU4MzE3NWM0MGY0YjcxYmFmNzcxNTYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzAzZmM5Zjc4NzFjMjQ0MjNiYzQzODAyMDdhMDhmOGJiIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxMzQsInN0cmVhbV9pZCI6InRlcm1pbmFsLXN0cmVhbTpkMGRkZGQyZTc5N2Q0YTA0YTA0YWIxNDRhZDhjNGU2NCJ9fQ",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_03fc9f7871c24423bc4380207a08f8bb",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImY4YzJhZDg4ZWJkZTIwNjhiNmZhNTgzMGJkOWRjMzMyNzRmNjJlZWNhMjJhMTU4ZWI3YjdlN2E5OTEyYWI4NDAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzAzZmM5Zjc4NzFjMjQ0MjNiYzQzODAyMDdhMDhmOGJiIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZDBkZGRkMmU3OTdkNGEwNGEwNGFiMTQ0YWQ4YzRlNjQifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 10,
+      "result_sequence": 11,
+      "tool_call_id": "call_oBwImEWAXdmUs073esdfxKCs",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "printf 'pwd=%s\\nCOGNITIVE_FLAG=%s\\n' \"$PWD\" \"${COGNITIVE_FLAG-<unset>}\""
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "pwd=/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\nCOGNITIVE_FLAG=<unset>\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjE5NDc3YWQxMTA1NTE5ZDFkYjUzNDc1NmU1MmQwYjMwNTE3YjZjNTNjNDk4OTZmNTc5ZDBiMzE3Y2VlYzBlNzQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2JmNTUwZGZkYjAyMDQzM2JhMmU0MWU4NWFkNWRiNTFkIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxMzAsInN0cmVhbV9pZCI6InRlcm1pbmFsLXN0cmVhbTpiNjdlYjU4YTMzZjY0MjE1YjQwNmI4ZDQ2Y2E5ZmVkOSJ9fQ",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_bf550dfdb020433ba2e41e85ad5db51d",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImFlOGRlYWJjZmI4ZjM0NGE4YWUyM2FkNzI0ZmI3NWI0MTNiMDY0OWU0ODA0YTg1NDJhNWJhOWZiYWE1N2QzMWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2JmNTUwZGZkYjAyMDQzM2JhMmU0MWU4NWFkNWRiNTFkIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjY3ZWI1OGEzM2Y2NDIxNWI0MDZiOGQ0NmNhOWZlZDkifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 14,
+      "result_sequence": 15,
+      "tool_call_id": "call_smwpoDZYDfgVANGovghW411M",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "'/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python' -u '/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace/repl.py'",
+        "yield_time_ms": 100
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "READY\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjIzMThlZTg3NGI2NTQwMTA5YTM5ZTZiMDI4MDcxMDNmZGQ4ZTE2NGQ2YjZhMTk0OGNiNjRiNWVmODE0NWJhNWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo2LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjM1ZTZiZDRkYTY1NDQzMzlkMWQyYzA2NjAxY2Q3ZDUifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_ee6d9fd396fc46639327ec9dd8d25caa",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImNhNDY5NzI0MDUxOTIzMDMxYzM4ZGU0OTJkYzFjZDIwMTU1YjYyOGVjOTE5NDRjYTJmM2UzYTAwYjNmZTUzNjAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjM1ZTZiZDRkYTY1NDQzMzlkMWQyYzA2NjAxY2Q3ZDUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 16,
+      "result_sequence": 17,
+      "tool_call_id": "call_3hFJAaZwU7gslw0lLe9lYLhv",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "data": "hello",
+        "action": "write",
+        "process_id": "proc_ee6d9fd396fc46639327ec9dd8d25caa",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "READY\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjIzMThlZTg3NGI2NTQwMTA5YTM5ZTZiMDI4MDcxMDNmZGQ4ZTE2NGQ2YjZhMTk0OGNiNjRiNWVmODE0NWJhNWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo2LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjM1ZTZiZDRkYTY1NDQzMzlkMWQyYzA2NjAxY2Q3ZDUifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_ee6d9fd396fc46639327ec9dd8d25caa",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImNhNDY5NzI0MDUxOTIzMDMxYzM4ZGU0OTJkYzFjZDIwMTU1YjYyOGVjOTE5NDRjYTJmM2UzYTAwYjNmZTUzNjAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjM1ZTZiZDRkYTY1NDQzMzlkMWQyYzA2NjAxY2Q3ZDUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "write",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 18,
+      "result_sequence": 19,
+      "tool_call_id": "call_TvIkkBwOfRvUkZ0802X2GL4v",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "data": "world",
+        "action": "submit",
+        "process_id": "proc_ee6d9fd396fc46639327ec9dd8d25caa"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "READY\nANSWER:helloworld\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjVmYjJmNTRjZTkxZTRmMWI2ZTkzM2E3OWRmYjcyMTU0NTAxZTY2NzZlMmE1MjkwMjUxZmE1MzI5NWQ5NWI5ZDkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoyNCwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOmIzNWU2YmQ0ZGE2NTQ0MzM5ZDFkMmMwNjYwMWNkN2Q1In19",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_ee6d9fd396fc46639327ec9dd8d25caa",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImNhNDY5NzI0MDUxOTIzMDMxYzM4ZGU0OTJkYzFjZDIwMTU1YjYyOGVjOTE5NDRjYTJmM2UzYTAwYjNmZTUzNjAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjM1ZTZiZDRkYTY1NDQzMzlkMWQyYzA2NjAxY2Q3ZDUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "submit",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 20,
+      "result_sequence": 21,
+      "tool_call_id": "call_MkA2aZlvwcyYKTsBekWkrW4R",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "data": "quit",
+        "action": "submit",
+        "process_id": "proc_ee6d9fd396fc46639327ec9dd8d25caa"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "READY\nANSWER:helloworld\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjVmYjJmNTRjZTkxZTRmMWI2ZTkzM2E3OWRmYjcyMTU0NTAxZTY2NzZlMmE1MjkwMjUxZmE1MzI5NWQ5NWI5ZDkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoyNCwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOmIzNWU2YmQ0ZGE2NTQ0MzM5ZDFkMmMwNjYwMWNkN2Q1In19",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_ee6d9fd396fc46639327ec9dd8d25caa",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImNhNDY5NzI0MDUxOTIzMDMxYzM4ZGU0OTJkYzFjZDIwMTU1YjYyOGVjOTE5NDRjYTJmM2UzYTAwYjNmZTUzNjAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjM1ZTZiZDRkYTY1NDQzMzlkMWQyYzA2NjAxY2Q3ZDUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "submit",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 24,
+      "result_sequence": 25,
+      "tool_call_id": "call_GMUMN1F4WWcuHhI4xB5KRMfz",
+      "tool_name": "terminal",
+      "arguments": {
+        "tty": true,
+        "command": "'/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python' -u '/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace/repl.py'",
+        "yield_time_ms": 100
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "READY\n",
+        "output_cursor": "eyJjaGVja3N1bSI6Ijk5Njk0ZjEyZGRlNWVhMTM2YWQ2MzUwOGE1YTk1NDg3MzZiMWVmNzY2NmVjZmNlZTE1ZjFmMjYxNzMwYjQ5MjciLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzliZDZmMDcyM2ZiYzRmMTQ5MDJiNjE3MzRmZmFkOGJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo2LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06Mzg1ZWFkMTcxZmJkNGI0OWExNjczODUwZjlkOGNiMjYifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_9bd6f0723fbc4f14902b61734ffad8be",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjdkZmEwOGNlODgxNTJiOTdlODQ2Zjg5ODNlZmI3MDZmZTFlOTM3MGEwMzEyNjg0MmI4ZTE5ZmYxZTc4ZWUyNGEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzliZDZmMDcyM2ZiYzRmMTQ5MDJiNjE3MzRmZmFkOGJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06Mzg1ZWFkMTcxZmJkNGI0OWExNjczODUwZjlkOGNiMjYifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 26,
+      "result_sequence": 27,
+      "tool_call_id": "call_QZ4H4AhHcj8vL5SmS3EGczcH",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "data": "delayed",
+        "action": "submit",
+        "process_id": "proc_9bd6f0723fbc4f14902b61734ffad8be"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "READY\ndelayed\nANSWER:delayed\n",
+        "output_cursor": "eyJjaGVja3N1bSI6IjdmMmEyMDFiZmM3ZThlNzljNzMyNGY1OTAyMjg1N2MyODBmNTM2NjY5MGIxMDViNTdmY2U5NWJkMmVjNjliYzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzliZDZmMDcyM2ZiYzRmMTQ5MDJiNjE3MzRmZmFkOGJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoyOSwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOjM4NWVhZDE3MWZiZDRiNDlhMTY3Mzg1MGY5ZDhjYjI2In19",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_9bd6f0723fbc4f14902b61734ffad8be",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjdkZmEwOGNlODgxNTJiOTdlODQ2Zjg5ODNlZmI3MDZmZTFlOTM3MGEwMzEyNjg0MmI4ZTE5ZmYxZTc4ZWUyNGEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzliZDZmMDcyM2ZiYzRmMTQ5MDJiNjE3MzRmZmFkOGJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06Mzg1ZWFkMTcxZmJkNGI0OWExNjczODUwZjlkOGNiMjYifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "submit",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 28,
+      "result_sequence": 29,
+      "tool_call_id": "call_1MOMLIvfhFqRFG3owMWHaroz",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "data": "quit",
+        "action": "submit",
+        "process_id": "proc_9bd6f0723fbc4f14902b61734ffad8be"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "READY\ndelayed\nANSWER:delayed\nquit\n",
+        "output_cursor": "eyJjaGVja3N1bSI6ImU4MjY0NzczMGVlMjYxMGFlYzM3OGExYjVlNDc1YTgzZjVhOTNmMjVkOWVjMjA1OWQxOTdlYTA0MTg2NGM3ZmMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzliZDZmMDcyM2ZiYzRmMTQ5MDJiNjE3MzRmZmFkOGJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjozNCwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOjM4NWVhZDE3MWZiZDRiNDlhMTY3Mzg1MGY5ZDhjYjI2In19",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_9bd6f0723fbc4f14902b61734ffad8be",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjdkZmEwOGNlODgxNTJiOTdlODQ2Zjg5ODNlZmI3MDZmZTFlOTM3MGEwMzEyNjg0MmI4ZTE5ZmYxZTc4ZWUyNGEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzliZDZmMDcyM2ZiYzRmMTQ5MDJiNjE3MzRmZmFkOGJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06Mzg1ZWFkMTcxZmJkNGI0OWExNjczODUwZjlkOGNiMjYifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "submit",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 32,
+      "result_sequence": 33,
+      "tool_call_id": "call_fSf6ZxSvX6s3XCYuC6uVHSCm",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 1.2; printf LONG_DONE",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6ImZlMWEyZmVlOWRhYjM5MTJjZTU3NTZjM2VkNDcxZDRhZGI0ZDM3MzMwYTYzNGZkOGQ3NDVlNjQyMTQ0MjEzYjQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzNkMDlhOGUyZWRiZjQ3OTU5OGI2NGYxODM1NmVmOTFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YWJhNWI5ZWNhYzc0NDk4NWJkMTlhY2Q0NmFkNWZmZmUifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_3d09a8e2edbf479598b64f18356ef91a",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImZlMWEyZmVlOWRhYjM5MTJjZTU3NTZjM2VkNDcxZDRhZGI0ZDM3MzMwYTYzNGZkOGQ3NDVlNjQyMTQ0MjEzYjQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzNkMDlhOGUyZWRiZjQ3OTU5OGI2NGYxODM1NmVmOTFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YWJhNWI5ZWNhYzc0NDk4NWJkMTlhY2Q0NmFkNWZmZmUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 34,
+      "result_sequence": 35,
+      "tool_call_id": "call_xSPZqg2ea6EnJAYKg5MM7pHE",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "wait",
+        "process_id": "proc_3d09a8e2edbf479598b64f18356ef91a",
+        "timeout_seconds": 30
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "LONG_DONE",
+        "output_cursor": "eyJjaGVja3N1bSI6IjE1ZTIzMTNhZjZhYWI5ODdjNDAzMmYzNzZhZTY1MTAyOTJlNDBmMjExNzk4M2ViNTcyOTBkNWQxNzQwNzNiYWIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzNkMDlhOGUyZWRiZjQ3OTU5OGI2NGYxODM1NmVmOTFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo5LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YWJhNWI5ZWNhYzc0NDk4NWJkMTlhY2Q0NmFkNWZmZmUifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_3d09a8e2edbf479598b64f18356ef91a",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImZlMWEyZmVlOWRhYjM5MTJjZTU3NTZjM2VkNDcxZDRhZGI0ZDM3MzMwYTYzNGZkOGQ3NDVlNjQyMTQ0MjEzYjQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzNkMDlhOGUyZWRiZjQ3OTU5OGI2NGYxODM1NmVmOTFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YWJhNWI5ZWNhYzc0NDk4NWJkMTlhY2Q0NmFkNWZmZmUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "wait",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 38,
+      "result_sequence": 39,
+      "tool_call_id": "call_7qFBwcMIU9VAEp0u3mk6JDyr",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python -c \"print('A'*9000); print('MIDDLE_7319'); print('B'*9000)\"",
+        "max_output_chars": 512
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nMIDDLE_7319\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n\n\n[TOOL OUTPUT ARTIFACT: full retained output is available as artifact_id=artifact:tool-result:d5c1f7ade6438f285757718b1b789447e6ae24d88c4d6313c2fa9ee9c908c912. If an exact reread is necessary for the current task, read the retained artifact with artifact_read({\"artifact_id\":\"artifact:tool-result:d5c1f7ade6438f285757718b1b789447e6ae24d88c4d6313c2fa9ee9c908c912\",\"offset_chars\":0,\"max_chars\":20000}); otherwise continue from the complete visible result without opening the artifact.]",
+        "output_cursor": "eyJjaGVja3N1bSI6ImE2MDcxYTY0MDM3YzA4ODE3NGU2MThkNWExOTI1MmVjN2E3MzY2MjlmMWYwY2MyNWU2MTYyNmUzNTYwMDI1ZGYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2NhNDgwYzJmYjA2YzQyMzg5NjE5ODRiMzZiYmQzNDFmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxODAxNCwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOmMzNWNhMzE0ZDc2MjQzY2VhNzM5MGEzNGQ3ODEyNmYxIn19",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_ca480c2fb06c4238961984b36bbd341f",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjExNTFmMmJmYTI5Mzk0NjE5NzcxMDU2ZDZmZDQ5ZmQ5YjBhYzI2MDQ1N2M1Y2M5NWM4ZWMyZTQxMGE5ZjM5OWMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2NhNDgwYzJmYjA2YzQyMzg5NjE5ODRiMzZiYmQzNDFmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YzM1Y2EzMTRkNzYyNDNjZWE3MzkwYTM0ZDc4MTI2ZjEifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": true,
+        "truncated_by_response_bound": true,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 40,
+      "result_sequence": 41,
+      "tool_call_id": "call_RorJawZim7DwekgPJ0p4ziRp",
+      "tool_name": "artifact_read",
+      "arguments": {
+        "max_chars": 20000,
+        "artifact_id": "artifact:tool-result:d5c1f7ade6438f285757718b1b789447e6ae24d88c4d6313c2fa9ee9c908c912",
+        "offset_chars": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "artifact_disposition": "AVAILABLE",
+        "artifact_id": "artifact:tool-result:d5c1f7ade6438f285757718b1b789447e6ae24d88c4d6313c2fa9ee9c908c912",
+        "artifact_unavailability_reason": null,
+        "display_kind": "COMPLETE",
+        "has_more": false,
+        "media_type": "text/plain",
+        "next_offset_chars": null,
+        "offset_chars": 0,
+        "returned_chars": 18014,
+        "role": "OUTPUT",
+        "size_bytes": 18014,
+        "source_coverage": "COMPLETE",
+        "source_coverage_reason": null,
+        "status": "success",
+        "text": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nMIDDLE_7319\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n",
+        "total_chars": 18014
+      }
+    },
+    {
+      "request_sequence": 44,
+      "result_sequence": 45,
+      "tool_call_id": "call_Jh4ZvCuW2Ew1ScNGPRQPIL3L",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "printf RACE_DONE",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjE3ZDUwM2ZlOTMxNmE1ZGZmZjIwZWE5YjhkNGY5NTQ0ODM5MGMyZmU0M2Y4ZGYxNTE3MGU0ZjE5ZGFmMDZhYTIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzc2OWU0ZmY4ZmIyZjRlYjA5N2IwMjdjYzg0YjczOTcxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MzQxYzczOTRjYjJjNGZhODhkZDAzNzJjNzM2NTZmNDIifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_769e4ff8fb2f4eb097b027cc84b73971",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjE3ZDUwM2ZlOTMxNmE1ZGZmZjIwZWE5YjhkNGY5NTQ0ODM5MGMyZmU0M2Y4ZGYxNTE3MGU0ZjE5ZGFmMDZhYTIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzc2OWU0ZmY4ZmIyZjRlYjA5N2IwMjdjYzg0YjczOTcxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MzQxYzczOTRjYjJjNGZhODhkZDAzNzJjNzM2NTZmNDIifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 46,
+      "result_sequence": 47,
+      "tool_call_id": "call_72aSJhJv8JD1bsEKARlfPZXh",
+      "tool_name": "terminal_monitor",
+      "arguments": {
+        "action": "register",
+        "process_id": "proc_769e4ff8fb2f4eb097b027cc84b73971"
+      },
+      "result_state": "APPLICATION_ERROR",
+      "result": {
+        "reason": "PROCESS_ALREADY_TERMINAL",
+        "status": "REJECTED"
+      }
+    },
+    {
+      "request_sequence": 48,
+      "result_sequence": 49,
+      "tool_call_id": "call_YMmt3lpSFnOpm9OGANTgsr0N",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "poll",
+        "process_id": "proc_769e4ff8fb2f4eb097b027cc84b73971"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": 0,
+        "gap_before_output": false,
+        "output": "RACE_DONE",
+        "output_cursor": "eyJjaGVja3N1bSI6ImY3NzcwMDRmODYxMjM5ODYzYjllNTdkOTdhYTU2NWNjYTEyZmMwMzU4ZmE0OGYwODU3MmE1ZjQ0ODRlMjg3NGIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzc2OWU0ZmY4ZmIyZjRlYjA5N2IwMjdjYzg0YjczOTcxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo5LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MzQxYzczOTRjYjJjNGZhODhkZDAzNzJjNzM2NTZmNDIifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_769e4ff8fb2f4eb097b027cc84b73971",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjE3ZDUwM2ZlOTMxNmE1ZGZmZjIwZWE5YjhkNGY5NTQ0ODM5MGMyZmU0M2Y4ZGYxNTE3MGU0ZjE5ZGFmMDZhYTIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzc2OWU0ZmY4ZmIyZjRlYjA5N2IwMjdjYzg0YjczOTcxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MzQxYzczOTRjYjJjNGZhODhkZDAzNzJjNzM2NTZmNDIifX0",
+        "source_coverage": "COMPLETE",
+        "status": "success",
+        "terminal_process_action": "poll",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 52,
+      "result_sequence": 53,
+      "tool_call_id": "call_o6bTgIpcDAxYfLffd5GcKBkN",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 2; printf MONITOR_DONE",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjdiYzQ2NGMwYmUzN2RlMmNiY2ZmYWIwYjk4NTNhNjdkN2M5NmU4NDFlNjI4OTA4OTIyOTgzNDdjMmIwZGY3NTciLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzEyMGFkYjIyZDg3MjQwNTZhMjkwMzQ0NDhkOWZiZWNhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZDMxODA2NWFlYzA2NGUzN2JmMWYzZDg1NjhkYzExMWEifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_120adb22d8724056a29034448d9fbeca",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjdiYzQ2NGMwYmUzN2RlMmNiY2ZmYWIwYjk4NTNhNjdkN2M5NmU4NDFlNjI4OTA4OTIyOTgzNDdjMmIwZGY3NTciLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzEyMGFkYjIyZDg3MjQwNTZhMjkwMzQ0NDhkOWZiZWNhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZDMxODA2NWFlYzA2NGUzN2JmMWYzZDg1NjhkYzExMWEifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 54,
+      "result_sequence": 55,
+      "tool_call_id": "call_4M8WtwHR7RpncyuscV8s1T3Q",
+      "tool_name": "terminal_monitor",
+      "arguments": {
+        "action": "register",
+        "process_id": "proc_120adb22d8724056a29034448d9fbeca"
+      },
+      "result_state": "APPLICATION_ERROR",
+      "result": {
+        "reason": "PROCESS_ALREADY_TERMINAL",
+        "status": "REJECTED"
+      }
+    },
+    {
+      "request_sequence": 58,
+      "result_sequence": 59,
+      "tool_call_id": "call_X8YmdxzSDrYxA989r9HgbuTc",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjZhYmExYjExNjRhYTM2Y2U1N2RmMWY2NjdmZGY4MGFkNjdkYTgwOGY5ZTdjMDk5NmNmNmMzM2Q1ZTQ4YTdmZWMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3ZDg1ZmNjNjFiYTQxYTg4YTNjMGRmZGU5NDM1MTU4Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDY0MTY4ZDY0N2NjNDM3MTk1MGMyY2M2MTJmZGJkNjUifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_e7d85fcc61ba41a88a3c0dfde9435158",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjZhYmExYjExNjRhYTM2Y2U1N2RmMWY2NjdmZGY4MGFkNjdkYTgwOGY5ZTdjMDk5NmNmNmMzM2Q1ZTQ4YTdmZWMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3ZDg1ZmNjNjFiYTQxYTg4YTNjMGRmZGU5NDM1MTU4Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDY0MTY4ZDY0N2NjNDM3MTk1MGMyY2M2MTJmZGJkNjUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 60,
+      "result_sequence": 61,
+      "tool_call_id": "call_JFNH99444z5i5ZCXcxo1gO7s",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjJkM2ZlOWJiYWNiZWJkZmE1ZGY3NjM5NGJkYWU5NjgzODMyZWZkYjlhYWVhZGMzZjkxYzU1YjhlNjY5NjA2MTEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U1YTg4NDY2NDJiNzRhMmQ4ZTI4MDhhNGYwY2FiOTY0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YmI1NmI3ZmJhY2Y0NDhkOTkxMzViNmU5ZTE1YTUyMDAifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_e5a8846642b74a2d8e2808a4f0cab964",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjJkM2ZlOWJiYWNiZWJkZmE1ZGY3NjM5NGJkYWU5NjgzODMyZWZkYjlhYWVhZGMzZjkxYzU1YjhlNjY5NjA2MTEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U1YTg4NDY2NDJiNzRhMmQ4ZTI4MDhhNGYwY2FiOTY0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YmI1NmI3ZmJhY2Y0NDhkOTkxMzViNmU5ZTE1YTUyMDAifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 62,
+      "result_sequence": 63,
+      "tool_call_id": "call_9EXO0zgMDqzDR2N6Nu9pm3pV",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjY0YjM3MjlkZmYwZDY5MmUyNGVlMDEwMDc1MThmZGZmODJlZTg3MTM2Mjc4Y2UyNDUyY2RmZmMxMjBkM2EyZTkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzg2OWYzY2Y2ODcyZDQyOWFhNTQzNTg5M2ViMjUwZWVmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZjAwMWE5YTUxN2Q3NDVkYmIyNTczOWM0ZDM1YzAzMGIifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_869f3cf6872d429aa5435893eb250eef",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjY0YjM3MjlkZmYwZDY5MmUyNGVlMDEwMDc1MThmZGZmODJlZTg3MTM2Mjc4Y2UyNDUyY2RmZmMxMjBkM2EyZTkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzg2OWYzY2Y2ODcyZDQyOWFhNTQzNTg5M2ViMjUwZWVmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZjAwMWE5YTUxN2Q3NDVkYmIyNTczOWM0ZDM1YzAzMGIifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 64,
+      "result_sequence": 65,
+      "tool_call_id": "call_csetyabNS0DG00OlFhBFBmSN",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6Ijk2NWMwMzI5MWUyNjlkOGZiMGM5N2M0YzNkZTI3ZWEyNWI3MjE2ODc5NGM5OGUzMTBiOTIxMzI1ZmExODJmMmQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VjMTFiMmMyMGY1YzRmZWJiYjFhZTZiNzIxNDUwNWExIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OGYwYjBiMDU3N2U5NDZkOTg1MmFjOGRiY2ZhZWE3MDEifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_ec11b2c20f5c4febbb1ae6b7214505a1",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6Ijk2NWMwMzI5MWUyNjlkOGZiMGM5N2M0YzNkZTI3ZWEyNWI3MjE2ODc5NGM5OGUzMTBiOTIxMzI1ZmExODJmMmQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VjMTFiMmMyMGY1YzRmZWJiYjFhZTZiNzIxNDUwNWExIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OGYwYjBiMDU3N2U5NDZkOTg1MmFjOGRiY2ZhZWE3MDEifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 66,
+      "result_sequence": 67,
+      "tool_call_id": "call_pZlRBKvYKLnttUgWFl8uWkso",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjI3NTJhMmI5YmNlNTE1YzNlYzM0OGRhZmNlOTQwNTYyYmQzNTgxYTg0YjVhZjJmMjM2OTM5NWQ4NmMxMTgwZmUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2EwZmZlYzBmN2U4YzQwOWFhY2U1MjE4ZWRiZTU3MGYwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MjRiM2VhMmUyZGEzNGRmNzg3YzY2NjQ3YTYzOTk1YzcifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_a0ffec0f7e8c409aace5218edbe570f0",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjI3NTJhMmI5YmNlNTE1YzNlYzM0OGRhZmNlOTQwNTYyYmQzNTgxYTg0YjVhZjJmMjM2OTM5NWQ4NmMxMTgwZmUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2EwZmZlYzBmN2U4YzQwOWFhY2U1MjE4ZWRiZTU3MGYwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MjRiM2VhMmUyZGEzNGRmNzg3YzY2NjQ3YTYzOTk1YzcifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 68,
+      "result_sequence": 69,
+      "tool_call_id": "call_NX1Y8JfVW2YYhKpNAp6UglrJ",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6ImE4Zjg2NTI0Yzg4MDE5NTU3ZDgyOTE3NzNhYTBkZGMyYjk3NzI4YWJmYmQ5NTEyY2QyZTExYjA1MzJmZDRiNzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzBkMGRjYjAxY2VjNjQxNTU5ZWMyYjdkNDg4N2IwM2QxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDMyZjk4MTlhMTMwNGExZmEzOWIwMzg4ODU5NzQ4YmMifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_0d0dcb01cec641559ec2b7d4887b03d1",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImE4Zjg2NTI0Yzg4MDE5NTU3ZDgyOTE3NzNhYTBkZGMyYjk3NzI4YWJmYmQ5NTEyY2QyZTExYjA1MzJmZDRiNzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzBkMGRjYjAxY2VjNjQxNTU5ZWMyYjdkNDg4N2IwM2QxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDMyZjk4MTlhMTMwNGExZmEzOWIwMzg4ODU5NzQ4YmMifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 70,
+      "result_sequence": 71,
+      "tool_call_id": "call_k0MZYNlfjZbQBQz1oUnXmIhh",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjExYTY0MjEzYjUyZTc5ZmU5YTRkYjY0OTMyNzRjMDJkOGYzYzNkYmE3NDU0ZGY5NjE4ODIyNjQ2N2I4YjdhYWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3MDYyODEzNzQ5YjQwNmM4ODI1NzFmNWU3YTRjZjBmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NTkyNzhmNDUxMjk5NGQ4NDhjZDQ1NDY5OTRmYjI3ODkifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_e7062813749b406c882571f5e7a4cf0f",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjExYTY0MjEzYjUyZTc5ZmU5YTRkYjY0OTMyNzRjMDJkOGYzYzNkYmE3NDU0ZGY5NjE4ODIyNjQ2N2I4YjdhYWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3MDYyODEzNzQ5YjQwNmM4ODI1NzFmNWU3YTRjZjBmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NTkyNzhmNDUxMjk5NGQ4NDhjZDQ1NDY5OTRmYjI3ODkifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 72,
+      "result_sequence": 73,
+      "tool_call_id": "call_DHXasuVkt567OM8xgmyXruLR",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "sleep 120",
+        "yield_time_ms": 0
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -1,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjdhYjE0NDY2ZDRiNGJiZjI2ZjQyMmYwY2QwOTlhNjkyNDI1MTM0N2Q0NjBjMmQ5MWU0M2E1ZDQ1NTIyMGU5ZDQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzA0OWY5ZGU4NWM0NDRlMjI4ODEyNmJmN2Q5ZjQ5NWNmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NjljNzE4Y2Q5MjJhNDQ3ZmJmMzA2Mjk4MDZiZDE0ZmYifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_049f9de85c444e2288126bf7d9f495cf",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjdhYjE0NDY2ZDRiNGJiZjI2ZjQyMmYwY2QwOTlhNjkyNDI1MTM0N2Q0NjBjMmQ5MWU0M2E1ZDQ1NTIyMGU5ZDQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzA0OWY5ZGU4NWM0NDRlMjI4ODEyNmJmN2Q5ZjQ5NWNmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NjljNzE4Y2Q5MjJhNDQ3ZmJmMzA2Mjk4MDZiZDE0ZmYifX0",
+        "source_coverage": "COMPLETE",
+        "status": "running",
+        "terminal_process_action": "start",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": true
+      }
+    },
+    {
+      "request_sequence": 74,
+      "result_sequence": 75,
+      "tool_call_id": "call_zpLqZzFZD3RI6MI9sopbNTmF",
+      "tool_name": "terminal",
+      "arguments": {
+        "command": "printf SHOULD_NOT_START",
+        "yield_time_ms": 0
+      },
+      "result_state": "APPLICATION_ERROR",
+      "result": {
+        "status": "blocked",
+        "terminal_process_action": "start",
+        "output": "",
+        "exit_code": -1,
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "timed_out": false,
+        "truncated": false,
+        "error": "terminal process limit reached: max 8",
+        "reason": "PROCESS_CAPACITY_EXHAUSTED",
+        "process_id": null,
+        "yielded_to_background": false,
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "output_cursor": null,
+        "retained_from_cursor": null,
+        "gap_before_output": false,
+        "truncated_by_response_bound": false,
+        "source_coverage": "COMPLETE"
+      }
+    },
+    {
+      "request_sequence": 76,
+      "result_sequence": 77,
+      "tool_call_id": "call_3wCvjLRunz39ucpZu299jmLP",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "list"
+      },
+      "result_state": "SUCCESS",
+      "result": "{\"status\": \"success\", \"terminal_process_action\": \"list\", \"processes\": [{\"process_id\": \"proc_83bf8bc70341421a90c07ef2545e66bb\", \"command\": \"cat alpha/marker.txt\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 0.004070624941959977, \"output_cursor\": \"eyJjaGVja3N1bSI6Ijg4NTNlMzQ4YjI1NGQ4MDVjMzY4OTAwMDFhODdjOWE1YjQyYTRlYTUxOTYyZGVlNGVkZjZhZTg5ZDk4NGM4MDEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzgzYmY4YmM3MDM0MTQyMWE5MGMwN2VmMjU0NWU2NmJiIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo2LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YTFkMmFiODNiMDYxNDk2NGFlNDkyNzI2Y2MxMjI1ZTkifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjAzNGUzZTI4YjRhMGIwNzZhNjZjYzUzNDYxNzc4MDNiYmQyN2I4OWU4ZmY1ZjljNTg4ODYzNjhkNjg0ZmI3ZmIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzgzYmY4YmM3MDM0MTQyMWE5MGMwN2VmMjU0NWU2NmJiIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YTFkMmFiODNiMDYxNDk2NGFlNDkyNzI2Y2MxMjI1ZTkifX0\"}, {\"process_id\": \"proc_463d4f0382b64bc0b179855b2c66badf\", \"command\": \"cat beta/marker.txt\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 0.005401666974648833, \"output_cursor\": \"eyJjaGVja3N1bSI6IjBhNTRmZWY0Yzg4ZmE0YzA0ZTlmYjg2N2JhNzBlN2IyNTQ1MDlhOWIwY2U4ZTdiZjRkZTgyODA2MDFkMzk4NTMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzQ2M2Q0ZjAzODJiNjRiYzBiMTc5ODU1YjJjNjZiYWRmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo1LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06N2NmYzBmZDdjOWY1NDI1YWJkZDY0ZjJkMmIwM2E2NTcifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6ImU0NGUzMzE5ZmJlZTI5ODE2NmI4OGJkMjYzODFkOWI0OTRiOGIxNGY1YzIyYzNlNTE4NDlkMjRjOWQyZTQ5MDIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzQ2M2Q0ZjAzODJiNjRiYzBiMTc5ODU1YjJjNjZiYWRmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06N2NmYzBmZDdjOWY1NDI1YWJkZDY0ZjJkMmIwM2E2NTcifX0\"}, {\"process_id\": \"proc_1310bd99298e408695f2f96c52aa75a0\", \"command\": \"cat alpha/marker.txt\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 0.006691584014333785, \"output_cursor\": \"eyJjaGVja3N1bSI6IjcwZGM2M2YxOGQ1NzUyMjAwZDdmMGJlOTA4NTBlNmI0NzVkY2JjY2Q2NmEzYzFjZjU5MDRmYjBmMTU1MzFhM2YiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzEzMTBiZDk5Mjk4ZTQwODY5NWYyZjk2YzUyYWE3NWEwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo2LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OTYzMGJjNzUwMTkwNDVjMjgxNjc1NjJmNjc0NmRhNWYifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6ImYxNGMwMmY2YzM4ZGQ4YWYxODVjMTZiY2RkNTk4MWZhMDRhOGZkNzI3OWY4MGYyOWM4MDM0ZDY0NGYxOTA0MTgiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzEzMTBiZDk5Mjk4ZTQwODY5NWYyZjk2YzUyYWE3NWEwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OTYzMGJjNzUwMTkwNDVjMjgxNjc1NjJmNjc0NmRhNWYifX0\"}, {\"process_id\": \"proc_03fc9f7871c24423bc4380207a08f8bb\", \"command\": \"cd beta && export COGNITIVE_FLAG=inside && printf 'pwd=%s\\\\nCOGNITIVE_FLAG=%s\\\\n' \\\"$PWD\\\" \\\"$COGNITIVE_FLAG\\\"\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 0.0051024589920416474, \"output_cursor\": \"eyJjaGVja3N1bSI6IjhhZmI1Njk0NDQ3NjRmMjc1Y2RkZWVmYTg3NmZlMTAwYWEzZGJiM2RhNDU4MzE3NWM0MGY0YjcxYmFmNzcxNTYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzAzZmM5Zjc4NzFjMjQ0MjNiYzQzODAyMDdhMDhmOGJiIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxMzQsInN0cmVhbV9pZCI6InRlcm1pbmFsLXN0cmVhbTpkMGRkZGQyZTc5N2Q0YTA0YTA0YWIxNDRhZDhjNGU2NCJ9fQ\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6ImY4YzJhZDg4ZWJkZTIwNjhiNmZhNTgzMGJkOWRjMzMyNzRmNjJlZWNhMjJhMTU4ZWI3YjdlN2E5OTEyYWI4NDAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzAzZmM5Zjc4NzFjMjQ0MjNiYzQzODAyMDdhMDhmOGJiIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZDBkZGRkMmU3OTdkNGEwNGEwNGFiMTQ0YWQ4YzRlNjQifX0\"}, {\"process_id\": \"proc_bf550dfdb020433ba2e41e85ad5db51d\", \"command\": \"printf 'pwd=%s\\\\nCOGNITIVE_FLAG=%s\\\\n' \\\"$PWD\\\" \\\"${COGNITIVE_FLAG-<unset>}\\\"\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 0.004509416059590876, \"output_cursor\": \"eyJjaGVja3N1bSI6IjE5NDc3YWQxMTA1NTE5ZDFkYjUzNDc1NmU1MmQwYjMwNTE3YjZjNTNjNDk4OTZmNTc5ZDBiMzE3Y2VlYzBlNzQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2JmNTUwZGZkYjAyMDQzM2JhMmU0MWU4NWFkNWRiNTFkIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxMzAsInN0cmVhbV9pZCI6InRlcm1pbmFsLXN0cmVhbTpiNjdlYjU4YTMzZjY0MjE1YjQwNmI4ZDQ2Y2E5ZmVkOSJ9fQ\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6ImFlOGRlYWJjZmI4ZjM0NGE4YWUyM2FkNzI0ZmI3NWI0MTNiMDY0OWU0ODA0YTg1NDJhNWJhOWZiYWE1N2QzMWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2JmNTUwZGZkYjAyMDQzM2JhMmU0MWU4NWFkNWRiNTFkIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjY3ZWI1OGEzM2Y2NDIxNWI0MDZiOGQ0NmNhOWZlZDkifX0\"}, {\"process_id\": \"proc_ee6d9fd396fc46639327ec9dd8d25caa\", \"command\": \"'/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python' -u '/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace/repl.py'\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 12.732217875076458, \"output_cursor\": \"eyJjaGVja3N1bSI6IjVmYjJmNTRjZTkxZTRmMWI2ZTkzM2E3OWRmYjcyMTU0NTAxZTY2NzZlMmE1MjkwMjUxZmE1MzI5NWQ5NWI5ZDkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoyNCwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOmIzNWU2YmQ0ZGE2NTQ0MzM5ZDFkMmMwNjYwMWNkN2Q1In19\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6ImNhNDY5NzI0MDUxOTIzMDMxYzM4ZGU0OTJkYzFjZDIwMTU1YjYyOGVjOTE5NDRjYTJmM2UzYTAwYjNmZTUzNjAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VlNmQ5ZmQzOTZmYzQ2NjM5MzI3ZWM5ZGQ4ZDI1Y2FhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YjM1ZTZiZDRkYTY1NDQzMzlkMWQyYzA2NjAxY2Q3ZDUifX0\"}, {\"process_id\": \"proc_9bd6f0723fbc4f14902b61734ffad8be\", \"command\": \"'/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python' -u '/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace/repl.py'\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 9.530342624988407, \"output_cursor\": \"eyJjaGVja3N1bSI6ImU4MjY0NzczMGVlMjYxMGFlYzM3OGExYjVlNDc1YTgzZjVhOTNmMjVkOWVjMjA1OWQxOTdlYTA0MTg2NGM3ZmMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzliZDZmMDcyM2ZiYzRmMTQ5MDJiNjE3MzRmZmFkOGJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjozNCwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOjM4NWVhZDE3MWZiZDRiNDlhMTY3Mzg1MGY5ZDhjYjI2In19\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjdkZmEwOGNlODgxNTJiOTdlODQ2Zjg5ODNlZmI3MDZmZTFlOTM3MGEwMzEyNjg0MmI4ZTE5ZmYxZTc4ZWUyNGEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzliZDZmMDcyM2ZiYzRmMTQ5MDJiNjE3MzRmZmFkOGJlIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06Mzg1ZWFkMTcxZmJkNGI0OWExNjczODUwZjlkOGNiMjYifX0\"}, {\"process_id\": \"proc_3d09a8e2edbf479598b64f18356ef91a\", \"command\": \"sleep 1.2; printf LONG_DONE\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 1.212603124906309, \"output_cursor\": \"eyJjaGVja3N1bSI6IjE1ZTIzMTNhZjZhYWI5ODdjNDAzMmYzNzZhZTY1MTAyOTJlNDBmMjExNzk4M2ViNTcyOTBkNWQxNzQwNzNiYWIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzNkMDlhOGUyZWRiZjQ3OTU5OGI2NGYxODM1NmVmOTFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo5LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YWJhNWI5ZWNhYzc0NDk4NWJkMTlhY2Q0NmFkNWZmZmUifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6ImZlMWEyZmVlOWRhYjM5MTJjZTU3NTZjM2VkNDcxZDRhZGI0ZDM3MzMwYTYzNGZkOGQ3NDVlNjQyMTQ0MjEzYjQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzNkMDlhOGUyZWRiZjQ3OTU5OGI2NGYxODM1NmVmOTFhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YWJhNWI5ZWNhYzc0NDk4NWJkMTlhY2Q0NmFkNWZmZmUifX0\"}, {\"process_id\": \"proc_ca480c2fb06c4238961984b36bbd341f\", \"command\": \"/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python -c \\\"print('A'*9000); print('MIDDLE_7319'); print('B'*9000)\\\"\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 0.02216350007802248, \"output_cursor\": \"eyJjaGVja3N1bSI6ImE2MDcxYTY0MDM3YzA4ODE3NGU2MThkNWExOTI1MmVjN2E3MzY2MjlmMWYwY2MyNWU2MTYyNmUzNTYwMDI1ZGYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2NhNDgwYzJmYjA2YzQyMzg5NjE5ODRiMzZiYmQzNDFmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxODAxNCwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOmMzNWNhMzE0ZDc2MjQzY2VhNzM5MGEzNGQ3ODEyNmYxIn19\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjExNTFmMmJmYTI5Mzk0NjE5NzcxMDU2ZDZmZDQ5ZmQ5YjBhYzI2MDQ1N2M1Y2M5NWM4ZWMyZTQxMGE5ZjM5OWMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2NhNDgwYzJmYjA2YzQyMzg5NjE5ODRiMzZiYmQzNDFmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YzM1Y2EzMTRkNzYyNDNjZWE3MzkwYTM0ZDc4MTI2ZjEifX0\"}, {\"process_id\": \"proc_769e4ff8fb2f4eb097b027cc84b73971\", \"command\": \"printf RACE_DONE\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 0.0037142500514164567, \"output_cursor\": \"eyJjaGVja3N1bSI6ImY3NzcwMDRmODYxMjM5ODYzYjllNTdkOTdhYTU2NWNjYTEyZmMwMzU4ZmE0OGYwODU3MmE1ZjQ0ODRlMjg3NGIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzc2OWU0ZmY4ZmIyZjRlYjA5N2IwMjdjYzg0YjczOTcxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0Ijo5LCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MzQxYzczOTRjYjJjNGZhODhkZDAzNzJjNzM2NTZmNDIifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjE3ZDUwM2ZlOTMxNmE1ZGZmZjIwZWE5YjhkNGY5NTQ0ODM5MGMyZmU0M2Y4ZGYxNTE3MGU0ZjE5ZGFmMDZhYTIiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzc2OWU0ZmY4ZmIyZjRlYjA5N2IwMjdjYzg0YjczOTcxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MzQxYzczOTRjYjJjNGZhODhkZDAzNzJjNzM2NTZmNDIifX0\"}, {\"process_id\": \"proc_120adb22d8724056a29034448d9fbeca\", \"command\": \"sleep 2; printf MONITOR_DONE\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"success\", \"exit_code\": 0, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 2.0122496669646353, \"output_cursor\": \"eyJjaGVja3N1bSI6IjA3ODlmNTI1YTE0Njk0MzJlZmZmYTAxOTk3YTM3ZWQ1NzQyYzQ5NGEyMGMzYWFkMGZjMDUwMThkYjRhZTI0NzkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzEyMGFkYjIyZDg3MjQwNTZhMjkwMzQ0NDhkOWZiZWNhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjoxMiwic3RyZWFtX2lkIjoidGVybWluYWwtc3RyZWFtOmQzMTgwNjVhZWMwNjRlMzdiZjFmM2Q4NTY4ZGMxMTFhIn19\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjdiYzQ2NGMwYmUzN2RlMmNiY2ZmYWIwYjk4NTNhNjdkN2M5NmU4NDFlNjI4OTA4OTIyOTgzNDdjMmIwZGY3NTciLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzEyMGFkYjIyZDg3MjQwNTZhMjkwMzQ0NDhkOWZiZWNhIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZDMxODA2NWFlYzA2NGUzN2JmMWYzZDg1NjhkYzExMWEifX0\"}, {\"process_id\": \"proc_e7d85fcc61ba41a88a3c0dfde9435158\", \"command\": \"sleep 120\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"running\", \"exit_code\": null, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 39.929535707924515, \"output_cursor\": \"eyJjaGVja3N1bSI6IjZhYmExYjExNjRhYTM2Y2U1N2RmMWY2NjdmZGY4MGFkNjdkYTgwOGY5ZTdjMDk5NmNmNmMzM2Q1ZTQ4YTdmZWMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3ZDg1ZmNjNjFiYTQxYTg4YTNjMGRmZGU5NDM1MTU4Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDY0MTY4ZDY0N2NjNDM3MTk1MGMyY2M2MTJmZGJkNjUifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjZhYmExYjExNjRhYTM2Y2U1N2RmMWY2NjdmZGY4MGFkNjdkYTgwOGY5ZTdjMDk5NmNmNmMzM2Q1ZTQ4YTdmZWMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3ZDg1ZmNjNjFiYTQxYTg4YTNjMGRmZGU5NDM1MTU4Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDY0MTY4ZDY0N2NjNDM3MTk1MGMyY2M2MTJmZGJkNjUifX0\"}, {\"process_id\": \"proc_e5a8846642b74a2d8e2808a4f0cab964\", \"command\": \"sleep 120\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"running\", \"exit_code\": null, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 35.53493229101878, \"output_cursor\": \"eyJjaGVja3N1bSI6IjJkM2ZlOWJiYWNiZWJkZmE1ZGY3NjM5NGJkYWU5NjgzODMyZWZkYjlhYWVhZGMzZjkxYzU1YjhlNjY5NjA2MTEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U1YTg4NDY2NDJiNzRhMmQ4ZTI4MDhhNGYwY2FiOTY0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YmI1NmI3ZmJhY2Y0NDhkOTkxMzViNmU5ZTE1YTUyMDAifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjJkM2ZlOWJiYWNiZWJkZmE1ZGY3NjM5NGJkYWU5NjgzODMyZWZkYjlhYWVhZGMzZjkxYzU1YjhlNjY5NjA2MTEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U1YTg4NDY2NDJiNzRhMmQ4ZTI4MDhhNGYwY2FiOTY0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YmI1NmI3ZmJhY2Y0NDhkOTkxMzViNmU5ZTE1YTUyMDAifX0\"}, {\"process_id\": \"proc_869f3cf6872d429aa5435893eb250eef\", \"command\": \"sleep 120\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"running\", \"exit_code\": null, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 31.70117245800793, \"output_cursor\": \"eyJjaGVja3N1bSI6IjY0YjM3MjlkZmYwZDY5MmUyNGVlMDEwMDc1MThmZGZmODJlZTg3MTM2Mjc4Y2UyNDUyY2RmZmMxMjBkM2EyZTkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzg2OWYzY2Y2ODcyZDQyOWFhNTQzNTg5M2ViMjUwZWVmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZjAwMWE5YTUxN2Q3NDVkYmIyNTczOWM0ZDM1YzAzMGIifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjY0YjM3MjlkZmYwZDY5MmUyNGVlMDEwMDc1MThmZGZmODJlZTg3MTM2Mjc4Y2UyNDUyY2RmZmMxMjBkM2EyZTkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzg2OWYzY2Y2ODcyZDQyOWFhNTQzNTg5M2ViMjUwZWVmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZjAwMWE5YTUxN2Q3NDVkYmIyNTczOWM0ZDM1YzAzMGIifX0\"}, {\"process_id\": \"proc_ec11b2c20f5c4febbb1ae6b7214505a1\", \"command\": \"sleep 120\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"running\", \"exit_code\": null, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 27.867574958945625, \"output_cursor\": \"eyJjaGVja3N1bSI6Ijk2NWMwMzI5MWUyNjlkOGZiMGM5N2M0YzNkZTI3ZWEyNWI3MjE2ODc5NGM5OGUzMTBiOTIxMzI1ZmExODJmMmQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VjMTFiMmMyMGY1YzRmZWJiYjFhZTZiNzIxNDUwNWExIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OGYwYjBiMDU3N2U5NDZkOTg1MmFjOGRiY2ZhZWE3MDEifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6Ijk2NWMwMzI5MWUyNjlkOGZiMGM5N2M0YzNkZTI3ZWEyNWI3MjE2ODc5NGM5OGUzMTBiOTIxMzI1ZmExODJmMmQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VjMTFiMmMyMGY1YzRmZWJiYjFhZTZiNzIxNDUwNWExIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OGYwYjBiMDU3N2U5NDZkOTg1MmFjOGRiY2ZhZWE3MDEifX0\"}, {\"process_id\": \"proc_a0ffec0f7e8c409aace5218edbe570f0\", \"command\": \"sleep 120\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"running\", \"exit_code\": null, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 24.517279500025325, \"output_cursor\": \"eyJjaGVja3N1bSI6IjI3NTJhMmI5YmNlNTE1YzNlYzM0OGRhZmNlOTQwNTYyYmQzNTgxYTg0YjVhZjJmMjM2OTM5NWQ4NmMxMTgwZmUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2EwZmZlYzBmN2U4YzQwOWFhY2U1MjE4ZWRiZTU3MGYwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MjRiM2VhMmUyZGEzNGRmNzg3YzY2NjQ3YTYzOTk1YzcifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjI3NTJhMmI5YmNlNTE1YzNlYzM0OGRhZmNlOTQwNTYyYmQzNTgxYTg0YjVhZjJmMjM2OTM5NWQ4NmMxMTgwZmUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2EwZmZlYzBmN2U4YzQwOWFhY2U1MjE4ZWRiZTU3MGYwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MjRiM2VhMmUyZGEzNGRmNzg3YzY2NjQ3YTYzOTk1YzcifX0\"}, {\"process_id\": \"proc_0d0dcb01cec641559ec2b7d4887b03d1\", \"command\": \"sleep 120\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"running\", \"exit_code\": null, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 20.200480166007765, \"output_cursor\": \"eyJjaGVja3N1bSI6ImE4Zjg2NTI0Yzg4MDE5NTU3ZDgyOTE3NzNhYTBkZGMyYjk3NzI4YWJmYmQ5NTEyY2QyZTExYjA1MzJmZDRiNzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzBkMGRjYjAxY2VjNjQxNTU5ZWMyYjdkNDg4N2IwM2QxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDMyZjk4MTlhMTMwNGExZmEzOWIwMzg4ODU5NzQ4YmMifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6ImE4Zjg2NTI0Yzg4MDE5NTU3ZDgyOTE3NzNhYTBkZGMyYjk3NzI4YWJmYmQ5NTEyY2QyZTExYjA1MzJmZDRiNzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzBkMGRjYjAxY2VjNjQxNTU5ZWMyYjdkNDg4N2IwM2QxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDMyZjk4MTlhMTMwNGExZmEzOWIwMzg4ODU5NzQ4YmMifX0\"}, {\"process_id\": \"proc_e7062813749b406c882571f5e7a4cf0f\", \"command\": \"sleep 120\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"running\", \"exit_code\": null, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 14.877760917064734, \"output_cursor\": \"eyJjaGVja3N1bSI6IjExYTY0MjEzYjUyZTc5ZmU5YTRkYjY0OTMyNzRjMDJkOGYzYzNkYmE3NDU0ZGY5NjE4ODIyNjQ2N2I4YjdhYWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3MDYyODEzNzQ5YjQwNmM4ODI1NzFmNWU3YTRjZjBmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NTkyNzhmNDUxMjk5NGQ4NDhjZDQ1NDY5OTRmYjI3ODkifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjExYTY0MjEzYjUyZTc5ZmU5YTRkYjY0OTMyNzRjMDJkOGYzYzNkYmE3NDU0ZGY5NjE4ODIyNjQ2N2I4YjdhYWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3MDYyODEzNzQ5YjQwNmM4ODI1NzFmNWU3YTRjZjBmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NTkyNzhmNDUxMjk5NGQ4NDhjZDQ1NDY5OTRmYjI3ODkifX0\"}, {\"process_id\": \"proc_049f9de85c444e2288126bf7d9f495cf\", \"command\": \"sleep 120\", \"cwd\": \"/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace\", \"status\": \"running\", \"exit_code\": null, \"timed_out\": false, \"stdin_closed\": false, \"duration_seconds\": 10.780590666923672, \"output_cursor\": \"eyJjaGVja3N1bSI6IjdhYjE0NDY2ZDRiNGJiZjI2ZjQyMmYwY2QwOTlhNjkyNDI1MTM0N2Q0NjBjMmQ5MWU0M2E1ZDQ1NTIyMGU5ZDQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzA0OWY5ZGU4NWM0NDRlMjI4ODEyNmJmN2Q5ZjQ5NWNmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NjljNzE4Y2Q5MjJhNDQ3ZmJmMzA2Mjk4MDZiZDE0ZmYifX0\", \"retained_from_cursor\": \"eyJjaGVja3N1bSI6IjdhYjE0NDY2ZDRiNGJiZjI2ZjQyMmYwY2QwOTlhNjkyNDI1MTM0N2Q0NjBjMmQ5MWU0M2E1ZDQ1NTIyMGU5ZDQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzA0OWY5ZGU4NWM0NDRlMjI4ODEyNmJmN2Q5ZjQ5NWNmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NjljNzE4Y2Q5MjJhNDQ3ZmJmMzA2Mjk4MDZiZDE0ZmYifX0\"}]}\n\n[TOOL OUTPUT ARTIFACT: full retained output is available as artifact_id=artifact:tool-result:f48a8513d4141ca6ca3dd68f802c76b763ddea7c1d8955a5d38e0d4c58ec88ff. If an exact reread is necessary for the current task, read the retained artifact with artifact_read({\"artifact_id\":\"artifact:tool-result:f48a8513d4141ca6ca3dd68f802c76b763ddea7c1d8955a5d38e0d4c58ec88ff\",\"offset_chars\":0,\"max_chars\":20000}); otherwise continue from the complete visible result without opening the artifact.]"
+    },
+    {
+      "request_sequence": 78,
+      "result_sequence": 79,
+      "tool_call_id": "call_nj9gKgtxGhQeof8wWW3g1Hue",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "kill",
+        "process_id": "proc_e7d85fcc61ba41a88a3c0dfde9435158"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -15,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjZhYmExYjExNjRhYTM2Y2U1N2RmMWY2NjdmZGY4MGFkNjdkYTgwOGY5ZTdjMDk5NmNmNmMzM2Q1ZTQ4YTdmZWMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3ZDg1ZmNjNjFiYTQxYTg4YTNjMGRmZGU5NDM1MTU4Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDY0MTY4ZDY0N2NjNDM3MTk1MGMyY2M2MTJmZGJkNjUifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_e7d85fcc61ba41a88a3c0dfde9435158",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjZhYmExYjExNjRhYTM2Y2U1N2RmMWY2NjdmZGY4MGFkNjdkYTgwOGY5ZTdjMDk5NmNmNmMzM2Q1ZTQ4YTdmZWMiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3ZDg1ZmNjNjFiYTQxYTg4YTNjMGRmZGU5NDM1MTU4Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDY0MTY4ZDY0N2NjNDM3MTk1MGMyY2M2MTJmZGJkNjUifX0",
+        "source_coverage": "COMPLETE",
+        "status": "killed",
+        "terminal_process_action": "kill",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 80,
+      "result_sequence": 81,
+      "tool_call_id": "call_DAjzBwW48OlrBFRq0VNJCItr",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "kill",
+        "process_id": "proc_e5a8846642b74a2d8e2808a4f0cab964"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -15,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjJkM2ZlOWJiYWNiZWJkZmE1ZGY3NjM5NGJkYWU5NjgzODMyZWZkYjlhYWVhZGMzZjkxYzU1YjhlNjY5NjA2MTEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U1YTg4NDY2NDJiNzRhMmQ4ZTI4MDhhNGYwY2FiOTY0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YmI1NmI3ZmJhY2Y0NDhkOTkxMzViNmU5ZTE1YTUyMDAifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_e5a8846642b74a2d8e2808a4f0cab964",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjJkM2ZlOWJiYWNiZWJkZmE1ZGY3NjM5NGJkYWU5NjgzODMyZWZkYjlhYWVhZGMzZjkxYzU1YjhlNjY5NjA2MTEiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U1YTg4NDY2NDJiNzRhMmQ4ZTI4MDhhNGYwY2FiOTY0Iiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06YmI1NmI3ZmJhY2Y0NDhkOTkxMzViNmU5ZTE1YTUyMDAifX0",
+        "source_coverage": "COMPLETE",
+        "status": "killed",
+        "terminal_process_action": "kill",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 82,
+      "result_sequence": 83,
+      "tool_call_id": "call_ZeUP5lwNNRVIB4OKjm8lQqzS",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "kill",
+        "process_id": "proc_869f3cf6872d429aa5435893eb250eef"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -15,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjY0YjM3MjlkZmYwZDY5MmUyNGVlMDEwMDc1MThmZGZmODJlZTg3MTM2Mjc4Y2UyNDUyY2RmZmMxMjBkM2EyZTkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzg2OWYzY2Y2ODcyZDQyOWFhNTQzNTg5M2ViMjUwZWVmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZjAwMWE5YTUxN2Q3NDVkYmIyNTczOWM0ZDM1YzAzMGIifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_869f3cf6872d429aa5435893eb250eef",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjY0YjM3MjlkZmYwZDY5MmUyNGVlMDEwMDc1MThmZGZmODJlZTg3MTM2Mjc4Y2UyNDUyY2RmZmMxMjBkM2EyZTkiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzg2OWYzY2Y2ODcyZDQyOWFhNTQzNTg5M2ViMjUwZWVmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06ZjAwMWE5YTUxN2Q3NDVkYmIyNTczOWM0ZDM1YzAzMGIifX0",
+        "source_coverage": "COMPLETE",
+        "status": "killed",
+        "terminal_process_action": "kill",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 84,
+      "result_sequence": 85,
+      "tool_call_id": "call_sUPG4o0MhlmTHmkbyrGwyvGC",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "kill",
+        "process_id": "proc_ec11b2c20f5c4febbb1ae6b7214505a1"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -15,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6Ijk2NWMwMzI5MWUyNjlkOGZiMGM5N2M0YzNkZTI3ZWEyNWI3MjE2ODc5NGM5OGUzMTBiOTIxMzI1ZmExODJmMmQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VjMTFiMmMyMGY1YzRmZWJiYjFhZTZiNzIxNDUwNWExIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OGYwYjBiMDU3N2U5NDZkOTg1MmFjOGRiY2ZhZWE3MDEifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_ec11b2c20f5c4febbb1ae6b7214505a1",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6Ijk2NWMwMzI5MWUyNjlkOGZiMGM5N2M0YzNkZTI3ZWEyNWI3MjE2ODc5NGM5OGUzMTBiOTIxMzI1ZmExODJmMmQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2VjMTFiMmMyMGY1YzRmZWJiYjFhZTZiNzIxNDUwNWExIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06OGYwYjBiMDU3N2U5NDZkOTg1MmFjOGRiY2ZhZWE3MDEifX0",
+        "source_coverage": "COMPLETE",
+        "status": "killed",
+        "terminal_process_action": "kill",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 86,
+      "result_sequence": 87,
+      "tool_call_id": "call_1UBe2mM6l5Mj788r7G9FfCyO",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "kill",
+        "process_id": "proc_a0ffec0f7e8c409aace5218edbe570f0"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -15,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjI3NTJhMmI5YmNlNTE1YzNlYzM0OGRhZmNlOTQwNTYyYmQzNTgxYTg0YjVhZjJmMjM2OTM5NWQ4NmMxMTgwZmUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2EwZmZlYzBmN2U4YzQwOWFhY2U1MjE4ZWRiZTU3MGYwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MjRiM2VhMmUyZGEzNGRmNzg3YzY2NjQ3YTYzOTk1YzcifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_a0ffec0f7e8c409aace5218edbe570f0",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjI3NTJhMmI5YmNlNTE1YzNlYzM0OGRhZmNlOTQwNTYyYmQzNTgxYTg0YjVhZjJmMjM2OTM5NWQ4NmMxMTgwZmUiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2EwZmZlYzBmN2U4YzQwOWFhY2U1MjE4ZWRiZTU3MGYwIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06MjRiM2VhMmUyZGEzNGRmNzg3YzY2NjQ3YTYzOTk1YzcifX0",
+        "source_coverage": "COMPLETE",
+        "status": "killed",
+        "terminal_process_action": "kill",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 88,
+      "result_sequence": 89,
+      "tool_call_id": "call_SwbGidOLaU7a21u4Uz8QbtDv",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "kill",
+        "process_id": "proc_0d0dcb01cec641559ec2b7d4887b03d1"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -15,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6ImE4Zjg2NTI0Yzg4MDE5NTU3ZDgyOTE3NzNhYTBkZGMyYjk3NzI4YWJmYmQ5NTEyY2QyZTExYjA1MzJmZDRiNzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzBkMGRjYjAxY2VjNjQxNTU5ZWMyYjdkNDg4N2IwM2QxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDMyZjk4MTlhMTMwNGExZmEzOWIwMzg4ODU5NzQ4YmMifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_0d0dcb01cec641559ec2b7d4887b03d1",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6ImE4Zjg2NTI0Yzg4MDE5NTU3ZDgyOTE3NzNhYTBkZGMyYjk3NzI4YWJmYmQ5NTEyY2QyZTExYjA1MzJmZDRiNzAiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzBkMGRjYjAxY2VjNjQxNTU5ZWMyYjdkNDg4N2IwM2QxIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NDMyZjk4MTlhMTMwNGExZmEzOWIwMzg4ODU5NzQ4YmMifX0",
+        "source_coverage": "COMPLETE",
+        "status": "killed",
+        "terminal_process_action": "kill",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 90,
+      "result_sequence": 91,
+      "tool_call_id": "call_p1SsOCnMsr0g1tMr7FRAYNt2",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "kill",
+        "process_id": "proc_e7062813749b406c882571f5e7a4cf0f"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -15,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjExYTY0MjEzYjUyZTc5ZmU5YTRkYjY0OTMyNzRjMDJkOGYzYzNkYmE3NDU0ZGY5NjE4ODIyNjQ2N2I4YjdhYWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3MDYyODEzNzQ5YjQwNmM4ODI1NzFmNWU3YTRjZjBmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NTkyNzhmNDUxMjk5NGQ4NDhjZDQ1NDY5OTRmYjI3ODkifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_e7062813749b406c882571f5e7a4cf0f",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjExYTY0MjEzYjUyZTc5ZmU5YTRkYjY0OTMyNzRjMDJkOGYzYzNkYmE3NDU0ZGY5NjE4ODIyNjQ2N2I4YjdhYWYiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jX2U3MDYyODEzNzQ5YjQwNmM4ODI1NzFmNWU3YTRjZjBmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NTkyNzhmNDUxMjk5NGQ4NDhjZDQ1NDY5OTRmYjI3ODkifX0",
+        "source_coverage": "COMPLETE",
+        "status": "killed",
+        "terminal_process_action": "kill",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    },
+    {
+      "request_sequence": 92,
+      "result_sequence": 93,
+      "tool_call_id": "call_AOpYKzf1NLzJK4WfHstcCZV7",
+      "tool_name": "terminal_process",
+      "arguments": {
+        "action": "kill",
+        "process_id": "proc_049f9de85c444e2288126bf7d9f495cf"
+      },
+      "result_state": "SUCCESS",
+      "result": {
+        "cwd": "/private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace",
+        "error": null,
+        "exit_code": -15,
+        "gap_before_output": false,
+        "output": "",
+        "output_cursor": "eyJjaGVja3N1bSI6IjdhYjE0NDY2ZDRiNGJiZjI2ZjQyMmYwY2QwOTlhNjkyNDI1MTM0N2Q0NjBjMmQ5MWU0M2E1ZDQ1NTIyMGU5ZDQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzA0OWY5ZGU4NWM0NDRlMjI4ODEyNmJmN2Q5ZjQ5NWNmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NjljNzE4Y2Q5MjJhNDQ3ZmJmMzA2Mjk4MDZiZDE0ZmYifX0",
+        "output_disposition": "CURRENT_SNAPSHOT",
+        "process_id": "proc_049f9de85c444e2288126bf7d9f495cf",
+        "reason": null,
+        "retained_from_cursor": "eyJjaGVja3N1bSI6IjdhYjE0NDY2ZDRiNGJiZjI2ZjQyMmYwY2QwOTlhNjkyNDI1MTM0N2Q0NjBjMmQ5MWU0M2E1ZDQ1NTIyMGU5ZDQiLCJwYXlsb2FkIjp7Im93bmVyX2Vwb2NoIjoiaG9zdDpmMDM5NTdkMTM2MGE0NTBjODcxZGIxNGU0MzNlNjJlMSIsInByb2Nlc3NfaWQiOiJwcm9jXzA0OWY5ZGU4NWM0NDRlMjI4ODEyNmJmN2Q5ZjQ5NWNmIiwic2FuaXRpemVkX3V0Zjhfb2Zmc2V0IjowLCJzdHJlYW1faWQiOiJ0ZXJtaW5hbC1zdHJlYW06NjljNzE4Y2Q5MjJhNDQ3ZmJmMzA2Mjk4MDZiZDE0ZmYifX0",
+        "source_coverage": "COMPLETE",
+        "status": "killed",
+        "terminal_process_action": "kill",
+        "timed_out": false,
+        "truncated": false,
+        "truncated_by_response_bound": false,
+        "yielded_to_background": false
+      }
+    }
+  ],
+  "saved_home": "/Users/plumliu/.pulsara",
+  "prompts": {
+    "directories": "Use terminal to read marker.txt in alpha, then beta, then alpha again, as three separate commands. Then run one command that changes to beta and exports COGNITIVE_FLAG=inside and prints both pwd and that variable. In a final separate terminal call without workdir or terminal session selection, print pwd and the value of COGNITIVE_FLAG. Report observed directories and whether the export persisted.",
+    "interaction": "Start '/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python -u /private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace/repl.py' with yield_time_ms=100. Send hello without a newline using write, then submit world to finish the line. Obtain ANSWER:helloworld, then submit quit. Use the advertised defaults for write/submit, except use yield_time_ms=0 for write if that option exists. Report the exact answer and which calls were needed to observe it.",
+    "pty": "Start '/Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python -u /private/var/folders/2y/j7tf9q5s4fg4q5sfkdp_ktc00000gn/T/pulsara-terminal-cognitive-f1rpoqoz/workspace/repl.py' with tty=true and yield_time_ms=100. Submit delayed and obtain ANSWER:delayed, not merely the echoed input. Then submit quit. Use the advertised submit defaults. Report the answer.",
+    "long": "Start the exact command \"sleep 1.2; printf LONG_DONE\" with yield_time_ms=0. Follow the returned process until it finishes and report its output and exit code.",
+    "truncation": "Run /Users/plumliu/Desktop/python_workspace/pulsara_agent/.venv/bin/python -c \"print('A'*9000); print('MIDDLE_7319'); print('B'*9000)\" with max_output_chars=512. Recover the exact MIDDLE marker from the omitted output using artifact_read; do not rerun the command.",
+    "monitor_race": "Run \"printf RACE_DONE\" with yield_time_ms=0. Attempt to register a completion monitor for that exact process. If already finished, read its final state via terminal_process. Report the outcome without restarting it.",
+    "monitor": "Start \"sleep 2; printf MONITOR_DONE\" with yield_time_ms=0 and register its completion monitor. End this turn after registration. When resumed by its completion, report MONITOR_DONE.",
+    "capacity": "Start eight separate \"sleep 120\" terminal commands with yield_time_ms=0. Then attempt one additional \"printf SHOULD_NOT_START\" command. Report whether it was admitted and the exact failure reason if blocked. Use terminal_process.list, then kill the eight sleep processes you started, using their exact IDs. Do not start replacements."
+  }
+}

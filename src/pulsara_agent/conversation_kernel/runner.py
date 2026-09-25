@@ -1124,7 +1124,7 @@ class ConversationKernelRunner:
             intent,
             self._writer_lease.guard.session_id,
             (
-                str(self._tools.snapshot_terminal_cwd())
+                str(self._tools.snapshot_workspace_root())
                 if self._hook_dispatcher is not None
                 else ""
             ),
@@ -2276,7 +2276,7 @@ class ConversationKernelRunner:
                     ):
                         stop_public_input = StopInput(
                             session_id=self._writer_lease.guard.session_id,
-                            cwd=str(self._tools.snapshot_terminal_cwd()),
+                            cwd=str(self._tools.snapshot_workspace_root()),
                             model=request.prepared_call.call.target.fact.model_id,
                             turn_id=turn_id,
                             stop_hook_active=stop_continuation_used,
@@ -2526,7 +2526,7 @@ class ConversationKernelRunner:
                         surface_borrow=active_surface_borrow,
                         deadline=self._canonical_deadline(),
                         hook_model=request.prepared_call.call.target.fact.model_id,
-                        hook_cwd=str(self._tools.snapshot_terminal_cwd()),
+                        hook_cwd=str(self._tools.snapshot_workspace_root()),
                         continuity_epoch_nonce=plan_epoch.epoch_nonce,
                     )
                     active_surface_borrow.close()
@@ -2694,7 +2694,7 @@ class ConversationKernelRunner:
             source,
             boundary.boundary_token,
         )
-        cwd = self._tools.snapshot_terminal_cwd()
+        cwd = self._tools.snapshot_workspace_root()
         public_input = SessionStartInput(
             session_id=self._writer_lease.guard.session_id,
             cwd=str(cwd),

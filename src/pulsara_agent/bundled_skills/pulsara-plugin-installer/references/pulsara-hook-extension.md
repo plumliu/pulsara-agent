@@ -153,6 +153,11 @@ hook_event_name: exact event name
 model: string
 ```
 
+For every event, `cwd` and the hook command's working directory are the current
+workspace root. A prior terminal command's `cd` does not change either value.
+For terminal tool events, inspect `tool_input.workdir` for that command's explicit
+working directory; its omission also means the workspace root.
+
 Event-specific fields are:
 
 | Event | Additional required input |

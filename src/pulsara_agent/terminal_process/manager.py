@@ -1,4 +1,4 @@
-"""Host-owned Terminal sessions, physical processes, and sanitized output."""
+"""Host-owned independent commands, physical processes, and sanitized output."""
 
 from __future__ import annotations
 
@@ -7,10 +7,8 @@ from enum import StrEnum
 import os
 from pathlib import Path
 import pty
-import shlex
 import signal
 import subprocess
-import tempfile
 from threading import Condition, Event, RLock, Thread, Timer, current_thread
 from time import monotonic, sleep
 from typing import Callable, IO
@@ -19,6 +17,7 @@ from uuid import uuid4
 from pulsara_agent.terminal_process.environment import TerminalEnvironmentOwner
 from pulsara_agent.terminal_process.models import (
     TerminalCwdScope,
+    TerminalFailureReason,
     TerminalIOMode,
     TerminalPhysicalState,
     TerminalProcessInfo,
@@ -26,7 +25,6 @@ from pulsara_agent.terminal_process.models import (
     TerminalProcessOrigin,
     TerminalRequest,
     TerminalResult,
-    TerminalSessionState,
     TerminalStatus,
     TerminalTerminationDisposition,
     TerminalTerminationResult,
@@ -41,11 +39,7 @@ from pulsara_agent.terminal_process.output import (
 )
 
 
-DEFAULT_TERMINAL_SESSION_ID = "default"
 _TIMEOUT_EXIT_CODE = 124
-_SESSION_CHARS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
-)
 
 
 class ProcessLimitError(RuntimeError):
@@ -91,7 +85,6 @@ class _TerminalForegroundDecisionAttempt:
 @dataclass(slots=True)
 class _ProcessState:
     process_id: str
-    terminal_session_id: str
     command: str
     cwd: Path
     owner_host_session_id: str
@@ -104,7 +97,6 @@ class _ProcessState:
     watcher: Thread | None
     master_fd: int | None
     started_at: float
-    cwd_probe_path: Path | None
     deadline_timer: Timer | None = None
     termination_intent: TerminalStatus | None = None
     final_status: TerminalStatus | None = None
@@ -169,7 +161,6 @@ class ProcessRegistry:
     def exec_with_yield(
         self,
         *,
-        terminal_session_id: str,
         command: str,
         cwd: Path,
         yield_time_ms: int,
@@ -180,10 +171,9 @@ class ProcessRegistry:
         env: dict[str, str],
         origin: TerminalProcessOrigin | None = None,
         output_subscriber: OutputSubscriber | None = None,
-        cwd_probe_path: Path | None = None,
         decision_attempt_id: str | None = None,
         decision_deadline_monotonic: float | None = None,
-    ) -> tuple[_ProcessState, bool, str | None]:
+    ) -> tuple[_ProcessState, bool]:
         decision_handle = TerminalForegroundDecisionAttemptHandle(
             attempt_id=decision_attempt_id or f"terminal-decision:{uuid4().hex}",
             owner_host_session_id=owner_host_session_id,
@@ -236,7 +226,6 @@ class ProcessRegistry:
             if remaining <= 0:
                 raise TimeoutError("terminal foreground decision expired before spawn")
             state = self._spawn(
-                terminal_session_id=terminal_session_id,
                 command=command,
                 cwd=cwd,
                 tty=tty,
@@ -250,7 +239,6 @@ class ProcessRegistry:
                         conversation_scope_kind="ROOT",
                     )
                 ),
-                cwd_probe_path=cwd_probe_path,
             )
         except BaseException:
             with self._launch_condition:
@@ -303,7 +291,7 @@ class ProcessRegistry:
                     state.process_id,
                     background_adopted=False,
                 )
-                return state, False, None
+                return state, False
             if yield_time_ms > 0:
                 state.physical_completion.wait(yield_time_ms / 1000)
             if self._foreground_decision_abort_requested(
@@ -323,10 +311,10 @@ class ProcessRegistry:
                     state.process_id,
                     background_adopted=False,
                 )
-                return state, False, None
+                return state, False
             state.refresh()
             yielded = not state.physical_completion.is_set()
-            final_cwd = self.finalize_yield_decision(state, yielded=yielded)
+            self.finalize_yield_decision(state, yielded=yielded)
             published = self._mark_foreground_decision_result_ready(
                 decision_handle.attempt_id,
                 state.process_id,
@@ -339,13 +327,12 @@ class ProcessRegistry:
                     raise ProcessPhysicalJoinError(
                         "terminal decision abort did not physically join"
                     )
-                return state, False, None
-            return state, yielded, final_cwd
+                return state, False
+            return state, yielded
         except BaseException as error:
             # No caller received this process identity, so it must not remain
-            # as an invisible physical effect.  Freeze the cwd probe as
-            # adoption-disallowed, terminate the whole group, and prove the
-            # reader/watcher/process exit before propagating the error.
+            # as an invisible physical effect. Disallow adoption, terminate the
+            # whole group, and prove reader/watcher/process exit before failing.
             with state.lock:
                 if state.yield_decision is None:
                     state.yield_decision = True
@@ -369,7 +356,6 @@ class ProcessRegistry:
                 raise ProcessPhysicalJoinError(
                     "failed terminal launch did not physically join"
                 ) from error
-            self._cleanup_disallowed_cwd_probe(state)
             with self._launch_condition:
                 if self._states.get(state.process_id) is state:
                     self._states.pop(state.process_id, None)
@@ -478,7 +464,6 @@ class ProcessRegistry:
     def _spawn(
         self,
         *,
-        terminal_session_id: str,
         command: str,
         cwd: Path,
         tty: bool,
@@ -486,7 +471,6 @@ class ProcessRegistry:
         shell_argv: tuple[str, ...],
         env: dict[str, str],
         origin: TerminalProcessOrigin,
-        cwd_probe_path: Path | None,
     ) -> _ProcessState:
         process_id = f"proc_{uuid4().hex}"
         output = TerminalOutputOwner(
@@ -540,7 +524,6 @@ class ProcessRegistry:
             mode = TerminalIOMode.PIPE
         return _ProcessState(
             process_id=process_id,
-            terminal_session_id=terminal_session_id,
             command=command,
             cwd=cwd,
             owner_host_session_id=owner_host_session_id,
@@ -553,7 +536,6 @@ class ProcessRegistry:
             watcher=None,
             master_fd=master_fd,
             started_at=monotonic(),
-            cwd_probe_path=cwd_probe_path,
         )
 
     def _start_physical_threads(self, state: _ProcessState) -> None:
@@ -647,13 +629,12 @@ class ProcessRegistry:
         state.output.finalize(status=status.value, exit_code=exit_code)
         if state.deadline_timer is not None:
             state.deadline_timer.cancel()
-        self._cleanup_disallowed_cwd_probe(state)
         with state.lock:
             if state.physical_state is not TerminalPhysicalState.PRUNABLE:
                 state.physical_state = TerminalPhysicalState.PHYSICALLY_JOINED
         # This is the sole normal physical-completion publication.  It is
         # intentionally after group exit, reader join, sanitizer finalization,
-        # and cwd cleanup, but before a best-effort external subscriber can
+        # but before a best-effort external subscriber can
         # delay waiters or retain process capacity.
         state.physical_completion.set()
         subscriber = self._completion_subscriber
@@ -754,6 +735,7 @@ class ProcessRegistry:
         data: str,
         *,
         append_newline: bool,
+        yield_time_ms: int,
         max_output_chars: int,
         owner_host_session_id: str,
     ) -> TerminalResult:
@@ -770,6 +752,9 @@ class ProcessRegistry:
             state.stdin.flush()
         except (BrokenPipeError, OSError, ValueError) as exc:
             raise ProcessInputError("terminal process stdin write failed") from exc
+        # Reuse the same physical boundary as initial yield/wait. Output or PTY
+        # echo does not establish that an interactive response is complete.
+        state.physical_completion.wait(yield_time_ms / 1000)
         return _snapshot(state, max_output_chars)
 
     def close_stdin(
@@ -965,17 +950,11 @@ class ProcessRegistry:
                 for state in self._states.values()
             )
 
-    def finalize_yield_decision(
-        self, state: _ProcessState, *, yielded: bool
-    ) -> str | None:
+    def finalize_yield_decision(self, state: _ProcessState, *, yielded: bool) -> None:
         with state.lock:
             if state.yield_decision is not None:
                 raise RuntimeError("terminal yield decision is already installed")
             state.yield_decision = yielded
-        if yielded:
-            self._cleanup_disallowed_cwd_probe(state)
-            return None
-        return _read_and_cleanup_cwd_probe(state)
 
     def release_owner(
         self, owner: str, *, timeout_seconds: float
@@ -1149,140 +1128,14 @@ class ProcessRegistry:
             self._launching_by_owner[owner] = count - 1
         self._launch_condition.notify_all()
 
-    @staticmethod
-    def _cleanup_disallowed_cwd_probe(state: _ProcessState) -> None:
-        with state.lock:
-            if state.yield_decision is not True or _process_is_live(state):
-                return
-            path = state.cwd_probe_path
-            state.cwd_probe_path = None
-        if path is not None:
-            path.unlink(missing_ok=True)
-
 
 @dataclass(slots=True)
-class TerminalSession:
-    state: TerminalSessionState
-    registry: ProcessRegistry
-    environment: TerminalEnvironmentOwner
-    state_lock: RLock
-
-    def execute(
-        self,
-        request: TerminalRequest,
-        *,
-        output_subscriber: OutputSubscriber | None = None,
-        origin: TerminalProcessOrigin | None = None,
-        decision_attempt_id: str | None = None,
-        decision_deadline_monotonic: float | None = None,
-        cwd_scope: TerminalCwdScope = TerminalCwdScope.WORKSPACE,
-    ) -> TerminalResult:
-        with self.state_lock:
-            current = _nearest_existing_cwd(
-                self.state.current_cwd, self.state.workspace_root
-            )
-        probe: Path | None = None
-        try:
-            cwd = _resolve_workdir(
-                request.workdir,
-                current=current,
-                workspace=self.state.workspace_root,
-                scope=cwd_scope,
-            )
-            environment = self.environment.build(cwd=cwd)
-            probe = _new_cwd_probe(self.state.workspace_root)
-            command = _command_with_cwd_probe(request.command, probe)
-        except Exception as exc:
-            if probe is not None:
-                probe.unlink(missing_ok=True)
-            return TerminalResult(
-                status=TerminalStatus.ERROR,
-                output="",
-                exit_code=-1,
-                cwd=str(current),
-                error=(f"terminal preflight failed ({type(exc).__name__}): {exc}"),
-            )
-        effective_decision_attempt_id = (
-            decision_attempt_id or f"terminal-decision:{uuid4().hex}"
-        )
-        try:
-            process, yielded, final_cwd = self.registry.exec_with_yield(
-                terminal_session_id=self.state.session_id,
-                command=request.command,
-                cwd=cwd,
-                yield_time_ms=request.yield_time_ms,
-                tty=request.tty,
-                max_lifetime_seconds=request.max_lifetime_seconds,
-                owner_host_session_id=self.state.owner_host_session_id,
-                shell_argv=environment.shell.command_argv(command),
-                env=environment.values,
-                output_subscriber=output_subscriber,
-                cwd_probe_path=probe,
-                origin=origin,
-                decision_attempt_id=effective_decision_attempt_id,
-                decision_deadline_monotonic=decision_deadline_monotonic,
-            )
-        except ProcessLimitError as exc:
-            probe.unlink(missing_ok=True)
-            self.registry.settle_foreground_decision(
-                effective_decision_attempt_id
-            )
-            return TerminalResult(
-                status=TerminalStatus.BLOCKED,
-                output="",
-                exit_code=-1,
-                cwd=str(cwd),
-                error=str(exc),
-                shell_diagnostic=environment.diagnostic,
-            )
-        except BaseException:
-            # ProcessRegistry owns any successfully spawned child and drains
-            # it before raising.  This caller still owns the path for failures
-            # that happened before a child state existed.
-            probe.unlink(missing_ok=True)
-            self.registry.settle_foreground_decision(
-                effective_decision_attempt_id
-            )
-            raise
-        result = _snapshot(process, request.max_output_chars)
-        if not yielded and final_cwd is not None:
-            candidate = Path(final_cwd)
-            inside_workspace = candidate == self.state.workspace_root or (
-                self.state.workspace_root in candidate.parents
-            )
-            if candidate.is_dir() and (
-                cwd_scope is TerminalCwdScope.HOST_LOCAL or inside_workspace
-            ):
-                with self.state_lock:
-                    self.state.current_cwd = candidate
-        with self.state_lock:
-            visible_cwd = self.state.current_cwd if not yielded else cwd
-        try:
-            return replace(
-                result,
-                cwd=str(visible_cwd),
-                shell_diagnostic=environment.diagnostic,
-            )
-        finally:
-            self.registry.settle_foreground_decision(
-                effective_decision_attempt_id
-            )
-
-
-@dataclass(slots=True)
-class TerminalSessionManager:
+class TerminalManager:
     workspace_root: Path
-    max_sessions: int = 4
     max_live_processes: int = 8
     max_finished_processes: int = 32
     finished_ttl_seconds: float = 3600.0
     completion_subscriber: TerminalCompletionSubscriber | None = None
-    _sessions: dict[tuple[str, str], TerminalSession] = field(
-        default_factory=dict, init=False
-    )
-    _released_owners: set[str] = field(default_factory=set, init=False)
-    _closed: bool = field(default=False, init=False)
-    _lock: RLock = field(default_factory=RLock, init=False)
     process_registry: ProcessRegistry = field(init=False)
     environment_owner: TerminalEnvironmentOwner = field(init=False)
 
@@ -1297,56 +1150,65 @@ class TerminalSessionManager:
         self.environment_owner = TerminalEnvironmentOwner(self.workspace_root)
 
     def activate_owner(self, owner_host_session_id: str) -> None:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("terminal manager is closed")
-            self._released_owners.discard(owner_host_session_id)
         self.process_registry.activate_owner(owner_host_session_id)
 
-    def get_or_create(
-        self, session_id: str | None = None, *, owner_host_session_id: str
-    ) -> TerminalSession:
-        normalized = session_id or DEFAULT_TERMINAL_SESSION_ID
-        if (
-            not normalized
-            or len(normalized) > 32
-            or any(char not in _SESSION_CHARS for char in normalized)
-        ):
-            raise ValueError("terminal session id is invalid")
-        key = (owner_host_session_id, normalized)
-        with self._lock:
-            if self._closed or owner_host_session_id in self._released_owners:
-                raise RuntimeError("terminal owner is closed")
-            existing = self._sessions.get(key)
-            if existing is not None:
-                return existing
-            if len(self._sessions) >= self.max_sessions:
-                raise ValueError(
-                    f"terminal session limit reached: max {self.max_sessions}"
-                )
-            session = TerminalSession(
-                TerminalSessionState(
-                    session_id=normalized,
-                    workspace_root=self.workspace_root,
-                    current_cwd=self.workspace_root,
-                    owner_host_session_id=owner_host_session_id,
-                ),
-                self.process_registry,
-                self.environment_owner,
-                self._lock,
+    def execute(
+        self,
+        request: TerminalRequest,
+        *,
+        owner_host_session_id: str,
+        output_subscriber: OutputSubscriber | None = None,
+        origin: TerminalProcessOrigin | None = None,
+        decision_attempt_id: str | None = None,
+        decision_deadline_monotonic: float | None = None,
+        cwd_scope: TerminalCwdScope = TerminalCwdScope.WORKSPACE,
+    ) -> TerminalResult:
+        # A command's cwd is an input, never process-local session memory.
+        try:
+            cwd = _resolve_workdir(
+                request.workdir, workspace=self.workspace_root, scope=cwd_scope
             )
-            self._sessions[key] = session
-            return session
-
-    def snapshot_default_cwd(self, *, owner_host_session_id: str) -> Path:
-        """Read the default session cwd without creating a Terminal session."""
-
-        key = (owner_host_session_id, DEFAULT_TERMINAL_SESSION_ID)
-        with self._lock:
-            if self._closed or owner_host_session_id in self._released_owners:
-                raise RuntimeError("terminal owner is closed")
-            session = self._sessions.get(key)
-            return self.workspace_root if session is None else session.state.current_cwd
+            environment = self.environment_owner.build(cwd=cwd)
+        except Exception as exc:
+            return TerminalResult(
+                status=TerminalStatus.ERROR,
+                output="",
+                exit_code=-1,
+                cwd=str(self.workspace_root),
+                error=f"terminal preflight failed ({type(exc).__name__}): {exc}",
+            )
+        attempt_id = decision_attempt_id or f"terminal-decision:{uuid4().hex}"
+        try:
+            process, _yielded = self.process_registry.exec_with_yield(
+                command=request.command,
+                cwd=cwd,
+                yield_time_ms=request.yield_time_ms,
+                tty=request.tty,
+                max_lifetime_seconds=request.max_lifetime_seconds,
+                owner_host_session_id=owner_host_session_id,
+                shell_argv=environment.shell.command_argv(request.command),
+                env=environment.values,
+                output_subscriber=output_subscriber,
+                origin=origin,
+                decision_attempt_id=attempt_id,
+                decision_deadline_monotonic=decision_deadline_monotonic,
+            )
+            return replace(
+                _snapshot(process, request.max_output_chars),
+                shell_diagnostic=environment.diagnostic,
+            )
+        except ProcessLimitError as exc:
+            return TerminalResult(
+                status=TerminalStatus.BLOCKED,
+                output="",
+                exit_code=-1,
+                cwd=str(cwd),
+                error=str(exc),
+                reason=TerminalFailureReason.PROCESS_CAPACITY_EXHAUSTED,
+                shell_diagnostic=environment.diagnostic,
+            )
+        finally:
+            self.process_registry.settle_foreground_decision(attempt_id)
 
     def list_processes(self, **kwargs):
         return self.process_registry.list_processes(**kwargs)
@@ -1395,27 +1257,13 @@ class TerminalSessionManager:
             owner_host_session_id, timeout_seconds=timeout_seconds
         )
         self.environment_owner.close(timeout_seconds=max(0.01, deadline - monotonic()))
-        with self._lock:
-            self._released_owners.add(owner_host_session_id)
-            for key in [
-                key for key in self._sessions if key[0] == owner_host_session_id
-            ]:
-                self._sessions.pop(key, None)
         return results
 
     def release_owner_and_join(
         self, owner_host_session_id: str
     ) -> list[TerminalResult]:
-        results = self.process_registry.release_owner_and_join(
-            owner_host_session_id
-        )
+        results = self.process_registry.release_owner_and_join(owner_host_session_id)
         self.environment_owner.close_and_join()
-        with self._lock:
-            self._released_owners.add(owner_host_session_id)
-            for key in [
-                key for key in self._sessions if key[0] == owner_host_session_id
-            ]:
-                self._sessions.pop(key, None)
         return results
 
 
@@ -1642,7 +1490,6 @@ def _info(state: _ProcessState) -> TerminalProcessInfo:
             )
     return TerminalProcessInfo(
         process_id=state.process_id,
-        terminal_session_id=state.terminal_session_id,
         command=state.command,
         cwd=str(state.cwd),
         backend_type="local",
@@ -1710,13 +1557,12 @@ def _snapshot(
 def _resolve_workdir(
     raw: str | None,
     *,
-    current: Path,
     workspace: Path,
     scope: TerminalCwdScope,
 ) -> Path:
-    candidate = current if not raw else Path(raw).expanduser()
+    candidate = workspace if not raw else Path(raw).expanduser()
     if not candidate.is_absolute():
-        candidate = current / candidate
+        candidate = workspace / candidate
     resolved = candidate.resolve()
     if scope is TerminalCwdScope.WORKSPACE and (
         resolved != workspace and workspace not in resolved.parents
@@ -1729,51 +1575,10 @@ def _resolve_workdir(
     return resolved
 
 
-def _nearest_existing_cwd(current: Path, workspace: Path) -> Path:
-    candidate = current
-    while candidate != workspace and not candidate.is_dir():
-        candidate = candidate.parent
-    return candidate if candidate.is_dir() else workspace
-
-
-def _new_cwd_probe(workspace: Path) -> Path:
-    descriptor, raw = tempfile.mkstemp(prefix=".pulsara-cwd-", dir=workspace)
-    os.close(descriptor)
-    path = Path(raw)
-    path.unlink(missing_ok=True)
-    return path
-
-
-def _command_with_cwd_probe(command: str, probe: Path) -> str:
-    quoted = shlex.quote(str(probe))
-    return (
-        f"__pulsara_cwd_probe={quoted}; "
-        "trap 'pwd -P > \"$__pulsara_cwd_probe\"' EXIT; "
-        f"{command}"
-    )
-
-
-def _read_and_cleanup_cwd_probe(state: _ProcessState) -> str | None:
-    with state.lock:
-        path = state.cwd_probe_path
-        state.cwd_probe_path = None
-    if path is None:
-        return None
-    try:
-        value = path.read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError):
-        value = ""
-    finally:
-        path.unlink(missing_ok=True)
-    return value or None
-
-
 __all__ = [
-    "DEFAULT_TERMINAL_SESSION_ID",
     "ProcessInputError",
     "ProcessLimitError",
     "ProcessPhysicalJoinError",
     "ProcessRegistry",
-    "TerminalSession",
-    "TerminalSessionManager",
+    "TerminalManager",
 ]

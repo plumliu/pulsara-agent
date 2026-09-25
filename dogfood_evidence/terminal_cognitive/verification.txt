@@ -1,0 +1,27 @@
+Backend related suite:
+........................................................................ [ 16%]
+........................................................................ [ 32%]
+........................................................................ [ 48%]
+........................................................................ [ 65%]
+........................................................................ [ 81%]
+........................................................................ [ 97%]
+..........                                                               [100%]
+442 passed in 28.75s
+
+Final descriptor/new contract check:
+.................                                                        [100%]
+17 passed in 3.02s
+
+Frontend related suite:
+
+> sites-project@0.1.0 test
+> vitest run lib/builtin-tool-summary.test.ts components/background-terminal-panel.test.tsx
+
+
+ RUN  v4.1.11 /Users/plumliu/Desktop/python_workspace/pulsara_agent/frontend
+
+
+ Test Files  2 passed (2)
+      Tests  63 passed (63)
+   Start at  00:20:03
+   Duration  788ms (transform 109ms, setup 30ms, import 226ms, tests 98ms, environment 749ms)

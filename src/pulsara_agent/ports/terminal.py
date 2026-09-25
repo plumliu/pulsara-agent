@@ -24,11 +24,11 @@ DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 TERMINAL_TOOL_DESCRIPTION = (
     "Run one shell command on the local host when the current run permission allows "
     "terminal access. workdir may be any existing local directory; relative paths "
-    "use the current working directory remembered for terminal_session_id. The "
+    "use the workspace root. Each command starts a new shell. The "
     "workspace is the initial working directory, not a sandbox in an authorized "
-    "terminal run. Omit workdir to remain in the remembered directory; explicitly "
-    "supplying it also makes that directory the session's cwd for later commands. "
-    "Omit terminal_session_id to use the default session. Set "
+    "terminal run. Omit workdir to start at the workspace root. cd and export "
+    "inside one command do not affect later calls. The returned cwd is this "
+    "command's starting directory. Set "
     "tty=true only for programs that need interactive terminal behavior, such as line "
     "editing or a full-screen interface. yield_time_ms controls how long this call waits "
     "initially (0-30000 ms); it does not stop or limit the command. If the response has "
@@ -37,23 +37,33 @@ TERMINAL_TOOL_DESCRIPTION = (
     "conversation, use terminal_monitor when a long-running command should resume the "
     "conversation later after completion or configured progress instead of repeatedly "
     "checking it. If status is not running, the command has ended or could not start; "
-    "use the returned output and do not manage or monitor it. max_output_chars limits "
+    "use the returned output. PROCESS_CAPACITY_EXHAUSTED means no command was "
+    "started; list processes and retry after capacity is released, without stopping "
+    "useful work. Even if list has no running item, child processes or output cleanup "
+    "may still occupy capacity. max_output_chars limits "
     "this response, not the command. If the response suggests artifact_read, use it to "
     "read output omitted from the response. Prefer file tools for file reads and edits; "
     "use terminal for tests, builds, git, scripts, package managers, network commands, "
     "and external CLIs."
 )
 TERMINAL_PROCESS_TOOL_DESCRIPTION = (
-    "Perform one immediate follow-up action on commands started by terminal. Actions: "
+    "Follow commands started by terminal. Actions: "
     "list shows current process records; poll checks current status and output without "
-    "waiting; log reads output currently kept for later reading; wait waits for up to "
+    "waiting; wait waits for process completion for up to "
     "timeout_seconds in this call; write sends data to command input without adding a "
-    "newline; submit sends data followed by a newline; close_stdin tells the command "
+    "newline; submit sends UTF-8 text followed by a newline. After a successful write "
+    "or submit, yield_time_ms waits up to 1000 ms by default (0-30000; 0 returns "
+    "immediately), or until the command and its child processes exit. Returned retained output may include "
+    "earlier text or PTY echo and is not proof of a complete reply. Do not resend "
+    "input if its result is uncertain. close_stdin tells the command "
     "that no more input will be sent without stopping it; and kill stops the command and "
     "its child processes, then waits for them to exit. Except for list, copy the exact "
     "process_id returned by terminal or an earlier response for that process. A "
     "process_id is temporary: it works only in the terminal environment that created it "
-    "and cannot be reused after that environment closes or is replaced. For log, poll, "
+    "and cannot be reused after that environment closes or is replaced. Finished "
+    "records can be evicted; a missing record does not prove the command never ran. "
+    "A successful observation or control call can report a failed process; inspect "
+    "its status and exit_code. For poll "
     "or wait, since_cursor may be copied unchanged from the same process's earlier "
     "output_cursor to request output after that "
     "position; omit it to read the output available now. GAP means some earlier output "
@@ -62,7 +72,7 @@ TERMINAL_PROCESS_TOOL_DESCRIPTION = (
     "The output_cursor marks the end of the observed output, even when this response "
     "is truncated: it reads future additions, not the omitted earlier text. "
     "For omitted text needed by the task, follow the returned artifact_read guidance; "
-    "do not rerun the command just to recover logs. poll, log, and wait return only this call's "
+    "do not rerun the command just to recover logs. poll and wait return only this call's "
     "result; they do not send another update later. A background process may also be "
     "stopped by the user outside a tool call. An empty terminal_monitor list does not "
     "prove that a process ended: when the user asks for current status, or the next step "
@@ -86,13 +96,17 @@ TERMINAL_MONITOR_TOOL_DESCRIPTION = (
     "update may cause the agent to run again. delivery controls how much output a later "
     "update includes and the minimum interval between progress updates; lifetime controls "
     "how long monitoring remains active. list shows active monitors. Later output is "
-    "limited; use terminal_process with action=log for more. After register, continue "
+    "limited; use terminal_process with action=poll for more. PROCESS_ALREADY_TERMINAL "
+    "means poll that same process for its final state. PROCESS_NOT_FOUND does not "
+    "mean the command never ran. After register, continue "
     "other independent work; when there is no other work, the current turn may end and "
     "the monitor can resume the conversation later; do not poll merely to wait. An empty "
     "monitor list does not prove that its process ended. cancel stops later updates but "
     "does not stop the command; use "
     "terminal_process with action=kill to stop it. Monitoring ends when its lifetime "
-    "expires or the current terminal environment closes or is replaced."
+    "expires (default 36000 seconds) or the current terminal environment closes or "
+    "is replaced. An EXPIRY observation is not process completion; poll and, if "
+    "still useful, register again for the same live process."
 )
 
 
@@ -112,19 +126,8 @@ class TerminalInput(_StrictInput):
         max_length=4096,
         description=(
             "Optional existing local working directory. Relative paths use the "
-            "current working directory remembered for terminal_session_id; absolute "
-            "paths and ~ are accepted when terminal access is authorized. Supplying "
-            "this field updates the remembered directory for later commands."
-        ),
-    )
-    terminal_session_id: str = Field(
-        default="default",
-        min_length=1,
-        max_length=32,
-        pattern=r"^[A-Za-z0-9_-]+$",
-        description=(
-            "Selects a separately remembered working directory for sequential commands. "
-            "Omit to use the default session; this is not a process_id."
+            "workspace root; absolute paths and ~ are accepted within the current "
+            "permission scope. This directory applies only to this command."
         ),
     )
     yield_time_ms: int = Field(
@@ -175,23 +178,6 @@ class _ProcessInput(_StrictInput):
     )
 
 
-class TerminalProcessLogInput(_ProcessInput):
-    action: Literal["log"]
-    since_cursor: str | None = Field(
-        default=None,
-        description=(
-            "Optional output_cursor copied unchanged from an earlier response for this "
-            "exact process; requests output after that position."
-        ),
-    )
-    max_output_chars: int = Field(
-        default=DEFAULT_MAX_OUTPUT_CHARS,
-        ge=MIN_TERMINAL_OUTPUT_CHARS,
-        le=DEFAULT_MAX_OUTPUT_CHARS,
-        description="Maximum output characters to include in this response.",
-    )
-
-
 class TerminalProcessPollInput(_ProcessInput):
     action: Literal["poll"]
     since_cursor: str | None = Field(
@@ -238,11 +224,27 @@ class TerminalProcessWaitInput(_ProcessInput):
 class TerminalProcessWriteInput(_ProcessInput):
     action: Literal["write"]
     data: str = Field(description="Exact text to send without adding a newline.")
+    yield_time_ms: int = Field(
+        default=1000, ge=0, le=30_000,
+        description=(
+            "Observation window after input is flushed; 0 returns immediately. "
+            "Returns early when the command exits; output or echo does not. "
+            "This does not prove that an interactive response is complete."
+        ),
+    )
 
 
 class TerminalProcessSubmitInput(_ProcessInput):
     action: Literal["submit"]
     data: str = Field(description="Line text to submit without the final newline.")
+    yield_time_ms: int = Field(
+        default=1000, ge=0, le=30_000,
+        description=(
+            "Observation window after input is flushed; 0 returns immediately. "
+            "Returns early when the command exits; output or echo does not. "
+            "This does not prove that an interactive response is complete."
+        ),
+    )
 
 
 class TerminalProcessCloseStdinInput(_ProcessInput):
@@ -255,7 +257,6 @@ class TerminalProcessKillInput(_ProcessInput):
 
 TerminalProcessInput: TypeAlias = Annotated[
     TerminalProcessListInput
-    | TerminalProcessLogInput
     | TerminalProcessPollInput
     | TerminalProcessWaitInput
     | TerminalProcessWriteInput

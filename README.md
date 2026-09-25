@@ -89,14 +89,21 @@ The current Kernel supports:
   without recovered TODO state;
 - real PIPE/PTY terminal output streaming, exact process-local cursors and
   typed GAP, same-Host future monitor observations, and autonomous
-  continuation at a provider-safe point;
+  continuation at a provider-safe point; each Host currently supports up to
+  8 execution slots (including startup and process-group/output settlement).
+  Capacity rejection reports `PROCESS_CAPACITY_EXHAUSTED` without starting the
+  command; no named cwd sessions or queue are allocated;
 - run-bound permission selection with an immutable admission snapshot, plus a
   canonical Plan workflow with Runtime-enforced read-only planning,
   structured questions, draft approve/revise/cancel, and Host-owned automatic
   continuation;
 - default-deny subprocess environments with a bounded login-shell snapshot,
-  nearest `.venv/bin`, foreground cwd continuity, and physical process-group
-  drain on Host close;
+  nearest `.venv/bin`, explicit per-command `workdir` (defaulting to the workspace
+  root), and physical process-group drain on Host close. `terminal_process.poll`
+  reads retained output, `wait` waits for process completion, and `write`/`submit`
+  observe for up to 1000 ms after input by default; this window does not promise
+  a complete interactive reply. Follow-up success is separate from process exit
+  status. Hook working directories remain the workspace root;
 - complete sanitized tool output retention through the shared blob store:
   a provider-neutral ToolResult logical message up to 40,000 UTF-8 bytes may
   remain FULL (independent of adapter wire bytes), while larger output uses a

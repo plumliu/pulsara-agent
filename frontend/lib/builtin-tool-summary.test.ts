@@ -19,7 +19,7 @@ describe('builtin tool summaries', () => {
     ['write_file', { bytes_written: 123, path: 'new.txt' }, {}, '写入文件', '已写入 123 字节'],
     ['artifact_read', { returned_chars: 300, has_more: true, source_coverage: 'RETAINED_SNAPSHOT', text: 'RAW OUTPUT' }, {}, '读取完整输出', '已读取 300 个字符，还有后续内容 · 仅保留了部分原始输出'],
     ['terminal', { status: 'running', exit_code: -1, yielded_to_background: true, output: 'RAW STDOUT' }, {}, '运行命令', '命令仍在后台运行'],
-    ['terminal_process', { process: { status: 'success', exit_code: 0 }, output: 'RAW LOG' }, { action: 'log' }, '读取命令输出', '已读取输出'],
+    ['terminal_process', { status: 'success', exit_code: 0, output: 'RAW OUTPUT' }, { action: 'poll' }, '查看命令状态', '命令执行完成'],
     ['terminal_monitor', { status: 'REGISTERED' }, { action: 'register' }, '关注命令进展', '已开启进展通知'],
     ['todo', { status: 'UPDATED', counts: { total: 5, completed: 2 } }, {}, '更新工作清单', '2/5 项已完成'],
     ['spawn_agent', { status: 'pending_start', task_id: 'private-id' }, { task_name: 'reviewer' }, '创建子任务', '子任务等待开始'],
@@ -53,6 +53,7 @@ describe('builtin tool summaries', () => {
     ['terminal', { status: 'error', exit_code: 2 }, '命令未成功，退出码 2'],
     ['terminal', { status: 'error', exit_code: -1 }, '命令执行失败'],
     ['terminal', { status: 'timeout', timed_out: true }, '命令已超时'],
+    ['terminal', { status: 'blocked', reason: 'PROCESS_CAPACITY_EXHAUSTED', process_id: null }, '执行容量已满，命令未启动'],
     ['terminal_process', { status: 'killed' }, '命令已停止'],
     ['terminal_process', { status: 'blocked', exit_code: -1 }, '命令未获准执行'],
     ['view_image', { error: 'MODEL_IMAGE_INPUT_UNSUPPORTED' }, '当前模型不支持查看图片'],
@@ -73,11 +74,13 @@ describe('builtin tool summaries', () => {
   });
 
   it.each([
-    ['log', 'running', null, '已读取输出 · 命令仍在运行'],
     ['poll', 'running', -1, '命令仍在运行'],
     ['wait', 'running', -1, '等待结束，命令仍在运行'],
     ['write', 'running', -1, '已发送输入 · 命令仍在运行'],
     ['wait', 'success', 0, '命令执行完成'],
+    ['poll', 'error', 7, '命令未成功，退出码 7'],
+    ['wait', 'timeout', 124, '命令已超时'],
+    ['kill', 'killed', -15, '命令已停止'],
   ])('describes the completed %s action for a %s process', (action, status, exitCode, expected) => {
     expect(builtinToolSummary(trace('terminal_process', {
       status, exit_code: exitCode, process_id: 'private-process-id',

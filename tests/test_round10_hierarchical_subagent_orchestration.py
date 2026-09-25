@@ -122,7 +122,7 @@ def _manager_launch_kwargs(
         )
     return {
         "launch_preparation": launch_preparation,
-        "terminal_cwd": Path.cwd,
+        "hook_workspace_root": Path.cwd,
     }
 
 
@@ -928,7 +928,6 @@ def test_round10_last_n_uses_exact_units_and_none_remains_absent() -> None:
     collector = KernelContextSourceCollector(
         workspace_kind="project",
         workspace_root=Path.cwd(),
-        terminal_cwd=SimpleNamespace(),  # type: ignore[arg-type]
         capability_composer=object(),  # type: ignore[arg-type]
         base_system_prompt="BASE",
         display_timezone=timezone.utc,

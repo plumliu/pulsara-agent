@@ -589,7 +589,7 @@ class TerminalOutputOwner:
 
         This is intentionally separate from the public tail-oriented
         ``snapshot`` API.  Monitor delivery needs a head/tail projection and
-        exact source-byte accounting, while ``terminal_process log`` retains
+        exact source-byte accounting, while ``terminal_process poll`` retains
         its established tail response semantics.
         """
 

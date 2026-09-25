@@ -600,7 +600,7 @@ def build_accepted_canonical_tool_result_settlement(
 
 
 class ToolSurfacePlanningPort(Protocol):
-    def snapshot_terminal_cwd(self) -> Path: ...
+    def snapshot_workspace_root(self) -> Path: ...
 
     def sealed_builtin_capability_snapshot(
         self,
@@ -671,7 +671,7 @@ class ToolSurfacePlanningPort(Protocol):
 
 
 class ToolInvocationPort(Protocol):
-    def snapshot_terminal_cwd(self) -> Path: ...
+    def snapshot_workspace_root(self) -> Path: ...
 
     def prepare_resolved_invocation(
         self,

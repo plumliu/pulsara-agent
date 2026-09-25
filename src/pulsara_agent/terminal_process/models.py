@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from typing import Any
 
 from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
@@ -12,10 +11,6 @@ from pulsara_agent.terminal_process.output import (
     TerminalOutputReadDisposition,
     TerminalOutputSourceCoverage,
 )
-
-
-class TerminalBackendType(StrEnum):
-    LOCAL = "local"
 
 
 class TerminalIOMode(StrEnum):
@@ -26,6 +21,10 @@ class TerminalIOMode(StrEnum):
 class TerminalCwdScope(StrEnum):
     WORKSPACE = "workspace"
     HOST_LOCAL = "host_local"
+
+
+class TerminalFailureReason(StrEnum):
+    PROCESS_CAPACITY_EXHAUSTED = "PROCESS_CAPACITY_EXHAUSTED"
 
 
 class TerminalStatus(StrEnum):
@@ -98,6 +97,7 @@ class TerminalResult:
     timed_out: bool = False
     truncated: bool = False
     error: str | None = None
+    reason: TerminalFailureReason | None = None
     process_id: str | None = None
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     output_disposition: TerminalOutputReadDisposition = (
@@ -125,7 +125,6 @@ class TerminalTerminationResult:
 @dataclass(frozen=True, slots=True)
 class TerminalProcessInfo:
     process_id: str
-    terminal_session_id: str
     command: str
     cwd: str
     backend_type: str
@@ -190,12 +189,3 @@ class TerminalProcessLog:
             "truncated_by_response_bound": self.truncated_by_response_bound,
             "source_coverage": self.source_coverage.value,
         }
-
-
-@dataclass(slots=True)
-class TerminalSessionState:
-    session_id: str
-    workspace_root: Path
-    current_cwd: Path
-    backend_type: TerminalBackendType = TerminalBackendType.LOCAL
-    owner_host_session_id: str = ""

@@ -506,7 +506,7 @@ def test_round1_retained_snapshot_keeps_both_failure_axes() -> None:
         public_output=json.dumps(
             {
                 "status": "success",
-                "terminal_process_action": "log",
+                "terminal_process_action": "poll",
                 "output": candidate.text,
             },
             ensure_ascii=False,

@@ -190,7 +190,6 @@ class _CommandHost:
         def process(process_id: str, started_at: float) -> TerminalProcessInfo:
             return TerminalProcessInfo(
                 process_id=process_id,
-                terminal_session_id="terminal-session:1",
                 command="sleep 60",
                 cwd="/tmp",
                 backend_type="local",

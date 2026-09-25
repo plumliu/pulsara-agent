@@ -1150,7 +1150,7 @@ class CompactionCoordinator:
         trigger_name = self._hook_trigger(trigger)
         public_input = PreCompactInput(
             session_id=self._writer_lease.guard.session_id,
-            cwd=str(self._tools.snapshot_terminal_cwd()),
+            cwd=str(self._tools.snapshot_workspace_root()),
             model=dispatch.prepared_call.call.target.fact.model_id,
             turn_id=turn_id,
             trigger=trigger_name,
@@ -3304,7 +3304,7 @@ class CompactionCoordinator:
                     else model_switch_candidate.destination_target.target.fact.model_id
                 ),
                 hook_cwd=(
-                    str(self._tools.snapshot_terminal_cwd())
+                    str(self._tools.snapshot_workspace_root())
                     if self._hook_dispatcher is not None
                     else ""
                 ),

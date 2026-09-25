@@ -84,10 +84,15 @@ Kernel 当前支持：
   相互隔离，Host replacement明确不恢复TODO state；
 - 真实 PIPE/PTY Terminal output streaming、exact process-local cursor、typed
   GAP、same-Host future monitor observation，以及 provider safe-point 上的
-  autonomous continuation；
+  autonomous continuation；每个 Host 保留 8 个执行槽（包含正在启动和等待
+  进程组／输出结算的执行），满额时返回 `PROCESS_CAPACITY_EXHAUSTED`，命令
+  不启动；不再分配记忆 cwd 的命名 session，也不建立等待队列；
 - default-deny subprocess environment、bounded login-shell snapshot、最近
-  `.venv/bin`、foreground cwd continuity，以及 Host close 时的 physical
-  process-group drain；
+  `.venv/bin`、每条命令显式 `workdir`（默认 workspace 根目录），以及 Host
+  close 时的 physical process-group drain。`terminal_process.poll` 立即读取保留
+  输出，`wait` 等待进程结束，`write`／`submit` 默认在送入后观察最多 1000 ms；
+  该窗口不保证交互回答完整。跟进操作成功与进程退出状态分别表达，hook 的
+  工作目录统一为 workspace 根目录；
 - 通过 shared blob store 保留完整 sanitized tool output：中等输出完整
   provider-neutral logical ToolResult不超过40,000 UTF-8 bytes时可保持FULL
   （与adapter physical wire bytes相互独立）；更大输出使用UTF-8-safe的8,000字符

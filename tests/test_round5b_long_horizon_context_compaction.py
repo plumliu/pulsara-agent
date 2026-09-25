@@ -2120,14 +2120,12 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
         terminal_processes=(
             FrozenTerminalProcessHandoffFact(
                 process_id="process:b",
-                terminal_session_id="terminal:1",
                 status="running",
                 command_preview="build",
                 cwd="/workspace",
             ),
             FrozenTerminalProcessHandoffFact(
                 process_id="process:a",
-                terminal_session_id="terminal:2",
                 status="running",
                 command_preview="test",
                 cwd="/workspace",
@@ -2172,7 +2170,6 @@ def test_round5b_runtime_handoff_never_drops_actionable_identity() -> None:
             terminal_processes=(
                 FrozenTerminalProcessHandoffFact(
                     process_id="process:1",
-                    terminal_session_id="terminal:1",
                     status="running",
                     command_preview="x" * 500,
                     cwd="/" + "x" * 500,

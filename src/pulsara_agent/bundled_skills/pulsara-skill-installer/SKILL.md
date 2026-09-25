@@ -24,7 +24,7 @@ deletion targets. A same-name lower-priority Skill may become effective again.
 1. Identify the source Skill directory and ask which scope the user wants if it is not already explicit:
    - `workspace` publishes under `<workspace>/.pulsara/skills`;
    - `user` publishes under `${PULSARA_HOME}/skills` and does not depend on the current workspace.
-2. For workspace scope, identify the intended workspace root. A relative source path is still relative to the terminal's current directory.
+2. For workspace scope, identify the intended workspace root. A relative source path is relative to this command's working directory: the workspace root unless this call supplies `workdir` or changes directory inside the command. Earlier terminal calls do not change it.
 3. Install with the global launcher:
 
 ```bash

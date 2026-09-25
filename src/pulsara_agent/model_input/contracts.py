@@ -2621,7 +2621,6 @@ class RuntimeTemporalCapture:
 class RuntimeEnvironmentSnapshot:
     workspace_kind: Literal["project", "transient"]
     workspace_root: str
-    terminal_current_cwd: str
     timezone_name: str
     utc_offset_minutes: int | None
 
@@ -2629,7 +2628,6 @@ class RuntimeEnvironmentSnapshot:
         if (
             self.workspace_kind not in {"project", "transient"}
             or not self.workspace_root
-            or not self.terminal_current_cwd
             or not self.timezone_name
             or (
                 self.utc_offset_minutes is not None

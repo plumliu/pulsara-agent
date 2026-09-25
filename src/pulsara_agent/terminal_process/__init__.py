@@ -8,7 +8,7 @@ destroyed during owner close.
 from pulsara_agent.terminal_process.manager import (
     TerminalForegroundDecisionAttemptHandle,
     TerminalForegroundDecisionState,
-    TerminalSessionManager,
+    TerminalManager,
 )
 from pulsara_agent.terminal_process.models import (
     TerminalCwdScope,
@@ -31,6 +31,6 @@ __all__ = [
     "TerminalProcessOrigin",
     "TerminalRequest",
     "TerminalResult",
-    "TerminalSessionManager",
+    "TerminalManager",
     "TerminalStatus",
 ]

@@ -26,7 +26,7 @@ from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverageReason
 from pulsara_agent.terminal_process.manager import ProcessRegistry
-from pulsara_agent.terminal_process.manager import TerminalSessionManager
+from pulsara_agent.terminal_process.manager import TerminalManager
 import pulsara_agent.terminal_process.manager as terminal_manager_module
 from pulsara_agent.terminal_process.models import (
     TerminalCwdScope,
@@ -154,14 +154,14 @@ def test_terminal_cursor_rejection_returns_actionable_tool_error(foreign: bool) 
     cursor = other.snapshot(maximum_chars=512).output_cursor if foreign else "bad-cursor-token"
 
     class Manager:
-        def log_process(self, process_id, *, since_cursor, **kwargs):
+        def poll_process(self, process_id, *, since_cursor, **kwargs):
             assert process_id == "process:1"
             return owner.snapshot(maximum_chars=512, since_cursor=since_cursor)
 
     result = _execute_terminal_tool_call(
         _DirectTerminalProcessTool(Manager(), "host:1"),
         ToolCall("call:cursor", "terminal_process", {
-            "action": "log", "process_id": "process:1", "since_cursor": cursor,
+            "action": "poll", "process_id": "process:1", "since_cursor": cursor,
         }),
         None,
         TerminalProcessOrigin("turn:1", "ROOT"),
@@ -248,8 +248,7 @@ def test_round2_host_aggregate_evicts_finished_output_before_live_output(
     registry = ProcessRegistry(maximum_host_retained_bytes=160)
     owner = "host:aggregate"
     registry.activate_owner(owner)
-    completed, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    completed, yielded = registry.exec_with_yield(
         command="finished",
         cwd=tmp_path,
         yield_time_ms=5_000,
@@ -265,8 +264,7 @@ def test_round2_host_aggregate_evicts_finished_output_before_live_output(
         env=dict(os.environ),
     )
     assert yielded is False
-    live, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    live, yielded = registry.exec_with_yield(
         command="live",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -296,8 +294,7 @@ def test_round2_physical_retirement_joins_reader_watcher_timer_and_group(
     registry = ProcessRegistry()
     owner = "host:physical-close"
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="parent-and-child",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -345,8 +342,7 @@ def test_round2_leader_exit_does_not_complete_or_release_capacity_until_group_ex
     )
     owner = "host:leader-group"
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="background-descendant",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -373,7 +369,6 @@ def test_round2_leader_exit_does_not_complete_or_release_capacity_until_group_ex
     assert completions == []
     with pytest.raises(terminal_manager_module.ProcessLimitError):
         registry.exec_with_yield(
-            terminal_session_id="default",
             command="must-remain-blocked",
             cwd=tmp_path,
             yield_time_ms=0,
@@ -399,8 +394,7 @@ def test_round2_wait_uses_physical_group_completion_not_shell_leader(
     registry = ProcessRegistry()
     owner = "host:wait-group"
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="background-descendant",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -437,8 +431,7 @@ def test_round2_foreground_yield_waits_for_physical_group_completion(
     owner = "host:foreground-group"
     registry.activate_owner(owner)
     started = monotonic()
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="background-descendant",
         cwd=tmp_path,
         yield_time_ms=2_000,
@@ -479,7 +472,6 @@ def test_round2_process_admission_linearizes_launching_reservation(
         try:
             outcomes.append(
                 registry.exec_with_yield(
-                    terminal_session_id="default",
                     command="first",
                     cwd=tmp_path,
                     yield_time_ms=0,
@@ -499,7 +491,6 @@ def test_round2_process_admission_linearizes_launching_reservation(
     assert entered_spawn.wait(1)
     with pytest.raises(terminal_manager_module.ProcessLimitError):
         registry.exec_with_yield(
-            terminal_session_id="default",
             command="second",
             cwd=tmp_path,
             yield_time_ms=0,
@@ -533,7 +524,6 @@ def test_round2_launch_reservation_releases_on_spawn_failure(
     monkeypatch.setattr(registry, "_spawn", fail_spawn)
     with pytest.raises(OSError, match="injected spawn failure"):
         registry.exec_with_yield(
-            terminal_session_id="default",
             command="never-started",
             cwd=tmp_path,
             yield_time_ms=0,
@@ -574,7 +564,6 @@ def test_round2_owner_close_waits_unpublished_launch_and_physical_drain(
     def launch() -> None:
         try:
             registry.exec_with_yield(
-                terminal_session_id="default",
                 command="close-race",
                 cwd=tmp_path,
                 yield_time_ms=0,
@@ -622,8 +611,7 @@ def test_round2_pty_close_stdin_sends_eot_and_produces_real_eof(
     registry = ProcessRegistry()
     owner = "host:pty-eof"
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="cat",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -658,8 +646,7 @@ def test_round2_finished_process_reaches_joined_before_prunable_without_regressi
     registry = ProcessRegistry(finished_ttl_seconds=0)
     owner = "host:retirement-state"
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="true",
         cwd=tmp_path,
         yield_time_ms=2_000,
@@ -825,7 +812,6 @@ def test_round5_post_spawn_installation_fault_rolls_back_every_physical_owner(
 
     with pytest.raises(RuntimeError, match="injected"):
         registry.exec_with_yield(
-            terminal_session_id="default",
             command="faulted launch",
             cwd=tmp_path,
             yield_time_ms=0,
@@ -855,8 +841,7 @@ def test_round2_observation_lease_and_join_failure_block_prune(
     registry = ProcessRegistry(finished_ttl_seconds=0)
     owner = "host:prune-fence"
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="finished",
         cwd=tmp_path,
         yield_time_ms=2_000,
@@ -888,8 +873,7 @@ def test_round2_host_close_invalidates_process_and_cursor(tmp_path: Path) -> Non
     registry = ProcessRegistry()
     owner = "host:cursor-close"
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="running",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -912,31 +896,32 @@ def test_round2_host_close_invalidates_process_and_cursor(tmp_path: Path) -> Non
         )
 
 
-def test_round2_cwd_fallback_preflight_result_host_scope_and_probe_cleanup(
+def test_round2_workspace_cwd_preflight_host_scope_and_no_probe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = tmp_path / "workspace"
     nested = workspace / "a" / "b"
     nested.mkdir(parents=True)
-    manager = TerminalSessionManager(workspace)
+    manager = TerminalManager(workspace)
     owner = "host:cwd-faults"
     manager.activate_owner(owner)
     manager.environment_owner.config = manager.environment_owner.config.__class__(
         enable_shell_snapshot=False
     )
-    session = manager.get_or_create(owner_host_session_id=owner)
-    session.state.current_cwd = nested
     nested.rmdir()
-    result = session.execute(
+    result = manager.execute(
         terminal_manager_module.TerminalRequest(command="pwd", yield_time_ms=2_000),
+        owner_host_session_id=owner,
         decision_deadline_monotonic=monotonic() + 5,
     )
     assert result.status.value == "success"
-    assert str(workspace / "a") in result.output
-    rejected = session.execute(
+    assert result.cwd == str(workspace)
+    assert result.output.strip() == str(workspace)
+    rejected = manager.execute(
         terminal_manager_module.TerminalRequest(
             command="pwd", workdir=str(tmp_path), yield_time_ms=2_000
         ),
+        owner_host_session_id=owner,
         decision_deadline_monotonic=monotonic() + 5,
     )
     assert rejected.status.value == "error"
@@ -946,10 +931,11 @@ def test_round2_cwd_fallback_preflight_result_host_scope_and_probe_cleanup(
     assert "inside workspace" in rejected.error
     assert manager.live_process_count(owner_host_session_id=owner) == 0
 
-    allowed = session.execute(
+    allowed = manager.execute(
         terminal_manager_module.TerminalRequest(
             command="pwd", workdir=str(tmp_path), yield_time_ms=2_000
         ),
+        owner_host_session_id=owner,
         decision_deadline_monotonic=monotonic() + 5,
         cwd_scope=TerminalCwdScope.HOST_LOCAL,
     )
@@ -964,10 +950,11 @@ def test_round2_cwd_fallback_preflight_result_host_scope_and_probe_cleanup(
 
     monkeypatch.setattr(manager.process_registry, "_spawn", fail_spawn)
     with pytest.raises(OSError, match="spawn failure"):
-        session.execute(
+        manager.execute(
             terminal_manager_module.TerminalRequest(
                 command="true", workdir=str(workspace), yield_time_ms=1
             ),
+            owner_host_session_id=owner,
             decision_deadline_monotonic=monotonic() + 5,
         )
     monkeypatch.setattr(manager.process_registry, "_spawn", original_spawn)

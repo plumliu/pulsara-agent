@@ -26,7 +26,6 @@ def _launch(
 ):
     registry.activate_owner(owner)
     return registry.exec_with_yield(
-        terminal_session_id="default",
         command=program,
         cwd=tmp_path,
         yield_time_ms=yield_time_ms,
@@ -55,7 +54,7 @@ def test_pr03_late_termination_preserves_confirmed_natural_terminal_state(
     registry._completion_subscriber = (  # noqa: SLF001
         lambda info, _snapshot: completions.append((info.status, info.exit_code))
     )
-    state, yielded, _cwd = _launch(
+    state, yielded = _launch(
         registry, tmp_path, owner=owner, program=program
     )
 
@@ -91,7 +90,7 @@ def test_pr03_background_adopted_only_after_successful_yield_publication(
 ) -> None:
     registry = ProcessRegistry()
     owner = "host:background-adopted"
-    state, yielded, _cwd = _launch(
+    state, yielded = _launch(
         registry,
         tmp_path,
         owner=owner,
@@ -126,8 +125,7 @@ def test_pr03_shell_exit_with_live_group_is_still_terminable(tmp_path: Path) -> 
     registry = ProcessRegistry()
     owner = "host:live-descendant"
     registry.activate_owner(owner)
-    state, yielded, _cwd = registry.exec_with_yield(
-        terminal_session_id="default",
+    state, yielded = registry.exec_with_yield(
         command="background descendant",
         cwd=tmp_path,
         yield_time_ms=0,
@@ -171,7 +169,7 @@ def test_pr03_natural_exit_during_physical_settlement_is_not_reported_as_termina
 
     registry = _PausedWatcherRegistry()
     owner = "host:natural-settlement-race"
-    state, _yielded, _cwd = _launch(
+    state, _yielded = _launch(
         registry,
         tmp_path,
         owner=owner,

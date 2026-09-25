@@ -91,7 +91,7 @@ from pulsara_agent.terminal_process import (
     TerminalProcessOrigin,
     TerminalRequest,
     TerminalResult,
-    TerminalSessionManager,
+    TerminalManager,
 )
 from pulsara_agent.terminal_process.output import (
     InvalidTerminalOutputCursor,
@@ -267,7 +267,6 @@ from .mcp.meta import (
 
 _TERMINAL_PROCESS_ACTION_EFFECTS = (
     ("list", "TERMINAL_OBSERVATION"),
-    ("log", "TERMINAL_OBSERVATION"),
     ("poll", "TERMINAL_OBSERVATION"),
     ("wait", "TERMINAL_OBSERVATION"),
     ("write", "TERMINAL_EFFECT"),
@@ -460,7 +459,7 @@ class KernelCapabilityReloadPort(Protocol):
 
 @dataclass(slots=True)
 class _DirectTerminalTool:
-    manager: TerminalSessionManager
+    manager: TerminalManager
     owner_host_session_id: str
     name: str = "terminal"
 
@@ -475,12 +474,7 @@ class _DirectTerminalTool:
         effective_permission_mode: PermissionMode,
     ) -> ToolExecutionResult:
         request = parse_terminal_input(call.arguments)
-        session_id = request.terminal_session_id
-        terminal = self.manager.get_or_create(
-            session_id,
-            owner_host_session_id=self.owner_host_session_id,
-        )
-        result = terminal.execute(
+        result = self.manager.execute(
             TerminalRequest(
                 command=request.command,
                 workdir=request.workdir,
@@ -488,6 +482,7 @@ class _DirectTerminalTool:
                 max_output_chars=request.max_output_chars,
                 tty=request.tty,
             ),
+            owner_host_session_id=self.owner_host_session_id,
             output_subscriber=(
                 None
                 if live_sink is None
@@ -509,7 +504,7 @@ class _DirectTerminalTool:
 
 @dataclass(slots=True)
 class _DirectTerminalProcessTool:
-    manager: TerminalSessionManager
+    manager: TerminalManager
     owner_host_session_id: str
     name: str = "terminal_process"
 
@@ -535,18 +530,6 @@ class _DirectTerminalProcessTool:
                     "terminal_process_action": action,
                     "processes": [item.to_payload() for item in processes],
                 },
-            )
-        if action == "log":
-            log = self.manager.log_process(
-                request.process_id,
-                max_output_chars=maximum,
-                owner_host_session_id=self.owner_host_session_id,
-                since_cursor=request.since_cursor,
-            )
-            return _success(
-                call,
-                {"status": "success", **log.to_payload()},
-                output_artifact_candidate=log.output_artifact_candidate,
             )
         if action == "poll":
             result = self.manager.poll_process(
@@ -574,6 +557,8 @@ class _DirectTerminalProcessTool:
             result = self.manager.write_process(
                 request.process_id,
                 request.data,
+                append_newline=False,
+                yield_time_ms=request.yield_time_ms,
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
             )
@@ -582,6 +567,7 @@ class _DirectTerminalProcessTool:
                 request.process_id,
                 request.data,
                 append_newline=True,
+                yield_time_ms=request.yield_time_ms,
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
             )
@@ -700,7 +686,7 @@ class DirectKernelToolPort:
         self._image_reference_read_port = image_reference_read_port
         self._visualization_reference_read_port = visualization_reference_read_port
         self._visualization_screenshots = VisualizationScreenshotOwner()
-        self._terminal = TerminalSessionManager(
+        self._terminal = TerminalManager(
             workspace_root=root,
             completion_subscriber=self._terminal_process_completed,
         )
@@ -1196,10 +1182,8 @@ class DirectKernelToolPort:
         with self._surface_lock:
             return self._executor_bindings_locked()
 
-    def snapshot_terminal_cwd(self) -> Path:
-        return self._terminal.snapshot_default_cwd(
-            owner_host_session_id=self._host_owner_id
-        )
+    def snapshot_workspace_root(self) -> Path:
+        return self._terminal.workspace_root
 
     def prepare_resolved_invocation(
         self,
@@ -1356,7 +1340,6 @@ class DirectKernelToolPort:
         process_facts = tuple(
             FrozenTerminalProcessHandoffFact(
                 process_id=item.process_id,
-                terminal_session_id=item.terminal_session_id,
                 status="running",
                 command_preview=bounded_handoff_preview(item.command),
                 cwd=_workspace_relative_handoff_path(Path(item.cwd), root),
@@ -4276,7 +4259,8 @@ def _terminal_execution_result(
         "cwd": result.cwd,
         "timed_out": result.timed_out,
         "truncated": result.truncated,
-        "error": result.error,
+        "error": result.error if action == "start" else None,
+        "reason": None if result.reason is None else result.reason.value,
         "process_id": result.process_id,
         "yielded_to_background": result.status.value == "running",
         "output_disposition": result.output_disposition.value,
@@ -4288,14 +4272,14 @@ def _terminal_execution_result(
     }
     state = (
         ToolResultState.SUCCESS
-        if result.status.value in {"success", "running"}
+        if action != "start" or result.status.value in {"success", "running"}
         else ToolResultState.INTERRUPTED
         if result.status.value == "killed"
         else ToolResultState.ERROR
     )
     trusted_duration = (
         normalize_observation_duration(result.trusted_process_duration_microseconds)
-        if action in {"start", "log", "poll", "wait"}
+        if action in {"start", "poll", "wait"}
         else None
     )
     return ToolExecutionResult(
@@ -4335,7 +4319,7 @@ def _validated_terminal_observation_supplement(
         return claimed
     if tool_name == "terminal_process" and isinstance(tool, _DirectTerminalProcessTool):
         action = parse_terminal_process_input(arguments).action
-        if action in {"log", "poll", "wait"}:
+        if action in {"poll", "wait"}:
             return claimed
     return None
 
