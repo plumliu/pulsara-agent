@@ -1,6 +1,6 @@
-import { Archive, ChevronRight, Ellipsis, Eye, Folder, FolderOpen, GitFork, Plus, Search, Trash2 } from 'lucide-react';
+import { Archive, ChevronRight, Ellipsis, Eye, Folder, FolderOpen, GitFork, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { RuntimeStatus, SessionSummary, Workspace } from '../lib/pulsara-types';
+import type { RuntimeStatus, SessionSummary, SessionWorkspaceSelection, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
 import {
   getSessionPresence,
@@ -29,6 +29,9 @@ interface SessionSidebarProps {
   onArchiveSession: (session: SessionSummary) => void;
   onRefreshSessions: () => void;
   onNewSession: () => void;
+  onCreateSession: (selection: SessionWorkspaceSelection) => Promise<boolean>;
+  onPickDirectory: (initialPath: string, signal: AbortSignal) => Promise<string | null>;
+  onNotify: (title: string, detail: string) => void;
   canCreateSession: boolean;
   onOpenCommand: () => void;
   onTakeControl: () => void;
@@ -146,12 +149,67 @@ export function SessionSidebar({
   onArchiveSession,
   onRefreshSessions,
   onNewSession,
+  onCreateSession,
+  onPickDirectory,
+  onNotify,
   canCreateSession,
   onOpenCommand,
   onTakeControl,
 }: SessionSidebarProps) {
   const sidebarRef = useRef<HTMLElement>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const [creatingGroup, setCreatingGroup] = useState<string | null>(null);
+  const createRequest = useRef<AbortController | null>(null);
+  // A picker result must not create a session after this sidebar disappears or
+  // creation becomes unavailable. Already submitted creates keep their owner.
+  useEffect(() => () => { createRequest.current?.abort(); }, [canCreateSession]);
+
+  const createFromShortcut = async (key: string, selection?: SessionWorkspaceSelection) => {
+    if (!canCreateSession || createRequest.current) return;
+    const request = new AbortController();
+    createRequest.current = request;
+    setCreatingGroup(key);
+    try {
+      if (!selection) {
+        const path = await onPickDirectory(workspace.path, request.signal);
+        if (request.signal.aborted || path === null) return;
+        selection = { kind: 'project', path };
+      }
+      const selected = selection;
+      setCollapsedGroups(current => {
+        const next = new Set(current);
+        next.delete(selected.kind === 'quick' ? 'section:quick' : 'section:projects');
+        // Picker and session summaries both carry the host's canonical path.
+        if (selected.kind === 'project') next.delete(`project:${selected.path}`);
+        return next;
+      });
+      await onCreateSession(selected);
+    } catch (error) {
+      if (!request.signal.aborted) {
+        onNotify('无法打开目录', error instanceof Error ? error.message : '请重试。');
+      }
+    } finally {
+      if (createRequest.current === request) {
+        createRequest.current = null;
+        setCreatingGroup(null);
+      }
+    }
+  };
+  const addButton = (key: string, label: string, selection?: SessionWorkspaceSelection) => (
+    <button
+      className="session-group-add"
+      type="button"
+      aria-label={label}
+      title={label}
+      aria-busy={creatingGroup === key}
+      disabled={!canCreateSession || creatingGroup !== null || (selection?.kind === 'project' && !selection.path)}
+      onClick={() => void createFromShortcut(key, selection)}
+    >
+      {creatingGroup === key
+        ? <LoaderCircle size={13} className="is-spinning" />
+        : selection ? <SquarePen size={13} /> : <FolderOpen size={13} />}
+    </button>
+  );
   useEffect(() => {
     const openMenus = () => sidebarRef.current?.querySelectorAll<HTMLDetailsElement>('.session-row__menu[open]');
     const dismissOutside = (event: MouseEvent) => {
@@ -215,7 +273,7 @@ export function SessionSidebar({
           <kbd>⌘ K</kbd>
         </button>
 
-        <button className="new-session" disabled={!canCreateSession} onClick={onNewSession}>
+        <button className="new-session" disabled={!canCreateSession || creatingGroup !== null} onClick={onNewSession}>
           <Plus size={14} />
           <span>新建会话</span>
           <kbd>⌘ N</kbd>
@@ -224,6 +282,7 @@ export function SessionSidebar({
         <section className="session-list" aria-label="会话目录">
           <div className="session-list__scroll">
             <section className="session-section" aria-label="从目录中打开">
+              <div className="session-group-heading">
               <button
                 className={`session-section__toggle${projectsCollapsed ? '' : ' is-expanded'}`}
                 type="button"
@@ -232,6 +291,8 @@ export function SessionSidebar({
               >
                 <strong>从目录中打开</strong><ChevronRight size={12} />
               </button>
+              {addButton('section:projects', '选择目录并创建会话')}
+              </div>
               {!projectsCollapsed && (
                 <div className="session-projects">
                   {groupedSessions.projects.length === 0 && <span className="session-group-empty">还没有从目录中打开的会话</span>}
@@ -241,6 +302,7 @@ export function SessionSidebar({
                     const ProjectIcon = collapsed ? Folder : FolderOpen;
                     return (
                       <section className="session-project" key={project.key} aria-label={`${project.label} 会话`}>
+                        <div className="session-group-heading">
                         <button
                           className={`session-project__toggle${collapsed ? '' : ' is-expanded'}`}
                           type="button"
@@ -251,6 +313,8 @@ export function SessionSidebar({
                         >
                           <ProjectIcon size={13} /><strong>{project.label}</strong><ChevronRight size={12} />
                         </button>
+                        {addButton(project.key, `在 ${project.label} 中创建会话`, { kind: 'project', path: project.path })}
+                        </div>
                         {!collapsed && (
                           <div className="session-project__sessions" id={sessionListId}>
                             {project.sessions.map((session) => (
@@ -272,6 +336,7 @@ export function SessionSidebar({
             </section>
 
             <section className="session-section session-section--quick" aria-label="快速开始">
+              <div className="session-group-heading">
               <button
                 className={`session-section__toggle${quickCollapsed ? '' : ' is-expanded'}`}
                 type="button"
@@ -280,6 +345,8 @@ export function SessionSidebar({
               >
                 <strong>快速开始</strong><ChevronRight size={12} />
               </button>
+              {addButton('section:quick', '创建快速开始会话', { kind: 'quick' })}
+              </div>
               {!quickCollapsed && (
                 <div className="session-section__sessions">
                   {groupedSessions.quick.length === 0 && <span className="session-group-empty">还没有快速开始会话</span>}

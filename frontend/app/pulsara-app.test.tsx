@@ -3081,6 +3081,130 @@ describe('PulsaraApp', () => {
     expect(await screen.findByRole('heading', { name: isWelcomeHeading })).toBeTruthy();
   });
 
+  it('selects a directory from the sidebar and adds to its existing collapsed group', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [{ ...initialSession, workspace: {
+      id: 'project-workspace', name: 'project', path: '/tmp/project', kind: 'project',
+    } }];
+    const picked = deferred<string | null>();
+    adapter.pickWorkspaceDirectory.mockImplementationOnce(() => picked.promise);
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const tree = screen.getByRole('region', { name: '会话目录' });
+    fireEvent.click(within(tree).getByRole('button', { name: 'project' }));
+    fireEvent.click(within(tree).getByRole('button', { name: '从目录中打开' }));
+    const add = within(tree).getByRole('button', { name: '选择目录并创建会话' });
+    fireEvent.click(add);
+    fireEvent.click(add);
+    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledTimes(1);
+    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith('/tmp/project', expect.any(AbortSignal));
+    expect((within(tree).getByRole('button', { name: '创建快速开始会话' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(adapter.createSession).not.toHaveBeenCalled();
+    await act(async () => picked.resolve('/tmp/project'));
+    await waitFor(() => expect(adapter.createSession).toHaveBeenCalledExactlyOnceWith({ kind: 'project', path: '/tmp/project' }));
+    const group = within(tree).getByRole('region', { name: 'project 会话' });
+    expect(within(tree).getAllByRole('region', { name: 'project 会话' })).toHaveLength(1);
+    expect(within(group).getByText('准备发布')).toBeTruthy();
+    expect(within(group).getByText('新会话')).toBeTruthy();
+    expect(within(group).getByRole('button', { name: 'project' }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
+    expect(adapter.connectCalls.at(-1)?.sessionId).toBe('session-2');
+  });
+
+  it.each(['project', 'quick'] as const)('creates a %s session directly from its sidebar plus', async kind => {
+    const adapter = new FakeAdapter();
+    adapter.sessions = [{ ...initialSession, workspace: {
+      id: 'project-workspace', name: 'project', path: '/tmp/ project ', kind: 'project',
+    } }];
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const tree = screen.getByRole('region', { name: '会话目录' });
+    const toggleName = kind === 'quick' ? '快速开始' : 'project';
+    fireEvent.click(within(tree).getByRole('button', { name: toggleName }));
+    fireEvent.click(within(tree).getByRole('button', {
+      name: kind === 'quick' ? '创建快速开始会话' : '在 project 中创建会话',
+    }));
+    await waitFor(() => expect(adapter.createSession).toHaveBeenCalledExactlyOnceWith(
+      kind === 'quick' ? { kind: 'quick' } : { kind: 'project', path: '/tmp/ project ' },
+    ));
+    expect(adapter.pickWorkspaceDirectory).not.toHaveBeenCalled();
+    expect(within(tree).getByRole('button', { name: toggleName }).getAttribute('aria-expanded')).toBe('true');
+    expect(within(tree).getByText('新会话')).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
+    expect(await screen.findByRole('heading', { name: isWelcomeHeading })).toBeTruthy();
+  });
+
+  it.each(['cancel', 'error'] as const)('keeps the current session when sidebar directory selection ends with %s', async outcome => {
+    const adapter = new FakeAdapter();
+    if (outcome === 'cancel') adapter.pickWorkspaceDirectory.mockResolvedValueOnce(null);
+    else adapter.pickWorkspaceDirectory.mockRejectedValueOnce(new Error('无法打开系统目录窗口'));
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const add = screen.getByRole('button', { name: '选择目录并创建会话' }) as HTMLButtonElement;
+    fireEvent.click(add);
+    await waitFor(() => expect(add.disabled).toBe(false));
+    expect(adapter.createSession).not.toHaveBeenCalled();
+    expect(screen.getByRole('heading', { name: '准备发布' })).toBeTruthy();
+    if (outcome === 'error') expect(screen.getByText('无法打开系统目录窗口')).toBeTruthy();
+  });
+
+  it('discards a late sidebar picker result after leaving the workbench', async () => {
+    const adapter = new FakeAdapter();
+    const picked = deferred<string | null>();
+    adapter.pickWorkspaceDirectory.mockImplementationOnce(() => picked.promise);
+    const view = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '选择目录并创建会话' }));
+    const signal = (adapter.pickWorkspaceDirectory.mock.calls[0] as unknown as [string, AbortSignal])[1];
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => picked.resolve('/tmp/project'));
+    expect(adapter.createSession).not.toHaveBeenCalled();
+  });
+
+  it('blocks duplicate sidebar creates and restores the buttons after failure', async () => {
+    const adapter = new FakeAdapter();
+    const creation = deferred<SessionSummary>();
+    adapter.createSession.mockImplementationOnce(() => creation.promise);
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const add = screen.getByRole('button', { name: '创建快速开始会话' }) as HTMLButtonElement;
+    fireEvent.click(add);
+    fireEvent.click(add);
+    expect(adapter.createSession).toHaveBeenCalledTimes(1);
+    expect(add.disabled).toBe(true);
+    await act(async () => creation.reject(new Error('目录不可用')));
+    await waitFor(() => expect(add.disabled).toBe(false));
+    expect(screen.getByText('无法创建会话')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '准备发布' })).toBeTruthy();
+  });
+
+  it('discards a pending sidebar directory selection when the service disconnects', async () => {
+    const adapter = new FakeAdapter();
+    const picked = deferred<string | null>();
+    const recovery = deferred<void>();
+    const connect = adapter.connect.bind(adapter);
+    let disconnect!: (error: Error) => void;
+    adapter.pickWorkspaceDirectory.mockImplementationOnce(() => picked.promise);
+    vi.spyOn(adapter, 'connect')
+      .mockImplementationOnce(async (...args) => {
+        const connection = await connect(...args);
+        vi.spyOn(connection, 'observe').mockImplementation(() => new Promise((_resolve, reject) => { disconnect = reject; }));
+        return connection;
+      })
+      .mockImplementationOnce(async (...args) => { await recovery.promise; return connect(...args); });
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: '选择目录并创建会话' }));
+    const signal = (adapter.pickWorkspaceDirectory.mock.calls[0] as unknown as [string, AbortSignal])[1];
+    await act(async () => disconnect(new Error('connection lost')));
+    expect(signal.aborted).toBe(true);
+    await act(async () => picked.resolve('/tmp/project'));
+    expect(adapter.createSession).not.toHaveBeenCalled();
+    expect((screen.getByRole('button', { name: '创建快速开始会话' }) as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => recovery.resolve());
+  });
+
   it('binds plan and permission choices to the next composer submission', async () => {
     const adapter = new FakeAdapter();
     const { container } = render(<PulsaraApp adapter={adapter} />);

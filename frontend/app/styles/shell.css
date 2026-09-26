@@ -73,6 +73,12 @@
 .session-list__scroll { flex: 1; min-height: 0; padding-right: 2px; overflow-y: auto; }
 .session-section + .session-section { margin-top: 11px; }
 .session-section--quick { padding-top: 10px; border-top: 1px solid var(--line); }
+.session-group-heading { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.session-group-heading > .session-section__toggle, .session-group-heading > .session-project__toggle { flex: 1; min-width: 0; }
+.session-group-add { display: grid; place-items: center; flex: none; width: 26px; height: 26px; padding: 0; border-radius: 6px; background: transparent; color: var(--muted); }
+.session-group-add:hover:not(:disabled) { background: var(--paper-deep); color: var(--ink-soft); }
+.session-group-add:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.session-group-add:disabled { opacity: .4; cursor: default; }
 .session-section__toggle { display: flex; align-items: center; gap: 3px; width: 100%; min-height: 29px; padding: 4px 5px; border-radius: 7px; background: transparent; color: var(--faint); text-align: left; }
 .session-section__toggle:hover { background: color-mix(in srgb, var(--paper-solid) 68%, transparent); color: var(--muted); }
 .session-section__toggle strong { font-size: var(--type-label); font-weight: 600; }

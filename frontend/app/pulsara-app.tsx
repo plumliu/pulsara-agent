@@ -1103,6 +1103,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       setActiveView('workbench');
       const next = await openRuntimeSession(created.id);
       if (!next) return false;
+      setSidebarOpen(false);
       notify(
         '会话已创建',
         selection.kind === 'quick' ? '工作目录已由 Pulsara 准备好。' : '已连接到指定目录。',
@@ -2164,6 +2165,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onArchiveSession={session => void archiveSession(session)}
           onRefreshSessions={() => { void adapter.listSessions().then(setSessionList).catch(() => {}); }}
           onNewSession={openNewSession}
+          onCreateSession={createSession}
+          onPickDirectory={(initialPath, signal) => adapter.pickWorkspaceDirectory(initialPath, signal)}
+          onNotify={(title, detail) => notify(title, detail, 'warning')}
           canCreateSession={canCreateSession}
           onOpenCommand={() => setCommandOpen(true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
