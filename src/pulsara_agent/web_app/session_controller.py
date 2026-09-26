@@ -102,6 +102,7 @@ from pulsara_agent.plugins.contracts import (
 )
 from pulsara_agent.tool_permission import EffectivePermissionPolicy
 from pulsara_agent.workspace_identity import HostWorkspaceInput, resolve_workspace
+from pulsara_agent.web_app.path_completion import complete_workspace_paths
 
 
 SessionWorkspaceKind = Literal["quick", "project"]
@@ -1616,6 +1617,14 @@ class LocalSessionController:
             )
             raise
 
+    async def complete_workspace_paths(self, session_id: str, prefix: str, cursor: str | None) -> dict[str, object]:
+        summary = await self.core.read_resumable_session(
+            session_id, memory_domain_id=self.workspace_input.memory_domain_id,
+        )
+        if summary is None:
+            raise KeyError(session_id)
+        return await asyncio.to_thread(complete_workspace_paths, Path(summary.workspace_root), prefix, cursor)
+
     async def read_session(self, session_id: str) -> dict[str, object] | None:
         summary = await self.core.read_resumable_session(
             session_id,
@@ -1847,7 +1856,7 @@ class LocalSessionController:
         elif workspace_kind == "project":
             if workspace_path is None or not workspace_path.strip():
                 raise ValueError("project workspace_path is required")
-            candidate = Path(workspace_path.strip()).expanduser()
+            candidate = Path(workspace_path).expanduser()
             if not candidate.is_absolute():
                 raise ValueError("project workspace_path must be absolute")
             workspace_input = HostWorkspaceInput(

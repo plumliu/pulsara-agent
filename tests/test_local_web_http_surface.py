@@ -9,6 +9,7 @@ from typing import cast
 
 from aiohttp import ClientSession, DummyCookieJar
 import pytest
+from unittest.mock import AsyncMock
 
 from pulsara_agent import mcp_config
 from pulsara_agent.capability.mcp_management import McpManagementConflict
@@ -25,6 +26,48 @@ from pulsara_agent.capability.user_skill_config import (
     set_user_skill_enabled,
 )
 from tests.support.model_config import test_model_runtime
+
+
+def test_native_workspace_picker_http_security_selection_cancel_and_failure(tmp_path, monkeypatch):
+    async def exercise():
+        (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(LocalBrowserBridge, _Bridge()),
+            static_root=tmp_path, requested_port=0,
+            is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies(),
+        )
+        choose = AsyncMock(side_effect=["/tmp/原目录 ", None, OSError("unavailable"), NotImplementedError()])
+        monkeypatch.setattr(server._directory_picker, "choose", choose)
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                url = f"{server.origin}/api/workspace-directory/pick"
+                for headers, code in [
+                    ({"Origin": "https://other.test"}, "ORIGIN_REJECTED"),
+                    ({"Sec-Fetch-Site": "cross-site"}, "CROSS_SITE_REQUEST_REJECTED"),
+                    ({"Host": "other.test"}, "HOST_REJECTED"),
+                ]:
+                    async with client.post(url, json={}, headers=headers) as response:
+                        assert (await response.json())["error"]["code"] == code
+                choose.assert_not_awaited()
+                async with client.post(url, json={"initial_path": []}) as response:
+                    assert response.status == 400
+                choose.assert_not_awaited()
+                for expected in ["/tmp/原目录 ", None]:
+                    async with client.post(url, json={"initial_path": "/tmp/start"}, headers={"Origin": server.origin}) as response:
+                        assert response.status == 200
+                        assert await response.json() == {"path": expected}
+                choose.assert_awaited_with("/tmp/start")
+                for status, code in [(503, "DIRECTORY_PICKER_UNAVAILABLE"), (501, "DIRECTORY_PICKER_UNSUPPORTED")]:
+                    async with client.post(url, json={}) as response:
+                        assert response.status == status
+                        assert (await response.json())["error"]["code"] == code
+        finally:
+            await server.aclose()
+
+    asyncio.run(exercise())
 
 
 async def _unexpected_reset(_postgres):
@@ -1435,3 +1478,40 @@ def test_user_mcp_live_overlay_requires_exact_user_source_and_config(
     assert retained_status_item["status"] == "CONFIGURED"
     assert retained_status_item["tool_count"] == 0
     assert retained_status_item["tools"] == []
+
+
+def test_workspace_path_candidates_http_contract_and_security(tmp_path):
+    async def exercise():
+        (tmp_path / 'index.html').write_text('Pulsara', encoding='utf-8')
+        sessions = _Sessions()
+        listing = {'directory': '/selected', 'items': [], 'next_cursor': None}
+        sessions.complete_workspace_paths = AsyncMock(side_effect=[listing, OSError('unreadable'), KeyError('missing')])
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, sessions), bridge=cast(LocalBrowserBridge, _Bridge()),
+            static_root=tmp_path, requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                url = f'{server.origin}/api/sessions/selected/path-candidates'
+                for headers, status in [({'Origin': 'https://other.test'}, 403), ({'Sec-Fetch-Site': 'cross-site'}, 403), ({'Host': 'other.test'}, 421)]:
+                    async with client.post(url, json={'prefix': ''}, headers=headers) as response:
+                        assert response.status == status
+                sessions.complete_workspace_paths.assert_not_awaited()
+                for body in [{}, {'prefix': []}, {'prefix': '', 'cursor': 123}, {'prefix': '', 'root': '/override'}]:
+                    async with client.post(url, json=body) as response:
+                        assert response.status == 400
+                sessions.complete_workspace_paths.assert_not_awaited()
+                async with client.post(url, json={'prefix': '文档 folder/', 'cursor': 'Report.pdf'}, headers={'Origin': server.origin}) as response:
+                    assert response.status == 200
+                    assert await response.json() == listing
+                sessions.complete_workspace_paths.assert_awaited_with('selected', '文档 folder/', 'Report.pdf')
+                async with client.post(url, json={'prefix': 'missing/'}) as response:
+                    assert response.status == 400
+                    assert (await response.json())['error']['code'] == 'PATH_CANDIDATES_UNAVAILABLE'
+                async with client.post(url, json={'prefix': ''}) as response:
+                    assert response.status == 404
+        finally:
+            await server.aclose()
+    asyncio.run(exercise())

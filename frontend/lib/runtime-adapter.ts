@@ -498,6 +498,8 @@ export interface RuntimeAdapter {
   }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection>;
   createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary>;
+  pickWorkspaceDirectory(initialPath: string, signal?: AbortSignal): Promise<string | null>;
+  completeWorkspacePaths(sessionId: string, prefix: string, cursor: string | null, signal: AbortSignal): Promise<import('./file-reference').WorkspacePathPage>;
   forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome>;
   deleteSession(sessionId: string): Promise<{ status: 'DELETED' | 'ABSENT'; session_id: string }>;
   listArchivedSessions(): Promise<SessionSummary[]>;
@@ -811,6 +813,7 @@ function taskAssistantBody(entryKind: string, body: string): string {
 }
 
 export interface RuntimeConnection {
+  importFiles(files: readonly File[], directory: boolean, signal: AbortSignal): Promise<import('./file-reference').ImportedPath>;
   readonly sessionId: string;
   readonly role: 'observer' | 'controller';
   readonly generation: number;
@@ -1870,6 +1873,19 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return payload.session ? projectSessionSummary(payload.session) : null;
   }
 
+  async completeWorkspacePaths(sessionId: string, prefix: string, cursor: string | null, signal: AbortSignal): Promise<import('./file-reference').WorkspacePathPage> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/path-candidates`, {
+      method: 'POST', body: JSON.stringify({ prefix, cursor }), signal,
+    });
+  }
+
+  async pickWorkspaceDirectory(initialPath: string, signal?: AbortSignal): Promise<string | null> {
+    const result = await apiRequest<{ path: string | null }>('/api/workspace-directory/pick', {
+      method: 'POST', body: JSON.stringify({ initial_path: initialPath }), signal,
+    });
+    return result.path;
+  }
+
   async createSession(selection: SessionWorkspaceSelection): Promise<SessionSummary> {
     const payload = await apiRequest<{ session: Record<string, unknown> }>('/api/sessions', {
       method: 'POST',
@@ -1937,6 +1953,29 @@ class LocalRuntimeConnection implements RuntimeConnection {
   async initialize(): Promise<void> {
     await this.backfillOlderHistory();
     await this.hydrateProjectionContent();
+  }
+
+  async importFiles(files: readonly File[], directory: boolean, signal: AbortSignal): Promise<import('./file-reference').ImportedPath> {
+    if (this.closed || this.role !== 'controller') throw new RuntimeApiError('IMPORT_CONTROLLER_REQUIRED', '当前页面没有文件导入控制权。', true);
+    if (!files.length) throw new Error('没有可导入的文件。');
+    const headers: Record<string, string> = { 'X-Pulsara-Connection-Generation': String(this.generation) };
+    let body: BodyInit;
+    if (directory) {
+      const form = new FormData();
+      for (const file of files) {
+        form.append('path', JSON.stringify(file.webkitRelativePath));
+        form.append('file', file, file.name);
+      }
+      body = form;
+    } else {
+      if (files.length !== 1) throw new Error('单文件导入只接受一个文件。');
+      headers['Content-Type'] = 'application/octet-stream';
+      headers['X-Pulsara-Filename'] = JSON.stringify(files[0].name).replace(/[^\x20-\x7e]/g,
+        character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+      body = files[0];
+    }
+    return httpRequest(`/api/connections/${encodeURIComponent(this.connectionId)}/${directory ? 'import-directory' : 'import-file'}`,
+      { method: 'POST', body, headers, signal });
   }
 
   current(): RuntimeProjection {
@@ -3321,14 +3360,16 @@ function assertProtocolFrame(frame: { error?: ProtocolError }) {
 }
 
 async function apiRequest<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
+  return httpRequest<T>(path, { ...init, headers: init.body
+    ? { 'Content-Type': 'application/json', ...init.headers } : init.headers });
+}
+
+async function httpRequest<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response;
   try {
     response = await fetch(path, {
       ...init,
       credentials: 'same-origin',
-      headers: init.body
-        ? { 'Content-Type': 'application/json', ...init.headers }
-        : init.headers,
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;

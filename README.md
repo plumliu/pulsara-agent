@@ -164,6 +164,20 @@ Workspace-owned MCP entries remain disabled during ordinary Host startup unless
 the user explicitly passes `--trust-workspace-mcp`; merely opening a repository
 can never execute its stdio command or resolve its HTTP secret references.
 
+### File and folder references
+
+The composer’s **+** menu groups files, folders, skills and planning. Files appear inline as a type icon and name. Hover, focus or click to inspect and copy their full path. Picker selections append to the draft; directly added images use inline image-icon + Figure cards in drafts, queues and sent messages. Hover a Figure card for a thumbnail preview, or click it to open the image viewer. User messages also show thumbnails above and outside the text bubble, aligned to the right; multimodal input is preserved.
+
+Non-image files and selected folders are copied into `imports/` under the effective Pulsara home. The model receives path text and uses file or terminal tools to read it. Images inside folders remain files in that directory. Existing local paths can also be typed directly; PDF and Office contents are not automatically extracted or inlined.
+
+Type `$name-prefix` to choose a skill, or `@path-prefix` to browse files and folders one directory at a time from the current session workspace (for example, `@src/`). Use Up/Down to select, Enter/Tab to confirm, and Escape to dismiss. The folder arrow or Right key enters a directory. Selections become inline icon cards; `@` references the original path without uploading a copy or reading its contents.
+
+Drop local files or images anywhere in the conversation header, message area or blank space to append them to the draft. Drops inside the editor use the drop position. A hint highlights the conversation area; the two sidebars do not accept these drops. Dropping never sends the message automatically.
+
+Folder drops are rejected with a toast; a drop containing any folder adds nothing. Use `@` to select a directory reference or paste its full path instead.
+
+Removing a reference, clearing a draft or deleting a session does not delete imported copies. Clean them up through the filesystem when needed. Paths require the same host and filesystem view; folder selection does not preserve empty subdirectories or source filesystem metadata.
+
 ## Requirements
 
 - Python 3.12+

@@ -1,6 +1,7 @@
 import { Slice } from '@tiptap/pm/model';
 import { closeHistory } from '@tiptap/pm/history';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PromptComposer } from '../components/prompt-composer';
 import type { EditablePromptContent } from './prompt-content';
@@ -201,6 +202,89 @@ describe('PromptComposer clipboard and drag boundary', () => {
       onNotify={() => undefined}
     />);
   }
+
+  it('rejects a folder when the composer is mounted without a workbench', async () => {
+    const store = new PromptDraftStore();
+    const upload = vi.fn();
+    store.setImporter(upload);
+    const onNotify = vi.fn();
+    const view = render(<PromptComposer store={store} sessionId="session" disabled={false}
+      placeholder="prompt" onSubmit={() => undefined} onNotify={onNotify} />);
+    const directory = new File([], 'memos');
+    expect(fireEvent.drop(screen.getByRole('textbox'), { dataTransfer: {
+      types: ['Files'], files: [directory], getData: () => '',
+      items: [{ kind: 'file', webkitGetAsEntry: () => ({ isDirectory: true }) }],
+    } })).toBe(false);
+    await act(async () => {});
+    expect(onNotify).toHaveBeenCalledOnce();
+    expect(onNotify).toHaveBeenCalledWith('不支持拖入文件夹', expect.stringContaining('@'));
+    expect(upload).not.toHaveBeenCalled();
+    expect(store.summary('session').hasContent).toBe(false);
+    view.unmount(); store.destroy();
+  });
+
+  it('renders numbered chips for duplicate occurrences and renumbers after delete, undo and move', async () => {
+    const store = new PromptDraftStore();
+    const editor = store.getEditor('session');
+    store.insertFiles('session', [imageFile('temporary.png', 'image/png', [1]), imageFile('other.png', 'image/png', [2])]);
+    await store.capture('session');
+    // The third occurrence shares its bytes/asset with the first.
+    editor.commands.insertContent(editor.getJSON().content![0].content![0]);
+    const view = mount(store);
+    const labels = () => [...view.container.querySelectorAll('.prompt-image-chip > span')].map(node => node.textContent);
+    await waitFor(() => expect(labels()).toEqual(['Figure 1', 'Figure 2', 'Figure 3']));
+    expect(view.container.querySelector('img[data-prompt-asset-id]')).toBeNull();
+    expect(view.container.textContent).not.toContain('temporary.png');
+    act(() => { editor.view.dispatch(closeHistory(editor.state.tr)); editor.commands.deleteRange({ from: 1, to: 2 }); });
+    await waitFor(() => expect(labels()).toEqual(['Figure 1', 'Figure 2']));
+    expect(imageBytes((await store.capture('session')).content)).toEqual([[2], [1]]);
+    act(() => { editor.commands.undo(); });
+    await waitFor(() => expect(labels()).toEqual(['Figure 1', 'Figure 2', 'Figure 3']));
+    act(() => {
+      const first = editor.state.doc.nodeAt(1)!;
+      editor.view.dispatch(editor.state.tr.delete(1, 2).insert(3, first));
+    });
+    await waitFor(() => expect(labels()).toEqual(['Figure 1', 'Figure 2', 'Figure 3']));
+    expect(imageBytes((await store.capture('session')).content)).toEqual([[2], [1], [1]]);
+    expect((await store.capture('session')).content.parts.every(part => part.type === 'image')).toBe(true);
+    view.unmount(); store.destroy();
+  });
+
+  it('opens a draft card with the keyboard, switches images, and returns focus without submitting', async () => {
+    const store = new PromptDraftStore(); store.getEditor('session');
+    store.insertFiles('session', [imageFile('a.png', 'image/png', [1]), imageFile('b.png', 'image/png', [2])]);
+    await store.capture('session');
+    const onSubmit = vi.fn();
+    const view = render(<PromptComposer store={store} sessionId="session" disabled={false} placeholder="prompt" onSubmit={onSubmit} onNotify={vi.fn()} />);
+    const trigger = await screen.findByRole('button', { name: '打开 Figure 1' });
+    await userEvent.hover(trigger);
+    expect(screen.getByRole('img', { name: 'Figure 1 缩略图' })).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: 'Lightbox' })).toBeNull();
+    trigger.focus(); await userEvent.keyboard('{Enter}');
+    expect(screen.getByRole('dialog', { name: 'Lightbox' })).toBeTruthy();
+    expect(document.querySelector('.yarl__slide_current .prompt-lightbox-caption')?.textContent).toBe('Figure 1');
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(document.querySelector('.yarl__slide_current .prompt-lightbox-caption')?.textContent).toBe('Figure 2'));
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(onSubmit).not.toHaveBeenCalled();
+    view.unmount(); store.destroy();
+  });
+
+  it('shows pending and failed reads on the same draft card and refuses partial capture', async () => {
+    const store = new PromptDraftStore(); store.getEditor('session');
+    const pending = deferred<ArrayBuffer>();
+    store.insertFiles('session', [imageFile('a.png', 'image/png', [1], () => pending.promise)]);
+    const view = mount(store);
+    const trigger = await screen.findByRole('button', { name: '打开 Figure 1' });
+    expect(trigger.textContent).toContain('读取中');
+    await act(async () => { pending.reject(new Error('browser read failed')); });
+    expect(trigger.textContent).toContain('读取失败');
+    await userEvent.hover(trigger);
+    expect(screen.getByRole('tooltip').textContent).toBe('browser read failed');
+    await expect(store.capture('session')).rejects.toThrow('browser read failed');
+    view.unmount(); store.destroy();
+  });
 
   it('keeps image input on paste/drop and undo/redo on editor shortcuts without toolbar controls', () => {
     const store = new PromptDraftStore();

@@ -18,12 +18,13 @@ import { RuntimeApiError } from '../lib/runtime-adapter';
 
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 
-type SettingsSection = 'general' | 'models' | 'service' | 'archived';
+export type SettingsSection = 'general' | 'models' | 'service' | 'archived';
 type CredentialKind = 'embedding' | 'rerank';
 type ModelConfigurationSource = 'models_dev' | 'user_declared';
 type CustomReasoningKind = CustomReasoningProfile;
 
 interface SettingsViewProps {
+  initialSection?: SettingsSection;
   sessionRevision: number;
   onSessionsChanged: () => Promise<void>;
   onDeleteSession: (session: SessionSummary) => void;
@@ -228,9 +229,9 @@ function ModelFormContainer({ editing, busy, onClose, children }: {
   return editing ? <dialog ref={dialog} className="model-edit-dialog" aria-label="修改模型配置" onClose={onClose} onCancel={(event) => { if (busy) event.preventDefault(); else onClose(); }}>{content}</dialog> : content;
 }
 
-export function SettingsView({ theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession }: SettingsViewProps) {
+export function SettingsView({ initialSection, theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession }: SettingsViewProps) {
   const { showBuiltinToolResults, onChange: onToolResultDisplayChange } = useContext(ToolResultDisplayContext);
-  const [section, setSection] = useState<SettingsSection>(bootstrap?.database_state === 'ready' ? 'general' : 'service');
+  const [section, setSection] = useState<SettingsSection>(initialSection ?? (bootstrap?.database_state === 'ready' ? 'general' : 'service'));
   const [settings, setSettings] = useState<LocalSettingsReadModel | undefined>(bootstrap);
   const [catalog, setCatalog] = useState<ModelCatalogReadModel>();
   const [loading, setLoading] = useState(true);

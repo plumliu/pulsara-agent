@@ -1,39 +1,20 @@
 import { Editor, type JSONContent } from '@tiptap/core';
 import Document from '@tiptap/extension-document';
 import HardBreak from '@tiptap/extension-hard-break';
-import Image from '@tiptap/extension-image';
 import Paragraph from '@tiptap/extension-paragraph';
 import Text from '@tiptap/extension-text';
 import { UndoRedo } from '@tiptap/extensions';
+import { FileReferenceNode } from '../components/file-reference-node';
+import { PromptImageNode } from '../components/prompt-image-node';
+import { SkillReferenceNode } from '../components/skill-reference-node';
+import { fileReference, formatFileReference, splitFileReferences, type ImportFiles } from './file-reference';
+import { skillReference, splitSkillReferences } from './skill-reference';
 import type { EditablePromptContent, LocalPromptImagePart } from './prompt-content';
 
 const acceptedImageMediaTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 const SingleParagraphDocument = Document.extend({
   content: 'paragraph',
-});
-
-const LocalImage = Image.extend({
-  addAttributes() {
-    return {
-      ...this.parent?.(),
-      assetId: {
-        default: null,
-        parseHTML: () => null,
-        renderHTML: (attributes) => typeof attributes.assetId === 'string'
-          ? { 'data-prompt-asset-id': attributes.assetId }
-          : {},
-      },
-    };
-  },
-  parseHTML() {
-    return [];
-  },
-}).configure({
-  inline: true,
-  allowBase64: false,
-  resize: false,
-  HTMLAttributes: { class: 'composer-inline-image' },
 });
 
 interface DraftAsset {
@@ -49,7 +30,17 @@ interface DraftAsset {
 interface DraftSession {
   editor: Editor;
   assets: Map<string, DraftAsset>;
+  imports: Map<string, DraftImport>;
   revision: number;
+}
+
+interface DraftImport {
+  id: string;
+  files: readonly File[];
+  directory: boolean;
+  controller: AbortController;
+  raw: string;
+  error?: string;
 }
 
 export interface PromptDraftSnapshot {
@@ -65,6 +56,8 @@ export interface PromptDraftSummary {
   hasImage: boolean;
   pendingImages: number;
   failedImages: number;
+  pendingFiles: number;
+  failedFiles: number;
 }
 
 export interface PromptDraftImageStatus {
@@ -77,6 +70,9 @@ export class PromptDraftStore {
   private readonly sessions = new Map<string, DraftSession>();
   private readonly listeners = new Set<() => void>();
   private version = 0;
+  private importer?: ImportFiles;
+
+  setImporter(importer: ImportFiles): void { this.importer = importer; }
 
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -95,6 +91,7 @@ export class PromptDraftStore {
     const session: DraftSession = {
       editor: undefined as unknown as Editor,
       assets: new Map(),
+      imports: new Map(),
       revision: 0,
     };
     session.editor = this.createEditor(session);
@@ -112,31 +109,40 @@ export class PromptDraftStore {
         hasImage: false,
         pendingImages: 0,
         failedImages: 0,
+        pendingFiles: 0,
+        failedFiles: 0,
       };
     }
-    const document = session.editor.getJSON();
+    const document: JSONContent = session.editor.getJSON();
     const text = draftText(document);
     const assetIds = imageAssetIds(document);
+    const references = (document.content?.[0]?.content ?? []).filter(node => node.type === 'fileReference');
     return {
       revision: session.revision,
       text,
-      hasContent: assetIds.length > 0 || text.trim().length > 0,
+      hasContent: references.length > 0 || assetIds.length > 0 || text.trim().length > 0,
       hasImage: assetIds.length > 0,
       pendingImages: assetIds.filter((id) => !session.assets.get(id)?.bytes
         && !session.assets.get(id)?.error).length,
       failedImages: assetIds.filter((id) => Boolean(session.assets.get(id)?.error)).length,
+      pendingFiles: references.filter(node => node.attrs?.state === 'uploading').length,
+      failedFiles: references.filter(node => node.attrs?.state === 'failed').length,
     };
   }
 
-  insertFiles(sessionId: string, files: readonly File[], position?: number): void {
+  insertFiles(sessionId: string, files: readonly File[], position?: number | 'end'): void {
     const session = this.requireSession(sessionId);
     for (const file of files) {
-      if (!acceptedImageMediaTypes.has(file.type)) {
-        throw new Error('仅支持 PNG、JPEG 和 WebP 图片。');
+      if (file.type.startsWith('image/') && !acceptedImageMediaTypes.has(file.type)) {
+        throw new Error('图片仅支持 PNG、JPEG 和 WebP。');
       }
     }
     const nodes: JSONContent[] = [];
     for (const file of files) {
+      if (!acceptedImageMediaTypes.has(file.type)) {
+        nodes.push(this.createImport(sessionId, session, [file], false));
+        continue;
+      }
       const asset = this.createAsset(file, file.type);
       session.assets.set(asset.id, asset);
       nodes.push({
@@ -150,9 +156,73 @@ export class PromptDraftStore {
       });
     }
     const chain = session.editor.chain().focus(undefined, { scrollIntoView: false });
-    if (position !== undefined) chain.setTextSelection(position);
+    if (position !== undefined) chain.setTextSelection(position === 'end' ? session.editor.state.doc.content.size - 1 : position);
     chain.insertContent(nodes).run();
     this.changed();
+  }
+
+  insertDirectory(sessionId: string, files: readonly File[]): void {
+    if (!files.length) return;
+    const session = this.requireSession(sessionId);
+    const node = this.createImport(sessionId, session, files, true);
+    session.editor.chain().focus('end', { scrollIntoView: false }).insertContent(node).run();
+  }
+
+  private createImport(sessionId: string, session: DraftSession, files: readonly File[], directory: boolean): JSONContent {
+    const item: DraftImport = { id: crypto.randomUUID(), files, directory, controller: new AbortController(), raw: '' };
+    session.imports.set(item.id, item);
+    // Reserve all editor positions synchronously before starting asynchronous IO.
+    queueMicrotask(() => { void this.runImport(sessionId, session, item); });
+    return { type: 'fileReference', attrs: { id: item.id, name: directory
+      ? files[0].webkitRelativePath.split('/')[0] : files[0].name, kind: directory ? 'directory' : 'file', state: 'uploading' } };
+  }
+
+  private async runImport(sessionId: string, session: DraftSession, item: DraftImport): Promise<void> {
+    if (session.editor.isDestroyed || !this.hasImport(session, item.id)) return;
+    const controller = new AbortController();
+    item.controller = controller;
+    item.error = undefined;
+    this.syncImports(session);
+    try {
+      if (!this.importer) throw new Error('本地连接尚未就绪，请重新连接后重试。');
+      const result = await this.importer(sessionId, item.files, item.directory, controller.signal);
+      if (item.controller !== controller || controller.signal.aborted) return;
+      const raw = formatFileReference(result, item.directory);
+      if (!fileReference(raw)) throw new Error('导入服务返回了无效路径。');
+      item.raw = raw;
+    } catch (error) {
+      if (item.controller !== controller || controller.signal.aborted) return;
+      item.error = error instanceof Error ? error.message : '导入失败，请重试。';
+    }
+    if (!session.editor.isDestroyed) { this.syncImports(session); this.changed(); }
+  }
+
+  private hasImport(session: DraftSession, id: string): boolean {
+    return ((session.editor.getJSON() as JSONContent).content?.[0]?.content ?? []).some(node => node.attrs?.id === id);
+  }
+
+  private syncImports(session: DraftSession): void {
+    const transaction = session.editor.state.tr;
+    session.editor.state.doc.descendants((node, position) => {
+      if (node.type.name !== 'fileReference') return;
+      const item = session.imports.get(node.attrs.id);
+      if (!item) return;
+      const state = item.raw ? 'ready' : item.error ? 'failed' : 'uploading';
+      if (node.attrs.raw !== item.raw || node.attrs.state !== state || node.attrs.error !== (item.error ?? '')) {
+        transaction.setNodeMarkup(position, undefined, { ...node.attrs, raw: item.raw, state, error: item.error ?? '' });
+      }
+    });
+    if (transaction.docChanged) session.editor.view.dispatch(transaction.setMeta('addToHistory', false));
+  }
+
+  private removeImport(session: DraftSession, id: string): void {
+    const transaction = session.editor.state.tr;
+    const positions: Array<{ from: number; to: number }> = [];
+    session.editor.state.doc.descendants((node, pos) => {
+      if (node.type.name === 'fileReference' && node.attrs.id === id) positions.push({ from: pos, to: pos + node.nodeSize });
+    });
+    for (const position of positions.reverse()) transaction.delete(position.from, position.to);
+    session.editor.view.dispatch(transaction);
   }
 
   insertText(sessionId: string, value: string, atStart = false): void {
@@ -167,7 +237,7 @@ export class PromptDraftStore {
     const session = this.requireSession(sessionId);
     const template = document.createElement('template');
     template.innerHTML = value;
-    if (!template.content.querySelector('img')) return false;
+    if (!template.content.querySelector('img, [data-file-reference], [data-skill-reference]')) return false;
     const nodes: JSONContent[] = [];
     let valid = true;
     const visit = (node: Node) => {
@@ -176,6 +246,18 @@ export class PromptDraftStore {
         return;
       }
       if (!(node instanceof HTMLElement)) return;
+      if (node.hasAttribute('data-skill-reference')) {
+        const raw = node.getAttribute('data-skill-reference') ?? '';
+        if (skillReference(raw)) nodes.push(skillReferenceNode(raw));
+        else valid = false;
+        return;
+      }
+      if (node.hasAttribute('data-file-reference')) {
+        const raw = node.getAttribute('data-file-reference') ?? '';
+        if (fileReference(raw)) nodes.push(referenceNode(raw));
+        else valid = false;
+        return;
+      }
       if (node.tagName === 'BR') {
         nodes.push({ type: 'hardBreak' });
         return;
@@ -201,7 +283,7 @@ export class PromptDraftStore {
       for (const child of node.childNodes) visit(child);
     };
     for (const child of template.content.childNodes) visit(child);
-    if (!valid || !nodes.some((node) => node.type === 'image')) return false;
+    if (!valid || !nodes.some((node) => node.type === 'image' || node.type === 'fileReference' || node.type === 'skillReference')) return false;
     const chain = session.editor.chain().focus(undefined, { scrollIntoView: false });
     if (position !== undefined) chain.setTextSelection(position);
     chain.insertContent(nodes).run();
@@ -234,7 +316,10 @@ export class PromptDraftStore {
   async capture(sessionId: string): Promise<PromptDraftSnapshot> {
     const session = this.requireSession(sessionId);
     const revision = session.revision;
-    const document = session.editor.getJSON();
+    const document: JSONContent = session.editor.getJSON();
+    if ((document.content?.[0]?.content ?? []).some(node => node.type === 'fileReference' && !fileReference(node.attrs?.raw ?? ''))) {
+      throw new Error('请等待文件导入完成，或重试/移除失败的文件。');
+    }
     const selectedAssets = new Map<string, DraftAsset>();
     for (const assetId of imageAssetIds(document)) {
       const asset = session.assets.get(assetId);
@@ -278,6 +363,7 @@ export class PromptDraftStore {
     const session: DraftSession = {
       editor: undefined as unknown as Editor,
       assets,
+      imports: new Map(),
       revision: 0,
     };
     session.editor = this.createEditor(session, paragraphDocument(nodes));
@@ -324,7 +410,12 @@ export class PromptDraftStore {
         Paragraph,
         Text,
         HardBreak,
-        LocalImage,
+        PromptImageNode,
+        SkillReferenceNode,
+        FileReferenceNode.configure({
+          retry: (id: string) => { const item = session.imports.get(id); if (item?.error) void this.runImport(this.sessionIdFor(session), session, item); },
+          remove: (id: string) => this.removeImport(session, id),
+        }),
         UndoRedo,
       ],
       content: content ?? paragraphDocument([]),
@@ -334,6 +425,13 @@ export class PromptDraftStore {
       injectCSS: false,
       onUpdate: () => {
         session.revision += 1;
+        for (const item of session.imports.values()) {
+          if (!item.raw && !item.error && !this.hasImport(session, item.id)) {
+            item.controller.abort();
+            item.error = '导入已取消，可重试。';
+          }
+        }
+        this.syncImports(session);
         this.changed();
       },
     });
@@ -372,9 +470,15 @@ export class PromptDraftStore {
   }
 
   private releaseSession(session: DraftSession): void {
+    for (const item of session.imports.values()) item.controller.abort();
     session.editor.destroy();
     for (const asset of session.assets.values()) URL.revokeObjectURL(asset.objectUrl);
     session.assets.clear();
+  }
+
+  private sessionIdFor(session: DraftSession): string {
+    for (const [id, value] of this.sessions) if (value === session) return id;
+    throw new Error('草稿已经关闭。');
   }
 
   private changed(): void {
@@ -391,6 +495,22 @@ function paragraphDocument(content: JSONContent[]): JSONContent {
 }
 
 function plainTextNodes(value: string): JSONContent[] {
+  return splitFileReferences(value).flatMap(part => typeof part === 'string'
+    ? splitSkillReferences(part).flatMap(piece => typeof piece === 'string'
+      ? literalTextNodes(piece) : [skillReferenceNode(piece.raw)])
+    : [referenceNode(part.raw)]);
+}
+
+function skillReferenceNode(raw: string): JSONContent {
+  return { type: 'skillReference', attrs: { raw } };
+}
+
+function referenceNode(raw: string): JSONContent {
+  const reference = fileReference(raw)!;
+  return { type: 'fileReference', attrs: { raw, name: reference.name, kind: reference.kind, state: 'ready' } };
+}
+
+function literalTextNodes(value: string): JSONContent[] {
   const result: JSONContent[] = [];
   const lines = value.split('\n');
   lines.forEach((line, index) => {
@@ -404,6 +524,7 @@ function draftText(document: JSONContent): string {
   let result = '';
   for (const node of document.content?.[0]?.content ?? []) {
     if (node.type === 'text') result += node.text ?? '';
+    else if (node.type === 'fileReference' || node.type === 'skillReference') result += node.attrs?.raw ?? '';
     else if (node.type === 'hardBreak') result += '\n';
   }
   return result;
@@ -433,6 +554,12 @@ function serializePromptDocument(
   for (const node of document.content?.[0]?.content ?? []) {
     if (node.type === 'text') {
       text += node.text ?? '';
+    } else if (node.type === 'fileReference') {
+      if (!fileReference(node.attrs?.raw ?? '')) throw new Error('文件尚未完成导入。');
+      text += node.attrs!.raw;
+    } else if (node.type === 'skillReference') {
+      if (!skillReference(node.attrs?.raw ?? '')) throw new Error('技能引用格式不正确。');
+      text += node.attrs!.raw;
     } else if (node.type === 'hardBreak') {
       text += '\n';
     } else if (node.type === 'image') {

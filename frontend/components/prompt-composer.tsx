@@ -2,11 +2,16 @@
 
 import type { Editor } from '@tiptap/core';
 import { EditorContent } from '@tiptap/react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import Lightbox from 'yet-another-react-lightbox';
 import Zoom from 'yet-another-react-lightbox/plugins/zoom';
 import { PromptDraftStore } from '../lib/prompt-draft';
+import { rejectDirectoryDrop } from '../lib/file-drop';
 import type { MarkdownNotify } from './markdown-body';
+import { DraftImagePreviewContext } from './prompt-image-node';
+import type { CompleteWorkspacePaths } from '../lib/file-reference';
+import type { SkillCapability } from '../lib/pulsara-types';
+import { usePromptSuggestions } from './prompt-suggestions';
 
 interface PromptComposerProps {
   store: PromptDraftStore;
@@ -15,6 +20,8 @@ interface PromptComposerProps {
   placeholder: string;
   onSubmit: () => void;
   onNotify: MarkdownNotify;
+  skills?: readonly SkillCapability[];
+  onCompletePaths?: CompleteWorkspacePaths;
 }
 
 export function PromptComposer({
@@ -24,14 +31,19 @@ export function PromptComposer({
   placeholder,
   onSubmit,
   onNotify,
+  skills = [],
+  onCompletePaths,
 }: PromptComposerProps) {
   const editor: Editor = store.getEditor(sessionId);
-  const [preview, setPreview] = useState<{ src: string; assetId: string }>();
+  useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
+  const [preview, setPreview] = useState<number>();
+  const previewTrigger = useRef<HTMLButtonElement | null>(null);
   const composing = useRef(false);
   const disabledRef = useRef(disabled);
   const notifyRef = useRef(onNotify);
   const submitRef = useRef(onSubmit);
   const imageStatuses = store.imageStatuses(sessionId);
+  const suggestionKeyDown = usePromptSuggestions(editor, disabled, { skills, completePaths: onCompletePaths });
 
   useEffect(() => {
     disabledRef.current = disabled;
@@ -63,8 +75,9 @@ export function PromptComposer({
           },
         },
         handleKeyDown: (_view, event) => {
-          if (event.key !== 'Enter') return false;
           if (composing.current || event.isComposing || event.keyCode === 229) return false;
+          if (suggestionKeyDown.current(_view, event)) { event.preventDefault(); return true; }
+          if (event.key !== 'Enter') return false;
           event.preventDefault();
           if (event.shiftKey) {
             editor.commands.setHardBreak();
@@ -74,6 +87,7 @@ export function PromptComposer({
           return true;
         },
         handlePaste: (_view, event) => {
+          if (disabledRef.current) { event.preventDefault(); return true; }
           const transfer = event.clipboardData;
           if (!transfer) return false;
           const files = clipboardFiles(transfer);
@@ -95,9 +109,14 @@ export function PromptComposer({
           return false;
         },
         handleDrop: (view, event, _slice, moved) => {
+          if (disabledRef.current) { event.preventDefault(); return true; }
           if (moved) return false;
           const transfer = event.dataTransfer;
           if (!transfer) return false;
+          if (rejectDirectoryDrop(transfer, notifyRef.current)) {
+            event.preventDefault();
+            return true;
+          }
           const files = [...transfer.files];
           if (files.length > 0) {
             event.preventDefault();
@@ -133,58 +152,43 @@ export function PromptComposer({
           }
           return false;
         },
-        handleClickOn: (_view, _position, node) => {
-          if (node.type.name !== 'image' || typeof node.attrs.assetId !== 'string') {
-            return false;
-          }
-          const src = store.imageObjectUrl(sessionId, node.attrs.assetId);
-          if (!src) return false;
-          setPreview({ src, assetId: node.attrs.assetId });
-          return true;
-        },
       },
     });
-  }, [editor, sessionId, store]);
+  }, [editor, sessionId, store, suggestionKeyDown]);
 
   useEffect(() => {
     if (editor.isEditable !== !disabled) editor.setEditable(!disabled);
   }, [disabled, editor]);
 
-  useEffect(() => {
-    for (const status of imageStatuses) {
-      const image = [...editor.view.dom.querySelectorAll<HTMLImageElement>(
-        'img[data-prompt-asset-id]',
-      )].find((candidate) => candidate.dataset.promptAssetId === status.assetId);
-      if (!image) continue;
-      image.dataset.readState = status.state;
-      image.title = status.reason ?? '';
-    }
-  }, [editor, imageStatuses]);
-
   return (
     <div className="prompt-composer">
-      <EditorContent editor={editor} />
+      <DraftImagePreviewContext.Provider value={{ images: imageStatuses,
+        imageUrl: assetId => store.imageObjectUrl(sessionId, assetId), open: (index, trigger) => {
+        previewTrigger.current = trigger;
+        setPreview(index);
+      } }}>
+        <EditorContent editor={editor} />
+      </DraftImagePreviewContext.Provider>
       {editor.isEmpty && (
         <span className="prompt-composer__placeholder" aria-hidden="true">
           {placeholder}
         </span>
       )}
-      {imageStatuses.some((status) => status.state !== 'ready') && (
-        <div className="prompt-composer__image-status" role="status">
-          {imageStatuses.map((status, index) => status.state === 'ready' ? null : (
-            <span key={status.assetId}>
-              图片 {index + 1}：{status.state === 'loading' ? '正在读取…' : status.reason}
-            </span>
-          ))}
-        </div>
-      )}
       <Lightbox
-        open={Boolean(preview)}
+        open={preview !== undefined}
         close={() => setPreview(undefined)}
-        slides={preview ? [{ src: preview.src, alt: '草稿图片' }] : []}
+        index={preview ?? 0}
+        slides={imageStatuses.map((image, index) => ({
+          src: store.imageObjectUrl(sessionId, image.assetId) ?? '', alt: `Figure ${index + 1}`,
+        }))}
         plugins={[Zoom]}
         carousel={{ finite: true }}
         controller={{ closeOnPullDown: true, closeOnBackdropClick: true }}
+        on={{ view: ({ index }) => setPreview(index), exited: () => {
+          if (previewTrigger.current?.isConnected) previewTrigger.current.focus();
+          else if (!editor.isDestroyed) editor.commands.focus();
+        } }}
+        render={{ slideFooter: ({ slide }) => <div className="prompt-lightbox-caption">{slide.alt}</div> }}
       />
     </div>
   );
@@ -208,8 +212,8 @@ function insertFiles(
     store.insertFiles(sessionId, files, position);
   } catch (error) {
     onNotify(
-      '图片未加入草稿',
-      error instanceof Error ? error.message : '请选择 PNG、JPEG 或 WebP 图片。',
+      '文件未加入草稿',
+      error instanceof Error ? error.message : '请重新选择文件。',
     );
   }
 }

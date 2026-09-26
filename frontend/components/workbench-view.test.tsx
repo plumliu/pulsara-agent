@@ -41,6 +41,7 @@ describe('visualization occurrence layout', () => {
       return this instanceof HTMLIFrameElement ? 560 : 0;
     });
     const html = '<!doctype html><html><body><main data-pulsara-visualization-root>Chart</main></body></html>';
+    const read = vi.fn(async () => html);
     const view = render(<ConversationMessages
       messages={[{
         id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
@@ -49,8 +50,13 @@ describe('visualization occurrence layout', () => {
         }],
       }]}
       artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
-      onReadVisualization={vi.fn(async () => html)}
+      onReadVisualization={read}
     />);
+    const toggle = screen.getByRole('button', { name: '展开可视化 1' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(read).not.toHaveBeenCalled();
+    expect(view.container.querySelector('iframe')).toBeNull();
+    fireEvent.click(toggle);
     const panel = await waitFor(() => {
       const element = view.container.querySelector<HTMLElement>('.assistant-visualization[data-visualization-layout]');
       expect(element?.querySelector('iframe')).toBeTruthy();
@@ -69,6 +75,15 @@ describe('visualization occurrence layout', () => {
     expect(panel.dataset.visualizationLayout).toBe('root');
     expect(panel.style.width).toBe('422px');
     expect(frame.style.transform).toBe('translate(-100px, -20px)');
+    fireEvent.click(screen.getByRole('button', { name: '收起可视化 1' }));
+    expect(panel.classList.contains('is-expanded')).toBe(false);
+    expect(panel.style.width).toBe('');
+    expect(panel.querySelector('.animated-disclosure')?.getAttribute('aria-hidden')).toBe('true');
+    expect(panel.querySelector('iframe')).toBe(frame);
+    fireEvent.click(screen.getByRole('button', { name: '展开可视化 1' }));
+    expect(panel.style.width).toBe('422px');
+    expect(panel.querySelector('iframe')).toBe(frame);
+    expect(read).toHaveBeenCalledOnce();
     availableWidth = 602;
     act(() => notifyResize?.([], {} as ResizeObserver));
     expect(panel.dataset.visualizationLayout).toBe('page');
@@ -430,21 +445,31 @@ describe('empty session welcome composer', () => {
     expect(compact().disabled).toBe(true);
   });
 
-  it('keeps the same focused editor when the first send opens the drawer, and retains a rejected draft', async () => {
+  it('keeps the same focused editor when the first send leaves welcome, and retains a rejected draft', async () => {
     let settle!: (accepted: boolean) => void;
     const onSend = vi.fn(() => new Promise<boolean>(resolve => { settle = resolve; }));
     const view = render(<WorkbenchView {...props({ isRunning: false, onSend,
       initialContextBase: { base_kind: 'FULL_HISTORY', display_after_entry_sequence: 0 },
     })} />);
     expect(screen.getByRole('heading', { name: isWelcomeHeading })).toBeTruthy();
-    const drawer = view.container.querySelector('.composer-drawer')!;
-    expect(drawer.hasAttribute('inert')).toBe(true);
     const wrap = view.container.querySelector('.composer-wrap') as HTMLElement;
     wrap.getBoundingClientRect = () => new DOMRect(0,
       view.container.querySelector('.is-welcome') ? 280 : 650, 720, 70);
+    Object.defineProperty(wrap, 'offsetTop', { configurable: true,
+      get: () => view.container.querySelector('.is-welcome') ? 280 : 650 });
+    Object.defineProperty(view.container.querySelector('.workbench'), 'clientHeight', { configurable: true, value: 800 });
     const animate = vi.fn(() => ({ cancel: vi.fn() }) as unknown as Animation);
     wrap.animate = animate;
     act(() => promptDraftStore.insertText('session-one', '从这里开始'));
+    const thread = view.container.querySelector('.thread-scroll') as HTMLElement;
+    Object.defineProperties(thread, {
+      scrollHeight: { configurable: true, value: 1200 },
+      clientHeight: { configurable: true, value: 400 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    fireEvent.scroll(thread);
+    const latest = await screen.findByRole('button', { name: '回到最新' });
+    await waitFor(() => expect(latest.style.bottom).toBe('532px'));
     const editor = screen.getByLabelText('发送给 Pulsara');
     act(() => editor.focus());
     expect(document.activeElement).toBe(editor);
@@ -453,7 +478,8 @@ describe('empty session welcome composer', () => {
     expect(screen.getByLabelText('发送给 Pulsara')).toBe(editor);
     expect(editor.contains(document.activeElement)).toBe(true);
     expect(view.container.querySelector('.is-welcome')).toBeNull();
-    expect(drawer.hasAttribute('inert')).toBe(false);
+    // The composer moved without resizing; the old welcome offset must not linger.
+    await waitFor(() => expect(latest.style.bottom).toBe('162px'));
     expect(screen.queryByRole('heading', { name: isWelcomeHeading })).toBeNull();
     expect(animate).toHaveBeenCalledWith([
       { transform: 'translateY(-370px)' }, { transform: 'translateY(0)' },
@@ -462,24 +488,15 @@ describe('empty session welcome composer', () => {
     expect(promptDraftStore.summary('session-one').text).toBe('从这里开始');
   });
 
-  it('keeps options collapsed and gently guides missing model selection in two steps', () => {
+  it('offers model and permission directly in welcome and guides missing model selection', () => {
     const view = render(<WorkbenchView {...props({ isRunning: false })} />);
-    expect(screen.getByRole('button', { name: '输入选项' }).classList.contains('needs-selection')).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: '输入选项' }));
-    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(false);
-    fireEvent.click(screen.getByRole('button', { name: '输入选项' }));
-    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(true);
+    expect(screen.getByRole('button', { name: 'test-model' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '只读' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '输入选项' })).toBeNull();
     view.rerender(<WorkbenchView {...props({ isRunning: false, modelCallBinding: null })} />);
-    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(true);
-    const options = screen.getByRole('button', { name: '输入选项' });
-    expect(options.classList.contains('needs-selection')).toBe(true);
-    expect(view.container.querySelector('.welcome-heading__brand')).toBeNull();
-    expect(view.container.querySelector('.composer-note')).toBeNull();
-    fireEvent.click(options);
-    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(false);
-    expect(options.classList.contains('needs-selection')).toBe(false);
     const model = screen.getByRole('button', { name: /选择模型/ });
     expect(model.classList.contains('needs-selection')).toBe(true);
+    expect(view.container.querySelector('.composer-note')).toBeNull();
     fireEvent.click(model);
     expect(model.classList.contains('needs-selection')).toBe(false);
     expect(model.getAttribute('aria-expanded')).toBe('true');
@@ -487,15 +504,14 @@ describe('empty session welcome composer', () => {
     expect(view.container.querySelector('.needs-selection')).toBeNull();
   });
 
-  it.each(['click', 'enter'])('opens options and model selection instead of submitting an unconfigured draft via %s', async (method) => {
+  it.each(['click', 'enter'])('opens model selection instead of submitting an unconfigured draft via %s', async (method) => {
     const input = props({ isRunning: false, modelCallBinding: null });
-    const view = render(<WorkbenchView {...input} />);
+    render(<WorkbenchView {...input} />);
     act(() => promptDraftStore.insertText('session-one', '先选择模型'));
     const send = screen.getByRole('button', { name: '发送' }) as HTMLButtonElement;
     expect(send.disabled).toBe(false);
     if (method === 'click') fireEvent.click(send);
     else fireEvent.keyDown(screen.getByLabelText('发送给 Pulsara'), { key: 'Enter' });
-    expect(view.container.querySelector('.composer-drawer')?.hasAttribute('inert')).toBe(false);
     expect(screen.getByRole('button', { name: /选择模型/ }).getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByRole('heading', { name: isWelcomeHeading })).toBeTruthy();
     expect(promptDraftStore.summary('session-one').text).toBe('先选择模型');
@@ -516,8 +532,15 @@ describe('empty session welcome composer', () => {
 });
 
 describe('WorkbenchView PR03 control and raw-result contract', () => {
-  it('keeps the bounded editor, TODO, and latest controls in one composer frame', async () => {
+  it('positions latest above the composer, TODO and queue independently of welcome animation', async () => {
     let composerTop = 650;
+    const visualOffset = -300;
+    const offsetTop = vi.spyOn(HTMLElement.prototype, 'offsetTop', 'get').mockImplementation(function(this: HTMLElement) {
+      return this.classList.contains('composer-wrap') ? composerTop : 0;
+    });
+    const clientHeight = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function(this: HTMLElement) {
+      return this.classList.contains('workbench') ? 800 : 0;
+    });
     const rect = (top: number, height: number): DOMRect => ({
       x: 0, y: top, top, bottom: top + height, left: 0, right: 800,
       width: 800, height, toJSON: () => ({}),
@@ -525,9 +548,9 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     const geometry = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
       .mockImplementation(function box(this: HTMLElement) {
         if (this.classList.contains('workbench')) return rect(0, 800);
-        if (this.classList.contains('composer-wrap')) return rect(composerTop, 800 - composerTop);
-        if (this.classList.contains('todo-dock__trigger')) return rect(composerTop - 16, 31);
-        if (this.classList.contains('todo-dock__popover')) return rect(composerTop - 180, 164);
+        if (this.classList.contains('composer-wrap')) return rect(composerTop + visualOffset, 800 - composerTop);
+        if (this.classList.contains('todo-dock__trigger')) return rect(composerTop + visualOffset, 31);
+        if (this.classList.contains('todo-dock__popover')) return rect(composerTop + visualOffset - 180, 164);
         return rect(0, 0);
       });
     try {
@@ -553,10 +576,28 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       const latest = await screen.findByRole('button', { name: '回到最新' });
       await waitFor(() => expect(latest.style.bottom).toBe('342px'));
 
+      fireEvent.click(todo);
+      await waitFor(() => expect(latest.style.bottom).toBe('162px'));
+      // Multiline draft growth changes the actual composer layout.
       composerTop = 530;
-      expect(composer.closest('.prompt-composer')).toBeTruthy();
+      fireEvent(window, new Event('resize'));
+      await waitFor(() => expect(latest.style.bottom).toBe('282px'));
+      view.rerender(<WorkbenchView {...props()} />);
+      await waitFor(() => expect(latest.style.bottom).toBe('282px'));
+      // Queue cards are inside the same composer wrapper and move its top.
+      composerTop = 430;
+      view.rerender(<WorkbenchView {...props({ queuedCount: 1, queuedPrompts: [{
+        queueItemId: 'queued-one', commandId: 'queued-command', sequence: 1,
+        status: 'pending', deliveryMode: 'new-turn', content: textPrompt('下一轮'), permission: 'read-only',
+      }] })} />);
+      await waitFor(() => expect(latest.style.bottom).toBe('382px'));
+      composerTop = 720;
+      view.rerender(<WorkbenchView {...props({ isObserver: true, canControl: false })} />);
+      await waitFor(() => expect(latest.style.bottom).toBe('92px'));
     } finally {
       geometry.mockRestore();
+      offsetTop.mockRestore();
+      clientHeight.mockRestore();
     }
   });
 
@@ -946,4 +987,218 @@ describe('completed reply process disclosure', () => {
     expect(screen.getByRole('button', { name: '展开工具详情：read_file' })).toBeTruthy();
   });
 
+});
+
+describe('composer + menu', () => {
+  it.each([false, true])('reserves queued edit against an open menu and late picker, directory=%s', async directory => {
+    const upload = vi.fn(async () => ({ path: '/tmp/imports/id/report.pdf', name: 'report.pdf', bytes: 1, file_count: 1 }));
+    promptDraftStore.setImporter(upload);
+    const item: QueuedPrompt = { queueItemId: 'source', commandId: 'submitted', sequence: 1, status: 'pending', deliveryMode: 'new-turn', content: textPrompt('queued body'), permission: 'read-only' };
+    const action: QueuedPromptAction = { commandId: 'edit-command', sessionId: 'session-one', connectionGeneration: 1, kind: 'edit', source: item, status: 'submitting', submittedAt: 'now' };
+    const onNotify = vi.fn();
+    const view = render(<WorkbenchView {...props({ queuedPrompts: [item], onNotify })} />);
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
+    const input = screen.getByLabelText(directory ? '选择文件夹' : '选择文件');
+    const pick = vi.spyOn(input, 'click');
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [action], onNotify })} />);
+    expect(screen.getByLabelText('发送给 Pulsara').getAttribute('contenteditable')).toBe('false');
+    const menuItem = screen.getByRole('button', { name: directory ? '添加文件夹' : '添加文件' }) as HTMLButtonElement;
+    expect(menuItem.disabled).toBe(true);
+    fireEvent.click(menuItem);
+    expect(pick).not.toHaveBeenCalled();
+    const file = new File(['bytes'], 'report.pdf');
+    Object.defineProperty(file, 'webkitRelativePath', { value: 'folder/report.pdf' });
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } });
+      fireEvent.paste(screen.getByLabelText('发送给 Pulsara'), { clipboardData: { files: [file] } });
+      fireEvent.drop(screen.getByLabelText('发送给 Pulsara'), { dataTransfer: { files: [file] } });
+    });
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(false);
+    expect(upload).not.toHaveBeenCalled();
+    expect(onNotify).toHaveBeenCalledWith('文件未加入草稿', expect.any(String));
+  });
+
+  it('groups attachments, skills and planning and appends a picked file beyond the current cursor', async () => {
+    promptDraftStore.setImporter(async (_session, files) => ({ path: `/tmp/imports/id/${files[0].name}`, name: files[0].name, bytes: 1, file_count: 1 }));
+    const onSend = vi.fn(async () => true);
+    const view = render(<WorkbenchView {...props({ isRunning: false, onSend })} />);
+    const editor = promptDraftStore.getEditor('session-one');
+    act(() => { promptDraftStore.insertText('session-one', 'before'); editor.commands.setTextSelection(2); });
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
+    expect(screen.getByRole('button', { name: '添加文件' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '添加文件夹' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '选择技能' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '先规划' }));
+    expect(view.container.querySelector('.composer-plan-status')?.textContent).toBe('本轮先规划');
+    await act(async () => { fireEvent.change(screen.getByLabelText('选择文件'), { target: { files: [new File(['x'], 'report.pdf')] } }); });
+    const content = (await promptDraftStore.capture('session-one')).content;
+    expect(content.parts[0]).toMatchObject({ type: 'text', text: expect.stringMatching(/^before【本地文件/) });
+    expect(screen.queryByRole('button', { name: '先规划' })).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '发送' })); });
+    expect(onSend).toHaveBeenCalledWith(content, 'read-only', true);
+    expect(view.container.querySelector('.composer-plan-status')).toBeNull();
+  });
+});
+
+describe('workbench file drop boundary', () => {
+  const transfer = (files: File[] = []) => ({ types: ['Files'], files, items: [], getData: () => '', dropEffect: 'none', effectAllowed: 'all' });
+  const importFile = async (_session: string, files: readonly File[]) => ({ path: `/tmp/imports/${files[0].name}`, name: files[0].name, bytes: files[0].size, file_count: 1 });
+
+  it.each([
+    { insideEditor: false, mixed: false }, { insideEditor: true, mixed: false },
+    { insideEditor: false, mixed: true }, { insideEditor: true, mixed: true },
+  ])('rejects a directory drop once, before importing any entries: %j', async ({ insideEditor, mixed }) => {
+    const upload = vi.fn(importFile);
+    promptDraftStore.setImporter(upload);
+    const onNotify = vi.fn();
+    const view = render(<WorkbenchView {...props({ onNotify })} />);
+    act(() => promptDraftStore.insertText('session-one', 'existing draft'));
+    const directory = new File([], 'memos');
+    const files = mixed ? [new File(['pdf'], 'report.pdf'), directory] : [directory];
+    const dataTransfer = { ...transfer(files), items: files.map(file => ({
+      kind: 'file', getAsFile: () => file,
+      webkitGetAsEntry: () => ({ isDirectory: file === directory, isFile: file !== directory }),
+    })) };
+    const target = insideEditor ? screen.getByRole('textbox') : view.container.querySelector('.thread-scroll')!;
+    fireEvent.dragEnter(target, { dataTransfer: transfer() });
+    expect(fireEvent.drop(target, { dataTransfer })).toBe(false);
+    await act(async () => {});
+    expect(onNotify).toHaveBeenCalledExactlyOnceWith('不支持拖入文件夹', '本次拖入未添加。请使用 @ 选择目录，或粘贴完整路径。');
+    expect(upload).not.toHaveBeenCalled();
+    expect(promptDraftStore.summary('session-one').text).toBe('existing draft');
+    expect(promptDraftStore.summary('session-one').pendingFiles).toBe(0);
+    expect(promptDraftStore.summary('session-one').failedFiles).toBe(0);
+    expect(screen.queryByText('松开以添加文件')).toBeNull();
+  });
+
+  it('accepts an empty extensionless file using its file entry metadata', async () => {
+    const upload = vi.fn(importFile);
+    promptDraftStore.setImporter(upload);
+    const onNotify = vi.fn();
+    render(<WorkbenchView {...props({ onNotify })} />);
+    const file = new File([], 'memos');
+    fireEvent.drop(screen.getByRole('region', { name: '会话工作台' }), { dataTransfer: {
+      ...transfer([file]), items: [{ kind: 'file', webkitGetAsEntry: () => ({ isDirectory: false, isFile: true }) }],
+    } });
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+    await waitFor(() => expect(promptDraftStore.summary('session-one').pendingFiles).toBe(0));
+    expect(promptDraftStore.summary('session-one').text).toBe('【本地文件（只读副本，0 bytes）："/tmp/imports/memos"】');
+    expect(onNotify).not.toHaveBeenCalled();
+  });
+
+  it('appends mixed files from the message area in order and focuses the existing draft without sending', async () => {
+    const upload = vi.fn(importFile);
+    promptDraftStore.setImporter(upload);
+    const onSend = vi.fn(async () => true);
+    const view = render(<WorkbenchView {...props({ onSend })} />);
+    const editor = promptDraftStore.getEditor('session-one');
+    act(() => { promptDraftStore.insertText('session-one', 'before'); editor.commands.setTextSelection(2); });
+    const image = new File(['image'], 'paste.png', { type: 'image/png' });
+    Object.defineProperty(image, 'arrayBuffer', { value: async () => new Uint8Array([1, 2]).buffer });
+    const files = [new File(['pdf'], 'report.pdf'), image, new File(['doc'], 'draft.docx')];
+    const messageArea = view.container.querySelector('.thread-scroll')!;
+    fireEvent.dragEnter(messageArea, { dataTransfer: transfer() });
+    expect(screen.getByText('松开以添加文件')).toBeTruthy();
+    fireEvent.drop(messageArea, { dataTransfer: transfer(files) });
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(promptDraftStore.summary('session-one').pendingFiles).toBe(0));
+    expect((await promptDraftStore.capture('session-one')).content.parts).toEqual([
+      { type: 'text', text: 'before【本地文件（只读副本，3 bytes）："/tmp/imports/report.pdf"】' },
+      { type: 'image', source: 'local', bytes: new Uint8Array([1, 2]), declaredMediaType: 'image/png' },
+      { type: 'text', text: '【本地文件（只读副本，3 bytes）："/tmp/imports/draft.docx"】' },
+    ]);
+    expect(screen.queryByText('松开以添加文件')).toBeNull();
+    expect(onSend).not.toHaveBeenCalled();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('textbox')));
+  });
+
+  it('lets Tiptap insert at the drop position once instead of also appending it', async () => {
+    const upload = vi.fn(importFile);
+    promptDraftStore.setImporter(upload);
+    render(<WorkbenchView {...props()} />);
+    const editor = promptDraftStore.getEditor('session-one');
+    act(() => promptDraftStore.insertText('session-one', 'abcd'));
+    vi.spyOn(editor.view, 'posAtCoords').mockReturnValue({ pos: 3, inside: -1 });
+    fireEvent.drop(screen.getByRole('textbox'), { dataTransfer: transfer([new File(['pdf'], 'report.pdf')]), clientX: 1, clientY: 1 });
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+    await waitFor(() => expect(promptDraftStore.summary('session-one').pendingFiles).toBe(0));
+    expect(promptDraftStore.summary('session-one').text).toBe('ab【本地文件（只读副本，3 bytes）："/tmp/imports/report.pdf"】cd');
+  });
+
+  it('keeps the hint stable across children and clears it on leaving or cancelling', () => {
+    const view = render(<WorkbenchView {...props()} />);
+    const region = screen.getByRole('region', { name: '会话工作台' });
+    const child = screen.getByRole('heading', { name: 'PR03 会话' });
+    const dataTransfer = transfer(); // OS drag metadata arrives before file bytes.
+    fireEvent.dragEnter(region, { dataTransfer });
+    fireEvent.dragEnter(child, { dataTransfer });
+    fireEvent.dragLeave(region, { dataTransfer });
+    expect(screen.getByText('松开以添加文件')).toBeTruthy();
+    fireEvent.dragLeave(child, { dataTransfer });
+    expect(screen.queryByText('松开以添加文件')).toBeNull();
+    fireEvent.dragEnter(region, { dataTransfer });
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByText('松开以添加文件')).toBeNull();
+    fireEvent.dragEnter(region, { dataTransfer });
+    fireEvent.dragEnd(window);
+    expect(view.container.querySelector('.is-file-dragging')).toBeNull();
+  });
+
+  it('excludes both sidebars, plain text, and internal drags', () => {
+    const upload = vi.fn(importFile);
+    promptDraftStore.setImporter(upload);
+    render(<><aside aria-label="左侧栏" /><WorkbenchView {...props()} /><aside aria-label="右侧栏" /></>);
+    const dataTransfer = transfer([new File(['pdf'], 'report.pdf')]);
+    for (const name of ['左侧栏', '右侧栏']) {
+      const sidebar = screen.getByRole('complementary', { name });
+      fireEvent.dragEnter(sidebar, { dataTransfer });
+      expect(screen.queryByText('松开以添加文件')).toBeNull();
+      expect(fireEvent.drop(sidebar, { dataTransfer })).toBe(true);
+    }
+    const region = screen.getByRole('region', { name: '会话工作台' });
+    const textTransfer = { ...transfer(), types: ['text/plain'], getData: () => 'normal text' };
+    fireEvent.dragEnter(region, { dataTransfer: textTransfer });
+    expect(fireEvent.drop(region, { dataTransfer: textTransfer })).toBe(true);
+    fireEvent.dragStart(region, { dataTransfer });
+    fireEvent.dragEnter(region, { dataTransfer });
+    expect(screen.queryByText('松开以添加文件')).toBeNull();
+    expect(fireEvent.drop(region, { dataTransfer })).toBe(true);
+    expect(upload).not.toHaveBeenCalled();
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(false);
+  });
+
+  it.each([{ runtimeStatus: 'offline' as const }, { canControl: false, isObserver: true }])('does not import while unavailable: %j', async blockedProps => {
+    const upload = vi.fn(importFile);
+    promptDraftStore.setImporter(upload);
+    render(<WorkbenchView {...props(blockedProps)} />);
+    const region = screen.getByRole('region', { name: '会话工作台' });
+    const dataTransfer = transfer([new File(['pdf'], 'report.pdf')]);
+    fireEvent.dragEnter(region, { dataTransfer });
+    expect(screen.queryByText('松开以添加文件')).toBeNull();
+    fireEvent.dragOver(region, { dataTransfer });
+    expect(dataTransfer.dropEffect).toBe('none');
+    await act(async () => fireEvent.drop(region, { dataTransfer }));
+    expect(upload).not.toHaveBeenCalled();
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(false);
+  });
+
+  it('rejects a drop if the session changes mid-drag, then allows a fresh gesture', async () => {
+    const upload = vi.fn(importFile);
+    promptDraftStore.setImporter(upload);
+    const onNotify = vi.fn();
+    const view = render(<WorkbenchView {...props({ onNotify })} />);
+    const region = screen.getByRole('region', { name: '会话工作台' });
+    const dataTransfer = transfer([new File(['pdf'], 'report.pdf')]);
+    fireEvent.dragEnter(region, { dataTransfer });
+    view.rerender(<WorkbenchView {...props({ onNotify, session: { ...props().session, id: 'session-two' } })} />);
+    expect(screen.queryByText('松开以添加文件')).toBeNull();
+    await act(async () => fireEvent.drop(region, { dataTransfer }));
+    expect(upload).not.toHaveBeenCalled();
+    expect(onNotify).toHaveBeenCalledWith('文件未加入草稿', expect.stringContaining('会话已切换'));
+    expect(promptDraftStore.summary('session-one').hasContent).toBe(false);
+    expect(promptDraftStore.summary('session-two').hasContent).toBe(false);
+    fireEvent.dragEnter(region, { dataTransfer });
+    fireEvent.drop(region, { dataTransfer });
+    await waitFor(() => expect(upload).toHaveBeenCalledWith('session-two', expect.any(Array), false, expect.any(AbortSignal)));
+  });
 });

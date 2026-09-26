@@ -1,12 +1,18 @@
 'use client';
 
+import { splitFileReferences } from '../lib/file-reference';
+import { FileReferenceChip } from './file-reference-chip';
+import { PromptImageChip } from './prompt-image-chip';
+import { splitSkillReferences } from '../lib/skill-reference';
+import { SkillReferenceChip } from './skill-reference-chip';
+
 import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from 'react';
 import Lightbox from 'yet-another-react-lightbox';
 import Zoom from 'yet-another-react-lightbox/plugins/zoom';
@@ -21,6 +27,7 @@ interface PromptContentViewProps {
   content: DisplayPromptContent;
   variant: 'message' | 'queue' | 'tool';
   onReadImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
+  renderMessageBody?: (body: ReactNode) => ReactNode;
 }
 
 type ImagePart = CanonicalPromptImagePart | LocalPromptImagePart;
@@ -35,6 +42,7 @@ export function PromptContentView({
   content,
   variant,
   onReadImage,
+  renderMessageBody,
 }: PromptContentViewProps) {
   const images = useMemo(
     () => content.parts.filter((part): part is ImagePart => part.type === 'image'),
@@ -102,8 +110,21 @@ export function PromptContentView({
   }, [load]);
 
   const body = (
-    <div className="prompt-content-body">
-      {renderPromptBody(content, (index, event) => open(index, event.currentTarget))}
+    <div className="prompt-content-body" onCopy={event => {
+      const selection = window.getSelection();
+      if (!selection?.rangeCount || !event.currentTarget.contains(selection.anchorNode)
+        || !event.currentTarget.contains(selection.focusNode)) return;
+      const fragment = selection.getRangeAt(0).cloneContents();
+      const references = fragment.querySelectorAll<HTMLElement>('[data-file-reference], [data-skill-reference]');
+      if (!references.length) return;
+      for (const reference of references) reference.replaceWith(reference.dataset.fileReference ?? reference.dataset.skillReference ?? '');
+      event.clipboardData.setData('text/plain', fragment.textContent ?? '');
+      event.preventDefault();
+    }}>
+      {renderPromptBody(content, index => <PromptImageChip number={index + 1}
+        state={states[index]?.kind} reason={states[index]?.kind === 'failed' ? states[index].reason : undefined}
+        previewSrc={states[index]?.kind === 'ready' ? states[index].url : undefined} onPreview={() => void load(index)}
+        onClick={event => open(index, event.currentTarget)} />)}
     </div>
   );
 
@@ -129,7 +150,7 @@ export function PromptContentView({
             </button>
           </div>
         </div>
-      ) : body}
+      ) : renderMessageBody ? renderMessageBody(body) : body}
       <Lightbox
         open={lightboxIndex !== undefined}
         close={() => setLightboxIndex(undefined)}
@@ -279,23 +300,19 @@ function LazyImage({
 
 function renderPromptBody(
   content: DisplayPromptContent,
-  open: (index: number, event: ReactMouseEvent<HTMLButtonElement>) => void,
+  renderImage: (index: number) => ReactNode,
 ) {
   let imageIndex = 0;
   return content.parts.map((part, partIndex) => {
     if (part.type === 'text') {
-      return <span key={partIndex} className="prompt-content-text">{part.text}</span>;
+      return <span key={partIndex} className="prompt-content-text">{splitFileReferences(part.text).map((piece, index) =>
+        typeof piece === 'string' ? splitSkillReferences(piece).map((reference, skillIndex) =>
+          typeof reference === 'string' ? reference : <SkillReferenceChip key={`${index}:${skillIndex}`} reference={reference} />)
+          : <FileReferenceChip key={index} reference={piece} />)}</span>;
     }
     const current = imageIndex;
     imageIndex += 1;
-    return (
-      <button
-        key={partIndex}
-        type="button"
-        className="prompt-figure-link"
-        onClick={(event) => open(current, event)}
-      >[Figure {current + 1}]</button>
-    );
+    return <span key={partIndex}>{renderImage(current)}</span>;
   });
 }
 

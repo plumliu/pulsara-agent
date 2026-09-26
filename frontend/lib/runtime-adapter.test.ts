@@ -10,6 +10,21 @@ import type { AgentTask } from './pulsara-types';
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('requests a native directory selection and distinguishes cancellation', async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ path: '/tmp/项目 ' }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ path: null }), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const adapter = new LocalHttpRuntimeAdapter();
+  const controller = new AbortController();
+  expect(await adapter.pickWorkspaceDirectory('/tmp/current', controller.signal)).toBe('/tmp/项目 ');
+  expect(fetchMock).toHaveBeenCalledWith('/api/workspace-directory/pick', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ initial_path: '/tmp/current' }),
+    signal: controller.signal, credentials: 'same-origin',
+  }));
+  expect(await adapter.pickWorkspaceDirectory('/tmp/项目 ')).toBeNull();
+});
+
 const SOURCE_FIDELITY_TEXT = [
   '',
   '中文与 `read_file`、edit_file、ROOT、Kernel、HostSession 保持原样。',
@@ -2612,4 +2627,45 @@ it.each([undefined, 'interaction:expired', 'unrecognized-reason'])('PR05 removes
   expect(closed.presentationNotices).toEqual([reason === 'interaction:expired'
     ? '确认已过期，本次操作未获授权。' : '这项确认已结束；原因暂不可确认。']);
   expect((await connection.observe()).presentationNotices).toEqual([]);
+});
+
+it('imports raw file bytes and multipart directories outside JSON commands using current controller generation', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify(String(url).endsWith('/connections') ? connectPayload()
+      : { path: '/tmp/imported/测试.pdf', name: '测试.pdf', bytes: 3, file_count: 1 }), { status: 200 });
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const file = new File(['pdf'], '测试.pdf', { type: 'application/pdf' });
+  const signal = new AbortController().signal;
+  await connection.importFiles([file], false, signal);
+  const single = calls.at(-1)!;
+  expect(single.url).toContain('/api/connections/connection-fidelity/import-file');
+  expect(single.init?.body).toBe(file);
+  expect(single.init?.signal).toBe(signal);
+  const headers = single.init?.headers as Record<string, string>;
+  expect(headers['Content-Type']).toBe('application/octet-stream');
+  expect(headers['X-Pulsara-Connection-Generation']).toBe('1');
+  expect(JSON.parse(headers['X-Pulsara-Filename'])).toBe('测试.pdf');
+  expect(headers['X-Pulsara-Filename']).toMatch(/^[\x20-\x7e]+$/);
+  Object.defineProperty(file, 'webkitRelativePath', { value: '目录/nested/测试.pdf' });
+  await connection.importFiles([file], true, signal);
+  const directory = calls.at(-1)!;
+  expect(directory.init?.body).toBeInstanceOf(FormData);
+  expect((directory.init?.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+  const entries = [...(directory.init?.body as FormData).entries()];
+  expect(entries[0]).toEqual(['path', JSON.stringify(file.webkitRelativePath)]);
+  expect(entries[1][0]).toBe('file');
+});
+
+it('lists cwd path candidates for the selected session with paging and cancellation', async () => {
+  const result = { directory: '/workspace/文档', items: [], next_cursor: 'report.pdf' };
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(result), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const controller = new AbortController();
+  expect(await new LocalHttpRuntimeAdapter().completeWorkspacePaths('session/selected', '文档/', 'prev.pdf', controller.signal)).toEqual(result);
+  expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session%2Fselected/path-candidates', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ prefix: '文档/', cursor: 'prev.pdf' }), signal: controller.signal, credentials: 'same-origin',
+  }));
 });

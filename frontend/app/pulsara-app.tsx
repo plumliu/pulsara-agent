@@ -10,7 +10,7 @@ import { CommandPalette, NewSessionDialog, ToastStack } from '../components/over
 import { OverviewView } from '../components/overview-view';
 import { SessionSidebar } from '../components/session-sidebar';
 import { SessionDeletionDialog } from '../components/session-deletion-dialog';
-import { SettingsView } from '../components/settings-view';
+import { SettingsView, type SettingsSection } from '../components/settings-view';
 import { WorkbenchView } from '../components/workbench-view';
 import { ToolResultDisplayContext, readSavedToolResultDisplay } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
@@ -175,6 +175,7 @@ type ToolDecisionIntent = {
 export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps) {
   const [promptDraftStore] = useState(() => new PromptDraftStore());
   const [activeView, setActiveView] = useState<AppView>('workbench');
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>();
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
   const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
   const [sessionRevision, setSessionRevision] = useState(0);
@@ -203,6 +204,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const userCapabilityAttempt = useRef(0);
   const [connection, setConnection] = useState<RuntimeConnection>();
   const connectionRef = useRef<RuntimeConnection | undefined>(undefined);
+  useEffect(() => {
+    promptDraftStore.setImporter(async (sessionId, files, directory, signal) => {
+      const active = connectionRef.current;
+      if (!active || active.sessionId !== sessionId) throw new Error('文件所属会话未连接，请切回该会话后重试。');
+      return active.importFiles(files, directory, signal);
+    });
+  }, [promptDraftStore]);
   const activeSessionIdRef = useRef('');
   const connectionAttempt = useRef(0);
   const promptReconciliationInFlight = useRef(new Set<string>());
@@ -1032,7 +1040,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [mergedProjection]);
   const renderedMessages = mergedProjection.messages;
 
-  const navigate = (view: AppView) => {
+  const navigate = (view: AppView, settingsSection?: SettingsSection) => {
+    if (view === 'settings') setSettingsInitialSection(settingsSection);
     setActiveView(view);
     setSidebarOpen(false);
   };
@@ -2178,6 +2187,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       )}
       {activeView === 'workbench' && !databaseBlocked && (
         <WorkbenchView
+          onCompletePaths={(prefix, cursor, signal) => adapter.completeWorkspacePaths(activeSession.id, prefix, cursor, signal)}
           workspace={activeWorkspace}
           session={activeSession}
           messages={renderedMessages}
@@ -2224,7 +2234,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onNewSession={openNewSession}
           canCreateSession={canCreateSession}
           onToggleInspector={() => setInspectorOpen((value) => !value)}
-          onOpenModelSettings={() => setActiveView('settings')}
+          onOpenModelSettings={() => navigate('settings', 'models')}
           onModelCallBindingChange={updateModelCallBinding}
           onSend={sendPrompt}
           onStop={() => void stopRun()}
@@ -2394,6 +2404,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       )}
       {activeView === 'settings' && (
         <SettingsView
+          initialSection={settingsInitialSection}
           sessionRevision={sessionRevision}
           onSessionsChanged={async () => { setSessionList(await adapter.listSessions()); }}
           onDeleteSession={session => { setDeleteTarget(session); setDeleteError(undefined); }}
@@ -2418,13 +2429,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         canCreateSession={canCreateSession}
         onThemeChange={setTheme}
       />
-      <NewSessionDialog
+      {newSessionOpen && <NewSessionDialog
         open={newSessionOpen}
         canCreateSession={canCreateSession}
         defaultWorkspacePath={workspace.path === '正在连接…' ? '' : workspace.path}
         onClose={() => setNewSessionOpen(false)}
         onCreate={createSession}
-      />
+        onPickDirectory={(initialPath, signal) => adapter.pickWorkspaceDirectory(initialPath, signal)}
+      />}
       <ToastStack
         toasts={toasts}
         onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}

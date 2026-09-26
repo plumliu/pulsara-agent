@@ -16,7 +16,7 @@ import {
   Sun,
   X,
 } from 'lucide-react';
-import { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import type { AppView, SessionWorkspaceSelection, ToastMessage } from '../lib/pulsara-types';
 
@@ -65,22 +65,46 @@ interface NewSessionDialogProps {
   defaultWorkspacePath: string;
   onClose: () => void;
   onCreate: (selection: SessionWorkspaceSelection) => Promise<boolean>;
+  onPickDirectory: (initialPath: string, signal: AbortSignal) => Promise<string | null>;
 }
 
-export function NewSessionDialog({ open, canCreateSession, defaultWorkspacePath, onClose, onCreate }: NewSessionDialogProps) {
+export function NewSessionDialog({ open, canCreateSession, defaultWorkspacePath, onClose, onCreate, onPickDirectory }: NewSessionDialogProps) {
   const [workspaceKind, setWorkspaceKind] = useState<'quick' | 'project'>('quick');
   const [workspacePath, setWorkspacePath] = useState(defaultWorkspacePath);
   const [submitting, setSubmitting] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [pickerError, setPickerError] = useState('');
+  const pickerRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => { pickerRequest.current?.abort(); }, []);
+
+  const pickDirectory = async () => {
+    if (pickerRequest.current || submitting) return;
+    const request = new AbortController();
+    pickerRequest.current = request;
+    setPicking(true);
+    setPickerError('');
+    try {
+      const path = await onPickDirectory(workspacePath, request.signal);
+      if (!request.signal.aborted && path !== null) setWorkspacePath(path);
+    } catch (error) {
+      if (!request.signal.aborted) setPickerError(error instanceof Error ? error.message : '无法打开目录选择窗口，请重试。');
+    } finally {
+      if (!request.signal.aborted) {
+        pickerRequest.current = null;
+        setPicking(false);
+      }
+    }
+  };
 
   if (!open) return null;
 
   const submit = async () => {
-    if (!canCreateSession || submitting || (workspaceKind === 'project' && !workspacePath.trim())) return;
+    if (!canCreateSession || submitting || picking || (workspaceKind === 'project' && !workspacePath)) return;
     setSubmitting(true);
     const created = await onCreate(
       workspaceKind === 'quick'
         ? { kind: 'quick' }
-        : { kind: 'project', path: workspacePath.trim() },
+        : { kind: 'project', path: workspacePath },
     );
     setSubmitting(false);
     if (created) {
@@ -108,13 +132,18 @@ export function NewSessionDialog({ open, canCreateSession, defaultWorkspacePath,
           </button>
         </div>
         {workspaceKind === 'project' && (
-          <label className="workspace-path-field">
-            <span>目录路径</span>
-            <input autoFocus value={workspacePath} onChange={(event) => setWorkspacePath(event.target.value)} placeholder="/Users/you/path/to/project" />
-            <small>请输入已存在的绝对路径</small>
-          </label>
+          <div className="workspace-path-field">
+            <label htmlFor="workspace-path-preview">目录路径</label>
+            <div className="workspace-path-selection">
+              <input id="workspace-path-preview" readOnly value={workspacePath} title={workspacePath} placeholder="尚未选择目录" />
+              <button type="button" onClick={() => void pickDirectory()} disabled={picking || submitting}>
+                <FolderOpen size={15} />{picking ? '正在选择…' : '选择目录'}
+              </button>
+            </div>
+            {pickerError && <small role="alert">{pickerError}</small>}
+          </div>
         )}
-        <footer><p>{canCreateSession ? '创建后，在会话输入框中描述要完成的工作。' : '本地服务尚未就绪，连接恢复后可创建会话。'}</p><button className="primary-action" type="submit" disabled={!canCreateSession || submitting || (workspaceKind === 'project' && !workspacePath.trim())}>{submitting ? '正在创建…' : '创建会话'} <span>↗</span></button></footer>
+        <footer><button className="primary-action" type="submit" disabled={!canCreateSession || submitting || picking || (workspaceKind === 'project' && !workspacePath)}>{submitting ? '正在创建…' : '创建会话'} <span>↗</span></button></footer>
       </form>
     </div>
   );

@@ -1,5 +1,5 @@
 import { Archive, ChevronRight, Ellipsis, Eye, Folder, FolderOpen, GitFork, Plus, Search, Trash2 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
 import {
@@ -150,7 +150,30 @@ export function SessionSidebar({
   onOpenCommand,
   onTakeControl,
 }: SessionSidebarProps) {
+  const sidebarRef = useRef<HTMLElement>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    const openMenus = () => sidebarRef.current?.querySelectorAll<HTMLDetailsElement>('.session-row__menu[open]');
+    const dismissOutside = (event: MouseEvent) => {
+      if (!(event.target instanceof Node)) return;
+      openMenus()?.forEach(menu => {
+        if (!menu.contains(event.target as Node)) menu.open = false;
+      });
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      openMenus()?.forEach(menu => {
+        menu.open = false;
+        menu.querySelector('summary')?.focus();
+      });
+    };
+    document.addEventListener('click', dismissOutside, true);
+    document.addEventListener('keydown', dismissOnEscape);
+    return () => {
+      document.removeEventListener('click', dismissOutside, true);
+      document.removeEventListener('keydown', dismissOnEscape);
+    };
+  }, []);
   const groupedSessions = useMemo(
     () => groupSessionsByWorkspace(sessions, workspace),
     [sessions, workspace],
@@ -174,7 +197,7 @@ export function SessionSidebar({
         aria-label="关闭会话侧栏"
         tabIndex={isOpen ? 0 : -1}
       />
-      <aside className={`session-sidebar${isOpen ? ' is-mobile-open' : ''}`}>
+      <aside ref={sidebarRef} className={`session-sidebar${isOpen ? ' is-mobile-open' : ''}`}>
         <header className="brand-row">
           <div className="brand-lockup">
             <BrandMark compact />

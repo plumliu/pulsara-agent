@@ -299,6 +299,9 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
 }
 
 class FakeConnection implements RuntimeConnection {
+  async importFiles(): Promise<import('../lib/file-reference').ImportedPath> {
+    throw new Error('Unexpected file import');
+  }
   readonly role: 'controller' | 'observer';
   readonly generation: number;
   private value: RuntimeProjection;
@@ -502,6 +505,8 @@ class FakeAdapter implements RuntimeAdapter {
   queryCommandResult?: CommandReceipt;
   connectionValues = new Map<string, RuntimeProjection>();
   connectCalls: Array<{ sessionId: string; takeover: boolean }> = [];
+  pickWorkspaceDirectory = vi.fn(async (): Promise<string | null> => '/tmp/project');
+  completeWorkspacePaths = vi.fn(async () => ({ directory: '/tmp/project', items: [], next_cursor: null }));
   createSession = vi.fn(async (selection: SessionWorkspaceSelection) => {
     const created: SessionSummary = {
       id: 'session-2',
@@ -837,10 +842,12 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     render(<PulsaraApp adapter={adapter} />);
 
+    fireEvent.click(await screen.findByRole('button', { name: '添加文件、技能或规划' }));
     const skillButton = await screen.findByRole('button', { name: '选择技能' });
     fireEvent.click(skillButton);
     fireEvent.click(screen.getByRole('button', { name: /\$pdf/ }));
-    expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe('$pdf ');
+    expect((await screen.findByLabelText('技能：pdf')).getAttribute('data-skill-reference')).toBe('$pdf');
+    expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe('pdf ');
 
     fireEvent.click(screen.getByRole('button', { name: '能力' }));
     expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
@@ -2004,6 +2011,28 @@ describe('PulsaraApp', () => {
     expect(screen.getByText('浏览器没有授予剪贴板权限')).toBeTruthy();
   });
 
+  it('dismisses a session menu outside the menu and with Escape while preserving its actions', async () => {
+    const user = userEvent.setup();
+    const adapter = new FakeAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+    const trigger = await screen.findByLabelText(`${initialSession.title} 更多操作`);
+    const menu = trigger.closest('details')!;
+    await user.click(trigger);
+    expect(menu.open).toBe(true);
+    await user.click(menu.querySelector('.session-row__menu-actions')!);
+    expect(menu.open).toBe(true);
+    await user.click(screen.getByRole('heading', { name: '准备发布' }));
+    expect(menu.open).toBe(false);
+    await user.click(trigger);
+    await user.keyboard('{Escape}');
+    expect(menu.open).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+    await user.click(trigger);
+    await user.click(screen.getByRole('button', { name: '删除会话…' }));
+    expect(menu.open).toBe(false);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+  });
+
   it('archives only eligible sessions, restores from settings without opening, and deletes there', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [{ ...initialSession, canArchive: false }];
@@ -2148,10 +2177,12 @@ describe('PulsaraApp', () => {
     const textbox = await screen.findByRole('textbox', { name: '发送给 Pulsara' });
     await userEvent.click(textbox);
     await userEvent.type(textbox, '父会话未发送草稿', { skipClick: true });
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
     fireEvent.click(screen.getByRole('button', { name: '先规划' }));
     fireEvent.click(screen.getByRole('button', { name: '从此处分叉' }));
     await screen.findByText('分叉已打开');
     expect(screen.getByRole('textbox', { name: '发送给 Pulsara' }).textContent).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
     expect(screen.getByRole('button', { name: '先规划' }).getAttribute('aria-pressed')).toBe('false');
     const source = screen.getAllByRole('button').find(button => button.textContent?.includes(initialSession.title) && button.textContent?.includes('已载入'));
     expect(source).toBeTruthy();
@@ -2159,6 +2190,7 @@ describe('PulsaraApp', () => {
     await waitFor(() => expect(adapter.connectCalls.at(-1)?.sessionId).toBe(initialSession.id));
     expect(screen.getByRole('textbox', { name: '发送给 Pulsara' }).textContent)
       .toBe('父会话未发送草稿');
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
     expect(screen.getByRole('button', { name: '本轮先规划' }).getAttribute('aria-pressed')).toBe('true');
   });
 
@@ -2793,18 +2825,31 @@ describe('PulsaraApp', () => {
     expect(removeListener).toHaveBeenCalledWith('change', expect.any(Function));
   });
 
-  it('uses the same reasoning control inside composer options and dismisses the panel without resetting it', async () => {
+  it('opens the models settings section from the picker gear and keeps the regular settings entry unchanged', async () => {
+    render(<PulsaraApp adapter={new FakeAdapter()} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    fireEvent.click(screen.getByRole('button', { name: 'test-model' }));
+    expect(screen.queryByRole('button', { name: '管理模型配置' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '模型设置' }));
+    expect(await screen.findByRole('heading', { name: '模型配置' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '模型' }).classList.contains('is-active')).toBe(true);
+    expect(screen.queryByRole('heading', { name: '外观' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '总览' }));
+    fireEvent.click(screen.getByRole('button', { name: '设置' }));
+    expect(await screen.findByRole('heading', { name: '外观' })).toBeTruthy();
+  });
+
+  it('changes reasoning directly from the toolbar and dismisses its menu without resetting it', async () => {
     const adapter = new FakeAdapter();
     const update = vi.spyOn(adapter, 'updateModelCallBinding');
     render(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('heading', { name: '准备发布' });
-    const trigger = screen.getByRole('button', { name: '本轮选项' });
-    fireEvent.click(trigger);
-    expect(trigger.getAttribute('aria-expanded')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: /推理 medium/ }));
     fireEvent.click(screen.getByRole('button', { name: 'high' }));
-    expect(await screen.findByRole('button', { name: /推理 high/ })).toBeTruthy();
+    const trigger = await screen.findByRole('button', { name: /推理 high/ });
     expect(update).toHaveBeenCalledTimes(1);
+    fireEvent.click(trigger);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(trigger);
@@ -2812,7 +2857,8 @@ describe('PulsaraApp', () => {
     fireEvent.pointerDown(screen.getByRole('heading', { name: '准备发布' }));
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
     const label = document.querySelector('.model-chip__label');
-    expect(label?.closest('button')?.title).toBe(label?.textContent);
+    expect(label?.textContent).toBe('test-model');
+    expect(label?.closest('button')?.title).toBe('Local Test · test-model · Responses');
     expect(update).toHaveBeenCalledTimes(1);
   });
 
@@ -3043,13 +3089,13 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
     await screen.findByRole('heading', { name: isWelcomeHeading });
 
-    fireEvent.click(screen.getByRole('button', { name: '输入选项' }));
     fireEvent.click(screen.getByRole('button', { name: /选择模型/ }));
     fireEvent.click(screen.getByRole('button', { name: /Local Test · test-model/ }));
     await waitFor(() => expect(adapter.sessions[0].modelCallBinding?.connection_id).toBe(
       'model-connection:00000000000000000000000000000000',
     ));
 
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
     fireEvent.click(screen.getByRole('button', { name: '先规划' }));
     const permissionTrigger = screen.getByRole('button', { name: /完全访问/ });
     expect(permissionTrigger.classList.contains('is-danger')).toBe(true);
@@ -3111,7 +3157,11 @@ describe('PulsaraApp', () => {
     await screen.findByRole('heading', { name: '准备发布' });
     fireEvent.click(screen.getByRole('button', { name: /新建会话/ }));
     fireEvent.click(screen.getByRole('radio', { name: /指定目录/ }));
-    fireEvent.change(await screen.findByPlaceholderText('/Users/you/path/to/project'), { target: { value: '/tmp/project' } });
+    const pathPreview = screen.getByRole('textbox', { name: '目录路径' }) as HTMLInputElement;
+    expect(pathPreview.readOnly).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '选择目录' }));
+    await waitFor(() => expect(pathPreview.value).toBe('/tmp/project'));
+    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith('/tmp/pulsara_agent', expect.any(AbortSignal));
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
     await waitFor(() => expect(adapter.createSession).toHaveBeenCalledWith({ kind: 'project', path: '/tmp/project' }));
   });
@@ -3844,7 +3894,7 @@ describe('PR04 atomic queue action ownership', () => {
     };
     render(<PulsaraApp adapter={adapter} />);
     const queue = await screen.findByRole('region', { name: '等待处理的输入' });
-    expect(within(queue).getAllByRole('button', { name: /^\[Figure [12]\]$/ }))
+    expect(within(queue).getAllByRole('button', { name: /^打开 Figure [12]$/ }))
       .toHaveLength(2);
     const active = adapter.lastConnection!;
     const secondRead = deferred<Uint8Array>();
@@ -3870,7 +3920,7 @@ describe('PR04 atomic queue action ownership', () => {
       screen.getByLabelText('发送给 Pulsara'),
     )).toBe(false));
     const composer = screen.getByLabelText('发送给 Pulsara');
-    expect(composer.querySelectorAll('img[data-prompt-asset-id]')).toHaveLength(2);
+    expect(within(composer).getAllByRole('button', { name: /^打开 Figure [12]$/ })).toHaveLength(2);
     expect(composer.textContent).toContain('before');
     expect(composer.textContent).toContain('after');
     await waitFor(() => expect(document.activeElement).toBe(composer));
@@ -3932,7 +3982,8 @@ describe('PR04 atomic queue action ownership', () => {
     const { active } = await setup();
     const pending = deferred<CommandReceipt>();
     const cancel = vi.spyOn(active, 'cancelQueuedPrompt').mockReturnValue(pending.promise);
-    fireEvent.click(screen.getByRole('button', { name: '本轮选项' }));
+    fireEvent.click(screen.getByRole('button', { name: '添加文件、技能或规划' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: '选择技能' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(await screen.findByRole('button', { name: '选择技能' }));
     const skill = screen.getByRole('button', { name: /\$pdf/ });
     fireEvent.click(screen.getByRole('button', { name: '编辑' }));

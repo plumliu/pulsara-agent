@@ -78,13 +78,14 @@
 .session-section__toggle strong { font-size: var(--type-label); font-weight: 600; }
 .session-section__toggle > svg { transition: transform .16s ease; }
 .session-section__toggle.is-expanded > svg { transform: rotate(90deg); }
-.session-projects { display: grid; gap: 2px; }
-.session-project__toggle { display: grid; grid-template-columns: 16px minmax(0,1fr) 13px; gap: 5px; align-items: center; width: 100%; min-height: 30px; padding: 5px 6px; border-radius: 7px; background: transparent; color: var(--muted); text-align: left; }
+.session-projects { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.session-project__toggle { display: flex; gap: 5px; align-items: center; width: 100%; min-height: 30px; padding: 5px 6px; border-radius: 7px; background: transparent; color: var(--muted); text-align: left; }
 .session-project__toggle:hover { background: color-mix(in srgb, var(--paper-solid) 72%, transparent); color: var(--ink-soft); }
+.session-project__toggle > svg { flex: none; }
 .session-project__toggle > svg:first-child { color: var(--muted); }
 .session-project__toggle > svg:last-child { color: var(--faint); transition: transform .16s ease; }
 .session-project__toggle.is-expanded > svg:last-child { transform: rotate(90deg); }
-.session-project__toggle strong { overflow: hidden; font-size: var(--type-small); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+.session-project__toggle strong { min-width: 0; overflow: hidden; font-size: var(--type-small); font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
 .session-project__sessions { padding-left: 13px; }
 .session-section__sessions { padding-left: 1px; }
 .session-group-empty { display: block; padding: 7px 9px 9px 26px; color: var(--faint); font-size: var(--type-caption); line-height: 1.45; }

@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -55,13 +55,13 @@ describe('PromptContentView', () => {
     const trigger = screen.getByRole('button', { name: '放大图片' });
     await userEvent.click(trigger);
     expect(screen.getByRole('dialog', { name: 'Lightbox' })).toBeTruthy();
-    expect(document.querySelector('.prompt-lightbox-caption')).toBeNull();
+    expect(document.querySelector('.yarl__slide_current .prompt-lightbox-caption')).toBeNull();
     expect(screen.queryByText(/Figure/)).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
-  it('derives queue Figure links from occurrences without reading image payloads', async () => {
+  it('derives queue Figure chips from occurrences without reading image payloads', async () => {
     const first = canonicalImage(0, 'a', { kind: 'queue', queueItemId: 'queue-1' });
     const second = canonicalImage(1, 'a', { kind: 'queue', queueItemId: 'queue-1' });
     const content: CanonicalPromptContent = {
@@ -76,49 +76,86 @@ describe('PromptContentView', () => {
     render(<PromptContentView content={content} variant="queue" onReadImage={read} />);
 
     expect(screen.getByText('2 张图片')).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /\[Figure [12]\]/ })).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: /^打开 Figure [12]$/ })).toHaveLength(2);
     expect(document.querySelector('.prompt-content-text')?.textContent)
       .toBe('literal [Figure 1] and ');
     expect(read).not.toHaveBeenCalled();
 
-    const trigger = screen.getByRole('button', { name: '[Figure 2]' });
+    const trigger = screen.getByRole('button', { name: '打开 Figure 2' });
+    await userEvent.hover(trigger);
+    await waitFor(() => expect(read).toHaveBeenCalledWith(second));
+    const tooltip = screen.getByRole('tooltip');
+    expect(within(tooltip).getByRole('img', { name: 'Figure 2 缩略图' })).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: 'Lightbox' })).toBeNull();
     await userEvent.click(trigger);
     await waitFor(() => expect(read).toHaveBeenCalledWith(second));
     expect(read).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText('Figure 2')).toBeTruthy();
+    expect(document.querySelector('.yarl__slide_current .prompt-lightbox-caption')?.textContent).toBe('Figure 2');
     await userEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Lightbox' })).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
-  it('keeps the full occurrence numbering when a narrow sent-message strip shows +N', async () => {
+  it('shows one inline chip per queue occurrence, loading only on hover or activation', async () => {
+    const images = [canonicalImage(0, 'a'), canonicalImage(1, 'b'), canonicalImage(2, 'a')];
+    const content: CanonicalPromptContent = {
+      parts: [images[0], { type: 'text', text: 'between' }, images[1], images[2]],
+    };
+    const read = vi.fn(async (image: CanonicalPromptImagePart) => Uint8Array.from([image.refOrdinal + 1]));
+    const view = render(<PromptContentView content={content} variant="queue" onReadImage={read} />);
+    expect(screen.getAllByRole('button', { name: /^打开 Figure [123]$/ })).toHaveLength(3);
+    expect([...view.container.querySelectorAll('.prompt-image-chip')].map(item => item.textContent))
+      .toEqual(['Figure 1', 'Figure 2', 'Figure 3']);
+    expect(view.container.querySelector('.prompt-content-body')?.textContent).toBe('Figure 1betweenFigure 2Figure 3');
+    expect(view.container.querySelector('img')).toBeNull();
+    expect(view.container.querySelector('.prompt-thumbnail-strip')).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+    const trigger = screen.getByRole('button', { name: '打开 Figure 2' });
+    trigger.focus(); await userEvent.keyboard('{Enter}');
+    await waitFor(() => expect(read).toHaveBeenCalledWith(images[1]));
+    expect(document.querySelector('.yarl__slide_current .prompt-lightbox-caption')?.textContent).toBe('Figure 2');
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it('keeps sent thumbnails above inline chips and shares their numbering and loaded images', async () => {
     class IdleIntersectionObserver {
       observe() {}
       disconnect() {}
-      unobserve() {}
-      takeRecords(): IntersectionObserverEntry[] { return []; }
-      readonly root = null;
-      readonly rootMargin = '0px';
-      readonly thresholds = [0];
     }
     vi.stubGlobal('IntersectionObserver', IdleIntersectionObserver);
-    const images = [canonicalImage(0, 'a'), canonicalImage(1, 'b'), canonicalImage(2, 'c')];
-    const content: CanonicalPromptContent = {
-      parts: [images[0], { type: 'text', text: 'one' }, images[1], images[2]],
-    };
-    const read = vi.fn(async (image: CanonicalPromptImagePart) => (
-      Uint8Array.from([image.refOrdinal + 1])
-    ));
-    const view = render(<PromptContentView content={content} variant="message" onReadImage={read} />);
-
-    expect(screen.getAllByRole('button', { name: /\[Figure [123]\]/ })).toHaveLength(3);
-    const more = await screen.findByRole('button', { name: '+2 张' });
+    const images = [canonicalImage(0, 'a'), canonicalImage(1, 'b'), canonicalImage(2, 'a')];
+    const read = vi.fn(async () => Uint8Array.from([1, 2, 3]));
+    const view = render(<PromptContentView
+      content={{ parts: [images[0], { type: 'text', text: 'between' }, images[1], images[2]] }}
+      variant="message" onReadImage={read}
+    />);
+    const body = view.container.querySelector<HTMLElement>('.prompt-content-body')!;
+    const strip = view.container.querySelector<HTMLElement>('.prompt-thumbnail-strip')!;
+    expect(strip.nextElementSibling).toBe(body);
+    expect(within(body).getAllByRole('button', { name: /^打开 Figure [123]$/ })).toHaveLength(3);
+    expect(body.textContent).toBe('Figure 1betweenFigure 2Figure 3');
+    const thumbnail = within(strip).getByRole('button', { name: '打开 Figure 1' });
+    const more = within(strip).getByRole('button', { name: '+2 张' });
     expect(read).not.toHaveBeenCalled();
+
+    await userEvent.click(thumbnail);
+    await waitFor(() => expect(read).toHaveBeenCalledWith(images[0]));
+    expect(document.querySelector('.yarl__slide_current .prompt-lightbox-caption')?.textContent).toBe('Figure 1');
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(document.activeElement).toBe(thumbnail));
+
+    const chip = within(body).getByRole('button', { name: '打开 Figure 1' });
+    chip.focus(); await userEvent.keyboard('{Enter}');
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('.yarl__slide_current .prompt-lightbox-caption')?.textContent).toBe('Figure 1');
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(document.activeElement).toBe(chip));
+
     await userEvent.click(more);
     await waitFor(() => expect(read).toHaveBeenCalledWith(images[1]));
-    expect(await screen.findByText('Figure 2')).toBeTruthy();
-    expect([...view.container.querySelectorAll('.prompt-figure-link')]
-      .map((item) => item.textContent)).toEqual(['[Figure 1]', '[Figure 2]', '[Figure 3]']);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('.yarl__slide_current .prompt-lightbox-caption')?.textContent).toBe('Figure 2');
     await userEvent.click(screen.getByRole('button', { name: 'Close' }));
   });
 
@@ -133,16 +170,16 @@ describe('PromptContentView', () => {
       onReadImage={read}
     />);
 
-    await userEvent.click(screen.getByRole('button', { name: '[Figure 1]' }));
+    await userEvent.click(screen.getByRole('button', { name: '打开 Figure 1' }));
     expect(await screen.findByText('原图读取失败')).toBeTruthy();
-    expect(view.container.querySelector('.prompt-figure-link')?.textContent).toBe('[Figure 1]');
+    expect(view.container.querySelector('.prompt-image-chip > span')?.textContent).toBe('Figure 1');
     await userEvent.click(screen.getByRole('button', { name: '重新读取' }));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
     expect(read.mock.calls[1]?.[0]).toBe(image);
     await userEvent.click(screen.getByRole('button', { name: 'Close' }));
   });
 
-  it('does not turn observer refreshes into automatic retries after a thumbnail read fails', async () => {
+  it('does not turn observer refreshes into automatic retries after an opened image read fails', async () => {
     vi.stubGlobal('IntersectionObserver', undefined);
     const image = canonicalImage(0, 'f');
     const read = vi.fn()
@@ -154,8 +191,9 @@ describe('PromptContentView', () => {
       onReadImage={read}
     />);
 
-    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText('重试')).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('读取失败')).toBeTruthy());
+    expect(screen.getByText('重试')).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(1);
     view.rerender(<PromptContentView
       content={{ parts: [image] }}
       variant="message"
@@ -164,7 +202,8 @@ describe('PromptContentView', () => {
     await Promise.resolve();
     expect(read).toHaveBeenCalledTimes(1);
 
-    await userEvent.click(screen.getByRole('button', { name: '打开 Figure 1' }));
+    const body = view.container.querySelector<HTMLElement>('.prompt-content-body')!;
+    await userEvent.click(within(body).getByRole('button', { name: '打开 Figure 1' }));
     expect(await screen.findByText('原图读取失败')).toBeTruthy();
     expect(read).toHaveBeenCalledTimes(1);
     await userEvent.click(screen.getByRole('button', { name: '重新读取' }));
@@ -181,7 +220,7 @@ describe('PromptContentView', () => {
       variant="queue"
       onReadImage={read}
     />);
-    await userEvent.click(screen.getByRole('button', { name: '[Figure 1]' }));
+    await userEvent.click(screen.getByRole('button', { name: '打开 Figure 1' }));
     await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
 
     view.unmount();
@@ -208,7 +247,7 @@ describe('PromptContentView', () => {
       variant="queue"
       onReadImage={async () => { throw new Error('not canonical'); }}
     />);
-    await userEvent.click(screen.getByRole('button', { name: '[Figure 1]' }));
+    await userEvent.click(screen.getByRole('button', { name: '打开 Figure 1' }));
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
     expect(revoke).not.toHaveBeenCalled();
 

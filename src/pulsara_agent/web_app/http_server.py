@@ -67,6 +67,8 @@ from pulsara_agent.web_app.browser_bridge import (
     LocalBrowserBridge,
 )
 from pulsara_agent.web_app.protocol_client import ProtocolBridgeError
+from pulsara_agent.web_app.file_import import LocalImport, receive_file, receive_directory
+from pulsara_agent.web_app.directory_picker import NativeDirectoryPicker
 from pulsara_agent.web_app.session_controller import (
     LocalSessionController,
     OldHostCloseQuarantined,
@@ -317,6 +319,7 @@ class LocalHttpServer:
         self._postgres_settings_saved = postgres_settings_saved
         self._reset_postgres_data = reset_postgres
         self._postgres_operation_lock = asyncio.Lock()
+        self._directory_picker = NativeDirectoryPicker()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._port: int | None = None
@@ -372,6 +375,7 @@ class LocalHttpServer:
         runner = self._runner
         self._runner = None
         self._site = None
+        await self._directory_picker.aclose()
         if runner is not None:
             await runner.cleanup()
 
@@ -392,6 +396,7 @@ class LocalHttpServer:
         self._app.router.add_get("/og.png", self._public_file)
         self._app.router.add_get("/assets/{tail:.*}", self._public_file)
         self._app.router.add_get("/api/app/bootstrap", self._bootstrap)
+        self._app.router.add_post("/api/workspace-directory/pick", self._pick_workspace_directory)
         self._app.router.add_get("/api/model-catalog", self._model_catalog)
         self._app.router.add_post(
             "/api/model-catalog/refresh", self._refresh_model_catalog
@@ -508,6 +513,7 @@ class LocalHttpServer:
             self._plugin_mcp_authorization,
         )
         self._app.router.add_get("/api/sessions", self._list_sessions)
+        self._app.router.add_post("/api/sessions/{session_id}/path-candidates", self._workspace_path_candidates)
         self._app.router.add_get(
             "/api/sessions/{session_id}/tasks", self._list_session_tasks
         )
@@ -597,6 +603,8 @@ class LocalHttpServer:
         self._app.router.add_delete(
             "/api/connections/{connection_id}", self._disconnect
         )
+        self._app.router.add_post("/api/connections/{connection_id}/import-file", self._import_file)
+        self._app.router.add_post("/api/connections/{connection_id}/import-directory", self._import_directory)
         for operation in (
             "snapshot",
             "history",
@@ -1956,6 +1964,36 @@ class LocalHttpServer:
             )
         )
 
+    async def _workspace_path_candidates(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        prefix, cursor = body.get("prefix"), body.get("cursor")
+        if set(body) - {"prefix", "cursor"} or not isinstance(prefix, str) or (cursor is not None and not isinstance(cursor, str)):
+            raise ValueError("path candidates require a prefix string and optional cursor string")
+        try:
+            result = await self.sessions.complete_workspace_paths(request.match_info["session_id"], prefix, cursor)
+        except (OSError, ValueError) as exc:
+            raise HttpPublicError("PATH_CANDIDATES_UNAVAILABLE", "无法读取这个目录，请检查路径或访问权限。", status=400) from exc
+        return web.json_response(result)
+
+    async def _pick_workspace_directory(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        initial_path = body.get("initial_path")
+        if set(body) - {"initial_path"} or (
+            initial_path is not None and not isinstance(initial_path, str)
+        ):
+            raise ValueError("directory selection accepts an optional initial_path string")
+        try:
+            path = await self._directory_picker.choose(initial_path)
+        except NotImplementedError as exc:
+            raise HttpPublicError(
+                "DIRECTORY_PICKER_UNSUPPORTED", "原生目录选择目前支持 macOS。", status=501,
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise HttpPublicError(
+                "DIRECTORY_PICKER_UNAVAILABLE", "无法打开目录选择窗口或读取所选目录，请重试。", status=503,
+            ) from exc
+        return web.json_response({"path": path})
+
     async def _create_session(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
         if set(body) - {"workspace_kind", "workspace_path"}:
@@ -2261,6 +2299,38 @@ class LocalHttpServer:
     async def _disconnect(self, request: web.Request) -> web.Response:
         await self.bridge.disconnect(request.match_info["connection_id"])
         return web.json_response({"status": "detached"})
+
+    async def _import_file(self, request: web.Request) -> web.Response:
+        return await self._import_local(request, directory=False)
+
+    async def _import_directory(self, request: web.Request) -> web.Response:
+        return await self._import_local(request, directory=True)
+
+    async def _import_local(self, request: web.Request, *, directory: bool) -> web.Response:
+        connection_id = request.match_info["connection_id"]
+        generation = int(request.headers.get("X-Pulsara-Connection-Generation", "0"))
+        await self.bridge.require_import_controller(connection_id, generation)
+        if request.headers.get("Content-Encoding"):
+            raise HttpPublicError("IMPORT_ENCODING_REJECTED", "请传输文件原始字节。", status=400)
+        pending = None
+        try:
+            pending = LocalImport()
+            name = await (receive_directory(request, pending) if directory else receive_file(request, pending))
+            await self.bridge.require_import_controller(connection_id, generation)
+            if self._is_draining() or request.transport is None or request.transport.is_closing():
+                raise HttpPublicError("IMPORT_INTERRUPTED", "导入已中断，请重新选择文件。", status=409)
+            return web.json_response(pending.publish(name))
+        except OSError as exc:
+            import errno
+            exhausted = exc.errno in {errno.ENOSPC, errno.EDQUOT}
+            raise HttpPublicError("IMPORT_STORAGE_FULL" if exhausted else "IMPORT_FILESYSTEM_ERROR",
+                                  "本机存储空间不足。" if exhausted else f"无法保存本地副本：{exc.strerror or exc}",
+                                  status=507 if exhausted else 400) from exc
+        except ValueError as exc:
+            raise HttpPublicError("IMPORT_INVALID", str(exc), status=400) from exc
+        finally:
+            if pending is not None:
+                pending.close()
 
     def _protocol_handler(
         self, operation: str

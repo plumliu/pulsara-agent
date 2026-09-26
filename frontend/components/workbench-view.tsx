@@ -4,6 +4,8 @@ import { CapabilityInteractionEditor } from './capability-interaction-editor';
 
 import {
   ArrowDown,
+  Plus,
+  FolderPlus,
   BookOpenText,
   Bot,
   BrainCircuit,
@@ -12,13 +14,14 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
-  CircleStop,
+  Square,
   Clock3,
   Copy,
   CornerDownRight,
   FileDiff,
   FileText,
   FileSearch,
+  Upload,
   GitFork,
   Eye,
   ListTodo,
@@ -31,9 +34,9 @@ import {
   Pencil,
   Trash2,
   RotateCcw,
-  Send,
+  ArrowUp,
   ShieldCheck,
-  SlidersHorizontal,
+  Settings,
   Sparkles,
   TerminalSquare,
   TriangleAlert,
@@ -46,6 +49,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useLayoutEffect,
   useRef,
@@ -78,6 +82,7 @@ import { AnimatedDisclosure } from './animated-disclosure';
 import { builtinToolSummary } from '../lib/builtin-tool-summary';
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
+import { useWorkbenchFileDrop } from '../lib/workbench-file-drop';
 import { promptContentTextProjection } from '../lib/prompt-content';
 import {
   usableVisualizationRootRect,
@@ -87,6 +92,7 @@ import {
 } from '../lib/visualization-frame';
 
 interface WorkbenchViewProps {
+  onCompletePaths?: import('../lib/file-reference').CompleteWorkspacePaths;
   focusMemoryEntry?: { sessionId: string; entryId: string };
   workspace: Workspace;
   session: SessionSummary;
@@ -964,6 +970,9 @@ function VisualizationPanel({ entryId, visualization, onRead }: {
   visualization: VisualizationOccurrence;
   onRead: NonNullable<WorkbenchViewProps['onReadVisualization']>;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const [opened, setOpened] = useState(false);
+  const contentId = useId();
   const [state, setState] = useState<{ html?: string; error?: string }>({});
   const [probeWidth, setProbeWidth] = useState<number | null>(null);
   const [rootRect, setRootRect] = useState<VisualizationRootRect | null>(null);
@@ -974,14 +983,14 @@ function VisualizationPanel({ entryId, visualization, onRead }: {
   const digest = visualization.visualizationRef;
   const size = visualization.contentSize;
   useEffect(() => {
-    if (visualization.state !== 'READY' || !digest || !size) return;
+    if (!opened || visualization.state !== 'READY' || !digest || !size) return;
     let active = true;
     void onRead(entryId, ordinal, digest, size).then(
       (html) => { if (active) { setRootRect(null); setState({ html }); } },
       () => { if (active) setState({ error: '已保存的可视化暂时无法读取。' }); },
     );
     return () => { active = false; };
-  }, [entryId, ordinal, digest, size, onRead, visualization.state]);
+  }, [entryId, ordinal, digest, size, onRead, visualization.state, opened]);
   useEffect(() => {
     const probe = widthProbeRef.current;
     if (!probe) return;
@@ -1012,33 +1021,37 @@ function VisualizationPanel({ entryId, visualization, onRead }: {
     window.addEventListener('message', receive);
     return () => window.removeEventListener('message', receive);
   }, []);
-  if (visualization.state === 'FAILED') {
-    return <div className="assistant-visualization assistant-visualization--failed" role="status">
-      {visualization.failureDetail ?? '可视化未能生成。'}
-    </div>;
-  }
-  if (!digest || !size) {
-    return <div className="assistant-visualization assistant-visualization--failed" role="status">可视化引用不完整。</div>;
-  }
-  if (state.error) {
-    return <div className="assistant-visualization assistant-visualization--failed" role="status">{state.error}</div>;
-  }
-  if (state.html === undefined) {
-    return <div className="assistant-visualization assistant-visualization--loading" role="status">正在加载可视化…</div>;
-  }
-  const documentBody = state.html.replace(/^\s*<!doctype[^>]*>/i, '');
+  const error = visualization.state === 'FAILED'
+    ? visualization.failureDetail ?? '可视化未能生成。'
+    : !digest || !size ? '可视化引用不完整。' : state.error;
+  const documentBody = state.html?.replace(/^\s*<!doctype[^>]*>/i, '') ?? '';
   const source = `<!doctype html><meta http-equiv="Content-Security-Policy" content="${visualizationCsp}">${documentBody}${visualizationFrameMeasurementScript}`;
-  return <div className="assistant-visualization" data-visualization-ordinal={ordinal}
+  return <div className={`assistant-visualization${expanded ? ' is-expanded' : ''}`} data-visualization-ordinal={ordinal}
     data-visualization-layout={rootRect ? 'root' : 'page'}
-    style={rootRect ? { width: Math.ceil(rootRect.width) + 2 } : undefined}>
+    style={expanded && rootRect ? { width: Math.ceil(rootRect.width) + 2 } : undefined}>
     <div className="assistant-visualization__width-probe" ref={widthProbeRef} aria-hidden="true" />
-    <div className="assistant-visualization__viewport" style={rootRect ? { height: Math.ceil(rootRect.height) } : undefined}>
-      <iframe ref={frameRef} title={`可视化 ${ordinal + 1}`} sandbox="allow-scripts"
-        referrerPolicy="no-referrer" srcDoc={source}
-        style={{
-          width: probeWidth === null ? '100%' : probeWidth,
-          transform: rootRect ? `translate(${-rootRect.x}px, ${-rootRect.y}px)` : undefined,
-        }} />
+    <button type="button" className="assistant-visualization__toggle"
+      aria-expanded={expanded} aria-controls={contentId}
+      aria-label={`${expanded ? '收起' : '展开'}可视化 ${ordinal + 1}`}
+      onClick={() => { setOpened(true); setExpanded(value => !value); }}>
+      <Eye size={15} aria-hidden="true" />
+      <span>可视化 {ordinal + 1}</span>
+      <small>{error ? '无法显示' : expanded ? '收起' : '展开'}</small>
+      <ChevronRight size={14} className="assistant-visualization__chevron" aria-hidden="true" />
+    </button>
+    <div id={contentId}>
+      <AnimatedDisclosure open={expanded}>
+        {error ? <div className="assistant-visualization__status" role="status">{error}</div>
+          : state.html === undefined ? <div className="assistant-visualization__status" role="status">正在加载可视化…</div>
+            : <div className="assistant-visualization__viewport" style={rootRect ? { height: Math.ceil(rootRect.height) } : undefined}>
+              <iframe ref={frameRef} title={`可视化 ${ordinal + 1}`} sandbox="allow-scripts"
+                referrerPolicy="no-referrer" srcDoc={source}
+                style={{
+                  width: probeWidth === null ? '100%' : probeWidth,
+                  transform: rootRect ? `translate(${-rootRect.x}px, ${-rootRect.y}px)` : undefined,
+                }} />
+            </div>}
+      </AnimatedDisclosure>
     </div>
   </div>;
 }
@@ -1106,22 +1119,27 @@ function UserMessage({
     );
   }
 
+  const renderBubble = (body: ReactNode) => (
+    <div className="user-message">
+      {body}
+      <div className="message-foot">{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
+    </div>
+  );
+
   return (
     <article className="user-turn">
       <header className="user-heading">
         <strong>{label}</strong>
         <span className="user-avatar"><UserRound size={14} /></span>
       </header>
-      <div className="user-message">
-        {content
-          ? <PromptContentView
-              content={content}
-              variant="message"
-              onReadImage={onReadPromptImage}
-            />
-          : <p style={sourceTextStyle}>{message.body}</p>}
-        <div className="message-foot">{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
-      </div>
+      {content
+        ? <PromptContentView
+            content={content}
+            variant="message"
+            onReadImage={onReadPromptImage}
+            renderMessageBody={renderBubble}
+          />
+        : renderBubble(<p style={sourceTextStyle}>{message.body}</p>)}
     </article>
   );
 }
@@ -1689,6 +1707,7 @@ export function WorkbenchView({
   onReadPromptImage,
   onReadVisualization = unavailableVisualization,
   promptDraftStore: draftStore,
+  onCompletePaths,
   onNotify,
   onPermissionChange,
 }: WorkbenchViewProps) {
@@ -1700,18 +1719,30 @@ export function WorkbenchView({
     setPlanRequests(current => ({ ...current, [session.id]: typeof value === 'function' ? value(current[session.id] ?? false) : value }));
   }, [session.id]);
   const [submitting, setSubmitting] = useState(false);
-  const [welcomeState, setWelcomeState] = useState({ sessionId: session.id, started: false, options: false });
+  const [welcomeState, setWelcomeState] = useState({ sessionId: session.id, started: false });
   if (welcomeState.sessionId !== session.id) {
-    setWelcomeState({ sessionId: session.id, started: false, options: false });
+    setWelcomeState({ sessionId: session.id, started: false });
   }
   const welcomeDeparture = useRef<{ sessionId: string; top: number } | null>(null);
   const [compacting, setCompacting] = useState(false);
   const [sessionActionsOpen, setSessionActionsOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [skillOpen, setSkillOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(false);
+  const [menuSession, setMenuSession] = useState(session.id);
+  if (menuSession !== session.id) {
+    setMenuSession(session.id);
+    setSessionActionsOpen(false);
+    setAddOpen(false);
+    setSkillOpen(false);
+  }
+  const addTrigger = useRef<HTMLButtonElement>(null);
+  const addMenu = useRef<HTMLDivElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const directoryInput = useRef<HTMLInputElement>(null);
+  const pickerSession = useRef(session.id);
   const [modelOpen, setModelOpen] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState(false);
-  const [optionsOpen, setOptionsOpen] = useState(false);
   const [modelBindingBusy, setModelBindingBusy] = useState(false);
   const [preparingQueueEdit, setPreparingQueueEdit] = useState<string>();
   const [atBottom, setAtBottom] = useState(true);
@@ -1725,7 +1756,6 @@ export function WorkbenchView({
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const composerEditorRef = useRef<HTMLDivElement>(null);
   const acceptedDraftLayout = useRef<{ sessionId: string; height: number; restoreFocus: boolean } | null>(null);
-  const optionsTriggerRef = useRef<HTMLButtonElement>(null);
   const budgetInputRef = useRef<HTMLInputElement>(null);
   const handledQueueActions = useRef(new Set<string>());
   const queueClicks = useRef(new Set<string>());
@@ -1863,7 +1893,6 @@ export function WorkbenchView({
       })}
     </section>
   );
-  const wordCount = draft.text.trim().length;
   const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
   const modelBindingMissing = Boolean(modelCallBinding && !selectedModel);
   const modelReady = Boolean(
@@ -1876,13 +1905,8 @@ export function WorkbenchView({
     && !interaction && initialContextBase?.base_kind !== 'SNAPSHOT' && !contextCompaction
     && session.status !== 'interrupted' && runtimeStatus === 'online'
     && !(welcomeState.sessionId === session.id && welcomeState.started));
-  const composerOptionsVisible = !welcome || welcomeState.options
-    || modelOpen || reasoningOpen || skillOpen || permissionOpen;
   const hasCompactionContext = messages.length > 0 || isRunning
     || initialContextBase?.base_kind === 'SNAPSHOT' || Boolean(contextCompaction);
-  useEffect(() => {
-    setSessionActionsOpen(false);
-  }, [session.id]);
   useEffect(() => {
     if (!sessionActionsOpen) return;
     const outside = (event: PointerEvent) => {
@@ -1916,10 +1940,28 @@ export function WorkbenchView({
     return () => animation?.cancel();
   }, [welcome, session.id]);
   const lastMessageLength = messages.at(-1)?.body.length ?? 0;
+  useLayoutEffect(() => {
+    if (!addOpen || !skillOpen) return;
+    const menu = addMenu.current;
+    const submenu = menu?.querySelector<HTMLElement>('.skill-menu--composer');
+    if (!menu || !submenu) return;
+    const position = () => {
+      const anchor = menu.getBoundingClientRect();
+      const fitsRight = anchor.right + 8 + submenu.offsetWidth <= window.innerWidth - 12;
+      const left = fitsRight ? anchor.right + 8 : Math.max(12, Math.min(anchor.left, window.innerWidth - submenu.offsetWidth - 12));
+      const top = Math.max(12, fitsRight ? anchor.bottom - submenu.offsetHeight : anchor.top - submenu.offsetHeight - 8);
+      submenu.style.left = `${left - anchor.left}px`;
+      submenu.style.top = `${top - anchor.top}px`;
+      submenu.style.bottom = 'auto';
+    };
+    position();
+    window.addEventListener('resize', position);
+    return () => window.removeEventListener('resize', position);
+  }, [addOpen, skillOpen]);
   useEffect(() => {
-    if (!optionsOpen && !modelOpen && !reasoningOpen && !skillOpen && !permissionOpen) return;
+    if (!addOpen && !modelOpen && !reasoningOpen && !skillOpen && !permissionOpen) return;
     const close = () => {
-      setOptionsOpen(false); setModelOpen(false); setReasoningOpen(false);
+      setAddOpen(false); setModelOpen(false); setReasoningOpen(false);
       setSkillOpen(false); setPermissionOpen(false);
     };
     const outside = (event: PointerEvent) => {
@@ -1928,7 +1970,7 @@ export function WorkbenchView({
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       close();
-      if (optionsOpen && optionsTriggerRef.current?.getClientRects().length) optionsTriggerRef.current.focus();
+      if (addOpen) addTrigger.current?.focus();
     };
     document.addEventListener('pointerdown', outside);
     document.addEventListener('keydown', escape);
@@ -1936,7 +1978,7 @@ export function WorkbenchView({
       document.removeEventListener('pointerdown', outside);
       document.removeEventListener('keydown', escape);
     };
-  }, [optionsOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen]);
+  }, [addOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen]);
   const contextCompactionIndex = useMemo(() => {
     if (!contextCompaction) return -1;
     const nextCanonical = messages.findIndex((message) => (
@@ -1969,35 +2011,59 @@ export function WorkbenchView({
     if (new RegExp(`(^|\\s)\\$${name}(?=\\s|$)`).test(draft.text)) return;
     draftStore.insertText(session.id, `${marker} `, true);
     setSkillOpen(false);
-    setOptionsOpen(false);
+    setAddOpen(false);
     window.requestAnimationFrame(() => draftStore.focus(session.id));
   }, [draft.text, draftStore, editingQueue, session.id]);
+
+  const fileEntryBlocked = !canControl || isObserver || runtimeStatus !== 'online' || editingQueue || submitting;
+  const fileDrop = useWorkbenchFileDrop({ sessionId: session.id, store: draftStore,
+    blocked: () => fileEntryBlocked || queueClicks.current.has('composer-edit'), notify: onNotify });
+  const openFilePicker = (directory: boolean) => {
+    if (fileEntryBlocked || queueClicks.current.has('composer-edit')) return;
+    pickerSession.current = session.id;
+    setAddOpen(false);
+    (directory ? directoryInput : fileInput).current?.click();
+    requestAnimationFrame(() => draftStore.focus(session.id));
+  };
+  const acceptPickedFiles = (files: File[], directory: boolean) => {
+    if (!files.length) return;
+    if (pickerSession.current !== session.id || fileEntryBlocked || queueClicks.current.has('composer-edit')) {
+      onNotify('文件未加入草稿', '会话已切换或输入框暂不可编辑，请稍后重新选择文件。');
+      return;
+    }
+    try {
+      if (directory) draftStore.insertDirectory(session.id, files);
+      else draftStore.insertFiles(session.id, files, 'end');
+    } catch (error) {
+      onNotify('文件未加入草稿', error instanceof Error ? error.message : '请重新选择文件。');
+    }
+  };
 
   const updateJumpPosition = useCallback(() => {
     const workbench = workbenchRef.current;
     const composer = composerWrapRef.current;
     if (!workbench || !composer) return;
-    const workbenchBox = workbench.getBoundingClientRect();
-    const obstacleTops = [composer.getBoundingClientRect().top];
-    for (const element of composer.querySelectorAll<HTMLElement>('.todo-dock__trigger, .todo-dock__popover')) {
-      obstacleTops.push(element.getBoundingClientRect().top);
+    const composerTop = composer.getBoundingClientRect().top;
+    const maximum = Math.max(12, Math.floor(workbench.clientHeight - 105));
+    const todoTrigger = composer.querySelector<HTMLElement>('.todo-dock__trigger');
+    const todoPopover = composer.querySelector<HTMLElement>('.todo-dock__popover');
+    if (todoTrigger && todoPopover) {
+      // Keep the scrollable TODO list below the topbar and leave room for the
+      // latest button (the same 105px ceiling used below), plus its 12px gap.
+      const popoverBottom = composer.offsetTop + todoTrigger.getBoundingClientRect().top - composerTop - 9;
+      todoPopover.style.maxHeight = `${Math.max(0, popoverBottom - (workbench.clientHeight - maximum) - 12)}px`;
     }
-    const obstacleTop = Math.min(...obstacleTops);
-    const requested = Math.ceil(workbenchBox.bottom - obstacleTop + 12);
-    const maximum = Math.max(112, Math.floor(workbenchBox.height - 105));
-    const next = Math.min(maximum, Math.max(112, requested));
+    let protrusion = 0;
+    for (const element of composer.querySelectorAll<HTMLElement>('.todo-dock__trigger, .todo-dock__popover')) {
+      protrusion = Math.max(protrusion, composerTop - element.getBoundingClientRect().top);
+    }
+    // The composer is a direct positioned child of the workbench. offsetTop
+    // follows layout, unlike its viewport rect during the welcome departure
+    // animation. Relative TODO protrusions cancel that shared translation.
+    const requested = Math.ceil(workbench.clientHeight - composer.offsetTop + protrusion + 12);
+    const next = Math.min(maximum, requested);
     setJumpBottom((current) => current === next ? current : next);
   }, []);
-
-  useEffect(() => {
-    const composer = composerWrapRef.current;
-    if (!composer) return;
-    updateJumpPosition();
-    if (typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(updateJumpPosition);
-    observer.observe(composer);
-    return () => observer.disconnect();
-  }, [updateJumpPosition]);
 
   useLayoutEffect(() => {
     const previous = acceptedDraftLayout.current;
@@ -2016,17 +2082,10 @@ export function WorkbenchView({
     return () => animation?.cancel();
   }, [draft.hasContent, draft.revision, draftStore, session.id]);
 
-  const composerHint = useMemo(() => {
-    if (!isRunning) return 'Enter 发送 · Shift Enter 换行';
-    return 'Enter 排队下一轮 · Shift Enter 换行';
-  }, [isRunning]);
-
   const submit = useCallback(async () => {
     if (!draft.hasContent || submitting || editingQueue) return;
     if (!modelReady) {
-      if (welcome) {
-        setWelcomeState(current => ({ ...current, options: true }));
-      } else onNotify(
+      if (!welcome) onNotify(
         modelBindingMissing ? '原模型配置已删除' : '请先选择模型配置',
         modelBindingMissing
           ? '请为这个会话显式选择另一条模型配置。'
@@ -2049,7 +2108,7 @@ export function WorkbenchView({
     }
     if (welcome && composerWrapRef.current) {
       welcomeDeparture.current = { sessionId: session.id, top: composerWrapRef.current.getBoundingClientRect().top };
-      setWelcomeState({ sessionId: session.id, started: true, options: false });
+      setWelcomeState({ sessionId: session.id, started: true });
     }
     let accepted = false;
     try {
@@ -2121,7 +2180,7 @@ export function WorkbenchView({
       window.removeEventListener('resize', schedule);
       window.cancelAnimationFrame(frame);
     };
-  }, [interaction?.id, isObserver, queuedCount, todo?.id, updateJumpPosition]);
+  }, [atBottom, interaction?.id, isObserver, queuedCount, session.id, todo?.id, updateJumpPosition, welcome]);
 
   useEffect(() => {
     const thread = threadRef.current;
@@ -2186,7 +2245,10 @@ export function WorkbenchView({
   }, [focusTaskHighlighted, focusTaskId, focusTaskRevision]);
 
   return (
-    <section className={`workbench${welcome ? ' is-welcome' : ''}`} aria-label="会话工作台" ref={workbenchRef}>
+    <section className={`workbench${welcome ? ' is-welcome' : ''}${fileDrop.dragging ? ' is-file-dragging' : ''}`} aria-label="会话工作台" ref={workbenchRef} {...fileDrop.handlers}>
+      {fileDrop.dragging && <div className="workbench-file-drop" role="status">
+        <span><Upload size={22} aria-hidden="true" />松开以添加文件</span>
+      </div>}
       <header className="topbar">
         <div className="session-title">
           <button className="mobile-menu-button" onClick={onOpenSidebar} aria-label="打开会话侧栏"><Menu size={17} /></button>
@@ -2318,7 +2380,7 @@ export function WorkbenchView({
       )}
 
       {!session.id ? (
-        <div className="composer-wrap composer-wrap--session-required">
+        <div className="composer-wrap composer-wrap--session-required" ref={composerWrapRef}>
           <div className="composer-frame">
             <div className="composer composer--session-required">
               <div className="session-required-composer">
@@ -2336,7 +2398,6 @@ export function WorkbenchView({
           <p className="composer-note">当前没有活动会话</p>
         </div>
       ) : !isObserver ? <div className="composer-wrap" ref={composerWrapRef}>
-        {composerQueue}
         <div className="composer-frame">
           <div className="welcome-heading" aria-hidden={!welcome}>
             <WelcomeTypewriter key={session.id} active={welcome} cycling={!draft.hasContent} />
@@ -2347,9 +2408,10 @@ export function WorkbenchView({
             interactionOpen={Boolean(interaction)}
             onLayoutChange={updateJumpPosition}
           />
+          {composerQueue}
           <div className={`composer${draft.hasContent ? ' has-content' : ''}`}>
           <div className="composer-editor" ref={composerEditorRef}>
-            <Sparkles size={14} />
+            {((requestPlan && !isRunning) || activePlanMode) && <span className="composer-plan-status"><WandSparkles size={12} />{activePlanMode ? '规划进行中' : '本轮先规划'}</span>}
             <PromptComposer
               key={session.id}
               store={draftStore}
@@ -2358,106 +2420,77 @@ export function WorkbenchView({
               placeholder={isRunning ? '输入下一轮任务…' : '让 Pulsara 处理复杂工作…'}
               onSubmit={() => void submit()}
               onNotify={onNotify}
+              skills={skills}
+              onCompletePaths={onCompletePaths}
             />
-            {wordCount > 0 && <span className="draft-count">{wordCount}</span>}
-            {welcome && <button type="button" className={`welcome-options-trigger${!modelReady && !composerOptionsVisible ? ' needs-selection' : ''}`} aria-label="输入选项"
-              aria-expanded={composerOptionsVisible} onClick={() => setWelcomeState(current => ({ ...current, options: !composerOptionsVisible }))}>
-              <SlidersHorizontal size={15} />
-            </button>}
-            <div className="composer-submit">
-              {isRunning && !draft.hasContent ? (
-                <button
-                  className="send-button is-stop"
-                  onClick={onStop}
-                  aria-label="停止本轮运行"
-                  title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，子任务、排队输入和后台命令不会自动取消。"
-                ><CircleStop size={15} /></button>
-              ) : (
-                <button className="send-button" onClick={() => void submit()} disabled={!draft.hasContent || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning ? '排队发送' : '发送'}>
-                  {isRunning ? <Play size={14} fill="currentColor" /> : <Send size={14} />}
-                </button>
-              )}
-            </div>
           </div>
-          <div className={`composer-drawer${composerOptionsVisible ? ' is-open' : ''}`} inert={!composerOptionsVisible} aria-hidden={!composerOptionsVisible}>
-          <div className="composer-drawer__content">
           <div className="composer-actions">
-            <div className="composer-controls">
-              <div className="popover-anchor model-picker">
-                <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}${welcome && !modelReady && composerOptionsVisible && !modelOpen ? ' needs-selection' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setOptionsOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
-                  <Bot size={12} /><span className="model-chip__label">{modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)}</span><ChevronDown size={10} />
-                </button>
-                {modelOpen && <div className="menu-popover model-menu">
-                  <span className="menu-label">此会话的模型</span>
-                  {modelConfigurations.length ? modelConfigurations.map((connection) => <button key={connection.id} className={connection.id === modelCallBinding?.connection_id ? 'is-selected' : ''} disabled={connection.status !== 'ready' || modelBindingBusy} onClick={() => void changeBinding({ connection_id: connection.id, reasoning: connection.default_reasoning ?? null })}>
-                    <span><strong>{connection.route_name ?? connection.route_id} · {connection.display_name ?? connection.model_id}</strong><small>{connection.wire_api === 'openai_responses' ? 'Responses' : 'Chat Completions'} · {connection.authentication === 'none' ? '无需认证' : connection.credential_configured ? '密钥已配置' : '密钥未配置'}</small></span>
-                    {connection.id === modelCallBinding?.connection_id && <Check size={13} />}
-                  </button>) : <div className="model-menu__empty"><span>还没有模型配置。</span><button onClick={onOpenModelSettings}>前往设置添加</button></div>}
-                  {modelConfigurations.length > 0 && <button className="model-menu__settings" onClick={onOpenModelSettings}>管理模型配置</button>}
-                </div>}
-              </div>
-              <button ref={optionsTriggerRef} className={`mode-chip composer-options-trigger${optionsOpen ? ' is-active' : ''}`} aria-label="本轮选项" aria-expanded={optionsOpen} aria-controls="composer-options" onClick={() => { setOptionsOpen(value => !value); setModelOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }}>
-                <SlidersHorizontal size={12} /><span>选项</span><small className={permission === 'bypass-permissions' ? 'is-danger' : ''}>{permissionLabels[permission]}</small>{((requestPlan && !isRunning) || activePlanMode) && <i title="已启用规划" />}<ChevronDown size={10} />
-              </button>
-              <div id="composer-options" className={`composer-secondary-controls${optionsOpen ? ' is-open' : ''}`}>
-              <div className="popover-anchor">
-                <button className={`mode-chip${reasoningOpen ? ' is-active' : ''}`} onClick={() => { setReasoningOpen((value) => !value); setModelOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={reasoningOpen} disabled={!selectedModel || selectedModel.reasoning.kind !== 'selectable' || modelBindingBusy}>
-                  <BrainCircuit size={12} /> {reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)} {selectedModel?.reasoning.kind === 'selectable' && <ChevronDown size={10} />}
-                </button>
-                {reasoningOpen && selectedModel?.reasoning.kind === 'selectable' && modelCallBinding && <div className="menu-popover reasoning-menu">
-                  {selectedModel.reasoning.effort && <><span className="menu-label">推理档位</span>{selectedModel.reasoning.effort.values.map((effort) => {
-                    const selected = modelCallBinding.reasoning?.kind === 'effort' && modelCallBinding.reasoning.value === effort;
-                    return <button key={effort ?? 'provider-none'} className={selected ? 'is-selected' : ''} onClick={() => void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'effort', value: effort } })}><span><strong>{effort === null || effort === 'none' ? '关闭' : effort}</strong></span>{selected && <Check size={13} />}</button>;
-                  })}</>}
-                  {selectedModel.reasoning.toggle && <><span className="menu-label">推理开关</span>{[true, false].map((enabled) => {
-                    const selected = modelCallBinding.reasoning?.kind === 'toggle' && modelCallBinding.reasoning.enabled === enabled;
-                    return <button key={enabled ? 'enabled' : 'disabled'} className={selected ? 'is-selected' : ''} onClick={() => void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'toggle', enabled } })}><span><strong>{enabled ? '开启' : '关闭'}</strong></span>{selected && <Check size={13} />}</button>;
-                  })}</>}
-                  {selectedModel.reasoning.budget_tokens?.minimum != null && selectedModel.reasoning.budget_tokens.maximum != null && <div className="reasoning-budget"><span className="menu-label">Token 预算</span><div><input ref={budgetInputRef} type="number" min={selectedModel.reasoning.budget_tokens.minimum} max={selectedModel.reasoning.budget_tokens.maximum} defaultValue={modelCallBinding.reasoning?.kind === 'budget_tokens' ? modelCallBinding.reasoning.tokens : Math.ceil((selectedModel.reasoning.budget_tokens.minimum + selectedModel.reasoning.budget_tokens.maximum) / 2)} /><button onClick={() => { const tokens = Number(budgetInputRef.current?.value); if (Number.isInteger(tokens)) void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'budget_tokens', tokens } }); }}>应用</button></div><small>{selectedModel.reasoning.budget_tokens.minimum.toLocaleString('zh-CN')}–{selectedModel.reasoning.budget_tokens.maximum.toLocaleString('zh-CN')}</small></div>}
-                </div>}
-              </div>
-              {skills.length > 0 && (
-                <div className="popover-anchor">
-                  <button
-                    className={`mode-chip${skillOpen ? ' is-active' : ''}`}
-                    onClick={() => {
-                      setSkillOpen((value) => !value);
-                      setPermissionOpen(false);
-                      setReasoningOpen(false);
-                      setModelOpen(false);
-                    }}
-                    aria-expanded={skillOpen}
-                    aria-label="选择技能"
-                    disabled={submitting || editingQueue}
-                  ><BookOpenText size={12} /> 技能 <ChevronDown size={10} /></button>
-                  {skillOpen && (
-                    <div className="menu-popover skill-menu skill-menu--composer">
-                      <span className="menu-label">用于本轮</span>
-                      <div className="skill-menu__list">
-                        {skills.map((skill) => {
-                          const selected = skill.configured || new RegExp(`(^|\\s)\\$${skill.name}(?=\\s|$)`).test(draft.text);
-                          return (
-                            <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured || editingQueue}>
-                              <span><strong>${skill.name}</strong><small>{skill.description}</small></span>
-                              {selected && <Check size={13} />}
-                            </button>
-                          );
-                        })}
+            <div className="composer-utilities">
+              <div className="composer-add-anchor">
+                <button ref={addTrigger} type="button" className="composer-add-trigger" aria-label="添加文件、技能或规划" aria-haspopup="dialog" aria-expanded={addOpen}
+                  disabled={fileEntryBlocked}
+                  onClick={() => { setAddOpen(value => !value); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); }}
+                  onKeyDown={event => { if (event.key === 'ArrowDown') { event.preventDefault(); setAddOpen(true); setSkillOpen(false); setModelOpen(false); setReasoningOpen(false); setPermissionOpen(false); requestAnimationFrame(() => addMenu.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()); } }}><Plus size={18} /></button>
+                <input ref={fileInput} type="file" multiple hidden aria-label="选择文件" onChange={event => {
+                  const files = [...(event.target.files ?? [])]; event.target.value = '';
+                  acceptPickedFiles(files, false);
+                }} />
+                <input ref={directoryInput} type="file" {...{ webkitdirectory: '' }} hidden aria-label="选择文件夹" onChange={event => {
+                  const files = [...(event.target.files ?? [])]; event.target.value = '';
+                  acceptPickedFiles(files, true);
+                }} />
+                {addOpen && <div ref={addMenu} className="menu-popover composer-add-menu" role="dialog" aria-label="添加内容与模式" onKeyDown={event => {
+                  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+                  const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+                  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+                  const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+                  event.preventDefault(); buttons[next]?.focus();
+                }}>
+                  <button type="button" className="mode-chip" disabled={fileEntryBlocked} onClick={() => openFilePicker(false)}><FileText size={12} /> 添加文件</button>
+                  <button type="button" className="mode-chip" disabled={fileEntryBlocked} onClick={() => openFilePicker(true)}><FolderPlus size={12} /> 添加文件夹</button>
+                {(
+                  <div className="popover-anchor">
+                    <button
+                      className={`mode-chip${skillOpen ? ' is-active' : ''}`}
+                      onClick={() => {
+                        setSkillOpen((value) => !value);
+                        setPermissionOpen(false);
+                        setReasoningOpen(false);
+                        setModelOpen(false);
+                      }}
+                      aria-expanded={skillOpen}
+                      aria-label="选择技能"
+                      disabled={submitting || editingQueue || skills.length === 0}
+                    ><BookOpenText size={12} /> 技能 <ChevronRight className="composer-skill-chevron" size={10} /></button>
+                    {skillOpen && (
+                      <div className="menu-popover skill-menu skill-menu--composer">
+                        <span className="menu-label">用于本轮</span>
+                        <div className="skill-menu__list">
+                          {skills.map((skill) => {
+                            const selected = skill.configured || new RegExp(`(^|\\s)\\$${skill.name}(?=\\s|$)`).test(draft.text);
+                            return (
+                              <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''} onClick={() => insertSkill(skill.name)} disabled={skill.configured || editingQueue}>
+                                <span><strong>${skill.name}</strong><small>{skill.description}</small></span>
+                                {selected && <Check size={13} />}
+                              </button>
+                            );
+                          })}
+                        </div>
                       </div>
-                      <small className="skill-menu__note">技能名称会加入输入，由 Pulsara 在本轮读取。</small>
-                    </div>
-                  )}
-                </div>
-              )}
-              <button
-                className={`mode-chip${(requestPlan && !isRunning) || activePlanMode ? ' is-active' : ''}`}
-                onClick={() => setRequestPlan((value) => !value)}
-                disabled={isRunning || activePlanMode || submitting}
-                aria-pressed={requestPlan && !isRunning}
-                title={isRunning ? '当前运行结束后可为下一轮启用规划' : undefined}
-              ><WandSparkles size={12} /> {activePlanMode ? '规划进行中' : requestPlan && !isRunning ? '本轮先规划' : '先规划'}</button>
+                    )}
+                  </div>
+                )}
+                <button
+                  className={`mode-chip${(requestPlan && !isRunning) || activePlanMode ? ' is-active' : ''}`}
+                  onClick={() => { setRequestPlan((value) => !value); setAddOpen(false); draftStore.focus(session.id); }}
+                  disabled={isRunning || activePlanMode || submitting}
+                  aria-pressed={requestPlan && !isRunning}
+                  title={isRunning ? '当前运行结束后可为下一轮启用规划' : undefined}
+                ><WandSparkles size={12} /> {activePlanMode ? '规划进行中' : requestPlan && !isRunning ? '本轮先规划' : '先规划'}</button>
+                </div>}
+              </div>
               <div className="popover-anchor">
-                <button className={`mode-chip permission-chip${permission === 'bypass-permissions' ? ' is-danger' : ''}`} onClick={() => {setPermissionOpen((value) => !value); setReasoningOpen(false); setSkillOpen(false); setModelOpen(false);}} aria-expanded={permissionOpen} disabled={submitting}>
+                <button className={`mode-chip permission-chip${permission === 'bypass-permissions' ? ' is-danger' : ''}`} onClick={() => {setPermissionOpen((value) => !value); setAddOpen(false); setReasoningOpen(false); setSkillOpen(false); setModelOpen(false);}} aria-expanded={permissionOpen} disabled={submitting}>
                   {permission === 'bypass-permissions' ? <TriangleAlert size={12} /> : <ShieldCheck size={12} />} {permissionLabels[permission]} <ChevronDown size={10} />
                 </button>
                 {permissionOpen && (
@@ -2472,17 +2505,62 @@ export function WorkbenchView({
                   </div>
                 )}
               </div>
+            </div>
+            <div className="composer-controls">
+              <div className="popover-anchor model-picker">
+                <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}${welcome && !modelReady && !modelOpen ? ' needs-selection' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setAddOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
+                  <span className="model-chip__label">{modelBindingMissing ? '模型配置已删除' : selectedModel?.display_name ?? selectedModel?.model_id ?? '选择模型'}</span><ChevronDown size={10} />
+                </button>
+                {modelOpen && <div className="menu-popover model-menu">
+                  <div className="model-menu__header">
+                    <span className="menu-label">此会话的模型</span>
+                    <button type="button" className="model-menu__settings" aria-label="模型设置" title="模型设置" onClick={onOpenModelSettings}><Settings size={15} /></button>
+                  </div>
+                  <div className="model-menu__list">
+                  {modelConfigurations.length ? modelConfigurations.map((connection) => <button key={connection.id} className={connection.id === modelCallBinding?.connection_id ? 'is-selected' : ''} disabled={connection.status !== 'ready' || modelBindingBusy} onClick={() => void changeBinding({ connection_id: connection.id, reasoning: connection.default_reasoning ?? null })}>
+                    <span><strong>{connection.route_name ?? connection.route_id} · {connection.display_name ?? connection.model_id}</strong><small>{connection.wire_api === 'openai_responses' ? 'Responses' : 'Chat Completions'} · {connection.authentication === 'none' ? '无需认证' : connection.credential_configured ? '密钥已配置' : '密钥未配置'}</small></span>
+                    {connection.id === modelCallBinding?.connection_id && <Check size={13} />}
+                  </button>) : <div className="model-menu__empty">还没有模型配置。</div>}
+                  </div>
+                </div>}
+              </div>
+              <div className="popover-anchor">
+                <button title={reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)} className={`mode-chip reasoning-chip${reasoningOpen ? ' is-active' : ''}`} onClick={() => { setReasoningOpen((value) => !value); setAddOpen(false); setModelOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={reasoningOpen} disabled={!selectedModel || selectedModel.reasoning.kind !== 'selectable' || modelBindingBusy}>
+                  <BrainCircuit size={12} /><span className="reasoning-chip__label">{reasoningSelectionLabel(selectedModel, modelCallBinding?.reasoning)}</span> {selectedModel?.reasoning.kind === 'selectable' && <ChevronDown size={10} />}
+                </button>
+                {reasoningOpen && selectedModel?.reasoning.kind === 'selectable' && modelCallBinding && <div className="menu-popover reasoning-menu">
+                  {selectedModel.reasoning.effort && <><span className="menu-label">推理档位</span>{selectedModel.reasoning.effort.values.map((effort) => {
+                    const selected = modelCallBinding.reasoning?.kind === 'effort' && modelCallBinding.reasoning.value === effort;
+                    return <button key={effort ?? 'provider-none'} className={selected ? 'is-selected' : ''} onClick={() => void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'effort', value: effort } })}><span><strong>{effort === null || effort === 'none' ? '关闭' : effort}</strong></span>{selected && <Check size={13} />}</button>;
+                  })}</>}
+                  {selectedModel.reasoning.toggle && <><span className="menu-label">推理开关</span>{[true, false].map((enabled) => {
+                    const selected = modelCallBinding.reasoning?.kind === 'toggle' && modelCallBinding.reasoning.enabled === enabled;
+                    return <button key={enabled ? 'enabled' : 'disabled'} className={selected ? 'is-selected' : ''} onClick={() => void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'toggle', enabled } })}><span><strong>{enabled ? '开启' : '关闭'}</strong></span>{selected && <Check size={13} />}</button>;
+                  })}</>}
+                  {selectedModel.reasoning.budget_tokens?.minimum != null && selectedModel.reasoning.budget_tokens.maximum != null && <div className="reasoning-budget"><span className="menu-label">Token 预算</span><div><input ref={budgetInputRef} type="number" min={selectedModel.reasoning.budget_tokens.minimum} max={selectedModel.reasoning.budget_tokens.maximum} defaultValue={modelCallBinding.reasoning?.kind === 'budget_tokens' ? modelCallBinding.reasoning.tokens : Math.ceil((selectedModel.reasoning.budget_tokens.minimum + selectedModel.reasoning.budget_tokens.maximum) / 2)} /><button onClick={() => { const tokens = Number(budgetInputRef.current?.value); if (Number.isInteger(tokens)) void changeBinding({ connection_id: modelCallBinding.connection_id, reasoning: { kind: 'budget_tokens', tokens } }); }}>应用</button></div><small>{selectedModel.reasoning.budget_tokens.minimum.toLocaleString('zh-CN')}–{selectedModel.reasoning.budget_tokens.maximum.toLocaleString('zh-CN')}</small></div>}
+                </div>}
+              </div>
+              <div className="composer-submit">
+                {isRunning && !draft.hasContent ? (
+                  <button
+                    className="send-button is-stop"
+                    onClick={onStop}
+                    aria-label="停止本轮运行"
+                    title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，子任务、排队输入和后台命令不会自动取消。"
+                  ><Square size={14} fill="currentColor" strokeWidth={0} aria-hidden="true" /></button>
+                ) : (
+                  <button className="send-button" onClick={() => void submit()} disabled={!draft.hasContent || draft.pendingFiles > 0 || draft.failedFiles > 0 || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning ? '排队发送' : '发送'}>
+                    {isRunning ? <Play size={14} fill="currentColor" /> : <ArrowUp size={16} />}
+                  </button>
+                )}
               </div>
             </div>
-
-          </div>
-          </div>
           </div>
           </div>
         </div>
-        {!welcome && <p className={`composer-note${!modelReady ? ' composer-note--attention' : ''}`}>{!modelReady ? (modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置') : composerHint} · 规划与权限只作用于本轮</p>}
+        {!welcome && !modelReady && <p className="composer-note composer-note--attention">{modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置'}</p>}
       </div> : (
-        <div className="observer-wrap composer-wrap">
+        <div className="observer-wrap composer-wrap" ref={composerWrapRef}>
           {composerQueue}
           <div className="observer-dock">
             <span className="observer-dock__icon"><Eye size={15} /></span>

@@ -442,6 +442,18 @@ class LocalBrowserBridge:
         async with self._lock:
             self._quarantined_sessions.add(session_id)
 
+    async def require_import_controller(self, connection_id: str, generation: int) -> None:
+        """Validate the existing browser owner without adding a protocol command."""
+        connection = await self._connection(connection_id)
+        async with self._lock:
+            if (self._closing or not connection.is_open
+                    or self._connections.get(connection_id) is not connection
+                    or connection.role != "controller"
+                    or connection.generation != generation
+                    or self._controller_by_session.get(connection.session_id) != connection_id
+                    or connection.session_id in self._quarantined_sessions):
+                raise ProtocolBridgeError("IMPORT_CONTROLLER_REQUIRED", "当前页面没有文件导入控制权，请重新连接。")
+
     async def snapshot(self, connection_id: str) -> dict[str, object]:
         connection = await self._connection(connection_id)
         frame = await connection.controller.request(
