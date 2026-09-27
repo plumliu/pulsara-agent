@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -4136,6 +4137,43 @@ class ProviderDispatchCoordinator:
             candidate=candidate,
             canonical_read=canonical_read,
         )
+        # Advisory source reads do not depend on the base compilation. Keep
+        # their lifetime inside this candidate attempt, and bind only after
+        # compilation succeeds. Final admission still waits for both.
+        recall_task = None
+        if family.preference_source is not None and family.resolved_sources is None:
+            recall_task = asyncio.create_task(
+                self._memory_support.apply_sources(
+                    family.source_completion_basis,
+                    activation_subject=family.activation_subject,
+                    activation_text=family.activation_text,
+                    include_recall=True,
+                    frozen_preference=family.preference_source,
+                    trigger_disposition=family.trigger_disposition,
+                    write_hint=family.write_hint,
+                ),
+                name="prospective-root-memory-sources",
+            )
+        try:
+            return await self._compile_prospective_root_candidate(
+                family, candidate=candidate, canonical_read=canonical_read,
+                deadline=deadline, recall_task=recall_task,
+            )
+        finally:
+            if recall_task is not None:
+                if not recall_task.done():
+                    recall_task.cancel()
+                await asyncio.gather(recall_task, return_exceptions=True)
+
+    async def _compile_prospective_root_candidate(
+        self,
+        family: PreparedProspectiveRootCandidateFamily,
+        *,
+        candidate: PreparedRootProviderInputCandidate,
+        canonical_read: FrozenCanonicalProviderDispatchRead,
+        deadline: float,
+        recall_task: asyncio.Task[CollectedContextSources] | None,
+    ) -> PreparedProspectiveRootCandidate:
         facts = canonical_read.compile_snapshot
         canonical_input = facts.canonical_input
         frontier = canonical_frontier(
@@ -4255,15 +4293,8 @@ class ProviderDispatchCoordinator:
             )
             resolved_sources = family.resolved_sources
             if resolved_sources is None:
-                resolved_sources = await self._memory_support.apply_sources(
-                    family.source_completion_basis,
-                    activation_subject=family.activation_subject,
-                    activation_text=family.activation_text,
-                    include_recall=True,
-                    frozen_preference=family.preference_source,
-                    trigger_disposition=family.trigger_disposition,
-                    write_hint=family.write_hint,
-                )
+                assert recall_task is not None
+                resolved_sources = await recall_task
                 family.bind_resolved_sources(resolved_sources)
             final_sources = resolved_sources
             final_request = replace(

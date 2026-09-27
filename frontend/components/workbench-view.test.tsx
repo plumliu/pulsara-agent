@@ -393,6 +393,47 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
   };
 }
 
+describe('prompt delivery and preparation', () => {
+  const submission = {
+    sessionId: 'session-one', connectionGeneration: 1, commandId: 'command:start',
+    queueItemId: 'queue:start', content: { parts: [{ type: 'text' as const, text: '开始处理这条消息' }] },
+    deliveryMode: 'new-turn' as const, permission: 'read-only' as const, displayAsMessage: true,
+  };
+
+  it('separates confirmed delivery from preparation, then replaces the placeholder with real activity', () => {
+    const view = render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [{ ...submission, status: 'sending' }] })} />);
+    expect(screen.getByText('正在发送…')).toBeTruthy();
+    expect(screen.queryByLabelText('Pulsara 处理状态')).toBeNull();
+    view.rerender(<WorkbenchView {...props({ isRunning: false, localSubmissions: [{ ...submission, status: 'synchronizing' }] })} />);
+    expect(screen.getByText('已送达').closest('.user-turn')).toBeTruthy();
+    expect(within(screen.getByLabelText('Pulsara 处理状态')).getByText('准备开始…')).toBeTruthy();
+    expect(screen.queryByText('正在开始…')).toBeNull();
+    const user = { id: 'entry:start', role: 'user' as const, turnId: 'turn:start', body: '开始处理这条消息', time: '12:00' };
+    view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn:start', messages: [user] })} />);
+    expect(screen.getAllByText('开始处理这条消息')).toHaveLength(1);
+    expect(within(screen.getByLabelText('Pulsara 处理状态')).getByText('正在处理…')).toBeTruthy();
+    view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn:start', messages: [user,
+      { id: 'live:start', role: 'assistant', turnId: 'turn:start', body: '收到', time: '', status: 'running' },
+    ] })} />);
+    expect(screen.queryByLabelText('Pulsara 处理状态')).toBeNull();
+    expect(screen.getByText('收到')).toBeTruthy();
+  });
+
+  it.each(['unknown', 'rejected', 'cancelled'] as const)('does not imply preparation for %s delivery', status => {
+    render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [{ ...submission, status }] })} />);
+    expect(screen.queryByText('已送达')).toBeNull();
+    expect(screen.queryByLabelText('Pulsara 处理状态')).toBeNull();
+  });
+
+  it('does not start another assistant for queued or disconnected submissions', () => {
+    const localSubmissions = [{ ...submission, status: 'queued' as const }];
+    const view = render(<WorkbenchView {...props({ localSubmissions })} />);
+    expect(screen.queryByText('准备开始…')).toBeNull();
+    view.rerender(<WorkbenchView {...props({ isRunning: false, runtimeStatus: 'reconnecting', localSubmissions })} />);
+    expect(screen.queryByText('准备开始…')).toBeNull();
+  });
+});
+
 describe('current-session runtime actions', () => {
   it('keeps runtime reopen in the header menu, separate from compaction', () => {
     const onReopenRuntime = vi.fn();

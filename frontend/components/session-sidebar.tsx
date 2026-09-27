@@ -20,6 +20,7 @@ interface SessionSidebarProps {
   workspace: Workspace;
   sessions: SessionSummary[];
   activeSessionId: string;
+  openingSessionId?: string;
   runtimeStatus: RuntimeStatus;
   connectionRole?: 'observer' | 'controller';
   isOpen: boolean;
@@ -88,6 +89,7 @@ function groupSessionsByWorkspace(
 function SessionItem({
   session,
   activeSessionId,
+  opening,
   onSelectSession,
   onDeleteSession,
   onArchiveSession,
@@ -95,6 +97,7 @@ function SessionItem({
 }: {
   session: SessionSummary;
   activeSessionId: string;
+  opening: boolean;
   onSelectSession: (id: string) => void;
   onDeleteSession: (session: SessionSummary) => void;
   onArchiveSession: (session: SessionSummary) => void;
@@ -105,12 +108,13 @@ function SessionItem({
     <div className="session-row">
     <button
       className={`session-item${presence === 'current' ? ' is-active' : ''}`}
+      aria-current={presence === 'current' ? 'page' : undefined}
       onClick={() => onSelectSession(session.id)}
     >
-      <SessionPresenceGlyph presence={presence} />
+      {opening ? <LoaderCircle size={11} className="session-item__loading" aria-hidden="true" /> : <SessionPresenceGlyph presence={presence} />}
       <span className="session-item__copy">
         <strong>{session.title}</strong>
-        <small>{session.subtitle} · {sessionPresenceLabels[presence]}</small>
+        <small>{session.subtitle} · {opening ? '正在载入' : sessionPresenceLabels[presence]}</small>
         {taskCountSummary(session) && (
           <span className={`session-item__tasks${session.taskCounts?.attention ? ' has-attention' : ''}`}>
             <GitFork size={10} /> {taskCountSummary(session)}
@@ -140,6 +144,7 @@ export function SessionSidebar({
   workspace,
   sessions,
   activeSessionId,
+  openingSessionId,
   runtimeStatus,
   connectionRole,
   isOpen,
@@ -322,6 +327,7 @@ export function SessionSidebar({
                                 key={session.id}
                                 session={session}
                                 activeSessionId={activeSessionId}
+                                opening={openingSessionId === session.id}
                                 onSelectSession={onSelectSession}
                                 onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRefreshSessions={onRefreshSessions}
                               />
@@ -355,6 +361,7 @@ export function SessionSidebar({
                       key={session.id}
                       session={session}
                       activeSessionId={activeSessionId}
+                      opening={openingSessionId === session.id}
                       onSelectSession={onSelectSession}
                       onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRefreshSessions={onRefreshSessions}
                     />

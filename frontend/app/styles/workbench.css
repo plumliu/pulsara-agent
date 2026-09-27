@@ -1,3 +1,5 @@
+.session-connected-views { display: contents; }
+.session-connected-views[hidden] { display: none; }
 .workbench {
   position: relative;
   z-index: 2;
@@ -15,6 +17,18 @@
 .session-title h2 { font-size: var(--type-body); font-weight: 700; }
 .session-title p { margin-top: 3px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); }
 .mobile-menu-button { display: none; place-items: center; width: 31px; height: 31px; border-radius: 8px; background: transparent; color: var(--muted); }
+.session-opening { grid-template-rows: 62px minmax(0, 1fr); }
+.session-opening__body { display: grid; place-items: center; min-height: 0; overflow: auto; padding: 32px 24px; }
+.session-opening__content { display: flex; flex-direction: column; align-items: center; gap: 22px; width: min(100%, 420px); text-align: center; animation: pop-in .2s ease-out; }
+.session-opening__content > .brand-mark { width: 48px; height: 48px; }
+.session-opening__content h3 { margin: 0; color: var(--ink-soft); font-family: var(--serif); font-size: var(--type-heading-small); font-weight: 500; }
+.session-opening__content p { margin: 10px 0 0; color: var(--muted); font-size: var(--type-small); line-height: 1.7; overflow-wrap: anywhere; }
+.session-opening__content > .ghost-button { display: inline-flex; }
+.session-opening__spinner, .session-item__loading { color: var(--muted); animation: spin 1.2s linear infinite; }
+.session-item__loading { margin-top: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .session-opening__content, .session-opening__spinner, .session-item__loading { animation: none; }
+}
 .live-badge { flex: none; padding: 3px 5px; border-radius: 4px; background: var(--green-soft); color: var(--green); font-family: var(--mono); font-size: var(--type-micro); font-weight: 800; letter-spacing: .12em; white-space: nowrap; }
 .live-badge--completed { color: var(--green); background: var(--green-soft); }
 .live-badge--interrupted { color: var(--red); background: var(--red-soft); }
@@ -184,6 +198,17 @@
 .assistant-markdown .katex { font-size: 1.04em; }
 .assistant-markdown .katex-display { max-width: 100%; margin: 12px 0 14px; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
 .markdown-copy-surface { display: contents; }
+.mermaid-block { min-width: 0; margin: 12px 0; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-raised); font-family: var(--sans); }
+.mermaid-block__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 9px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: var(--type-caption); line-height: 1.5; }
+.mermaid-block__toolbar > span, .mermaid-block__toolbar > div { display: flex; align-items: center; gap: 6px; }
+.mermaid-block button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px; border-radius: 5px; background: transparent; color: var(--muted); font-size: var(--type-caption); line-height: 1.5; }
+.mermaid-block button:hover:not(:disabled) { background: var(--paper-deep); color: var(--ink); }
+.mermaid-block__status { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; color: var(--muted); font-size: var(--type-small); line-height: 1.5; }
+.mermaid-block__preview { display: flex; justify-content: center; padding: 16px; overflow: auto; }
+.mermaid-block__preview img { display: block; max-width: 100%; height: auto; }
+.mermaid-block pre, .assistant-markdown .mermaid-block pre { margin: 0; border-radius: 0; }
+.mermaid-block pre code { display: block; padding: 12px; white-space: pre; }
+.mermaid-measure { position: fixed; top: 0; left: -100000px; width: 1200px; visibility: hidden; pointer-events: none; }
 .math-copy-target { position: relative; outline: none; cursor: pointer; transition: background-color .14s ease, border-color .14s ease, box-shadow .14s ease; }
 .math-copy-target--inline { display: inline-block; border-radius: 5px; }
 .math-copy-target--display { display: block; max-width: 100%; margin: 12px 0 14px; padding: 4px 7px; border: 1px solid transparent; border-radius: 7px; }

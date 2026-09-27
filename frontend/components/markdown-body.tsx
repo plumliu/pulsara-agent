@@ -3,11 +3,12 @@
 import type { Element as HastElement, Parent as HastParent, Root as HastRoot } from 'hast';
 import { toText } from 'hast-util-to-text';
 import rehypeKatex from 'rehype-katex';
-import { useCallback, useRef, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { useCallback, useMemo, useRef, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math-extended';
 import { SKIP, visitParents } from 'unist-util-visit-parents';
+import { MermaidBlock } from './mermaid-block';
 
 export type MarkdownNotify = (
   title: string,
@@ -18,6 +19,7 @@ export type MarkdownNotify = (
 interface MarkdownProps {
   body: string;
   onNotify: MarkdownNotify;
+  streaming?: boolean;
 }
 
 interface PointerOrigin {
@@ -231,15 +233,24 @@ export function normalizeMathMarkdown(value: string): string {
   return output;
 }
 
-export function MarkdownBody({ body, onNotify }: MarkdownProps) {
+export function MarkdownBody({ body, onNotify, streaming = false }: MarkdownProps) {
+  const components = useMemo<Components>(() => ({
+    a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
+    pre: ({ node, children, ...props }) => {
+      const code = node?.children[0];
+      if (code?.type === 'element' && code.tagName === 'code'
+        && elementClasses(code).some(name => name.toLowerCase() === 'language-mermaid')) {
+        return <MermaidBlock source={toText(code, { whitespace: 'pre' }).replace(/\n$/, '')} streaming={streaming} onNotify={onNotify} />;
+      }
+      return <pre {...props}>{children}</pre>;
+    },
+  }), [onNotify, streaming]);
   return (
     <MarkdownCopySurface onNotify={onNotify}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: true }]]}
         rehypePlugins={[rehypeCopyableMath, [rehypeKatex, { strict: false }]]}
-        components={{
-          a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
-        }}
+        components={components}
       >
         {normalizeMathMarkdown(body)}
       </ReactMarkdown>

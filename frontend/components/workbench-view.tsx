@@ -103,6 +103,7 @@ interface WorkbenchViewProps {
   todo?: TodoRun;
   activePlanMode: boolean;
   isRunning: boolean;
+  activeTurnId?: string;
   inspectorOpen: boolean;
   queuedCount: number;
   queuedPrompts: QueuedPrompt[];
@@ -805,7 +806,7 @@ function ReasoningRow({ block, onNotify }: { block: ReasoningBlock; onNotify: Ma
         <ChevronRight className="reasoning-row__chevron" size={12} />
       </button>
       <AnimatedDisclosure open={expanded}>
-        <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} /></div>
+        <div className="reasoning-row__body assistant-markdown"><MarkdownBody body={block.body} onNotify={onNotify} streaming={running} /></div>
       </AnimatedDisclosure>
     </section>
   );
@@ -895,7 +896,7 @@ function SubagentRunCard({
                   <span><CornerDownRight size={11} /> 主任务补充</span>
                   <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>
                 </div>
-              ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>)}
+              ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} streaming={activity.status === 'running'} /></div>)}
               {activity.traces?.length ? <div className="execution-rail subagent-execution">{activity.traces.map((trace) => <TraceCard key={`${artifactOwnerKey}:${trace.id}:${trace.resultEntryId ?? ''}`} trace={trace} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div> : null}
             </section>
           ))}
@@ -1230,7 +1231,7 @@ function AssistantMessage({
         <>
           <div className="assistant-copy">
             <div className={`assistant-markdown${isStreaming ? '' : ' assistant-markdown--pretty'}`}>
-              <MarkdownBody body={message.body} onNotify={onNotify} />
+              <MarkdownBody body={message.body} onNotify={onNotify} streaming={isStreaming} />
             </div>
             {(canCopyResponse || message.forkEligible) && (
               <div className="response-actions">
@@ -1667,6 +1668,7 @@ export function WorkbenchView({
   todo,
   activePlanMode,
   isRunning,
+  activeTurnId,
   inspectorOpen,
   queuedCount,
   queuedPrompts,
@@ -1771,6 +1773,10 @@ export function WorkbenchView({
     ));
   const conversationSubmissions = localSubmissions.filter(item => item.displayAsMessage
     && item.deliveryMode === 'new-turn' && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER');
+  const preparingSubmission = !isRunning && runtimeStatus === 'online'
+    && conversationSubmissions.find(item => ['synchronizing', 'queued'].includes(item.status));
+  const awaitingFirstActivity = isRunning && runtimeStatus === 'online' && activeTurnId && !interaction
+    && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId);
   const conversationCommandIds = new Set(conversationSubmissions.map(item => item.commandId));
   const queuedDisplayCount = queuedCount - queuedPrompts.filter(item => conversationCommandIds.has(item.commandId)).length;
   const visibleQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
@@ -2344,9 +2350,17 @@ export function WorkbenchView({
                     : item.status === 'cancelled' ? '发送已取消'
                       : item.status === 'unknown' ? '发送状态待确认'
                         : item.status === 'consumed' ? item.outcomeCode === 'TURN_INTERRUPTED' ? '已接收 · 执行已中断' : '已接收'
-                          : '正在开始…'} />
+                          : '已送达'} />
             </div>
           ))}
+          {(preparingSubmission || awaitingFirstActivity) && (
+            <article className="assistant-turn assistant-turn--operational assistant-turn--run-start" aria-label="Pulsara 处理状态">
+              <AssistantHeading message={{ id: 'pending-preparation', role: 'assistant', time: '', body: '' }} response={false} />
+              <div className="assistant-progress" role="status"><i aria-hidden="true" />
+                {preparingSubmission ? '准备开始…' : '正在处理…'}
+              </div>
+            </article>
+          )}
           {pendingSteers.map(item => (
             <div key={item.queueItemId} data-queue-item-id={item.queueItemId} data-action-command-id={item.commandId}
               aria-description="引导已提交，等待当前任务接收">

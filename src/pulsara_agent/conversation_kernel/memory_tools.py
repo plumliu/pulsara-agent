@@ -824,32 +824,23 @@ class KernelMemoryToolPort:
                 texts=None,
                 absence_kind=ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             )
-        embedding = None
-        if self._feature_config.automatic_dense:
-            try:
-                embedding = await self._embedding_provider()
-            except Exception:
-                # Dense recall is optional; a constructor/configuration error
-                # degrades this trigger to the local sparse channel.
-                embedding = None
-        vector = None
+        # The query text is already frozen. Remote embedding and local Chinese
+        # tokenization are independent; a cold tokenizer must not delay HTTP.
+        vector_task = asyncio.create_task(
+            self._automatic_query_embedding(normalized),
+            name="memory-automatic-query-vector",
+        )
         try:
-            query_terms = self._query.tokenize_query(normalized)
-        except ValueError:
-            # Automatic recall is advisory: a lexical resource-bound input
-            # only disables sparse retrieval for this trigger.
-            query_terms = ()
-        if embedding is not None:
-            try:
-                vector = await self._run_remote_exact(
-                    embedding.embed(normalized),
-                    timeout_seconds=self._deadlines.policy.seconds_for(
-                        KernelWatchdogOwner.MEMORY_AUTO_QUERY_EMBEDDING
-                    ),
-                    name="memory-automatic-query-embedding",
-                )
-            except Exception:
-                vector = None
+            query_terms = await self._io.run(
+                self._automatic_query_terms,
+                normalized,
+                deadline_monotonic=self._canonical_deadline(MEMORY_SEARCH_TIMEOUT_SECONDS),
+            )
+            vector = await vector_task
+        finally:
+            if not vector_task.done():
+                vector_task.cancel()
+            await asyncio.gather(vector_task, return_exceptions=True)
         try:
             result = await self._parallel_recall(
                 terms=query_terms,
@@ -867,6 +858,42 @@ class KernelMemoryToolPort:
                 texts=None,
                 absence_kind=ContextSourceAbsenceKind.UNAVAILABLE,
             )
+        return await self._automatic_recall_source(result, normalized)
+
+    def _automatic_query_terms(
+        self, text: str, *, deadline_monotonic: float,
+    ) -> tuple[str, ...]:
+        try:
+            return self._query.tokenize_query(text)
+        except ValueError:
+            # A lexical resource-bound input disables only the sparse channel.
+            return ()
+
+    async def _automatic_query_embedding(self, normalized: str) -> Sequence[float] | None:
+        embedding = None
+        if self._feature_config.automatic_dense:
+            try:
+                embedding = await self._embedding_provider()
+            except Exception:
+                # Dense recall is optional; a constructor/configuration error
+                # degrades this trigger to the local sparse channel.
+                embedding = None
+        if embedding is not None:
+            try:
+                return await self._run_remote_exact(
+                    embedding.embed(normalized),
+                    timeout_seconds=self._deadlines.policy.seconds_for(
+                        KernelWatchdogOwner.MEMORY_AUTO_QUERY_EMBEDDING
+                    ),
+                    name="memory-automatic-query-embedding",
+                )
+            except Exception:
+                pass
+        return None
+
+    async def _automatic_recall_source(
+        self, result: MemoryQueryResult, normalized: str,
+    ) -> ContextSourceCandidate | ContextSourceAbsentFact:
         filtered_facts = tuple(
             item
             for item in result.facts

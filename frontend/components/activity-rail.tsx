@@ -52,6 +52,7 @@ export function ActivityRail({ activeView, onNavigate, onOpenCommand }: Activity
           className={`rail-button${activeView === 'settings' ? ' is-active' : ''}`}
           onClick={() => onNavigate('settings')}
           aria-label="设置"
+          aria-current={activeView === 'settings' ? 'page' : undefined}
           data-tooltip="设置"
         >
           <Settings size={17} strokeWidth={1.8} />

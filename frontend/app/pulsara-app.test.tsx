@@ -803,6 +803,144 @@ class FakeAdapter implements RuntimeAdapter {
 }
 
 describe('PulsaraApp', () => {
+  it('shows a selected session loading page immediately, including while closing the old connection', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    const closing = deferred<void>();
+    vi.spyOn(adapter.lastConnection!, 'close').mockImplementation(() => closing.promise);
+    const opening = deferred<void>();
+    const connect = adapter.connect.bind(adapter);
+    const connectSpy = vi.spyOn(adapter, 'connect').mockImplementation(async (...args) => {
+      await opening.promise;
+      return connect(...args);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /历史会话.*可恢复/ }));
+    expect(screen.getByRole('region', { name: '会话加载页' })).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toContain('正在恢复会话');
+    const selected = screen.getByRole('button', { name: /历史会话.*正在载入/ });
+    expect(selected.getAttribute('aria-current')).toBe('page');
+    expect(screen.getByText('我已经开始检查。').closest('[hidden]')).toBeTruthy();
+    expect(screen.queryByRole('textbox', { name: '发送给 Pulsara' })).toBeNull();
+    expect(screen.queryByRole('complementary', { name: '当前会话详情' })).toBeNull();
+    expect(connectSpy).not.toHaveBeenCalled();
+    fireEvent.click(selected);
+    await act(async () => closing.resolve());
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+    await act(async () => opening.resolve());
+    expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
+    expect(screen.getByRole('heading', { name: '历史会话' })).toBeTruthy();
+    expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();
+    expect(screen.getByRole('complementary', { name: '当前会话详情' })).toBeTruthy();
+  });
+
+  it('keeps the failed target visible and retries it instead of reopening the previous session', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    const connectSpy = vi.spyOn(adapter, 'connect').mockRejectedValueOnce(new Error('暂时无法恢复会话'));
+    fireEvent.click(screen.getByRole('button', { name: /历史会话.*可恢复/ }));
+    expect((await screen.findByRole('alert')).textContent).toContain('暂时无法恢复会话');
+    expect(screen.getByRole('heading', { name: '历史会话' })).toBeTruthy();
+    expect(screen.queryByRole('textbox', { name: '发送给 Pulsara' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    await screen.findByRole('textbox', { name: '发送给 Pulsara' });
+    expect(connectSpy.mock.calls.map(args => args[0])).toEqual(['session-2', 'session-2']);
+    expect(screen.queryByText('暂时无法恢复会话')).toBeNull();
+  });
+
+  it.each(['success', 'error-after-read'] as const)('ignores late %s after selecting a different session', async outcome => {
+    const adapter = new FakeAdapter();
+    adapter.sessions.push(
+      { ...initialSession, id: 'session-2', title: '历史会话' },
+      { ...initialSession, id: 'session-3', title: '另一会话' },
+    );
+    adapter.connectionValues.set('session-3', projection('另一会话的正文'));
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    const opening = deferred<void>();
+    const existence = deferred<SessionSummary | null>();
+    const connect = adapter.connect.bind(adapter);
+    let lateConnection: FakeConnection | undefined;
+    vi.spyOn(adapter, 'connect').mockImplementationOnce(async (...args) => {
+      await opening.promise;
+      if (outcome === 'error-after-read') throw new Error('旧会话恢复失败');
+      lateConnection = await connect(...args);
+      return lateConnection;
+    });
+    if (outcome === 'error-after-read') adapter.readSession.mockImplementationOnce(() => existence.promise);
+    fireEvent.click(screen.getByRole('button', { name: /历史会话.*可恢复/ }));
+    if (outcome === 'error-after-read') {
+      await act(async () => opening.resolve());
+      expect(adapter.readSession).toHaveBeenCalledWith('session-2');
+    } else {
+      await act(async () => {});
+    }
+    fireEvent.click(screen.getByRole('button', { name: /另一会话.*可恢复/ }));
+    await screen.findByText('另一会话的正文');
+    await act(async () => {
+      if (outcome === 'success') opening.resolve();
+      else existence.resolve(adapter.sessions.find(session => session.id === 'session-2')!);
+    });
+    expect(screen.getByRole('heading', { name: '另一会话' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
+    expect(screen.queryByText('旧会话恢复失败')).toBeNull();
+    expect(screen.getByLabelText('发送给 Pulsara').getAttribute('contenteditable')).toBe('true');
+    if (outcome === 'success') expect(lateConnection?.closed).toBe(true);
+  });
+
+  it('does not connect an abandoned selection after its previous connection finally closes', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions.push(
+      { ...initialSession, id: 'session-2', title: '历史会话' },
+      { ...initialSession, id: 'session-3', title: '另一会话' },
+    );
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    const closing = deferred<void>();
+    vi.spyOn(adapter.lastConnection!, 'close').mockImplementation(() => closing.promise);
+    fireEvent.click(screen.getByRole('button', { name: /历史会话.*可恢复/ }));
+    fireEvent.click(screen.getByRole('button', { name: /另一会话.*可恢复/ }));
+    await screen.findByLabelText('发送给 Pulsara');
+    await act(async () => closing.resolve());
+    expect(adapter.connectCalls.map(call => call.sessionId)).toEqual(['session-1', 'session-3']);
+    expect(screen.getByRole('heading', { name: '另一会话' })).toBeTruthy();
+  });
+
+  it.each(['missing', 'deleted'] as const)('exits loading when its target is %s', async outcome => {
+    const adapter = new FakeAdapter();
+    adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    const opening = deferred<void>();
+    const connect = adapter.connect.bind(adapter);
+    let lateConnection: FakeConnection | undefined;
+    vi.spyOn(adapter, 'connect').mockImplementationOnce(async (...args) => {
+      await opening.promise;
+      if (outcome === 'missing') throw new Error('会话已不存在');
+      lateConnection = await connect(...args);
+      return lateConnection;
+    });
+    fireEvent.click(screen.getByRole('button', { name: /历史会话.*可恢复/ }));
+    await act(async () => {});
+    if (outcome === 'missing') {
+      adapter.readSession.mockResolvedValueOnce(null);
+    } else {
+      fireEvent.click(screen.getByLabelText('历史会话 更多操作'));
+      fireEvent.click(screen.getAllByRole('button', { name: '删除会话…' }).at(-1)!);
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^(停止并删除|永久删除)$/ }));
+      await screen.findByText('会话已删除');
+    }
+    await act(async () => opening.resolve());
+    expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
+    expect(screen.queryByLabelText('历史会话 更多操作')).toBeNull();
+    expect(screen.getByRole('heading', { name: '尚未选择会话' })).toBeTruthy();
+    if (outcome === 'deleted') expect(lateConnection?.closed).toBe(true);
+  });
+
   it('shows canonical ROOT interruption instead of treating idle as completed', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {

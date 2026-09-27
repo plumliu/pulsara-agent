@@ -9,6 +9,7 @@ import { InspectorPanel } from '../components/inspector-panel';
 import { CommandPalette, NewSessionDialog, ToastStack } from '../components/overlays';
 import { OverviewView } from '../components/overview-view';
 import { SessionSidebar } from '../components/session-sidebar';
+import { SessionOpeningView } from '../components/session-opening-view';
 import { SessionDeletionDialog } from '../components/session-deletion-dialog';
 import { SettingsView, type SettingsSection } from '../components/settings-view';
 import { WorkbenchView } from '../components/workbench-view';
@@ -186,6 +187,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const deletingSession = useRef<string | undefined>(undefined);
   const requestedSession = useRef('');
   const [activeSessionId, setActiveSessionId] = useState('');
+  // Selection feedback is local UI state; only a connected runtime becomes active.
+  const [openingSessionId, setOpeningSessionId] = useState('');
   const [focusMemoryEntry, setFocusMemoryEntry] = useState<{ sessionId: string; entryId: string }>();
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
   const [taskInventory, setTaskInventory] = useState<AgentTask[]>([]);
@@ -544,7 +547,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     setToolDecisions(toolDecisionsRef.current);
     setFocusMemoryEntry(current => current?.sessionId === sessionId ? undefined : current);
     if (readSavedSessionId() === sessionId) saveSessionId('');
-    if (activeSessionIdRef.current !== sessionId || requestedSession.current !== sessionId) return;
+    if (requestedSession.current !== sessionId) return;
     const previous = connectionRef.current;
     connectionAttempt.current += 1;
     taskInventoryAttempt.current += 1;
@@ -554,6 +557,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     requestedSession.current = '';
     setConnection(undefined);
     setActiveSessionId('');
+    setOpeningSessionId('');
     setProjection(emptyProjection);
     setTaskInventory([]);
     setTaskInventorySessionId('');
@@ -615,6 +619,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     if (deletingSession.current === sessionId || archivingSession.current === sessionId) return undefined;
     requestedSession.current = sessionId;
     const attempt = ++connectionAttempt.current;
+    setOpeningSessionId(current => current === sessionId ? current : '');
     taskInventoryAttempt.current += 1;
     capabilityAttempt.current += 1;
     setTaskInventory([]);
@@ -629,8 +634,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const previous = connectionRef.current;
     connectionRef.current = undefined;
     setConnection(undefined);
-    if (previous) await previous.close();
     try {
+      if (previous) await previous.close();
+      if (attempt !== connectionAttempt.current) return undefined;
       const next = await adapter.connect(sessionId, takeover);
       if (attempt !== connectionAttempt.current) {
         await next.close();
@@ -640,6 +646,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       activeSessionIdRef.current = sessionId;
       setConnection(next);
       setActiveSessionId(sessionId);
+      setOpeningSessionId('');
       saveSessionId(sessionId);
       setSessionList((current) => current.map((session) => (
         session.id === sessionId ? { ...session, live: true } : session
@@ -670,6 +677,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           return undefined;
         }
       } catch { /* an unavailable server is not evidence of a missing session */ }
+      if (attempt !== connectionAttempt.current) return undefined;
       const message = productMessage(error instanceof Error ? error.message : undefined, '无法连接本地服务。');
       setRuntimeStatus(error instanceof RuntimeApiError && error.retryable ? 'offline' : 'failed');
       setRuntimeError(message);
@@ -720,6 +728,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         connectionRef.current = undefined;
         activeSessionIdRef.current = '';
         setConnection(undefined);
+        setOpeningSessionId('');
         setRuntimeStatus('online');
         setRuntimeError(undefined);
         if (previous) await previous.close();
@@ -1021,6 +1030,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     [activeSessionId, sessionList],
   );
   const activeWorkspace = activeSession.workspace ?? workspace;
+  const openingSession = sessionList.find(session => session.id === openingSessionId);
   const isObserver = connection?.role === 'observer';
   const canControl = connection?.role === 'controller';
   const mergedProjection = useMemo(() => mergeRuntimeTaskInventory(
@@ -1090,8 +1100,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [adapter, notify, openRuntimeSession, runtimeReopenBusy]);
 
   const openSession = (id: string) => {
+    if (deletingSession.current === id || archivingSession.current === id) return;
     setActiveView('workbench');
     setSidebarOpen(false);
+    if (connectionRef.current?.sessionId === id || (openingSessionId === id && !runtimeError)) return;
+    setOpeningSessionId(id);
     void openRuntimeSession(id);
   };
 
@@ -2148,14 +2161,15 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
   return (
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
-    <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
+    <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !openingSession ? ' has-inspector' : ''}`}>
       <ActivityRail activeView={activeView} onNavigate={navigate} onOpenCommand={() => setCommandOpen(true)} />
 
       {activeView === 'workbench' && !databaseBlocked && (
         <SessionSidebar
           workspace={activeWorkspace}
           sessions={sessionList}
-          activeSessionId={activeSessionId}
+          activeSessionId={openingSessionId || activeSessionId}
+          openingSessionId={runtimeError ? undefined : openingSessionId}
           runtimeStatus={runtimeStatus}
           connectionRole={connection?.role}
           isOpen={sidebarOpen}
@@ -2189,7 +2203,17 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           canCreateSession={canCreateSession}
         />
       )}
+      {activeView === 'workbench' && !databaseBlocked && openingSession && (
+        <SessionOpeningView
+          session={openingSession}
+          workspace={openingSession.workspace ?? workspace}
+          error={runtimeError}
+          onRetry={() => openSession(openingSession.id)}
+          onOpenSidebar={() => setSidebarOpen(true)}
+        />
+      )}
       {activeView === 'workbench' && !databaseBlocked && (
+        <div className="session-connected-views" hidden={Boolean(openingSession)}>
         <WorkbenchView
           onCompletePaths={(prefix, cursor, signal) => adapter.completeWorkspacePaths(activeSession.id, prefix, cursor, signal)}
           workspace={activeWorkspace}
@@ -2201,6 +2225,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           todo={projection.todo}
           activePlanMode={projection.planMode}
           isRunning={projection.isRunning}
+          activeTurnId={projection.activeTurnId}
           inspectorOpen={inspectorOpen}
           queuedCount={projection.queuedCount}
           queuedPrompts={projection.queuedPrompts}
@@ -2256,9 +2281,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           permission={turnPermission}
           onPermissionChange={setTurnPermission}
         />
-      )}
-      {activeView === 'workbench' && !databaseBlocked && inspectorOpen && <button className="inspector-scrim" aria-label="收起详情侧栏" onClick={() => setInspectorOpen(false)} />}
-      {activeView === 'workbench' && !databaseBlocked && (
+        {inspectorOpen && <button className="inspector-scrim" aria-label="收起详情侧栏" onClick={() => setInspectorOpen(false)} />}
         <InspectorPanel
           projectMcpForms={{
             preview: (input) => adapter.previewMcpImport(input),
@@ -2369,6 +2392,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onNotify={notify}
           onClose={() => setInspectorOpen(false)}
         />
+        </div>
       )}
       {activeView === 'workbench' && databaseBlocked && databaseState && (
         <div className="database-workbench-mask">
