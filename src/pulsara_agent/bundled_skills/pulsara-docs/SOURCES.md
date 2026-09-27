@@ -1,8 +1,8 @@
 # Pulsara Docs — source notes
 
-Maintainer reference record. These Skills informed the design; they are not runtime dependencies. This bundle contains original instructions and helpers, with no upstream Skill scripts vendored. Third-party materials retain their own licenses.
+Attribution for maintainers; not required to use this Skill. This bundle contains original instructions and helpers, with no upstream Skill scripts vendored. Third-party materials retain their own licenses.
 
-| Reference | Lesson retained |
+| Reference | Areas referenced |
 | --- | --- |
 | OpenAI Codex Documents, installed package 26.915.20218 | Preserve templates; combine structural and rendered-page verification; distinguish comments from visible PDF output. |
 | [Anthropic docx](https://github.com/anthropics/skills/tree/main/skills/docx) | Task routing and concrete OOXML pitfalls. |
@@ -14,3 +14,5 @@ Maintainer reference record. These Skills informed the design; they are not runt
 | [borghei docx-toolkit](https://github.com/borghei/Claude-Skills/tree/main/documents/docx-toolkit) | Pre-delivery structural audit. |
 | [Houssem footnote-docx](https://github.com/Houssem0220/footnote-docx) | Native note relationships, IDs, and editable output. |
 | [Sun-Lebs word-mathtype-docx](https://github.com/Sun-Lebs-For-DeepOM/word-mathtype-docx) | Separate mathematical correctness, visual appearance, representation, and editability; expose platform requirements. |
+
+Library references: [LibreOffice conversion filters](https://help.libreoffice.org/latest/en-US/text/shared/guide/convertfilters.html) and [msoffcrypto-tool](https://github.com/nolze/msoffcrypto-tool).

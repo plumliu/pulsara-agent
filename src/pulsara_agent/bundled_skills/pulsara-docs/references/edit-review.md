@@ -2,6 +2,8 @@
 
 ## Local edits
 
+For binary `.doc`, choose a DOC-capable editor and a separate output through [formats and passwords](formats-passwords.md). The run/OOXML techniques below apply to DOCX.
+
 Locate the target by its story, surrounding context, and exact original text. Verify the intended occurrence before writing; re-resolve locations after structural changes. Word can split a phrase across differently formatted runs and inline objects.
 
 For a small replacement, preserve unaffected runs and their formatting. Assigning `paragraph.text` or `cell.text` rebuilds their inline content; reserve it for intentional replacement of the whole structure. Treat hyperlinks, fields, bookmarks, note references, comments, and revisions as boundaries. Use a supported library API, or a local namespace-aware OOXML edit that preserves unrelated parts and relationships.

@@ -431,11 +431,13 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         "references/edit-review.md",
         "references/notes-math.md",
         "references/render-verify.md",
+        "references/formats-passwords.md",
         "scripts/inspect_docx.py",
         "scripts/render_docx.py",
         "examples/create_report.py",
         "examples/replace_text.py",
         "examples/fill_template.py",
+        "examples/decrypt_document.py",
     ):
         resource = docs.base_dir / relative_path
         resource_read = ReadFileTool(tmp_path).execute(

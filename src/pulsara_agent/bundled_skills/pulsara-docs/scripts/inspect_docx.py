@@ -280,7 +280,7 @@ def main():
                          view=args.view, start=args.start, end=args.end)
     except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as exc:
         print(json.dumps({"input": str(args.input), "error": str(exc),
-                          "hint": "Use a readable, unencrypted DOCX/OOXML package; binary DOC requires conversion"}, ensure_ascii=False))
+                          "hint": "This inspector needs unencrypted DOCX; use a DOC-capable reader for binary DOC, or decrypt encrypted input when needed"}, ensure_ascii=False))
         return 2
     if args.text:
         result = {key: result[key] for key in

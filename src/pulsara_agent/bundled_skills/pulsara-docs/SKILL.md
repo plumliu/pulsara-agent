@@ -1,6 +1,6 @@
 ---
 name: pulsara-docs
-description: Read, create, edit, and review Word documents (.docx), including templates, forms, comments, tracked changes, notes, and equations. Use for Word 文档、报告、合同、填表、批注、修订 and legacy .doc conversion.
+description: Read, create, edit, and review Word documents (.docx/.doc), including templates, forms, comments, tracked changes, notes, and equations. Use for Word 文档、报告、合同、填表、批注、修订, DOC/DOCX conversion, and decryption with a user-provided password.
 ---
 
 # Pulsara Docs
@@ -15,9 +15,9 @@ Follow the user's template and editing scope. For existing documents, inspect th
 | Create or fill | `python-docx` for ordinary documents; `docxtpl` for prepared templates; Pandoc for Markdown/citations | [Creation](references/create-template.md) for examples, forms, layout, and CJK fonts |
 | Edit or review | Locate the exact passage; preserve surrounding formatting and review markup | [Editing](references/edit-review.md) for guarded replacement, comments, or tracked changes |
 
-Use a native editor or a feature-specific library when the document's affected structures exceed these tools. Consult [notes and equations](references/notes-math.md) only for those features, and [rendering](references/render-verify.md) for conversion or page inspection.
+For legacy `.doc`, format conversion, or password-protected inputs, start with [formats and passwords](references/formats-passwords.md); choose a working format for the task rather than converting every input. Use a native editor or a feature-specific library when the document's affected structures exceed these tools. Consult [notes and equations](references/notes-math.md) only for those features, and [rendering](references/render-verify.md) for page inspection.
 
-Reuse a suitable Python environment, or prepare task dependencies with uv, venv, or Conda. The examples declare dependencies for `uv run --script`; helpers need Python 3.10+, and rendering also needs LibreOffice and Poppler. Resolve bundled paths relative to this `SKILL.md`, not the task's working directory. Scripts are optional: run them, adapt them in the task workspace, or write task-specific code.
+Reuse a suitable Python environment, or prepare task dependencies with uv, venv, or Conda. The examples declare dependencies for `uv run --script`; helpers need Python 3.10+, and the bundled render helper also needs LibreOffice and Poppler. Resolve bundled paths relative to this `SKILL.md`, not the task's working directory. Scripts are optional: run them, adapt them in the task workspace, or write task-specific code.
 
 ## Verify and deliver
 

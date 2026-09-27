@@ -1,6 +1,6 @@
 # Read and inspect
 
-For ordinary reading, preserve interleaved paragraphs and tables (`Document.iter_inner_content()`), including relevant headers, notes, comments, and nested/merged cells. Images, text boxes, charts, and equations may require separate extraction or visual inspection. Page citations require a current render; DOCX text positions and cached page fields are not authoritative page numbers.
+For DOCX body text, `Document.iter_inner_content()` reads paragraphs and tables in document order. Read relevant headers, notes, and comments separately, and account for nested/merged cells. Images, text boxes, charts, and equations may require separate extraction or visual inspection. Page citations require a current render; DOCX text positions and cached page fields are not authoritative page numbers.
 
 ## Optional inspector
 
@@ -24,4 +24,4 @@ The helper retains hidden text and cached field values. It omits drawing, text-b
 
 Paragraph-mark, table, numbering, and formatting revisions need a capable editor or targeted inspection beyond this text projection. The helper reports comment contents and reference markers, but does not resolve anchored ranges: locate those using the range markers or a capable editor, rather than guessing from nearby text. Modern replies and resolved states may use extension parts. Preserve original comment IDs when reporting feedback.
 
-Cover the requested scope, expanding extraction when warnings affect the answer. Convert legacy `.doc` through a capable application; encrypted inputs require an authorized decryption workflow.
+Cover the requested scope, expanding extraction when warnings affect the answer. For legacy `.doc` or encrypted inputs, follow [formats and passwords](formats-passwords.md) before using DOCX readers; an encrypted DOCX may be an OLE container rather than a ZIP, so a ZIP error alone does not establish corruption.
