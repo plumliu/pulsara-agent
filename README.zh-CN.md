@@ -110,6 +110,9 @@ Kernel 当前支持：
 - 内置 [pulsara-docs](src/pulsara_agent/bundled_skills/pulsara-docs/SKILL.md)，支持
   Word 读取、新建、模板填充、编辑、批注、修订与版面检查；可选脚本使用任务选定的
   环境和依赖；
+- 内置 [pulsara-sheets](src/pulsara_agent/bundled_skills/pulsara-sheets/SKILL.md)，支持
+  表格读取、编辑、公式、格式、原生图表、格式转换与验证；分析方法属于独立 Skill
+  的职责，可选脚本使用任务选定的环境和依赖；
 - 统一的process-local capability discovery：execution-backed Builtin、每server
   MCP snapshot与聚合Skill catalog进入同一个pure frozen registry，physical
   authority仍由原owner持有；

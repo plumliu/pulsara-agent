@@ -1705,6 +1705,7 @@ def test_cli_four_loose_commands_project_typed_service_outcomes(
             "pulsara-docs",
             "pulsara-mcp-installer",
             "pulsara-plugin-installer",
+            "pulsara-sheets",
             "pulsara-skill-creator",
             "pulsara-skill-installer",
         }

@@ -10,6 +10,7 @@ EXPECTED_BUNDLED_SKILL_NAMES = (
     "pulsara-docs",
     "pulsara-mcp-installer",
     "pulsara-plugin-installer",
+    "pulsara-sheets",
     "pulsara-skill-creator",
     "pulsara-skill-installer",
 )

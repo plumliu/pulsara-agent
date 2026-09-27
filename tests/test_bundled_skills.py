@@ -350,6 +350,7 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         "pulsara-docs",
         "pulsara-mcp-installer",
         "pulsara-plugin-installer",
+        "pulsara-sheets",
         "pulsara-skill-creator",
         "pulsara-skill-installer",
     )
@@ -443,6 +444,31 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         resource_read = ReadFileTool(tmp_path).execute(
             ToolCall(
                 f"call:docs-resource:{relative_path}",
+                "read_file",
+                {"path": str(resource)},
+            )
+        )
+        assert resource_read.status is ToolResultState.SUCCESS
+        assert json.loads(resource_read.output)["path"] == str(resource)
+
+    sheets = next(item for item in result.candidates if item.name == "pulsara-sheets")
+    assert sheets.source is SkillSource.BUNDLED
+    assert sheets.origin == BundledSkillOrigin("bundled_skills/pulsara-sheets")
+    for relative_path in (
+        "SKILL.md",
+        "references/read-inspect.md",
+        "references/create-edit.md",
+        "references/formulas-recalc.md",
+        "references/charts-layout.md",
+        "references/formats-passwords.md",
+        "references/verify-deliver.md",
+        "scripts/inspect_workbook.py",
+        "examples/create_workbook.py",
+    ):
+        resource = sheets.base_dir / relative_path
+        resource_read = ReadFileTool(tmp_path).execute(
+            ToolCall(
+                f"call:sheets-resource:{relative_path}",
                 "read_file",
                 {"path": str(resource)},
             )

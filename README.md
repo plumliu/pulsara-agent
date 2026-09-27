@@ -121,6 +121,10 @@ The current Kernel supports:
 - bundled [pulsara-docs](src/pulsara_agent/bundled_skills/pulsara-docs/SKILL.md)
   for Word reading, creation, templates, editing, comments, revisions, and layout
   checks; its optional scripts use task-selected environments and dependencies;
+- bundled [pulsara-sheets](src/pulsara_agent/bundled_skills/pulsara-sheets/SKILL.md)
+  for spreadsheet reading, editing, formulas, formatting, native charts, format
+  conversion, and verification; analysis methods remain a separate Skill scope,
+  and optional helpers use task-selected environments and dependencies;
 - unified, process-local capability discovery: execution-backed Builtins,
   per-server MCP snapshots, and the aggregate Skill catalog enter one pure
   frozen registry while their original owners retain physical authority;
