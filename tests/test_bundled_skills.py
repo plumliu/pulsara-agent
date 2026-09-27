@@ -347,6 +347,7 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
     tmp_path: Path,
 ) -> None:
     assert EXPECTED_BUNDLED_SKILL_NAMES == (
+        "pulsara-docs",
         "pulsara-mcp-installer",
         "pulsara-plugin-installer",
         "pulsara-skill-creator",
@@ -419,6 +420,33 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
     )
     assert mcp_skill_read.status is ToolResultState.SUCCESS
     assert json.loads(mcp_skill_read.output)["path"] == str(mcp_installer.path)
+
+    docs = next(item for item in result.candidates if item.name == "pulsara-docs")
+    assert docs.source is SkillSource.BUNDLED
+    assert docs.origin == BundledSkillOrigin("bundled_skills/pulsara-docs")
+    for relative_path in (
+        "SKILL.md",
+        "references/read-inspect.md",
+        "references/create-template.md",
+        "references/edit-review.md",
+        "references/notes-math.md",
+        "references/render-verify.md",
+        "scripts/inspect_docx.py",
+        "scripts/render_docx.py",
+        "examples/create_report.py",
+        "examples/replace_text.py",
+        "examples/fill_template.py",
+    ):
+        resource = docs.base_dir / relative_path
+        resource_read = ReadFileTool(tmp_path).execute(
+            ToolCall(
+                f"call:docs-resource:{relative_path}",
+                "read_file",
+                {"path": str(resource)},
+            )
+        )
+        assert resource_read.status is ToolResultState.SUCCESS
+        assert json.loads(resource_read.output)["path"] == str(resource)
 
 
 def _inspect(

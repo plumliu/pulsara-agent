@@ -118,6 +118,9 @@ The current Kernel supports:
   catalog routing metadata is complete-or-unavailable, explicit/configured
   activation carries the exact parsed Markdown body, and model-driven
   progressive disclosure uses ordinary `read_file` with a 2,000-line window;
+- bundled [pulsara-docs](src/pulsara_agent/bundled_skills/pulsara-docs/SKILL.md)
+  for Word reading, creation, templates, editing, comments, revisions, and layout
+  checks; its optional scripts use task-selected environments and dependencies;
 - unified, process-local capability discovery: execution-backed Builtins,
   per-server MCP snapshots, and the aggregate Skill catalog enter one pure
   frozen registry while their original owners retain physical authority;

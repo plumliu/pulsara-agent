@@ -107,6 +107,9 @@ Kernel 当前支持：
   routing metadata只能完整发布或明确UNAVAILABLE，explicit/configured activation
   携带exact parsed Markdown，模型驱动的progressive disclosure只使用普通
   `read_file`及其2,000行窗口；
+- 内置 [pulsara-docs](src/pulsara_agent/bundled_skills/pulsara-docs/SKILL.md)，支持
+  Word 读取、新建、模板填充、编辑、批注、修订与版面检查；可选脚本使用任务选定的
+  环境和依赖；
 - 统一的process-local capability discovery：execution-backed Builtin、每server
   MCP snapshot与聚合Skill catalog进入同一个pure frozen registry，physical
   authority仍由原owner持有；
