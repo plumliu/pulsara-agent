@@ -20,6 +20,7 @@ from pulsara_agent.llm.resolution import (
     with_call_output_cap,
 )
 from pulsara_agent.llm.retry import LLMRetryConfig
+from pulsara_agent.llm.stream_limits import MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.llm.frozen_target import _freeze_provider_physical_call_target
 from pulsara_agent.llm.provider_open import (
@@ -30,6 +31,12 @@ from pulsara_agent.ports.provider_stream import (
     ProviderNormalizedTerminalKind,
     ProviderPhysicalCompletionStatus,
     ProviderStreamTerminal,
+)
+from pulsara_agent.ports.live_agent_event import (
+    DataDeltaPayload,
+    TextDeltaPayload,
+    ThinkingDeltaPayload,
+    ToolCallDeltaPayload,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 
@@ -110,7 +117,6 @@ async def probe_model_connection(
                 target=target,
                 call=call,
                 maximum_input_tokens=target.context_budget.input_budget_tokens,
-                maximum_output_tokens=_PROBE_OUTPUT_TOKENS,
             ),
             resolved_model_call_id=call.resolved_model_call_id,
             timeout_policy=_PROBE_TIMEOUT,
@@ -120,12 +126,26 @@ async def probe_model_connection(
         if borrowed.call.fact != call.fact:
             raise RuntimeError("borrowed connection probe call drifted")
         execution = borrowed.open_stream(context=context)
+        received_content_bytes = 0
         while True:
             item = await execution.read_next()
             if item is None:
                 raise ModelConnectionProbeFailure(
                     "transport_protocol_error",
                     "测试请求在协议终态前结束。",
+                )
+            if isinstance(item, (TextDeltaPayload, ThinkingDeltaPayload, ToolCallDeltaPayload)):
+                received_content_bytes += len(item.delta.encode("utf-8"))
+            elif isinstance(item, DataDeltaPayload):
+                received_content_bytes += len(item.data.encode("utf-8"))
+            # A connection probe has no kernel assembler. Reuse the existing
+            # content working-set boundary if an endpoint ignores its 64-token
+            # request; never charge event envelopes or end snapshots twice.
+            # This purpose-local protection does not limit agent task output.
+            if received_content_bytes > MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES:
+                raise ModelConnectionProbeFailure(
+                    "transport_source_payload_limit_exceeded",
+                    "连接测试返回的内容超过探测缓冲边界。",
                 )
             if not isinstance(item, ProviderStreamTerminal):
                 continue

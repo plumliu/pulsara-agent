@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from hashlib import sha256
 
+import pytest
+
 from pulsara_agent.llm.provider_replay import (
     build_prepared_durable_provider_assistant_replay,
 )
-from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
-from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
+from pulsara_agent.primitives.context import (
+    FrozenJsonObjectFact, canonical_json_bytes, freeze_json,
+)
+from pulsara_agent.terminal_protocol.canonical_v3 import (
+    CanonicalProtocolReader, MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES,
+)
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from tests.support.model_config import build_test_provider_replay_target
 
@@ -29,6 +35,8 @@ class _Connection:
         self.replay = replay
 
     def execute(self, sql: str, _parameters: object) -> _Result:
+        if "AS root_final" in sql:
+            return _Result(one={"root_final": False})
         if "executed_status" in sql:
             return _Result(one={**self.entry, "executed_status": "RUNNING", "executed_final": None})
         if "FROM pulsara_v3.assistant_message_blocks" in sql:
@@ -132,3 +140,35 @@ def test_large_provider_reasoning_uses_the_existing_chunked_content_read() -> No
     assert resolved is not None
     assert resolved["inline_content"] == reasoning.encode("utf-8")
     assert resolved["blob_id"] is None
+
+
+@pytest.mark.parametrize(
+    ("character", "split_bytes"),
+    (("é", 1), ("中", 1), ("中", 2), ("🙂", 1), ("🙂", 2), ("🙂", 3)),
+)
+def test_long_tool_argument_preview_keeps_a_valid_utf8_boundary(
+    character: str, split_bytes: int,
+) -> None:
+    prefix = b'{"content":"'
+    padding = "x" * (MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES - len(prefix) - split_bytes)
+    arguments = {"content": padding + character + "tail"}
+    encoded = canonical_json_bytes(arguments)
+    entry, replay = _fixture("reasoning")
+
+    class WithTool(_Connection):
+        def execute(self, sql: str, parameters: object) -> _Result:
+            if "FROM pulsara_v3.assistant_message_blocks" in sql:
+                return _Result(many=({
+                    "id": "block:tool", "block_ordinal": 0,
+                    "block_kind": "TOOL_CALL", "tool_call_id": "call:write",
+                    "tool_name": "write_file", "tool_arguments": arguments,
+                },))
+            return super().execute(sql, parameters)
+
+    reader = CanonicalProtocolReader(None)  # type: ignore[arg-type]
+    projected = reader._entry(WithTool(entry, replay), entry)
+    block = projected.blocks[0]
+    assert block.tool_arguments_preview.decode("utf-8") == prefix.decode() + padding
+    assert block.tool_arguments_truncated
+    assert block.tool_arguments_size == len(encoded)
+    assert block.tool_arguments_digest == "sha256:" + sha256(encoded).hexdigest()

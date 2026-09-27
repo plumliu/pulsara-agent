@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-import json
 from typing import TYPE_CHECKING, AsyncIterator
 
 from pulsara_agent.llm.provider_sanitization import (
@@ -29,7 +28,6 @@ from pulsara_agent.ports.live_agent_event import (
     ToolCallEndPayload,
     ToolCallStartPayload,
     is_provider_stream_payload,
-    payload_to_mapping,
 )
 from pulsara_agent.ports.provider_stream import (
     ProviderAdapterTerminal,
@@ -41,19 +39,11 @@ from pulsara_agent.ports.provider_stream import (
     ProviderStreamFailure,
     ProviderStreamTerminal,
 )
-from pulsara_agent.llm.stream_limits import (
-    MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES,
-    MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL,
-    MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL,
-)
 from pulsara_agent.primitives.model_call import sha256_fingerprint
 from pulsara_agent.primitives.model_call import ModelCallDiagnosticFact
 
 if TYPE_CHECKING:
     from pulsara_agent.llm.resolution import ResolvedModelCall
-
-
-_MAX_SINGLE_PAYLOAD_BYTES = 256 << 10
 
 
 @dataclass(slots=True)
@@ -77,8 +67,6 @@ class NormalizedProviderTransportExecution:
         self._open: dict[str, _OpenBlock] = {}
         self._seen: set[str] = set()
         self._usage: TransportUsageReport | None = None
-        self._item_count = 0
-        self._payload_bytes = 0
         self._terminal_delivered = False
         self._adapter_terminal_seen = False
         self._physical_completed = False
@@ -137,19 +125,6 @@ class NormalizedProviderTransportExecution:
                         "Provider completed with an open semantic block.",
                         "transport_protocol_error",
                     )
-                replay_bytes = (
-                    0
-                    if item.completed_replay_payload is None
-                    else item.completed_replay_payload.logical_utf8_bytes
-                )
-                if (
-                    self._payload_bytes + replay_bytes
-                    > MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES
-                ):
-                    return self._terminal_error(
-                        "Provider completed-response aggregate exceeded its byte bound.",
-                        "transport_source_payload_limit_exceeded",
-                    )
                 try:
                     trailing = await anext(self._stream)
                 except asyncio.CancelledError:
@@ -183,39 +158,16 @@ class NormalizedProviderTransportExecution:
                     "transport_protocol_error",
                 )
             try:
-                encoded = json.dumps(
-                    payload_to_mapping(item),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                ).encode("utf-8")
-                if len(encoded) > _MAX_SINGLE_PAYLOAD_BYTES:
-                    return self._terminal_error(
-                        "Provider source item exceeded the canonical byte cap.",
-                        "transport_source_payload_limit_exceeded",
-                    )
-                if self._item_count + 1 > MAX_TRANSPORT_SOURCE_ITEMS_PER_MODEL_CALL:
-                    return self._terminal_error(
-                        "Provider stream exceeded the source-item circuit breaker.",
-                        "transport_source_item_limit_exceeded",
-                    )
-                if (
-                    self._payload_bytes + len(encoded)
-                    > MAX_SANITIZED_SOURCE_PAYLOAD_BYTES_PER_MODEL_CALL
-                ):
-                    return self._terminal_error(
-                        "Provider stream exceeded the sanitized-byte circuit breaker.",
-                        "transport_source_payload_limit_exceeded",
-                    )
+                # SDK decoding and replay storage own their resource bounds.
+                # Re-serializing semantic deltas/end snapshots here makes the
+                # accepted output depend on fragmentation and counts it twice.
+                # See PULSARA_PROVIDER_OUTPUT_BUDGET_SPEC.zh.md.
                 self._apply(item)
             except BaseException:
                 return self._terminal_error(
                     "Provider emitted an invalid semantic event.",
                     "transport_protocol_error",
                 )
-            self._item_count += 1
-            self._payload_bytes += len(encoded)
             return item
 
     async def request_cancel(self, *, reason: str) -> None:

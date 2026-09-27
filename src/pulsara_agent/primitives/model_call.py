@@ -43,6 +43,12 @@ def sha256_fingerprint(namespace: str, value: object) -> str:
 
 
 class ModelContextLimits(BaseModel):
+    """Provider ceilings; actual input and output share the context window.
+
+    Output is lowered against the final wire input quote at request encoding,
+    rather than reserving the largest possible response before seeing input.
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     total_context_tokens: int = Field(ge=2)
@@ -62,7 +68,7 @@ class ModelContextLimits(BaseModel):
         default_input = (
             min(
                 self.max_input_tokens,
-                self.total_context_tokens - self.default_output_tokens,
+                self.total_context_tokens - 1,
             )
             - self.input_safety_margin_tokens
         )
@@ -89,6 +95,7 @@ class TokenEstimatorFact(BaseModel):
 class ResolvedModelContextBudgetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    # Per-call output ceiling; final wire lowering accounts for actual input.
     effective_output_tokens: int = Field(ge=1)
     pre_margin_input_tokens: int = Field(ge=1)
     safety_margin_tokens: int = Field(ge=0)
@@ -176,8 +183,7 @@ class ResolvedModelTargetFact(BaseModel):
     def _validate_target(self) -> "ResolvedModelTargetFact":
         expected_pre_margin = min(
             self.limits.max_input_tokens,
-            self.limits.total_context_tokens
-            - self.context_budget.effective_output_tokens,
+            self.limits.total_context_tokens - 1,
         )
         if self.context_budget.effective_output_tokens > self.limits.max_output_tokens:
             raise ValueError("effective output exceeds model maximum")

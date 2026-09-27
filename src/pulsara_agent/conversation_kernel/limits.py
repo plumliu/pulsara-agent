@@ -62,7 +62,6 @@ class Stage2RuntimeLimits:
     foreground_io_timeout_ms: int = 30_000
     memory_index_lag_warning_generations: int = 2
     memory_index_lag_error_generations: int = 10
-    provider_output_tokens_per_call_hard: int = 16_384
     prompt_hard_bytes: int = MAXIMUM_PROMPT_TEXT_UTF8_BYTES
     tool_result_hard_bytes: int = 4 << 20
     canonical_blob_hard_bytes: int = 16 << 20

@@ -1667,7 +1667,6 @@ class ProviderDispatchCoordinator:
         memory_support: MemoryDispatchSupport,
         deadline_factory: KernelExecutionDeadlineFactory,
         maximum_input_tokens_per_call: int | None,
-        maximum_output_tokens_per_call: int,
         workspace_resolver: SessionWorkspaceResolver,
         compaction_owner: HostCompactionRuntimeOwner | None,
         subagent_runtime: SubagentRuntimePort | None,
@@ -1687,7 +1686,6 @@ class ProviderDispatchCoordinator:
         self._continuity = continuity_owner
         self._deadlines = deadline_factory
         self._maximum_input_tokens_per_call = maximum_input_tokens_per_call
-        self._maximum_output_tokens_per_call = maximum_output_tokens_per_call
         self._workspace_resolver = workspace_resolver
         self._memory_support = memory_support
         self._steer_consumption = SteerConsumptionCoordinator(
@@ -1740,7 +1738,6 @@ class ProviderDispatchCoordinator:
                 model_call_index=model_call_index,
                 purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
                 maximum_input_tokens=self._maximum_input_tokens_per_call,
-                maximum_output_tokens=self._maximum_output_tokens_per_call,
                 binding=binding,
             ),
             bundle=source,
@@ -1903,7 +1900,6 @@ class ProviderDispatchCoordinator:
                     model_call_index=model_call_index,
                     purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
                     maximum_input_tokens=self._maximum_input_tokens_per_call,
-                    maximum_output_tokens=self._maximum_output_tokens_per_call,
                     binding=binding,
                 )
             )
@@ -2202,7 +2198,6 @@ class ProviderDispatchCoordinator:
                 model_call_index=1,
                 purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
                 maximum_input_tokens=self._maximum_input_tokens_per_call,
-                maximum_output_tokens=self._maximum_output_tokens_per_call,
                 binding=candidate.model_call_binding,
             )
         )
@@ -2223,7 +2218,6 @@ class ProviderDispatchCoordinator:
                 model_call_index=model_call_index,
                 purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
                 maximum_input_tokens=self._maximum_input_tokens_per_call,
-                maximum_output_tokens=self._maximum_output_tokens_per_call,
                 binding=prepared.call.binding,
             ),
             target=prepared.target,
@@ -2712,7 +2706,6 @@ class ProviderDispatchCoordinator:
                             model_call_index=model_call_index,
                             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
                             maximum_input_tokens=self._maximum_input_tokens_per_call,
-                            maximum_output_tokens=self._maximum_output_tokens_per_call,
                             binding=turn_binding,
                         )
                     )

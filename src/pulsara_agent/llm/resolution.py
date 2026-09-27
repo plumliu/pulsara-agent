@@ -97,7 +97,7 @@ def resolve_model_target(
     output = limits.default_output_tokens
     pre_margin = min(
         limits.max_input_tokens,
-        limits.total_context_tokens - output,
+        limits.total_context_tokens - 1,
     )
     input_budget = pre_margin - limits.input_safety_margin_tokens
     if input_budget < 1:
@@ -180,22 +180,32 @@ def with_call_output_cap(
     if maximum_output_tokens < 1:
         raise ValueError("model output cap must be positive")
     cap = min(maximum_output_tokens, target.limits.max_output_tokens)
-    pre_margin = min(
-        target.limits.max_input_tokens,
-        target.limits.total_context_tokens - cap,
-    )
-    margin = min(target.limits.input_safety_margin_tokens, pre_margin - 1)
-    if pre_margin - margin < 1:
-        raise ModelInputBudgetUnavailable(
-            "purpose-local model input budget is non-positive"
-        )
-    budget = ResolvedModelContextBudgetFact(
-        effective_output_tokens=cap,
-        pre_margin_input_tokens=pre_margin,
-        safety_margin_tokens=margin,
-        input_budget_tokens=pre_margin - margin,
-    )
+    budget = target.context_budget.model_copy(update={"effective_output_tokens": cap})
     return replace(target, context_budget=budget)
+
+
+def resolve_wire_output_tokens(
+    *, target: ResolvedModelTarget, final_wire_input_tokens: int,
+) -> int:
+    """Use the provider ceiling, reduced only by the actual shared window.
+
+    The final wire estimator includes SYSTEM/tools, replay and images. No
+    history or prefix is rewritten to make room for an arbitrary output cap.
+    """
+
+    if final_wire_input_tokens < 0:
+        raise ValueError("final wire input token estimate must be non-negative")
+    budget = target.context_budget
+    if final_wire_input_tokens > budget.input_budget_tokens:
+        raise ModelInputBudgetUnavailable("final wire input exceeds model input budget")
+    available = (
+        target.limits.total_context_tokens
+        - final_wire_input_tokens
+        - budget.safety_margin_tokens
+    )
+    if available < 1:
+        raise ModelInputBudgetUnavailable("shared context has no output space")
+    return min(budget.effective_output_tokens, target.limits.max_output_tokens, available)
 
 
 def rebind_model_target(
@@ -228,4 +238,5 @@ __all__ = [
     "resolve_model_call",
     "resolve_model_target",
     "with_call_output_cap",
+    "resolve_wire_output_tokens",
 ]

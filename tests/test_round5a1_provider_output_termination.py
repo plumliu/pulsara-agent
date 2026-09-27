@@ -85,7 +85,6 @@ from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.stream_limits import (
     MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES,
-    MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE,
     MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES,
 )
 from pulsara_agent.primitives.model_call import (
@@ -533,28 +532,26 @@ def test_chat_closed_field_accumulation_and_final_reconciliation() -> None:
     assert message["reasoning"] == "normalized-text"
 
 
-def test_chat_opaque_replay_item_limit_fails_before_terminal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "pulsara_agent.llm.adapters.openai.chat_completions."
-        "MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE",
-        1_000,
-    )
+def test_chat_opaque_replay_preserves_more_than_former_fragment_limit() -> None:
+    # The output-budget contract delegates fragmentation to the provider.
+    count = 65_537
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
-    for index in range(1_000):
+    for index in range(count):
         assert (
             accumulator.apply(_chat_chunk({"reasoning_details": [{"ordinal": index}]}))
             == []
         )
-    assert len(accumulator._array_field_items["reasoning_details"]) == 1_000
-
-    with pytest.raises(LLMTransportContractError) as captured:
-        accumulator.apply(_chat_chunk({"reasoning_details": [{"ordinal": 1_000}]}))
-    assert captured.value.reason_code == "transport_source_item_limit_exceeded"
-    assert accumulator.terminal is None
+    accumulator.apply(_chat_chunk({"content": "done"}, "stop"))
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+    assert terminal.completed_replay_payload is not None
+    message = thaw_json(terminal.completed_replay_payload.ordered_items[0])
+    assert message["reasoning_details"] == [
+        {"ordinal": index} for index in range(count)
+    ]
     assert accumulator._array_field_items == {}
 
 
@@ -563,16 +560,16 @@ def test_chat_reasoning_replay_bounds_are_physical_headroom() -> None:
         MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES
         == MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES
     )
-    assert MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE == 65_536
 
 
 def test_chat_text_reasoning_accumulates_chunks_without_repeated_concat() -> None:
+    count = 65_537
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), route_wire_profile=_chat_profile()
     )
-    for _index in range(128):
+    for _index in range(count):
         accumulator.apply(_chat_chunk({"reasoning_content": "x"}))
-    assert accumulator._text_field_chunks["reasoning_content"] == ["x"] * 128
+    assert accumulator._text_field_chunks["reasoning_content"] == ["x"] * count
     accumulator.apply(
         _chat_chunk(
             {"content": "done"},
@@ -580,13 +577,15 @@ def test_chat_text_reasoning_accumulates_chunks_without_repeated_concat() -> Non
             message={
                 "role": "assistant",
                 "content": "done",
-                "reasoning_content": "x" * 128,
+                "reasoning_content": "x" * count,
             },
         )
     )
     terminal = accumulator.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
     assert terminal.completed_replay_payload is not None
+    message = thaw_json(terminal.completed_replay_payload.ordered_items[0])
+    assert message["reasoning_content"] == "x" * count
     assert accumulator._text_field_chunks == {}
 
 
@@ -3236,15 +3235,16 @@ def test_normalized_transport_keeps_adapter_contract_failure_typed() -> None:
     assert terminal.error.code is ProviderModelStreamErrorCode.TRANSPORT_PROTOCOL_ERROR
 
 
-def test_completed_replay_and_live_payload_share_one_aggregate_bound(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_completed_replay_does_not_recharge_consumed_live_payloads() -> None:
+    # The retained replay fits its 16 MiB storage boundary. Delta/end/replay
+    # repeat the same content; their sum is not a response-size boundary.
+    content = "x" * (9 << 20)
     profile = _chat_profile()
     accumulator = ChatCompletionAccumulator(
         builder=ProviderLiveItemBuilder(), route_wire_profile=profile
     )
-    live_items = accumulator.apply(_chat_chunk({"content": "public"}))
-    accumulator.apply(_chat_chunk({"reasoning_content": "opaque"}))
+    live_items = accumulator.apply(_chat_chunk({"content": content}))
+    live_items.extend(accumulator.apply(_chat_chunk({"reasoning_content": "opaque"})))
     live_items.extend(accumulator.apply(_chat_chunk({}, "stop")))
     terminal = accumulator.finish()
     assert isinstance(terminal, ProviderAdapterTerminal)
@@ -3263,14 +3263,13 @@ def test_completed_replay_and_live_payload_share_one_aggregate_bound(
         assert terminal_result is not None
         return terminal_result
 
-    monkeypatch.setattr(
-        "pulsara_agent.llm.normalized_transport."
-        "MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES",
-        terminal.completed_replay_payload.logical_utf8_bytes,  # type: ignore[union-attr]
-    )
     result = asyncio.run(exercise())
-    assert result.terminal_kind is ProviderNormalizedTerminalKind.PROVIDER_ERROR
-    assert result.completed_replay_payload is None
+    assert result.terminal_kind is ProviderNormalizedTerminalKind.COMPLETED
+    assert result.completed_replay_payload is terminal.completed_replay_payload
+    assert result.completed_replay_payload is not None
+    message = thaw_json(result.completed_replay_payload.ordered_items[0])
+    assert message["content"] == content
+    assert message["reasoning_content"] == "opaque"
 
 
 def test_sdk_decoded_json_shape_is_bounded_before_freeze(

@@ -60,7 +60,7 @@ from pulsara_agent.llm.provider_replay import (
     RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS,
     RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS,
 )
-from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.resolution import ResolvedModelCall, resolve_wire_output_tokens
 from pulsara_agent.llm.model_target import reasoning_wire_fields
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.ports.provider_stream import (
@@ -325,6 +325,7 @@ def build_responses_payload(
             raise ValueError(
                 "Responses context tool choice changed after wire planning"
             )
+        wire_input_tokens = plan.quote.final_wire_estimated_input_tokens
     else:
         context_fields = materialize_responses_context_bearing_wire_projection(
             call=call,
@@ -333,6 +334,19 @@ def build_responses_payload(
             tool_items=tuple(_tool_to_responses_tool(tool) for tool in context.tools),
             tool_choice=context.tool_choice,
         )
+        groups = tuple(responses_semantic_wire_group(message) for message in context.messages)
+        wire_input_tokens = call.target.token_estimator.estimate_final_wire_json_components(
+            fixed_context=materialize_responses_context_bearing_wire_projection(
+                call=call, root_policy=context.system_prompt, ordered_input_items=(),
+                tool_items=tuple(_tool_to_responses_tool(tool) for tool in context.tools),
+                tool_choice=context.tool_choice,
+            ),
+            ordered_input_items=tuple(item for group in groups for item in group),
+            ordered_input_sources=tuple(
+                message for message, group in zip(context.messages, groups, strict=True)
+                for _ in group
+            ),
+        ).total_input_tokens
     # Manual full-history replay is the only correctness authority.  Keeping
     # Responses stateless also makes encrypted reasoning carriers observable
     # on providers that support zero-retention/manual-history operation; a
@@ -354,7 +368,9 @@ def build_responses_payload(
     )
     for key, value in route_wire_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
-    payload["max_output_tokens"] = call.target.context_budget.effective_output_tokens
+    payload["max_output_tokens"] = resolve_wire_output_tokens(
+        target=call.target, final_wire_input_tokens=wire_input_tokens,
+    )
     reasoning = reasoning_wire_fields(call.target.contract, call.selected_reasoning)
     for key, value in reasoning.root.items():
         if key in payload:

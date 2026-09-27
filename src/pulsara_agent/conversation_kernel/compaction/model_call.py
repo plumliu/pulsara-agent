@@ -952,7 +952,6 @@ def promote_compaction_summary_call(
         target=semantic.call.target,
         call=semantic.call,
         maximum_input_tokens=semantic.compile_binding.effective_input_budget_tokens,
-        maximum_output_tokens=semantic.call.target.context_budget.effective_output_tokens,
     )
     permit = _issue_compaction_summary_provider_open_permit(
         summary_call_target=call_target,

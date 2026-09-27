@@ -100,11 +100,12 @@ from pulsara_agent.primitives.context import (
     freeze_json,
     thaw_json,
 )
-from tests.support.model_config import test_model_binding, test_model_runtime
+from tests.support.model_config import test_model_binding, test_model_limits, test_model_runtime
 from tests.support.round3 import (
     StaticContextSourceCollector,
     StructuredToolPort,
     new_test_provider_input_continuity_owner,
+    new_test_subagent_lease_source,
     prepare_test_direct_tool_surface,
     prepare_test_model_call,
     static_canonical_compile_facts,
@@ -141,7 +142,6 @@ def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128
             model_call_index=1,
             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             maximum_input_tokens=None,
-            maximum_output_tokens=16_384,
             binding=test_model_binding(port._model_runtime),  # noqa: SLF001
         )
     )
@@ -392,7 +392,6 @@ def _prepared_execution(
             model_call_index=1,
             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             maximum_input_tokens=maximum_input_tokens,
-            maximum_output_tokens=16_384,
             binding=binding,
             tool_surface=surface,
         ),
@@ -513,6 +512,13 @@ def _continuity_candidate(request: KernelModelExecutionRequest):
         scope_subagent_task_id=identity.scope_subagent_task_id,
     )
     owner = new_test_provider_input_continuity_owner(request.session_id)
+    if scope.scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
+        owner.authorize_new_subagent_scope(
+            scope,
+            source=new_test_subagent_lease_source(
+                session_id=request.session_id, task_id=scope.scope_subagent_task_id,
+            ),
+        )
     frontier = ProcessLocalCanonicalFrontier(
         latest_context_binding_revision_id=identity.context_binding_revision_id,
         context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
@@ -565,7 +571,9 @@ def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
     prepared = request.prepared_call
     compiled = request.compiled_input
 
-    assert prepared.compile_binding.effective_output_tokens <= 16_384
+    assert prepared.compile_binding.effective_output_tokens == (
+        prepared.call.target.limits.max_output_tokens
+    )
     assert compiled.system_prompt.startswith("ROOT SYSTEM")
     assert [item.name for item in compiled.tools] == ["read_file"]
     assert (
@@ -577,6 +585,58 @@ def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
         )
     )
     request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
+    ("api", "builder", "output_key"),
+    (
+        ("openai_chat_completions", build_chat_completions_payload, "max_completion_tokens"),
+        ("openai_responses", build_responses_payload, "max_output_tokens"),
+    ),
+)
+@pytest.mark.parametrize("output_limit", (128_000, 384_000, 1_050_000))
+@pytest.mark.parametrize("scope_kind", (ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT_TASK))
+def test_foreground_large_provider_output_survives_compilation_and_preflight(
+    api, builder, output_key, output_limit, scope_kind,
+) -> None:
+    # The provider limit must survive the whole foreground path (not just
+    # payload construction); ROOT and SUBAGENT use the same budget owner.
+    runtime = test_model_runtime(
+        wire_api=api,
+        limits=test_model_limits(
+            total_context_tokens=1_050_000, max_input_tokens=922_000,
+            max_output_tokens=output_limit, default_output_tokens=output_limit,
+        ),
+    )
+    port = DirectKernelModelPort(model_runtime=runtime)
+    request, _ = _prepared_execution(
+        port, scope_kind=scope_kind,
+        scope_subagent_task_id=(
+            "subagent:budget" if scope_kind is ModelInputScopeKind.SUBAGENT_TASK else None
+        ),
+    )
+    try:
+        owner, candidate = _continuity_candidate(request)
+        execution = port.preflight_execution(
+            request, append_candidate=candidate, install_authority=owner.install_authority,
+        )
+        prepared = request.prepared_call
+        assert prepared.compile_binding.effective_output_tokens == output_limit
+        frozen = prepared.epoch_call_target.physical_call_target.input_budget
+        assert frozen.maximum_output_tokens == output_limit
+        assert frozen.effective_output_tokens == output_limit
+        assert prepared.call.target.context_budget.input_budget_tokens == (
+            922_000 - 8_192
+        )
+        payload = builder(call=prepared.call, context=execution.final_context)
+        wire_input = request.wire_input_plan.quote.final_wire_estimated_input_tokens
+        assert payload[output_key] == min(output_limit, 1_050_000 - wire_input - 8_192)
+        assert payload[output_key] > 16_384
+        assert wire_input + payload[output_key] + 8_192 <= 1_050_000
+        assert request.compiled_input.system_prompt.startswith("ROOT SYSTEM")
+        assert [item.name for item in request.compiled_input.tools] == ["read_file"]
+    finally:
+        request.surface_borrow.close()
 
 
 @pytest.mark.parametrize(

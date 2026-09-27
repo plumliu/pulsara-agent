@@ -8,7 +8,6 @@ from enum import StrEnum
 from pulsara_agent.llm.provider_replay import (
     MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES,
     MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH,
-    MAXIMUM_PROVIDER_REPLAY_JSON_NODES,
     MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
     MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES,
     ProviderAssistantReplayCodecKind,
@@ -514,7 +513,7 @@ def decode_provider_replay_fragment(
     value = bounded_json_loads(
         payload_bytes,
         maximum_bytes=MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
-        maximum_nodes=MAXIMUM_PROVIDER_REPLAY_JSON_NODES,
+        maximum_nodes=len(payload_bytes),
         maximum_depth=MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH,
         maximum_string_utf8_bytes=MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES,
     )

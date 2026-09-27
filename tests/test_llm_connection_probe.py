@@ -5,7 +5,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from threading import Thread
 
-from pulsara_agent.llm.connection_probe import probe_model_connection
+import pytest
+
+from pulsara_agent.llm.connection_probe import (
+    ModelConnectionProbeFailure,
+    probe_model_connection,
+)
 from pulsara_agent.llm.model_catalog import ReasoningProviderDefault, WireApi
 from pulsara_agent.llm.model_connections import (
     ModelConnectionAuthentication,
@@ -35,7 +40,8 @@ class _ProbeHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Connection", "close")
         self.end_headers()
-        for delta, finish_reason in (("OK", None), ("", "stop")):
+        chunks = self.server.response_chunks  # type: ignore[attr-defined]
+        for delta, finish_reason in (*((chunk, None) for chunk in chunks), ("", "stop")):
             payload = {
                 "id": "chatcmpl_probe",
                 "object": "chat.completion.chunk",
@@ -55,9 +61,22 @@ class _ProbeHandler(BaseHTTPRequestHandler):
         self.close_connection = True
 
 
-def test_no_auth_probe_uses_generic_chat_without_authorization_header() -> None:
+@pytest.mark.parametrize(
+    ("response_chunks", "succeeds"),
+    ((("OK",), True), (("x" * 8,), True), (("x" * 9,), False), (("xxx", "xxx", "xxx"), False)),
+)
+def test_probe_content_bound_is_independent_of_fragments_and_closes_transport(
+    monkeypatch: pytest.MonkeyPatch, response_chunks: tuple[str, ...], succeeds: bool,
+) -> None:
+    # Probe-only content protection survives removal of transport envelopes;
+    # end snapshots are not charged again. Exercise the real SDK/HTTP close.
+    monkeypatch.setattr(
+        "pulsara_agent.llm.connection_probe.MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES",
+        8,
+    )
     server = ThreadingHTTPServer(("127.0.0.1", 0), _ProbeHandler)
     server.observed = None  # type: ignore[attr-defined]
+    server.response_chunks = response_chunks  # type: ignore[attr-defined]
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     route_wires = production_route_wire_registry()
@@ -78,14 +97,20 @@ def test_no_auth_probe_uses_generic_chat_without_authorization_header() -> None:
         connection_id=ModelConnectionId("model-connection:" + "e" * 32),
     )
     try:
-        asyncio.run(
-            probe_model_connection(
+        async def probe():
+            await probe_model_connection(
                 resolved=resolved,
                 catalog=None,
                 route_wires=route_wires,
                 api_key=None,
             )
-        )
+        if succeeds:
+            asyncio.run(probe())
+        else:
+            with pytest.raises(ModelConnectionProbeFailure) as failure:
+                asyncio.run(probe())
+            # A failed physical close would instead report protocol_error.
+            assert failure.value.code == "transport_source_payload_limit_exceeded"
         observed = server.observed  # type: ignore[attr-defined]
         assert observed["path"] == "/v1/chat/completions"
         assert observed["authorization"] is None

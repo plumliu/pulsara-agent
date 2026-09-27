@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 from urllib.parse import unquote, urlsplit
@@ -41,7 +41,6 @@ from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.primitives.model_call import ModelContextLimits
 
 
-DEFAULT_OUTPUT_TOKEN_TARGET = 8_192
 INPUT_SAFETY_MARGIN_TARGET = 8_192
 
 _PERCENT_ESCAPE_RE = re.compile(r"%([0-9a-fA-F]{2})")
@@ -237,14 +236,14 @@ def derive_model_context_limits(entry: ModelCatalogEntry) -> ModelContextLimits:
     hard = entry.limits
     if hard is None:
         raise ModelTargetNotExecutable("model hard limits are unavailable")
-    default_output = min(
-        DEFAULT_OUTPUT_TOKEN_TARGET,
-        hard.max_output_tokens,
-        hard.total_context_tokens - 1,
-    )
+    # These are independent provider ceilings. The final wire quote determines
+    # how much output fits beside this call's actual input; reserving the whole
+    # output ceiling here would leave no input for output == context models.
+    # See PULSARA_PROVIDER_OUTPUT_BUDGET_SPEC.zh.md.
+    default_output = hard.max_output_tokens
     pre_margin_input = min(
         hard.max_input_tokens,
-        hard.total_context_tokens - default_output,
+        hard.total_context_tokens - 1,
     )
     margin = min(INPUT_SAFETY_MARGIN_TARGET, pre_margin_input - 1)
     if min(default_output, pre_margin_input, pre_margin_input - margin) < 1:
@@ -561,30 +560,6 @@ def reconcile_model_call_binding(
     return current, False
 
 
-def with_output_cap(
-    target: ModelTargetContract, maximum_output_tokens: int
-) -> ModelTargetContract:
-    if maximum_output_tokens < 1:
-        raise ValueError("model output cap must be positive")
-    limits = target.target_facts.limits
-    cap = min(maximum_output_tokens, limits.max_output_tokens)
-    pre_margin = min(
-        limits.max_input_tokens, limits.total_context_tokens - cap
-    )
-    margin = min(limits.input_safety_margin_tokens, pre_margin - 1)
-    bounded = ModelContextLimits(
-        total_context_tokens=limits.total_context_tokens,
-        max_input_tokens=limits.max_input_tokens,
-        max_output_tokens=limits.max_output_tokens,
-        default_output_tokens=cap,
-        input_safety_margin_tokens=margin,
-    )
-    return replace(
-        target,
-        target_facts=replace(target.target_facts, limits=bounded),
-    )
-
-
 def canonicalize_endpoint(base_url: str) -> str:
     parsed = urlsplit(base_url)
     scheme = parsed.scheme.lower()
@@ -635,7 +610,6 @@ def reasoning_wire_fields(
 
 __all__ = [
     "FrozenModelResolutionSnapshot",
-    "DEFAULT_OUTPUT_TOKEN_TARGET",
     "INPUT_SAFETY_MARGIN_TARGET",
     "ModelTargetFacts",
     "ModelReasoningSelectionInvalid",
@@ -658,5 +632,4 @@ __all__ = [
     "reconcile_model_call_binding",
     "resolve_model_target_contract",
     "validate_reasoning_selection",
-    "with_output_cap",
 ]

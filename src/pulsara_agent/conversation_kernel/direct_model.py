@@ -130,7 +130,6 @@ class KernelModelTargetPreparationRequest:
     model_call_index: int
     purpose: ModelCallPurpose
     maximum_input_tokens: int | None
-    maximum_output_tokens: int
     binding: ModelCallBinding = field(repr=False)
 
 
@@ -143,7 +142,6 @@ class PreparedKernelModelTarget:
     target: ResolvedModelTarget = field(repr=False)
     call: ResolvedModelCall = field(repr=False)
     maximum_input_tokens: int
-    maximum_output_tokens: int
     effective_input_budget_tokens: int
     native_function_tool_wire_contract_fingerprint: str
     transport_timeout_policy_fingerprint: str
@@ -158,7 +156,7 @@ class PreparedKernelModelTarget:
             or self.call.target is not self.target
             or self.effective_input_budget_tokens < 1
             or self.target.context_budget.effective_output_tokens
-            > self.maximum_output_tokens
+            > self.target.limits.max_output_tokens
             or self.epoch_call_target.session_id != self.session_id
             or self.epoch_call_target.turn_id != self.turn_id
             or self.epoch_call_target.model_call_index != self.model_call_index
@@ -186,7 +184,6 @@ class KernelModelPreparationRequest:
     model_call_index: int
     purpose: ModelCallPurpose
     maximum_input_tokens: int
-    maximum_output_tokens: int
     binding: ModelCallBinding = field(repr=False)
     tool_surface: PreparedKernelToolSurface = field(repr=False)
 
@@ -633,7 +630,6 @@ class DirectKernelModelPort:
             raise ValueError("foreground model preparation purpose is invalid")
         if (
             request.model_call_index < 1
-            or request.maximum_output_tokens < 1
             or (
                 request.maximum_input_tokens is not None
                 and request.maximum_input_tokens < 1
@@ -677,7 +673,6 @@ class DirectKernelModelPort:
             raise ValueError("foreground model preparation purpose is invalid")
         if (
             request.model_call_index < 1
-            or request.maximum_output_tokens < 1
             or (
                 request.maximum_input_tokens is not None
                 and request.maximum_input_tokens < 1
@@ -691,13 +686,6 @@ class DirectKernelModelPort:
             purpose=request.purpose,
             resolved_model_call_id=f"model_call:{uuid4().hex}",
         )
-        if (
-            target.context_budget.effective_output_tokens
-            > request.maximum_output_tokens
-        ):
-            raise ValueError(
-                "resolved provider output exceeds the foreground attempt cap"
-            )
         input_budget = target.context_budget.input_budget_tokens
         if request.maximum_input_tokens is not None:
             input_budget = min(request.maximum_input_tokens, input_budget)
@@ -709,7 +697,6 @@ class DirectKernelModelPort:
             target=target,
             call=call,
             maximum_input_tokens=input_budget,
-            maximum_output_tokens=request.maximum_output_tokens,
         )
         return PreparedKernelModelTarget(
             session_id=request.session_id,
@@ -719,7 +706,6 @@ class DirectKernelModelPort:
             target=target,
             call=call,
             maximum_input_tokens=input_budget,
-            maximum_output_tokens=request.maximum_output_tokens,
             effective_input_budget_tokens=input_budget,
             native_function_tool_wire_contract_fingerprint=native_contract,
             transport_timeout_policy_fingerprint=(
@@ -1144,7 +1130,6 @@ def _freeze_epoch_model_call_target(
     target: ResolvedModelTarget,
     call: ResolvedModelCall,
     maximum_input_tokens: int,
-    maximum_output_tokens: int,
 ) -> FrozenEpochModelCallTarget:
     """Strip all live resolution state at the model-boundary factory."""
 
@@ -1152,7 +1137,6 @@ def _freeze_epoch_model_call_target(
         target=target,
         call=call,
         maximum_input_tokens=maximum_input_tokens,
-        maximum_output_tokens=maximum_output_tokens,
     )
     return FrozenEpochModelCallTarget(
         session_id=request.session_id,

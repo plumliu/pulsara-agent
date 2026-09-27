@@ -7,6 +7,7 @@ subjects; the subject relation is loaded and validated independently.
 
 from __future__ import annotations
 
+import codecs
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -796,7 +797,12 @@ class CanonicalProtocolReader:
                 block_kind=str(block["block_kind"]),
                 tool_call_id=str(block["tool_call_id"] or ""),
                 tool_name=str(block["tool_name"] or ""),
-                tool_arguments_preview=arguments[:MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES],
+                # A display prefix can end in the middle of a UTF-8 code point.
+                # Let the stdlib decoder retain that unfinished suffix; the
+                # canonical arguments and their digest remain complete.
+                tool_arguments_preview=codecs.utf_8_decode(
+                    arguments[:MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES], "strict", False
+                )[0].encode("utf-8"),
                 tool_arguments_truncated=(
                     len(arguments) > MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES
                 ),

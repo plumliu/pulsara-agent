@@ -113,6 +113,9 @@ Kernel 当前支持：
 - 内置 [pulsara-sheets](src/pulsara_agent/bundled_skills/pulsara-sheets/SKILL.md)，支持
   表格读取、编辑、公式、格式、原生图表、格式转换与验证；分析方法属于独立 Skill
   的职责，可选脚本使用任务选定的环境和依赖；
+- 内置 [pulsara-data-analysis](src/pulsara_agent/bundled_skills/pulsara-data-analysis/SKILL.md)，
+  支持 EDA、ETL、比较分析、统计方法，并通过 `visualization_render` 展示交互式 HTML
+  结果；依赖按任务准备，深入方法按需阅读；
 - 统一的process-local capability discovery：execution-backed Builtin、每server
   MCP snapshot与聚合Skill catalog进入同一个pure frozen registry，physical
   authority仍由原owner持有；
@@ -182,6 +185,8 @@ Pulsara 不再从 `.env` 或产品专用环境变量读取配置。启动本地�
 - 选择 provider 与 models.dev 目录中的模型，选择 Chat Completions 或 Responses，
   并添加 API key；
 - 可选地分别填写 DashScope embedding 与 rerank 两枚独立 key。
+
+正式模型调用采用目录或自定义连接声明的最大输出额度，按本次实际输入占用的共享上下文空间计算可用输出；Pulsara 不另设固定的 8K/16K 输出上限。详见[输出额度规则](PULSARA_PROVIDER_OUTPUT_BUDGET_SPEC.zh.md)。
 
 PostgreSQL DSN、模型配置与全部 API key 一同保存在 closed
 `${PULSARA_HOME}/local-settings.yaml`（或 Pulsara 默认 home）中；目录权限为 `0700`，

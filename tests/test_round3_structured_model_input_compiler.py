@@ -1030,7 +1030,6 @@ def _prepared_request(
             model_call_index=1,
             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             maximum_input_tokens=max(budget, 1),
-            maximum_output_tokens=16_384,
             binding=test_model_binding(model_runtime),
             tool_surface=prepared_surface,
         ),
@@ -3837,7 +3836,9 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        "sha256:f6b93412fab14a44834f5f19346a784c396b987b2f03c183da6bb3ba8b5f0b0c"
+        # Provider-output policy changes the frozen target's input ceiling;
+        # source selection and its decision digest above stay byte-identical.
+        "sha256:d95fc4d59cffecff64ba7305f74bb505e126eb7b8c18500135841da154238965"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

@@ -1314,7 +1314,6 @@ def prepare_test_model_call(
             model_call_index=request.model_call_index,
             purpose=request.purpose,
             maximum_input_tokens=request.maximum_input_tokens,
-            maximum_output_tokens=request.maximum_output_tokens,
             binding=request.binding,
         )
     )

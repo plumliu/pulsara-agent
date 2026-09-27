@@ -9,6 +9,7 @@ from time import monotonic
 from uuid import uuid4
 
 import psycopg
+from psycopg.rows import dict_row
 import pytest
 
 from pulsara_agent.conversation_kernel.contracts import InlineContent
@@ -25,6 +26,10 @@ from pulsara_agent.llm.request import (
 )
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, freeze_json
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.model_input.provider_replay import (
+    decode_provider_replay_fragment,
+    freeze_provider_replay_manifest,
+)
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
@@ -68,14 +73,19 @@ def _open_turn(repository: ConversationKernelRepository, lease):
     )
 
 
-def _native_candidate(*, session_id: str, workspace_id: str, entry_id: str):
-    frozen = freeze_json(
-        {
-            "role": "assistant",
-            "content": "answer",
-            "reasoning_content": "private-native-carrier",
-        }
-    )
+def _native_candidate(
+    *, session_id: str, workspace_id: str, entry_id: str, detail_count: int = 0,
+):
+    message: dict[str, object] = {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "private-native-carrier",
+    }
+    if detail_count:
+        message["reasoning_details"] = [
+            {"ordinal": index} for index in range(detail_count)
+        ]
+    frozen = freeze_json(message)
     assert isinstance(frozen, FrozenJsonObjectFact)
     target = build_test_provider_replay_target(
         transport_binding_id="openai_chat_completions",
@@ -94,7 +104,7 @@ def _native_candidate(*, session_id: str, workspace_id: str, entry_id: str):
     )
 
 
-def _commit_arguments(repository, lease, *, workspace_id: str):
+def _commit_arguments(repository, lease, *, workspace_id: str, detail_count: int = 0):
     _turn_id, cut = _open_turn(repository, lease)
     entry_id = _name("assistant")
     content = InlineContent.from_bytes(b"answer")
@@ -103,6 +113,7 @@ def _commit_arguments(repository, lease, *, workspace_id: str):
         session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         entry_id=entry_id,
+        detail_count=detail_count,
     )
     occurred_at = datetime.now(timezone.utc)
     return {
@@ -117,8 +128,9 @@ def _commit_arguments(repository, lease, *, workspace_id: str):
     }
 
 
+@pytest.mark.parametrize("detail_count", (0, 65_537))
 def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
-    stage2_migrated_postgres_database,
+    stage2_migrated_postgres_database, detail_count: int,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -132,7 +144,9 @@ def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    arguments = _commit_arguments(repository, lease, workspace_id=workspace_id)
+    arguments = _commit_arguments(
+        repository, lease, workspace_id=workspace_id, detail_count=detail_count,
+    )
     assert (
         repository.confirm_assistant_message_winner(
             lease.guard,
@@ -152,6 +166,29 @@ def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
         deadline_monotonic=monotonic() + 30,
     )
     assert confirmed == accepted
+    # Read committed bytes through a new connection and the production replay
+    # decoder: accepting >65K fragments must survive storage and next-call use.
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        row = connection.execute(
+            "SELECT id AS replay_id, assistant_entry_id, wire_api, codec_kind, "
+            "provider_replay_contract_fingerprint, replay_target_fingerprint, "
+            "public_projection_fingerprint, payload_digest, payload_size, "
+            "item_count, fragment_fingerprint, payload_bytes "
+            "FROM pulsara_v3.provider_assistant_replay_fragments "
+            "WHERE session_id = %s AND assistant_entry_id = %s",
+            (session_id, arguments["entry_id"]),
+        ).fetchone()
+    assert row is not None
+    payload_bytes = bytes(row.pop("payload_bytes"))
+    manifest = freeze_provider_replay_manifest(**row)
+    decoded = decode_provider_replay_fragment(
+        manifest=manifest, payload_bytes=payload_bytes,
+    )
+    assert decoded.payload_bytes == arguments["provider_replay"].payload_bytes
     with pytest.raises(ConversationKernelConflict):
         repository.confirm_assistant_message_winner(
             lease.guard,

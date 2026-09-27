@@ -89,6 +89,8 @@ class FrozenEpochModelTargetBundle:
 
 @dataclass(frozen=True, slots=True)
 class FrozenModelInputBudget:
+    """Frozen ceilings; actual wire input determines available output space."""
+
     maximum_input_tokens: int
     maximum_output_tokens: int
     effective_input_budget_tokens: int
@@ -126,9 +128,8 @@ class FrozenProviderPhysicalCallTarget:
             or self.input_budget.effective_output_tokens
             > fact.limits.max_output_tokens
             or self.input_budget.effective_input_budget_tokens
-            + self.input_budget.effective_output_tokens
             + fact.limits.input_safety_margin_tokens
-            > fact.limits.total_context_tokens
+            >= fact.limits.total_context_tokens
         ):
             raise ValueError("physical model call target does not exact-join")
 
@@ -217,7 +218,6 @@ def _freeze_provider_physical_call_target(
     target: "ResolvedModelTarget",
     call: "ResolvedModelCall",
     maximum_input_tokens: int,
-    maximum_output_tokens: int,
 ) -> FrozenProviderPhysicalCallTarget:
     """Private boundary factory stripping every live resolution object."""
 
@@ -225,8 +225,7 @@ def _freeze_provider_physical_call_target(
         call.target is not target
         or call.binding.connection_id != target.connection.id
         or maximum_input_tokens < 1
-        or maximum_output_tokens < 1
-        or target.context_budget.effective_output_tokens > maximum_output_tokens
+        or target.context_budget.effective_output_tokens > target.limits.max_output_tokens
     ):
         raise ValueError("resolved physical call target does not exact-join")
     bundle = FrozenEpochModelTargetBundle(
@@ -245,7 +244,7 @@ def _freeze_provider_physical_call_target(
         target_bundle=bundle,
         input_budget=FrozenModelInputBudget(
             maximum_input_tokens=maximum_input_tokens,
-            maximum_output_tokens=maximum_output_tokens,
+            maximum_output_tokens=target.limits.max_output_tokens,
             effective_input_budget_tokens=min(
                 maximum_input_tokens,
                 target.context_budget.input_budget_tokens,

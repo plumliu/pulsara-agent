@@ -125,6 +125,10 @@ The current Kernel supports:
   for spreadsheet reading, editing, formulas, formatting, native charts, format
   conversion, and verification; analysis methods remain a separate Skill scope,
   and optional helpers use task-selected environments and dependencies;
+- bundled [pulsara-data-analysis](src/pulsara_agent/bundled_skills/pulsara-data-analysis/SKILL.md)
+  for EDA, ETL, comparisons, statistical methods, and interactive HTML findings
+  through `visualization_render`; dependencies are prepared per task, and deeper
+  methods are loaded as needed;
 - unified, process-local capability discovery: execution-backed Builtins,
   per-server MCP snapshots, and the aggregate Skill catalog enter one pure
   frozen registry while their original owners retain physical authority;
@@ -206,6 +210,10 @@ environment variables. Start the local app and use **Settings** to:
 - choose a provider and a models.dev-backed model, select Chat Completions or
   Responses, and add the API key;
 - optionally add the two independent DashScope keys for embedding and rerank.
+
+Task calls use the model's catalog or user-declared maximum output, reduced only
+by the shared context space occupied by the actual input. Pulsara adds no fixed
+8K/16K output ceiling. See the [output budget contract](PULSARA_PROVIDER_OUTPUT_BUDGET_SPEC.zh.md).
 
 PostgreSQL DSNs, model configurations, and all API keys are stored together in
 the closed `${PULSARA_HOME}/local-settings.yaml` document (or the default

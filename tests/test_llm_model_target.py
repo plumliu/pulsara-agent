@@ -16,6 +16,7 @@ from pulsara_agent.llm.adapters.openai.responses import (
     project_responses_context_bearing_payload_fields,
 )
 from pulsara_agent.llm.errors import (
+    ModelInputBudgetUnavailable,
     ModelContextIdentityMismatch,
     ModelTargetCapabilityMismatch,
 )
@@ -63,7 +64,9 @@ from pulsara_agent.llm.model_target import (
 )
 from pulsara_agent.llm.provider import RouteWireProfile
 from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.llm.resolution import resolve_model_call, resolve_model_target
+from pulsara_agent.llm.resolution import (
+    resolve_model_call, resolve_model_target, resolve_wire_output_tokens,
+)
 from pulsara_agent.llm.route_wires import production_route_wire_registry
 from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
 from pulsara_agent.llm.validation import validate_model_context_shape_for_call
@@ -192,6 +195,109 @@ def test_exact_route_wire_and_model_resolve_to_different_control_domains() -> No
         validate_reasoning_selection(
             direct.target.reasoning, ReasoningEffortSelection("xhigh")
         )
+
+
+@pytest.mark.parametrize("wire_api", tuple(WireApi))
+@pytest.mark.parametrize("effort", ("high", "max"))
+@pytest.mark.parametrize("output_limit", (4_096, 8_192, 16_384, 128_000, 384_000))
+def test_output_allowance_comes_from_provider_limits(
+    wire_api: WireApi, effort: str, output_limit: int,
+) -> None:
+    # PULSARA_PROVIDER_OUTPUT_BUDGET_SPEC.zh.md: no independent local ceiling.
+    fixture = catalog_fixture()
+    fixture["zhipuai"]["models"]["glm-5.3"]["limit"] = {
+        "context": 1_050_000, "input": 922_000, "output": output_limit,
+    }
+    call, context = _resolved_call(
+        "zhipuai", "glm-5.3", wire_api, ReasoningEffortSelection(effort),
+        fixture=fixture,
+    )
+    target = call.target
+    budget = target.context_budget
+    assert target.limits.default_output_tokens == output_limit
+    assert budget.effective_output_tokens == output_limit
+    assert budget.pre_margin_input_tokens == 922_000
+    assert budget.input_budget_tokens == budget.pre_margin_input_tokens - 8_192
+    physical = _freeze_provider_physical_call_target(
+        target=target, call=call, maximum_input_tokens=budget.input_budget_tokens,
+    )
+    assert physical.input_budget.maximum_output_tokens == output_limit
+    assert physical.input_budget.effective_output_tokens == output_limit
+    assert physical.input_budget.effective_input_budget_tokens == budget.input_budget_tokens
+    if wire_api is WireApi.OPENAI_CHAT_COMPLETIONS:
+        payload = build_chat_completions_payload(call=call, context=context)
+        assert payload["max_completion_tokens"] == output_limit
+    else:
+        payload = build_responses_payload(call=call, context=context)
+        assert payload["max_output_tokens"] == output_limit
+
+
+def test_wire_output_reduces_only_at_the_shared_context_boundary() -> None:
+    runtime = test_model_runtime()
+    target = runtime.resolve_target(
+        test_model_binding(runtime),
+        timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
+    )
+    # Provider output is 8192 here; it is metadata, not a Pulsara default.
+    full_output_boundary = 256_000 - 8_192 - 8_192
+    assert resolve_wire_output_tokens(
+        target=target, final_wire_input_tokens=full_output_boundary,
+    ) == 8_192
+    assert resolve_wire_output_tokens(
+        target=target, final_wire_input_tokens=full_output_boundary + 1,
+    ) == 8_191
+    assert resolve_wire_output_tokens(
+        target=target, final_wire_input_tokens=target.context_budget.input_budget_tokens,
+    ) == 1
+    with pytest.raises(ModelInputBudgetUnavailable, match="input exceeds"):
+        resolve_wire_output_tokens(
+            target=target,
+            final_wire_input_tokens=target.context_budget.input_budget_tokens + 1,
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        resolve_wire_output_tokens(target=target, final_wire_input_tokens=-1)
+
+
+@pytest.mark.parametrize("near_admission", (False, True))
+def test_direct_chat_output_budget_quotes_actual_merged_tool_messages(near_admission: bool) -> None:
+    fixture = catalog_fixture()
+    fixture["zhipuai"]["models"]["glm-5.3"]["limit"] = {
+        "context": 256_000, "input": 256_000, "output": 256_000,
+    }
+    call, context = _resolved_call(
+        "zhipuai", "glm-5.3", WireApi.OPENAI_CHAT_COMPLETIONS,
+        ReasoningEffortSelection("high"), fixture=fixture,
+    )
+    messages = tuple(
+        LLMMessage.tool_call(tool_call_id=f"call:{index}", name="read_file", arguments="{}")
+        for index in range(20)
+    )
+    payload = build_chat_completions_payload(
+        call=call, context=replace(context, messages=messages),
+    )
+    if near_admission:
+        # Leave a small real output window. Quoting each tool call as its own
+        # assistant message would exceed admission despite the merged request
+        # fitting, so this must still produce a valid request.
+        room = payload["max_completion_tokens"]
+        messages += (LLMMessage.user("x" * (2 * (room - 50))),)
+        payload = build_chat_completions_payload(
+            call=call, context=replace(context, messages=messages),
+        )
+    actual = project_chat_context_bearing_payload_fields(payload)
+    ordered = tuple(actual.pop("messages"))
+    assert len(ordered) == (2 if near_admission else 1)
+    assert len(ordered[0]["tool_calls"]) == 20
+    actual["messages"] = []
+    quote = call.target.token_estimator.estimate_final_wire_json_components(
+        fixed_context=actual, ordered_input_items=ordered,
+        ordered_input_sources=(None,) * len(ordered),
+    )
+    assert payload["max_completion_tokens"] == (
+        256_000 - call.target.context_budget.safety_margin_tokens - quote.total_input_tokens
+    )
+    if near_admission:
+        assert 1 <= payload["max_completion_tokens"] < 50
 
 
 @pytest.mark.parametrize("wire_api", tuple(WireApi))
@@ -890,7 +996,6 @@ def test_editing_saved_connection_preserves_frozen_epoch_boundary(tmp_path: Path
     bundle = _freeze_provider_physical_call_target(
         target=target, call=call,
         maximum_input_tokens=target.context_budget.input_budget_tokens,
-        maximum_output_tokens=target.context_budget.effective_output_tokens,
     ).target_bundle
     connection = runtime.connection(binding)
     changed = (
@@ -926,7 +1031,6 @@ def test_frozen_target_rejects_executable_projection_strategy_drift(
         target=target,
         call=call,
         maximum_input_tokens=target.context_budget.input_budget_tokens,
-        maximum_output_tokens=target.context_budget.effective_output_tokens,
     ).target_bundle
     if drift == "lowerer":
         key, contract = next(iter(runtime.route_wires._dialect_contracts.items()))
@@ -1029,6 +1133,10 @@ def test_models_dev_fixed_on_model_can_select_thinking_type_profile() -> None:
     assert call.target.fact.reasoning_wire_profile == "thinking_type"
     payload = build_chat_completions_payload(call=call, context=context)
     assert payload["extra_body"] == {"thinking": {"type": "enabled"}}
+    # The shared provider context is a real bound; no fixed local output cap.
+    assert call.target.context_budget.effective_output_tokens == 262_144
+    assert call.target.context_budget.input_budget_tokens == 262_144 - 1 - 8_192
+    assert 250_000 < payload["max_completion_tokens"] < 262_144
 
     entry = selectable_catalog(parse_models_dev_catalog(fixture)).require(
         call.target.contract.key.catalog_key
@@ -1044,8 +1152,9 @@ def test_models_dev_fixed_on_model_can_select_thinking_type_profile() -> None:
 
 
 @pytest.mark.parametrize("input_modalities", (None, ("text",), ("text", "image")))
+@pytest.mark.parametrize("output_limit", (12_000, 128_000))
 def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
-    input_modalities: tuple[str, ...] | None,
+    input_modalities: tuple[str, ...] | None, output_limit: int,
 ) -> None:
     route_wires = production_route_wire_registry()
     resolved = create_user_declared_model_connection(
@@ -1056,7 +1165,7 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
             configuration_name="Local Gateway",
             input_modalities=input_modalities,
             total_context_tokens=300_000,
-            max_output_tokens=12_000,
+            max_output_tokens=output_limit,
             tool_call=True,
             reasoning=ReasoningSelectableControls(
                 effort=ReasoningEffortChoices(("low", "high"))
@@ -1095,12 +1204,14 @@ def test_user_declared_target_resolves_without_catalog_and_uses_generic_chat(
 
     assert target.contract.target_facts.route_name == "Local Gateway"
     assert target.contract.target_facts.limits.total_context_tokens == 300_000
+    assert target.context_budget.effective_output_tokens == output_limit
+    assert target.context_budget.input_budget_tokens == 300_000 - 1 - 8_192
     assert target.contract.target_facts.input_modalities == input_modalities
     assert target.fact.input_modalities == input_modalities
     assert target.contract.canonical_endpoint_base_url == "http://127.0.0.1:9000/v1"
-    assert build_chat_completions_payload(call=call, context=context)[
-        "reasoning_effort"
-    ] == "high"
+    payload = build_chat_completions_payload(call=call, context=context)
+    assert payload["reasoning_effort"] == "high"
+    assert payload["max_completion_tokens"] == output_limit
 
     image_context = replace(
         context,

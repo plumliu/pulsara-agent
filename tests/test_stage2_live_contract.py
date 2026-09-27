@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+
+from pulsara_agent.llm.adapters.openai.events import ProviderLiveItemBuilder
+from pulsara_agent.llm.normalized_transport import NormalizedProviderTransportExecution
 from pulsara_agent.conversation_kernel.assembler import (
     CompletedTextBlock,
     CompletedToolCallBlock,
@@ -17,6 +21,11 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
+from pulsara_agent.ports.provider_stream import (
+    ProviderAdapterTerminal,
+    ProviderAdapterTerminalKind,
+    ProviderStreamTerminal,
+)
 
 
 def _assembler() -> ProviderStreamAssembler:
@@ -140,3 +149,48 @@ def test_live_snapshot_has_an_independent_byte_bound_and_exact_suffix_cut() -> N
     assert snapshot.retained_from_revision == 3
     assert snapshot.through_revision == 3
     assert [event.revision for event in snapshot.events] == [3]
+
+
+def test_large_provider_end_can_invalidate_live_cache_without_losing_result() -> None:
+    # PULSARA_PROVIDER_OUTPUT_BUDGET_SPEC.zh.md: an end snapshot larger than
+    # the disposable live ring must still complete as an exact canonical result.
+    content = "x" * (1 << 20) + "中文🙂"
+    bus = LiveAgentEventBus()
+    _, initial = bus.subscribe_with_snapshot()
+    assembler = ProviderStreamAssembler(
+        session_id="session:large",
+        turn_id="turn:large",
+        live_bus=bus,
+        proposed_entry_id="entry:large",
+    )
+    builder = ProviderLiveItemBuilder()
+
+    async def stream():
+        for offset in range(0, len(content), 64 << 10):
+            for event in builder.text_delta(content[offset:offset + (64 << 10)]):
+                yield event
+        for event in builder.text_end():
+            yield event
+        yield ProviderAdapterTerminal(ProviderAdapterTerminalKind.COMPLETED)
+
+    async def exercise():
+        execution = NormalizedProviderTransportExecution(stream())
+        terminal = None
+        try:
+            while (event := await execution.read_next()) is not None:
+                if isinstance(event, ProviderStreamTerminal):
+                    terminal = event
+                else:
+                    assembler.apply(event)
+        finally:
+            await execution.aclose()
+        return terminal
+
+    terminal = asyncio.run(exercise())
+    assert terminal is not None and terminal.outcome == "COMPLETED"
+    completed = assembler.complete()
+    assert completed.public_text == content
+    assert len(completed.blocks) == 1
+    assert completed.blocks[0].text == content
+    _, snapshot = bus.subscribe_with_snapshot()
+    assert snapshot.generation > initial.generation

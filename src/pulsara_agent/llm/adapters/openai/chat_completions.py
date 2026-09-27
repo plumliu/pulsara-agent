@@ -53,12 +53,11 @@ from pulsara_agent.llm.provider import (
     mutable_provider_value,
 )
 from pulsara_agent.llm.request import LLMContext
-from pulsara_agent.llm.resolution import ResolvedModelCall
+from pulsara_agent.llm.resolution import ResolvedModelCall, resolve_wire_output_tokens
 from pulsara_agent.llm.model_target import reasoning_wire_fields
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.stream_limits import (
     MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES,
-    MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE,
 )
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.provider_stream import (
@@ -323,18 +322,26 @@ def build_chat_completions_payload(
             raise TypeError("Chat context projection must be an object")
         if context_fields.get("tool_choice") != context.tool_choice:
             raise ValueError("Chat context tool choice changed after wire planning")
+        wire_input_tokens = plan.quote.final_wire_estimated_input_tokens
     else:
+        items_with_sources = _chat_message_items_with_sources(context.messages)
+        ordered_items = tuple(item for item, _source in items_with_sources)
         context_fields = materialize_chat_context_bearing_wire_projection(
             call=call,
             root_policy=context.system_prompt,
-            ordered_input_items=tuple(
-                _messages_to_chat_messages(
-                    context.messages,
-                )
-            ),
+            ordered_input_items=ordered_items,
             tool_items=tuple(_tool_to_chat_tool(tool) for tool in context.tools),
             tool_choice=context.tool_choice,
         )
+        wire_input_tokens = call.target.token_estimator.estimate_final_wire_json_components(
+            fixed_context=materialize_chat_context_bearing_wire_projection(
+                call=call, root_policy=context.system_prompt, ordered_input_items=(),
+                tool_items=tuple(_tool_to_chat_tool(tool) for tool in context.tools),
+                tool_choice=context.tool_choice,
+            ),
+            ordered_input_items=ordered_items,
+            ordered_input_sources=tuple(source for _item, source in items_with_sources),
+        ).total_input_tokens
 
     payload: dict[str, Any] = dict(context_fields)
     extra_body: dict[str, Any] = {}
@@ -353,8 +360,8 @@ def build_chat_completions_payload(
     )
     for key, value in route_wire_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
-    payload["max_completion_tokens"] = (
-        call.target.context_budget.effective_output_tokens
+    payload["max_completion_tokens"] = resolve_wire_output_tokens(
+        target=call.target, final_wire_input_tokens=wire_input_tokens,
     )
     reasoning = reasoning_wire_fields(call.target.contract, call.selected_reasoning)
     for key, value in reasoning.root.items():
@@ -448,7 +455,7 @@ def chat_semantic_wire_group(
 ) -> tuple[dict[str, Any], ...]:
     """Return the exact generic wire group for one compiled message."""
 
-    return tuple(_messages_to_chat_messages((message,)))
+    return tuple(item for item, _source in _chat_message_items_with_sources((message,)))
 
 
 def chat_tool_wire_items(tools: tuple[ToolSpec, ...]) -> tuple[dict[str, Any], ...]:
@@ -467,10 +474,12 @@ def _thaw_wire_objects(
     return result
 
 
-def _messages_to_chat_messages(
+def _chat_message_items_with_sources(
     messages: tuple[LLMMessage, ...],
-) -> list[dict[str, Any]]:
-    chat_messages: list[dict[str, Any]] = []
+) -> list[tuple[dict[str, Any], LLMMessage | None]]:
+    """Lower once for both dispatch and estimation, preserving image sources."""
+
+    chat_messages: list[tuple[dict[str, Any], LLMMessage | None]] = []
     pending_tool_calls: list[dict[str, Any]] = []
     for message in messages:
         if message.role is MessageRole.TOOL_CALL:
@@ -478,21 +487,21 @@ def _messages_to_chat_messages(
             continue
         if pending_tool_calls:
             chat_messages.append(
-                {
+                ({
                     "role": "assistant",
                     "content": "",
                     "tool_calls": pending_tool_calls,
-                }
+                }, None)
             )
             pending_tool_calls = []
-        chat_messages.append(_message_to_chat_message(message))
+        chat_messages.append((_message_to_chat_message(message), message))
     if pending_tool_calls:
         chat_messages.append(
-            {
+            ({
                 "role": "assistant",
                 "content": "",
                 "tool_calls": pending_tool_calls,
-            }
+            }, None)
         )
     return chat_messages
 
@@ -516,7 +525,6 @@ class ChatCompletionAccumulator:
     _text_field_chunks: dict[str, list[str]] = field(default_factory=dict)
     _array_field_items: dict[str, list[FrozenJsonValue]] = field(default_factory=dict)
     _replay_aggregate_bytes: int = 2
-    _replay_item_count: int = 0
     _unknown_nonempty_field_seen: bool = False
     _live_reasoning_source: str | None = None
     _live_reasoning_text_field: str | None = None
@@ -927,7 +935,6 @@ class ChatCompletionAccumulator:
         if mode is ProviderChatFieldAccumulationMode.TEXT_CONCAT:
             if not isinstance(raw_value, str):
                 raise AssertionError("chat replay text quote shape drifted")
-            item_increment = 1
             encoded = self._canonical_replay_value_bytes(raw_value)
             additional_bytes = (
                 self._new_replay_field_prefix_bytes(field_name) + len(encoded)
@@ -937,12 +944,6 @@ class ChatCompletionAccumulator:
         elif mode is ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND:
             if not isinstance(raw_value, list):
                 raise AssertionError("chat replay array quote shape drifted")
-            item_increment = max(1, len(raw_value))
-            if (
-                self._replay_item_count + item_increment
-                > MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE
-            ):
-                self._fail_replay_limit(items=True)
             encoded = self._canonical_replay_value_bytes(raw_value)
             if not observed:
                 additional_bytes = self._new_replay_field_prefix_bytes(
@@ -958,16 +959,10 @@ class ChatCompletionAccumulator:
             raise AssertionError("chat replay accumulation mode drifted")
 
         if (
-            self._replay_item_count + item_increment
-            > MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE
-        ):
-            self._fail_replay_limit(items=True)
-        if (
             self._replay_aggregate_bytes + additional_bytes
             > MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES
         ):
-            self._fail_replay_limit(items=False)
-        self._replay_item_count += item_increment
+            self._fail_replay_limit()
         self._replay_aggregate_bytes += additional_bytes
 
     def _validate_final_replay_field_bound(
@@ -979,22 +974,18 @@ class ChatCompletionAccumulator:
         if mode is ProviderChatFieldAccumulationMode.TEXT_CONCAT:
             if not isinstance(raw_value, str):
                 raise AssertionError("chat final replay text quote shape drifted")
-            item_count = 1
         elif mode is ProviderChatFieldAccumulationMode.ORDERED_ARRAY_APPEND:
             if not isinstance(raw_value, list):
                 raise LLMTransportContractError(
                     "chat final replay append field is not an array",
                     reason_code="transport_chat_replay_field_invalid",
                 )
-            item_count = max(1, len(raw_value))
         else:  # pragma: no cover - closed enum.
             raise AssertionError("chat replay accumulation mode drifted")
-        if item_count > MAX_CHAT_REASONING_REPLAY_ITEMS_PER_RESPONSE:
-            self._fail_replay_limit(items=True)
         encoded = self._canonical_replay_value_bytes(raw_value)
         logical_bytes = 2 + len(canonical_json_bytes(field_name)) + 1 + len(encoded)
         if logical_bytes > MAX_CHAT_REASONING_REPLAY_AGGREGATE_BYTES:
-            self._fail_replay_limit(items=False)
+            self._fail_replay_limit()
 
     @staticmethod
     def _canonical_replay_value_bytes(raw_value: object) -> bytes:
@@ -1019,26 +1010,17 @@ class ChatCompletionAccumulator:
     def _text_field_value(self, field_name: str) -> str:
         return "".join(self._text_field_chunks[field_name])
 
-    def _fail_replay_limit(self, *, items: bool) -> None:
+    def _fail_replay_limit(self) -> None:
         self._clear_replay_fields()
         raise LLMTransportContractError(
-            (
-                "chat reasoning replay exceeded its item bound"
-                if items
-                else "chat reasoning replay exceeded its aggregate byte bound"
-            ),
-            reason_code=(
-                "transport_source_item_limit_exceeded"
-                if items
-                else "transport_source_payload_limit_exceeded"
-            ),
+            "chat reasoning replay exceeded its aggregate byte bound",
+            reason_code="transport_source_payload_limit_exceeded",
         )
 
     def _clear_replay_fields(self) -> None:
         self._text_field_chunks.clear()
         self._array_field_items.clear()
         self._replay_aggregate_bytes = 2
-        self._replay_item_count = 0
 
     def _freeze_completed_replay(self):
         contracts = self.route_wire_profile.chat_replay_fields

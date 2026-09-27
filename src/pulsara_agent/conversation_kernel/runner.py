@@ -138,7 +138,6 @@ from pulsara_agent.conversation_kernel.extensions import (
 from pulsara_agent.conversation_kernel.limits import (
     PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
     ROOT_COMPLETION_SUFFIX_BATCH_ITEMS,
-    STAGE2_LIMITS,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryUsePolicy,
@@ -935,7 +934,6 @@ class ConversationKernelRunner:
         automatic_plan_continuation: AutomaticPlanContinuationPort | None = None,
         launch_permission_mode: PermissionMode = DEFAULT_PERMISSION_MODE,
         maximum_input_tokens_per_call: int | None = None,
-        maximum_output_tokens_per_call: int = STAGE2_LIMITS.provider_output_tokens_per_call_hard,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         memory_projection: MemoryContextProjectionPort | None = None,
         assistant_settlement_owner: AssistantMessageSettlementOwner | None = None,
@@ -954,7 +952,7 @@ class ConversationKernelRunner:
             Callable[[str, str], Awaitable[None]] | None
         ) = None,
     ) -> None:
-        if maximum_output_tokens_per_call < 1 or (
+        if (
             maximum_input_tokens_per_call is not None
             and maximum_input_tokens_per_call < 1
         ):
@@ -1064,7 +1062,6 @@ class ConversationKernelRunner:
             memory_support=self._memory_dispatch,
             deadline_factory=self._deadlines,
             maximum_input_tokens_per_call=maximum_input_tokens_per_call,
-            maximum_output_tokens_per_call=maximum_output_tokens_per_call,
             workspace_resolver=self._workspace_resolver,
             compaction_owner=compaction_owner,
             subagent_runtime=subagent_runtime,

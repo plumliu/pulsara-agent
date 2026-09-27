@@ -525,6 +525,34 @@ def test_round5a2_chat_payload_boundary_is_exact() -> None:
         _candidate(over)
 
 
+def test_chat_fragmented_replay_survives_durable_hydration() -> None:
+    # Streaming, commit and later input hydration must agree on the same
+    # provider-owned sequence; no former 65K fragment/node count survives.
+    details = [{"ordinal": index} for index in range(65_537)]
+    item = _frozen_object(
+        {"role": "assistant", "content": "done", "reasoning_details": details}
+    )
+    candidate = _candidate(item)
+    manifest = freeze_provider_replay_manifest(
+        replay_id=candidate.replay_id,
+        assistant_entry_id=candidate.assistant_entry_id,
+        wire_api=candidate.wire_api,
+        codec_kind=candidate.codec_kind.value,
+        provider_replay_contract_fingerprint=candidate.provider_replay_contract_fingerprint,
+        replay_target_fingerprint=candidate.replay_target_fingerprint,
+        public_projection_fingerprint=candidate.public_projection_fingerprint,
+        payload_digest=candidate.payload_digest,
+        payload_size=candidate.payload_size,
+        item_count=candidate.item_count,
+        fragment_fingerprint=candidate.fragment_fingerprint,
+    )
+    decoded = decode_provider_replay_fragment(
+        manifest=manifest, payload_bytes=candidate.payload_bytes
+    )
+    assert decoded.ordered_items == (item,)
+    assert decoded.payload_bytes == candidate.payload_bytes
+
+
 def test_round5a2_responses_item_count_and_allowlist_are_closed() -> None:
     target = _target(api="openai_responses")
     items = tuple(

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from pulsara_agent.llm.adapters.openai.events import ProviderLiveItemBuilder
 from pulsara_agent.llm.normalized_transport import (
     NormalizedProviderTransportExecution,
@@ -76,6 +78,66 @@ def test_stage2_provider_stream_uses_formal_live_payloads_without_adoption() -> 
     assert values[-1].outcome == "COMPLETED"
     assert not hasattr(execution, "require_adoptable")
     assert not hasattr(execution, "acknowledge_adopted")
+    assert completion.status is ProviderPhysicalCompletionStatus.COMPLETED
+
+
+@pytest.mark.parametrize("kind", ("text", "thinking", "tool"))
+@pytest.mark.parametrize("chunk_size", (1, 100, 1_000_000))
+def test_provider_stream_fragmentation_preserves_long_output(
+    kind: str, chunk_size: int,
+) -> None:
+    # PULSARA_PROVIDER_OUTPUT_BUDGET_SPEC.zh.md: legal provider fragmentation
+    # cannot impose another ceiling below the model's output allowance. The
+    # one-character case exceeds the former 16 MiB serialized-event sum; the
+    # end snapshot (and whole-block delta) exceeds the former 256 KiB cap.
+    expected = "x" * 300_000 + "中文🙂"
+    if kind == "tool":
+        expected = '{"content":"' + expected + '"}'
+    builder = ProviderLiveItemBuilder()
+
+    async def fragmented():
+        if kind == "tool":
+            for item in builder.tool_call_start(
+                tool_call_id="call:long", tool_call_name="write_file"
+            ):
+                yield item
+        for offset in range(0, len(expected), chunk_size):
+            chunk = expected[offset:offset + chunk_size]
+            if kind == "text":
+                items = builder.text_delta(chunk)
+            elif kind == "thinking":
+                items = builder.thinking_delta(chunk)
+            else:
+                items = builder.tool_call_delta(tool_call_id="call:long", delta=chunk)
+            for item in items:
+                yield item
+        if kind == "text":
+            ends = builder.text_end()
+        elif kind == "thinking":
+            ends = builder.thinking_end()
+        else:
+            ends = builder.tool_call_end(tool_call_id="call:long")
+        for item in ends:
+            yield item
+        yield ProviderAdapterTerminal(ProviderAdapterTerminalKind.COMPLETED)
+
+    async def collect():
+        execution = NormalizedProviderTransportExecution(fragmented())
+        final = None
+        terminal = None
+        while (item := await execution.read_next()) is not None:
+            if isinstance(item, (TextEndPayload, ThinkingEndPayload)):
+                final = item.final_text
+            elif isinstance(item, ToolCallEndPayload):
+                final = item.arguments_json
+            elif isinstance(item, ProviderStreamTerminal):
+                terminal = item
+        await execution.aclose()
+        return final, terminal, await execution.wait_physical_completion()
+
+    final, terminal, completion = asyncio.run(collect())
+    assert final == expected
+    assert terminal.outcome == "COMPLETED"
     assert completion.status is ProviderPhysicalCompletionStatus.COMPLETED
 
 

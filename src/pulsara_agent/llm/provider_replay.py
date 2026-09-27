@@ -26,8 +26,6 @@ from pulsara_agent.ports.live_agent_event import ReasoningPresentationKind
 
 MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES = 16 << 20
 MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS = 4_096
-MAXIMUM_PROVIDER_REPLAY_CHAT_NESTED_ITEMS = 65_536
-MAXIMUM_PROVIDER_REPLAY_JSON_NODES = 65_536
 MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH = 128
 MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES = 16 << 20
 MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES = 64 << 20
@@ -297,7 +295,9 @@ def project_provider_visible_reasoning(
     decoded = bounded_json_loads(
         payload_bytes,
         maximum_bytes=MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
-        maximum_nodes=MAXIMUM_PROVIDER_REPLAY_JSON_NODES,
+        # Each JSON node consumes at least one input byte. Use the existing
+        # payload byte boundary without imposing a second fragment-count cap.
+        maximum_nodes=len(payload_bytes),
         maximum_depth=MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH,
         maximum_string_utf8_bytes=MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES,
     )
@@ -601,7 +601,7 @@ def _validate_fragment_fields(
     decoded = bounded_json_loads(
         payload_bytes,
         maximum_bytes=MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
-        maximum_nodes=MAXIMUM_PROVIDER_REPLAY_JSON_NODES,
+        maximum_nodes=len(payload_bytes),
         maximum_depth=MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH,
         maximum_string_utf8_bytes=MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES,
     )
@@ -709,11 +709,8 @@ def _validate_provider_replay_payload_shape(
         ):
             raise ValueError("Chat provider replay registry is invalid")
         details = message.get("reasoning_details")
-        if details is not None and (
-            not isinstance(details, list)
-            or len(details) > MAXIMUM_PROVIDER_REPLAY_CHAT_NESTED_ITEMS
-        ):
-            raise ValueError("Chat provider replay nested item bound exceeded")
+        if details is not None and not isinstance(details, list):
+            raise ValueError("Chat provider replay details are not an array")
         return
     if codec_kind is ProviderAssistantReplayCodecKind.RESPONSES_EXACT_OUTPUT_ITEMS:
         if not decoded or len(decoded) > MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS:
@@ -736,9 +733,7 @@ def provider_replay_contract_fingerprint_for_codec(
 
 __all__ = [
     "MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES",
-    "MAXIMUM_PROVIDER_REPLAY_CHAT_NESTED_ITEMS",
     "MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH",
-    "MAXIMUM_PROVIDER_REPLAY_JSON_NODES",
     "MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES",
     "MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS",
     "MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES",
