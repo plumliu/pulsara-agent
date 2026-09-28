@@ -1,5 +1,7 @@
 'use client';
 
+import { FilePreviewProvider } from '../components/file-preview-dialog';
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityRail } from '../components/activity-rail';
 import { CapabilityView } from '../components/capability-view';
@@ -2214,6 +2216,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       )}
       {activeView === 'workbench' && !databaseBlocked && (
         <div className="session-connected-views" hidden={Boolean(openingSession)}>
+        <FilePreviewProvider ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
         <WorkbenchView
           onCompletePaths={(prefix, cursor, signal) => adapter.completeWorkspacePaths(activeSession.id, prefix, cursor, signal)}
           workspace={activeWorkspace}
@@ -2392,6 +2395,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onNotify={notify}
           onClose={() => setInspectorOpen(false)}
         />
+        </FilePreviewProvider>
         </div>
       )}
       {activeView === 'workbench' && databaseBlocked && databaseState && (

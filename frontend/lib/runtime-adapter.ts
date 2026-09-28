@@ -1,3 +1,4 @@
+import type { FilePreviewApi } from './file-preview';
 import { LocalMemoryApi } from './memory-api';
 import type {
   PluginImportOptions,
@@ -813,6 +814,7 @@ function taskAssistantBody(entryKind: string, body: string): string {
 }
 
 export interface RuntimeConnection {
+  readonly filePreview: FilePreviewApi;
   importFiles(files: readonly File[], directory: boolean, signal: AbortSignal): Promise<import('./file-reference').ImportedPath>;
   readonly sessionId: string;
   readonly role: 'observer' | 'controller';
@@ -1948,6 +1950,20 @@ class LocalRuntimeConnection implements RuntimeConnection {
     this.liveOwnerEpoch = numeric(payload.live_hello.live_owner_epoch ?? live.owner_epoch);
     this.liveRevision = numeric(payload.live_hello.live_revision ?? live.through_revision);
     this.applyLive(live.events ?? [], live.settlements ?? []);
+  }
+
+  readonly filePreview: FilePreviewApi = {
+    open: (path, basePreview) => this.previewRequest('', { path, base_preview: basePreview }),
+    close: async token => { await this.previewRequest('', { read_token: token }, 'DELETE'); },
+    page: (token, cursor, mode, signal) => this.previewRequest('/page', { read_token: token, cursor, mode }, 'POST', signal),
+    action: async (token, action) => { await this.previewRequest('/action', { read_token: token, action }); },
+  };
+
+  private previewRequest<T>(suffix: string, body: object, method = 'POST', signal?: AbortSignal): Promise<T> {
+    if (this.closed) return Promise.reject(new RuntimeApiError('PREVIEW_EXPIRED', '会话连接已关闭。', false));
+    return apiRequest<T>(`/api/connections/${encodeURIComponent(this.connectionId)}/file-preview${suffix}`, {
+      method, body: JSON.stringify(body), signal,
+    });
   }
 
   async initialize(): Promise<void> {

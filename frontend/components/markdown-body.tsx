@@ -3,12 +3,14 @@
 import type { Element as HastElement, Parent as HastParent, Root as HastRoot } from 'hast';
 import { toText } from 'hast-util-to-text';
 import rehypeKatex from 'rehype-katex';
-import { useCallback, useMemo, useRef, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
-import ReactMarkdown, { type Components } from 'react-markdown';
+import { useCallback, useContext, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math-extended';
 import { SKIP, visitParents } from 'unist-util-visit-parents';
 import { MermaidBlock } from './mermaid-block';
+import { FileLinkContext } from './file-link-context';
+import { classifyFileLink, markdownImageUrl } from '../lib/file-preview';
 
 export type MarkdownNotify = (
   title: string,
@@ -233,9 +235,41 @@ export function normalizeMathMarkdown(value: string): string {
   return output;
 }
 
+function markdownUrl(url: string, key: string, node: HastElement) {
+  return node.tagName === 'a' && key === 'href' && classifyFileLink(url) === 'local' ? url : defaultUrlTransform(url);
+}
+
+function MarkdownLink({ href = '', children, onNotify }: { href?: string; children?: ReactNode; onNotify: MarkdownNotify }) {
+  const context = useContext(FileLinkContext);
+  const kind = classifyFileLink(href);
+  if (kind === 'external') return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
+  if (kind === 'anchor') return <a href={href}>{children}</a>;
+  return <a href={kind === 'local' ? href : undefined} role="link" tabIndex={0}
+    onClick={event => {
+      event.preventDefault();
+      if (kind === 'local' && context) context.open(href, event.currentTarget, context.basePreview);
+      else onNotify('无法打开文件', kind === 'invalid' ? '无法识别这个文件地址。' : '此内容没有可用的会话文件连接。', 'warning');
+    }} onKeyDown={event => { if (event.key === 'Enter' && !event.currentTarget.hasAttribute('href')) event.currentTarget.click(); }}>
+    {children}
+  </a>;
+}
+
+function MarkdownImage({ src, alt }: { src?: string | Blob; alt?: string }) {
+  const context = useContext(FileLinkContext);
+  const [failed, setFailed] = useState<string>();
+  if (typeof src !== 'string') return <span>{alt ?? '图片'}</span>;
+  const kind = classifyFileLink(src);
+  const url = kind === 'external' ? src : context?.imagesUrl ? markdownImageUrl(src, context.imagesUrl) : undefined;
+  if (!url || failed === url) return <span className="file-preview-image-placeholder" title={src}>[{alt || '本地图片'}：暂不可预览 — {src}]</span>;
+  // Raster resources and the existing external image policy; never raw SVG DOM.
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={url} alt={alt ?? ''} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(url)} />;
+}
+
 export function MarkdownBody({ body, onNotify, streaming = false }: MarkdownProps) {
   const components = useMemo<Components>(() => ({
-    a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
+    a: ({ children, href }) => <MarkdownLink href={href} onNotify={onNotify}>{children}</MarkdownLink>,
+    img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
     pre: ({ node, children, ...props }) => {
       const code = node?.children[0];
       if (code?.type === 'element' && code.tagName === 'code'
@@ -248,6 +282,7 @@ export function MarkdownBody({ body, onNotify, streaming = false }: MarkdownProp
   return (
     <MarkdownCopySurface onNotify={onNotify}>
       <ReactMarkdown
+        urlTransform={markdownUrl}
         remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: true }]]}
         rehypePlugins={[rehypeCopyableMath, [rehypeKatex, { strict: false }]]}
         components={components}
@@ -262,12 +297,13 @@ export function MarkdownInline({ body, onNotify }: MarkdownProps) {
   return (
     <MarkdownCopySurface inline onNotify={onNotify}>
       <ReactMarkdown
+        urlTransform={markdownUrl}
         remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: true }]]}
         rehypePlugins={[rehypeCopyableMath, [rehypeKatex, { strict: false }]]}
         allowedElements={['a', 'strong', 'em', 'del', 'code', 'span']}
         unwrapDisallowed
         components={{
-          a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer">{children}</a>,
+          a: ({ children, href }) => <MarkdownLink href={href} onNotify={onNotify}>{children}</MarkdownLink>,
         }}
       >
         {normalizeMathMarkdown(body)}

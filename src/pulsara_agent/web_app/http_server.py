@@ -69,6 +69,8 @@ from pulsara_agent.web_app.browser_bridge import (
 from pulsara_agent.web_app.protocol_client import ProtocolBridgeError
 from pulsara_agent.web_app.file_import import LocalImport, receive_file, receive_directory
 from pulsara_agent.web_app.directory_picker import NativeDirectoryPicker
+from pulsara_agent.web_app.file_preview import FilePreviewError
+from pulsara_agent.web_app.file_preview_http import FilePreviewHttp
 from pulsara_agent.web_app.session_controller import (
     LocalSessionController,
     OldHostCloseQuarantined,
@@ -329,6 +331,7 @@ class LocalHttpServer:
             middlewares=[self._errors, self._security],
         )
         self._install_routes()
+        FilePreviewHttp(self.bridge, lambda: self.origin).install(self._app.router)
 
     @property
     def port(self) -> int:
@@ -645,6 +648,8 @@ class LocalHttpServer:
                 status=exc.status,
                 retryable=exc.retryable,
             )
+        except FilePreviewError as exc:
+            return self._error_response(exc.code, exc.message, status=exc.status, retryable=False)
         except SessionDeleteRejected as exc:
             return self._error_response(exc.public_code, str(exc), status=exc.status)
         except ProtocolBridgeError as exc:

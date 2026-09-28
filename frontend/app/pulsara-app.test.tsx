@@ -299,6 +299,12 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
 }
 
 class FakeConnection implements RuntimeConnection {
+  readonly filePreview = {
+    open: vi.fn(async () => { throw new Error('No preview fixture'); }),
+    page: vi.fn(async () => { throw new Error('No page fixture'); }),
+    close: vi.fn(async () => undefined),
+    action: vi.fn(async () => undefined),
+  };
   async importFiles(): Promise<import('../lib/file-reference').ImportedPath> {
     throw new Error('Unexpected file import');
   }

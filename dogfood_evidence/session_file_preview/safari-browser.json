@@ -1,0 +1,49 @@
+[
+  {
+    "case": "canonical-inline-script-and-layout",
+    "ok": true
+  },
+  {
+    "case": "local-css-esm-json-font-image",
+    "ok": true,
+    "messages": [
+      {
+        "type": "pulsara-preview-ready"
+      },
+      {
+        "type": "pulsara-visualization-layout",
+        "mode": "root",
+        "rect": {
+          "x": 1,
+          "y": 1,
+          "width": 237,
+          "height": 256
+        }
+      }
+    ]
+  },
+  {
+    "case": "canonical-blocked-network-navigation-popups-form",
+    "ok": true,
+    "hits": [],
+    "executed": 10
+  },
+  {
+    "case": "local-blocked-network-navigation-popups-form",
+    "ok": true,
+    "hits": [],
+    "executed": 10
+  },
+  {
+    "case": "main-dom-and-storage-isolated",
+    "ok": true
+  },
+  {
+    "case": "non-iframe-read-url-not-executable",
+    "ok": true
+  },
+  {
+    "case": "actual-plotly-document",
+    "ok": true
+  }
+]

@@ -40,6 +40,9 @@ from pulsara_agent.web_app.session_controller import (
     SessionRetirementOperation,
     RuntimeReopenOperation,
 )
+from pulsara_agent.web_app.file_preview import FilePreviews, expired, local_path, open_preview
+from pathlib import Path
+
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 
@@ -155,6 +158,7 @@ class LocalBrowserBridge:
         self.sessions = sessions
         self.protocol_server = protocol_server
         self._connections: dict[str, BrowserRuntimeConnection] = {}
+        self.file_previews = FilePreviews()
         self._controller_by_session: dict[str, str] = {}
         self._browser_instance_by_connection: dict[str, str] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -223,6 +227,7 @@ class LocalBrowserBridge:
                     controller_id = None
                 role = "controller" if controller_id is None else "observer"
             if old is not None:
+                self.file_previews.revoke(old.connection_id)
                 await old.aclose()
 
             handle = await self.sessions.resume_session(session_id)
@@ -272,6 +277,7 @@ class LocalBrowserBridge:
                 raise
 
     async def disconnect(self, connection_id: str) -> None:
+        self.file_previews.revoke(connection_id)
         async with self._lock:
             connection = self._connections.pop(connection_id, None)
             self._browser_instance_by_connection.pop(connection_id, None)
@@ -356,6 +362,7 @@ class LocalBrowserBridge:
                 if connection.session_id == operation.session_id
             )
             for connection in connections:
+                self.file_previews.revoke(connection.connection_id)
                 self._connections.pop(connection.connection_id, None)
                 self._browser_instance_by_connection.pop(connection.connection_id, None)
                 if (
@@ -441,6 +448,58 @@ class LocalBrowserBridge:
     async def _quarantine_detach(self, session_id: str) -> None:
         async with self._lock:
             self._quarantined_sessions.add(session_id)
+
+    async def open_file_preview(self, connection_id: str, path: str, base_token: str | None):
+        connection = await self._connection(connection_id)
+        async with self._lock:
+            if self._connections.get(connection_id) is not connection:
+                raise expired()
+            base = self.file_previews.current(connection_id, base_token).path.parent if base_token else None
+            self.file_previews.revoke(connection_id)
+            operation = object()
+            self.file_previews.pending[connection_id] = operation
+        item = None
+        try:
+            if base is None:
+                summary = await self.sessions.core.read_resumable_session(
+                    connection.session_id, memory_domain_id=self.sessions.workspace_input.memory_domain_id,
+                )
+                if summary is None:
+                    raise expired()
+                base = Path(summary.workspace_root)
+            target = local_path(path, base)
+            task = asyncio.create_task(asyncio.to_thread(open_preview, connection_id, target))
+            try:
+                item = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # The OS open still owns its result when the HTTP request disappears.
+                def discard(done):
+                    if not done.cancelled() and done.exception() is None:
+                        done.result().close()
+                task.add_done_callback(discard)
+                raise
+            async with self._lock:
+                if (self._connections.get(connection_id) is not connection or not connection.is_open
+                        or self.file_previews.pending.get(connection_id) is not operation or self._closing):
+                    raise expired()
+                self.file_previews.pending.pop(connection_id, None)
+                self.file_previews.slots[connection_id] = item
+                return item.metadata()
+        except BaseException:
+            if self.file_previews.pending.get(connection_id) is operation:
+                self.file_previews.pending.pop(connection_id, None)
+            if item is not None:
+                item.close()
+            raise
+
+    async def require_file_preview(self, connection_id: str, token: str, *, check_content=True):
+        await self._connection(connection_id)
+        return self.file_previews.current(connection_id, token, check_content=check_content)
+
+    async def read_file_preview(self, token: str):
+        item = self.file_previews.by_token(token)
+        await self._connection(item.connection_id)
+        return self.file_previews.current(item.connection_id, token)
 
     async def require_import_controller(self, connection_id: str, generation: int) -> None:
         """Validate the existing browser owner without adding a protocol command."""
@@ -944,6 +1003,9 @@ class LocalBrowserBridge:
         async with self._lock:
             self._closing = True
             connections = tuple(self._connections.values())
+            for connection_id in tuple(self.file_previews.slots):
+                self.file_previews.revoke(connection_id)
+            self.file_previews.pending.clear()
             self._connections.clear()
             self._controller_by_session.clear()
             self._browser_instance_by_connection.clear()
@@ -959,6 +1021,7 @@ class LocalBrowserBridge:
                 raise RuntimeError("Local Web application is draining")
             connection = self._connections.get(connection_id)
             if connection is not None and not connection.is_open:
+                self.file_previews.revoke(connection_id)
                 stale = self._connections.pop(connection_id)
                 self._browser_instance_by_connection.pop(connection_id, None)
                 if (

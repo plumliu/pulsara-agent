@@ -58,7 +58,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
-      <head><meta httpEquiv="Content-Security-Policy" content="frame-src about:" /></head>
+      <head><meta httpEquiv="Content-Security-Policy" content="frame-src about: http://127.0.0.1:*/api/file-previews/" /></head>
       <body>{children}</body>
     </html>
   );

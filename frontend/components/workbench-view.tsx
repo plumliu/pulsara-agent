@@ -1,5 +1,8 @@
 'use client';
 
+import { SandboxedHtmlPreview } from './sandboxed-html-preview';
+
+
 import { CapabilityInteractionEditor } from './capability-interaction-editor';
 
 import {
@@ -86,7 +89,6 @@ import { useWorkbenchFileDrop } from '../lib/workbench-file-drop';
 import { promptContentTextProjection } from '../lib/prompt-content';
 import {
   usableVisualizationRootRect,
-  visualizationFrameMeasurementScript,
   visualizationLayoutMessageType,
   type VisualizationRootRect,
 } from '../lib/visualization-frame';
@@ -964,7 +966,7 @@ const unavailableVisualization = async (): Promise<string> => {
   throw new Error('Visualization content reader is unavailable');
 };
 
-const visualizationCsp = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; worker-src 'none'; frame-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; navigate-to 'none'";
+
 
 function VisualizationPanel({ entryId, visualization, onRead }: {
   entryId: string;
@@ -1025,8 +1027,6 @@ function VisualizationPanel({ entryId, visualization, onRead }: {
   const error = visualization.state === 'FAILED'
     ? visualization.failureDetail ?? '可视化未能生成。'
     : !digest || !size ? '可视化引用不完整。' : state.error;
-  const documentBody = state.html?.replace(/^\s*<!doctype[^>]*>/i, '') ?? '';
-  const source = `<!doctype html><meta http-equiv="Content-Security-Policy" content="${visualizationCsp}">${documentBody}${visualizationFrameMeasurementScript}`;
   return <div className={`assistant-visualization${expanded ? ' is-expanded' : ''}`} data-visualization-ordinal={ordinal}
     data-visualization-layout={rootRect ? 'root' : 'page'}
     style={expanded && rootRect ? { width: Math.ceil(rootRect.width) + 2 } : undefined}>
@@ -1045,8 +1045,8 @@ function VisualizationPanel({ entryId, visualization, onRead }: {
         {error ? <div className="assistant-visualization__status" role="status">{error}</div>
           : state.html === undefined ? <div className="assistant-visualization__status" role="status">正在加载可视化…</div>
             : <div className="assistant-visualization__viewport" style={rootRect ? { height: Math.ceil(rootRect.height) } : undefined}>
-              <iframe ref={frameRef} title={`可视化 ${ordinal + 1}`} sandbox="allow-scripts"
-                referrerPolicy="no-referrer" srcDoc={source}
+              <SandboxedHtmlPreview frameRef={frameRef} title={`可视化 ${ordinal + 1}`}
+                source={{ html: state.html, measure: true }}
                 style={{
                   width: probeWidth === null ? '100%' : probeWidth,
                   transform: rootRect ? `translate(${-rootRect.x}px, ${-rootRect.y}px)` : undefined,

@@ -1,6 +1,6 @@
 # Pulsara 会话文件链接与预览实施规格
 
-状态：**独立可行性复核通过，尚未实施**。日期：2026-09-28。依据本轮用户讨论、[AGENTS.md](AGENTS.md) 与当前生产代码，可作为后续实施基线。本篇只规定用户点击文件链接后的本地阅读体验，不改变模型工具、权限档位、provider 输入、对话持久结构或既有可视化订阅语义。
+状态：**已实施，独立代码复核通过**。日期：2026-09-28。依据本轮用户讨论、[AGENTS.md](AGENTS.md) 与当前生产代码，作为当前实施合同。本篇只规定用户点击文件链接后的本地阅读体验，不改变模型工具、权限档位、provider 输入、对话持久结构或既有可视化订阅语义。
 
 ## 1. 目标与产品合同
 
@@ -28,8 +28,8 @@
 
 | 代码/规格 | 已有机制 | 本次用途或缺口 |
 | --- | --- | --- |
-| `frontend/components/markdown-body.tsx` | `MarkdownBody` 与 `MarkdownInline` 的 `a` 都直接输出新窗口 `<a>` | 当前相对文件链接按页面 URL 解析；需要共用链接分类与点击处理 |
-| `frontend/components/workbench-view.tsx` | `VisualizationPanel` 读取已提交 occurrence，展开后使用 `srcDoc` iframe | 提取底层 HTML 展示部分，卡片订阅和 canonical 读取继续由原 owner 负责 |
+| `frontend/components/markdown-body.tsx` | `MarkdownBody` 与 `MarkdownInline` 共用链接分类和文件阅读上下文 | 本地文件进入弹窗，外链保留原行为 |
+| `frontend/components/workbench-view.tsx` | `VisualizationPanel` 读取已提交 occurrence，展开后使用共享隔离外壳 | 底层展示由 `SandboxedHtmlPreview` 负责，卡片订阅和 canonical 读取继续由原 owner 负责 |
 | `frontend/lib/visualization-frame.ts` | 可视化主体测量，只接收匹配 frame 的几何消息 | 可视化卡片继续使用；文件弹窗默认整页展示，不强行裁剪图表主体 |
 | `frontend/components/file-reference-chip.tsx` | 路径 hover 与复制，无通用内容预览 | 复用外观/路径展示；本次不改变编辑器节点和 canonical prompt 格式 |
 | `frontend/lib/runtime-adapter.ts` | JSON API、连接生命周期及 canonical 内容读取 | 新增窄文件预览调用；文件流不经过 JSON/base64 包装 |
@@ -39,7 +39,7 @@
 | `local_source_binding.py` | 词法路径处理、Darwin 系统别名、逐组件 no-follow 目录打开 | 复用 OS 文件绑定原语，避免校验路径后又按可变路径重开 |
 | `PULSARA_VISUALIZATION_SUBSCRIPTION_IMPLEMENTATION_SPEC.zh.md` | 订阅后的 HTML 随消息保存为 immutable blob，历史从 occurrence 读 | 此合同保持；本地链接预览是独立、临时的当前文件阅读入口 |
 
-当前 canonical 可视化 CSP 禁止外部脚本、样式和网络连接；其 `navigate-to 'none'` 不能作为跨浏览器导航隔离已成立的证据。共享组件拆分时必须实际验证导航，而不是照抄字符串就宣称安全。
+canonical 可视化 CSP 禁止外部脚本、样式和网络连接。当前实现使用可信外壳限制内容 frame 的导航，已移除对 `navigate-to` 的依赖；实际浏览器证据见 §12。
 
 ## 3. 两种 HTML 入口的明确分工
 
@@ -50,7 +50,7 @@
 
 未注册可视化的 HTML 也可点击预览。预览不会自动调用 `visualization_render`、创建订阅槽位、增加 occurrence、生成 `visualization_ref` 或把 HTML 保存到 canonical blob。
 
-组件建议：
+组件所有权：
 
 ```text
 VisualizationPanel ── canonical occurrence reader ──┐
@@ -62,7 +62,7 @@ FilePreviewDialog ── local preview reader ──────────┘
 
 ## 4. 文件预览界面
 
-使用当前主题的居中大模态弹窗，桌面提供充足阅读面积，窄屏占满可用区域。顶部显示文件名；完整路径可查看/复制。提供关闭、下载、在 Finder 中显示；适用类型另外提供“使用系统应用打开”。保留短过渡及减少动画设置。
+使用当前主题的居中大模态弹窗，桌面提供充足阅读面积，窄屏占满可用区域。顶部显示文件名；完整路径可查看/复制。提供关闭、下载、在 Finder 中显示；适用类型另外提供“使用系统应用打开”。保留短过渡及减少动画设置。CSV/TSV 表格使用 14px 字号。Markdown、CSV/TSV、HTML 的源码切换统一使用右上角的 `Code2` 图标按钮，保持按下状态与可访问名称；原有独立源码工具栏删除。代码/JSON/普通文本直接显示源文。仅在内容需要分页时，在内容底部显示翻页操作。HTML 切换源码时沿同一已绑定文件的 UTF-8 分页读取；恢复预览保留原 iframe 交互状态。
 
 - 打开后立即显示容器与加载状态，异步读取；原对话滚动位置不变。
 - Escape 和关闭按钮关闭，焦点回到原链接；遮罩与内部滚动、文本选择互不干扰。正在下载不因关闭预览而伪称下载失败。
@@ -82,7 +82,7 @@ FilePreviewDialog ── local preview reader ──────────┘
 | DOC/DOCX、XLS/XLSX、PPT/PPTX、压缩包和其他二进制 | 文件信息、下载；适用时系统应用打开 | 本次不新增 Office 转换依赖或后台格式转换 |
 | 文件夹 | 文件夹信息、复制路径、在 Finder 中打开 | 不复制/压缩整个目录，不引入文件管理器 |
 
-类型路由结合文件名和实际读取结果；不能仅凭扩展名将任意内容作为有主应用权限的 HTML 执行。未知类型按下载处理。
+类型路由结合文件名和实际读取结果；不能仅凭扩展名将任意内容作为有主应用权限的 HTML 执行。无已知扩展名但采样可解码为 UTF-8 且无 NUL 的文件可尝试文本分页；后续解码失败仍明确降级。其余未知类型按下载处理。
 
 ## 5. 链接解析与本地读取所有权
 
@@ -92,7 +92,7 @@ FilePreviewDialog ── local preview reader ──────────┘
 
 - `http:`、`https:`、`mailto:` 和协议相对网络 URL 保留正常外链语义；`#anchor` 是当前文档锚点。
 - 无 scheme 的文件路径、绝对磁盘路径、`~/` 和空 host/localhost 的 `file:` URL 进入本地解析。拒绝远程 `file://host/`、控制字符、NUL、非法编码。
-- URL 只按确定的单次百分号解码规则转换为文件路径，避免 `%252e` 等重复解码；query 和 fragment 不属于磁盘文件名，带这些字符的真实文件名须编码。fragment 可用于 Markdown 锚点/代码行，但不能扩大文件权限。
+- URL 只按确定的单次百分号解码规则转换为文件路径，避免 `%252e` 等重复解码；query 和 fragment 不属于磁盘文件名，带这些字符的真实文件名须编码。fragment 不参与文件寻址，首版不提供跨文件的标题/行号跳转，不扩大文件权限。
 - `javascript:`、任意 `data:` 链接和未知 scheme 不交给宿主执行。`sandbox:` 等其他产品专用链接不给本机路径猜测规则，展示“无法识别这个文件地址”。
 - `react-markdown` 当前默认 URL transform 会处理 scheme；新增 transform 仅在 `a[href]` 上保留经过分类认可的本地 URL，其余属性沿用默认规则，不能全局 identity transform 放开脚本 URL。
 
@@ -106,7 +106,7 @@ FilePreviewDialog ── local preview reader ──────────┘
 
 ### 5.3 HTTP 与临时资源
 
-建议在现有 browser connection 下增加窄入口：
+现有 browser connection 下的窄入口：
 
 | 请求 | 用途 |
 | --- | --- |
@@ -124,14 +124,14 @@ FilePreviewDialog ── local preview reader ──────────┘
 
 并发合同：
 
-- `read_token` 同时标识本次预览实例。action/page/DELETE 必须在该 connection 下比较当前 token；不匹配返回 `PREVIEW_EXPIRED`，旧请求不得操作新实例。`base_preview` 同样精确匹配，并在替换前取得当前文件父目录。
+- `read_token` 同时标识本次预览实例。action/page/DELETE 必须在该 connection 下比较当前 token；不匹配返回 `PREVIEW_EXPIRED`，旧请求不得操作新实例。DELETE 只校验连接与实例身份，文件已变化也必须可撤销。`base_preview` 同样精确匹配，并在替换前取得当前文件父目录。前端同时保存用户所点击目标的绝对 URL 供失败重试，重试不依赖已经撤销的父文档 token。
 - 同一前端 connection owner 串行提交创建、替换和关闭。用户可立即选择下一文件并看到加载状态；已经提交的创建先结算，若结果过时则按返回 token 清理，再提交最新仍待处理的选择，不积压已经被替代的点击。
 - 后端在现有连接锁保护下登记当前进程内打开操作，慢速磁盘读取在锁外完成；安装结果前同时复查连接仍有效、操作对象仍为当前。被替代/关闭的操作只能释放自己的句柄，不得重新安装。操作对象身份已经足够，不增加 generation、持久请求收据或通用任务队列。
-- AbortSignal 用于内容请求与前端迟到结果隔离，不能代替变更请求结算。连接失效即放弃该视图；请求中断后也不能假定服务器未执行，服务端关闭/替换检查仍负责收尾。带 cursor 的分页在实例内串行读取，重读同一当前页不得再次推进 CSV 迭代器。
+- AbortSignal 用于内容请求与前端迟到结果隔离，不能代替变更请求结算。连接失效即放弃该视图；请求中断后也不能假定服务器未执行，服务端关闭/替换检查仍负责收尾。带 cursor 的分页在实例内串行读取，重读同一当前页不得再次推进 CSV 迭代器。解析失败后本实例的表格模式持续返回明确失败，不沿出错后的位置继续冒充原 cursor；源文本和下载仍可使用。
 
 该槽位仅为浏览器子资源访问提供限域能力，不增加数据库关系、持久事件、job、receipt、内容哈希身份或跨重启恢复；不作为模型 tool 权限凭据。不能以客户端可控路径或内容摘要替代不可猜测 token。token 不进入模型、导出消息、访问日志或外链 referrer。创建/动作端点要求精确 Origin 和 same-origin Fetch Metadata；不因当前 middleware 对无 Origin 请求较宽松而在新文件入口省略验证。
 
-用已有 HTTP/connection owner 收尾并发请求。关闭时先撤销后续读权，再结束持有 FD 的请求；不要为下载添加独立持久 job 或 lease。普通下载流只保持当前请求所需文件句柄，UI 关闭后允许已经由用户开始的下载完成。
+用已有 HTTP/connection owner 收尾并发请求。关闭时先撤销后续读权，再结束持有 FD 的请求；不要为下载添加独立持久 job 或 lease。普通预览流在每块读入前后检查撤销，撤销后中止后续传输并释放该请求的句柄。显式下载流只保持当前请求所需文件句柄，UI 关闭后允许已经由用户开始的下载完成。
 
 读取响应使用 `Cache-Control: no-store`、`Referrer-Policy: no-referrer` 与 `X-Content-Type-Options: nosniff`，不依赖浏览器缓存续用已经撤销的能力。当前 HTTP access log 已关闭；新增诊断也不能记录完整 token URL。header 与 MIME 由服务端按已验证类型生成。
 
@@ -145,9 +145,9 @@ FilePreviewDialog ── local preview reader ──────────┘
 
 - 下载流式传输并尊重背压/取消，不全文 base64，不设文件总大小、会话累计下载量或总次数上限。
 - 预览使用有界页和按需读取；前端只挂载可见/当前页内容，不把大文本或 CSV 全量塞进 DOM。复用现有 `content_chunk_hard_bytes` 作为每次内容块的传输内存边界；它是分页块大小，不能变成文件拒绝阈值。
-- 文本按完整 UTF-8 字符边界返回，首版支持 UTF-8/BOM；其他编码提供明确说明、下载和系统应用打开，不悄悄替换乱码。
+- 文本按完整 UTF-8 字符边界返回，首版支持 UTF-8/BOM；其他编码提供明确说明与下载，系统应用打开仍遵守文件类型白名单，不悄悄替换乱码。
 - CSV/TSV 复用 Python 标准库 `csv` 顺序解析，不能按 `split(',')` 或每行一条记录处理。页传输预算不能限制解析器构造一条完整记录的内存：另将已有 1 MiB 内容块值用作**单次记录原始 UTF-8 输入预算**，理由是浏览器表格预览不能无限累积一个尚未产出的记录。使用带预算的行迭代器，同时约束物理行读取与 `next(csv_reader)` 消费的多行累计输入；仍由 `csv` 处理语法，不复制 CSV 解析器。超过记录预算或解析器实际字段边界时返回 `FILE_PREVIEW_UNSUPPORTED` 并说明原因，不默默丢行/截断字段，原文件仍可不限总大小地下载。
-- 记录解析预算和页面编码后的 JSON 预算分别检查；后一项必须计入转义和结构开销。下一完整记录装不进当前页时留给下一页；单记录连同结构本身超过页面预算时明确降级为源文本/下载，不陷入空页循环。页内行列虚拟化属展示资源控制。这些都是一次解析/传输的物理边界，不限制总记录数、总页数或会话寿命。
+- 记录解析预算和页面编码后的 JSON 预算分别检查；后一项必须计入转义和结构开销。下一完整记录装不进当前页时留给下一页；单记录连同结构本身超过页面预算时明确降级为源文本/下载，不陷入空页循环。页内行列虚拟化属展示资源控制。横向每 1024 列构成一个可直接跳转的展示分组，以免浏览器 CSS 布局坐标上限导致末尾列无法到达；全部列仍可访问，没有总列数限制。这些都是一次解析/传输的物理边界，不限制总记录数、总页数或会话寿命。
 - Markdown 只有在完整内容落在单页预算内时保证完整的 Markdown 排版。大 Markdown 提供源文本分页并说明，不能逐字节页独立解释围栏、表格和跨页引用定义；首版不自建增量 Markdown 解析器。
 - 图片/PDF 读取可使用原始流；Range 通过 aiohttp 已有 request range 解析能力实现必要的单范围响应，非法/不满足返回标准结果。不要复制完整 HTTP range/缓存协议栈。
 - 已检查当前 aiohttp `FileResponse`：公开构造参数只收 path，内部会重新 `stat/open`，没有接收已经验证的 FD 的公开入口。限域读需要采用 `StreamResponse` + 已绑定文件句柄的小适配，保留 aiohttp 的流写入/取消/Range 解析；此处的自定义仅补 FD 身份缺口。
@@ -177,9 +177,11 @@ canonical 卡片与本地弹窗共享 frame 外壳，但各自保持读源。can
 
 ### 7.3 导航与消息边界
 
-iframe sandbox 会隔离页面权限，但不能据此声称任意 HTML 都无法发起 iframe 自身导航。当前 `navigate-to` 不作为安全门。建议采用**可信预览外壳约束内层内容 frame**：外壳的 CSP `frame-src` 只允许当前预览文档/资源前缀；内层 frame 使用 `sandbox="allow-scripts"` 和自身资源 CSP。外壳不混入不可信 HTML，不向内层提供主应用 API。
+iframe sandbox 会隔离页面权限，但不能据此声称任意 HTML 都无法发起 iframe 自身导航。当前 `navigate-to` 不作为安全门。使用**可信预览外壳约束内层内容 frame**：外壳的 CSP `frame-src` 只允许当前预览文档/资源前缀；内层 frame 使用 `sandbox="allow-scripts"` 和自身资源 CSP。外壳不混入不可信 HTML，不向内层提供主应用 API。
 
-这是待实际浏览器证明的最小隔离方案，不承诺仅凭设计已覆盖所有导航。必须同时验证自包含 HTML、静态资源 HTML 和读 URL 被直接打开三种装载方式，覆盖脚本自导航、meta refresh、`_self/_top/_blank`、重定向和父级导航的网络结果；若不能守住声明的边界，应先修订装载方案，不能通过放宽主应用权限让图表“显示成功”。不依赖父级外壳约束来声称顶层直接打开的页面也已经阻止全部网络导航。
+该组合已通过 §12 的 Chromium/Safari 检查。后续改动仍必须同时验证自包含 HTML、静态资源 HTML 和读 URL 被直接打开三种装载方式，覆盖脚本自导航、meta refresh、`_self/_top/_blank`、重定向和父级导航的网络结果；若不能守住声明的边界，应先修订装载方案，不能通过放宽主应用权限让图表“显示成功”。顶层直接打开没有可信父外壳，因此资源端点仅在 `Sec-Fetch-Dest: iframe` 时返回可执行 HTML；其他装载方式返回 403 纯文本并保留 sandbox/CSP 响应头，禁止直接打开后以自身导航绕过父级约束。
+
+应用两个入口的 CSP 使用 `frame-src about: http://127.0.0.1:*/api/file-previews/`。端口通配适应本机服务动态端口；可信外壳仍进一步收窄为当前 origin 的精确 token 前缀，canonical 外壳则为 `frame-src 'none'`。Safari 会在 opaque 子 frame 重新解释继承的 `'self'`，因此此处明确写 loopback 预览路径，不开放整个主应用路由。
 
 主页面只接受已知 frame/source 的有限加载/尺寸观察。文件路径、资源读取授权、原生打开、下载和用户操作不能由 HTML 的 `postMessage` 请求触发。文件弹窗不需要沿用可视化主体裁剪协议；共享底层后 canonical 的原布局测量必须回归验证。
 
@@ -202,13 +204,13 @@ iframe sandbox 会隔离页面权限，但不能据此声称任意 HTML 都无�
 4. **静态依赖与浏览器隔离验证**：实现受控资源 URL，先验证沙箱、CORS、导航、路径竞争，再开启 CSS/JS/图片/字体/本地 JSON 组合案例；失败则修订方案，不能宣布 HTML 依赖支持完成。
 5. **真实案例验收**：在 `little_snake` 会话点击实际报告、CSV 和四张 HTML；准备一份未注册 render 的 HTML 及含静态依赖目录，验收后确认未增加消息/订阅/数据库事实。
 
-预计改动区域：
+已实施落点：
 
 - `frontend/components/markdown-body.tsx`：复用文件链接组件与分类；保留公式/Mermaid行为。
-- `frontend/components/workbench-view.tsx`、`task-workspace.tsx`：提供所属会话阅读上下文，承载单个文件预览弹窗。
+- `frontend/app/pulsara-app.tsx`：以当前 connection/session owner 提供阅读上下文，覆盖工作台、检查器及其任务视图 portal；只让内部预览 host 随 owner 替换，不重挂载会话正文或输入框。
 - 新增 `frontend/components/file-preview-dialog.tsx`、`sandboxed-html-preview.tsx` 和窄的链接/预览类型模块；避免复制现有可视化整张卡片。
 - `frontend/lib/runtime-adapter.ts`：预览/动作/分页 DTO 与 AbortSignal，二进制 URL 与 JSON 请求明确分开。
-- `web_app/http_server.py`、`browser_bridge.py`、`session_controller.py`：入口、现有连接生命周期、workspace 来源；具体文件打开/流读放到单独的 `web_app/file_preview.py`，不扩散到 kernel 或 tools。
+- `web_app/http_server.py`、`browser_bridge.py`：入口、现有连接生命周期、saved workspace 来源；文件绑定/分页在 `web_app/file_preview.py`，HTTP/流读适配在 `web_app/file_preview_http.py`，不扩散到 kernel 或 tools。
 - 复用 `local_source_binding.py` 的目录绑定。若需要补文件 FD 原语，限制为可复用的窄 OS 适配，不增加路径权限框架。
 - 本篇是用户阅读行为的新增合同；可视化规格同步说明共享组件与两种来源，既有 canonical 快照/权限/禁网条款仍有效。
 
@@ -231,7 +233,7 @@ iframe sandbox 会隔离页面权限，但不能据此声称任意 HTML 都无�
 10. 主 HTML 与嵌套 HTML 的读 URL 直接打开也受响应头隔离；资源 CORS 不扩散到其他 API，撤销能力不因缓存恢复。请求中断、连接替换/stale/detach、Host 关闭、失效预览按上述合同释放资源；不把浏览器 crash 误作已收到断开通知。
 11. 不增加 canonical row/event/subject/guard/job，不写 provider SYSTEM/tools/messages，不调用模型或 render tool，不创建文件副本、目录压缩包或新持久内容身份。
 
-本轮只交付文档与 critic 可行性复核，以上属于后续实现的验收门；不能将设计复核标记为运行时验证已经完成。
+上述合同已按 §12 的范围完成实现与验证；既有 canonical 快照和身份合同继续由原测试覆盖。
 
 ## 11. 依赖与浏览器依据
 
@@ -241,10 +243,15 @@ iframe 权限、opaque origin 与 `srcdoc` 相对地址行为依据 [MDN iframe]
 
 CSV 解析器接口和字段限制见 [Python csv 文档](https://docs.python.org/3.12/library/csv.html)；字段限制不等价于整条记录的输入预算。frame 导航约束的规范依据见 [CSP Level 3 frame-src](https://www.w3.org/TR/CSP3/#directive-frame-src)。
 
-## 12. 独立可行性复核结论
+## 12. 实施与独立代码复核
 
-新建的 `file_preview_feasibility_critic` 已对照 AGENTS.md、生产代码及依赖/浏览器依据独立审阅，并复看修订后的完整文档。结论：**可作为实施基线，未发现剩余阻塞问题**。
+初始计划已先提交于 `402c1975`。实现沿本篇的文件/连接 owner 落地，未修改 provider 输入、可视化订阅语义或数据库结构。
 
-复核闭环覆盖预览实例与并发结算、HTML 文档/资源地址、Markdown 图片授权范围、可观察的连接清理事件，以及 CSV 解析/传输的独立预算；大 Markdown 降级、并发文件读取偏移和原生路径交接语义也已明确。
+验证证据见 [会话文件预览验收记录](dogfood_evidence/session_file_preview/README.zh.md)：
 
-本次交付是设计与可行性复核。尚未实现接口、展示组件或资源读取，也未运行 §10 的运行时/浏览器验收；双层 frame 导航限制、CORS 和三种 HTML 装载方式必须在实际实现中验证通过，不能把本节结论当作这些测试的替代。
+- 后端预览、browser bridge 与 HTTP surface 共 **33 项通过**；前端 app、预览、Markdown、工作台、任务视图与 runtime adapter 共 **277 项通过**。类型检查、相关 ESLint、Ruff 和本地打包通过。
+- 真实 `little_snake` 会话的 12 个链接可阅读，四张 Plotly HTML 在弹窗内可见；390px 窄屏无应用级横向溢出，原有可视化卡片再次开合保留同一 iframe。
+- Chromium 和原生 macOS Safari 均验证 canonical/local 两种装载，各 10 个攻击样本确认执行且无越界请求；静态 CSS/ESM/JSON/字体/图片和 Plotly 成功。真实顶层导航均返回 403 纯文本。
+- critic 首轮发现 Markdown 源文切换、CSV 失败重试、变化文件撤销、普通流释放、嵌套链接重试五项问题；均已修复并加入回归。critic 独立重跑后端预览 8 项和前端预览 8 项，复核结论为**无剩余必须修复项**。Safari 入口策略、宽列展示及失败占位也已交叉核验。
+
+HTML 静态资源仍不是事务快照，PDF 依赖浏览器查看器，Office 通过下载/系统应用打开；这些是当前产品合同，不宣称已经提供转换或任意网站托管能力。
