@@ -18,11 +18,16 @@ from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMImagePart,
     LLMTextPart,
+    PromptAnnotationPart,
+    FrozenPromptPart,
+    annotation_value,
+    annotation_from_value,
+    prompt_content_text_utf8_bytes,
+    prompt_provider_parts,
     MAXIMUM_PROMPT_IMAGE_PIXELS,
     MAXIMUM_PROMPT_TEXT_UTF8_BYTES,
     frozen_prompt_content_canonical_value,
     llm_content_logical_bytes,
-    prompt_text_utf8_bytes,
 )
 from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
@@ -75,7 +80,7 @@ class CanonicalPromptImageDescriptor:
             raise ValueError("canonical prompt image dimensions are invalid")
 
 
-CanonicalPromptBodyPart = LLMTextPart | CanonicalPromptImageDescriptor
+CanonicalPromptBodyPart = LLMTextPart | PromptAnnotationPart | CanonicalPromptImageDescriptor
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,19 +93,17 @@ class CanonicalPromptBody:
         if not self.parts:
             raise ValueError("canonical prompt body must contain parts")
         if any(
-            not isinstance(part, (LLMTextPart, CanonicalPromptImageDescriptor))
+            not isinstance(part, (LLMTextPart, PromptAnnotationPart, CanonicalPromptImageDescriptor))
             for part in self.parts
         ):
             raise TypeError("canonical prompt body contains an invalid part")
         if not any(
-            isinstance(part, CanonicalPromptImageDescriptor)
+            isinstance(part, (CanonicalPromptImageDescriptor, PromptAnnotationPart))
             or (isinstance(part, LLMTextPart) and part.text != "")
             for part in self.parts
         ):
             raise ValueError("canonical prompt body has no content")
-        prompt_text_utf8_bytes(
-            tuple(part for part in self.parts if isinstance(part, LLMTextPart))
-        )
+        prompt_content_text_utf8_bytes(self.parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,10 +208,12 @@ def _descriptor_for_image(image: LLMImagePart) -> CanonicalPromptImageDescriptor
 
 
 def _part_value(
-    part: LLMTextPart | LLMImagePart | CanonicalPromptImageDescriptor,
+    part: FrozenPromptPart | CanonicalPromptImageDescriptor,
 ) -> dict[str, object]:
     if isinstance(part, LLMTextPart):
         return {"type": "text", "text": part.text}
+    if isinstance(part, PromptAnnotationPart):
+        return annotation_value(part)
     descriptor = _descriptor_for_image(part) if isinstance(part, LLMImagePart) else part
     return {
         "type": "image",
@@ -242,7 +247,7 @@ def canonical_prompt_body(content: FrozenPromptContent) -> CanonicalPromptBody:
         raise TypeError("canonical prompt body requires frozen prompt content")
     return CanonicalPromptBody(
         tuple(
-            part if isinstance(part, LLMTextPart) else _descriptor_for_image(part)
+            _descriptor_for_image(part) if isinstance(part, LLMImagePart) else part
             for part in content.parts
         )
     )
@@ -278,18 +283,16 @@ def canonical_prompt_body_resource_quote(
     image_bytes = sum(part.encoded_bytes for part in images)
     multipart_bytes = len(body_bytes) + image_bytes
     return PromptContentResourceQuote(
-        text_utf8_bytes=prompt_text_utf8_bytes(
-            tuple(part for part in body.parts if isinstance(part, LLMTextPart))
-        ),
+        text_utf8_bytes=prompt_content_text_utf8_bytes(body.parts),
         canonical_body_bytes=len(body_bytes),
         image_occurrence_encoded_bytes=image_bytes,
         multipart_bytes=multipart_bytes,
         canonical_expanded_bytes=multipart_bytes,
-        epoch_logical_bytes=sum(
-            len(part.text.encode("utf-8"))
-            if isinstance(part, LLMTextPart)
-            else part.encoded_bytes + len(part.media_type.encode("utf-8"))
-            for part in body.parts
+        epoch_logical_bytes=llm_content_logical_bytes(prompt_provider_parts(tuple(
+            part for part in body.parts if not isinstance(part, CanonicalPromptImageDescriptor)
+        ))) + sum(
+            part.encoded_bytes + len(part.media_type.encode("utf-8"))
+            for part in images
         ),
         image_occurrences=len(images),
         visual_image_tokens=sum(
@@ -306,7 +309,7 @@ def prompt_content_resource_quote(
     content: FrozenPromptContent,
 ) -> PromptContentResourceQuote:
     quote = canonical_prompt_body_resource_quote(canonical_prompt_body(content))
-    if quote.epoch_logical_bytes != llm_content_logical_bytes(content.parts):
+    if quote.epoch_logical_bytes != llm_content_logical_bytes(prompt_provider_parts(content.parts)):
         raise ValueError("canonical prompt logical byte quote drifted")
     return quote
 
@@ -353,6 +356,9 @@ def decode_canonical_prompt_body(body: bytes) -> CanonicalPromptBody:
             if set(item) != {"type", "text"} or not isinstance(item["text"], str):
                 raise ValueError("canonical prompt text part is invalid")
             parts.append(LLMTextPart(item["text"]))
+            continue
+        if item["type"] == "annotation":
+            parts.append(annotation_from_value(item))
             continue
         if item["type"] == "image":
             expected = {
@@ -403,9 +409,9 @@ def hydrate_canonical_prompt_body(
     if len(image_payloads) != expected_images:
         raise ValueError("canonical prompt image refs are incomplete or excessive")
     payload_index = 0
-    hydrated: list[LLMTextPart | LLMImagePart] = []
+    hydrated: list[FrozenPromptPart] = []
     for part in decoded.parts:
-        if isinstance(part, LLMTextPart):
+        if isinstance(part, (LLMTextPart, PromptAnnotationPart)):
             hydrated.append(part)
             continue
         payload = image_payloads[payload_index]

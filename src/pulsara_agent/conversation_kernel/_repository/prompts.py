@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.annotations import validate_annotation_sources
+
 from datetime import datetime
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
@@ -672,6 +674,8 @@ class _PromptOperations:
                     candidate.queue_item_id,
                 ),
             )
+            validate_annotation_sources(connection, session_id=guard.session_id,
+                                        content=candidate.canonical_prompt.content)
             publication = materialize_canonical_prompt(
                 connection,
                 publisher=self._canonical_content_publisher,

@@ -814,6 +814,7 @@ function taskAssistantBody(entryKind: string, body: string): string {
 }
 
 export interface RuntimeConnection {
+  locateAnnotationSource?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   readonly filePreview: FilePreviewApi;
   importFiles(files: readonly File[], directory: boolean, signal: AbortSignal): Promise<import('./file-reference').ImportedPath>;
   readonly sessionId: string;
@@ -2284,7 +2285,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
   ): Promise<EditablePromptContent> {
     const parts: Array<EditablePromptContent['parts'][number]> = [];
     for (const part of content.parts) {
-      parts.push(part.type === 'text'
+      parts.push(part.type === 'annotation' ? { ...part, source: part.source ? { ...part.source } : null } : part.type === 'text'
         ? { type: 'text' as const, text: part.text }
         : {
           type: 'image' as const,
@@ -2637,42 +2638,75 @@ class LocalRuntimeConnection implements RuntimeConnection {
     this.writerGeneration = numeric(snapshot.writer_generation);
   }
 
-  private async backfillOlderHistory(): Promise<void> {
-    let cursor = this.olderHistoryCursor;
-    while (cursor) {
-      const frame = await this.post<{
-        history_page?: ProtocolHistoryPage;
-        error?: ProtocolError;
-      }>('history', {
-        cursor,
-        maximum_entries: 256,
-        maximum_serialized_bytes: 2 << 20,
-      });
+  private historyPageRead?: { promise: Promise<void>; signal?: AbortSignal };
+
+  private async readOlderHistoryPage(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.historyPageRead) {
+      const pending = this.historyPageRead;
+      try {
+        // A waiter owns its cancellation, without aborting another caller's read.
+        await new Promise<void>((resolve, reject) => {
+          const aborted = () => reject(signal!.reason);
+          signal?.addEventListener('abort', aborted, { once: true });
+          pending.promise.then(resolve, reject).finally(() => signal?.removeEventListener('abort', aborted));
+        });
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (!pending.signal?.aborted) throw error;
+        // A replacement lookup resumes from the unchanged owner cursor after
+        // the preceding lookup's canceled operation has settled.
+        if (this.historyPageRead === pending) this.historyPageRead = undefined;
+        return this.readOlderHistoryPage(signal);
+      }
+      signal?.throwIfAborted(); return;
+    }
+    const cursor = this.olderHistoryCursor;
+    if (!cursor) return;
+    const operation = (async () => {
+      const frame = await this.post<{ history_page?: ProtocolHistoryPage; error?: ProtocolError }>('history', {
+        cursor, maximum_entries: 256, maximum_serialized_bytes: 2 << 20,
+      }, signal);
+      signal?.throwIfAborted();
       assertProtocolFrame(frame);
       const page = frame.history_page;
-      if (!page) {
-        throw new RuntimeApiError('HISTORY_RESPONSE_INVALID', '较早的会话内容暂时无法加载。', true);
-      }
-      for (const entry of page.entries ?? []) this.entries.set(entry.entry_id, entry);
-      if (!page.has_more) {
-        this.olderHistoryCursor = undefined;
-        return;
-      }
-
+      if (!page) throw new RuntimeApiError('HISTORY_RESPONSE_INVALID', '较早的会话内容暂时无法加载。', true);
+      // A replacement snapshot owns a different cursor and cut.
+      if (this.olderHistoryCursor !== cursor) return;
       const next = page.older_history_cursor;
-      const currentSequence = numeric(cursor.entry_sequence);
-      const nextSequence = numeric(next?.entry_sequence);
-      if (
-        !next
-        || next.session_id !== cursor.session_id
+      if (page.has_more && (!next || next.session_id !== cursor.session_id
         || numeric(next.cut_sequence) !== numeric(cursor.cut_sequence)
-        || nextSequence >= currentSequence
-      ) {
+        || numeric(next.entry_sequence) >= numeric(cursor.entry_sequence))) {
         throw new RuntimeApiError('HISTORY_CURSOR_INVALID', '较早的会话内容无法继续加载。', true);
       }
-      cursor = next;
-      this.olderHistoryCursor = next;
+      for (const entry of page.entries ?? []) this.entries.set(entry.entry_id, entry);
+      this.olderHistoryCursor = page.has_more ? next : undefined;
+    })();
+    const pending = { promise: operation, signal };
+    this.historyPageRead = pending;
+    try { await operation; } finally { if (this.historyPageRead === pending) this.historyPageRead = undefined; }
+  }
+
+  private async backfillOlderHistory(): Promise<void> {
+    while (this.olderHistoryCursor) await this.readOlderHistoryPage();
+  }
+
+  async locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection> {
+    signal.throwIfAborted();
+    while (!this.entries.has(entryId) && this.olderHistoryCursor) {
+      await this.readOlderHistoryPage(signal); signal.throwIfAborted();
     }
+    const entry = this.entries.get(entryId);
+    if (!entry || !['ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'].includes(entry.entry_kind ?? '')) {
+      throw new RuntimeApiError('ANNOTATION_SOURCE_MISSING', '当前会话中找不到来源回复。', false);
+    }
+    for (const block of entry.blocks ?? []) {
+      signal.throwIfAborted();
+      if (block.block_kind === 'TEXT') await this.hydrateContentReference(block.content,
+        { entry_id: entryId, block_id: block.block_id }, '来源回复暂时无法完整读取。', signal);
+    }
+    signal.throwIfAborted();
+    return this.project();
   }
 
   private async hydrateProjectionContent(): Promise<void> {
@@ -2845,6 +2879,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     reference: ProtocolContent | undefined,
     target: { entry_id: string; block_id?: string } | { queue_item_id: string },
     publicMessage: string,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!reference || reference.inline_content !== undefined || numeric(reference.size) === 0) return;
     const expectedSize = numeric(reference.size);
@@ -2855,6 +2890,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
       expectedSize,
       publicMessage,
       true,
+      signal,
     );
     reference.inline_content = encodeBase64Bytes(complete);
   }
@@ -2868,10 +2904,12 @@ class LocalRuntimeConnection implements RuntimeConnection {
     expectedSize: number,
     publicMessage: string,
     requireUtf8: boolean,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const chunks: Uint8Array[] = [];
     let offset = 0;
     while (true) {
+      signal?.throwIfAborted();
       const frame = await this.post<{
         content?: {
           digest?: string; complete_size?: string | number; offset_bytes?: string | number;
@@ -2882,7 +2920,8 @@ class LocalRuntimeConnection implements RuntimeConnection {
         ...target,
         offset_bytes: offset,
         limit_bytes: 1 << 20,
-      });
+      }, signal);
+      signal?.throwIfAborted();
       assertProtocolFrame(frame);
       const chunk = frame.content;
       if (
@@ -2910,6 +2949,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
       cursor += chunk.length;
     }
     await verifyContentIntegrity(complete, expectedDigest, publicMessage, requireUtf8);
+    signal?.throwIfAborted();
     return complete;
   }
 
@@ -3388,6 +3428,7 @@ async function httpRequest<T = unknown>(path: string, init: RequestInit = {}): P
       credentials: 'same-origin',
     });
   } catch (error) {
+    init.signal?.throwIfAborted();
     if (error instanceof DOMException && error.name === 'AbortError') throw error;
     throw new RuntimeApiError(
       'LOCAL_TRANSPORT_UNAVAILABLE',

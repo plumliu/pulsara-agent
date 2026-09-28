@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.primitives.context import canonical_json_bytes
+
 import asyncio
 from collections import deque
 from contextlib import suppress
@@ -22,6 +24,9 @@ from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMImagePart,
     LLMTextPart,
+    PromptAnnotationPart,
+    FrozenPromptPart,
+    annotation_value,
     MAXIMUM_PROMPT_IMAGE_PIXELS,
     PromptContent,
     PromptImagePart,
@@ -210,6 +215,8 @@ class HostPromptImageValidator:
         raw_bytes = sum(
             len(part.text.encode("utf-8"))
             if isinstance(part, LLMTextPart)
+            else len(canonical_json_bytes(annotation_value(part)))
+            if isinstance(part, PromptAnnotationPart)
             else len(part.original_bytes)
             for part in content.parts
         )
@@ -222,7 +229,7 @@ class HostPromptImageValidator:
         )
         if not images:
             frozen = FrozenPromptContent(
-                tuple(part for part in content.parts if isinstance(part, LLMTextPart))
+                tuple(part for part in content.parts if not isinstance(part, PromptImagePart))
             )
             freeze_canonical_prompt(frozen)
             return frozen
@@ -232,9 +239,9 @@ class HostPromptImageValidator:
             deadline_monotonic=deadline_monotonic,
         )
         fact_index = 0
-        parts: list[LLMTextPart | LLMImagePart] = []
+        parts: list[FrozenPromptPart] = []
         for part in content.parts:
-            if isinstance(part, LLMTextPart):
+            if isinstance(part, (LLMTextPart, PromptAnnotationPart)):
                 parts.append(part)
                 continue
             media_type, width, height = facts[fact_index]

@@ -51,6 +51,8 @@
 
 模型可见的工具及三个参数说明必须交代实际工作流和分岔：先用现有工具写/改完整 HTML，并内联展示所需的渲染资源，不要求清理不会触发资源加载的 URL 文本；组件/图表可标记唯一主体，网站整页不标记；普通调用只预约下一条无工具调用的回复展示，允许继续修改，发布时才取最终文件；删除文件会取消该路径的待展示；`review=true` 当场尝试截图供模型检查，但不是最终版本锁定；无图片能力、读取/截图失败时仅回看失败而订阅仍有效；已发布的引用可在同一会话中重新订阅，不应臆造未知引用。描述只使用模型完成任务所需的概念，不泄露 canonical row、epoch、owner、exact-join 等内部机制。
 
+description 开头还应说明展示方式的选择：已有本地图片用 `![description](path)`，用户点击后进入文件预览弹窗，相对路径以所属会话工作目录为准；静态 SVG 可直接写在 `svg` 围栏代码块中，由前端渲染；交互图表、仪表板或较复杂 HTML 页面布局使用本工具。前两种不需要包装 HTML 或调用工具。这是模型选择展示形式的指引，不新增工具准入条件或复杂度阈值。数据分析内置 Skill 的展示指导须保持一致。该描述更新沿现有冷 epoch / 明确采用的 compaction successor 生效路径安装，不刷新既有 epoch 已冻结的 provider tools。
+
 普通调用在现有 schema、权限、Hook 与 attempt 流程允许该工具执行后，只生成闭合来源值与进程内待登记 token；被拒绝的调用不生成 token。只有对应 canonical `SUCCESS` ToolResult 已提交或经现有 exact confirmation 确认后，active-turn owner 才原子 install 该 token；失败、取消或未确认时 discard，不提前留下可物化槽位，也不新增持久事实。成功调用只返回简短状态：
 
 ```text
@@ -125,6 +127,8 @@ assistant 正文与工具卡仍在普通对话版心；每个展示结果在它�
 本次折叠修订验收：工作台、任务视图、开合组件与主体测量相关 **66 项回归通过**，类型、相关 ESLint 与本地打包通过。真实会话 `010d04df` 以旁观模式核对：1900px 视口收起宽度 650px，与正文左右边缘一致，展开宽度 960px；390px 视口两态均无应用级横向溢出。预览切换到深色后收起并用 Enter 再展开仍保留深色，Space 可收起。首次收起未创建 iframe，重复开合复用实例；受限 sandbox/CSP 与 canonical HTML 读取边界保持原合同。本次未重新触发模型任务。
 
 文件链接预览实施后，可视化卡片的底层 frame 统一使用 `SandboxedHtmlPreview`：可信外壳限制内层导航，canonical 源继续来自 immutable occurrence，自包含内容保持禁网。文件弹窗的 local URL 模式是独立的临时阅读入口，允许范围由 [会话文件链接与预览规格](PULSARA_SESSION_FILE_LINK_PREVIEW_IMPLEMENTATION_SPEC.zh.md) 定义；它不创建订阅或改写历史。真实浏览器已回归原卡片展开、收起和键盘再展开，仍复用同一 iframe。
+
+按用户 2026-09-28 的选区要求，本工具展示的独立可视化卡片及内层 HTML 的普通内容不可选中文本，也不参与对话正文批注。`SandboxedHtmlPreview` 仅对该 inline 来源显式关闭文本选择，样式和 `selectstart` 处理在实际内层文档中生效；外层卡片同时使用 `user-select:none`。按钮、悬停、滚动、图表操作及输入控件自身编辑保持可用，不使用 `pointer-events:none`。此显示策略不改写 canonical HTML/blob，不改变文件预览弹窗的默认选择行为。assistant 正文中的 Markdown 图片引用、SVG/Mermaid 和公式仍属于正文来源；其前端工具栏是 UI 装饰，不进入引用/复制结果，也不阻断同一消息内跨图形的连续选择。正文源码复制和完整批注边界见 [回复选区与批注实施规格](PULSARA_RESPONSE_ANNOTATION_IMPLEMENTATION_SPEC.zh.md)。
 
 隔离 iframe 只向父页面报告“整页/主体”与有限边界数据；父页面仅接受**该 iframe 的**消息，校验数值和边界，不接收 HTML、路径、脚本或导航命令。测量协议是可丢失的前端布局观察，不新增持久状态、前端回执或跨进程恢复；没有测量结果时展示整页。作者脚本也在该隔离 iframe 中，因此不得把消息里的几何数值当成授权或可信内容。截图直接使用浏览器元素截图，不另造 HTML 解析/裁剪引擎。
 

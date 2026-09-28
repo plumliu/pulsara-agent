@@ -151,12 +151,26 @@ class FilePreviewHttp:
         attachment = request.query.get("download") == "1"
         mime = (
             item.mime
-            if item.kind in {"image", "pdf"}
+            if item.kind in {"image", "svg", "pdf"}
             else "text/plain"
             if item.kind in {"html", "text", "table", "markdown"}
             else "application/octet-stream"
         )
         headers = dict(HEADERS)
+        if item.kind == "svg":
+            # Native <img> decoding owns SVG rendering, without script execution.
+            # Do not expose that same file as an active browser document.
+            headers["Content-Security-Policy"] = (
+                "sandbox; default-src 'none'; style-src 'unsafe-inline'; "
+                "img-src data:; font-src data:; base-uri 'none'; form-action 'none'"
+            )
+            if not attachment and request.headers.get("Sec-Fetch-Dest") != "image":
+                return web.Response(
+                    status=403,
+                    text="请在 Pulsara 文件预览中查看此 SVG。",
+                    headers=headers,
+                    content_type="text/plain",
+                )
         if attachment or item.kind == "file":
             headers["Content-Disposition"] = content_disposition_header(
                 "attachment", filename=item.path.name

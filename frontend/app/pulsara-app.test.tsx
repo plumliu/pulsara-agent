@@ -406,8 +406,8 @@ class FakeConnection implements RuntimeConnection {
   async readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent> {
     const parts: EditablePromptContent['parts'][number][] = [];
     for (const part of content.parts) {
-      parts.push(part.type === 'text'
-        ? { type: 'text', text: part.text }
+      parts.push(part.type !== 'image'
+        ? { ...part }
         : {
           type: 'image',
           source: 'local',

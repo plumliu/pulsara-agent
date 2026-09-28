@@ -7,6 +7,8 @@ acquires a new writer generation and rehydrates canonical rows only.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.annotations import AnnotationSourceInvalid
+
 import asyncio
 import logging
 from contextlib import suppress
@@ -2755,6 +2757,11 @@ class KernelHostSession:
                 deadline_monotonic=self._canonical_deadline(),
                 _expected_permission_snapshot=expected_permission_snapshot,
             )
+        except AnnotationSourceInvalid as exc:
+            if hook_context_reservation is not None:
+                hook_context_reservation.retire()
+            return KernelCommandOutcome(command_id, "REJECTED", queue_item_id,
+                                        "INVALID_ANNOTATION", str(exc))
         except PromptIngressRejected as exc:
             if hook_context_reservation is not None:
                 hook_context_reservation.retire()

@@ -2669,3 +2669,67 @@ it('lists cwd path candidates for the selected session with paging and cancellat
     method: 'POST', body: JSON.stringify({ prefix: '文档/', cursor: 'prev.pdf' }), signal: controller.signal, credentials: 'same-origin',
   }));
 });
+
+describe('annotation source history ownership', () => {
+  const cursor = (sequence: number) => ({ session_id: 'session-1', cut_sequence: '3', entry_sequence: String(sequence) });
+  const source = (id: string, body = 'source') => ({
+    entry_id: id, entry_sequence: '2', entry_kind: 'ASSISTANT_MESSAGE', turn_id: 'turn-source',
+    blocks: [{ block_id: `block-${id}`, block_kind: 'TEXT', block_ordinal: 0, content: inlineContent(body) }],
+  });
+  async function windowedConnection() {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(connectPayload()))));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    // Seed an existing owner window without changing ordinary full-backfill startup.
+    (connection as unknown as { replaceSnapshot(value: unknown): void }).replaceSnapshot({
+      session_id: 'session-1', entries: [], older_history_cursor: cursor(3), control: {},
+    });
+    return connection;
+  }
+  it('stops at the source page, reuses loaded content, and reports exhaustion', async () => {
+    const connection = await windowedConnection();
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ history_page: {
+      entries: [source('wanted')], has_more: true, older_history_cursor: cursor(2),
+    } }))).mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [], has_more: false } })));
+    vi.stubGlobal('fetch', fetchMock);
+    const signal = new AbortController().signal;
+    expect((await connection.locateAnnotationSource!('wanted', signal)).messages.some(message => message.body === 'source')).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await connection.locateAnnotationSource!('wanted', signal);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(connection.locateAnnotationSource!('missing', signal)).rejects.toThrow('找不到来源回复');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it('allows a replacement lookup to continue after its predecessor was canceled', async () => {
+    const connection = await windowedConnection();
+    const a = new AbortController(); const b = new AbortController();
+    const fetchMock = vi.fn().mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    })).mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [source('b')], has_more: false } })));
+    vi.stubGlobal('fetch', fetchMock);
+    const canceled = connection.locateAnnotationSource!('a', a.signal).catch(error => error.name);
+    a.abort();
+    const replacement = connection.locateAnnotationSource!('b', b.signal);
+    expect(await canceled).toBe('AbortError');
+    expect((await replacement).messages.some(message => message.body === 'source')).toBe(true);
+    expect(b.signal.aborted).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it('cancels multi-chunk hydration without installing a partial body and permits retry', async () => {
+    const connection = await windowedConnection(); const controller = new AbortController();
+    const entry = source('wanted'); const bytes = new TextEncoder().encode('完整来源');
+    const blobEntry = { ...entry, blocks: [{ ...entry.blocks[0], content: blobBytes(bytes) }] };
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [blobEntry], has_more: false } })))
+      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
+        expect(init.signal).toBe(controller.signal);
+        controller.abort();
+        return new Response(JSON.stringify({ content: { digest: sha256Digest(bytes), complete_size: bytes.length, offset_bytes: 0, content: btoa('a'), complete: false } }));
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(connection.locateAnnotationSource!('wanted', controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(contentBytes(bytes))));
+    const result = await connection.locateAnnotationSource!('wanted', new AbortController().signal);
+    expect(result.messages.some(message => message.body === '完整来源')).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});

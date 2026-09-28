@@ -93,6 +93,9 @@ from pulsara_agent.primitives.plan_workflow import (
 )
 from pulsara_agent.llm.input import (
     LLMTextPart,
+    PromptContentPart,
+    PromptAnnotationPart,
+    PromptAnnotationSource,
     PromptContent,
     PromptImagePart,
     prompt_text_utf8_bytes,
@@ -105,7 +108,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:00da1f010265882e60b572e60e2754b088a621fafd2f805f42c83b99d7adaef0"
+    "sha256:f46431f5f5f65e48acf5946e9484069deb99c80a94005ef1998236123da01bd0"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -2155,11 +2158,20 @@ def _valid_prompt(value: str) -> bool:
 
 
 def _prompt_content_from_wire(value: wire.PromptContent) -> PromptContent:
-    parts: list[LLMTextPart | PromptImagePart] = []
+    parts: list[PromptContentPart] = []
     for item in value.parts:
         kind = item.WhichOneof("value")
         if kind == "text":
             parts.append(LLMTextPart(item.text))
+        elif kind == "annotation":
+            annotation = item.annotation
+            if not annotation.HasField("source"):
+                raise ValueError("新建批注必须包含来源消息")
+            parts.append(PromptAnnotationPart(
+                annotation.quote,
+                PromptAnnotationSource(annotation.source.entry_id, annotation.source.start, annotation.source.end),
+                annotation.comment if annotation.HasField("comment") else None,
+            ))
         elif kind == "image":
             parts.append(
                 PromptImagePart(

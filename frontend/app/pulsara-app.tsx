@@ -191,7 +191,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [activeSessionId, setActiveSessionId] = useState('');
   // Selection feedback is local UI state; only a connected runtime becomes active.
   const [openingSessionId, setOpeningSessionId] = useState('');
-  const [focusMemoryEntry, setFocusMemoryEntry] = useState<{ sessionId: string; entryId: string }>();
+  const [focusSourceEntry, setFocusSourceEntry] = useState<{ sessionId: string; entryId: string }>();
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
   const [taskInventory, setTaskInventory] = useState<AgentTask[]>([]);
   const [taskInventorySessionId, setTaskInventorySessionId] = useState('');
@@ -547,7 +547,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     }
     toolDecisionsRef.current = toolDecisionsRef.current.filter(item => item.sessionId !== sessionId);
     setToolDecisions(toolDecisionsRef.current);
-    setFocusMemoryEntry(current => current?.sessionId === sessionId ? undefined : current);
+    setFocusSourceEntry(current => current?.sessionId === sessionId ? undefined : current);
     if (readSavedSessionId() === sessionId) saveSessionId('');
     if (requestedSession.current !== sessionId) return;
     const previous = connectionRef.current;
@@ -2123,6 +2123,16 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return page;
   }, [ownsConnection]);
 
+  const locateAnnotationSource = useCallback(async (entryId: string, signal: AbortSignal) => {
+    const active = connectionRef.current;
+    if (!active?.locateAnnotationSource) throw new Error('本地服务未连接。');
+    const next = await active.locateAnnotationSource(entryId, signal);
+    signal.throwIfAborted();
+    if (!ownsConnection(active)) throw new Error('会话已经切换。');
+    publishProjection(next, active);
+    setFocusSourceEntry({ sessionId: active.sessionId, entryId });
+  }, [ownsConnection, publishProjection]);
+
   const readPromptImage = useCallback(async (image: CanonicalPromptImagePart) => {
     const active = connectionRef.current;
     if (!active) {
@@ -2257,7 +2267,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
             (skill) => skill.enabled && skill.effective,
           )}
           focusTaskId={undefined}
-          focusMemoryEntry={focusMemoryEntry}
+          focusSourceEntry={focusSourceEntry}
           focusTaskRevision={0}
           focusTaskHighlighted={false}
           onReconnect={reconnect}
@@ -2278,6 +2288,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           artifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
           onReadToolArtifact={readToolArtifact}
           onReadPromptImage={readPromptImage}
+          onLocateAnnotation={locateAnnotationSource}
           onReadVisualization={readVisualization}
           promptDraftStore={promptDraftStore}
           onNotify={notify}
@@ -2450,7 +2461,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         />
       )}
 
-      {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={runtimeStatus} onReconnect={reconnect} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusMemoryEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
+      {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={runtimeStatus} onReconnect={reconnect} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusSourceEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
 
       <CommandPalette
         open={commandOpen}

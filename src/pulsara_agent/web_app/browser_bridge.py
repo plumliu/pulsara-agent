@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.llm.input import annotation_from_value
+
 import asyncio
 import base64
 import binascii
@@ -1072,6 +1074,16 @@ def _prompt_content_from_json(value: object) -> wire.PromptContent:
             if not isinstance(text, str):
                 raise ValueError("prompt text part must contain text")
             item.text = text
+        elif kind == "annotation":
+            annotation = annotation_from_value(raw_part)
+            if annotation.source is None:
+                raise ValueError("新建批注必须包含来源消息")
+            item.annotation.quote = annotation.quote
+            if annotation.comment is not None:
+                item.annotation.comment = annotation.comment
+            item.annotation.source.entry_id = annotation.source.entry_id
+            item.annotation.source.start = annotation.source.start
+            item.annotation.source.end = annotation.source.end
         elif kind == "image" and set(raw_part) == {
             "type",
             "content_base64",

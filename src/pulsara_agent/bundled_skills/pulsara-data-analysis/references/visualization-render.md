@@ -1,6 +1,12 @@
-# HTML visualization and render
+# Charts and HTML visualization
 
-Use the available `visualization_render` tool for useful conversation visuals, including EDA views and final findings. Compute substantive results with Python or SQL, then embed the data needed for the display. Use a chart library for suitable charts; a simple SVG, table, or numeric answer needs no application framework.
+Compute substantive results with Python or SQL, then choose a suitable display for EDA views or final findings:
+
+- **Saved image:** use `![description](path)` in the reply; the user clicks it to open the image preview. Use an existing file's workspace-relative or absolute path.
+- **Static SVG:** put the SVG directly in a fenced `svg` code block; the frontend renders it. Neither this nor an image link requires an HTML wrapper or a tool call.
+- **Interactive chart, dashboard, or richer HTML layout:** write self-contained HTML and call `visualization_render` to embed it beneath the reply, following the contract below.
+
+Use a chart library for suitable charts. A small table or numeric answer can remain ordinary Markdown.
 
 ## Produce a self-contained HTML file
 
@@ -8,7 +14,7 @@ Write a complete UTF-8 HTML document, normally under `.pulsara/visualizations/<d
 
 - Plotly can export an interactive fragment with `fig.to_html(full_html=False, include_plotlyjs=True, include_mathjax=False, config={"responsive": True, "displayModeBar": False})`; place it in a complete responsive HTML document. For several charts in one document, inline the library once and omit it from subsequent fragments.
 - If using ECharts, Vega, D3, or another library, obtain the needed library through available authorized tools and embed it. Check whether the chosen chart also loads maps, workers, fonts, or other external resources.
-- For a static figure, embed its SVG or PNG data into the HTML when conversation display is helpful. Provide a separate export when the user needs a publication or reusable image.
+- Embed static SVG or PNG data when it is part of the HTML layout; standalone figures can use the image/SVG forms above. Provide a separate export when the user needs a publication or reusable image.
 - Use library serialization for figures. Escape untrusted labels in HTML; when embedding custom JSON into a script element, escape `<` in the serialized JSON (for example as `\u003c`) so dataset text cannot terminate the script. Insert plain text through `textContent`, not `innerHTML`.
 
 Prefer a compact chart or a small set of related views. Mark the **one visible containing element** with `data-pulsara-visualization-root` for a chart/card; an entire page can omit it. Make the content fit narrow viewports, give charts sensible height, wrap controls, and keep wide tables in their own scroll container. Avoid fixed desktop page widths or large empty sections.

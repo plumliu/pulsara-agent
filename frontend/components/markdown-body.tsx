@@ -1,14 +1,20 @@
 'use client';
 
 import type { Element as HastElement, Parent as HastParent, Root as HastRoot } from 'hast';
+import type { Root as MdastRoot } from 'mdast';
 import { toText } from 'hast-util-to-text';
+import { Image as ImageIcon } from 'lucide-react';
 import rehypeKatex from 'rehype-katex';
-import { useCallback, useContext, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math-extended';
 import { SKIP, visitParents } from 'unist-util-visit-parents';
+import { normalizeMathWithSource, rehypeSourceMapping } from '../lib/markdown-source';
+import { markdownDiagramFormat } from '../lib/markdown-diagram';
 import { MermaidBlock } from './mermaid-block';
+import { DiagramBlock } from './diagram-block';
+import { renderSvg, startsWithSvg } from '../lib/svg-renderer';
 import { FileLinkContext } from './file-link-context';
 import { classifyFileLink, markdownImageUrl } from '../lib/file-preview';
 
@@ -22,6 +28,7 @@ interface MarkdownProps {
   body: string;
   onNotify: MarkdownNotify;
   streaming?: boolean;
+  annotationSource?: boolean;
 }
 
 interface PointerOrigin {
@@ -36,6 +43,20 @@ function elementClasses(element: HastElement): ReadonlyArray<string> {
   return Array.isArray(element.properties.className)
     ? element.properties.className.map(String)
     : [];
+}
+
+function remarkSvgBlocks() {
+  return (tree: MdastRoot) => {
+    visitParents(tree, 'html', (node, ancestors) => {
+      const parent = ancestors.at(-1);
+      if (!parent || (parent.type !== 'root' && parent.type !== 'blockquote' && parent.type !== 'listItem')) return;
+      // Recognize only standalone SVG HTML blocks, never arbitrary raw HTML or
+      // inline examples. XML validation and sanitizing happen in the renderer.
+      if (!startsWithSvg(node.value) || !/(?:<\/svg>|^\s*<svg\b[^<>]*\/>)\s*$/.test(node.value)) return;
+      const index = parent.children.indexOf(node);
+      if (index >= 0) parent.children[index] = { type: 'code', lang: 'svg', value: node.value, position: node.position };
+    });
+  };
 }
 
 function rehypeCopyableMath() {
@@ -73,6 +94,7 @@ function rehypeCopyableMath() {
           role: 'button',
           tabIndex: 0,
         },
+        position: scope.position ?? element.position,
         children: [scope],
       };
       scopeParent.children[index] = wrapper;
@@ -100,12 +122,16 @@ function MarkdownCopySurface({
   children,
   inline = false,
   onNotify,
+  annotationSource = false,
 }: {
   children: ReactNode;
   inline?: boolean;
   onNotify: MarkdownNotify;
+  annotationSource?: boolean;
 }) {
   const pointerOrigin = useRef<PointerOrigin | undefined>(undefined);
+  const imageOrigin = useRef<PointerOrigin | undefined>(undefined);
+  const imageSelectionClick = useRef<HTMLElement | undefined>(undefined);
 
   const copy = useCallback(async (target: HTMLElement) => {
     const source = target.dataset.mathSource;
@@ -119,6 +145,12 @@ function MarkdownCopySurface({
   }, [onNotify]);
 
   const onPointerDown = useCallback((event: PointerEvent<HTMLElement>) => {
+    imageSelectionClick.current = undefined;
+    const image = annotationSource && event.target instanceof HTMLImageElement
+      && event.target.closest('[data-source-atom]') ? event.target : undefined;
+    imageOrigin.current = image && event.button === 0 ? {
+      pointerId: event.pointerId, target: image, x: event.clientX, y: event.clientY, moved: false,
+    } : undefined;
     const target = findMathTarget(event.target);
     pointerOrigin.current = target ? {
       pointerId: event.pointerId,
@@ -127,13 +159,28 @@ function MarkdownCopySurface({
       y: event.clientY,
       moved: false,
     } : undefined;
-  }, []);
+  }, [annotationSource]);
 
   const onPointerMove = useCallback((event: PointerEvent<HTMLElement>) => {
+    const image = imageOrigin.current;
+    if (image && image.pointerId === event.pointerId && Math.hypot(event.clientX - image.x, event.clientY - image.y) > 5) image.moved = true;
     const origin = pointerOrigin.current;
     if (!origin || origin.pointerId !== event.pointerId || origin.moved) return;
     if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 5) {
       origin.moved = true;
+    }
+  }, []);
+
+  const onPointerUp = useCallback((event: PointerEvent<HTMLElement>) => {
+    const origin = imageOrigin.current; imageOrigin.current = undefined;
+    const selection = window.getSelection();
+    // Chromium does not create a text Range for a drag confined to an image.
+    // Give that whole-image gesture a native Range; cross-node selections keep
+    // the browser's original endpoints and the shared strict source validator.
+    if (origin?.moved && origin.pointerId === event.pointerId && event.target === origin.target && selection?.isCollapsed) {
+      const range = document.createRange(); range.selectNode(origin.target);
+      selection.removeAllRanges(); selection.addRange(range);
+      imageSelectionClick.current = origin.target;
     }
   }, []);
 
@@ -158,11 +205,16 @@ function MarkdownCopySurface({
   }, [copy]);
 
   const handlers = {
+    onClickCapture: (event: MouseEvent<HTMLElement>) => {
+      const image = imageSelectionClick.current; imageSelectionClick.current = undefined;
+      if (image && event.target === image) { event.preventDefault(); event.stopPropagation(); }
+    },
     onClick,
     onKeyDown,
-    onPointerCancel: () => { pointerOrigin.current = undefined; },
+    onPointerCancel: () => { pointerOrigin.current = undefined; imageOrigin.current = undefined; },
     onPointerDown,
     onPointerMove,
+    onPointerUp,
   };
   return inline ? (
     <span className="markdown-copy-surface" {...handlers}>
@@ -178,116 +230,88 @@ function MarkdownCopySurface({
   );
 }
 
-function normalizePlainMath(value: string): string {
-  return value.replace(
-    /^([ \t]{0,3})\$\$[ \t]*([^\n]+?)[ \t]*\$\$[ \t]*$/gm,
-    (_match, indent: string, math: string) => `${indent}$$\n${indent}${math.trim()}\n${indent}$$`,
-  );
-}
-
-function normalizeOutsideInlineCode(value: string): string {
-  let output = '';
-  let cursor = 0;
-  while (cursor < value.length) {
-    const opening = value.indexOf('`', cursor);
-    if (opening < 0) {
-      output += normalizePlainMath(value.slice(cursor));
-      break;
-    }
-    let width = 1;
-    while (value[opening + width] === '`') width += 1;
-    const delimiter = '`'.repeat(width);
-    const closing = value.indexOf(delimiter, opening + width);
-    if (closing < 0) {
-      output += normalizePlainMath(value.slice(cursor));
-      break;
-    }
-    output += normalizePlainMath(value.slice(cursor, opening));
-    output += value.slice(opening, closing + width);
-    cursor = closing + width;
-  }
-  return output;
-}
-
 export function normalizeMathMarkdown(value: string): string {
-  const openingFence = /^ {0,3}(`{3,}|~{3,})[^\n]*(?:\n|$)/gm;
-  let output = '';
-  let cursor = 0;
-  while (cursor < value.length) {
-    openingFence.lastIndex = cursor;
-    const opening = openingFence.exec(value);
-    if (!opening) {
-      output += normalizeOutsideInlineCode(value.slice(cursor));
-      break;
-    }
-    output += normalizeOutsideInlineCode(value.slice(cursor, opening.index));
-    const marker = opening[1] ?? '```';
-    const closingFence = new RegExp(
-      `^ {0,3}${marker[0]}{${marker.length},}[ \\t]*(?:\\n|$)`,
-      'gm',
-    );
-    closingFence.lastIndex = opening.index + opening[0].length;
-    const closing = closingFence.exec(value);
-    const end = closing ? closing.index + closing[0].length : value.length;
-    output += value.slice(opening.index, end);
-    cursor = end;
-  }
-  return output;
+  return normalizeMathWithSource(value).text;
 }
 
 function markdownUrl(url: string, key: string, node: HastElement) {
-  return node.tagName === 'a' && key === 'href' && classifyFileLink(url) === 'local' ? url : defaultUrlTransform(url);
+  const fileAddress = (node.tagName === 'a' && key === 'href') || (node.tagName === 'img' && key === 'src');
+  return fileAddress && classifyFileLink(url) === 'local' ? url : defaultUrlTransform(url);
 }
+
+const MarkdownAnchorContext = createContext(false);
 
 function MarkdownLink({ href = '', children, onNotify }: { href?: string; children?: ReactNode; onNotify: MarkdownNotify }) {
   const context = useContext(FileLinkContext);
   const kind = classifyFileLink(href);
-  if (kind === 'external') return <a href={href} target="_blank" rel="noreferrer">{children}</a>;
-  if (kind === 'anchor') return <a href={href}>{children}</a>;
+  const content = <MarkdownAnchorContext.Provider value={true}>{children}</MarkdownAnchorContext.Provider>;
+  if (kind === 'external') return <a href={href} target="_blank" rel="noreferrer">{content}</a>;
+  if (kind === 'anchor') return <a href={href}>{content}</a>;
   return <a href={kind === 'local' ? href : undefined} role="link" tabIndex={0}
     onClick={event => {
       event.preventDefault();
       if (kind === 'local' && context) context.open(href, event.currentTarget, context.basePreview);
       else onNotify('无法打开文件', kind === 'invalid' ? '无法识别这个文件地址。' : '此内容没有可用的会话文件连接。', 'warning');
     }} onKeyDown={event => { if (event.key === 'Enter' && !event.currentTarget.hasAttribute('href')) event.currentTarget.click(); }}>
-    {children}
+    {content}
   </a>;
 }
 
-function MarkdownImage({ src, alt }: { src?: string | Blob; alt?: string }) {
+function MarkdownImage({ src, alt, onNotify, selectable }: { src?: string | Blob; alt?: string; onNotify: MarkdownNotify; selectable?: boolean }) {
   const context = useContext(FileLinkContext);
+  const linked = useContext(MarkdownAnchorContext);
   const [failed, setFailed] = useState<string>();
   if (typeof src !== 'string') return <span>{alt ?? '图片'}</span>;
   const kind = classifyFileLink(src);
   const url = kind === 'external' ? src : context?.imagesUrl ? markdownImageUrl(src, context.imagesUrl) : undefined;
-  if (!url || failed === url) return <span className="file-preview-image-placeholder" title={src}>[{alt || '本地图片'}：暂不可预览 — {src}]</span>;
-  // Raster resources and the existing external image policy; never raw SVG DOM.
-  // eslint-disable-next-line @next/next/no-img-element
-  return <img src={url} alt={alt ?? ''} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(url)} />;
+  const thumbnail = Boolean(url && failed !== url);
+  const content = thumbnail
+    // Raster resources and the existing external image policy; never raw SVG DOM.
+    // eslint-disable-next-line @next/next/no-img-element
+    ? <img draggable={selectable ? false : undefined} src={url} alt={alt ?? ''} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(url)} />
+    : kind === 'local' ? <><ImageIcon size={14} aria-hidden="true" /><span>{alt || src}</span></>
+      : <span className="file-preview-image-placeholder" title={src}>[{alt || '图片'}：暂不可预览 — {src}]</span>;
+  // Linked images keep their enclosing link's target; never nest buttons in links.
+  if (kind !== 'local' || linked) return content;
+  return <button type="button" className={thumbnail ? 'markdown-image-preview' : 'file-reference__label markdown-image-reference'}
+    title={src} aria-label={`查看图片：${alt || src}`} onClick={event => {
+      if (selectable && selectionTouches(event.currentTarget)) { event.preventDefault(); return; }
+      event.preventDefault();
+      event.stopPropagation();
+      if (context) context.open(src, event.currentTarget, context.basePreview);
+      else onNotify('无法打开图片', '此内容没有可用的会话文件连接。', 'warning');
+    }}>{content}</button>;
 }
 
-export function MarkdownBody({ body, onNotify, streaming = false }: MarkdownProps) {
+export function MarkdownBody({ body, onNotify, streaming = false, annotationSource = false }: MarkdownProps) {
+  const normalized = useMemo(() => normalizeMathWithSource(body), [body]);
+  const sourceMapping = useMemo(() => () => annotationSource ? rehypeSourceMapping(normalized) : () => {}, [normalized, annotationSource]);
   const components = useMemo<Components>(() => ({
     a: ({ children, href }) => <MarkdownLink href={href} onNotify={onNotify}>{children}</MarkdownLink>,
-    img: ({ src, alt }) => <MarkdownImage src={src} alt={alt} />,
+    img: ({ src, alt, node }) => <span data-source-atom={node?.properties['data-source-atom']}><MarkdownImage src={src} alt={alt} onNotify={onNotify} selectable={annotationSource} /></span>,
     pre: ({ node, children, ...props }) => {
       const code = node?.children[0];
-      if (code?.type === 'element' && code.tagName === 'code'
-        && elementClasses(code).some(name => name.toLowerCase() === 'language-mermaid')) {
-        return <MermaidBlock source={toText(code, { whitespace: 'pre' }).replace(/\n$/, '')} streaming={streaming} onNotify={onNotify} />;
+      if (code?.type === 'element' && code.tagName === 'code') {
+        const language = elementClasses(code).find(name => name.startsWith('language-'))?.slice(9).toLowerCase();
+        const source = toText(code, { whitespace: 'pre' }).replace(/\n$/, '');
+        const format = markdownDiagramFormat(language, source);
+        if (format === 'mermaid') return <div data-source-atom={node?.properties['data-source-atom']}><MermaidBlock source={source} streaming={streaming} onNotify={onNotify} /></div>;
+        if (format === 'svg') {
+          return <div data-source-atom={node?.properties['data-source-atom']}><DiagramBlock source={source} streaming={streaming} onNotify={onNotify} format="SVG" renderImage={renderSvg} /></div>;
+        }
       }
       return <pre {...props}>{children}</pre>;
     },
-  }), [onNotify, streaming]);
+  }), [onNotify, streaming, annotationSource]);
   return (
-    <MarkdownCopySurface onNotify={onNotify}>
+    <MarkdownCopySurface onNotify={onNotify} annotationSource={annotationSource}>
       <ReactMarkdown
         urlTransform={markdownUrl}
-        remarkPlugins={[remarkGfm, [remarkMath, { singleDollarTextMath: true }]]}
-        rehypePlugins={[rehypeCopyableMath, [rehypeKatex, { strict: false }]]}
+        remarkPlugins={[remarkGfm, remarkSvgBlocks, [remarkMath, { singleDollarTextMath: true }]]}
+        rehypePlugins={[rehypeCopyableMath, sourceMapping, [rehypeKatex, { strict: false }]]}
         components={components}
       >
-        {normalizeMathMarkdown(body)}
+        {normalized.text}
       </ReactMarkdown>
     </MarkdownCopySurface>
   );

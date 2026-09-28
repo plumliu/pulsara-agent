@@ -8,6 +8,7 @@ from typing import Mapping
 
 from pulsara_agent.llm.input import (
     LLMContentPart,
+    prompt_provider_parts,
     LLMImagePart,
     LLMMessage,
     LLMTextPart,
@@ -188,7 +189,7 @@ def lower_canonical_item(
             item,
             LLMMessage(
                 role=MessageRole.USER,
-                content=image_referenced_content(item.content),
+                content=image_referenced_content(prompt_provider_parts(item.content)),
             ),
         )
     if kind in {
@@ -260,7 +261,7 @@ def lower_retained_request_content(request) -> tuple[LLMContentPart, ...]:
 
     parts = request.content.parts
     if request.item_kind is FrozenProviderInputItemKind.USER:
-        return parts
+        return prompt_provider_parts(parts)
     if any(isinstance(part, LLMImagePart) for part in parts):
         raise ValueError("non-human retained request contains image content")
     text = "\n".join(part.text for part in parts if isinstance(part, LLMTextPart))

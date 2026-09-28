@@ -162,6 +162,7 @@
 .assistant-copy { margin: 10px 0 18px 40px; }
 .assistant-visualization { position: relative; left: calc(50% + 20px); transform: translateX(-50%); width: calc(100% - 40px); max-width: calc(100cqw - 54px); margin: 18px 0 24px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--paper-solid); font-family: var(--sans); transition: width .22s ease, left .22s ease; }
 .assistant-visualization.is-expanded { left: 50%; width: min(960px, calc(100cqw - 54px)); }
+.assistant-visualization { -webkit-user-select: none; user-select: none; }
 .assistant-visualization__toggle { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; padding: 9px 12px; background: transparent; color: var(--muted); text-align: left; font-family: var(--sans); font-size: var(--type-label); }
 .assistant-visualization__toggle:hover { background: var(--paper-deep); }
 .assistant-visualization__toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: -3px; }
@@ -194,7 +195,7 @@
 .assistant-markdown blockquote { margin: 10px 0; padding: 2px 0 2px 12px; border-left: 2px solid var(--blue); color: var(--muted); }
 .assistant-markdown a { color: var(--blue); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--blue) 35%, transparent); text-underline-offset: 2px; }
 .assistant-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
-.assistant-markdown th, .assistant-markdown td { padding: 6px 8px; border: 1px solid var(--line); text-align: left; }
+.assistant-markdown th, .assistant-markdown td { padding: 6px 8px; border: 1px solid var(--line); text-align: left; overflow-wrap: normal; }
 .assistant-markdown .katex { font-size: 1.04em; }
 .assistant-markdown .katex-display { max-width: 100%; margin: 12px 0 14px; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
 .markdown-copy-surface { display: contents; }
@@ -206,6 +207,7 @@
 .mermaid-block__status { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 12px; color: var(--muted); font-size: var(--type-small); line-height: 1.5; }
 .mermaid-block__preview { display: flex; justify-content: center; padding: 16px; overflow: auto; }
 .mermaid-block__preview img { display: block; max-width: 100%; height: auto; }
+.svg-block .mermaid-block__preview img { max-height: min(60vh, 560px); width: auto; object-fit: contain; }
 .mermaid-block pre, .assistant-markdown .mermaid-block pre { margin: 0; border-radius: 0; }
 .mermaid-block pre code { display: block; padding: 12px; white-space: pre; }
 .mermaid-measure { position: fixed; top: 0; left: -100000px; width: 1200px; visibility: hidden; pointer-events: none; }
@@ -699,3 +701,70 @@
 .workbench-file-drop > span { display: flex; align-items: center; gap: 10px; padding: 16px 22px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-solid); box-shadow: var(--shadow-md); color: var(--blue); font: 14px/1.5 var(--sans); }
 .workbench.is-file-dragging iframe { pointer-events: none; }
 @media (prefers-reduced-motion: reduce) { .workbench-file-drop { animation: none; } }
+
+/* Canonical response annotations share the composer document and undo history. */
+.annotation-selection-menu {
+  position: fixed; z-index: 120; display: flex; align-items: center; gap: 7px;
+  padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--paper-solid); color: var(--ink);
+  box-shadow: 0 4px 18px #0002; font: 12px var(--sans); cursor: pointer;
+}
+.prompt-annotation { border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; margin: 0 0 8px; font: 12px/1.5 var(--sans); background: var(--paper-solid); }
+.prompt-annotation button { display: inline-flex; gap: 5px; align-items: center; background: transparent; border: 0; color: var(--muted, #858279); cursor: pointer; padding: 0; font: inherit; }
+.prompt-annotation blockquote { white-space: pre-wrap; overflow-wrap: anywhere; margin: 7px 0; padding-left: 9px; border-left: 2px solid #c7b58f; max-height: 120px; overflow-y: auto; color: var(--muted, #77756e); }
+.prompt-annotation p { white-space: pre-wrap; margin: 7px 0 0; }
+.prompt-annotation blockquote.is-expanded { max-height: none; }
+.prompt-annotation .prompt-annotation__expand { display: flex; width: fit-content; margin: 0 0 0 auto; }
+::highlight(annotation-source), ::highlight(annotation-hover) { background-color: color-mix(in srgb, var(--amber) 27%, transparent); color: inherit; }
+::highlight(annotation-active) { background-color: color-mix(in srgb, var(--amber) 43%, transparent); color: inherit; }
+[data-source-atom].annotation-source, [data-source-atom].annotation-hover, [data-source-atom].annotation-active { outline: 2px solid var(--annotation-accent); outline-offset: 3px; border-radius: 4px; }
+.prompt-composer .tiptap:has(> .node-annotation) { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 7px 6px; }
+.prompt-composer .tiptap > .node-annotation { display: inline-flex; min-width: 0; max-width: 220px; }
+.prompt-composer .tiptap > p { flex-basis: 100%; min-width: 0; width: 100%; }
+.annotation-chip { display: inline-flex; align-items: center; min-width: 0; max-width: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--paper-solid); font: 12px/1.5 var(--sans); color: var(--muted); white-space: nowrap; user-select: none; }
+.annotation-chip:hover, .annotation-chip.is-active { border-color: color-mix(in srgb, var(--annotation-accent) 55%, var(--line)); }
+.annotation-chip.is-active { background: color-mix(in srgb, var(--annotation-accent) 6%, var(--paper-solid)); }
+.annotation-chip button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 7px; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.annotation-chip__open { min-width: 0; }
+.annotation-chip__open > svg, .annotation-chip__number { flex: none; color: var(--annotation-accent); }
+.annotation-chip__number { font-size: 11px; font-variant-numeric: tabular-nums; }
+.annotation-chip__summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.annotation-chip .annotation-chip__remove { flex: none; padding: 6px 5px; margin-right: 2px; }
+.annotation-chip__remove:hover { color: var(--red); }
+.annotation-marker { position: fixed; z-index: 80; display: grid; place-items: center; min-width: 22px; height: 22px; padding: 0 5px; border: 1px solid color-mix(in srgb, var(--annotation-accent) 70%, transparent); border-radius: 12px 12px 12px 3px; background: var(--annotation-accent); color: var(--annotation-marker-ink); font: 11px/1 var(--sans); font-variant-numeric: tabular-nums; cursor: pointer; box-shadow: 0 1px 4px #0001; user-select: none; }
+.annotation-marker:hover, .annotation-marker.is-active { box-shadow: 0 0 0 3px color-mix(in srgb, var(--annotation-accent) 18%, transparent); }
+.annotation-editor { position: fixed; z-index: 160; max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-solid); color: var(--ink); box-shadow: 0 6px 24px #0002; }
+.annotation-editor--inline { width: min(300px, calc(100vw - 32px)); border-color: color-mix(in srgb, var(--annotation-accent) 30%, var(--line)); }
+.annotation-editor--preview { --annotation-divider-gap: 6px; width: min(350px, calc(100vw - 32px)); max-height: min(420px, calc(100dvh - 40px)); }
+.annotation-editor__header { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--faint); }
+.annotation-editor__header b { margin-right: 5px; font-weight: 500; color: var(--annotation-accent); }
+.annotation-editor__header > div { display: flex; gap: 4px; }
+.annotation-editor__header button { padding: 4px; border-radius: 5px; }
+.annotation-editor__header button:hover:not(:disabled) { background: var(--paper-deep); color: var(--ink); }
+.annotation-editor--preview blockquote { max-height: 72px; margin: 8px 0 4px; color: var(--ink); border-left-color: color-mix(in srgb, var(--annotation-accent) 45%, transparent); }
+.annotation-editor textarea { display: block; width: 100%; min-height: 24px; resize: none; border: 0; outline: none; padding: 0; margin: 0; background: transparent; color: inherit; font: 14px/1.55 var(--sans); }
+.annotation-editor--preview textarea { border-top: 1px solid var(--line); padding-top: var(--annotation-divider-gap); margin-top: var(--annotation-divider-gap); min-height: 40px; font-size: 12px; }
+.annotation-editor textarea::placeholder { color: var(--faint); }
+
+[data-annotation-entry] ::selection { background-color: color-mix(in srgb, var(--amber) 43%, transparent); }
+.annotation-selection-menu > svg { color: var(--annotation-accent); }
+.annotation-chip button:disabled { opacity: .55; cursor: default; }
+
+/* Short, one-shot feedback; positions still follow their source while scrolling. */
+.annotation-selection-menu, .annotation-editor { animation: annotation-reveal .18s cubic-bezier(.2, .7, .2, 1); transform-origin: bottom left; }
+.annotation-chip { animation: annotation-reveal .2s cubic-bezier(.2, .7, .2, 1); transition: background-color .16s ease, border-color .16s ease; }
+.annotation-chip button, .annotation-editor button { transition: color .14s ease, background-color .14s ease; }
+.annotation-marker { animation: annotation-marker-reveal .2s ease-out; transition: scale .16s ease, box-shadow .16s ease; }
+.annotation-marker:hover, .annotation-marker:focus-visible, .annotation-marker.is-active { scale: 1.08; }
+.annotation-marker:active { scale: .96; }
+@keyframes annotation-reveal { from { opacity: 0; transform: translateY(4px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes annotation-marker-reveal { from { opacity: 0; transform: scale(.8); } to { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .annotation-selection-menu, .annotation-editor, .annotation-chip, .annotation-marker { animation: none; transition: none; }
+  .annotation-chip button, .annotation-editor button { transition: none; }
+  .annotation-marker:hover, .annotation-marker:focus-visible, .annotation-marker.is-active, .annotation-marker:active { scale: 1; }
+}
+
+[data-annotation-entry] .markdown-image-reference,
+[data-annotation-entry] .markdown-image-preview { -webkit-user-select: text; user-select: text; }
+[data-annotation-entry] [data-source-decoration] { -webkit-user-select: none; user-select: none; }

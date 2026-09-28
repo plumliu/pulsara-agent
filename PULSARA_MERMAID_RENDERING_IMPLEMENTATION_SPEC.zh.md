@@ -15,6 +15,8 @@
 
 使用精确版本 `mermaid@12.0.0`，由 Vite 本地构建，按需动态加载，不使用外部渲染服务或 CDN。Mermaid 拥有语法解析、图布局、SVG 生成与 strict 清洗；Pulsara 只接 Markdown 节点、当前主题、加载/错误状态、对象 URL 生命周期和已有图片查看器。
 
+展示外壳由 `DiagramBlock` 统一拥有源码切换、复制、放大、加载/错误及对象 URL 生命周期；`MermaidBlock` 保留主题订阅并调用 `renderMermaid`。消息中的直接 SVG 复用该外壳，其独立读取与清洗合同见 `PULSARA_SVG_RENDERING_IMPLEMENTATION_SPEC.zh.md`。
+
 已核对官方 [使用文档](https://mermaid.js.org/config/usage.html) 及安装包的 `mermaid.core.mjs`、`config.type.d.ts`：`render` 有内部串行队列，但 `initialize` 作用于全局配置、不会加入该队列。为避免多个图表/主题切换互相污染，用一个最小 Promise 链串行包住 initialize + render；不再实现解析器、布局器或完整任务调度器。
 
 - `startOnLoad: false`、`securityLevel: strict`、`htmlLabels: false`、`suppressErrorRendering: true`；保留依赖原有单图资源边界，禁止图内指令更改安全设置。不新增会话/历史/图表总数上限。

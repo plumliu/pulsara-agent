@@ -2,7 +2,7 @@ export interface FilePreview {
   read_token: string;
   path: string;
   name: string;
-  kind: 'text' | 'markdown' | 'table' | 'image' | 'pdf' | 'html' | 'file' | 'directory';
+  kind: 'text' | 'markdown' | 'table' | 'image' | 'svg' | 'pdf' | 'html' | 'file' | 'directory';
   size: number | null;
   notice: string | null;
   content_url: string | null;

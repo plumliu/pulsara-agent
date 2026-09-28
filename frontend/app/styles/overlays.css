@@ -52,6 +52,10 @@
 .file-preview-image > div:last-child { flex: 1; min-height: 0; overflow: auto; display: grid; align-content: start; justify-items: center; padding: 20px; }
 .file-preview-image img { max-width: none; height: auto; object-fit: contain; }
 .file-preview-image-placeholder,.file-preview-empty { color: var(--muted); font-size: 13px; }
+.markdown-image-reference > span { overflow: hidden; text-overflow: ellipsis; }
+.markdown-image-preview { display: inline-block; max-width: 100%; padding: 0; border: 0; background: transparent; cursor: zoom-in; vertical-align: middle; }
+.markdown-image-preview img { display: block; max-width: 100%; height: auto; }
+.markdown-image-preview:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .file-preview-table { flex: 1; min-height: 0; overflow: auto; font: 14px/34px var(--sans); }
 .file-preview-table [role=row] { position: absolute; height: 34px; }
 .file-preview-table :is([role=cell],[role=columnheader]) { position: absolute; width: 180px; height: 34px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 0 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

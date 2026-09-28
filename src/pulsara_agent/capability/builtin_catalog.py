@@ -1029,8 +1029,14 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "visualization_render": _descriptor(
         name="visualization_render",
         description=(
-            "Display an HTML file beneath your next tool-free assistant message. "
-            "Write it first, preferably in .pulsara/visualizations/, then call with "
+            "Embed interactive HTML charts, dashboards, or page layouts beneath your "
+            "next tool-free assistant message. For an existing local image, reply with "
+            "![description](path); the user can click it to open the image preview. "
+            "Relative image paths start at the session workspace root; absolute paths "
+            "also work. For a static SVG diagram, reply with a fenced svg code block; "
+            "the frontend renders it directly. These image/SVG forms need no HTML "
+            "wrapper or call to this tool. For HTML, "
+            "write it first, preferably in .pulsara/visualizations/, then call with "
             "a path or a visualization_ref previously shown in this session. For a "
             "chart or card, mark one visible element data-pulsara-visualization-root; "
             "it is framed when it fits, otherwise the whole page is shown. For a "

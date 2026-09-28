@@ -110,7 +110,7 @@ function FilePreviewDialog({ view, api, onClose, onNotify, onRetry, open }: {
       <div className="file-preview-title"><strong>{file?.name ?? '文件预览'}</strong><small title={file?.path ?? view.intent.path}>{file?.path ?? view.intent.path}</small></div>
       <nav aria-label="文件操作">
         {file && <>
-          {!file.notice && ['markdown', 'table', 'html'].includes(file.kind) && <button
+          {!file.notice && ['markdown', 'table', 'html', 'svg'].includes(file.kind) && <button
             title={source ? '显示预览' : '查看源码'} aria-label={source ? '显示预览' : '查看源码'} aria-pressed={source}
             onClick={() => setSourceToken(source ? null : file.read_token)}><Code2 size={16} /></button>}
           <button title="复制路径" aria-label="复制路径" onClick={() => { void navigator.clipboard.writeText(file.path).then(() => onNotify('路径已复制', undefined, 'success'), () => onNotify('无法复制路径', undefined, 'warning')); }}><Copy size={16} /></button>
@@ -137,7 +137,7 @@ function FileBody({ file, api, source, onNotify, onRetry }: FileBodyProps) {
   const [error, setError] = useState<string>();
   const [htmlStatus, setHtmlStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [zoom, setZoom] = useState(1);
-  const reading = ['text', 'markdown', 'table'].includes(file.kind);
+  const reading = ['text', 'markdown', 'table', 'svg'].includes(file.kind);
   const mode = file.kind === 'table' && !source ? 'table' : 'text';
   const htmlObservation = useCallback((status: 'ready' | 'error') => {
     setHtmlStatus(previous => previous === 'error' ? previous : status);
@@ -147,11 +147,11 @@ function FileBody({ file, api, source, onNotify, onRetry }: FileBodyProps) {
     {htmlStatus !== 'ready' && <div className="file-preview-html-status" role="status">{htmlStatus === 'error' ? '部分内容未能加载，请检查 HTML 的静态依赖或脚本。' : '正在加载页面…'}</div>}
     <SandboxedHtmlPreview source={{ url: file.document_url }} title={file.name} onStatus={htmlObservation} />
   </div>{source && <FileReader file={file} api={api} source={source} mode="text" onNotify={onNotify} onRetry={onRetry} />}</>;
-  if (file.kind === 'image' && file.content_url) return <div className="file-preview-image">
+  if ((file.kind === 'image' || file.kind === 'svg') && !source && file.content_url) return <div className="file-preview-image">
     <div className="file-preview-pagebar"><button onClick={() => setZoom(value => value / 1.25)} aria-label="缩小图片">−</button><span>{Math.round(zoom * 100)}%</span><button onClick={() => setZoom(value => value * 1.25)} aria-label="放大图片">+</button><button onClick={() => setZoom(1)}>适应窗口</button></div>
-    <div>{/* Native image decoding; SVG never enters this route. */}
+    <div>{/* Native image decoding keeps SVG out of the application's DOM. */}
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={file.content_url} alt={file.name} style={{ width: `${zoom * 100}%` }} onError={() => setError('图片暂时无法解码，可下载或使用系统应用打开。')} />{error && <p role="status">{error}</p>}
+      <img src={file.content_url} alt={file.name} style={{ width: `${zoom * 100}%` }} onError={() => setError(file.kind === 'svg' ? 'SVG 暂时无法显示，可查看源码或下载原文件。' : '图片暂时无法解码，可下载或使用系统应用打开。')} />{error && <p role="status">{error}</p>}
     </div>
   </div>;
   if (file.kind === 'pdf' && file.content_url) return <object className="file-preview-pdf" data={file.content_url} type="application/pdf" aria-label={file.name}><p>浏览器无法预览此 PDF，请下载或使用系统应用打开。</p></object>;

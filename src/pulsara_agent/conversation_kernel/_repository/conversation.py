@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.annotations import validate_annotation_sources
+
 from datetime import datetime
 from hashlib import sha256
 import json
@@ -487,6 +489,8 @@ class _ConversationOperations:
                 or source_through != prospective.source_through_sequence
             ):
                 raise ConversationKernelConflict("ROOT provider input base changed")
+            validate_annotation_sources(connection, session_id=guard.session_id,
+                                        content=intent.canonical_prompt.content)
             publication = materialize_canonical_prompt(
                 connection,
                 publisher=self._canonical_content_publisher,

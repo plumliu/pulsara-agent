@@ -135,6 +135,8 @@ def classify(path: Path, fd: int) -> tuple[str, str]:
         return "html", "text/html"
     if ext in RASTER:
         return "image", RESOURCE_TYPES[ext]
+    if ext == ".svg":
+        return "svg", "image/svg+xml"
     if ext == ".pdf":
         return "pdf", "application/pdf"
     if ext in {".csv", ".tsv"}:
@@ -256,7 +258,7 @@ class Preview:
             return self.last_page[2]
         if mode == "table" and self.kind == "table":
             result = self._table_page(cursor)
-        elif mode == "text" and self.kind in {"text", "markdown", "table", "html"}:
+        elif mode == "text" and self.kind in {"text", "markdown", "table", "html", "svg"}:
             if cursor < 0 or cursor > self.info.st_size:
                 raise expired()
             raw = os.pread(self.fd, TEXT_BYTES, cursor)

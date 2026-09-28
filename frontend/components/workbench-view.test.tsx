@@ -986,7 +986,7 @@ describe('completed reply process disclosure', () => {
     }] })} />);
     expect(hiddenProgress()).toBe(true);
     expect(screen.queryByRole('button', { name: /展开思考/ })).toBeNull();
-    expect(view.container.querySelectorAll('[data-memory-entry="final"]')).toHaveLength(1);
+    expect(view.container.querySelectorAll('[data-source-entry="final"]')).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
     fireEvent.click(screen.getByRole('button', { name: kind === 'summary' ? '展开思考摘要' : '展开思考' }));
     expect(screen.getByText('核对完成。').closest('.reasoning-row__body')).toBeTruthy();
@@ -1023,7 +1023,7 @@ describe('completed reply process disclosure', () => {
     expect(screen.getByRole('separator', { name: '上下文已压缩' })).toBeTruthy();
     expect(screen.getByText(final.body).closest('[hidden]')).toBeNull();
     view.rerender(<ConversationMessages {...common}
-      focusMemoryEntry={{ sessionId: 'session-one', entryId: progress.id }} />);
+      focusSourceEntry={{ sessionId: 'session-one', entryId: progress.id }} />);
     expect(hiddenProgress()).toBe(false);
     expect(screen.getByRole('button', { name: '展开工具详情：read_file' })).toBeTruthy();
   });

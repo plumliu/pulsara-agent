@@ -82,6 +82,7 @@ from pulsara_agent.conversation_kernel.capability_composition import (
     freeze_capability_registry_from_owner_snapshots,
 )
 from pulsara_agent.llm.input import (
+    FrozenPromptContent,
     LLMContentPart,
     LLMImagePart,
     LLMTextPart,
@@ -5432,9 +5433,7 @@ def _activation_subject_for_anchor(
         }:
             return (
                 CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
-                "\n".join(
-                    part.text for part in item.content if isinstance(part, LLMTextPart)
-                ),
+                prompt_text_projection(FrozenPromptContent(item.content)),
             )
         return CapabilityActivationSubjectKind.ROOT_NON_HUMAN_TRIGGER, ""
     # NoNewTriggerAnchor represents a same-turn tool/result continuation.  It

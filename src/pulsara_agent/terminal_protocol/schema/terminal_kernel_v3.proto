@@ -771,10 +771,23 @@ message PromptImagePart {
   string declared_media_type = 2;
 }
 
+message PromptAnnotationSource {
+  string entry_id = 1;
+  uint64 start = 2;
+  uint64 end = 3;
+}
+
+message PromptAnnotationPart {
+  string quote = 1;
+  optional string comment = 2;
+  PromptAnnotationSource source = 3;
+}
+
 message PromptContentPart {
   oneof value {
     string text = 1;
     PromptImagePart image = 2;
+    PromptAnnotationPart annotation = 3;
   }
 }
 

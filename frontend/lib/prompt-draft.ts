@@ -1,4 +1,8 @@
+import { closeHistory } from '@tiptap/pm/history';
 import { Editor, type JSONContent } from '@tiptap/core';
+import { PromptAnnotationNode } from '../components/prompt-annotation-node';
+import type { PromptAnnotationPart } from './prompt-content';
+import { copyAnnotation, decodeAnnotation } from './prompt-content';
 import Document from '@tiptap/extension-document';
 import HardBreak from '@tiptap/extension-hard-break';
 import Paragraph from '@tiptap/extension-paragraph';
@@ -14,7 +18,7 @@ import type { EditablePromptContent, LocalPromptImagePart } from './prompt-conte
 const acceptedImageMediaTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 const SingleParagraphDocument = Document.extend({
-  content: 'paragraph',
+  content: 'annotation* paragraph',
 });
 
 interface DraftAsset {
@@ -64,6 +68,13 @@ export interface PromptDraftImageStatus {
   assetId: string;
   state: 'loading' | 'ready' | 'failed';
   reason?: string;
+}
+
+export interface DraftAnnotation {
+  id: string;
+  position: number;
+  number: number;
+  value: PromptAnnotationPart;
 }
 
 export class PromptDraftStore {
@@ -116,11 +127,11 @@ export class PromptDraftStore {
     const document: JSONContent = session.editor.getJSON();
     const text = draftText(document);
     const assetIds = imageAssetIds(document);
-    const references = (document.content?.[0]?.content ?? []).filter(node => node.type === 'fileReference');
+    const references = (document.content?.find(node => node.type === 'paragraph')?.content ?? []).filter(node => node.type === 'fileReference');
     return {
       revision: session.revision,
       text,
-      hasContent: references.length > 0 || assetIds.length > 0 || text.trim().length > 0,
+      hasContent: Boolean(document.content?.some(node => node.type === 'annotation')) || references.length > 0 || assetIds.length > 0 || text.trim().length > 0,
       hasImage: assetIds.length > 0,
       pendingImages: assetIds.filter((id) => !session.assets.get(id)?.bytes
         && !session.assets.get(id)?.error).length,
@@ -128,6 +139,42 @@ export class PromptDraftStore {
       pendingFiles: references.filter(node => node.attrs?.state === 'uploading').length,
       failedFiles: references.filter(node => node.attrs?.state === 'failed').length,
     };
+  }
+
+  annotations(sessionId: string): DraftAnnotation[] {
+    const result: DraftAnnotation[] = [];
+    this.sessions.get(sessionId)?.editor.state.doc.forEach((node, position) => {
+      if (node.type.name === 'annotation') result.push({ id: node.attrs.draftId, position, number: result.length + 1, value: node.attrs.value });
+    });
+    return result;
+  }
+
+  addAnnotation(sessionId: string, annotation: PromptAnnotationPart): string {
+    const editor = this.getEditor(sessionId);
+    let position = 0;
+    editor.state.doc.forEach(node => { if (node.type.name === 'annotation') position += node.nodeSize; });
+    // Only identifies a draft node across edits, undo and duplicate quotes.
+    // Canonical serialization carries value alone, never this UI identity.
+    const id = crypto.randomUUID();
+    editor.view.dispatch(closeHistory(editor.state.tr));
+    editor.commands.insertContentAt(position, { type: 'annotation', attrs: { value: copyAnnotation(annotation), draftId: id } });
+    return id;
+  }
+
+  updateAnnotation(sessionId: string, id: string, comment: string): void {
+    const annotation = this.annotations(sessionId).find(item => item.id === id);
+    if (!annotation) return;
+    const editor = this.getEditor(sessionId);
+    editor.view.dispatch(editor.state.tr.setNodeMarkup(annotation.position, undefined, {
+      draftId: id, value: { ...annotation.value, comment },
+    }));
+  }
+
+  removeAnnotation(sessionId: string, id: string): void {
+    const annotation = this.annotations(sessionId).find(item => item.id === id);
+    if (!annotation) return;
+    const editor = this.getEditor(sessionId);
+    editor.view.dispatch(closeHistory(editor.state.tr).delete(annotation.position, annotation.position + 1));
   }
 
   insertFiles(sessionId: string, files: readonly File[], position?: number | 'end'): void {
@@ -198,7 +245,7 @@ export class PromptDraftStore {
   }
 
   private hasImport(session: DraftSession, id: string): boolean {
-    return ((session.editor.getJSON() as JSONContent).content?.[0]?.content ?? []).some(node => node.attrs?.id === id);
+    return ((session.editor.getJSON() as JSONContent).content?.find(node => node.type === 'paragraph')?.content ?? []).some(node => node.attrs?.id === id);
   }
 
   private syncImports(session: DraftSession): void {
@@ -229,7 +276,11 @@ export class PromptDraftStore {
     const session = this.requireSession(sessionId);
     const nodes = plainTextNodes(value);
     const chain = session.editor.chain().focus(undefined, { scrollIntoView: false });
-    if (atStart) chain.setTextSelection(1);
+    if (atStart) {
+      let start = 1;
+      session.editor.state.doc.forEach(node => { if (node.type.name === 'annotation') start += node.nodeSize; });
+      chain.setTextSelection(start);
+    }
     chain.insertContent(nodes).run();
   }
 
@@ -317,7 +368,7 @@ export class PromptDraftStore {
     const session = this.requireSession(sessionId);
     const revision = session.revision;
     const document: JSONContent = session.editor.getJSON();
-    if ((document.content?.[0]?.content ?? []).some(node => node.type === 'fileReference' && !fileReference(node.attrs?.raw ?? ''))) {
+    if ((document.content?.find(node => node.type === 'paragraph')?.content ?? []).some(node => node.type === 'fileReference' && !fileReference(node.attrs?.raw ?? ''))) {
       throw new Error('请等待文件导入完成，或重试/移除失败的文件。');
     }
     const selectedAssets = new Map<string, DraftAsset>();
@@ -345,9 +396,14 @@ export class PromptDraftStore {
     if (current) this.releaseSession(current);
     const assets = new Map<string, DraftAsset>();
     const nodes: JSONContent[] = [];
+    const annotations: JSONContent[] = [];
     for (const part of content.parts) {
       if (part.type === 'text') {
         nodes.push(...plainTextNodes(part.text));
+        continue;
+      }
+      if (part.type === 'annotation') {
+        annotations.push({ type: 'annotation', attrs: { value: copyAnnotation(part), draftId: crypto.randomUUID() } });
         continue;
       }
       const blob = new Blob([new Uint8Array(part.bytes)], {
@@ -366,7 +422,7 @@ export class PromptDraftStore {
       imports: new Map(),
       revision: 0,
     };
-    session.editor = this.createEditor(session, paragraphDocument(nodes));
+    session.editor = this.createEditor(session, { type: 'doc', content: [...annotations, ...paragraphDocument(nodes).content!] });
     this.sessions.set(sessionId, session);
     this.changed();
     return true;
@@ -407,6 +463,7 @@ export class PromptDraftStore {
       element: document.createElement('div'),
       extensions: [
         SingleParagraphDocument,
+        PromptAnnotationNode,
         Paragraph,
         Text,
         HardBreak,
@@ -522,7 +579,7 @@ function literalTextNodes(value: string): JSONContent[] {
 
 function draftText(document: JSONContent): string {
   let result = '';
-  for (const node of document.content?.[0]?.content ?? []) {
+  for (const node of document.content?.find(node => node.type === 'paragraph')?.content ?? []) {
     if (node.type === 'text') result += node.text ?? '';
     else if (node.type === 'fileReference' || node.type === 'skillReference') result += node.attrs?.raw ?? '';
     else if (node.type === 'hardBreak') result += '\n';
@@ -532,7 +589,7 @@ function draftText(document: JSONContent): string {
 
 function imageAssetIds(document: JSONContent): string[] {
   const result: string[] = [];
-  for (const node of document.content?.[0]?.content ?? []) {
+  for (const node of document.content?.find(node => node.type === 'paragraph')?.content ?? []) {
     if (node.type === 'image' && typeof node.attrs?.assetId === 'string') {
       result.push(node.attrs.assetId);
     }
@@ -544,14 +601,15 @@ function serializePromptDocument(
   document: JSONContent,
   assets: ReadonlyMap<string, DraftAsset>,
 ): EditablePromptContent {
-  const parts: Array<EditablePromptContent['parts'][number]> = [];
+  const parts: Array<EditablePromptContent['parts'][number]> = (document.content ?? [])
+    .filter(node => node.type === 'annotation').map(node => decodeAnnotation(node.attrs?.value));
   let text = '';
   const flushText = () => {
     if (!text) return;
     parts.push({ type: 'text', text });
     text = '';
   };
-  for (const node of document.content?.[0]?.content ?? []) {
+  for (const node of document.content?.find(node => node.type === 'paragraph')?.content ?? []) {
     if (node.type === 'text') {
       text += node.text ?? '';
     } else if (node.type === 'fileReference') {

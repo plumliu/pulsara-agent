@@ -1,5 +1,6 @@
 'use client';
 
+import { AnnotationCard } from './response-annotations';
 import { splitFileReferences } from '../lib/file-reference';
 import { FileReferenceChip } from './file-reference-chip';
 import { PromptImageChip } from './prompt-image-chip';
@@ -304,6 +305,7 @@ function renderPromptBody(
 ) {
   let imageIndex = 0;
   return content.parts.map((part, partIndex) => {
+    if (part.type === 'annotation') return <AnnotationCard key={partIndex} value={part} />;
     if (part.type === 'text') {
       return <span key={partIndex} className="prompt-content-text">{splitFileReferences(part.text).map((piece, index) =>
         typeof piece === 'string' ? splitSkillReferences(piece).map((reference, skillIndex) =>

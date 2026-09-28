@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from time import monotonic
 
@@ -21,6 +21,8 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 )
 from pulsara_agent.conversation_kernel.prompt_storage import (
     copy_canonical_prompt_refs,
+    hydrate_canonical_prompt_owner,
+    materialize_canonical_prompt,
     insert_canonical_prompt_refs,
     materialize_compaction_snapshot,
 )
@@ -30,7 +32,10 @@ from pulsara_agent.llm.model_connections import model_call_binding_to_dict
 from pulsara_agent.llm.provider_replay import rebind_durable_provider_assistant_replay
 from pulsara_agent.primitives.context import context_fingerprint, thaw_json
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from .contracts import ConversationKernelConflict, _id
+from .contracts import ConversationKernelConflict, _id, _content_columns
+from pulsara_agent.conversation_kernel.annotations import remap_annotation_sources
+from pulsara_agent.conversation_kernel.prompt_content import PROMPT_BODY_MEDIA_TYPE, freeze_canonical_prompt
+from pulsara_agent.llm.input import PromptAnnotationPart
 from .locking import lock_canonical_identities
 
 
@@ -245,7 +250,27 @@ class _ForkOperations:
                                 int(entry["provider_input_through_sequence"])
                             ),
                         )
+                    publication = None
+                    if entry["entry_kind"] in {"USER_MESSAGE", "USER_STEER"} and entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE:
+                        original = hydrate_canonical_prompt_owner(
+                            connection, row=entry, transcript_entry_id=source_id,
+                        ).content
+                        if any(isinstance(part, PromptAnnotationPart) for part in original.parts):
+                            publication = materialize_canonical_prompt(
+                                connection, publisher=self._canonical_content_publisher,
+                                workspace_id=material.workspace_id,
+                                prompt=freeze_canonical_prompt(remap_annotation_sources(original, entry_map)),
+                            )
+                            values.update(zip(_CONTENT_COLUMNS, _content_columns(publication.body)))
                     _insert(connection, "transcript_entries", values)
+                    if publication is not None:
+                        insert_canonical_prompt_refs(
+                            connection, session_id=child_session_id,
+                            workspace_id=material.workspace_id,
+                            transcript_entry_id=entry_map[source_id],
+                            image_blob_ids=publication.image_blob_ids,
+                        )
+                        continue
                     copy_canonical_prompt_refs(
                         connection,
                         session_id=source_session_id,
@@ -374,10 +399,12 @@ class _ForkOperations:
                     )
                     carrier = build_compaction_snapshot_carrier(
                         summary=summary,
-                        recent_human_requests=old.recent_human_requests,
+                        recent_human_requests=tuple(replace(request, content=remap_annotation_sources(request.content, entry_map))
+                                                    for request in old.recent_human_requests),
                         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
                         active_request=None,
-                        retained_historical_requests=material.retained_historical_requests,
+                        retained_historical_requests=tuple(replace(request, content=remap_annotation_sources(request.content, entry_map))
+                                                          for request in material.retained_historical_requests),
                     )
                     snapshot_id = _id("context-snapshot")
                     source = material.snapshot

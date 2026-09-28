@@ -78,6 +78,7 @@ import type {
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, VisualizationOccurrence, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
+import { AnnotationBody, ResponseAnnotations } from './response-annotations';
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
 import { WelcomeTypewriter } from './welcome-typewriter';
@@ -94,8 +95,9 @@ import {
 } from '../lib/visualization-frame';
 
 interface WorkbenchViewProps {
+  onLocateAnnotation?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onCompletePaths?: import('../lib/file-reference').CompleteWorkspacePaths;
-  focusMemoryEntry?: { sessionId: string; entryId: string };
+  focusSourceEntry?: { sessionId: string; entryId: string };
   workspace: Workspace;
   session: SessionSummary;
   messages: Message[];
@@ -1046,7 +1048,7 @@ function VisualizationPanel({ entryId, visualization, onRead }: {
           : state.html === undefined ? <div className="assistant-visualization__status" role="status">正在加载可视化…</div>
             : <div className="assistant-visualization__viewport" style={rootRect ? { height: Math.ceil(rootRect.height) } : undefined}>
               <SandboxedHtmlPreview frameRef={frameRef} title={`可视化 ${ordinal + 1}`}
-                source={{ html: state.html, measure: true }}
+                source={{ html: state.html, measure: true, allowTextSelection: false }}
                 style={{
                   width: probeWidth === null ? '100%' : probeWidth,
                   transform: rootRect ? `translate(${-rootRect.x}px, ${-rootRect.y}px)` : undefined,
@@ -1231,7 +1233,9 @@ function AssistantMessage({
         <>
           <div className="assistant-copy">
             <div className={`assistant-markdown${isStreaming ? '' : ' assistant-markdown--pretty'}`}>
-              <MarkdownBody body={message.body} onNotify={onNotify} streaming={isStreaming} />
+              <AnnotationBody entryId={message.assistantKind !== 'live' && !isStreaming ? message.id : undefined} body={message.body}>
+                <MarkdownBody annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
+              </AnnotationBody>
             </div>
             {(canCopyResponse || message.forkEligible) && (
               <div className="response-actions">
@@ -1376,7 +1380,7 @@ export function ConversationMessages({
   focusTaskId,
   focusTaskRevision = 0,
   focusTaskHighlighted = false,
-  focusMemoryEntry,
+  focusSourceEntry,
 }: {
   messages: Message[];
   skills?: SkillCapability[];
@@ -1394,14 +1398,14 @@ export function ConversationMessages({
   focusTaskId?: string;
   focusTaskRevision?: number;
   focusTaskHighlighted?: boolean;
-  focusMemoryEntry?: WorkbenchViewProps['focusMemoryEntry'];
+  focusSourceEntry?: WorkbenchViewProps['focusSourceEntry'];
 }) {
   const toolChainConnections = useMemo(
     () => findToolChainConnections(messages, contextCompactionIndex), [messages, contextCompactionIndex],
   );
   const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
   const renderMessage = (message: Message, startsRun: boolean) => (
-    <div key={message.id} data-memory-entry={message.id} style={{ display: 'contents' }}>
+    <div key={message.id} data-source-entry={message.id} style={{ display: 'contents' }}>
       {message.role === 'user'
         ? <UserMessage message={message} label={userLabel} onReadPromptImage={onReadPromptImage} />
         : <AssistantMessage message={message} responseActionEligible={isCompleteAnswer(message, taskFinalAnswerId)} startsAssistantRun={startsRun}
@@ -1420,8 +1424,8 @@ export function ConversationMessages({
   let run: Message[] = [];
   const flush = () => {
     if (!run.length) return;
-    const focused = focusMemoryEntry && run.some(message => message.id === focusMemoryEntry.entryId)
-      ? focusMemoryEntry
+    const focused = focusSourceEntry && run.some(message => message.id === focusSourceEntry.entryId)
+      ? focusSourceEntry
       : focusTaskHighlighted && run.some(message => message.subagentRuns?.some(task => task.id === focusTaskId))
         ? focusTaskRevision : undefined;
     content.push(<ConversationRun key={`${artifactOwnerKey}:${run[0].id}`} messages={run}
@@ -1658,7 +1662,7 @@ function AnimatedQueueItem({ children }: { children: ReactNode }) {
 }
 
 export function WorkbenchView({
-  focusMemoryEntry,
+  focusSourceEntry,
   workspace,
   session,
   messages,
@@ -1709,6 +1713,7 @@ export function WorkbenchView({
   onReadPromptImage,
   onReadVisualization = unavailableVisualization,
   promptDraftStore: draftStore,
+  onLocateAnnotation,
   onCompletePaths,
   onNotify,
   onPermissionChange,
@@ -1999,17 +2004,17 @@ export function WorkbenchView({
     return lastCanonical + 1;
   }, [contextCompaction, messages]);
 
-  const locatedMemoryRequest = useRef<typeof focusMemoryEntry>(undefined);
+  const locatedSourceRequest = useRef<typeof focusSourceEntry>(undefined);
   useEffect(() => {
-    if (!focusMemoryEntry || locatedMemoryRequest.current === focusMemoryEntry || focusMemoryEntry.sessionId !== session.id) return;
-    const target = [...(threadRef.current?.querySelectorAll<HTMLElement>('[data-memory-entry]') ?? [])]
-      .find(element => element.dataset.memoryEntry === focusMemoryEntry.entryId)?.firstElementChild;
+    if (!focusSourceEntry || locatedSourceRequest.current === focusSourceEntry || focusSourceEntry.sessionId !== session.id) return;
+    const target = [...(threadRef.current?.querySelectorAll<HTMLElement>('[data-source-entry]') ?? [])]
+      .find(element => element.dataset.sourceEntry === focusSourceEntry.entryId)?.firstElementChild;
     if (!target) return;
-    locatedMemoryRequest.current = focusMemoryEntry;
+    locatedSourceRequest.current = focusSourceEntry;
     followLatestRef.current = false;
     const frame = requestAnimationFrame(() => target.scrollIntoView({ block: 'center' }));
     return () => cancelAnimationFrame(frame);
-  }, [focusMemoryEntry, session.id, messages]);
+  }, [focusSourceEntry, session.id, messages]);
 
   const insertSkill = useCallback((name: string) => {
     if (editingQueue || queueClicks.current.has('composer-edit')) return;
@@ -2251,6 +2256,8 @@ export function WorkbenchView({
   }, [focusTaskHighlighted, focusTaskId, focusTaskRevision]);
 
   return (
+    <ResponseAnnotations sessionId={session.id} store={draftStore} onLocate={onLocateAnnotation} onNotify={onNotify}
+      canAnnotate={canControl && !isObserver && runtimeStatus === 'online' && Boolean(session.id) && !editingQueue}>
     <section className={`workbench${welcome ? ' is-welcome' : ''}${fileDrop.dragging ? ' is-file-dragging' : ''}`} aria-label="会话工作台" ref={workbenchRef} {...fileDrop.handlers}>
       {fileDrop.dragging && <div className="workbench-file-drop" role="status">
         <span><Upload size={22} aria-hidden="true" />松开以添加文件</span>
@@ -2335,7 +2342,7 @@ export function WorkbenchView({
             onReadVisualization={onReadVisualization}
             onNotify={onNotify} onFork={onFork} contextCompactionIndex={contextCompactionIndex}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
-            focusTaskHighlighted={focusTaskHighlighted} focusMemoryEntry={focusMemoryEntry} />
+            focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={focusSourceEntry} />
           {session.status === 'interrupted' && !isRunning && (
             <p className="conversation-interruption" role="status">本轮回复已中断。</p>
           )}
@@ -2584,5 +2591,6 @@ export function WorkbenchView({
         </div>
       )}
     </section>
+    </ResponseAnnotations>
   );
 }

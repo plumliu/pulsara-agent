@@ -28,8 +28,38 @@ export interface CanonicalPromptImagePart {
   owner: PromptContentOwner;
 }
 
-export type EditablePromptPart = PromptTextPart | LocalPromptImagePart;
-export type CanonicalPromptPart = PromptTextPart | CanonicalPromptImagePart;
+export interface PromptAnnotationSource {
+  entry_id: string;
+  start: number;
+  end: number;
+}
+
+export interface PromptAnnotationPart {
+  type: 'annotation';
+  quote: string;
+  comment?: string;
+  source: PromptAnnotationSource | null;
+}
+
+export function copyAnnotation(part: PromptAnnotationPart): PromptAnnotationPart {
+  return { ...part, source: part.source ? { ...part.source } : null };
+}
+
+export function decodeAnnotation(value: unknown): PromptAnnotationPart {
+  if (!isRecord(value) || value.type !== 'annotation'
+    || !hasExactKeys(value, value.comment === undefined ? ['quote', 'source', 'type'] : ['comment', 'quote', 'source', 'type'])
+    || typeof value.quote !== 'string' || !value.quote
+    || (value.comment !== undefined && typeof value.comment !== 'string')) throw new Error('批注格式无效。');
+  const source = value.source;
+  if (source !== null && (!isRecord(source) || !hasExactKeys(source, ['end', 'entry_id', 'start'])
+    || typeof source.entry_id !== 'string' || !source.entry_id
+    || !Number.isSafeInteger(source.start) || (source.start as number) < 0
+    || !Number.isSafeInteger(source.end) || (source.end as number) <= (source.start as number))) throw new Error('批注来源无效。');
+  return copyAnnotation(value as unknown as PromptAnnotationPart);
+}
+
+export type EditablePromptPart = PromptTextPart | LocalPromptImagePart | PromptAnnotationPart;
+export type CanonicalPromptPart = PromptTextPart | CanonicalPromptImagePart | PromptAnnotationPart;
 
 export interface EditablePromptContent {
   parts: readonly EditablePromptPart[];
@@ -43,6 +73,7 @@ export type DisplayPromptContent = EditablePromptContent | CanonicalPromptConten
 
 export interface PromptContentTransport {
   parts: Array<
+    | PromptAnnotationPart
     | { type: 'text'; text: string }
     | { type: 'image'; content_base64: string; declared_media_type: string }
   >;
@@ -73,6 +104,7 @@ export function decodeCanonicalPromptContent(
       && typeof item.text === 'string') {
       return { type: 'text', text: item.text };
     }
+    if (item.type === 'annotation') return decodeAnnotation(item);
     if (
       item.type !== 'image'
       || !hasExactKeys(item, [
@@ -100,7 +132,7 @@ export function decodeCanonicalPromptContent(
     refOrdinal += 1;
     return result;
   });
-  if (!parts.some((part) => part.type === 'image' || part.text !== '')) {
+  if (!parts.some((part) => part.type !== 'text' || part.text !== '')) {
     throw new Error('输入正文格式无效。');
   }
   return { parts };
@@ -112,7 +144,7 @@ export function editablePromptToTransport(
   return {
     parts: content.parts.map((part) => part.type === 'text'
       ? { type: 'text', text: part.text }
-      : {
+      : part.type === 'annotation' ? copyAnnotation(part) : {
         type: 'image',
         content_base64: encodeBase64(part.bytes),
         declared_media_type: part.declaredMediaType,
@@ -126,14 +158,13 @@ export function copyEditablePromptContent(
   return {
     parts: content.parts.map((part) => part.type === 'text'
       ? { ...part }
-      : { ...part, bytes: new Uint8Array(part.bytes) }),
+      : part.type === 'annotation' ? copyAnnotation(part) : { ...part, bytes: new Uint8Array(part.bytes) }),
   };
 }
 
 export function promptContentTextProjection(content: DisplayPromptContent): string {
   return content.parts
-    .filter((part): part is PromptTextPart => part.type === 'text')
-    .map((part) => part.text)
+    .flatMap(part => part.type === 'text' ? [part.text] : part.type === 'annotation' && part.comment ? [part.comment] : [])
     .join('\n');
 }
 
@@ -143,7 +174,7 @@ export function promptContentHasImage(content: DisplayPromptContent): boolean {
 
 export function promptContentCanSubmit(content: EditablePromptContent): boolean {
   return content.parts.some(
-    (part) => part.type === 'image' || part.text.trim().length > 0,
+    (part) => part.type !== 'text' || part.text.trim().length > 0,
   );
 }
 

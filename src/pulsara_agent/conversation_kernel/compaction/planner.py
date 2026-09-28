@@ -38,6 +38,8 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMContentPart,
+    FrozenPromptPart,
+    prompt_provider_parts,
     LLMImagePart,
     LLMMessage,
     LLMTextPart,
@@ -124,7 +126,7 @@ class DestinationDialogueEntry:
     role: str
     item_kind: FrozenProviderInputItemKind
     input_origin: CanonicalInputOriginKind | None
-    content: tuple[LLMContentPart, ...]
+    content: tuple[FrozenPromptPart, ...]
     requested_tools: tuple[DestinationToolEvidence, ...] = ()
 
 
@@ -278,7 +280,7 @@ def project_destination_dialogue_plan_for_text_only_handover(
 ) -> DestinationDialogueProjectionPlan:
     """Apply P to all candidate dialogue and ToolResult evidence before selection."""
 
-    def project_parts(parts: tuple[LLMContentPart, ...]) -> tuple[LLMContentPart, ...]:
+    def project_parts(parts: tuple[FrozenPromptPart, ...]) -> tuple[FrozenPromptPart, ...]:
         return tuple(
             LLMTextPart(TEXT_ONLY_IMAGE_OMISSION_TEXT)
             if isinstance(part, LLMImagePart)
@@ -1601,7 +1603,7 @@ def select_recent_human_messages(
     for item in reversed(items):
         size = sum(
             len(part.text.encode("utf-8"))
-            for part in item.content
+            for part in prompt_provider_parts(item.content)
             if isinstance(part, LLMTextPart)
         )
         if aggregate + size > policy.maximum_recent_human_text_utf8_bytes:

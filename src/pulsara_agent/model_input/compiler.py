@@ -25,6 +25,7 @@ from pulsara_agent.llm.input import (
     join_text_content,
     llm_content_identity_value,
     llm_content_logical_bytes,
+    prompt_provider_parts,
 )
 from pulsara_agent.model_input.contracts import (
     CompiledSourceDecision,
@@ -3075,7 +3076,7 @@ def _fixed_message_envelope_logical_bytes(item: LoweredCanonicalItem) -> int:
     source_bytes = (
         source.content.canonical_expanded_bytes
         if isinstance(source.content, CompactionSnapshotCarrier)
-        else llm_content_logical_bytes(source.content)
+        else llm_content_logical_bytes(prompt_provider_parts(source.content))
     )
     # The reader's canonical byte charge is content-oriented and does not
     # promise to include JSONB-backed tool arguments.  Count every non-body

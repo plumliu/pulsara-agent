@@ -16,7 +16,9 @@ from typing import Literal, Mapping, Protocol
 from pulsara_agent.llm.estimator import FinalWireTokenEstimate, TokenEstimate
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
-    LLMContentPart,
+    FrozenPromptPart,
+    PromptAnnotationPart,
+    prompt_provider_parts,
     LLMImagePart,
     LLMMessage,
     LLMTextPart,
@@ -779,6 +781,12 @@ class FrozenCompactionActiveRequest:
             self.content, FrozenPromptContent
         ):
             raise TypeError("compaction active request content must be frozen")
+        if self.content is not None and any(isinstance(part, PromptAnnotationPart) for part in self.content.parts) and (
+            self.item_kind is not FrozenProviderInputItemKind.USER or self.input_origin not in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE, CanonicalInputOriginKind.HUMAN_STEER,
+            }
+        ):
+            raise ValueError("only human requests can contain annotations")
         validate_compaction_request_shape(
             item_kind=self.item_kind,
             input_origin=self.input_origin,
@@ -816,6 +824,12 @@ class FrozenRetainedHistoricalRequest:
     def __post_init__(self) -> None:
         if not isinstance(self.content, FrozenPromptContent):
             raise TypeError("retained historical request content must be frozen")
+        if self.content is not None and any(isinstance(part, PromptAnnotationPart) for part in self.content.parts) and (
+            self.item_kind is not FrozenProviderInputItemKind.USER or self.input_origin not in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE, CanonicalInputOriginKind.HUMAN_STEER,
+            }
+        ):
+            raise ValueError("only human requests can contain annotations")
         validate_compaction_request_shape(
             item_kind=self.item_kind,
             input_origin=self.input_origin,
@@ -993,7 +1007,7 @@ class FrozenProviderInputItem:
     source_entry_id: str | None
     source_entry_sequence: int | None
     source_turn_id: str | None
-    content: tuple[LLMContentPart, ...] | CompactionSnapshotCarrier = field(
+    content: tuple[FrozenPromptPart, ...] | CompactionSnapshotCarrier = field(
         repr=False
     )
     input_origin: CanonicalInputOriginKind | None = None
@@ -1018,7 +1032,8 @@ class FrozenProviderInputItem:
             if not isinstance(self.content, CompactionSnapshotCarrier):
                 raise TypeError("context snapshot content must be its typed carrier")
         elif not isinstance(self.content, tuple) or any(
-            not isinstance(part, (LLMTextPart, LLMImagePart))
+            not isinstance(part, (LLMTextPart, LLMImagePart, PromptAnnotationPart))
+            or (isinstance(part, PromptAnnotationPart) and self.item_kind is not FrozenProviderInputItemKind.USER)
             for part in self.content
         ):
             raise TypeError("provider input content must be typed immutable parts")
@@ -1057,6 +1072,10 @@ class FrozenProviderInputItem:
         }
         if has_origin != (self.input_origin is not None):
             raise ValueError("provider input origin union is invalid")
+        if not snapshot_kind and any(isinstance(part, PromptAnnotationPart) for part in self.content) and self.input_origin not in {
+            CanonicalInputOriginKind.HUMAN_MESSAGE, CanonicalInputOriginKind.HUMAN_STEER,
+        }:
+            raise ValueError("only human USER input can contain annotations")
         images_allowed = (
             self.item_kind is FrozenProviderInputItemKind.USER
             and self.input_origin
@@ -1930,7 +1949,7 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
 
         content = compaction_snapshot_provider_content(item.content)
     else:
-        content = item.content
+        content = prompt_provider_parts(item.content)
 
     return {
         "kind": item.item_kind.value,
