@@ -15,6 +15,7 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   todo: ['更新工作清单', '正在更新工作清单', '已更新工作清单'],
   spawn_agent: ['创建子任务', '正在创建子任务', '已创建子任务'],
   create_agent_tasks: ['创建子任务', '正在创建子任务', '已创建子任务'],
+  list_agent_models: ['查看可用模型', '正在读取已保存的模型配置', '已读取可用模型'],
   list_agents: ['查看子任务', '正在查看子任务状态', '已读取子任务状态'],
   wait_agent: ['等待子任务', '正在等待子任务进展', '已等待子任务'],
   stop_agent: ['停止子任务', '正在请求停止子任务', '已请求停止子任务'],
@@ -221,6 +222,11 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
         const total = count(result.tasks);
         if (total !== undefined) detail = name === 'create_agent_tasks' ? `已创建 ${total} 个子任务` : `本次列出 ${total} 个子任务`;
         if (result.has_more === true) detail += '，还有后续任务';
+        break;
+      }
+      case 'list_agent_models': {
+        const total = count(result.models);
+        if (total !== undefined) detail = total === 0 ? '暂无可用模型' : `已读取 ${total} 个可用模型`;
         break;
       }
       case 'wait_agent':

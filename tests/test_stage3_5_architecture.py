@@ -235,6 +235,8 @@ def test_stage3_5_process_local_task_sites_are_closed() -> None:
         "src/pulsara_agent/web_app/http_server.py",
         "src/pulsara_agent/web_app/protocol_client.py",
         "src/pulsara_agent/web_app/session_controller.py",
+        "src/pulsara_agent/web_app/file_preview_http.py",
+        "src/pulsara_agent/conversation_kernel/provider_dispatch.py",
     }
     observed: set[str] = set()
     for path in _production_python():

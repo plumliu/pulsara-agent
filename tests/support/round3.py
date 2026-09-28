@@ -164,8 +164,6 @@ from tests.support.model_config import test_model_runtime
 
 def new_test_provider_input_continuity_owner(
     session_id: str = "session:test",
-    *,
-    maximum_child_scopes: int = 4,
 ) -> HostProviderInputContinuityOwner:
     """Build a unit-test Host owner from an exact synthetic session genesis."""
 
@@ -180,7 +178,6 @@ def new_test_provider_input_continuity_owner(
     )
     return HostProviderInputContinuityOwner(
         root_lease_source=_issue_root_bootstrap_lease_source(writer_lease),
-        maximum_child_scopes=maximum_child_scopes,
     )
 
 
@@ -747,6 +744,8 @@ class StaticContextSourceCollector:
             ContextSourceKind.DEPENDENCY_RESULTS: (
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
+            ContextSourceKind.TERMINAL_MATERIAL: ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceKind.WORKER_HISTORY: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.HOOK_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         }
         absent = tuple(
@@ -1607,6 +1606,16 @@ class Round10TestSubagentRuntime:
                 text=None,
                 domain_identity=None,
             ),
+            build_subagent_context_source(
+                kind=ContextSourceKind.TERMINAL_MATERIAL,
+                text=None,
+                domain_identity=None,
+            ),
+            build_subagent_context_source(
+                kind=ContextSourceKind.WORKER_HISTORY,
+                text=None,
+                domain_identity=None,
+            ),
         )
 
     def build_initial_seed(
@@ -1638,6 +1647,9 @@ class Round10TestSubagentRuntime:
         del turn_id
         return 0
 
+    async def set_root_completion_delivery_limit(self, turn_id: str, maximum_items: int) -> None:
+        del turn_id, maximum_items
+
     async def root_completion_followup_possible(self, turn_id: str) -> bool:
         del turn_id
         return False
@@ -1650,8 +1662,8 @@ class Round10TestSubagentRuntime:
     async def close_root_completion_delivery(self, turn_id: str) -> None:
         del turn_id
 
-    async def snapshot_pending_root_completions(self, turn_id: str) -> tuple[str, ...]:
-        del turn_id
+    async def snapshot_pending_root_completions(self, turn_id: str, *, for_delivery: bool = False) -> tuple[str, ...]:
+        del turn_id, for_delivery
         return ()
 
     async def retire_root_completion(self, task_id: str) -> bool:

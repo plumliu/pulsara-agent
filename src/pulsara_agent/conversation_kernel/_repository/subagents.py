@@ -60,6 +60,12 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     subagent_task_batch_identity_digest,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding, model_call_binding_from_dict, model_call_binding_to_dict,
+)
+from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
+from pulsara_agent.conversation_kernel.subagents.history import read_terminal_worker_public_history
+from pulsara_agent.primitives.context import canonical_json_bytes
 
 
 def _explicit_result_arguments_match(
@@ -67,11 +73,13 @@ def _explicit_result_arguments_match(
 ) -> bool:
     if not isinstance(arguments, Mapping):
         return False
-    if set(arguments) - {"summary", "output_preview", "diagnostics"}:
+    if set(arguments) - {"summary", "data", "output_preview", "diagnostics"}:
         return False
     try:
         return (
             arguments.get("summary") == candidate.summary
+            and ("data" in arguments) == (candidate.data is not None)
+            and ("data" not in arguments or freeze_json(arguments["data"]) == candidate.data)
             and arguments.get("output_preview") == candidate.output_preview
             and freeze_json(arguments.get("diagnostics", []))
             == candidate.diagnostics
@@ -85,14 +93,23 @@ def _subagent_context_arguments_match(
     *,
     mode: str,
     last_n_turns: int | None,
+    history_task_id: str | None,
 ) -> bool:
-    if not isinstance(value, Mapping) or set(value) - {"mode", "turns"}:
+    if not isinstance(value, Mapping) or set(value) - {"mode", "turns", "task_id"}:
         return False
     raw_mode = value.get("mode", "none")
     if raw_mode == "none":
         return (
             value.get("turns") is None
+            and value.get("task_id") is None
             and mode == "NONE"
+            and last_n_turns is None
+        )
+    if raw_mode == "worker_history":
+        return (
+            value.get("turns") is None
+            and value.get("task_id") == history_task_id
+            and mode == "WORKER_HISTORY"
             and last_n_turns is None
         )
     turns = value.get("turns")
@@ -102,6 +119,7 @@ def _subagent_context_arguments_match(
         and not isinstance(turns, bool)
         and 1 <= turns <= 3
         and mode == "LAST_N"
+        and history_task_id is None
         and last_n_turns == turns
     )
 
@@ -111,13 +129,14 @@ def _subagent_batch_arguments_match(
     *,
     tool_name: str,
     candidate: PreparedSubagentTaskBatchAdmission,
+    parent_binding: ModelCallBinding,
 ) -> bool:
     """Exact-join one public spawn/batch call to its sealed task candidate."""
 
     if not isinstance(arguments, Mapping):
         return False
     if tool_name == "spawn_agent":
-        if set(arguments) - {"task", "task_name", "profile", "context"}:
+        if set(arguments) - {"task", "task_name", "profile", "context", "model", "material_task_ids"}:
             return False
         if len(candidate.ordered_tasks) != 1:
             return False
@@ -134,8 +153,11 @@ def _subagent_batch_arguments_match(
                 arguments.get("context", {"mode": "none"}),
                 mode=item.context.mode.value,
                 last_n_turns=item.context.last_n_turns,
+                history_task_id=item.context.history_task_id,
             )
             and not item.dependency_task_ids
+            and _subagent_model_arguments_match(arguments.get("model"), item.model_call_binding, parent_binding)
+            and arguments.get("material_task_ids", []) == list(item.material_source_task_ids)
         )
     if tool_name != "create_agent_tasks" or set(arguments) != {"tasks"}:
         return False
@@ -157,6 +179,8 @@ def _subagent_batch_arguments_match(
         "display_role",
         "context",
         "depends_on",
+        "model",
+        "material_task_ids",
     }
     for raw, item in zip(raw_tasks, candidate.ordered_tasks, strict=True):
         if not isinstance(raw, Mapping) or set(raw) - allowed:
@@ -185,11 +209,32 @@ def _subagent_batch_arguments_match(
                 raw.get("context", {"mode": "none"}),
                 mode=item.context.mode.value,
                 last_n_turns=item.context.last_n_turns,
+                history_task_id=item.context.history_task_id,
             )
             and tuple(resolved) == item.dependency_task_ids
+            and _subagent_model_arguments_match(raw.get("model"), item.model_call_binding, parent_binding)
+            and raw.get("material_task_ids", []) == list(item.material_source_task_ids)
         ):
             return False
     return True
+
+
+def _subagent_model_arguments_match(
+    value: object, accepted: ModelCallBinding, parent: ModelCallBinding
+) -> bool:
+    if value is None:
+        return accepted == parent
+    if not isinstance(value, Mapping) or set(value) - {"connection_id", "reasoning"}:
+        return False
+    if value.get("connection_id") != accepted.connection_id.value:
+        return False
+    if "reasoning" not in value:
+        return True
+    try:
+        from pulsara_agent.llm.model_connections import reasoning_selection_from_dict
+        return reasoning_selection_from_dict(value["reasoning"]) == accepted.reasoning
+    except (TypeError, ValueError):
+        return False
 
 
 def _subagent_batch_subject_matches(
@@ -198,6 +243,9 @@ def _subagent_batch_subject_matches(
     candidate: PreparedSubagentTaskBatchAdmission,
 ) -> bool:
     if parent is None or attempt is None:
+        return False
+    parent_binding = model_call_binding_from_dict(parent.get("model_call_binding"))
+    if parent_binding is None:
         return False
     tool_name = str(attempt["tool_name"])
     return (
@@ -216,6 +264,7 @@ def _subagent_batch_subject_matches(
             attempt["tool_arguments"],
             tool_name=tool_name,
             candidate=candidate,
+            parent_binding=parent_binding,
         )
     )
 
@@ -265,6 +314,9 @@ class _SubagentOperations:
                 and str(task["status"]) == "ACTIVE"
                 and task["pending_reason"] is None
                 and task["terminal_reason"] is None
+                and task["dependency_context_body"] == (None if candidate.dependency_context is None else candidate.dependency_context.rendered_body)
+                and task["terminal_material_body"] == candidate.terminal_material_body
+                and task["worker_history_body"] == candidate.worker_history_body
                 and _event_row_matches_draft(event, expected_event)
             ):
                 raise ConversationKernelConflict(
@@ -358,7 +410,7 @@ class _SubagentOperations:
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
             parent = connection.execute(
-                """SELECT workspace_id, conversation_scope_kind,
+                """SELECT workspace_id, conversation_scope_kind, model_call_binding,
                           effective_permission_mode,
                           permission_snapshot_fingerprint
                    FROM pulsara_v3.turns
@@ -387,18 +439,6 @@ class _SubagentOperations:
             if not _subagent_batch_subject_matches(parent, attempt, candidate):
                 raise ConversationKernelConflict(
                     "subagent batch does not exact-join its ROOT tool attempt"
-                )
-            accepted_count = int(
-                connection.execute(
-                    """SELECT count(*) AS count
-                       FROM pulsara_v3.subagent_tasks
-                       WHERE session_id = %s AND parent_turn_id = %s""",
-                    (guard.session_id, candidate.parent_turn_id),
-                ).fetchone()["count"]
-            )
-            if accepted_count + len(candidate.ordered_tasks) > 16:
-                raise ConversationKernelConflict(
-                    "ROOT turn subagent task capacity is exhausted"
                 )
             batch_ids = {item.task_id for item in candidate.ordered_tasks}
             external_ids = tuple(
@@ -466,17 +506,58 @@ class _SubagentOperations:
                     raise ConversationKernelConflict(
                         "subagent dependency status changed before admission"
                     )
+                material_refs: list[dict[str, object]] = []
+                for source_id in item.material_source_task_ids:
+                    source = connection.execute(
+                        """SELECT t.id, t.status, t.terminal_public_detail,
+                                  result.id AS result_id
+                           FROM pulsara_v3.subagent_tasks AS t
+                           LEFT JOIN pulsara_v3.subagent_task_children AS result
+                             ON result.session_id=t.session_id AND result.task_id=t.id
+                            AND result.child_kind='RESULT'
+                           WHERE t.session_id=%s AND t.id=%s FOR SHARE OF t""",
+                        (guard.session_id, source_id),
+                    ).fetchone()
+                    if source is None or not SubagentTaskStatus(str(source["status"])).terminal:
+                        raise ConversationKernelConflict("terminal material source is unavailable")
+                    if str(source["status"]) == "COMPLETED" and source["result_id"] is None:
+                        raise ConversationKernelConflict("terminal result material is absent")
+                    material_refs.append({"task_id": source_id, "status": source["status"], "result_id": source["result_id"]})
+                history_cut = None
+                history_revision_id = None
+                if item.context.history_task_id is not None:
+                    source = connection.execute(
+                        """SELECT t.status, t.parent_context_body, t.dependency_context_body,
+                                  child.id AS child_turn_id,
+                                  child.current_context_binding_revision_id AS history_revision_id,
+                                  (SELECT max(e.entry_sequence) FROM pulsara_v3.transcript_entries AS e
+                                   WHERE e.session_id=t.session_id AND e.scope_subagent_task_id=t.id) AS cut
+                           FROM pulsara_v3.subagent_tasks AS t
+                           LEFT JOIN pulsara_v3.turns AS child
+                             ON child.session_id=t.session_id AND child.scope_subagent_task_id=t.id
+                           WHERE t.session_id=%s AND t.id=%s FOR SHARE OF t""",
+                        (guard.session_id, item.context.history_task_id),
+                    ).fetchone()
+                    if source is None or not SubagentTaskStatus(str(source["status"])).terminal or source["child_turn_id"] is None or source["cut"] is None or source["history_revision_id"] is None:
+                        raise ConversationKernelConflict("worker history source is unavailable")
+                    history_cut = int(source["cut"])
+                    history_revision_id = str(source["history_revision_id"])
                 connection.execute(
                     """INSERT INTO pulsara_v3.subagent_tasks (
                            id, session_id, workspace_id, parent_turn_id,
                            batch_id, task_key, label, profile_kind, display_role,
                            context_mode, context_last_n_turns, objective, status,
                            pending_reason, terminal_reason, terminal_public_detail,
-                           execution_writer_generation, terminal_at
+                           execution_writer_generation, terminal_at,
+                           model_call_binding, model_target_fact,
+                           material_refs, history_source_task_id, history_cut_sequence,
+                           history_context_binding_revision_id,
+                           parent_context_body
                        ) VALUES (
                            %s, %s, %s, %s, %s, %s, %s, %s, %s,
                            %s, %s, %s, %s, %s, %s, %s, %s,
-                           CASE WHEN %s THEN clock_timestamp() ELSE NULL END
+                           CASE WHEN %s THEN clock_timestamp() ELSE NULL END,
+                           %s, %s, %s, %s, %s, %s, %s
                        )""",
                     (
                         item.task_id,
@@ -503,6 +584,13 @@ class _SubagentOperations:
                         ),
                         guard.writer_generation,
                         item.initial_status.terminal,
+                        Jsonb(model_call_binding_to_dict(item.model_call_binding)),
+                        Jsonb(item.model_target_fact.model_dump(mode="json")),
+                        Jsonb(material_refs),
+                        item.context.history_task_id,
+                        history_cut,
+                        history_revision_id,
+                        item.context.rendered_body,
                     ),
                 )
                 events.append(
@@ -526,6 +614,104 @@ class _SubagentOperations:
             )
             return tuple(item.task_id for item in candidate.ordered_tasks)
 
+    def read_subagent_task_model_target(
+        self,
+        guard: HostWriterGuard,
+        *,
+        task_id: str,
+        deadline_monotonic: float,
+    ) -> tuple[ModelCallBinding, FrozenSubagentModelTarget]:
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            row = connection.execute(
+                """SELECT model_call_binding, model_target_fact
+                   FROM pulsara_v3.subagent_tasks
+                   WHERE session_id=%s AND id=%s""",
+                (guard.session_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise ConversationKernelConflict("subagent model target is absent")
+            binding = model_call_binding_from_dict(row["model_call_binding"])
+            if binding is None:
+                raise ConversationKernelConflict("subagent model binding is absent")
+            return binding, FrozenSubagentModelTarget.model_validate(row["model_target_fact"])
+
+    def read_subagent_start_sources(
+        self, *, session_id: str, task_id: str, deadline_monotonic: float
+    ) -> tuple[str | None, str | None]:
+        """Validate accepted terminal references and read one worker scope at its cut."""
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            task = connection.execute(
+                """SELECT material_refs, history_source_task_id, history_cut_sequence,
+                          history_context_binding_revision_id
+                   FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s""",
+                (session_id, task_id),
+            ).fetchone()
+            if task is None:
+                raise ConversationKernelConflict("subagent start sources are absent")
+            refs = task["material_refs"]
+            if not isinstance(refs, list) or len(refs) > 16:
+                raise ConversationKernelConflict("terminal material reference shape is invalid")
+            success_dependencies = {
+                str(row["dependency_task_id"])
+                for row in connection.execute(
+                    """SELECT dependency_task_id FROM pulsara_v3.subagent_task_dependencies
+                       WHERE session_id=%s AND task_id=%s""",
+                    (session_id, task_id),
+                ).fetchall()
+            }
+            material: list[dict[str, object]] = []
+            for ref in refs:
+                if not isinstance(ref, dict) or set(ref) != {"task_id", "status", "result_id"}:
+                    raise ConversationKernelConflict("terminal material reference is not closed")
+                source = connection.execute(
+                    """SELECT t.status, t.terminal_reason, t.terminal_public_detail,
+                              result.id AS result_id, result.summary, result.data,
+                              result.output_preview
+                       FROM pulsara_v3.subagent_tasks AS t
+                       LEFT JOIN pulsara_v3.subagent_task_children AS result
+                         ON result.session_id=t.session_id AND result.task_id=t.id
+                        AND result.child_kind='RESULT'
+                       WHERE t.session_id=%s AND t.id=%s""",
+                    (session_id, ref["task_id"]),
+                ).fetchone()
+                if source is None or not SubagentTaskStatus(str(source["status"])).terminal or source["status"] != ref["status"] or source["result_id"] != ref["result_id"]:
+                    raise ConversationKernelConflict("terminal material source drifted or is unavailable")
+                if str(ref["task_id"]) in success_dependencies:
+                    continue
+                material.append({
+                    "task_id": ref["task_id"], "status": source["status"],
+                    "result_id": source["result_id"], "summary": source["summary"],
+                    "data": source["data"], "output_preview": source["output_preview"],
+                    "failure_reason": source["terminal_reason"],
+                    "failure_detail": source["terminal_public_detail"],
+                    "side_effects": "UNCERTAIN_WHEN_FAILED_OR_CANCELLED" if source["status"] != "COMPLETED" else None,
+                })
+            material_body = None if not material else canonical_json_bytes({
+                "pulsara_terminal_material": {"content_semantics": "ADVISORY_COLLABORATION_DATA", "sources": material}
+            }).decode("utf-8")
+            history_body = None
+            if task["history_source_task_id"] is not None:
+                if task["history_cut_sequence"] is None or task["history_context_binding_revision_id"] is None:
+                    raise ConversationKernelConflict("worker history cut or binding is absent")
+                history_body = read_terminal_worker_public_history(
+                    connection, session_id=session_id,
+                    source_task_id=str(task["history_source_task_id"]),
+                    through_sequence=int(task["history_cut_sequence"]),
+                    binding_revision_id=str(task["history_context_binding_revision_id"]),
+                )
+            return material_body, history_body
+
     def confirm_subagent_task_batch(
         self,
         *,
@@ -539,7 +725,7 @@ class _SubagentOperations:
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
             parent = connection.execute(
-                """SELECT workspace_id, conversation_scope_kind,
+                """SELECT workspace_id, conversation_scope_kind, model_call_binding,
                           effective_permission_mode,
                           permission_snapshot_fingerprint
                    FROM pulsara_v3.turns
@@ -691,7 +877,7 @@ class _SubagentOperations:
                           edge.dependency_ordinal, dependency.status,
                           dependency.task_key, dependency.label,
                           result.id AS result_id, result.result_source,
-                          result.summary, result.result_fingerprint
+                          result.summary, result.data, result.result_fingerprint
                    FROM pulsara_v3.subagent_task_dependencies AS edge
                    JOIN pulsara_v3.subagent_tasks AS dependency
                      ON dependency.session_id = edge.session_id
@@ -720,12 +906,15 @@ class _SubagentOperations:
                 )
             updated = connection.execute(
                 """UPDATE pulsara_v3.subagent_tasks
-                   SET status = 'ACTIVE', pending_reason = NULL
+                   SET status = 'ACTIVE', pending_reason = NULL,
+                       dependency_context_body = %s,
+                       terminal_material_body = %s,
+                       worker_history_body = %s
                    WHERE session_id = %s AND id = %s
                      AND status = 'PENDING_START'
                      AND execution_writer_generation = %s
                    RETURNING id""",
-                (guard.session_id, candidate.task_id, guard.writer_generation),
+                ((None if candidate.dependency_context is None else candidate.dependency_context.rendered_body), candidate.terminal_material_body, candidate.worker_history_body, guard.session_id, candidate.task_id, guard.writer_generation),
             ).fetchone()
             if updated is None:
                 raise ConversationKernelConflict("subagent start lost its task winner")
@@ -786,6 +975,9 @@ class _SubagentOperations:
                 and str(task["status"]) == "ACTIVE"
                 and task["pending_reason"] is None
                 and task["terminal_reason"] is None
+                and task["dependency_context_body"] == (None if candidate.dependency_context is None else candidate.dependency_context.rendered_body)
+                and task["terminal_material_body"] == candidate.terminal_material_body
+                and task["worker_history_body"] == candidate.worker_history_body
                 and event is not None
                 and _event_row_matches_draft(event, expected_event)
             ):
@@ -1135,13 +1327,13 @@ class _SubagentOperations:
             connection.execute(
                 """INSERT INTO pulsara_v3.subagent_task_children (
                        id, session_id, task_id, child_kind, child_ordinal,
-                       entry_id, result_source, summary, output_preview,
+                       entry_id, result_source, summary, data, output_preview,
                        diagnostics, result_fingerprint
                    ) VALUES (
                        %s, %s, %s, 'RESULT',
                        (SELECT count(*) FROM pulsara_v3.subagent_task_children
                          WHERE session_id = %s AND task_id = %s),
-                       %s, 'EXPLICIT', %s, %s, %s::jsonb, %s
+                       %s, 'EXPLICIT', %s, %s, %s, %s::jsonb, %s
                    )""",
                 (
                     result.result_id,
@@ -1151,6 +1343,7 @@ class _SubagentOperations:
                     candidate.task_id,
                     result.producer_entry_id,
                     result.summary,
+                    Jsonb(thaw_json(result.data)) if result.data is not None else None,
                     result.output_preview,
                     json.dumps(
                         thaw_json(result.diagnostics),
@@ -1359,6 +1552,7 @@ class _SubagentOperations:
                 and str(result["entry_id"]) == result_fact.producer_entry_id
                 and str(result["result_source"]) == "EXPLICIT"
                 and str(result["summary"]) == result_fact.summary
+                and (None if result["data"] is None else freeze_json(result["data"])) == result_fact.data
                 and result["output_preview"] == result_fact.output_preview
                 and freeze_json(result["diagnostics"]) == result_fact.diagnostics
                 and str(result["result_fingerprint"])
@@ -1773,7 +1967,7 @@ class _SubagentOperations:
         ) as connection:
             task = connection.execute(
                 """
-                SELECT workspace_id, parent_turn_id, objective
+                SELECT workspace_id, parent_turn_id, objective, model_call_binding
                 FROM pulsara_v3.subagent_tasks
                 WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
                   AND execution_writer_generation = %s
@@ -1832,7 +2026,7 @@ class _SubagentOperations:
                     guard.session_id,
                     task["workspace_id"],
                     task_id,
-                    Jsonb(parent["model_call_binding"]),
+                    Jsonb(task["model_call_binding"]),
                     entry_id,
                     context_binding_revision_id,
                     *self._permission_columns(permission),
@@ -2036,11 +2230,14 @@ class _SubagentOperations:
                 SELECT t.id, t.workspace_id, t.batch_id, t.task_key, t.label,
                        t.profile_kind,
                        t.display_role, t.context_mode, t.context_last_n_turns,
+                       t.model_call_binding, t.model_target_fact,
+                       t.history_source_task_id, t.material_refs,
                        t.parent_turn_id, t.objective, t.status, t.pending_reason,
                        t.terminal_reason, t.terminal_public_detail,
                        c.id AS result_id,
                        c.entry_id AS result_entry_id, c.result_source,
                        c.summary AS result_summary,
+                       c.data AS result_data,
                        c.output_preview AS result_output_preview,
                        c.diagnostics AS result_diagnostics,
                        c.result_fingerprint,
@@ -2067,6 +2264,7 @@ class _SubagentOperations:
         after_accepted_at: datetime | None = None,
         after_task_id: str | None = None,
         batch_id: str | None = None,
+        task_id: str | None = None,
         include_lookahead: bool = False,
     ) -> tuple[Mapping[str, object], ...]:
         if not 1 <= maximum_items <= 50:
@@ -2087,26 +2285,56 @@ class _SubagentOperations:
                         SELECT t.id, t.batch_id, t.task_key, t.label,
                                t.profile_kind, t.display_role, t.context_mode,
                                t.context_last_n_turns, t.parent_turn_id,
+                               t.model_call_binding, t.model_target_fact,
+                               t.history_source_task_id, t.material_refs,
                                t.objective, t.status, t.pending_reason,
                                t.terminal_reason, t.terminal_public_detail,
                                t.accepted_at, t.terminal_at,
                                c.id AS result_id,
                                c.entry_id AS result_entry_id, c.result_source,
                                c.summary AS result_summary,
+                               c.data AS result_data,
                                c.output_preview AS result_output_preview,
                                c.diagnostics AS result_diagnostics,
                                c.result_fingerprint,
                                accepted.id AS accepted_root_entry_id,
+                               s.latest_event_sequence AS read_event_sequence,
+                               dependencies.rows AS dependency_rows,
                                count(*) OVER () AS total_count
                         FROM pulsara_v3.subagent_tasks AS t
+                        JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
                         LEFT JOIN pulsara_v3.subagent_task_children AS c
                           ON c.session_id = t.session_id AND c.task_id = t.id
                          AND c.child_kind = 'RESULT'
                         LEFT JOIN pulsara_v3.transcript_entries AS accepted
                           ON accepted.entry_owner_kind = 'EXECUTED_TURN' AND accepted.session_id = t.session_id
                          AND accepted.source_subagent_task_id = t.id
+                        LEFT JOIN LATERAL (
+                            SELECT coalesce(jsonb_agg(jsonb_build_object(
+                                'task_id', edge.task_id,
+                                'dependency_task_id', edge.dependency_task_id,
+                                'dependency_ordinal', edge.dependency_ordinal,
+                                'task_key', dependency.task_key,
+                                'label', dependency.label,
+                                'status', dependency.status,
+                                'result_id', result.id,
+                                'result_source', result.result_source,
+                                'summary', result.summary,
+                                'data', result.data
+                            ) ORDER BY edge.dependency_ordinal), '[]'::jsonb) AS rows
+                            FROM pulsara_v3.subagent_task_dependencies AS edge
+                            JOIN pulsara_v3.subagent_tasks AS dependency
+                              ON dependency.session_id = edge.session_id
+                             AND dependency.id = edge.dependency_task_id
+                            LEFT JOIN pulsara_v3.subagent_task_children AS result
+                              ON result.session_id = dependency.session_id
+                             AND result.task_id = dependency.id
+                             AND result.child_kind = 'RESULT'
+                            WHERE edge.session_id = t.session_id AND edge.task_id = t.id
+                        ) AS dependencies ON TRUE
                         WHERE t.session_id = %s
                           AND (%s::text IS NULL OR t.batch_id = %s)
+                          AND (%s::text IS NULL OR t.id = %s)
                     )
                     SELECT * FROM inventory
                     WHERE %s::timestamptz IS NULL
@@ -2117,6 +2345,8 @@ class _SubagentOperations:
                         session_id,
                         batch_id,
                         batch_id,
+                        task_id,
+                        task_id,
                         after_accepted_at,
                         after_accepted_at,
                         after_task_id,
@@ -2133,6 +2363,7 @@ class _SubagentOperations:
         deadline_monotonic: float,
         after_first_accepted_at: datetime | None = None,
         after_batch_id: str | None = None,
+        batch_id: str | None = None,
         include_lookahead: bool = False,
     ) -> tuple[Mapping[str, object], ...]:
         """Read one keyset page of real batch rows without creating a Host."""
@@ -2175,17 +2406,28 @@ class _SubagentOperations:
                                CASE WHEN count(*) = 1
                                     THEN max(COALESCE(label, task_key, '子任务'))
                                     ELSE NULL END AS single_task_label,
-                               count(*) OVER () AS total_count
+                               count(*) OVER () AS filtered_count
                         FROM pulsara_v3.subagent_tasks
                         WHERE session_id = %s
+                          AND (%s::text IS NULL OR batch_id = %s)
                         GROUP BY batch_id
                     )
-                    SELECT * FROM groups
+                    SELECT groups.*, totals.total_count, session.latest_event_sequence AS read_event_sequence
+                    FROM groups
+                    JOIN pulsara_v3.sessions AS session ON session.id = %s
+                    CROSS JOIN LATERAL (
+                        SELECT count(DISTINCT batch_id) AS total_count
+                        FROM pulsara_v3.subagent_tasks
+                        WHERE session_id = session.id
+                    ) AS totals
                     WHERE %s::timestamptz IS NULL
                        OR (first_accepted_at, batch_id) > (%s::timestamptz, %s::text)
                     ORDER BY first_accepted_at, batch_id LIMIT %s
                     """,
                     (
+                        session_id,
+                        batch_id,
+                        batch_id,
                         session_id,
                         after_first_accepted_at,
                         after_first_accepted_at,
@@ -2226,13 +2468,16 @@ class _SubagentOperations:
             if task is None:
                 raise KeyError(task_id)
             entries = connection.execute(
-                """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE entry_owner_kind = 'EXECUTED_TURN'
-                     AND session_id = %s
-                     AND conversation_scope_kind = 'SUBAGENT_TASK'
-                     AND scope_subagent_task_id = %s
-                     AND entry_sequence > %s
-                   ORDER BY entry_sequence, id LIMIT %s""",
+                """SELECT e.*, turn.status AS turn_status
+                   FROM pulsara_v3.transcript_entries AS e
+                   JOIN pulsara_v3.turns AS turn
+                     ON turn.session_id=e.session_id AND turn.id=e.turn_id
+                   WHERE e.entry_owner_kind = 'EXECUTED_TURN'
+                     AND e.session_id = %s
+                     AND e.conversation_scope_kind = 'SUBAGENT_TASK'
+                     AND e.scope_subagent_task_id = %s
+                     AND e.entry_sequence > %s
+                   ORDER BY e.entry_sequence, e.id LIMIT %s""",
                 (session_id, task_id, after_entry_sequence, maximum_items + 1),
             ).fetchall()
             selected = entries[:maximum_items]
@@ -2240,11 +2485,15 @@ class _SubagentOperations:
             if not entry_ids:
                 return (), (), (), False
             blocks = connection.execute(
-                """SELECT id, assistant_entry_id, block_ordinal, block_kind,
-                          tool_call_id, tool_name
-                   FROM pulsara_v3.assistant_message_blocks
-                   WHERE session_id = %s AND assistant_entry_id = ANY(%s)
-                   ORDER BY assistant_entry_id, block_ordinal""",
+                """SELECT b.id, b.assistant_entry_id, b.block_ordinal, b.block_kind,
+                          b.tool_call_id, b.tool_name, attempt.id AS attempt_id
+                   FROM pulsara_v3.assistant_message_blocks AS b
+                   LEFT JOIN pulsara_v3.tool_execution_attempts AS attempt
+                     ON attempt.session_id=b.session_id
+                    AND attempt.assistant_entry_id=b.assistant_entry_id
+                    AND attempt.tool_call_id=b.tool_call_id
+                   WHERE b.session_id = %s AND b.assistant_entry_id = ANY(%s)
+                   ORDER BY b.assistant_entry_id, b.block_ordinal""",
                 (session_id, entry_ids),
             ).fetchall()
             results = connection.execute(
@@ -2343,7 +2592,7 @@ class _SubagentOperations:
                               edge.dependency_ordinal, dependency.status,
                               dependency.task_key, dependency.label,
                               result.id AS result_id, result.result_source,
-                              result.summary, result.result_fingerprint
+                              result.summary, result.data, result.result_fingerprint
                        FROM pulsara_v3.subagent_task_dependencies AS edge
                        JOIN pulsara_v3.subagent_tasks AS dependency
                          ON dependency.session_id = edge.session_id
@@ -2365,7 +2614,9 @@ class _SubagentOperations:
         maximum_items: int,
         deadline_monotonic: float,
     ) -> tuple[Mapping[str, object], ...]:
-        if not 1 <= maximum_items <= 4:
+        # This is a per-query page bound, independent of the Host's adjustable
+        # worker target and of the session's total accepted task horizon.
+        if not 1 <= maximum_items <= 128:
             raise ValueError("subagent runnable read bound is invalid")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic

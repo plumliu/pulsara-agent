@@ -46,6 +46,10 @@ from pulsara_agent.ports.artifact import (
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
+from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
+from tests.support.model_config import test_model_binding, test_model_runtime
 
 
 def _fixture_id(prefix: str) -> str:
@@ -77,6 +81,23 @@ class StaticSubagentLaunchPreparationPort:
         self._model = configured_model_identity
         self._permission_mode = permission_mode
 
+    def freeze_target(self, binding, *, use_default: bool):
+        runtime = test_model_runtime(model_id="test-pro", wire_api="openai_chat_completions")
+        target = runtime.resolve_target(
+            binding,
+            timeout_policy=OpenAITransportTimeoutPolicy(
+                connect_seconds=1, write_seconds=1, pool_seconds=1,
+                read_idle_seconds=1, total_seconds=2,
+            ),
+        )
+        return binding, FrozenSubagentModelTarget.freeze(target.fact, target.contract.reasoning)
+
+    def inherit_target(self, subject, binding):
+        return self.freeze_target(binding, use_default=False)[1]
+
+    def list_models(self):
+        return ({"connection_id": test_model_binding(test_model_runtime(model_id="test-pro", wire_api="openai_chat_completions")).connection_id.value, "model_id": self._model, "reasoning": {}},)
+
     async def prepare_launch(self, candidate):
         permission = build_run_permission_snapshot(
             snapshot_id=f"parent-permission:{candidate.parent_turn_id}",
@@ -91,6 +112,9 @@ class StaticSubagentLaunchPreparationPort:
                 task_id=candidate.task_id,
             ),
             configured_model_identity=self._model,
+            accepted_model_target_fact=self.freeze_target(
+                test_model_binding(test_model_runtime(model_id="test-pro", wire_api="openai_chat_completions")), use_default=False,
+            )[1],
             parent_permission_snapshot=permission,
         )
 
@@ -119,6 +143,7 @@ def accept_active_subagent_fixture(
     *,
     parent_turn_id: str,
     objective: str,
+    model_runtime: ModelRuntime | None = None,
 ) -> ActiveSubagentFixtureId:
     """Accept and activate one worker through Round 10's exact product seam."""
 
@@ -196,6 +221,18 @@ def accept_active_subagent_fixture(
         last_n_turns=None,
     )
     task_id = _stable_id("subagent-task", attempt_id, "0")
+    model_runtime = model_runtime or test_model_runtime(
+        model_id="test-pro", wire_api="openai_chat_completions"
+    )
+    model_binding = test_model_binding(model_runtime)
+    model_target = model_runtime.resolve_target(
+        model_binding,
+        timeout_policy=OpenAITransportTimeoutPolicy(
+            connect_seconds=1, write_seconds=1, pool_seconds=1,
+            read_idle_seconds=1, total_seconds=2,
+        ),
+    )
+    model_target = FrozenSubagentModelTarget.freeze(model_target.fact, model_target.contract.reasoning)
     draft = PreparedSubagentTaskDraft(
         task_id=task_id,
         task_key=None,
@@ -205,6 +242,9 @@ def accept_active_subagent_fixture(
         objective=objective,
         context=selection,
         dependency_task_ids=(),
+        material_source_task_ids=(),
+        model_call_binding=model_binding,
+        model_target_fact=model_target,
         initial_status=SubagentTaskStatus.PENDING_START,
         pending_reason="CAPACITY",
         terminal_reason=None,
@@ -260,6 +300,7 @@ def accept_active_subagent_fixture(
             task_id=task_id,
         ),
         configured_model_identity="test-pro",
+        accepted_model_target_fact=model_target,
         parent_permission_snapshot=parent_permission,
     )
     observed_at = datetime.now(timezone.utc)
@@ -305,3 +346,13 @@ __all__ = [
     "accept_active_subagent_fixture",
     "run_admitted_subagent_fixture",
 ]
+
+
+def fixture_parent_target(subject, binding):
+    target = test_model_runtime().resolve_target(
+        binding, timeout_policy=OpenAITransportTimeoutPolicy(
+            connect_seconds=1, write_seconds=1, pool_seconds=1,
+            read_idle_seconds=1, total_seconds=2,
+        ),
+    )
+    return FrozenSubagentModelTarget.freeze(target.fact, target.contract.reasoning)

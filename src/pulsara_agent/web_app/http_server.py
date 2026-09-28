@@ -528,6 +528,14 @@ class LocalHttpServer:
             self._list_session_task_groups,
         )
         self._app.router.add_get(
+            "/api/sessions/{session_id}/task-groups/{group_id}",
+            self._read_session_task_group,
+        )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/tasks/{task_id}",
+            self._read_session_task,
+        )
+        self._app.router.add_get(
             "/api/sessions/{session_id}/tasks/{task_id}/activities",
             self._list_session_task_activities,
         )
@@ -617,6 +625,7 @@ class LocalHttpServer:
             "observe",
             "command",
             "query-command",
+            "subagent-capacity",
             "live-control-snapshot",
             "resolve-interaction",
             "read-capability-form",
@@ -1423,6 +1432,20 @@ class LocalHttpServer:
                 "任务组的分页参数不正确。",
                 status=400,
             ) from exc
+        return web.json_response(payload)
+
+    async def _read_session_task(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.read_session_task(
+            request.match_info["session_id"],
+            request.match_info["task_id"],
+        )
+        return web.json_response(payload)
+
+    async def _read_session_task_group(self, request: web.Request) -> web.Response:
+        payload = await self.sessions.read_session_task_group(
+            request.match_info["session_id"],
+            request.match_info["group_id"],
+        )
         return web.json_response(payload)
 
     async def _list_session_task_activities(self, request: web.Request) -> web.Response:
@@ -2353,6 +2376,7 @@ class LocalHttpServer:
                 "observe": lambda: self.bridge.observe(connection_id, body),
                 "command": lambda: self.bridge.command(connection_id, body),
                 "query-command": lambda: self.bridge.query_command(connection_id, body),
+                "subagent-capacity": lambda: self.bridge.subagent_capacity(connection_id, body),
                 "live-control-snapshot": lambda: self.bridge.live_control_snapshot(
                     connection_id
                 ),

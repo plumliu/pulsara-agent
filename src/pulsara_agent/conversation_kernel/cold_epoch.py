@@ -273,6 +273,10 @@ class SubagentInitialSeed:
     dependency_results_source: ContextSourceCandidate | ContextSourceAbsentFact = field(
         repr=False
     )
+    terminal_material_body: str | None = field(repr=False)
+    worker_history_body: str | None = field(repr=False)
+    terminal_material_source: ContextSourceCandidate | ContextSourceAbsentFact = field(repr=False)
+    worker_history_source: ContextSourceCandidate | ContextSourceAbsentFact = field(repr=False)
     _authority: object = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -288,6 +292,7 @@ class SubagentInitialSeed:
             self.parent_call_subject,
             mode=self.parent_context_selection.mode,
             last_n_turns=self.parent_context_selection.last_n_turns,
+            history_task_id=self.parent_context_selection.history_task_id,
         )
         expected_parent_source = build_subagent_context_source(
             kind=ContextSourceKind.PARENT_CONTEXT,
@@ -317,6 +322,16 @@ class SubagentInitialSeed:
                 else dependency_result_context_identity_digest(self.dependency_context)
             ),
         )
+        expected_material_source = build_subagent_context_source(
+            kind=ContextSourceKind.TERMINAL_MATERIAL,
+            text=self.terminal_material_body,
+            domain_identity=(None if self.terminal_material_body is None else {"task_id": self.task_id, "body": self.terminal_material_body}),
+        )
+        expected_history_source = build_subagent_context_source(
+            kind=ContextSourceKind.WORKER_HISTORY,
+            text=self.worker_history_body,
+            domain_identity=(None if self.worker_history_body is None else {"task_id": self.task_id, "source_task_id": self.parent_context_selection.history_task_id, "body": self.worker_history_body}),
+        )
         parent_present = isinstance(self.parent_context_source, ContextSourceCandidate)
         dependency_present = isinstance(
             self.dependency_results_source, ContextSourceCandidate
@@ -336,6 +351,8 @@ class SubagentInitialSeed:
             or self.parent_context_selection != expected_selection
             or self.parent_context_source != expected_parent_source
             or self.dependency_results_source != expected_dependency_source
+            or self.terminal_material_source != expected_material_source
+            or self.worker_history_source != expected_history_source
             or (
                 self.parent_context_selection.mode is SubagentContextMode.NONE
                 and parent_present
@@ -357,7 +374,7 @@ class SubagentInitialSeed:
     def source_replacements(
         self,
     ) -> tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...]:
-        return self.parent_context_source, self.dependency_results_source
+        return self.parent_context_source, self.dependency_results_source, self.terminal_material_source, self.worker_history_source
 
 
 def build_subagent_initial_seed(
@@ -370,6 +387,8 @@ def build_subagent_initial_seed(
     parent_call_subject: FrozenSubagentParentContextCallSubject,
     parent_context_selection: FrozenSubagentParentContextSelection,
     dependency_context: FrozenDependencyResultContext | None,
+    terminal_material_body: str | None = None,
+    worker_history_body: str | None = None,
 ) -> SubagentInitialSeed:
     canonical = dispatch_read.compile_snapshot.canonical_input
     objective_items = tuple(
@@ -403,6 +422,16 @@ def build_subagent_initial_seed(
             else dependency_result_context_identity_digest(dependency_context)
         ),
     )
+    material_source = build_subagent_context_source(
+        kind=ContextSourceKind.TERMINAL_MATERIAL,
+        text=terminal_material_body,
+        domain_identity=(None if terminal_material_body is None else {"task_id": task_id, "body": terminal_material_body}),
+    )
+    history_source = build_subagent_context_source(
+        kind=ContextSourceKind.WORKER_HISTORY,
+        text=worker_history_body,
+        domain_identity=(None if worker_history_body is None else {"task_id": task_id, "source_task_id": parent_context_selection.history_task_id, "body": worker_history_body}),
+    )
     return SubagentInitialSeed(
         dispatch_read,
         task_id,
@@ -415,6 +444,10 @@ def build_subagent_initial_seed(
         parent_source,
         dependency_context,
         dependency_source,
+        terminal_material_body,
+        worker_history_body,
+        material_source,
+        history_source,
         _SUBAGENT_SEED_AUTHORITY,
     )
 
@@ -626,6 +659,8 @@ class KernelColdEpochInputAssembler:
                 in {
                     ContextSourceKind.PARENT_CONTEXT,
                     ContextSourceKind.DEPENDENCY_RESULTS,
+                    ContextSourceKind.TERMINAL_MATERIAL,
+                    ContextSourceKind.WORKER_HISTORY,
                 }
             }
             expected = {item.source_kind: item for item in seed.source_replacements}

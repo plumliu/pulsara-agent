@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.support.subagents import fixture_parent_target
+
 from pulsara_agent.llm.input import FrozenPromptContent
 
 import asyncio
@@ -987,6 +989,7 @@ def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
             session_id=lease.guard.session_id, owner_epoch="host:test"
         ),
         launch_preparation=CanonicalSubagentLaunchPreparationPort(
+            inherit_parent_target=fixture_parent_target,
             repository=repository,
             guard=lease.guard,
             io_owner=KernelSessionIO(),
@@ -1086,6 +1089,7 @@ def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
             session_id=lease.guard.session_id, owner_epoch="host:test"
         ),
         launch_preparation=CanonicalSubagentLaunchPreparationPort(
+            inherit_parent_target=fixture_parent_target,
             repository=repository,
             guard=lease.guard,
             io_owner=KernelSessionIO(),

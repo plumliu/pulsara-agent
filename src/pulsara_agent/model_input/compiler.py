@@ -227,6 +227,16 @@ _SOURCE_POLICY = {
         (ContextRenderMode.FULL,),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.TERMINAL_MATERIAL: (
+        "pulsara.subagent-terminal-material.v1", ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION, ContextBudgetClass.MUST_KEEP,
+        44, 5, (ContextRenderMode.FULL,), ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    ContextSourceKind.WORKER_HISTORY: (
+        "pulsara.subagent-worker-history.v1", ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION, ContextBudgetClass.MUST_KEEP,
+        45, 5, (ContextRenderMode.FULL,), ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
         "pulsara.tool-observation-freshness.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -358,6 +368,8 @@ _SOURCE_ABSENCE_POLICY = {
             ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         }
     ),
+    ContextSourceKind.TERMINAL_MATERIAL: frozenset({ContextSourceAbsenceKind.NOT_APPLICABLE, ContextSourceAbsenceKind.EXPLICIT_EMPTY}),
+    ContextSourceKind.WORKER_HISTORY: frozenset({ContextSourceAbsenceKind.NOT_APPLICABLE, ContextSourceAbsenceKind.EXPLICIT_EMPTY}),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset(),
     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: frozenset(
         {

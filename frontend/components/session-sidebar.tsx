@@ -1,4 +1,4 @@
-import { Archive, ChevronRight, Ellipsis, Eye, Folder, FolderOpen, GitFork, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
+import { Archive, ChevronRight, Ellipsis, Eye, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, SessionWorkspaceSelection, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
@@ -36,16 +36,6 @@ interface SessionSidebarProps {
   canCreateSession: boolean;
   onOpenCommand: () => void;
   onTakeControl: () => void;
-}
-
-function taskCountSummary(session: SessionSummary): string | undefined {
-  const counts = session.taskCounts;
-  if (!counts?.total) return undefined;
-  const parts: string[] = [];
-  if (counts.active + counts.waiting > 0) parts.push(`${counts.active + counts.waiting} 个进行中`);
-  if (counts.attention > 0) parts.push(`${counts.attention} 项需留意`);
-  if (!parts.length) parts.push(`${counts.total} 个子任务`);
-  return parts.join(' · ');
 }
 
 interface ProjectSessionGroup {
@@ -113,13 +103,8 @@ function SessionItem({
     >
       {opening ? <LoaderCircle size={11} className="session-item__loading" aria-hidden="true" /> : <SessionPresenceGlyph presence={presence} />}
       <span className="session-item__copy">
-        <strong>{session.title}</strong>
-        <small>{session.subtitle} · {opening ? '正在载入' : sessionPresenceLabels[presence]}</small>
-        {taskCountSummary(session) && (
-          <span className={`session-item__tasks${session.taskCounts?.attention ? ' has-attention' : ''}`}>
-            <GitFork size={10} /> {taskCountSummary(session)}
-          </span>
-        )}
+        <strong title={session.title}>{session.title}</strong>
+        <small>{opening ? '正在载入' : sessionPresenceLabels[presence]}</small>
       </span>
       {session.unread && <span className="unread-dot" aria-label="有新活动" />}
     </button>

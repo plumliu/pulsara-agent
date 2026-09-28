@@ -20,6 +20,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_parent_context_call_subject,
 )
 from tests.support.subagents import StaticSubagentLaunchPreparationPort
+from tests.support.model_config import test_model_binding, test_model_runtime
 from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
 
 
@@ -27,6 +28,14 @@ class _Repository:
     def __init__(self) -> None:
         self.statuses: list[tuple[str, str | None]] = []
         self.row: dict[str, object] | None = None
+
+    def read_turn_model_call_binding(self, *_args, **_kwargs):
+        return test_model_binding(
+            test_model_runtime(model_id="test-pro", wire_api="openai_chat_completions")
+        )
+
+    def read_subagent_start_sources(self, **_kwargs):
+        return None, None
 
     def accept_subagent_task_batch(self, *_args, **kwargs):
         draft = kwargs["candidate"].ordered_tasks[0]

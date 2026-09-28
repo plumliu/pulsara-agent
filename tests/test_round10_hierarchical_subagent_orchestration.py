@@ -65,7 +65,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
 )
 from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
 from pulsara_agent.conversation_kernel.todo_runtime import build_child_activation
-from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
@@ -78,6 +78,7 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
     acquire_bound_test_writer,
@@ -87,9 +88,16 @@ from tests.support.model_config import (
 )
 from tests.support.round3 import prepare_test_direct_tool_surface
 from tests.support.subagents import (
+    fixture_parent_target,
     StaticSubagentLaunchPreparationPort,
     accept_active_subagent_fixture,
 )
+
+
+async def _set_capacity(manager, target):
+    if await manager.set_capacity_target(target):
+        await manager.fill_available_capacity()
+    return await manager.capacity_state()
 
 
 def _id(prefix: str) -> str:
@@ -114,6 +122,7 @@ def _manager_launch_kwargs(
     launch_preparation = StaticSubagentLaunchPreparationPort()
     if repository is not None and guard is not None:
         launch_preparation = CanonicalSubagentLaunchPreparationPort(  # type: ignore[assignment]
+            inherit_parent_target=fixture_parent_target,
             repository=repository,
             guard=guard,
             io_owner=KernelSessionIO(),
@@ -131,6 +140,7 @@ def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
         "spawn_agent",
         "create_agent_tasks",
         "list_agents",
+        "list_agent_models",
         "wait_agent",
         "send_agent_message",
         "stop_agent",
@@ -166,6 +176,23 @@ def test_round10_tool_inventory_and_result_fact_are_closed() -> None:
             producer_entry_id="entry:test",
             summary="done",
             diagnostics=[{"code": str(index)} for index in range(33)],
+        )
+    absent_data = build_subagent_result_public_fact(
+        task_id="task:test", result_id="result:absent", source=SubagentResultSource.EXPLICIT,
+        producer_entry_id="entry:test", summary="done",
+    )
+    assert absent_data.data is None
+    structured = build_subagent_result_public_fact(
+        task_id="task:test", result_id="result:structured", source=SubagentResultSource.EXPLICIT,
+        producer_entry_id="entry:test", summary="needs changes",
+        data={"decision": "needs_changes", "issue_count": 2}, data_present=True,
+    )
+    assert json.loads(canonical_json_bytes(structured.data)) == {"decision": "needs_changes", "issue_count": 2}
+    with pytest.raises(ValueError, match="delivery bound"):
+        build_subagent_result_public_fact(
+            task_id="task:test", result_id="result:large", source=SubagentResultSource.EXPLICIT,
+            producer_entry_id="entry:test", summary="x" * 16_380,
+            data={"decision": "needs_changes"}, data_present=True,
         )
 
 
@@ -952,6 +979,7 @@ def test_round10_last_n_uses_exact_units_and_none_remains_absent() -> None:
 @pytest.mark.postgres
 def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
     stage2_migrated_postgres_database,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -987,6 +1015,21 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         parent_turn_id=parent_turn_id,
         objective=objective,
     )
+    launch_port = CanonicalSubagentLaunchPreparationPort(
+            inherit_parent_target=fixture_parent_target,
+        repository=repository, guard=lease.guard, io_owner=KernelSessionIO(),
+        model_runtime=test_model_runtime(model_id="test-pro", wire_api="openai_chat_completions"),
+        deadline_factory=KernelExecutionDeadlineFactory(),
+    )
+    prepared_launch = asyncio.run(launch_port.prepare_launch(task_id.launch.task_start))
+    assert prepared_launch.accepted_model_target_fact == task_id.launch.accepted_model_target_fact
+    original_resolve = launch_port._model_runtime.resolve_target  # noqa: SLF001
+    def drift_resolve(_runtime, *args, **kwargs):
+        target = original_resolve(*args, **kwargs)
+        return replace(target, fact=target.fact.model_copy(update={"model_id": "drifted-model"}))
+    monkeypatch.setattr(type(launch_port._model_runtime), "resolve_target", drift_resolve)  # noqa: SLF001
+    with pytest.raises(ValueError, match="target changed"):
+        asyncio.run(launch_port.prepare_launch(task_id.launch.task_start))
     child_turn = stable_subagent_turn_id(session_id=session_id, task_id=task_id)
     repository.start_subagent_turn(
         lease.guard,
@@ -1103,6 +1146,7 @@ def test_round10_all_root_orchestration_tools_are_bypass_only_before_owner_io(
                 "tasks": [{"task": "bounded objective", "depends_on": []}]
             },
             "list_agents": {},
+            "list_agent_models": {},
             "wait_agent": {"task_ids": ["task:test"]},
             "send_agent_message": {
                 "task_id": "task:test",
@@ -1243,6 +1287,15 @@ class _BlockingLaunchPreparation:
         self._inner = inner
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
+
+    def freeze_target(self, binding, *, use_default: bool):
+        return self._inner.freeze_target(binding, use_default=use_default)
+
+    def inherit_target(self, subject, binding):
+        return self._inner.inherit_target(subject, binding)
+
+    def list_models(self):
+        return self._inner.list_models()
 
     async def prepare_launch(self, candidate):
         self.entered.set()
@@ -1936,6 +1989,11 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
         manager.bind_runner_factory(
             lambda _scope: _BlockingChildRunner()  # type: ignore[arg-type]
         )
+        projection_reader = CanonicalProtocolReader(provider)
+        before = projection_reader.snapshot(
+            session_id=session_id, maximum_entries=64, maximum_control_items=128,
+            deadline_monotonic=monotonic() + 30,
+        )
 
         original = repository.accept_subagent_task_batch
         committed = False
@@ -1965,6 +2023,26 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
         )
         assert [row["task_key"] for row in rows] == ["inspect", "review"]
         assert [row["status"] for row in rows] == ["ACTIVE", "WAITING_DEPENDENCY"]
+        observation = projection_reader.observe_committed(
+            session_id=session_id, after_event_sequence=before.event_sequence_cut,
+            maximum_events=128, maximum_bytes=2 << 20,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert {item.affected_subagent_task_id for item in observation.projections if item.affected_subagent_task_id} == {
+            str(row["id"]) for row in rows
+        }
+        assert observation.through_event_sequence == max(item.event_sequence for item in observation.projections)
+        after = projection_reader.snapshot(
+            session_id=session_id, maximum_entries=64, maximum_control_items=128,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert after.control.task_total_count == 2
+        assert after.control.task_unreceived_count == 2
+        parent_binding = repository.read_turn_model_call_binding(
+            lease.guard, turn_id=context.turn_id, deadline_monotonic=monotonic() + 30,
+        )
+        assert all(row["model_call_binding"]["connection_id"] == parent_binding.connection_id.value for row in rows)
+        assert all(row["model_target_fact"]["model_id"] for row in rows)
         first_with_lookahead = repository.list_subagent_tasks(
             session_id=session_id,
             maximum_items=1,
@@ -2066,6 +2144,34 @@ def test_round10_batch_admission_exact_joins_args_permission_and_ack_unknown(
             ).fetchone()
         assert index is not None
         assert "WHERE (child_kind = 'RESULT'::text)" in str(index[0])
+
+        invalid_session = _id("session")
+        invalid_args = {"tasks": [
+            {"task_key": "valid", "task": "would be valid", "depends_on": []},
+            {"task_key": "invalid", "task": "must abort the batch", "depends_on": [],
+             "model": {"connection_id": "model-connection:unknown"}},
+        ]}
+        invalid_lease, invalid_context = _prepare_root_tool_attempt(
+            repository, session_id=invalid_session, workspace_id=_id("workspace"),
+            tool_name="create_agent_tasks", arguments=invalid_args,
+        )
+        invalid_manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, invalid_lease.guard),
+            repository=repository, guard=invalid_lease.guard,
+            host_owner_id=_id("host"), io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(session_id=invalid_session, owner_epoch=_id("todo")),
+        )
+        rejected = await invalid_manager.invoke(
+            tool_name="create_agent_tasks", arguments=invalid_args,
+            invocation_context=invalid_context,
+        )
+        assert rejected.state == "INVALID_ARGUMENTS"
+        assert repository.list_subagent_tasks(
+            session_id=invalid_session, maximum_items=50,
+            deadline_monotonic=monotonic() + 30,
+        ) == ()
+        await invalid_manager.aclose(deadline_monotonic=monotonic() + 2)
 
     asyncio.run(exercise())
 
@@ -2189,7 +2295,7 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
 
 
 @pytest.mark.postgres
-def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizon(
+def test_round10_host_capacity_grandfathers_and_refills_one_ordered_queue(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -2205,7 +2311,7 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
                     "task": f"worker objective {index}",
                     "depends_on": [],
                 }
-                for index in range(5)
+                for index in range(8)
             ]
         }
         lease, context = _prepare_root_tool_attempt(
@@ -2253,12 +2359,11 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
             deadline_monotonic=monotonic() + 30,
         )
         assert [row["status"] for row in rows] == [
-            "ACTIVE",
-            "ACTIVE",
-            "ACTIVE",
-            "ACTIVE",
-            "PENDING_START",
+            "ACTIVE", "ACTIVE", "ACTIVE", "ACTIVE",
+            "PENDING_START", "PENDING_START", "PENDING_START", "PENDING_START",
         ]
+
+        assert await _set_capacity(manager, 2) == (2, 4)
 
         stopped = await manager.invoke(
             tool_name="stop_agent",
@@ -2266,15 +2371,27 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
             invocation_context=context,
         )
         assert json.loads(stopped.content)["status"] == "cancelled"
+        assert await manager.capacity_state() == (2, 3)
+        assert blocker.started == task_ids[:4]
+        stopped = await manager.invoke(
+            tool_name="stop_agent",
+            arguments={"task_id": task_ids[1]},
+            invocation_context=context,
+        )
+        assert json.loads(stopped.content)["status"] == "cancelled"
+        assert await manager.capacity_state() == (2, 2)
+        assert blocker.started == task_ids[:4]
+
+        assert await _set_capacity(manager, 6) == (6, 6)
         for _ in range(20):
-            if task_ids[4] in blocker.started:
+            if len(blocker.started) == 8:
                 break
             blocker.changed.clear()
             await asyncio.wait_for(blocker.changed.wait(), timeout=1)
         assert blocker.started == task_ids
-        assert (
-            len([item for item in manager._tasks.values() if not item.task.done()]) == 4
-        )
+        assert await manager.capacity_state() == (6, 6)
+        assert await _set_capacity(manager, 6) == (6, 6)
+        assert blocker.started == task_ids
         await manager.aclose(deadline_monotonic=monotonic() + 2)
 
     asyncio.run(exercise())
@@ -2283,6 +2400,7 @@ def test_round10_global_four_worker_capacity_queues_without_limiting_task_horizo
 @pytest.mark.postgres
 def test_round10_postcommit_child_activation_failure_settles_task_and_turn(
     stage2_migrated_postgres_database,
+    monkeypatch,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -2301,16 +2419,9 @@ def test_round10_postcommit_child_activation_failure_settles_task_and_turn(
             session_id=session_id,
             owner_epoch=_id("todo"),
         )
-        for index in range(4):
-            todo_owner.activate_child_run(
-                build_child_activation(
-                    session_id=session_id,
-                    subagent_task_id=f"occupied:{index}",
-                    exact_turn_id=f"turn:occupied:{index}",
-                    exact_initial_entry_id=f"entry:occupied:{index}",
-                    exact_context_binding_revision_id=f"revision:occupied:{index}",
-                )
-            )
+        def reject_postcommit_activation(_prepared):
+            raise RuntimeError("simulated TODO activation failure after child commit")
+        monkeypatch.setattr(todo_owner, "activate_child_run", reject_postcommit_activation)
         manager = KernelSubagentManager(
             **_manager_launch_kwargs(repository, lease.guard),
             repository=repository,
@@ -2571,6 +2682,24 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
         await asyncio.sleep(0)
         assert manager._mailbox_consumptions == {}
 
+        observation = CanonicalProtocolReader(provider).observe_committed(
+            session_id=session_id,
+            after_event_sequence=0,
+            maximum_events=128,
+            maximum_bytes=2 << 20,
+            deadline_monotonic=monotonic() + 30,
+        )
+        assert observation.gap_reason is None
+        mailbox_events = [
+            item for item in observation.projections
+            if item.HasField("entry") and item.entry.entry_id in {
+                _round10_id("inter-agent-entry", first_attempt, task_id),
+                _round10_id("inter-agent-entry", second_attempt, task_id),
+            }
+        ]
+        assert len(mailbox_events) == 2
+        assert all(item.affected_subagent_task_id == task_id for item in mailbox_events)
+
         child_turn = stable_subagent_turn_id(
             session_id=session_id,
             task_id=task_id,
@@ -2635,5 +2764,309 @@ def test_round10_mailbox_exact_fifo_ack_unknown_and_typed_child_projection(
                 (session_id,),
             ).fetchone() == (2,)
         await manager.aclose(deadline_monotonic=monotonic() + 2)
+
+    asyncio.run(exercise())
+
+
+def test_scheduler_waiter_cancellation_joins_shared_launch_before_propagating() -> None:
+    async def exercise() -> None:
+        manager = object.__new__(KernelSubagentManager)
+        manager._lock = asyncio.Lock()
+        manager._closed = False
+        manager._scheduler_task = None
+        manager._scheduler_reschedule = False
+        manager._guard = SimpleNamespace(session_id="scheduler-cancel")
+        entered, finish = asyncio.Event(), asyncio.Event()
+        settled: list[bool] = []
+
+        async def scheduler() -> None:
+            entered.set()
+            await finish.wait()
+            settled.append(True)
+
+        manager._start_available_tasks_worker = scheduler
+        waiter = asyncio.create_task(manager._start_available_tasks())
+        await entered.wait()
+        worker = manager._scheduler_task
+        waiter.cancel()
+        await asyncio.sleep(0)
+        waiter.cancel()
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        assert worker is not None and not worker.done()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert settled == [True]
+        assert manager._scheduler_task is None
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize('compact_middle', [False, True, 'image'])
+def test_worker_history_three_generations_survive_reload_and_gc(
+    stage2_migrated_postgres_database, compact_middle,
+) -> None:
+    from pulsara_agent.conversation_kernel.subagents.history import read_terminal_worker_public_history
+    from psycopg.rows import dict_row
+    from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
+    from tests.test_conversation_fork import compact, rows as read_rows
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+
+    async def exercise():
+        session_id, workspace_id = _id('session'), _id('workspace')
+        attempts = [_id('attempt') for _ in range(3)]
+        task_ids = [_round10_id('subagent-task', attempt, '0') for attempt in attempts]
+        arguments = [
+            {'task': 'ancestor-alpha'},
+            {'task': 'middle-bravo', 'context': {'mode': 'worker_history', 'task_id': task_ids[0]}},
+            {'task': 'latest-charlie', 'context': {'mode': 'worker_history', 'task_id': task_ids[1]}},
+        ]
+        lease, contexts = _prepare_root_tool_batch(repository, session_id=session_id, workspace_id=workspace_id,
+            calls=tuple(('spawn_agent', _id('call'), attempt, args) for attempt,args in zip(attempts,arguments,strict=True)))
+        manager = KernelSubagentManager(**_manager_launch_kwargs(repository, lease.guard),
+            repository=repository, guard=lease.guard, host_owner_id=_id('host'), io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(), todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch=_id('todo')))
+        sources, started = {}, []
+        manager.bind_runner_factory(lambda _scope: _CompletingChildRunner(
+            repository=repository, lease=lease, manager=manager, started=started, source_bodies=sources))
+        await manager.open_root_completion_delivery(contexts[0].turn_id)
+        for index, (args, ctx) in enumerate(zip(arguments, contexts, strict=True)):
+            created = await manager.invoke(tool_name='spawn_agent', arguments=args, invocation_context=ctx)
+            assert created.state == 'SUCCESS', created.content
+            assert json.loads(created.content)['task_id'] == task_ids[index]
+            waited = await manager.invoke(tool_name='wait_agent', arguments={'task_ids':[task_ids[index]], 'settle':'all', 'timeout_seconds':10}, invocation_context=ctx)
+            assert json.loads(waited.content)['pending_task_ids'] == []
+            if index == 1 and compact_middle:
+                turn = read_rows(repository, 'SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND scope_subagent_task_id=%s', (session_id,task_ids[index]))[0]
+                boundary = read_rows(repository, 'SELECT max(entry_sequence) AS n FROM pulsara_v3.transcript_entries WHERE session_id=%s AND scope_subagent_task_id=%s', (session_id,task_ids[index]))[0]['n']
+                retained = ()
+                if compact_middle == 'image':
+                    from io import BytesIO
+                    from PIL import Image
+                    from pulsara_agent.llm.input import LLMImagePart, LLMTextPart
+                    from pulsara_agent.model_input.contracts import FrozenRetainedHistoricalRequest, FrozenProviderInputItemKind, CanonicalInputOriginKind
+                    image_bytes = BytesIO()
+                    Image.new('RGB', (4,4), (12,34,56)).save(image_bytes, 'PNG')
+                    retained = (FrozenRetainedHistoricalRequest(FrozenProviderInputItemKind.USER, CanonicalInputOriginKind.HUMAN_MESSAGE, FrozenPromptContent((LLMTextPart('retained illustration'), LLMImagePart('image/png', image_bytes.getvalue(), 4,4)))),)
+                compact(repository, lease.guard, turn['id'], boundary, summary='ancestor-alpha and middle-bravo public findings', idle=True, retained_historical_requests=retained)
+        if compact_middle == 'image':
+            task = repository.query_subagent_task(session_id=session_id, task_id=task_ids[2], deadline_monotonic=monotonic()+30)
+            assert task['status'] == 'FAILED'
+            assert 'unsupported multimodal' in task['terminal_public_detail']
+            assert 'latest-charlie' not in sources
+            await manager.aclose(deadline_monotonic=monotonic()+5)
+            return
+        assert any('ancestor-alpha' in text for text in sources['latest-charlie'])
+        assert any('middle-bravo' in text for text in sources['latest-charlie'])
+        await manager.aclose(deadline_monotonic=monotonic()+5)
+        # Reload only canonical owners, then run the real orphan collector.
+        reloaded = ConversationKernelRepository(provider)
+        PostgresCanonicalBlobStore(provider).delete_orphans(grace_seconds=1, deadline_monotonic=monotonic()+30)
+        turn = read_rows(reloaded, 'SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND scope_subagent_task_id=%s', (session_id,task_ids[2]))[0]
+        boundary = read_rows(reloaded, 'SELECT max(entry_sequence) AS n FROM pulsara_v3.transcript_entries WHERE session_id=%s AND scope_subagent_task_id=%s', (session_id,task_ids[2]))[0]['n']
+        with provider.connection(lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row, deadline_monotonic=monotonic()+30) as conn:
+            history = json.loads(read_terminal_worker_public_history(conn, session_id=session_id, source_task_id=task_ids[2], through_sequence=boundary, binding_revision_id=turn['current_context_binding_revision_id']))['pulsara_worker_history']
+        parent = history['frames'][-2]
+        if compact_middle:
+            assert parent['initial_public_sources'] is None
+            assert parent['adopted_summary'] == 'ancestor-alpha and middle-bravo public findings'
+        else:
+            assert history['frames'][0]['objective'] == 'ancestor-alpha'
+            assert len(history['frames']) == 3
+        assert parent['objective'] == 'middle-bravo'
+    asyncio.run(exercise())
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize('hold_after_reservation', [False, True])
+def test_capacity_lowering_during_query_or_reserved_launch(
+    stage2_migrated_postgres_database, monkeypatch, hold_after_reservation,
+):
+    from threading import Event
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    async def exercise():
+        args = {'tasks':[{'task':f'capacity race {index}'} for index in range(4)]}
+        session_id = _id('session')
+        lease,ctx = _prepare_root_tool_attempt(repository,session_id=session_id,workspace_id=_id('workspace'),tool_name='create_agent_tasks',arguments=args)
+        kwargs = _manager_launch_kwargs(repository, lease.guard)
+        launch = _BlockingLaunchPreparation(kwargs['launch_preparation'])
+        if hold_after_reservation:
+            kwargs['launch_preparation'] = launch
+        manager=KernelSubagentManager(**kwargs,repository=repository,guard=lease.guard,host_owner_id=_id('host'),io_owner=KernelSessionIO(),live_bus=LiveAgentEventBus(),todo_owner=TodoRunStateOwner(session_id=session_id,owner_epoch=_id('todo')))
+        child = _CanonicalBlockingChildRunner(repository, lease)
+        manager.bind_runner_factory(lambda scope:child)
+        queried, release = Event(), Event()
+        original = repository.list_runnable_subagent_tasks
+        def query(*args,**kwargs):
+            rows = original(*args,**kwargs)
+            if not queried.is_set():
+                queried.set()
+                assert release.wait(10)
+            return rows
+        if not hold_after_reservation:
+            monkeypatch.setattr(repository, 'list_runnable_subagent_tasks', query)
+        creating=asyncio.create_task(manager.invoke(tool_name='create_agent_tasks', arguments=args, invocation_context=ctx))
+        if hold_after_reservation:
+            await asyncio.wait_for(launch.entered.wait(),5)
+            assert await manager.capacity_state() == (4,1)
+        else:
+            assert await asyncio.to_thread(queried.wait,5)
+            assert await manager.capacity_state() == (4,0)
+        await _set_capacity(manager, 1)
+        release.set()
+        launch.release.set()
+        result = await asyncio.wait_for(creating,5)
+        assert result.state == 'SUCCESS'
+        assert await manager.capacity_state() == (1,1)
+        rows=repository.list_subagent_tasks(session_id=session_id,maximum_items=50,deadline_monotonic=monotonic()+30)
+        assert [row['status'] for row in rows] == ['ACTIVE','PENDING_START','PENDING_START','PENDING_START']
+        await manager.aclose(deadline_monotonic=monotonic()+5)
+    asyncio.run(exercise())
+
+
+def test_capacity_raise_while_scheduler_exits_is_not_lost():
+    async def exercise():
+        manager=object.__new__(KernelSubagentManager)
+        manager._lock=asyncio.Lock()
+        manager._state_changed=asyncio.Condition(manager._lock)
+        manager._state_revision=0
+        manager._capacity_target=1
+        manager._tasks={}
+        manager._launch_permits={}
+        manager._closed=False
+        manager._scheduler_task=None
+        manager._scheduler_reschedule=False
+        manager._guard=SimpleNamespace(session_id='exit-race')
+        exiting, release=asyncio.Event(),asyncio.Event()
+        checks=[]
+        async def worker():
+            checks.append(manager._capacity_target)
+            if len(checks)==1:
+                exiting.set()
+                await release.wait()
+        manager._start_available_tasks_worker=worker
+        first=asyncio.create_task(manager.fill_available_capacity())
+        await exiting.wait()
+        raising=asyncio.create_task(_set_capacity(manager, 6))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first,raising)
+        assert checks[0] == 1
+        assert checks[1:] and all(target==6 for target in checks[1:])
+        assert manager._scheduler_task is None
+    asyncio.run(exercise())
+
+
+@pytest.mark.postgres
+def test_worker_controls_beyond_128_remain_queryable_and_cancellable(stage2_migrated_postgres_database):
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+
+    async def exercise():
+        session_id, workspace_id = _id('session'), _id('workspace')
+        calls = tuple(('create_agent_tasks', _id('call'), _id('attempt'), {
+            'tasks': [{'task': f'worker {batch * 16 + i}'} for i in range(16)]
+        }) for batch in range(9))
+        lease, contexts = _prepare_root_tool_batch(repository, session_id=session_id, workspace_id=workspace_id, calls=calls)
+        io = KernelSessionIO()
+        manager = KernelSubagentManager(**_manager_launch_kwargs(repository, lease.guard),
+            repository=repository, guard=lease.guard, host_owner_id=_id('host'),
+            io_owner=io, live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch=_id('todo')))
+        attempts = {}
+
+        class Worker(_CanonicalBlockingChildRunner):
+            async def admit_subagent_turn(self, *, launch, cancellation_intent):
+                result = await super().admit_subagent_turn(launch=launch, cancellation_intent=cancellation_intent)
+                task_id, turn_id = launch.task_start.task_id, cancellation_intent.turn_id
+                entry, call_id, attempt = _id('entry'), _id('call'), _id('attempt')
+                cut = repository.prepare_provider_input_cut(lease.guard, turn_id=turn_id, deadline_monotonic=monotonic()+30)
+                repository.commit_assistant_message(lease.guard, cut=cut, entry_id=entry,
+                    parent_content=InlineContent.from_bytes(b'working'),
+                    blocks=(AssistantToolCallBlock(_id('block'), call_id, 'terminal', freeze_json({'command':'work'})),),
+                    occurred_at=datetime.now(timezone.utc), actor_id=task_id, deadline_monotonic=monotonic()+30)
+                repository.accept_tool_attempt(lease.guard, attempt_id=attempt, assistant_entry_id=entry,
+                    tool_call_id=call_id, authorization_kind='policy', authorization_reference='allow',
+                    actor_kind='runtime', actor_id='executor', remote_idempotency_key=None, retry_of_attempt_id=None,
+                    permission_snapshot_fingerprint=_permission_fingerprint(repository, session_id=session_id, turn_id=turn_id),
+                    occurred_at=datetime.now(timezone.utc), deadline_monotonic=monotonic()+30)
+                attempts[task_id] = (turn_id, attempt)
+                return result
+
+        manager.bind_runner_factory(lambda _scope: Worker(repository, lease))
+        await _set_capacity(manager, 144)
+        try:
+            for call, context in zip(calls, contexts, strict=True):
+                response = await manager.invoke(tool_name=call[0], arguments=call[3], invocation_context=context)
+                assert response.state == 'SUCCESS'
+            assert len(attempts) == 144
+            snapshot = CanonicalProtocolReader(provider).snapshot(session_id=session_id,
+                maximum_entries=64, maximum_control_items=128, deadline_monotonic=monotonic()+30)
+            assert snapshot.control.active_turn_total_count == 145
+            assert len(snapshot.control.active_turns) == 128
+            assert snapshot.control.tool_attempt_total_count == 153
+            assert len(snapshot.control.tool_attempts) == 128
+            visible = {item.scope_subagent_task_id for item in snapshot.control.active_turns}
+            task_id = next(task for task in attempts if task not in visible)
+            entries, blocks, results, has_more = repository.list_subagent_task_activities(
+                session_id=session_id, task_id=task_id, maximum_items=50, after_entry_sequence=0, deadline_monotonic=monotonic()+30)
+            assert not has_more and not results
+            assert {row['turn_id'] for row in entries} == {attempts[task_id][0]}
+            assert all(row['turn_status'] == 'RUNNING' for row in entries)
+            assert [row['attempt_id'] for row in blocks] == [attempts[task_id][1]]
+            stopped = await manager._stop({'task_id': task_id})
+            assert stopped.state == 'SUCCESS'
+            row = repository.query_subagent_task(session_id=session_id, task_id=task_id, deadline_monotonic=monotonic()+30)
+            assert row['status'] == 'CANCELLED'
+        finally:
+            await manager.aclose(deadline_monotonic=monotonic()+30)
+            await io.aclose(deadline_monotonic=monotonic()+5)
+    asyncio.run(exercise())
+
+
+@pytest.mark.postgres
+def test_host_takeover_interrupts_active_queued_and_dependency_waiting_workers(
+    stage2_migrated_postgres_database,
+):
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+
+    async def exercise():
+        session_id, workspace_id = _id('session'), _id('workspace')
+        arguments = {'tasks': [
+            {'task_key': 'first', 'task': 'active review'},
+            {'task_key': 'second', 'task': 'queued review'},
+            {'task_key': 'summary', 'task': 'synthesis', 'depends_on': ['first', 'second']},
+        ]}
+        lease, context = _prepare_root_tool_attempt(
+            repository, session_id=session_id, workspace_id=workspace_id,
+            tool_name='create_agent_tasks', arguments=arguments,
+        )
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard), repository=repository,
+            guard=lease.guard, host_owner_id=_id('host'), io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch=_id('todo')),
+        )
+        child = _CanonicalBlockingChildRunner(repository, lease)
+        manager.bind_runner_factory(lambda scope: child)
+        await _set_capacity(manager, 1)
+        await manager.invoke(tool_name='create_agent_tasks', arguments=arguments, invocation_context=context)
+        def rows():
+            return repository.list_subagent_tasks(session_id=session_id, maximum_items=50, deadline_monotonic=monotonic()+10)
+        assert [row['status'] for row in rows()] == ['ACTIVE', 'PENDING_START', 'WAITING_DEPENDENCY']
+        await asyncio.wait_for(child.started.wait(), 1)
+        repository.acquire_host_writer(
+            intent='EXISTING', session_id=session_id, workspace_id=workspace_id,
+            writer_owner_id=_id('host'), lease_seconds=30, deadline_monotonic=monotonic()+10,
+        )
+        after = rows()
+        assert [row['status'] for row in after] == ['INTERRUPTED'] * 3
+        assert all(row['pending_reason'] is None and row['terminal_reason'] == 'HOST_TAKEOVER' for row in after)
+        await manager.aclose(deadline_monotonic=monotonic()+5)
 
     asyncio.run(exercise())

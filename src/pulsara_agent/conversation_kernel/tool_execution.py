@@ -1366,6 +1366,7 @@ class ToolBatchExecutor:
                             tool_result_block_id,
                             call.tool_call_id,
                             attempt_id,
+                            assistant_entry_id,
                         ),
                         block_id=tool_result_block_id,
                         block_ordinal=0,

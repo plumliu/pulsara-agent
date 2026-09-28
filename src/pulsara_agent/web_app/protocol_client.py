@@ -45,6 +45,7 @@ _ATTACHED_FIELDS: Final = frozenset(
         "observe",
         "command",
         "query_command",
+        "subagent_capacity",
         "read_content",
         "read_tool_artifact",
         "list_background_processes",

@@ -392,16 +392,11 @@ class CanonicalProtocolReader:
                 """,
                 (session_id, after_event_sequence, high_water, maximum_events + 1),
             ).fetchall()
-            if len(events) > maximum_events:
-                return CanonicalObservationBatch(
-                    through_event_sequence=high_water,
-                    projections=(),
-                    gap_reason="COMMITTED_SUFFIX_EVENT_BOUND",
-                )
             control: wire.CanonicalControl | None = None
             result: list[wire.CommittedObservationProjection] = []
             total = 0
-            for event in events:
+            through = after_event_sequence
+            for event in events[:maximum_events]:
                 event_type = str(event["event_type"])
                 if event_type not in _COMMITTED_ENUM:
                     return CanonicalObservationBatch(
@@ -417,6 +412,17 @@ class CanonicalProtocolReader:
                     subject_slot=subject_slot,
                     subject_id=subject_id,
                 )
+                if subject_slot == "subject_subagent_task_id":
+                    projection.affected_subagent_task_id = subject_id
+                elif subject_slot == "subject_subagent_result_id":
+                    child = connection.execute(
+                        """SELECT task_id FROM pulsara_v3.subagent_task_children
+                           WHERE session_id = %s AND id = %s AND child_kind = 'RESULT'""",
+                        (session_id, subject_id),
+                    ).fetchone()
+                    if child is None:
+                        raise RuntimeError("committed result subject is missing")
+                    projection.affected_subagent_task_id = str(child["task_id"])
                 if event_type in _ENTRY_TYPES:
                     row = connection.execute(
                         """SELECT * FROM pulsara_v3.transcript_entries
@@ -427,6 +433,15 @@ class CanonicalProtocolReader:
                         raise RuntimeError("committed entry subject is missing")
                     projection.projection_kind = wire.IMMUTABLE_ENTRY
                     projection.entry.CopyFrom(self._entry(connection, row))
+                    if event_type == CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED.value:
+                        task_id = (
+                            row["source_subagent_task_id"]
+                            if row["conversation_scope_kind"] == "ROOT"
+                            else row["scope_subagent_task_id"]
+                        )
+                        if task_id is None:
+                            raise RuntimeError("accepted inter-agent message lacks task identity")
+                        projection.affected_subagent_task_id = str(task_id)
                 elif event_type in _CONTROL_TYPES:
                     if control is None:
                         control = self._control(
@@ -441,19 +456,51 @@ class CanonicalProtocolReader:
                                 + 1,
                             ),
                         )
-                    projection.projection_kind = wire.CURRENT_CONTROL
-                    projection.current_control.CopyFrom(control)
+                        projection.projection_kind = wire.CURRENT_CONTROL
+                        projection.current_control.CopyFrom(control)
+                        projection.control_read_event_sequence = high_water
+                    else:
+                        # The event remains ordered and visible; only its
+                        # duplicate derived snapshot is coalesced in this batch.
+                        projection.projection_kind = wire.CURRENT_CONTROL
                 else:
                     projection.projection_kind = wire.EVENT_ONLY
+                if projection.affected_subagent_task_id and not projection.HasField("current_control"):
+                    if control is None:
+                        control = self._control(
+                            connection,
+                            session_id=session_id,
+                            lifecycle=str(session["lifecycle"]),
+                            maximum_items=MAXIMUM_CONTROL_ITEMS,
+                            entry_sequence_floor=max(
+                                1,
+                                int(session["latest_entry_sequence"])
+                                - MAXIMUM_SNAPSHOT_ENTRIES + 1,
+                            ),
+                        )
+                    if not any(item.HasField("current_control") for item in result):
+                        projection.current_control.CopyFrom(control)
+                        projection.control_read_event_sequence = high_water
+                if projection.affected_subagent_task_id:
+                    task = connection.execute(
+                        "SELECT batch_id FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s",
+                        (session_id, projection.affected_subagent_task_id),
+                    ).fetchone()
+                    if task is None:
+                        raise RuntimeError("affected subagent task is absent")
+                    projection.affected_subagent_batch_id = str(task["batch_id"])
                 total += len(projection.SerializeToString(deterministic=True))
                 if total > maximum_bytes:
-                    return CanonicalObservationBatch(
-                        through_event_sequence=high_water,
-                        projections=(),
-                        gap_reason="COMMITTED_SUFFIX_BYTE_BOUND",
-                    )
+                    if not result:
+                        return CanonicalObservationBatch(
+                            through_event_sequence=after_event_sequence,
+                            projections=(),
+                            gap_reason="COMMITTED_EVENT_TOO_LARGE",
+                        )
+                    break
                 result.append(projection)
-            return CanonicalObservationBatch(high_water, tuple(result))
+                through = int(event["event_sequence"])
+            return CanonicalObservationBatch(through, tuple(result))
 
     def resolve_content_reference(
         self,
@@ -911,11 +958,16 @@ class CanonicalProtocolReader:
                 )
             return tuple(rows)
 
-        turns = bounded(
-            """SELECT * FROM pulsara_v3.turns WHERE session_id = %s AND status = 'RUNNING'
-               ORDER BY accepted_at, id LIMIT %s""",
+        active_turn_total = int(connection.execute(
+            "SELECT count(*) AS total FROM pulsara_v3.turns WHERE session_id = %s AND status = 'RUNNING'",
             (session_id,),
-        )
+        ).fetchone()["total"])
+        turns = tuple(connection.execute(
+            """SELECT * FROM pulsara_v3.turns WHERE session_id = %s AND status = 'RUNNING'
+               ORDER BY CASE WHEN conversation_scope_kind = 'ROOT' THEN 0 ELSE 1 END,
+                        accepted_at, id LIMIT %s""",
+            (session_id, maximum_items),
+        ).fetchall())
         queue_total = int(
             connection.execute(
                 """SELECT count(*) AS total FROM pulsara_v3.prompt_queue_items
@@ -929,7 +981,18 @@ class CanonicalProtocolReader:
                ORDER BY queue_sequence, id LIMIT %s""",
             (session_id,),
         )
-        attempts = bounded(
+        tool_attempt_total = int(connection.execute(
+            """SELECT count(*) AS total
+               FROM pulsara_v3.tool_execution_attempts AS a
+               JOIN pulsara_v3.transcript_entries AS e
+                 ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = a.session_id AND e.id = a.assistant_entry_id
+               JOIN pulsara_v3.turns AS t ON t.session_id = e.session_id AND t.id = e.turn_id
+               LEFT JOIN pulsara_v3.tool_results AS r ON r.session_id = a.session_id AND r.attempt_id = a.id
+               WHERE a.session_id = %s AND r.id IS NULL
+                 AND (e.entry_sequence >= %s OR t.status = 'RUNNING')""",
+            (session_id, entry_sequence_floor),
+        ).fetchone()["total"])
+        attempts = tuple(connection.execute(
             """SELECT a.*, r.result_state, r.result_entry_id
                FROM pulsara_v3.tool_execution_attempts AS a
                JOIN pulsara_v3.transcript_entries AS e
@@ -940,38 +1003,23 @@ class CanonicalProtocolReader:
                  ON r.session_id = a.session_id AND r.attempt_id = a.id
                WHERE a.session_id = %s AND r.id IS NULL
                  AND (e.entry_sequence >= %s OR t.status = 'RUNNING')
-               ORDER BY a.started_at, a.id LIMIT %s""",
-            (session_id, entry_sequence_floor),
-        )
-        tasks = bounded(
-            """SELECT t.*, c.id AS result_id,
-                      c.entry_id AS result_entry_id, c.result_source,
-                      c.summary AS result_summary,
-                      coalesce(deps.ids, ARRAY[]::text[]) AS dependency_task_ids,
-                      accepted.id AS accepted_root_entry_id
-               FROM pulsara_v3.subagent_tasks AS t
-               LEFT JOIN pulsara_v3.subagent_task_children AS c
-                 ON c.session_id = t.session_id AND c.task_id = t.id
-                AND c.child_kind = 'RESULT'
-               LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                 ON accepted.entry_owner_kind = 'EXECUTED_TURN' AND accepted.session_id = t.session_id
-                AND accepted.source_subagent_task_id = t.id
-               LEFT JOIN LATERAL (
-                 SELECT array_agg(edge.dependency_task_id
-                                  ORDER BY edge.dependency_ordinal) AS ids
-                 FROM pulsara_v3.subagent_task_dependencies AS edge
-                 WHERE edge.session_id = t.session_id AND edge.task_id = t.id
-               ) AS deps ON TRUE
-               WHERE t.session_id = %s AND (
-                 t.status IN ('PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE') OR
-                 (t.status IN (
-                    'COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
-                    'BLOCKED_DEPENDENCY_FAILED'
-                  ) AND accepted.id IS NULL)
-               )
-               ORDER BY t.accepted_at, t.id LIMIT %s""",
+               ORDER BY CASE WHEN e.conversation_scope_kind = 'ROOT' THEN 0 ELSE 1 END,
+                        a.started_at, a.id LIMIT %s""",
+            (session_id, entry_sequence_floor, maximum_items),
+        ).fetchall())
+        task_counts = connection.execute(
+            """SELECT count(*) AS total,
+                      count(*) FILTER (WHERE t.status IN ('PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE')
+                        OR (t.status IN ('COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
+                                         'BLOCKED_DEPENDENCY_FAILED') AND NOT EXISTS (
+                          SELECT 1 FROM pulsara_v3.transcript_entries AS accepted
+                          WHERE accepted.entry_owner_kind = 'EXECUTED_TURN'
+                            AND accepted.session_id = t.session_id
+                            AND accepted.source_subagent_task_id = t.id
+                        ))) AS unreceived
+               FROM pulsara_v3.subagent_tasks AS t WHERE t.session_id = %s""",
             (session_id,),
-        )
+        ).fetchone()
         active_plan = connection.execute(
             """
             SELECT * FROM pulsara_v3.plan_workflows
@@ -1066,6 +1114,10 @@ class CanonicalProtocolReader:
         result = wire.CanonicalControl(
             session_lifecycle=lifecycle,
             prompt_queue_total_count=queue_total,
+            active_turn_total_count=active_turn_total,
+            tool_attempt_total_count=tool_attempt_total,
+            task_total_count=int(task_counts["total"]),
+            task_unreceived_count=int(task_counts["unreceived"]),
         )
         genesis = connection.execute(
             "SELECT base_kind, source_through_sequence FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
@@ -1119,29 +1171,6 @@ class CanonicalProtocolReader:
                 tool_call_id=str(row["tool_call_id"]),
                 result_state=str(row["result_state"] or ""),
                 result_entry_id=str(row["result_entry_id"] or ""),
-            )
-        for row in tasks:
-            result.subagent_tasks.add(
-                task_id=str(row["id"]),
-                parent_turn_id=str(row["parent_turn_id"] or ""),
-                status=str(row["status"]),
-                objective=str(row["objective"]),
-                result_id=str(row["result_id"] or ""),
-                result_entry_id=str(row["result_entry_id"] or ""),
-                completion_accepted=row["accepted_root_entry_id"] is not None,
-                batch_id=str(row["batch_id"] or ""),
-                task_key=str(row["task_key"] or ""),
-                label=str(row["label"] or ""),
-                profile=str(row["profile_kind"]),
-                display_role=str(row["display_role"] or ""),
-                context_mode=str(row["context_mode"]),
-                context_last_n_turns=int(row["context_last_n_turns"] or 0),
-                pending_reason=str(row["pending_reason"] or ""),
-                terminal_reason=str(row["terminal_reason"] or ""),
-                terminal_public_detail=str(row["terminal_public_detail"] or ""),
-                result_source=str(row["result_source"] or ""),
-                result_summary=str(row["result_summary"] or ""),
-                dependency_task_ids=tuple(row["dependency_task_ids"]),
             )
         if active_plan is not None:
             result.active_plan_workflow.CopyFrom(

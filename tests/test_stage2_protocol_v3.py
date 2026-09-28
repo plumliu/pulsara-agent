@@ -41,6 +41,7 @@ from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedInteractionDecision,
     ConversationKernelConflict,
+    StaleHostWriter,
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import (
@@ -396,6 +397,39 @@ def test_stage2_presentation_notice_is_ephemeral_and_controller_bound() -> None:
     interactions.controller_id = "attachment:new"
     assert host.take_presentation_notices("attachment:new") == ()
     assert host._presentation_notices == {}
+
+
+@pytest.mark.parametrize("owner", [None, "attachment:replacement"])
+def test_capacity_rejects_detached_or_replaced_controller(owner) -> None:
+    async def exercise() -> None:
+        server = _server()
+        state = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+        await server._command(state, wire.CommandRequest(
+            request_id="detach", command_id="detach", command_kind=wire.DETACH,
+        ))
+        state.host_session.controller_id = owner
+        response = await server._subagent_capacity(state, wire.SubagentCapacityRequest(
+            request_id="capacity", expected_session_id="session:test",
+            expected_host_session_id="host:test", target=2,
+        ))
+        # The fake host deliberately has no setter: revoked authority must never reach it.
+        assert response.error.stable_code == "CONTROL_UNAVAILABLE"
+
+    asyncio.run(exercise())
+
+
+def test_capacity_reports_stale_writer_as_owner_unavailable() -> None:
+    state = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+
+    async def stale(target):
+        raise StaleHostWriter("writer changed")
+
+    state.host_session.set_subagent_capacity = stale
+    response = asyncio.run(_server()._subagent_capacity(state, wire.SubagentCapacityRequest(
+        request_id="capacity", expected_session_id="session:test",
+        expected_host_session_id="host:test", target=2,
+    )))
+    assert response.error.stable_code == "OWNER_UNAVAILABLE"
 
 
 def test_stage2_observer_cannot_mutate_but_can_detach() -> None:

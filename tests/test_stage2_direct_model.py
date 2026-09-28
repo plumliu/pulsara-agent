@@ -58,6 +58,7 @@ from pulsara_agent.llm.request import (
     provider_assistant_message_public_projection_fingerprint,
 )
 from pulsara_agent.llm.retry import LLMRetryConfig
+from pulsara_agent.llm.normalized_transport import NormalizedProviderTransportExecution
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.continuity import (
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
@@ -90,9 +91,11 @@ from pulsara_agent.ports.live_agent_event import (
     TextStartPayload,
 )
 from pulsara_agent.ports.provider_stream import (
+    ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
     ProviderOutputIncompleteReason,
     ProviderStreamFailure,
+    ProviderStreamTerminal,
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.context import (
@@ -360,6 +363,88 @@ def test_round5_provider_never_retries_after_semantic_output(
     assert failures[0].retry_summary is not None
     assert failures[0].retry_summary.skipped_reason == "semantic_output_started"
     request.surface_borrow.close()
+
+
+@pytest.mark.parametrize(
+    ("api", "transport_type", "failure_kind"),
+    (
+        ("openai_chat_completions", OpenAIChatCompletionsTransport, "exception"),
+        ("openai_responses", OpenAIResponsesTransport, "exception"),
+        ("openai_responses", OpenAIResponsesTransport, "stream"),
+        ("openai_chat_completions", OpenAIChatCompletionsTransport, "close"),
+        ("openai_responses", OpenAIResponsesTransport, "close"),
+    ),
+)
+def test_provider_error_details_preserve_cause_without_exact_credential(
+    api: str, transport_type, failure_kind: str, monkeypatch,
+) -> None:
+    port = _port(api=api)
+    request, _tool_port = _prepared_execution(port)
+    owner, candidate = _continuity_candidate(request)
+    prepared = port.preflight_execution(
+        request, append_candidate=candidate, install_authority=owner.install_authority,
+    )
+    secret = "sk-fixture-secret"
+    message = f"Upstream rejected credential {secret}; request req-safe-123."
+    closed = False
+
+    async def create(**_kwargs):
+        if failure_kind == "exception":
+            raise RuntimeError(message)
+
+        async def stream():
+            if failure_kind == "stream":
+                yield {"type": "response.failed", "response": {
+                    "error": {"message": message},
+                }}
+
+        return stream()
+
+    async def close():
+        nonlocal closed
+        closed = True
+        if failure_kind == "close":
+            raise RuntimeError(message)
+
+    def build_client(**kwargs):
+        assert kwargs["api_key"] == secret
+        endpoint = SimpleNamespace(create=create)
+        return SimpleNamespace(
+            chat=SimpleNamespace(completions=endpoint), responses=endpoint, close=close,
+        )
+
+    # Exercise the saved-credential path; injecting _client bypasses that owner.
+    monkeypatch.setattr(
+        f"{transport_type.__module__}.build_async_openai_client", build_client,
+    )
+    transport = transport_type(
+        settings=port._model_runtime.settings,  # noqa: SLF001
+        timeout_policy=OpenAITransportTimeoutPolicy(1, 1, 1, 1, None),
+        retry_config=LLMRetryConfig(enabled=False),
+    )
+
+    async def collect():
+        execution = NormalizedProviderTransportExecution(transport.stream(
+            call=request.prepared_call.call, context=prepared.final_context,
+        ))
+        try:
+            while (item := await execution.read_next()) is not None:
+                if isinstance(item, ProviderStreamTerminal):
+                    assert item.error is not None
+                    return str(ProviderModelExecutionFailed(item.error))
+        finally:
+            await execution.aclose()
+        pytest.fail("expected a provider failure")
+
+    try:
+        detail = asyncio.run(collect())
+        assert "Upstream rejected credential" in detail
+        assert "request req-safe-123" in detail
+        assert secret not in detail
+        assert "[REDACTED_CREDENTIAL]" in detail
+        assert closed
+    finally:
+        request.surface_borrow.close()
 
 
 def _prepared_execution(

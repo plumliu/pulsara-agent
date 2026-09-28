@@ -159,6 +159,7 @@ class OpenAIChatCompletionsTransport:
         else:
             credential_boundary = ProcessCredentialBoundary()
             client = self._client
+        error_scrubber = credential_boundary.capture_scrub_set()
         retry_traces: list[RetryAttemptTrace] = []
         completed_model_identity: str | None = None
         try:
@@ -251,7 +252,7 @@ class OpenAIChatCompletionsTransport:
                             reported_model_id=model_identity.reported_model_id,
                         )
                     yield ProviderStreamFailure(
-                        message=str(exc),
+                        message=error_scrubber.scrub_text(str(exc)),
                         code_hint=(
                             exc.reason_code
                             if isinstance(exc, LLMTransportContractError)
@@ -274,9 +275,14 @@ class OpenAIChatCompletionsTransport:
                     )
                     return
         finally:
-            if should_close_client:
-                await client.close()
             api_key = None
+            if should_close_client:
+                try:
+                    await client.close()
+                except Exception as exc:
+                    raise RuntimeError(
+                        error_scrubber.scrub_text(f"{type(exc).__name__}: {exc}")
+                    ) from None
 
         report = accumulator.usage_report
         if report is not None or completed_model_identity is not None:

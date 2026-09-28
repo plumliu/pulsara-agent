@@ -1776,7 +1776,7 @@ class ProviderDispatchCoordinator:
         )
         if pending_steer:
             return canonical_read, ()
-        pending_cut = await runtime.snapshot_pending_root_completions(identity.turn_id)
+        pending_cut = await runtime.snapshot_pending_root_completions(identity.turn_id, for_delivery=True)
         candidates: list[PreparedAutomaticSubagentCompletion] = []
         items: list[FrozenProviderInputItem] = []
         canonical_bytes = 0

@@ -122,8 +122,18 @@ CREATE TABLE pulsara_v3.subagent_tasks (
         'verification_worker', 'synthesizer'
     )),
     display_role text,
-    context_mode text NOT NULL CHECK (context_mode IN ('NONE', 'LAST_N')),
+    model_call_binding jsonb NOT NULL,
+    model_target_fact jsonb NOT NULL,
+    context_mode text NOT NULL CHECK (context_mode IN ('NONE', 'LAST_N', 'WORKER_HISTORY')),
     context_last_n_turns integer,
+    history_source_task_id text,
+    history_cut_sequence bigint,
+    history_context_binding_revision_id text,
+    parent_context_body text,
+    dependency_context_body text,
+    terminal_material_body text,
+    worker_history_body text,
+    material_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
     objective text NOT NULL,
     status text NOT NULL CHECK (status IN (
         'PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE', 'COMPLETED',
@@ -139,14 +149,24 @@ CREATE TABLE pulsara_v3.subagent_tasks (
     UNIQUE (session_id, parent_turn_id, batch_id, task_key),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id, history_source_task_id)
+        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (octet_length(objective) BETWEEN 1 AND 65536),
     CHECK (task_key IS NULL OR task_key ~ '^[a-z][a-z0-9_-]{0,63}$'),
     CHECK (label IS NULL OR octet_length(label) BETWEEN 1 AND 256),
     CHECK (display_role IS NULL OR octet_length(display_role) BETWEEN 1 AND 256),
+    CHECK (jsonb_typeof(model_call_binding) = 'object'
+        AND model_call_binding ? 'connection_id' AND model_call_binding ? 'reasoning'
+        AND model_call_binding - ARRAY['connection_id', 'reasoning']::text[] = '{}'::jsonb
+        AND jsonb_typeof(model_call_binding->'connection_id') = 'string'),
+    CHECK (jsonb_typeof(model_target_fact) = 'object'
+        AND model_target_fact->>'contract_version' = 'resolved-model-target:v8'),
     CHECK (
-        (context_mode = 'NONE' AND context_last_n_turns IS NULL) OR
-        (context_mode = 'LAST_N' AND context_last_n_turns BETWEEN 1 AND 3)
+        (context_mode = 'NONE' AND context_last_n_turns IS NULL AND history_source_task_id IS NULL AND history_cut_sequence IS NULL AND history_context_binding_revision_id IS NULL) OR
+        (context_mode = 'LAST_N' AND context_last_n_turns BETWEEN 1 AND 3 AND history_source_task_id IS NULL AND history_cut_sequence IS NULL AND history_context_binding_revision_id IS NULL) OR
+        (context_mode = 'WORKER_HISTORY' AND context_last_n_turns IS NULL AND history_source_task_id IS NOT NULL AND history_cut_sequence >= 1 AND history_context_binding_revision_id IS NOT NULL)
     ),
+    CHECK (jsonb_typeof(material_refs) = 'array' AND jsonb_array_length(material_refs) <= 16),
     CHECK ((status IN (
         'COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
         'BLOCKED_DEPENDENCY_FAILED'
@@ -1347,6 +1367,7 @@ CREATE TABLE pulsara_v3.subagent_task_children (
     entry_id text NOT NULL,
     result_source text CHECK (result_source IN ('EXPLICIT', 'INFERRED')),
     summary text,
+    data jsonb,
     output_preview text,
     diagnostics jsonb,
     result_fingerprint text,
@@ -1359,11 +1380,12 @@ CREATE TABLE pulsara_v3.subagent_task_children (
     FOREIGN KEY (session_id, entry_id)
         REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (
-        (child_kind = 'MESSAGE' AND result_source IS NULL AND summary IS NULL
+        (child_kind = 'MESSAGE' AND result_source IS NULL AND summary IS NULL AND data IS NULL
             AND output_preview IS NULL AND diagnostics IS NULL
             AND result_fingerprint IS NULL) OR
         (child_kind = 'RESULT' AND result_source IS NOT NULL
             AND summary IS NOT NULL AND octet_length(summary) BETWEEN 1 AND 16384
+            AND (data IS NULL OR jsonb_typeof(data) = 'object')
             AND (output_preview IS NULL OR octet_length(output_preview) <= 32768)
             AND diagnostics IS NOT NULL AND jsonb_typeof(diagnostics) = 'array'
             AND jsonb_array_length(diagnostics) <= 32
@@ -1931,6 +1953,17 @@ BEGIN
             OLD.display_role IS DISTINCT FROM NEW.display_role OR
             OLD.context_mode IS DISTINCT FROM NEW.context_mode OR
             OLD.context_last_n_turns IS DISTINCT FROM NEW.context_last_n_turns OR
+            OLD.model_call_binding IS DISTINCT FROM NEW.model_call_binding OR
+            OLD.model_target_fact IS DISTINCT FROM NEW.model_target_fact OR
+            OLD.material_refs IS DISTINCT FROM NEW.material_refs OR
+            OLD.history_source_task_id IS DISTINCT FROM NEW.history_source_task_id OR
+            OLD.history_cut_sequence IS DISTINCT FROM NEW.history_cut_sequence OR
+            OLD.history_context_binding_revision_id IS DISTINCT FROM NEW.history_context_binding_revision_id OR
+            OLD.parent_context_body IS DISTINCT FROM NEW.parent_context_body OR
+            ((OLD.dependency_context_body IS DISTINCT FROM NEW.dependency_context_body OR
+              OLD.terminal_material_body IS DISTINCT FROM NEW.terminal_material_body OR
+              OLD.worker_history_body IS DISTINCT FROM NEW.worker_history_body)
+             AND NOT (OLD.status = 'PENDING_START' AND NEW.status = 'ACTIVE')) OR
             OLD.objective IS DISTINCT FROM NEW.objective OR
             OLD.execution_writer_generation IS DISTINCT FROM
                 NEW.execution_writer_generation OR

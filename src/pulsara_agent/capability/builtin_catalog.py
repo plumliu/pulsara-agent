@@ -97,6 +97,7 @@ _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "enter_plan": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
     "exit_plan": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
     "list_agents": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
+    "list_agent_models": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "memory_explain": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "memory_get": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
     "memory_search": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
@@ -1381,6 +1382,19 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_concurrency_safe=False,
         permission_category="agent_local",
     ),
+    "list_agent_models": _descriptor(
+        name="list_agent_models",
+        description=(
+            "List saved model connections available for delegated tasks, including "
+            "their exact connection IDs and reasoning choices. Read this before "
+            "selecting a different model; the result contains no credentials."
+        ),
+        input_schema=object_schema(properties={}, required=[]),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
+        is_read_only=True,
+        is_concurrency_safe=True,
+        permission_category="subagent_runtime",
+    ),
     "spawn_agent": _descriptor(
         name="spawn_agent",
         description=(
@@ -1433,7 +1447,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                     "properties": {
                         "mode": {
                             "type": "string",
-                            "enum": ["none", "last_n"],
+                            "enum": ["none", "last_n", "worker_history"],
                             "description": _SUBAGENT_CONTEXT_MODE_DESCRIPTION,
                         },
                         "turns": {
@@ -1442,12 +1456,26 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                             "maximum": 3,
                             "description": _SUBAGENT_CONTEXT_TURNS_DESCRIPTION,
                         },
+                        "task_id": {"type": "string", "description": "Terminal worker task ID for worker_history; its public effective history is imported as advisory material."},
                     },
                     "required": ["mode"],
                     "additionalProperties": False,
                     "default": {"mode": "none"},
                     "description": _SUBAGENT_CONTEXT_DESCRIPTION,
                 },
+                "model": {
+                    "type": "object", "properties": {
+                        "connection_id": {"type": "string", "description": "Exact ID from list_agent_models."},
+                        "reasoning": {"type": "object", "properties": {
+                            "kind": {"type": "string", "enum": ["effort", "toggle", "budget_tokens"]},
+                            "value": {"type": "string"},
+                            "enabled": {"type": "boolean"},
+                            "tokens": {"type": "integer", "minimum": 1},
+                        }, "required": ["kind"], "additionalProperties": False},
+                    }, "required": ["connection_id"], "additionalProperties": False,
+                    "description": "Optional saved connection and reasoning choice. Omit reasoning for this target's default.",
+                },
+                "material_task_ids": {"type": "array", "maxItems": 16, "uniqueItems": True, "items": {"type": "string", "minLength": 1}, "description": "Terminal task IDs whose result or public failure detail is needed as material; these do not block scheduling."},
             },
             required=["task"],
         ),
@@ -1685,7 +1713,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                 "properties": {
                                     "mode": {
                                         "type": "string",
-                                        "enum": ["none", "last_n"],
+                                        "enum": ["none", "last_n", "worker_history"],
                                         "description": _SUBAGENT_CONTEXT_MODE_DESCRIPTION,
                                     },
                                     "turns": {
@@ -1694,11 +1722,25 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                         "maximum": 3,
                                         "description": _SUBAGENT_CONTEXT_TURNS_DESCRIPTION,
                                     },
+                                    "task_id": {"type": "string", "description": "Terminal worker task ID for worker_history."},
                                 },
                                 "required": ["mode"],
                                 "additionalProperties": False,
                                 "description": _SUBAGENT_CONTEXT_DESCRIPTION,
                             },
+                            "model": {
+                                "type": "object", "properties": {
+                                    "connection_id": {"type": "string", "description": "Exact ID from list_agent_models."},
+                                    "reasoning": {"type": "object", "properties": {
+                                        "kind": {"type": "string", "enum": ["effort", "toggle", "budget_tokens"]},
+                                        "value": {"type": "string"},
+                                        "enabled": {"type": "boolean"},
+                                        "tokens": {"type": "integer", "minimum": 1},
+                                    }, "required": ["kind"], "additionalProperties": False},
+                                }, "required": ["connection_id"], "additionalProperties": False,
+                                "description": "Optional saved connection and reasoning choice; omit reasoning for its default.",
+                            },
+                            "material_task_ids": {"type": "array", "maxItems": 16, "uniqueItems": True, "items": {"type": "string", "minLength": 1}, "description": "Terminal task IDs to read as result or failure material without a success dependency."},
                             "depends_on": {
                                 "type": "array",
                                 "maxItems": 16,
@@ -1787,6 +1829,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                         "constraints, and exact next-step file, artifact, or source locations."
                     ),
                 },
+                "data": {"type": "object", "description": "Optional small structured JSON result for the assigning agent. Summary and canonical data share the 16 KiB delivery budget."},
                 "output_preview": {
                     "type": "string",
                     "maxLength": 32768,
@@ -2201,6 +2244,7 @@ _SUBAGENT_PARENT = frozenset(
     {
         "create_agent_tasks",
         "list_agents",
+        "list_agent_models",
         "spawn_agent",
         "stop_agent",
         "send_agent_message",

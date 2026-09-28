@@ -39,6 +39,13 @@ const SOURCE_FIDELITY_TEXT = [
   '',
 ].join('\n');
 
+function inventoryTask(id: string, label: string, status: AgentTask['status'], parentId: string, objective = ''): AgentTask {
+  return {
+    id, label, role: '通用协作', objective, status, parentId,
+    dependencyIds: [], completionAccepted: status === 'completed', color: 'blue',
+  };
+}
+
 function inlineContent(value: string) {
   const bytes = new TextEncoder().encode(value);
   return inlineBytes(bytes);
@@ -412,8 +419,8 @@ describe('exact prompt projection', () => {
     }), { status: 200 })));
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
     const projection = connection.current();
-    expect(projection.messages.find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
-    const merged = mergeRuntimeTaskInventory(projection, projection.agentTasks);
+    expect(projection.messages.find(message => message.id === 'completion')?.sourceSubagentTaskId).toBe('reader');
+    const merged = mergeRuntimeTaskInventory(projection, [inventoryTask('reader', 'reader', 'completed', 'A')]);
     expect(merged.messages.find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
     expect(mergeRuntimeTaskInventory(merged, merged.agentTasks).messages
       .find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
@@ -532,7 +539,8 @@ describe('exact prompt projection', () => {
       { body: '', userKind: 'subagent-completion' },
     ]);
     expect(connection.current().messages[2]?.sourceSubagentTaskId).toBe('task-1');
-    expect(connection.current().messages[2]).toMatchObject({
+    const withTask = mergeRuntimeTaskInventory(connection.current(), [inventoryTask('task-1', 'reader', 'completed', 'turn-1')]);
+    expect(withTask.messages[2]).toMatchObject({
       sourceSubagentLabel: 'reader',
       sourceSubagentRelation: 'previous',
     });
@@ -1188,6 +1196,64 @@ describe('exact prompt projection', () => {
     });
   });
 
+  it('joins retained worker activities only after an exact task page and settles only canonical terminal facts', async () => {
+    const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
+    const payload = connectPayload([
+      {entry_id:'create',turn_id:'root',entry_sequence:'1',entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'ROOT',blocks:[{block_id:'spawn',block_kind:'TOOL_CALL',tool_call_id:'spawn',tool_name:'create_agent_tasks'}]},
+      {entry_id:'created',turn_id:'root',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',tool_result:{assistant_entry_id:'create',tool_call_id:'spawn',result_state:'SUCCESS'},content:inlineContent(JSON.stringify({tasks:ids.map(task_id=>({task_id}))}))},
+      ...ids.map((id,i)=>({entry_id:`entry-${id}`,turn_id:`turn-${id}`,entry_sequence:String(i+3),entry_kind:'ASSISTANT_MESSAGE',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:id,blocks:[{block_id:`text-${id}`,block_kind:'TEXT',content:inlineContent('intermediate commentary')},{block_id:`call-${id}`,block_kind:'TOOL_CALL',tool_call_id:`call-${id}`,tool_name:'terminal'}]})),
+    ], {active_turns:[{turn_id:'root',scope_kind:'ROOT',status:'RUNNING'}]}, [{
+      live_revision:'1', event_type:'TEXT_DELTA', draft_identity:'worker-live', turn_id:'turn-worker-143', scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:'worker-143',payload:{text_delta:{delta:'still working'}},
+    }]);
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
+    const raw = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    expect(raw.subagentRuns).toHaveLength(144);
+    expect(raw.subagentRuns?.[0].status).toBe('unknown');
+    expect(raw.subagentRuns?.[0].activities[0].traces?.[0].status).toBe('running');
+    const task = inventoryTask('worker-143','visible worker','running','root','work');
+    const loaded = mergeRuntimeTaskInventory(raw,[task]);
+    const runs = loaded.messages.find(m=>m.id==='create')?.subagentRuns;
+    expect(runs).toHaveLength(1);
+    expect(runs?.[0].activities.some(a=>a.body==='still working')).toBe(true);
+    expect(runs?.[0].activities[0].traces?.[0].status).toBe('running');
+    const terminal = mergeRuntimeTaskInventory(raw,[{...task,status:'completed'}]);
+    const done = terminal.messages.find(m=>m.id==='create')?.subagentRuns?.[0];
+    expect(done?.activities.some(a=>a.id.startsWith('live:'))).toBe(false);
+    expect(done?.activities[0].traces?.[0].status).toBe('cancelled');
+    expect(raw.subagentRuns?.[143].activities[0].traces?.[0].status).toBe('running');
+    expect(mergeRuntimeTaskInventory(raw,[]).messages.find(m=>m.id==='create')?.subagentRuns).toBeUndefined();
+  });
+
+  it.each(['start', 'delta', 'end'])('keeps the 144th worker result %s and progress outside bounded control', async phase => {
+    const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
+    const target = ids[143];
+    const event = {turn_id: `turn-${target}`, scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: target,
+      channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-143', channel_tool_call_id: 'same-call-id'};
+    const events = [
+      {...event, live_revision:'1', event_type:'TOOL_RESULT_START', payload:{tool_result_start:{assistant_entry_id:'entry-worker-143',tool_call_id:'same-call-id',attempt_id:'attempt-143'}}},
+      {...event, live_revision:'2', event_type:'TOOL_RESULT_DELTA', payload:{tool_result_delta:{text:'partial result'}}},
+      {...event, live_revision:'3', event_type:'TOOL_RESULT_END', payload:{tool_result_end:{result_state:'SUCCESS',final_text:'complete result'}}},
+    ].slice(0, phase === 'start' ? 1 : phase === 'delta' ? 2 : 3);
+    const payload = connectPayload([
+      {entry_id:'create',turn_id:'root',entry_sequence:'1',entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'ROOT',blocks:[{block_id:'spawn',block_kind:'TOOL_CALL',tool_call_id:'spawn',tool_name:'create_agent_tasks'}]},
+      ...ids.map((id,i)=>({entry_id:`entry-${id}`,turn_id:`turn-${id}`,entry_sequence:String(i+2),entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:id,blocks:[{block_id:`call-${id}`,block_kind:'TOOL_CALL',tool_call_id:'same-call-id',tool_name:'terminal'}]})),
+    ], {
+      active_turns: ids.slice(0,128).map(id=>({turn_id:`turn-${id}`,scope_kind:'SUBAGENT_TASK',status:'RUNNING'})),
+      tool_attempts: ids.slice(0,128).map((id,i)=>({attempt_id:`attempt-${i}`,assistant_entry_id:`entry-${id}`,tool_call_id:'same-call-id'})),
+    }, [...events, {live_revision:'4',event_type:'SUBAGENT_PROGRESS',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:target,payload:{subagent_progress:{task_id:target,status:'ACTIVE',public_summary:'examining last worker'}}}]);
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
+    const raw = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    const task = inventoryTask(target,'last worker','running','root');
+    const merged = mergeRuntimeTaskInventory(raw,[task]);
+    const trace = merged.messages[0].subagentRuns?.[0].activities[0].traces?.[0];
+    expect(trace).toMatchObject({id:'same-call-id',status:phase === 'end' ? 'completed' : 'running'});
+    expect(trace?.resultText).toBe(phase === 'start' ? undefined : phase === 'delta' ? 'partial result' : 'complete result');
+    expect(raw.subagentRuns?.[0].activities[0].traces?.[0].resultText).toBeUndefined();
+    expect(merged.agentTasks[0].progress).toBe('examining last worker');
+    expect(mergeRuntimeTaskInventory(raw,[{...task,status:'completed'}]).agentTasks[0].progress).toBeUndefined();
+    expect(mergeRuntimeTaskInventory(raw,[]).agentTasks).toEqual([]);
+  });
+
   it('projects successful orchestration results and exposes child execution', async () => {
     const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(value) });
     const toolRequest = (
@@ -1326,7 +1392,10 @@ describe('exact prompt projection', () => {
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    const projected = connection.current();
+    const projected = mergeRuntimeTaskInventory(connection.current(), [
+      { ...inventoryTask('task-1', '读取标题', 'completed', 'turn-root', 'Read README.md.'), summary: '# Pulsara' },
+      inventoryTask('task-2', '等待槽位', 'pending', 'turn-root', 'Wait for capacity.'),
+    ]);
     const create = projected.messages.find((message) => message.id === 'root-create');
     const wait = projected.messages.find((message) => message.id === 'root-wait');
     const denied = projected.messages.find((message) => message.id === 'root-denied');
@@ -1358,17 +1427,12 @@ describe('exact prompt projection', () => {
     expect(create?.subagentRuns?.[0]).toMatchObject({
       id: 'task-1', label: '读取标题', status: 'completed', objective: 'Read README.md.',
     });
-    expect(create?.subagentRuns?.[0].activities).toHaveLength(3);
-    expect(create?.subagentRuns?.[0].activities[0]).toMatchObject({
-      kind: 'guidance', body: 'Also verify the visible heading.',
-    });
+    expect(create?.subagentRuns?.[0].activities.some(activity => activity.id === 'task-read')).toBe(true);
     expect(create?.subagentRuns?.find((run) => run.id === 'task-2')).toMatchObject({
       label: '等待槽位', status: 'pending', activities: [],
     });
-    expect(create?.subagentRuns?.[0].activities.find((activity) => activity.traces?.length)?.traces?.[0]).toMatchObject({
-      title: '读取文件', status: 'completed', meta: '操作完成',
-    });
-    expect(projected.isRunning).toBe(false);
+    expect(projected.agentTasks).toHaveLength(2);
+    expect(projected.agentTasks[1].status).toBe('pending');
     expect(JSON.stringify(create?.subagentRuns)).not.toContain('stale live text');
   });
 
@@ -1418,7 +1482,9 @@ describe('exact prompt projection', () => {
       }] },
     )), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
-    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    const projection = mergeRuntimeTaskInventory((await new LocalHttpRuntimeAdapter().connect('session-1')).current(), [
+      { ...inventoryTask('task-success', 'reader', 'completed', 'turn-root', 'Read the target file.'), batchId: 'batch-success' },
+    ]);
     const invalid = projection.messages.find((message) => message.id === 'create-invalid');
     const success = projection.messages.find((message) => message.id === 'create-success');
 
@@ -1480,7 +1546,7 @@ describe('exact prompt projection', () => {
     });
   });
 
-  it('ignores a stale child live draft after the task leaves active control', async () => {
+  it('keeps detached child result data without inferring active membership or showing unloaded tasks', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
@@ -2400,15 +2466,18 @@ describe('source text fidelity hard cut', () => {
       }] },
     );
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
-      String(input).includes('/tasks?')
-        ? { session_id: 'session-1', tasks: [task], total_count: 1, remaining_count: 0 }
-        : connect,
+      String(input).includes('/activities?')
+        ? { activities: [{ entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2', entry_kind: 'INTER_AGENT_MESSAGE', accepted_at: '2026-09-01T00:00:00Z', objective: SOURCE_FIDELITY_TEXT, content: inlineContent(SOURCE_FIDELITY_TEXT) }] }
+        : String(input).includes('/tasks?')
+          ? { session_id: 'session-1', tasks: [task], total_count: 1, remaining_count: 0 }
+          : connect,
     ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
 
     const adapter = new LocalHttpRuntimeAdapter();
     const inventory = (await adapter.listSessionTasks('session-1')).tasks[0];
-    const projection = (await adapter.connect('session-1')).current();
+    const projection = mergeRuntimeTaskInventory((await adapter.connect('session-1')).current(), [inventory]);
     const liveTask = projection.agentTasks.find((item) => item.id === 'task-1');
+    const activityPage = await adapter.listSessionTaskActivities('session-1', 'task-1');
     const run = projection.messages.find((message) => message.id === 'root-create')?.subagentRuns
       ?.find((item) => item.id === 'task-1');
 
@@ -2421,9 +2490,8 @@ describe('source text fidelity hard cut', () => {
     expect(liveTask).toMatchObject({
       label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT, objective: SOURCE_FIDELITY_TEXT,
       terminalPublicDetail: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
-      progress: SOURCE_FIDELITY_TEXT,
     });
-    expect(projection.agentTasks.find((item) => item.id === 'task-default-role')?.role).toBe('研究');
+    expect(activityPage.activities[0]).toMatchObject({ body: SOURCE_FIDELITY_TEXT, entryKind: 'INTER_AGENT_MESSAGE' });
     expect(projection.todo?.items).toEqual([{
       id: 'todo-root:0', label: SOURCE_FIDELITY_TEXT, status: 'in-progress',
     }]);
@@ -2431,13 +2499,11 @@ describe('source text fidelity hard cut', () => {
       label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT,
       objective: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
     });
-    expect(run?.activities).toEqual(expect.arrayContaining([
-      expect.objectContaining({ body: SOURCE_FIDELITY_TEXT, kind: 'guidance' }),
-      expect.objectContaining({
-        body: SOURCE_FIDELITY_TEXT,
-        reasoning: [{ id: 'child-reasoning', kind: 'summary', body: SOURCE_FIDELITY_TEXT }],
-      }),
-    ]));
+    expect(liveTask?.progress).toBe(SOURCE_FIDELITY_TEXT);
+    expect(run?.activities).toMatchObject([
+      {id: 'child-guidance', body: SOURCE_FIDELITY_TEXT},
+      {id: 'child-answer', body: SOURCE_FIDELITY_TEXT, reasoning: [{body: SOURCE_FIDELITY_TEXT}]},
+    ]);
   });
 
   it('preserves plain and JSON message tool text while keeping typed tool labels', async () => {

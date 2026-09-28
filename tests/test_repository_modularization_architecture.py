@@ -656,6 +656,7 @@ _ROUND5B_RUNTIME_CHANGED_METHODS = {
 }
 _ROUND10_ADDED_TOP_LEVEL_FUNCTIONS = {
     "_explicit_result_arguments_match",
+    "_subagent_model_arguments_match",
     "_subagent_batch_arguments_match",
     "_subagent_batch_subject_matches",
     "_subagent_context_arguments_match",
@@ -692,7 +693,9 @@ _ROUND10_ADDED_METHODS = {
     "confirm_subagent_task_terminal_settlement",
     "list_runnable_subagent_tasks",
     "read_subagent_dependencies",
+    "read_subagent_start_sources",
     "read_subagent_task_board",
+    "read_subagent_task_model_target",
     "settle_subagent_dependency_frontier",
 }
 _ROUND10_CHANGED_METHODS = {
@@ -720,6 +723,7 @@ _ROUND10_REMOVED_METHODS = {
     "accept_subagent_child",
     "accept_subagent_task",
     "set_subagent_task_status",
+    "close_session",
 }
 
 
@@ -989,7 +993,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _ASYNC_SUBAGENT_COMPLETION_ADDED_TOP_LEVEL_CLASSES
         | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_CLASSES
         | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_CLASSES
-        | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation"}
+        | {"FrozenMemoryDeletionPlan", "CanonicalForkCreation", "_DeletionSources"}
         | _DIRECT_MEMORY_ADDED_TOP_LEVEL_CLASSES
     )
     for key, added, changed in (
@@ -1004,7 +1008,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
                 | _MODEL_UNIVERSE_ADDED_TOP_LEVEL_FUNCTIONS
                 | _KERNEL_IMAGE_K2_ADDED_TOP_LEVEL_FUNCTIONS
                 | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_FUNCTIONS
-                | {"_freeze", "_frozen_rows", "_remaining", "_insert"}
+                | {"_freeze", "_frozen_rows", "_remaining", "_insert", "_sources"}
             )
             - _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
             | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS
@@ -1151,6 +1155,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             "FrozenMemoryDeletionPlan", "CanonicalForkCreation",
             "DirectMemoryOutcome", "AcceptedMemoryToolResult",
             "PreparedMemoryMutationSideBranch",
+            "_DeletionSources",
         }
     )
     for name in (
@@ -1315,7 +1320,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _KERNEL_IMAGE_K3_CHANGED_METHODS
             | _KERNEL_IMAGE_K3_ADDED_TOP_LEVEL_FUNCTIONS
             | _KERNEL_IMAGE_K3_CHANGED_TOP_LEVEL_FUNCTIONS
-            | {"fork_conversation", "_insert", "lock_canonical_identities"}
+            | {"fork_conversation", "_insert", "_sources", "lock_canonical_identities"}
         )
     for key in ("database_calls", "physical_checkouts"):
         current_unchanged = _without_source_modules(
@@ -1368,6 +1373,12 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
         # unused implementation merely to retain this historical unit test.
         | {
             "tests/test_round6_mcp_production.py::test_round6_slot_wire_budget_is_shared_and_released"
+        }
+        # These baseline nodes were removed by earlier terminal/source hard cuts.
+        | {
+            "tests/test_round2_terminal_monitor.py::test_round2_foreground_updates_cwd_but_yielded_process_never_does",
+            "tests/test_round3_structured_model_input_compiler.py::test_round3_runtime_source_tracks_foreground_cwd_but_not_yielded_cwd",
+            "tests/test_stage2_terminal_host_lifetime.py::test_round5_canonical_close_upgrade_after_decision_fence_is_rejected",
         }
     )
     assert (

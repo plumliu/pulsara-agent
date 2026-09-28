@@ -903,6 +903,46 @@ describe('completed reply process disclosure', () => {
   };
   const hiddenProgress = () => screen.getByText(progress.body).closest('.conversation-run__step')?.getAttribute('aria-hidden') === 'true';
 
+  it.each([1, 3])('folds %s leading completion notifications without an earlier assistant step', count => {
+    const notices = Array.from({ length: count }, (_, i) => ({
+      id: `completion-${i}`, turnId: 'turn-one', role: 'user' as const,
+      userKind: 'subagent-completion' as const, time: '13:02', body: '', sourceSubagentLabel: `任务 ${i}`,
+    }));
+    render(<ConversationMessages messages={[
+      { id: 'prompt', turnId: 'turn-one', role: 'user', userKind: 'prompt', time: '13:01', body: '继续汇总' },
+      ...notices, final,
+    ]} artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} />);
+    expect(screen.getByText('继续汇总').closest('.conversation-run')).toBeNull();
+    expect(screen.queryAllByRole('article', { name: /的结果已加入本轮对话/ })).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    expect(screen.getAllByRole('article', { name: /的结果已加入本轮对话/ })).toHaveLength(count);
+    expect(screen.getByText(final.body).closest('.conversation-run__step')).toBeNull();
+  });
+
+  it('folds completion notifications into the process and portals their help outside clipped rows', () => {
+    const completion = { id: 'completion', turnId: 'turn-one', role: 'user' as const,
+      userKind: 'subagent-completion' as const, time: '13:02', body: '', sourceSubagentLabel: '事实核对' };
+    const view = render(<ConversationMessages messages={[progress, completion, steer, final]}
+      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} />);
+    expect(screen.queryByRole('article', { name: '事实核对 的结果已加入本轮对话' })).toBeNull();
+    expect(screen.getByText(steer.body).closest('[inert]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '展开中间过程' }));
+    const card = screen.getByRole('article', { name: '事实核对 的结果已加入本轮对话' });
+    fireEvent.mouseEnter(card);
+    const tooltip = screen.getByRole('tooltip');
+    expect(tooltip.parentElement).toBe(document.body);
+    expect(card.getAttribute('aria-describedby')).toBe(tooltip.id);
+    expect(view.container.querySelector('[role="tooltip"]')).toBeNull();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    fireEvent.focus(card);
+    expect(screen.getByRole('tooltip')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '收起中间过程' }));
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    expect(card.closest('[inert]')).toBeTruthy();
+    expect(screen.getByText(final.body).closest('.conversation-run__step')).toBeNull();
+  });
+
   it('keeps streaming and steer in order, closes only on a confirmed final, and preserves manual expansion', () => {
     const view = renderWithRawResults(<WorkbenchView {...props({ messages: [progress, steer] })} />);
     expect(hiddenProgress()).toBe(false);

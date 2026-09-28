@@ -541,6 +541,39 @@ class _FrameReader:
         return False
 
 
+@pytest.mark.parametrize("read_only,target", [(True, 0), (False, 2)])
+def test_browser_capacity_uses_authenticated_protocol_transport(read_only, target) -> None:
+    async def exercise() -> None:
+        response = wire.ServerFrame(subagent_capacity=wire.SubagentCapacityResponse(
+            request_id="request:capacity", target=2, occupied=1,
+        ))
+        writer = _FrameWriter()
+        client = TerminalProtocolClient(
+            reader=cast(asyncio.StreamReader, _FrameReader(response)),
+            writer=cast(asyncio.StreamWriter, writer),
+            role=wire.ATTACHMENT_ROLE_CONTROLLER,
+            server=cast(TerminalKernelProtocolServer, object()),
+            session_id="session:one", host_session_id="host:one",
+        )
+        client.attachment_id = "attachment:capacity"
+        client.attachment_generation = 3
+        returned = await client.request("subagent_capacity", wire.SubagentCapacityRequest(
+            request_id="request:capacity", expected_session_id="session:one",
+            expected_host_session_id="host:one", read_only=read_only, target=target,
+        ))
+        sent = wire.ClientFrame.FromString(bytes(writer.written[4:])).subagent_capacity
+        assert sent.attachment_id == "attachment:capacity"
+        assert sent.attachment_generation == 3
+        assert sent.expected_session_id == "session:one"
+        assert sent.expected_host_session_id == "host:one"
+        assert sent.read_only == read_only
+        assert sent.target == target
+        assert returned.subagent_capacity.target == 2
+        assert returned.subagent_capacity.occupied == 1
+
+    asyncio.run(exercise())
+
+
 def test_u2_protocol_frame_counts_complete_typed_prompt_at_eight_mib_boundary() -> None:
     asyncio.run(_exercise_protocol_frame_boundary())
 

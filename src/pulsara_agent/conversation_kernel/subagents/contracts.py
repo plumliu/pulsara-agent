@@ -25,6 +25,9 @@ from pulsara_agent.primitives.context import (
     freeze_json,
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
+from pulsara_agent.llm.model_connections import ModelCallBinding, model_call_binding_to_dict
+from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
+from pulsara_agent.model_input.contracts import MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
 
 
 MAXIMUM_TASK_OBJECTIVE_UTF8_BYTES = 65_536
@@ -204,6 +207,7 @@ def build_subagent_completion_storage_body(
     result_id: str | None,
     result_source: str | None,
     result_summary: str | None,
+    result_data: FrozenJsonValue | None = None,
 ) -> bytes:
     """Build the only durable ROOT completion body accepted by the reader."""
 
@@ -225,11 +229,16 @@ def build_subagent_completion_storage_body(
         summary = _text(
             result_summary or "", "result_summary", MAXIMUM_RESULT_SUMMARY_UTF8_BYTES
         )
+        if len(summary.encode("utf-8")) + (
+            0 if result_data is None else len(canonical_json_bytes(result_data))
+        ) > MAXIMUM_RESULT_SUMMARY_UTF8_BYTES:
+            raise ValueError("result summary and data exceed delivery bound")
         failure: object = None
         result: object = {
             "result_id": result_id,
             "source": source.value,
             "summary": summary,
+            **({"data": result_data} if result_data is not None else {}),
         }
     else:
         reason = SubagentTerminalReason(terminal_reason or "")
@@ -248,7 +257,7 @@ def build_subagent_completion_storage_body(
         }
         result = None
         if any(
-            value is not None for value in (result_id, result_source, result_summary)
+            value is not None for value in (result_id, result_source, result_summary, result_data)
         ):
             raise ValueError("failed task cannot carry a result")
     return canonical_json_bytes(
@@ -303,7 +312,8 @@ def validate_subagent_completion_storage_body(value: bytes) -> Mapping[str, obje
         raise ValueError("subagent completion failure is not closed")
     if result is not None and (
         not isinstance(result, dict)
-        or set(result) != {"result_id", "source", "summary"}
+        or not {"result_id", "source", "summary"}.issubset(result)
+        or set(result) - {"result_id", "source", "summary", "data"}
     ):
         raise ValueError("subagent completion result is not closed")
     rebuilt = build_subagent_completion_storage_body(
@@ -325,6 +335,7 @@ def validate_subagent_completion_storage_body(value: bytes) -> Mapping[str, obje
         result_id=(None if result is None else str(result.get("result_id") or "")),
         result_source=(None if result is None else str(result.get("source") or "")),
         result_summary=(None if result is None else str(result.get("summary") or "")),
+        result_data=(None if result is None or "data" not in result else freeze_json(result["data"])),
     )
     if rebuilt != value:
         raise ValueError("subagent completion body is not canonical")
@@ -455,6 +466,7 @@ def derive_subagent_batch_initial_dispositions(
 class SubagentContextMode(StrEnum):
     NONE = "NONE"
     LAST_N = "LAST_N"
+    WORKER_HISTORY = "WORKER_HISTORY"
 
 
 class SubagentProfileKind(StrEnum):
@@ -636,6 +648,8 @@ class PreparedSubagentTaskStart:
     dependency_context: FrozenDependencyResultContext | None = dataclass_field(
         repr=False
     )
+    terminal_material_body: str | None = dataclass_field(repr=False)
+    worker_history_body: str | None = dataclass_field(repr=False)
     occurred_at: datetime
     actor_id: str
     event_id: str
@@ -659,6 +673,10 @@ class PreparedSubagentTaskStart:
             self.dependency_context.target_task_id != self.task_id
         ):
             raise ValueError("subagent task start dependency context is foreign")
+        if self.terminal_material_body is not None:
+            _text(self.terminal_material_body, "terminal_material_body", MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES)
+        if self.worker_history_body is not None:
+            _text(self.worker_history_body, "worker_history_body", MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES)
         expected_event = _stable_id(
             "subagent-start-event",
             self.session_id,
@@ -676,6 +694,7 @@ class PreparedSubagentLaunch:
     task_start: PreparedSubagentTaskStart = dataclass_field(repr=False)
     child_turn_id: str
     configured_model_identity: str
+    accepted_model_target_fact: FrozenSubagentModelTarget = dataclass_field(repr=False)
     parent_permission_snapshot: FrozenRunPermissionSnapshot = dataclass_field(
         repr=False
     )
@@ -683,6 +702,8 @@ class PreparedSubagentLaunch:
     def __post_init__(self) -> None:
         _text(self.child_turn_id, "child_turn_id", 512)
         _text(self.configured_model_identity, "configured_model_identity", 512)
+        if not isinstance(self.accepted_model_target_fact, FrozenSubagentModelTarget):
+            raise TypeError("subagent launch target must be the accepted frozen fact")
         if self.parent_permission_snapshot.inherited_from_turn_id is not None:
             raise ValueError("subagent launch parent permission fact is invalid")
         if self.child_turn_id != stable_subagent_turn_id(
@@ -703,6 +724,8 @@ def build_subagent_task_start(
     profile: SubagentProfileKind,
     parent_context: FrozenSubagentParentContextSelection,
     dependency_context: FrozenDependencyResultContext | None,
+    terminal_material_body: str | None = None,
+    worker_history_body: str | None = None,
     occurred_at: datetime,
     actor_id: str,
 ) -> PreparedSubagentTaskStart:
@@ -719,6 +742,8 @@ def build_subagent_task_start(
         profile,
         parent_context,
         dependency_context,
+        terminal_material_body,
+        worker_history_body,
         occurred_at,
         actor_id,
         event_id,
@@ -842,6 +867,7 @@ class FrozenSubagentParentContextSelection:
     last_n_turns: int | None
     selected_units: tuple[FrozenRootConversationContextUnitFact, ...]
     rendered_body: str | None
+    history_task_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.mode is SubagentContextMode.NONE:
@@ -851,18 +877,24 @@ class FrozenSubagentParentContextSelection:
                     for value in (
                         self.last_n_turns,
                         self.rendered_body,
+                        self.history_task_id,
                     )
                 )
                 or self.selected_units
             ):
                 raise ValueError("NONE parent context must be absent")
         elif self.mode is SubagentContextMode.LAST_N:
+            if self.history_task_id is not None:
+                raise ValueError("LAST_N cannot also select worker history")
             if self.last_n_turns is None or not 1 <= self.last_n_turns <= 3:
                 raise ValueError("LAST_N parent context requires 1..3 turns")
             if self.selected_units and self.rendered_body is None:
                 raise ValueError("non-empty LAST_N selection requires a source")
             if not self.selected_units and self.rendered_body is not None:
                 raise ValueError("empty LAST_N selection must remain absent")
+        elif self.mode is SubagentContextMode.WORKER_HISTORY:
+            if self.last_n_turns is not None or self.rendered_body is not None or self.selected_units or not self.history_task_id:
+                raise ValueError("WORKER_HISTORY requires one task source")
         else:
             raise TypeError("unknown parent context mode")
 
@@ -891,8 +923,9 @@ def build_parent_context_selection(
     *,
     mode: SubagentContextMode,
     last_n_turns: int | None,
+    history_task_id: str | None = None,
 ) -> FrozenSubagentParentContextSelection:
-    if mode is SubagentContextMode.NONE:
+    if mode in {SubagentContextMode.NONE, SubagentContextMode.WORKER_HISTORY}:
         selected: tuple[FrozenRootConversationContextUnitFact, ...] = ()
         body = None
     else:
@@ -900,7 +933,7 @@ def build_parent_context_selection(
             raise ValueError("LAST_N parent context requires 1..3 turns")
         selected = subject.ordered_eligible_units[-last_n_turns:]
         body = _render_parent_units(selected) if selected else None
-    return FrozenSubagentParentContextSelection(mode, last_n_turns, selected, body)
+    return FrozenSubagentParentContextSelection(mode, last_n_turns, selected, body, history_task_id)
 
 
 def parent_context_source_identity_digest(
@@ -935,6 +968,7 @@ def parent_context_selection_identity_digest(
             "subject": parent_context_call_subject_identity_digest(subject),
             "mode": selection.mode.value,
             "last_n": selection.last_n_turns,
+            **({"history_task_id": selection.history_task_id} if selection.history_task_id is not None else {}),
             "units": tuple(
                 _root_context_unit_identity_digest(item)
                 for item in selection.selected_units
@@ -954,6 +988,9 @@ class PreparedSubagentTaskDraft:
     objective: str
     context: FrozenSubagentParentContextSelection
     dependency_task_ids: tuple[str, ...]
+    material_source_task_ids: tuple[str, ...]
+    model_call_binding: ModelCallBinding
+    model_target_fact: FrozenSubagentModelTarget
     initial_status: SubagentTaskStatus
     pending_reason: str | None
     terminal_reason: str | None
@@ -965,6 +1002,10 @@ class PreparedSubagentTaskDraft:
             raise TypeError("subagent task profile must be closed")
         if not isinstance(self.context, FrozenSubagentParentContextSelection):
             raise TypeError("subagent task context selection must be frozen")
+        if not isinstance(self.model_call_binding, ModelCallBinding) or not isinstance(
+            self.model_target_fact, FrozenSubagentModelTarget
+        ):
+            raise TypeError("subagent task model target must be frozen")
         if not isinstance(self.initial_status, SubagentTaskStatus):
             raise TypeError("subagent task status must be closed")
         if self.task_key is not None:
@@ -986,6 +1027,10 @@ class PreparedSubagentTaskDraft:
             raise ValueError("dependency identity is invalid")
         if self.task_id in self.dependency_task_ids:
             raise ValueError("task cannot depend on itself")
+        if len(self.material_source_task_ids) > 16 or len(set(self.material_source_task_ids)) != len(self.material_source_task_ids):
+            raise ValueError("terminal material references are invalid")
+        if self.task_id in self.material_source_task_ids:
+            raise ValueError("task cannot use itself as terminal material")
         if self.initial_status.terminal != (self.terminal_reason is not None):
             raise ValueError("task terminal reason does not match initial status")
         if (
@@ -1070,6 +1115,7 @@ class PreparedSubagentTaskBatchAdmission:
                 self.parent_call_subject,
                 mode=item.context.mode,
                 last_n_turns=item.context.last_n_turns,
+                history_task_id=item.context.history_task_id,
             )
             for item in self.ordered_tasks
         ):
@@ -1091,6 +1137,9 @@ def _subagent_task_draft_identity_digest(
             "objective": draft.objective,
             "context": parent_context_selection_identity_digest(subject, draft.context),
             "dependencies": draft.dependency_task_ids,
+            "materials": draft.material_source_task_ids,
+            "model_call_binding": model_call_binding_to_dict(draft.model_call_binding),
+            "model_target_fact": draft.model_target_fact.model_dump(mode="json"),
             "initial_status": draft.initial_status.value,
             "pending_reason": draft.pending_reason,
             "terminal_reason": draft.terminal_reason,
@@ -1135,6 +1184,7 @@ class FrozenSubagentResultPublicFact:
     source: SubagentResultSource
     producer_entry_id: str
     summary: str
+    data: FrozenJsonValue | None
     output_preview: str | None
     diagnostics: FrozenJsonValue
     source_assistant_content_digest: str | None
@@ -1147,6 +1197,10 @@ class FrozenSubagentResultPublicFact:
         if not isinstance(self.source, SubagentResultSource):
             raise TypeError("subagent result source must be closed")
         _text(self.summary, "summary", MAXIMUM_RESULT_SUMMARY_UTF8_BYTES)
+        if len(self.summary.encode("utf-8")) + (
+            0 if self.data is None else len(canonical_json_bytes(self.data))
+        ) > MAXIMUM_RESULT_SUMMARY_UTF8_BYTES:
+            raise ValueError("result summary and data exceed delivery bound")
         if self.output_preview is not None:
             _text(
                 self.output_preview,
@@ -1192,6 +1246,7 @@ class FrozenSubagentResultPublicFact:
                 "source": self.source.value,
                 "producer_entry_id": self.producer_entry_id,
                 "summary": self.summary,
+                "data": self.data,
                 "output_preview": self.output_preview,
                 "diagnostics": self.diagnostics,
                 "source_assistant_content_digest": self.source_assistant_content_digest,
@@ -1242,17 +1297,23 @@ def build_subagent_result_public_fact(
     source: SubagentResultSource,
     producer_entry_id: str,
     summary: str,
+    data: object = None,
+    data_present: bool = False,
     output_preview: str | None = None,
     diagnostics: object = (),
     source_assistant_content_digest: str | None = None,
 ) -> FrozenSubagentResultPublicFact:
     frozen = freeze_json(diagnostics)
+    frozen_data = freeze_json(data) if data_present else None
+    if frozen_data is not None and not isinstance(frozen_data, FrozenJsonObjectFact):
+        raise ValueError("result data must be a JSON object")
     payload = {
         "task_id": task_id,
         "result_id": result_id,
         "source": source.value,
         "producer_entry_id": producer_entry_id,
         "summary": summary,
+        "data": frozen_data,
         "output_preview": output_preview,
         "diagnostics": frozen,
         "source_assistant_content_digest": source_assistant_content_digest,
@@ -1263,6 +1324,7 @@ def build_subagent_result_public_fact(
         source,
         producer_entry_id,
         summary,
+        frozen_data,
         output_preview,
         frozen,
         source_assistant_content_digest,
@@ -1279,6 +1341,7 @@ class FrozenDependencyResultContextItem:
     result_id: str
     result_source: SubagentResultSource
     summary: str
+    data: FrozenJsonValue | None
     result_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -1323,6 +1386,7 @@ def dependency_result_context_identity_digest(
                 "result_id": item.result_id,
                 "source": item.result_source.value,
                 "summary": item.summary,
+                "data": item.data,
                 "result_fingerprint": item.result_fingerprint,
             },
         )
@@ -1353,6 +1417,7 @@ def _render_dependency_results(
                         "result_id": item.result_id,
                         "result_source": item.result_source.value,
                         "summary": item.summary,
+                        **({"data": item.data} if item.data is not None else {}),
                     }
                     for item in items
                 ],
@@ -1384,6 +1449,7 @@ def build_dependency_result_context(
                 result_id=str(row["result_id"]),
                 result_source=source,
                 summary=str(row["summary"]),
+                data=(None if row.get("data") is None else freeze_json(row["data"])),
                 result_fingerprint=str(row["result_fingerprint"]),
             )
         )

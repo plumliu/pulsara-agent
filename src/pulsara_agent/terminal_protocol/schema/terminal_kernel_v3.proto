@@ -295,29 +295,6 @@ message ToolAttemptControl {
   string result_entry_id = 5;
 }
 
-message SubagentTaskControl {
-  string task_id = 1;
-  string parent_turn_id = 2;
-  string status = 3;
-  string objective = 4;
-  string result_id = 5;
-  string result_entry_id = 6;
-  bool completion_accepted = 7;
-  string batch_id = 8;
-  string task_key = 9;
-  string label = 10;
-  string profile = 11;
-  string display_role = 12;
-  string context_mode = 13;
-  uint32 context_last_n_turns = 14;
-  string pending_reason = 15;
-  string terminal_reason = 16;
-  string result_source = 17;
-  string result_summary = 18;
-  repeated string dependency_task_ids = 19;
-  string terminal_public_detail = 20;
-}
-
 message ContextCompactionControl {
   string turn_id = 1;
   string context_binding_revision_id = 2;
@@ -338,14 +315,17 @@ message CanonicalControl {
   repeated PromptQueueControl prompt_queue = 3;
   uint64 prompt_queue_total_count = 4;
   repeated ToolAttemptControl tool_attempts = 5;
-  repeated SubagentTaskControl subagent_tasks = 6;
-  reserved 7, 8;
+  reserved 6, 7, 8;
   PlanWorkflowControl active_plan_workflow = 9;
   PlanInteractionControl open_plan_interaction = 10;
   PlanHandoffControl latest_plan_handoff = 11;
   ContextCompactionControl latest_context_compaction = 12;
   LatestRootTurnControl latest_root_turn = 13;
   InitialContextBase initial_context_base = 14;
+  uint64 task_total_count = 15;
+  uint64 task_unreceived_count = 16;
+  uint64 active_turn_total_count = 17;
+  uint64 tool_attempt_total_count = 18;
 }
 
 message InitialContextBase {
@@ -442,6 +422,9 @@ message CommittedObservationProjection {
   string subject_id = 6;
   CanonicalEntry entry = 7;
   CanonicalControl current_control = 8;
+  string affected_subagent_task_id = 9;
+  string affected_subagent_batch_id = 11;
+  uint64 control_read_event_sequence = 10;
 }
 
 enum LiveChannelKind {
@@ -495,6 +478,7 @@ message LiveToolCallEndPayload {
 }
 message LiveToolResultStartPayload {
   string block_identity = 1; string tool_call_id = 2; string attempt_id = 3;
+  string assistant_entry_id = 4;
 }
 message LiveToolResultDeltaPayload { string block_identity = 1; string text = 2; }
 message LiveToolResultEndPayload {
@@ -724,6 +708,22 @@ message LiveControlSnapshotRequest {
 message LiveControlSnapshotResponse {
   string request_id = 1;
   SessionLiveControlSnapshot snapshot = 2;
+}
+
+message SubagentCapacityRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+  string expected_session_id = 4;
+  string expected_host_session_id = 5;
+  uint32 target = 6;
+  bool read_only = 7;
+}
+
+message SubagentCapacityResponse {
+  string request_id = 1;
+  uint32 target = 2;
+  uint32 occupied = 3;
 }
 
 enum CommandKind {
@@ -1198,6 +1198,7 @@ message ClientFrame {
     ReadToolArtifactRequest read_tool_artifact = 14;
     ListBackgroundProcessesRequest list_background_processes = 15;
     ReadBackgroundProcessLogRequest read_background_process_log = 16;
+    SubagentCapacityRequest subagent_capacity = 17;
   }
 }
 
@@ -1225,5 +1226,6 @@ message ServerFrame {
     ToolArtifactTextChunk tool_artifact = 14;
     BackgroundProcessPage background_processes = 15;
     BackgroundProcessLog background_process_log = 16;
+    SubagentCapacityResponse subagent_capacity = 17;
   }
 }

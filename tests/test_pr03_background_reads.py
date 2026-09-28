@@ -137,6 +137,7 @@ class _ReadCore:
                 "blocked_count": 0,
                 "single_task_label": None,
                 "total_count": 2,
+                "read_event_sequence": 17,
             },
             {
                 "batch_id": "batch:b",
@@ -153,6 +154,7 @@ class _ReadCore:
                 "blocked_count": 0,
                 "single_task_label": "单节点",
                 "total_count": 2,
+                "read_event_sequence": 17,
             },
         ]
 
@@ -175,6 +177,7 @@ class _ReadCore:
             {
                 "id": "entry:1",
                 "turn_id": "turn:child",
+                "turn_status": "RUNNING",
                 "entry_sequence": 10,
                 "entry_kind": "ASSISTANT_TOOL_REQUEST",
                 "accepted_at": datetime(2026, 9, 11, 1, 1, tzinfo=timezone.utc),
@@ -188,6 +191,7 @@ class _ReadCore:
             {
                 "id": "entry:2",
                 "turn_id": "turn:child",
+                "turn_status": "RUNNING",
                 "entry_sequence": 11,
                 "entry_kind": "TOOL_RESULT",
                 "accepted_at": datetime(2026, 9, 11, 1, 2, tzinfo=timezone.utc),

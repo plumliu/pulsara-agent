@@ -1,6 +1,8 @@
 'use client';
 
 import { VisualizationGallery, type ReadVisualizationThumbnail } from './visualization-gallery';
+import { createPortal } from 'react-dom';
+import { usePromptHover } from '../lib/prompt-hover';
 
 
 import { CapabilityInteractionEditor } from './capability-interaction-editor';
@@ -838,6 +840,7 @@ const subagentStatusLabels: Record<SubagentRun['status'], string> = {
   interrupted: '已中断',
   blocked: '依赖未完成',
   ended: '已结束',
+  unknown: '状态待读取',
 };
 
 function SubagentRunCard({
@@ -966,49 +969,52 @@ const unavailableVisualization = async (): Promise<string> => {
 
 
 
+function SubagentCompletionEvent({ message, visible }: { message: Message; visible: boolean }) {
+  const { trigger, details, position, show, hide, keep, dismiss } = usePromptHover<HTMLElement>(310);
+  useEffect(() => { if (!visible) dismiss(); }, [visible, dismiss]);
+  const helpId = `${message.id}-subagent-completion-help`;
+  const sourceResult = message.sourceSubagentLabel ? `${message.sourceSubagentLabel} 的结果` : '子任务结果';
+  const title = message.sourceSubagentRelation === 'previous'
+    ? `上一轮 ${sourceResult}已加入本轮对话`
+    : message.sourceSubagentRelation === 'earlier'
+      ? `此前 ${sourceResult}已加入本轮对话`
+      : `${sourceResult}已加入本轮对话`;
+  return <>
+    <article ref={trigger} className="subagent-completion-event" aria-label={title}
+      aria-describedby={position && visible ? helpId : undefined} tabIndex={0}
+      onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}>
+      <span className="subagent-completion-event__icon"><GitFork size={13} /></span>
+      <div className="subagent-completion-event__copy"><strong>{title}</strong></div>
+      <time>{message.time}</time>
+    </article>
+    {position && visible && createPortal(<span ref={details} id={helpId}
+      className="subagent-completion-event__tooltip" role="tooltip" data-above={position.above}
+      style={{ left: position.left, top: position.top, translate: position.above ? '0 calc(-100% - 7px)' : '0 7px' }}
+      onMouseEnter={keep} onMouseLeave={hide}>
+      该结果已记录到当前对话，不会重新运行子任务。
+    </span>, document.body)}
+  </>;
+}
+
 function UserMessage({
   message,
   label = '你',
   pendingContent,
   deliveryStatus,
   onReadPromptImage = unavailablePromptImage,
+  visible = true,
 }: {
   message: Message;
   label?: string;
   pendingContent?: LocalPromptSubmission['content'];
   deliveryStatus?: string;
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
+  visible?: boolean;
 }) {
   const content = pendingContent ?? message.promptContent;
   const sourceTextStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const;
   if (message.userKind === 'subagent-completion') {
-    const helpId = `${message.id}-subagent-completion-help`;
-    const sourceResult = message.sourceSubagentLabel
-      ? `${message.sourceSubagentLabel} 的结果`
-      : '子任务结果';
-    const title = message.sourceSubagentRelation === 'previous'
-      ? `上一轮 ${sourceResult}已加入本轮对话`
-      : message.sourceSubagentRelation === 'earlier'
-        ? `此前 ${sourceResult}已加入本轮对话`
-        : `${sourceResult}已加入本轮对话`;
-    return (
-      <article
-        className="subagent-completion-event"
-        aria-label={title}
-        aria-describedby={helpId}
-        tabIndex={0}
-      >
-        <span className="subagent-completion-event__icon"><GitFork size={13} /></span>
-        <div className="subagent-completion-event__copy">
-          <strong>{title}</strong>
-          <small>子任务结果已记录到当前对话</small>
-        </div>
-        <time>{message.time}</time>
-        <span id={helpId} className="subagent-completion-event__tooltip" role="tooltip">
-          该结果已记录到当前对话；这不是你发送的新消息，也不会重新运行子任务。
-        </span>
-      </article>
-    );
+    return <SubagentCompletionEvent message={message} visible={visible} />;
   }
 
   if (message.userKind === 'steer') {
@@ -1201,7 +1207,7 @@ function isCompleteAnswer(message: Message, taskFinalAnswerId?: string): boolean
 
 function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel, taskFinalAnswerId }: {
   messages: Message[];
-  renderMessage: (message: Message, startsRun: boolean) => ReactNode;
+  renderMessage: (message: Message, startsRun: boolean, visible?: boolean) => ReactNode;
   focusRequest?: object | number;
   taskFinalAnswerId?: string;
   completed: boolean;
@@ -1224,7 +1230,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     return message.reasoning?.length || message.traces?.length || message.subagentRuns?.length
       ? [{ ...message, id: `${message.id}:process`, body: '', forkEligible: false, visualizations: undefined }] : [];
   });
-  const hasProcess = process.some((message) => message.role === 'assistant');
+  const hasProcess = process.some((message) => message.role === 'assistant' || message.userKind === 'subagent-completion');
   if (!hasProcess) return renderMessage(answer!, true);
   return <section className="conversation-run" data-process-expanded={disclosure.expanded}>
     <AssistantHeading message={messages[0]} response={Boolean(messages[0].body.trim())} label={assistantLabel} />
@@ -1234,12 +1240,14 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
       onClick={() => setDisclosure({ ...disclosure, expanded: !disclosure.expanded })}>
       <span>{complete ? '处理过程' : '中间过程'}</span><ChevronRight size={13} />
     </button>
-    {process.map((message) => <div key={message.id}
-      className="conversation-run__step"
-      aria-hidden={message.role === 'assistant' && !disclosure.expanded && !message.visualizations?.length}
-      inert={message.role === 'assistant' && !disclosure.expanded && !message.visualizations?.length}>
-      <div className="conversation-run__step-content">{renderMessage(message, false)}</div>
-    </div>)}
+    {process.map((message) => {
+      // User guidance stays visible; tool-result notifications belong to the process.
+      const hidden = !disclosure.expanded && !message.visualizations?.length
+        && (message.role === 'assistant' || message.userKind === 'subagent-completion');
+      return <div key={message.id} className="conversation-run__step" aria-hidden={hidden} inert={hidden}>
+        <div className="conversation-run__step-content">{renderMessage(message, false, !hidden)}</div>
+      </div>;
+    })}
     {answer && renderMessage({ ...answer, reasoning: undefined, traces: undefined, subagentRuns: undefined }, false)}
   </section>;
 }
@@ -1312,10 +1320,10 @@ export function ConversationMessages({
     () => findToolChainConnections(messages, contextCompactionIndex), [messages, contextCompactionIndex],
   );
   const mcpToolRefs = useMemo(() => buildMcpToolRefIndex(messages), [messages]);
-  const renderMessage = (message: Message, startsRun: boolean) => (
+  const renderMessage = (message: Message, startsRun: boolean, visible = true) => (
     <div key={message.id} data-source-entry={message.id} style={{ display: 'contents' }}>
       {message.role === 'user'
-        ? <UserMessage message={message} label={userLabel} onReadPromptImage={onReadPromptImage} />
+        ? <UserMessage message={message} label={userLabel} onReadPromptImage={onReadPromptImage} visible={visible} />
         : <AssistantMessage message={message} responseActionEligible={isCompleteAnswer(message, taskFinalAnswerId)} startsAssistantRun={startsRun}
             joinsPreviousToolChain={toolChainConnections.before.has(message.id)}
             joinsNextToolChain={toolChainConnections.after.has(message.id)}
@@ -1351,7 +1359,7 @@ export function ConversationMessages({
     const newInput = message.role === 'user'
       && message.userKind !== 'steer' && message.userKind !== 'subagent-completion';
     if (newInput || (run.length && message.turnId && run[0].turnId !== message.turnId)) flush();
-    if (message.role === 'user' && !run.length) content.push(renderMessage(message, false));
+    if (message.role === 'user' && message.userKind !== 'subagent-completion' && !run.length) content.push(renderMessage(message, false));
     else run.push(message);
     if (isCompleteAnswer(message, taskFinalAnswerId)) flush();
   });

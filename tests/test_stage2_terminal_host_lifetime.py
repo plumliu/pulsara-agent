@@ -11,6 +11,7 @@ import shlex
 import sys
 from threading import Event
 from time import monotonic
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -48,6 +49,8 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.message import ToolResultState
+
+
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import (
     RunPermissionAdmissionSource,
@@ -61,6 +64,67 @@ from pulsara_agent.ports.tool_execution import (
 )
 from tests.support.round3 import authorize_direct_tool, invoke_direct_tool
 
+
+def test_capacity_raise_releases_host_lock_before_child_todo_activation() -> None:
+    from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
+    from pulsara_agent.conversation_kernel.todo_runtime import build_child_activation
+
+    async def exercise():
+        host = object.__new__(KernelHostSession)
+        host._lock = asyncio.Lock()
+        host._closing = host._closed = False
+        host._deadlines = KernelExecutionDeadlineFactory()
+        host._lease = SimpleNamespace(guard=object())
+        validated, activated = [], []
+
+        def validate(guard, **kwargs):
+            assert host._lock.locked()
+            validated.append(guard)
+
+        class InlineIO:
+            async def run(self, operation, *args, **kwargs):
+                return operation(*args, **kwargs)
+
+        host.repository = SimpleNamespace(validate_host_writer=validate)
+        host._io = InlineIO()
+        host._tools = SimpleNamespace(
+            todo_owner=SimpleNamespace(activate_child_run=activated.append),
+            offer_todo_close=lambda value: None,
+        )
+        manager = object.__new__(KernelSubagentManager)
+        manager._lock = asyncio.Lock()
+        manager._state_changed = asyncio.Condition(manager._lock)
+        manager._state_revision = 0
+        manager._capacity_target = 1
+        manager._tasks = {}
+        manager._launch_permits = {}
+        manager._closed = False
+        manager._scheduler_task = None
+        manager._scheduler_reschedule = False
+        manager._guard = SimpleNamespace(session_id="session:capacity")
+        host._subagents = manager
+        prepared = build_child_activation(
+            session_id="session:capacity", subagent_task_id="task:child",
+            exact_turn_id="turn:child", exact_initial_entry_id="entry:child",
+            exact_context_binding_revision_id="revision:child",
+        )
+
+        async def launch():
+            # This is the production finalizer called by child turn admission.
+            assert not host._lock.locked()
+            await host._finalize_todo_run_activation(
+                prepared, SimpleNamespace(turn_id="turn:child", entry_id="entry:child"),
+            )
+
+        manager._start_available_tasks_worker = launch
+        assert await asyncio.wait_for(host.set_subagent_capacity(2), 1) == (2, 0)
+        assert activated == [prepared]
+        assert validated == [host._lease.guard]
+        assert await asyncio.wait_for(host.subagent_capacity_state(), 1) == (2, 0)
+        assert await host.set_subagent_capacity(2) == (2, 0)
+        assert activated == [prepared]  # An unchanged target does not wake a launch.
+
+    asyncio.run(exercise())
 
 def _name(prefix: str) -> str:
     return f"{prefix}:{uuid4().hex}"

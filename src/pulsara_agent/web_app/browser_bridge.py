@@ -740,6 +740,24 @@ class LocalBrowserBridge:
             await connection.controller.request("query_command", request)
         )
 
+    async def subagent_capacity(
+        self, connection_id: str, body: dict[str, object]
+    ) -> dict[str, object]:
+        connection = await self._connection(connection_id)
+        read_only = bool(body.get("read_only", False))
+        target = 0 if read_only else _bounded_uint(
+            body.get("target"), "target", minimum=1, maximum=2_147_483_647
+        )
+        request = wire.SubagentCapacityRequest(
+            expected_session_id=_required_string(body, "expected_session_id"),
+            expected_host_session_id=_required_string(body, "expected_host_session_id"),
+            read_only=read_only,
+            target=target,
+        )
+        return protobuf_json(
+            await connection.controller.request("subagent_capacity", request)
+        )
+
     async def read_content(
         self, connection_id: str, body: dict[str, object]
     ) -> dict[str, object]:

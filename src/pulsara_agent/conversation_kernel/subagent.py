@@ -94,6 +94,10 @@ from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding, ModelConnectionId,
+    reasoning_selection_from_dict,
+)
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.conversation_kernel.subagents.contracts import (
@@ -165,6 +169,7 @@ SUBAGENT_TOOL_NAMES = frozenset(
         "spawn_agent",
         "create_agent_tasks",
         "list_agents",
+        "list_agent_models",
         "wait_agent",
         "send_agent_message",
         "stop_agent",
@@ -211,6 +216,8 @@ class _TaskStartMaterial:
     context: FrozenSubagentParentContextSelection
     dependency_task_ids: tuple[str, ...]
     dependency_context: FrozenDependencyResultContext | None = None
+    terminal_material_body: str | None = None
+    worker_history_body: str | None = None
 
 
 @dataclass(slots=True)
@@ -309,6 +316,8 @@ class KernelSubagentManager:
         self._completing: set[str] = set()
         self._batch_admissions: dict[str, _BatchAdmissionAttempt] = {}
         self._scheduler_task: asyncio.Task[None] | None = None
+        self._capacity_target = MAXIMUM_LIVE_SUBAGENTS
+        self._scheduler_reschedule = False
         self._lock = asyncio.Lock()
         self._state_changed = asyncio.Condition(self._lock)
         self._state_revision = 0
@@ -316,6 +325,10 @@ class KernelSubagentManager:
         self._root_completion_set: set[str] = set()
         self._root_completion_turn_id: str | None = None
         self._root_completion_delivery_open = False
+        # Before a ROOT response has a measured follow-up budget, expose only
+        # one completion. The Runner raises this per-turn physical batch size
+        # after quoting the exact model's input budget.
+        self._root_completion_delivery_limit = 1
         self._closed = False
         self._list_cursor_secret = secrets.token_bytes(32)
         self._hook_dispatcher = hook_dispatcher
@@ -334,6 +347,39 @@ class KernelSubagentManager:
 
         self._state_revision += 1
         self._state_changed.notify_all()
+
+    async def capacity_state(self) -> tuple[int, int]:
+        """Return the current Host-local target and occupied worker slots."""
+
+        async with self._lock:
+            occupied = {task_id for task_id, item in self._tasks.items() if item.status == "ACTIVE"}
+            return self._capacity_target, len(occupied | self._launch_permits.keys())
+
+    async def set_capacity_target(self, target: int) -> bool:
+        """Commit the target; report whether the caller must wake the scheduler.
+
+        This short phase may run under the Host owner lock. Launch settlement
+        must run after that lock is released: TODO activation needs it too.
+        """
+
+        if isinstance(target, bool) or not isinstance(target, int) or not 1 <= target <= 2**31 - 1:
+            raise ValueError("subagent capacity must be a positive protocol integer")
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("subagent manager is closed")
+            if target == self._capacity_target:
+                return False
+            raised = target > self._capacity_target
+            self._capacity_target = target
+            if raised:
+                # A scheduler can be between its final query and task completion.
+                # The pending bit is consumed only after that scheduler settles.
+                self._scheduler_reschedule = True
+            self._notify_state_changed_locked()
+        return raised
+
+    async def fill_available_capacity(self) -> None:
+        await self._start_available_tasks()
 
     def _enqueue_root_completion_locked(self, task_id: str) -> bool:
         if task_id in self._root_completion_set:
@@ -443,6 +489,16 @@ class KernelSubagentManager:
                 raise RuntimeError("another ROOT completion phase is still open")
             self._root_completion_turn_id = turn_id
             self._root_completion_delivery_open = True
+            self._root_completion_delivery_limit = 1
+            self._notify_state_changed_locked()
+
+    async def set_root_completion_delivery_limit(self, turn_id: str, maximum_items: int) -> None:
+        if not 1 <= maximum_items <= ROOT_COMPLETION_SUFFIX_BATCH_ITEMS:
+            raise ValueError("ROOT completion delivery batch is outside its existing bound")
+        async with self._state_changed:
+            if self._root_completion_turn_id != turn_id or not self._root_completion_delivery_open:
+                raise RuntimeError("ROOT completion phase is not open")
+            self._root_completion_delivery_limit = maximum_items
             self._notify_state_changed_locked()
 
     async def seal_root_completion_delivery(self, turn_id: str) -> int:
@@ -455,7 +511,7 @@ class KernelSubagentManager:
             ):
                 raise RuntimeError("ROOT completion phase is not open")
             pending = min(
-                len(self._root_completion_queue), ROOT_COMPLETION_SUFFIX_BATCH_ITEMS
+                len(self._root_completion_queue), self._root_completion_delivery_limit
             )
             self._root_completion_delivery_open = False
             self._notify_state_changed_locked()
@@ -502,14 +558,15 @@ class KernelSubagentManager:
             self._root_completion_delivery_open = False
             self._notify_state_changed_locked()
 
-    async def snapshot_pending_root_completions(self, turn_id: str) -> tuple[str, ...]:
+    async def snapshot_pending_root_completions(self, turn_id: str, *, for_delivery: bool = False) -> tuple[str, ...]:
         async with self._lock:
             if (
                 self._root_completion_turn_id != turn_id
                 or not self._root_completion_delivery_open
             ):
                 return ()
-            return tuple(self._root_completion_queue)
+            pending = tuple(self._root_completion_queue)
+            return pending[:self._root_completion_delivery_limit] if for_delivery else pending
 
     async def retire_root_completion(self, task_id: str) -> bool:
         async with self._state_changed:
@@ -606,6 +663,8 @@ class KernelSubagentManager:
             parent_call_subject=material.parent_call_subject,
             parent_context_selection=material.context,
             dependency_context=material.dependency_context,
+            terminal_material_body=material.terminal_material_body,
+            worker_history_body=material.worker_history_body,
         )
 
     def profile_kind(self, *, task_id: str) -> SubagentProfileKind:
@@ -652,6 +711,16 @@ class KernelSubagentManager:
                         material.dependency_context
                     )
                 ),
+            ),
+            build_subagent_context_source(
+                kind=ContextSourceKind.TERMINAL_MATERIAL,
+                text=material.terminal_material_body,
+                domain_identity=(None if material.terminal_material_body is None else {"task_id": task_id, "body": material.terminal_material_body}),
+            ),
+            build_subagent_context_source(
+                kind=ContextSourceKind.WORKER_HISTORY,
+                text=material.worker_history_body,
+                domain_identity=(None if material.worker_history_body is None else {"task_id": task_id, "source_task_id": material.context.history_task_id, "body": material.worker_history_body}),
             ),
         )
 
@@ -705,6 +774,8 @@ class KernelSubagentManager:
             )
         if tool_name == "list_agents":
             return await self._list(arguments)
+        if tool_name == "list_agent_models":
+            return _result("SUCCESS", {"models": self._launch_preparation.list_models()})
         if tool_name == "wait_agent":
             return await self._wait(arguments, invocation_context)
         if tool_name == "stop_agent":
@@ -767,6 +838,10 @@ class KernelSubagentManager:
         if arguments.get("task_name") is not None:
             single["task_key"] = arguments["task_name"]
             single["label"] = arguments["task_name"]
+        if "model" in arguments:
+            single["model"] = arguments["model"]
+        if "material_task_ids" in arguments:
+            single["material_task_ids"] = arguments["material_task_ids"]
         result = await self._create_agent_tasks(
             {"tasks": [single]}, invocation_context=invocation_context
         )
@@ -801,6 +876,12 @@ class KernelSubagentManager:
                 "subagent-batch", invocation_context.attempt_id, "batch"
             )
             normalized: list[dict[str, object]] = []
+            parent_binding = await self._io.run(
+                self._repository.read_turn_model_call_binding,
+                self._guard,
+                turn_id=invocation_context.turn_id,
+                deadline_monotonic=self._canonical_deadline(),
+            )
             key_to_id: dict[str, str] = {}
             for ordinal, raw in enumerate(raw_tasks):
                 if not isinstance(raw, Mapping):
@@ -813,6 +894,8 @@ class KernelSubagentManager:
                     "display_role",
                     "context",
                     "depends_on",
+                    "model",
+                    "material_task_ids",
                 }
                 if set(raw) - allowed:
                     raise ValueError("task item has unknown fields")
@@ -838,9 +921,10 @@ class KernelSubagentManager:
                     key_to_id[task_key] = task_id
                 profile = SubagentProfileKind(str(raw.get("profile", "general_worker")))
                 context = raw.get("context", {"mode": "none"})
-                mode, turns = _parse_context(context)
+                mode, turns, history_task_id = _parse_context(context)
                 selection = build_parent_context_selection(
-                    subject, mode=mode, last_n_turns=turns
+                    subject, mode=mode, last_n_turns=turns,
+                    history_task_id=history_task_id,
                 )
                 # Admission-time source quote: no silent shrink to NONE.
                 if (
@@ -850,6 +934,31 @@ class KernelSubagentManager:
                 ):
                     raise ValueError("parent context exceeds source bound")
                 depends = raw.get("depends_on", [])
+                material_task_ids = raw.get("material_task_ids", [])
+                if (
+                    not isinstance(material_task_ids, list)
+                    or len(material_task_ids) > 16
+                    or any(not isinstance(value, str) or not value for value in material_task_ids)
+                    or len(set(material_task_ids)) != len(material_task_ids)
+                ):
+                    raise ValueError("material_task_ids is invalid")
+                model_value = raw.get("model")
+                if model_value is None:
+                    binding = parent_binding
+                    model_target_fact = self._launch_preparation.inherit_target(subject, binding)
+                else:
+                    if not isinstance(model_value, Mapping) or set(model_value) - {"connection_id", "reasoning"}:
+                        raise ValueError("model selection has an invalid shape")
+                    connection_id = model_value.get("connection_id")
+                    if not isinstance(connection_id, str):
+                        raise ValueError("model connection_id is required")
+                    binding = ModelCallBinding(
+                        ModelConnectionId(connection_id),
+                        reasoning_selection_from_dict(model_value.get("reasoning")),
+                    )
+                    binding, model_target_fact = self._launch_preparation.freeze_target(
+                        binding, use_default="reasoning" not in model_value
+                    )
                 if not isinstance(depends, list) or len(depends) > 16:
                     raise ValueError("depends_on is invalid")
                 normalized.append(
@@ -861,7 +970,10 @@ class KernelSubagentManager:
                         "display_role": raw.get("display_role"),
                         "objective": objective,
                         "selection": selection,
+                        "model_call_binding": binding,
+                        "model_target_fact": model_target_fact,
                         "raw_dependencies": tuple(depends),
+                        "material_source_task_ids": tuple(material_task_ids),
                     }
                 )
             batch_task_ids = {str(item["task_id"]) for item in normalized}
@@ -903,6 +1015,25 @@ class KernelSubagentManager:
                 if row is None:
                     raise ValueError("dependency reference is unknown")
                 external_rows[dependency_id] = row
+            source_ids = tuple(dict.fromkeys(
+                source_id
+                for item in normalized
+                for source_id in (*item["material_source_task_ids"], *((item["selection"].history_task_id,) if item["selection"].history_task_id else ()))
+            ))
+            for source_id in source_ids:
+                if source_id in batch_task_ids:
+                    raise ValueError("terminal material source cannot be created in the same batch")
+                source = external_rows.get(source_id)
+                if source is None:
+                    source = await self._io.run(
+                        self._repository.query_subagent_task,
+                        session_id=self._guard.session_id,
+                        task_id=source_id,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                if source is None or not SubagentTaskStatus(str(source["status"])).terminal:
+                    raise ValueError("terminal material source is unavailable")
+                external_rows[source_id] = source
             dispositions = dict(
                 derive_subagent_batch_initial_dispositions(
                     ordered_tasks=tuple(
@@ -938,6 +1069,9 @@ class KernelSubagentManager:
                         objective=str(item["objective"]),
                         context=item["selection"],
                         dependency_task_ids=tuple(dependency_ids),
+                        material_source_task_ids=item["material_source_task_ids"],
+                        model_call_binding=item["model_call_binding"],
+                        model_target_fact=item["model_target_fact"],
                         initial_status=status,
                         pending_reason=pending_reason,
                         terminal_reason=terminal_reason,
@@ -960,7 +1094,7 @@ class KernelSubagentManager:
                 occurred_at=occurred_at,
                 actor_id=self._host_owner_id,
             )
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, KeyError) as exc:
             return _result("INVALID_ARGUMENTS", {"error": str(exc)})
 
         materials = tuple(
@@ -1129,28 +1263,38 @@ class KernelSubagentManager:
         )
 
     async def _start_available_tasks(self) -> None:
-        async with self._lock:
-            task = self._scheduler_task
-            if task is None or task.done():
-                task = asyncio.create_task(
-                    self._start_available_tasks_worker(),
-                    name=f"kernel-subagent-scheduler:{self._guard.session_id}",
-                )
-                self._scheduler_task = task
         cancellation: asyncio.CancelledError | None = None
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError as exc:
-                cancellation = cancellation or exc
-            except BaseException:
-                break
-        try:
+        while True:
+            async with self._lock:
+                if self._closed:
+                    break
+                task = self._scheduler_task
+                if task is None or task.done():
+                    task = asyncio.create_task(
+                        self._start_available_tasks_worker(),
+                        name=f"kernel-subagent-scheduler:{self._guard.session_id}",
+                    )
+                    self._scheduler_task = task
+                    self._scheduler_reschedule = False
+            # This waiter does not own the shared scheduler's lifetime. Join
+            # its started launch settlements before propagating cancellation.
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+                except BaseException:
+                    break
             task.result()
-        finally:
             async with self._lock:
                 if self._scheduler_task is task:
                     self._scheduler_task = None
+                    rerun = self._scheduler_reschedule and not self._closed
+                    self._scheduler_reschedule = False
+                else:
+                    rerun = not self._closed
+            if not rerun:
+                break
         if cancellation is not None:
             raise cancellation
 
@@ -1165,15 +1309,14 @@ class KernelSubagentManager:
                 # scheduler to fill the slot, so a canonical terminal child no
                 # longer blocks the next accepted task merely because its
                 # coroutine has not returned from final settlement yet.
-                active = sum(item.status == "ACTIVE" for item in self._tasks.values())
-                reserved = len(self._launch_permits)
-                available = MAXIMUM_LIVE_SUBAGENTS - active - reserved
+                occupied = {task_id for task_id, item in self._tasks.items() if item.status == "ACTIVE"}
+                available = self._capacity_target - len(occupied | self._launch_permits.keys())
                 if available <= 0:
                     return
             rows = await self._io.run(
                 self._repository.list_runnable_subagent_tasks,
                 self._guard,
-                maximum_items=available,
+                maximum_items=min(available, 128),
                 deadline_monotonic=self._canonical_deadline(),
             )
             if not rows:
@@ -1182,6 +1325,9 @@ class KernelSubagentManager:
             for row in rows:
                 task_id = str(row["id"])
                 async with self._lock:
+                    occupied = {task_id for task_id, item in self._tasks.items() if item.status == "ACTIVE"}
+                    if len(occupied | self._launch_permits.keys()) >= self._capacity_target:
+                        break
                     material = self._start_materials.get(task_id)
                     if material is None or task_id in self._launch_permits:
                         continue
@@ -1213,7 +1359,18 @@ class KernelSubagentManager:
                         target_task_id=task_id,
                         rows=dependencies,
                     )
-                    material = replace(material, dependency_context=dependency_context)
+                    terminal_body, history_body = await self._io.run(
+                        self._repository.read_subagent_start_sources,
+                        session_id=self._guard.session_id,
+                        task_id=task_id,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                    material = replace(
+                        material,
+                        dependency_context=dependency_context,
+                        terminal_material_body=terminal_body,
+                        worker_history_body=history_body,
+                    )
                     async with self._lock:
                         if self._launch_permits.get(task_id) is not permit:
                             continue
@@ -1231,6 +1388,8 @@ class KernelSubagentManager:
                         profile=material.profile,
                         parent_context=material.context,
                         dependency_context=dependency_context,
+                        terminal_material_body=terminal_body,
+                        worker_history_body=history_body,
                         occurred_at=datetime.now(timezone.utc),
                         actor_id=self._host_owner_id,
                     )
@@ -1985,6 +2144,14 @@ class KernelSubagentManager:
                     await self.offer_subagent_completion(task_id)
                     return accepted
                 if confirmation.kind is TurnAdmissionConfirmationKind.CONFLICT:
+                    # A new Host may have interrupted the task after this
+                    # process lost its writer. Retire that old execution via
+                    # the existing stale-owner path; never overwrite its winner.
+                    await self._io.run(
+                        self._repository.validate_host_writer,
+                        self._guard,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
                     raise ConversationKernelConflict(
                         "subagent cancellation winner conflicts"
                     )
@@ -2206,6 +2373,11 @@ class KernelSubagentManager:
                     "result_id": item.get("result_id"),
                     "result_source": item.get("result_source"),
                     "result_summary": item.get("result_summary"),
+                    "result_data": item.get("result_data"),
+                    "model_call_binding": item.get("model_call_binding"),
+                    "model_target": item.get("model_target_fact"),
+                    "material_refs": item.get("material_refs"),
+                    "history_source_task_id": item.get("history_source_task_id"),
                     "completion_accepted": (
                         item.get("accepted_root_entry_id") is not None
                     ),
@@ -2677,13 +2849,15 @@ class KernelSubagentManager:
         """
 
         summary = arguments.get("summary")
+        data_present = "data" in arguments
+        data = arguments.get("data")
         preview = arguments.get("output_preview")
         diagnostics = arguments.get("diagnostics", [])
         try:
             if (
                 not isinstance(summary, str)
                 or not summary
-                or len(summary.encode("utf-8")) > 16_384
+                or len(summary.encode("utf-8")) + (len(canonical_json_bytes(data)) if data_present else 0) > 16_384
                 or (preview is not None and not isinstance(preview, str))
                 or (isinstance(preview, str) and len(preview.encode("utf-8")) > 32_768)
                 or not isinstance(diagnostics, list)
@@ -2752,6 +2926,8 @@ class KernelSubagentManager:
             source=SubagentResultSource.EXPLICIT,
             producer_entry_id=result_entry_id,
             summary=summary,
+            data=data,
+            data_present=data_present,
             output_preview=preview,
             diagnostics=diagnostics,
         )
@@ -3075,7 +3251,7 @@ class KernelSubagentManager:
                 await self._retire_canonical_terminal_dormant_tasks(causal_candidates)
             async with self._state_changed:
                 self._notify_state_changed_locked()
-            # TODO child ownership is the same four-slot physical resource as
+            # TODO child ownership follows the manager's physical slots.  Release
             # live execution.  Release it before recursively admitting work
             # from the newly opened dependency frontier.
             await self._close_todo_child_run(task_id)
@@ -3316,20 +3492,25 @@ def _stable_id(namespace: str, *parts: str) -> str:
     return f"{namespace}:" + digest.hexdigest()
 
 
-def _parse_context(value: object) -> tuple[SubagentContextMode, int | None]:
-    if not isinstance(value, Mapping) or set(value) - {"mode", "turns"}:
+def _parse_context(value: object) -> tuple[SubagentContextMode, int | None, str | None]:
+    if not isinstance(value, Mapping) or set(value) - {"mode", "turns", "task_id"}:
         raise ValueError("context must be a closed object")
     raw_mode = value.get("mode", "none")
     if raw_mode == "none":
-        if value.get("turns") is not None:
+        if value.get("turns") is not None or value.get("task_id") is not None:
             raise ValueError("NONE context cannot specify turns")
-        return SubagentContextMode.NONE, None
-    if raw_mode != "last_n":
+        return SubagentContextMode.NONE, None, None
+    if raw_mode == "worker_history":
+        task_id = value.get("task_id")
+        if value.get("turns") is not None or not isinstance(task_id, str) or not task_id:
+            raise ValueError("WORKER_HISTORY requires an exact task_id")
+        return SubagentContextMode.WORKER_HISTORY, None, task_id
+    if raw_mode != "last_n" or value.get("task_id") is not None:
         raise ValueError("context mode is invalid")
     turns = value.get("turns")
     if not isinstance(turns, int) or isinstance(turns, bool) or not 1 <= turns <= 3:
         raise ValueError("LAST_N context requires 1..3 turns")
-    return SubagentContextMode.LAST_N, turns
+    return SubagentContextMode.LAST_N, turns, None
 
 
 def _bounded_nonempty_text(value: object, field: str, maximum: int) -> str:
@@ -3360,6 +3541,8 @@ def _validate_task_definition(value: object) -> None:
         "display_role",
         "context",
         "depends_on",
+        "model",
+        "material_task_ids",
     }
     if set(value) - allowed:
         raise ValueError("task item has unknown fields")
@@ -3379,7 +3562,19 @@ def _validate_task_definition(value: object) -> None:
     except ValueError as exc:
         raise ValueError("profile is invalid") from exc
     _parse_context(value.get("context", {"mode": "none"}))
+    model = value.get("model")
+    if model is not None:
+        if not isinstance(model, Mapping) or set(model) - {"connection_id", "reasoning"}:
+            raise ValueError("model selection has an invalid shape")
+        connection_id = model.get("connection_id")
+        if not isinstance(connection_id, str):
+            raise ValueError("model connection_id is required")
+        ModelConnectionId(connection_id)
+        reasoning_selection_from_dict(model.get("reasoning"))
     dependencies = value.get("depends_on", [])
+    material_ids = value.get("material_task_ids", [])
+    if not isinstance(material_ids, list) or len(material_ids) > 16 or any(not isinstance(item, str) or not item for item in material_ids) or len(set(material_ids)) != len(material_ids):
+        raise ValueError("material_task_ids is invalid")
     if (
         not isinstance(dependencies, list)
         or not len(dependencies) <= 16
@@ -3401,7 +3596,7 @@ def _validate_subagent_tool_arguments(
     if tool_name not in SUBAGENT_TOOL_NAMES:
         raise ValueError("unknown subagent tool")
     if tool_name == "spawn_agent":
-        if set(arguments) - {"task", "task_name", "profile", "context"}:
+        if set(arguments) - {"task", "task_name", "profile", "context", "model", "material_task_ids"}:
             raise ValueError("spawn request has unknown fields")
         task_name = arguments.get("task_name")
         normalized = {
@@ -3411,6 +3606,8 @@ def _validate_subagent_tool_arguments(
             "profile": arguments.get("profile", "general_worker"),
             "context": arguments.get("context", {"mode": "none"}),
             "depends_on": [],
+            **({"model": arguments["model"]} if "model" in arguments else {}),
+            **({"material_task_ids": arguments["material_task_ids"]} if "material_task_ids" in arguments else {}),
         }
         _validate_task_definition(normalized)
         return
@@ -3456,6 +3653,10 @@ def _validate_subagent_tool_arguments(
         if cursor is not None:
             _bounded_nonempty_text(cursor, "cursor", _MAXIMUM_LIST_CURSOR_BYTES)
         return
+    if tool_name == "list_agent_models":
+        if arguments:
+            raise ValueError("model list request takes no arguments")
+        return
     if tool_name == "wait_agent":
         if set(arguments) - {"task_ids", "settle", "timeout_seconds"}:
             raise ValueError("wait request has unknown fields")
@@ -3497,11 +3698,20 @@ def _validate_subagent_tool_arguments(
             MAXIMUM_INTER_AGENT_MESSAGE_UTF8_BYTES,
         )
         return
-    if set(arguments) - {"summary", "output_preview", "diagnostics"}:
+    if set(arguments) - {"summary", "data", "output_preview", "diagnostics"}:
         raise ValueError("result request has unknown fields")
     _bounded_nonempty_text(
         arguments.get("summary"), "summary", MAXIMUM_RESULT_SUMMARY_UTF8_BYTES
     )
+    if "data" in arguments:
+        if not isinstance(arguments["data"], Mapping):
+            raise ValueError("data must be a JSON object")
+        try:
+            data_bytes = canonical_json_bytes(arguments["data"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("data must be a JSON value") from exc
+        if len(arguments["summary"].encode("utf-8")) + len(data_bytes) > MAXIMUM_RESULT_SUMMARY_UTF8_BYTES:
+            raise ValueError("summary and data exceed delivery bound")
     preview = arguments.get("output_preview")
     if preview is not None:
         if not isinstance(preview, str):

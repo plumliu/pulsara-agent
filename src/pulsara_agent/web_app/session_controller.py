@@ -16,7 +16,7 @@ from uuid import uuid4
 from pulsara_agent.conversation_kernel.session_deletion import (
     KernelSessionRetirement, SessionDeleteRejected,
 )
-from pulsara_agent.conversation_kernel._repository.deletion import SessionDeletionBusy
+from pulsara_agent.conversation_kernel.repository_errors import SessionDeletionBusy
 
 from pulsara_agent.capability.local_skill_management import (
     InstallLooseLocalSkillRequest,
@@ -540,6 +540,7 @@ class LocalSessionController:
         return {
             "session_id": session_id,
             "tasks": tasks,
+            "read_event_sequence": int(durable[0]["read_event_sequence"]) if durable else 0,
             "total_count": total_count,
             "page_count": len(tasks),
             "remaining_count": max(0, total_count - next_seen_count),
@@ -619,10 +620,90 @@ class LocalSessionController:
         return {
             "session_id": session_id,
             "groups": groups,
+            "read_event_sequence": int(durable[0]["read_event_sequence"]) if durable else 0,
             "total_count": total_count,
             "page_count": len(groups),
             "remaining_count": max(0, total_count - next_seen_count),
             "next_cursor": next_cursor,
+        }
+
+    async def read_session_task(self, session_id: str, task_id: str) -> dict[str, object]:
+        """Read one exact task and its dependency view for event invalidation."""
+
+        if not task_id:
+            raise ValueError("task id is required")
+        summary = await self.core.read_resumable_session(
+            session_id,
+            memory_domain_id=self.workspace_input.memory_domain_id,
+        )
+        if summary is None:
+            raise KeyError(session_id)
+        rows, _ = await self.core.read_subagent_task_page(
+            session_id=session_id,
+            maximum_items=1,
+            task_id=task_id,
+        )
+        if not rows:
+            raise KeyError(task_id)
+        row = rows[0]
+        dependencies = [
+            {
+                "task_id": str(edge["dependency_task_id"]),
+                "task_key": edge.get("task_key"),
+                "label": edge.get("label"),
+                "status": str(edge["status"]),
+                "result_id": edge.get("result_id"),
+                "result_source": edge.get("result_source"),
+                "result_summary": edge.get("summary"),
+            }
+            for edge in row["dependency_rows"]
+        ]
+        return {
+            "session_id": session_id,
+            "task": _task_payload(row, dependencies),
+            "read_event_sequence": int(row["read_event_sequence"]),
+        }
+
+    async def read_session_task_group(self, session_id: str, group_id: str) -> dict[str, object]:
+        """Read one exact batch aggregate after an observed task change."""
+
+        if not group_id:
+            raise ValueError("task group id is required")
+        summary = await self.core.read_resumable_session(
+            session_id,
+            memory_domain_id=self.workspace_input.memory_domain_id,
+        )
+        if summary is None:
+            raise KeyError(session_id)
+        rows = await self.core.read_subagent_task_group_page(
+            session_id=session_id,
+            maximum_items=1,
+            batch_id=group_id,
+        )
+        if not rows:
+            raise KeyError(group_id)
+        row = rows[0]
+        return {
+            "session_id": session_id,
+            "group": {
+                "group_id": str(row["batch_id"]),
+                "parent_turn_id": str(row["parent_turn_id"]),
+                "first_accepted_at": row["first_accepted_at"].isoformat(),
+                "task_count": int(row["task_count"]),
+                "status_counts": {
+                    "pending": int(row["pending_count"]),
+                    "active": int(row["active_count"]),
+                    "waiting": int(row["waiting_count"]),
+                    "completed": int(row["completed_count"]),
+                    "cancelled": int(row["cancelled_count"]),
+                    "failed": int(row["failed_count"]),
+                    "interrupted": int(row["interrupted_count"]),
+                    "blocked": int(row["blocked_count"]),
+                },
+                "single_task_label": row.get("single_task_label"),
+            },
+            "read_event_sequence": int(row["read_event_sequence"]),
+            "total_count": int(row["total_count"]),
         }
 
     async def list_session_task_activities(
@@ -668,6 +749,7 @@ class LocalSessionController:
                     "kind": str(block["block_kind"]),
                     "tool_call_id": block.get("tool_call_id"),
                     "tool_name": block.get("tool_name"),
+                    "attempt_id": block.get("attempt_id"),
                 }
             )
         results_by_entry: dict[str, list[dict[str, object]]] = {}
@@ -705,6 +787,7 @@ class LocalSessionController:
                     "entry_id": entry_id,
                     "turn_id": str(entry["turn_id"]),
                     "entry_sequence": int(entry["entry_sequence"]),
+                    "turn_status": str(entry["turn_status"]),
                     "entry_kind": str(entry["entry_kind"]),
                     "accepted_at": entry["accepted_at"].isoformat(),
                     "objective": str(entry["task_objective"]),
@@ -3388,6 +3471,7 @@ def _task_payload(
             "entry_id": task.get("result_entry_id"),
             "source": task.get("result_source"),
             "summary": task.get("result_summary"),
+            "data": task.get("result_data"),
             "output_preview": task.get("result_output_preview"),
             "diagnostics": task.get("result_diagnostics") or [],
             "accepted": task.get("accepted_root_entry_id") is not None,
@@ -3403,7 +3487,11 @@ def _task_payload(
         "context": {
             "mode": str(task["context_mode"]),
             "last_n_turns": task.get("context_last_n_turns"),
+            "history_task_id": task.get("history_source_task_id"),
         },
+        "model_call_binding": task.get("model_call_binding"),
+        "model_target": task.get("model_target_fact"),
+        "material_refs": task.get("material_refs") or [],
         "objective": str(task["objective"]),
         "status": str(task["status"]),
         "pending_reason": task.get("pending_reason"),

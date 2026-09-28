@@ -47,6 +47,8 @@ import { AnimatedDisclosure } from './animated-disclosure';
 import type {
   BackgroundProcessLog,
   BackgroundProcessPage,
+  AgentTaskGroup,
+  ModelConfigurationSummary,
   CommandReceipt,
   ToolArtifactPage,
   UserControlCommandRef,
@@ -58,6 +60,14 @@ interface InspectorPanelProps {
   session: SessionSummary;
   isOpen: boolean;
   agentTasks: AgentTask[];
+  modelConfigurations?: readonly ModelConfigurationSummary[];
+  taskGroups?: AgentTaskGroup[];
+  loadedTaskGroups?: ReadonlySet<string>;
+  taskGroupTotal?: number;
+  onUnloadTaskGroup?: (groupId: string) => void;
+  onLoadTaskGroup?: (groupId: string) => Promise<void>;
+  onLoadMoreTaskGroups?: () => Promise<void>;
+  onReadSubagentCapacity?: () => Promise<{ target: number; occupied: number }>;
   loading: boolean;
   canControl: boolean;
   capabilities?: CapabilitySnapshot;
@@ -67,6 +77,7 @@ interface InspectorPanelProps {
   error?: string;
   onRetry: () => void;
   taskActivities: ReadonlyMap<string, SubagentActivity[]>;
+  onLoadTask?: (taskId: string) => Promise<AgentTask>;
   onLoadTaskActivities: (taskId: string, cursor?: string) => ReturnType<import('../lib/runtime-adapter').RuntimeAdapter['listSessionTaskActivities']>;
   taskArtifactOwnerKey: string;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
@@ -413,6 +424,14 @@ export function InspectorPanel({
   session,
   isOpen,
   agentTasks,
+  modelConfigurations,
+  taskGroups,
+  loadedTaskGroups,
+  taskGroupTotal,
+  onLoadTaskGroup,
+  onUnloadTaskGroup,
+  onLoadMoreTaskGroups,
+  onReadSubagentCapacity,
   loading,
   canControl,
   capabilities,
@@ -422,6 +441,7 @@ export function InspectorPanel({
   error,
   onRetry,
   taskActivities,
+  onLoadTask,
   onLoadTaskActivities,
   taskArtifactOwnerKey,
   onReadToolArtifact,
@@ -469,7 +489,15 @@ export function InspectorPanel({
           </div>
         ) : view === 'tasks' ? (
           <TaskWorkspace
+            modelConfigurations={modelConfigurations}
             tasks={agentTasks}
+            groups={taskGroups}
+            loadedGroupIds={loadedTaskGroups}
+            totalGroupCount={taskGroupTotal}
+            onLoadGroup={onLoadTaskGroup}
+            onUnloadGroup={onUnloadTaskGroup}
+            onLoadMoreGroups={onLoadMoreTaskGroups}
+            readCapacity={onReadSubagentCapacity}
             loading={loading}
             error={error}
             canControl={canControl}
@@ -477,6 +505,7 @@ export function InspectorPanel({
             onCancel={onCancelTask}
             onNotify={onNotify}
             activities={taskActivities}
+            loadTask={onLoadTask}
             loadActivities={onLoadTaskActivities}
             loadBackgroundProcesses={onLoadBackgroundProcesses}
             skills={(capabilities?.skills.items ?? []).filter((skill) => skill.enabled && skill.effective)}

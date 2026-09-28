@@ -8,7 +8,6 @@ from enum import StrEnum
 from threading import RLock
 from uuid import uuid4
 
-from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.tools.builtins.todo import FrozenTodoCandidate, FrozenTodoItem
@@ -198,8 +197,6 @@ class TodoRunStateOwner:
                         raise RuntimeError("child TODO activation identity conflicts")
                     return
                 raise RuntimeError("child TODO run identity conflicts")
-            if len(self._children) >= STAGE2_LIMITS.nonterminal_subagent_hard_items:
-                raise RuntimeError("child TODO run capacity is exhausted")
             identity = _child_identity(
                 session_id=self._session_id,
                 task_id=prepared.subagent_task_id,

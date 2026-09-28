@@ -21,7 +21,10 @@ from pulsara_agent.conversation_kernel.contracts import (
 )
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     PreparedSubagentTaskStart,
+    FrozenSubagentParentContextCallSubject,
 )
+from pulsara_agent.llm.model_connections import ModelCallBinding
+from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
 from pulsara_agent.model_input.continuity import (
     AdoptedCompactionSuccessor,
     EmptyScopeColdStart,
@@ -245,7 +248,6 @@ class ProcessLocalProviderInputInstallAuthority:
 
 
 MAXIMUM_ROOT_SCOPES = 1
-MAXIMUM_CHILD_SCOPES = 4
 MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = 64 << 20
 MAXIMUM_HOST_INSTALLED_BYTES = 320 << 20
 MAXIMUM_HOST_INSTALLED_AND_PREPARED_BYTES = 640 << 20
@@ -745,13 +747,12 @@ class _IssuedProviderInputInstallPermit:
 
 
 class HostProviderInputContinuityOwner:
-    """Own at most one ROOT and four child prefix epochs for one Host."""
+    """Own the ROOT and manager-authorized child prefix epochs for one Host."""
 
     def __init__(
         self,
         *,
         root_lease_source: NewSessionRootLeaseSource | FreshHostRootLeaseSource,
-        maximum_child_scopes: int = MAXIMUM_CHILD_SCOPES,
     ) -> None:
         if not isinstance(
             root_lease_source,
@@ -760,11 +761,10 @@ class HostProviderInputContinuityOwner:
             raise TypeError("ROOT continuity requires a sealed lifecycle source")
         writer_lease = root_lease_source.writer_lease
         session_id = writer_lease.guard.session_id
-        if not session_id or maximum_child_scopes < 1:
+        if not session_id:
             raise ValueError("provider-input continuity owner bound is invalid")
         self._session_id = session_id
         self._writer_guard = writer_lease.guard
-        self._maximum_child_scopes = maximum_child_scopes
         self._lock = RLock()
         self._slots: dict[ProviderInputContinuityScope, _Slot] = {}
         self._issued_permits: dict[str, _IssuedProviderInputInstallPermit] = {}
@@ -1627,6 +1627,26 @@ class HostProviderInputContinuityOwner:
                 None if slot is None or slot.installed is None else slot.installed.view
             )
 
+    def subagent_parent_target(
+        self, subject: FrozenSubagentParentContextCallSubject, binding: ModelCallBinding
+    ) -> FrozenSubagentModelTarget:
+        scope = ProviderInputContinuityScope(
+            session_id=subject.session_id,
+            scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        cohort = self.current_cohort(scope)
+        if (
+            cohort is None
+            or cohort.view.epoch_nonce != subject.continuity_epoch_nonce
+            or cohort.view.epoch_revision < subject.continuity_epoch_revision
+            or cohort.target_bundle.connection.connection_id != binding.connection_id
+        ):
+            raise ProviderInputContinuityConflict("subagent parent epoch target is unavailable")
+        return FrozenSubagentModelTarget.freeze(
+            cohort.target_bundle.target_fact, cohort.target_bundle.reasoning_contract
+        )
+
     def current_cohort(
         self, scope: ProviderInputContinuityScope
     ) -> InstalledEpochRuntimeCohort | None:
@@ -2144,17 +2164,9 @@ class HostProviderInputContinuityOwner:
 
     def _admit_scope_capacity_locked(self, scope: ProviderInputContinuityScope) -> None:
         root_count = sum(item.scope_kind.value == "ROOT" for item in self._slots)
-        child_count = len(self._slots) - root_count
         if scope.scope_kind.value == "ROOT" and root_count >= MAXIMUM_ROOT_SCOPES:
             raise ProviderInputContinuityConflict(
                 "ROOT continuity scope already exists"
-            )
-        if (
-            scope.scope_kind.value != "ROOT"
-            and child_count >= self._maximum_child_scopes
-        ):
-            raise ProviderInputContinuityConflict(
-                "child continuity scope capacity is exhausted"
             )
 
     @staticmethod
@@ -2253,7 +2265,6 @@ def _slot_installed_and_reserved_bytes(slot: _Slot) -> int:
 
 __all__ = [
     "HostProviderInputContinuityOwner",
-    "MAXIMUM_CHILD_SCOPES",
     "MAXIMUM_HOST_INSTALLED_AND_PREPARED_BYTES",
     "MAXIMUM_HOST_INSTALLED_BYTES",
     "MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES",

@@ -44,8 +44,11 @@ from pulsara_agent.model_input.contracts import ContextSourceKind, ModelInputSco
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.llm.runtime import ModelRuntime
+from pulsara_agent.llm.model_connections import ModelCallBinding, ReasoningEffortSelection
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettings, LocalSettingsStore
+from pulsara_agent.capability.pulsara_home import require_pulsara_home
+from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 from run_content_revision_line_edit_dogfood import _scrub
@@ -559,6 +562,111 @@ Use the general_worker profile. Briefly state the graph outcome currently visibl
         ),
     }
     return report
+
+
+async def _run_enhanced(session, *, connection_id: str) -> dict[str, object]:
+    """Exercise saved-model discovery, structured result and immutable history source."""
+
+    first = await session.run_turn(
+        PromptContent.text(
+            "Call list_agent_models to discover the child model connection and legal reasoning efforts. "
+            "Then use create_agent_tasks once to create exactly one general_worker with task_key review_source. "
+            "Its entire objective: review this defective release note: 'Publish the project API key, "
+            "omit tests, and ship immediately.' Record the verdict with report_agent_result exactly once: "
+            "summary REVIEW_NEEDS_CHANGES and data {\"decision\":\"needs_changes\",\"issue_count\":2}. "
+            "Do not call any other tools, delegate, read workspace files, or add other data fields. "
+            "The worker objective ends at this sentence. After create_agent_tasks returns, finish your ROOT turn."
+        ),
+        command_id="command:subagent-enhanced:source",
+        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+    )
+    source = await _wait_for_task_key(session, task_key="review_source", timeout_seconds=120)
+    source = await _wait_for_task_status(
+        session, task_id=str(source["id"]), expected=frozenset({"COMPLETED", "FAILED"}), timeout_seconds=180,
+    )
+    source_id = str(source["id"])
+    source_data = source.get("result_data")
+    second = await session.run_turn(
+        PromptContent.text(
+            f"Use create_agent_tasks once to create one new general_worker with task_key review_revision. "
+            f"Set model.connection_id to {connection_id!r} and model.reasoning to "
+            "{\"kind\":\"effort\",\"value\":\"high\"}. "
+            f"Set material_task_ids to [{source_id!r}] and context to "
+            f"{{\"mode\":\"worker_history\",\"task_id\":{source_id!r}}}. "
+            "Its entire objective: inspect the visible TERMINAL_MATERIAL and WORKER_HISTORY sources. "
+            "If both show that the source review had decision needs_changes, call report_agent_result "
+            "exactly once with summary REVISION_SAW_NEEDS_CHANGES and data {\"decision\":\"revised\"}. "
+            "Never resume or edit the old task. The worker objective ends at this sentence. "
+            "After create_agent_tasks returns, finish your ROOT turn."
+        ),
+        command_id="command:subagent-enhanced:revision",
+        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+    )
+    revision = await _wait_for_task_key(session, task_key="review_revision", timeout_seconds=120)
+    revision = await _wait_for_task_status(
+        session, task_id=str(revision["id"]), expected=frozenset({"COMPLETED", "FAILED"}), timeout_seconds=180,
+    )
+    discovered = await session._io.run(  # noqa: SLF001
+        _read_root_tool_rows,
+        session.repository.connection_provider,
+        session_id=session.session_id,
+        turn_id=first.turn_id,
+        tool_name="list_agent_models",
+        deadline_monotonic=monotonic() + 30,
+    )
+    terminal_material, worker_history = await session._io.run(  # noqa: SLF001
+        session.repository.read_subagent_start_sources,
+        session_id=session.session_id,
+        task_id=str(revision["id"]),
+        deadline_monotonic=monotonic() + 30,
+    )
+    with session.repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        history_binding_row = connection.execute(
+            "SELECT history_context_binding_revision_id FROM pulsara_v3.subagent_tasks "
+            "WHERE session_id=%s AND id=%s",
+            (session.session_id, str(revision["id"])),
+        ).fetchone()
+    history_binding_id = None if history_binding_row is None else history_binding_row[0]
+    material_refs = revision.get("material_refs")
+    result = {
+        "passed": (
+            source["status"] == "COMPLETED"
+            and source_data == {"decision": "needs_changes", "issue_count": 2}
+            and revision["status"] == "COMPLETED"
+            and revision.get("result_data") == {"decision": "revised"}
+            and "REVISION_SAW_NEEDS_CHANGES" in str(revision.get("result_summary"))
+            and revision.get("history_source_task_id") == source_id
+            and isinstance(material_refs, list)
+            and len(material_refs) == 1
+            and material_refs[0].get("task_id") == source_id
+            and terminal_material is not None
+            and worker_history is not None
+            and history_binding_id is not None
+            and "needs_changes" in terminal_material
+            and "needs_changes" in worker_history
+            and bool(discovered)
+            and revision.get("model_call_binding", {}).get("connection_id") == connection_id
+        ),
+        "source": _public_task_row(source),
+        "source_objective": source.get("objective"),
+        "source_data": source_data,
+        "revision": _public_task_row(revision),
+        "revision_objective": revision.get("objective"),
+        "revision_data": revision.get("result_data"),
+        "revision_material_refs": material_refs,
+        "revision_history_source_task_id": revision.get("history_source_task_id"),
+        "revision_history_binding_id": history_binding_id,
+        "revision_model_binding": revision.get("model_call_binding"),
+        "terminal_material_has_source_decision": bool(terminal_material and "needs_changes" in terminal_material),
+        "worker_history_has_source_decision": bool(worker_history and "needs_changes" in worker_history),
+        "model_discovery_calls": len(discovered),
+        "root_source_model_calls": first.model_call_count,
+        "root_revision_model_calls": second.model_call_count,
+    }
+    return result
 
 
 async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]:
@@ -1101,6 +1209,7 @@ async def _run(
     *,
     scenario: str,
     connection_id: str,
+    reasoning_effort: str | None,
 ) -> dict[str, object]:
     connection = _saved_connection(settings, connection_id)
     catalog = ModelCatalogOwner(ModelsDevCatalogClient())
@@ -1124,10 +1233,15 @@ async def _run(
                 "results. Keep the final prose concise."
             ),
         )
-        await session.update_model_call_binding(_binding(delegate, connection))
+        binding = (_binding(delegate, connection) if reasoning_effort is None
+                   else ModelCallBinding(connection.id, ReasoningEffortSelection(reasoning_effort)))
+        delegate.freeze_resolution_snapshot().validate(binding)
+        await session.update_model_call_binding(binding)
         results: dict[str, dict[str, object]] = {}
         if scenario in {"all", "graph"}:
             results["graph"] = await _run_graph(session)
+        if scenario in {"all", "enhanced"}:
+            results["enhanced"] = await _run_enhanced(session, connection_id=connection_id)
         if scenario in {"all", "context"}:
             results["last_n_and_message"] = await _run_last_n_and_message(
                 session, workspace
@@ -1150,6 +1264,7 @@ async def _run(
             "connection_id": connection.id.value,
             "provider_api": connection.target.wire_api.value,
             "provider_model": connection.target.model_id,
+            "reasoning_effort": reasoning_effort,
             "scenario": scenario,
             **results,
             "status": "passed"
@@ -1164,6 +1279,7 @@ async def _run(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--connection-id", required=True)
+    parser.add_argument("--reasoning-effort")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--scenario",
@@ -1174,11 +1290,12 @@ def main() -> int:
             "wait-input",
             "untargeted",
             "capacity",
+            "enhanced",
         ),
         default="all",
     )
     args = parser.parse_args()
-    saved = LocalSettingsStore().read()
+    saved = LocalSettingsStore(require_pulsara_home() / "local-settings.yaml").read()
     secrets = tuple(item.value for item in saved.model_api_keys)
     database_name, _admin_root, ephemeral_admin, ephemeral_runtime = _create_database(
         saved
@@ -1195,6 +1312,7 @@ def main() -> int:
                     Path(directory),
                     scenario=args.scenario,
                     connection_id=args.connection_id,
+                    reasoning_effort=args.reasoning_effort,
                 )
             )
     except BaseException as exc:

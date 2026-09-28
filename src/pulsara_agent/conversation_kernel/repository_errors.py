@@ -7,6 +7,14 @@ class ConversationKernelConflict(RuntimeError):
     """A stable identity already names a different semantic fact."""
 
 
+class PreparedCompletionSuffixStale(ConversationKernelConflict):
+    """A speculative ROOT completion batch lost its exact canonical cut."""
+
+
+class SessionDeletionBusy(RuntimeError):
+    """Deletion has no authority over the current canonical writer."""
+
+
 # Preserve the long-standing public/pickle identity owned by the repository
 # facade while allowing neutral readers and blob helpers to avoid importing the
 # private ``_repository`` implementation package (or the facade's SQL owners).
@@ -15,4 +23,4 @@ ConversationKernelConflict.__module__ = (
 )
 
 
-__all__ = ["ConversationKernelConflict"]
+__all__ = ["ConversationKernelConflict", "PreparedCompletionSuffixStale", "SessionDeletionBusy"]

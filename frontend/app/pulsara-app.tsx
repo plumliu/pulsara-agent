@@ -29,6 +29,7 @@ import {
   type RuntimeInteractionResolution,
   type RuntimeInteractionSummary,
   type RuntimeProjection,
+  type AgentTaskGroup,
   type LocalPromptSubmission,
   type QueuedPrompt,
   type QueuedPromptAction,
@@ -194,10 +195,26 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [focusSourceEntry, setFocusSourceEntry] = useState<{ sessionId: string; entryId: string }>();
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
   const [taskInventory, setTaskInventory] = useState<AgentTask[]>([]);
+  const [taskGroups, setTaskGroups] = useState<AgentTaskGroup[]>([]);
+  const [taskGroupCursor, setTaskGroupCursor] = useState<string>();
+  const [taskGroupTotal, setTaskGroupTotal] = useState(0);
+  const [loadedTaskGroups, setLoadedTaskGroups] = useState<ReadonlySet<string>>(new Set());
+  const taskRowWatermarks = useRef(new Map<string, number>());
+  const taskGroupWatermarks = useRef(new Map<string, number>());
+  const taskTotalWatermark = useRef(-1);
+  const taskPageWatermark = useRef(-1);
+  const taskInventoryRef = useRef(taskInventory);
+  taskInventoryRef.current = taskInventory;
   const [taskInventorySessionId, setTaskInventorySessionId] = useState('');
   const [taskInventoryLoading, setTaskInventoryLoading] = useState(false);
   const [taskInventoryError, setTaskInventoryError] = useState<string>();
   const taskInventoryAttempt = useRef(0);
+  const taskReadOwner = useRef({});
+  const taskLastPageCursor = useRef<string | undefined>(undefined);
+  const taskPageRequest = useRef<object | undefined>(undefined);
+  const openTaskGroup = useRef<string | undefined>(undefined);
+  const taskGroupsRef = useRef(taskGroups);
+  taskGroupsRef.current = taskGroups;
   const [capabilities, setCapabilities] = useState<CapabilitySnapshot>();
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const [capabilityError, setCapabilityError] = useState<string>();
@@ -266,6 +283,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     && activeSessionIdRef.current === expected.sessionId
     && connectionRef.current.generation === expected.generation
   ), []);
+
+  const readSubagentCapacity = useCallback(async () => {
+    const active = connectionRef.current;
+    if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
+    const value = await active.readSubagentCapacity();
+    if (!ownsConnection(active)) throw new RuntimeApiError('OWNER_CHANGED', '运行时连接已经改变。', true);
+    return value;
+  }, [ownsConnection]);
 
   const notify = useCallback((
     title: string,
@@ -405,74 +430,159 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     )));
   }, []);
 
+  const mergeTaskTotal = useCallback((total: number, sequence: number) => {
+    if (sequence < taskTotalWatermark.current) return;
+    taskTotalWatermark.current = sequence;
+    setTaskGroupTotal(total);
+  }, []);
+
   const loadSessionTasks = useCallback(async (sessionId: string) => {
     const attempt = ++taskInventoryAttempt.current;
+    const owner = taskReadOwner.current;
     setTaskInventoryLoading(true);
     setTaskInventoryError(undefined);
     try {
-      const tasks: AgentTask[] = [];
-      const groups: Array<{ id: string; taskCount: number }> = [];
-      const seenGroupCursors = new Set<string>();
-      let groupCursor: string | undefined;
-      do {
-        const page = await adapter.listSessionTaskGroups(sessionId, groupCursor);
-        if (attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
-        groups.push(...page.groups.map((group) => ({ id: group.id, taskCount: group.taskCount })));
-        groupCursor = page.nextCursor;
-        if (groupCursor) {
-          if (seenGroupCursors.has(groupCursor)) {
-            throw new RuntimeApiError('TASK_GROUP_PAGE_LOOP', '任务组清单暂时无法完整读取。', true);
-          }
-          seenGroupCursors.add(groupCursor);
+      const cursor = taskLastPageCursor.current;
+      const page = await adapter.listSessionTaskGroups(sessionId, cursor);
+      if (owner !== taskReadOwner.current || attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
+      setTaskGroups((current) => {
+        const byId = new Map(current.map((group) => [group.id, group]));
+        for (const group of page.groups) {
+          if (page.readEventSequence < (taskGroupWatermarks.current.get(group.id) ?? -1)) continue;
+          taskGroupWatermarks.current.set(group.id, page.readEventSequence);
+          byId.set(group.id, group);
         }
-      } while (groupCursor);
-
-      for (const group of groups) {
-        const seenTaskCursors = new Set<string>();
-        let taskCursor: string | undefined;
-        let loaded = 0;
-        do {
-          const page = await adapter.listSessionTasks(sessionId, taskCursor, group.id);
-          if (attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
-          tasks.push(...page.tasks);
-          loaded += page.tasks.length;
-          taskCursor = page.nextCursor;
-          if (taskCursor) {
-            if (seenTaskCursors.has(taskCursor)) {
-              throw new RuntimeApiError('TASK_PAGE_LOOP', '子任务清单暂时无法完整读取。', true);
-            }
-            seenTaskCursors.add(taskCursor);
-          }
-        } while (taskCursor);
-        if (loaded !== group.taskCount) {
-          throw new RuntimeApiError('TASK_GROUP_CHANGED', '任务组在读取期间发生变化，请刷新后重试。', true);
-        }
+        return [...byId.values()];
+      });
+      if (cursor === taskLastPageCursor.current && page.readEventSequence >= taskPageWatermark.current) {
+        taskPageWatermark.current = page.readEventSequence;
+        setTaskGroupCursor(page.nextCursor);
       }
-
-      const uniqueTasks = [...new Map(tasks.map((task) => [task.id, task])).values()];
-      setTaskInventory(uniqueTasks);
+      mergeTaskTotal(page.totalCount, page.readEventSequence);
       setTaskInventorySessionId(sessionId);
-      setSessionList((current) => current.map((session) => session.id === sessionId ? {
-        ...session,
-        taskCounts: {
-          total: uniqueTasks.length,
-          active: uniqueTasks.filter((task) => task.status === 'running').length,
-          waiting: uniqueTasks.filter((task) => task.status === 'pending' || task.status === 'waiting').length,
-          attention: uniqueTasks.filter((task) => (
-            task.status === 'failed' || task.status === 'interrupted' || task.status === 'blocked'
-          )).length,
-        },
-      } : session));
       setTaskInventoryLoading(false);
     } catch (error) {
-      if (attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
+      if (owner !== taskReadOwner.current || attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
       setTaskInventoryError(productMessage(
         error instanceof Error ? error.message : undefined,
         '子任务清单暂时无法读取。',
       ));
       setTaskInventoryLoading(false);
     }
+  }, [adapter, mergeTaskTotal]);
+
+  const mergeTaskRows = useCallback((tasks: AgentTask[], readEventSequence: number) => {
+    setTaskInventory((current) => {
+      const byId = new Map(current.map((task) => [task.id, task]));
+      for (const task of tasks) {
+        if (readEventSequence < (taskRowWatermarks.current.get(task.id) ?? -1)) continue;
+        taskRowWatermarks.current.set(task.id, readEventSequence);
+        byId.set(task.id, task);
+      }
+      return [...byId.values()];
+    });
+  }, []);
+
+  const loadTask = useCallback(async (taskId: string) => {
+    const sessionId = activeSessionIdRef.current;
+    const owner = taskReadOwner.current;
+    if (!sessionId) throw new RuntimeApiError('TASK_OWNER_CHANGED', '当前没有活动会话。', true);
+    const { task } = await adapter.readSessionTask(sessionId, taskId);
+    if (activeSessionIdRef.current !== sessionId || taskReadOwner.current !== owner) {
+      throw new RuntimeApiError('TASK_OWNER_CHANGED', '任务所属的会话已经改变。', true);
+    }
+    return task;
   }, [adapter]);
+
+  const loadTaskActivities = useCallback(async (taskId: string, cursor?: string) => {
+    const sessionId = activeSessionIdRef.current;
+    const active = connectionRef.current;
+    if (!sessionId || !active || active.sessionId !== sessionId) throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
+    const page = await adapter.listSessionTaskActivities(sessionId, taskId, cursor);
+    if (activeSessionIdRef.current !== sessionId || !ownsConnection(active)) {
+      throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
+    }
+    const activities = [];
+    for (const activity of page.activities) {
+      if (activity.body !== undefined || activity.contentSize === 0) {
+        activities.push({ ...activity, body: activity.body ?? '' });
+        continue;
+      }
+      const body = await active.readCanonicalEntryContent(
+        activity.entryId,
+        activity.contentDigest,
+        activity.contentSize,
+      );
+      if (!ownsConnection(active)) {
+        throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
+      }
+      activities.push({ ...activity, body });
+    }
+    return { ...page, activities };
+  }, [adapter, ownsConnection]);
+
+  const loadTaskBackgroundProcesses = useCallback(async (cursor?: string) => {
+    const active = connectionRef.current;
+    if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
+    const page = await active.listBackgroundProcesses(cursor);
+    if (!ownsConnection(active)) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
+    return page;
+  }, [ownsConnection]);
+
+  const loadTaskGroup = useCallback(async (groupId: string) => {
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) return;
+    if (openTaskGroup.current !== groupId) {
+      setTaskInventory([]);
+      setLoadedTaskGroups(new Set());
+      taskRowWatermarks.current.clear();
+    }
+    openTaskGroup.current = groupId;
+    const owner = taskReadOwner.current;
+    const page = await adapter.listSessionTasks(sessionId, undefined, groupId);
+    if (owner !== taskReadOwner.current || openTaskGroup.current !== groupId || activeSessionIdRef.current !== sessionId) return;
+    if (page.nextCursor) throw new RuntimeApiError('TASK_GROUP_PAGE_INCOMPLETE', '任务组超过单次接纳边界。', true);
+    mergeTaskRows(page.tasks, page.readEventSequence);
+    setLoadedTaskGroups((current) => new Set(current).add(groupId));
+  }, [adapter, mergeTaskRows]);
+
+  const unloadTaskGroup = useCallback((groupId: string) => {
+    if (openTaskGroup.current !== groupId) return;
+    openTaskGroup.current = undefined;
+    setTaskInventory([]);
+    setLoadedTaskGroups(new Set());
+    taskRowWatermarks.current.clear();
+  }, []);
+
+  const loadMoreTaskGroups = useCallback(async () => {
+    const sessionId = activeSessionIdRef.current;
+    const cursor = taskGroupCursor;
+    if (!sessionId || !cursor || taskPageRequest.current) return;
+    const request = {};
+    taskPageRequest.current = request;
+    const owner = taskReadOwner.current;
+    try {
+    const page = await adapter.listSessionTaskGroups(sessionId, cursor);
+    if (owner !== taskReadOwner.current || activeSessionIdRef.current !== sessionId) return;
+    taskLastPageCursor.current = cursor;
+    taskPageWatermark.current = page.readEventSequence;
+    taskInventoryAttempt.current += 1;
+    setTaskInventoryLoading(false);
+    setTaskGroups((current) => {
+      const byId = new Map(current.map((group) => [group.id, group]));
+      for (const group of page.groups) {
+        if (page.readEventSequence < (taskGroupWatermarks.current.get(group.id) ?? -1)) continue;
+        taskGroupWatermarks.current.set(group.id, page.readEventSequence);
+        byId.set(group.id, group);
+      }
+      return [...byId.values()];
+    });
+    setTaskGroupCursor(page.nextCursor);
+    mergeTaskTotal(page.totalCount, page.readEventSequence);
+    } finally {
+      if (taskPageRequest.current === request) taskPageRequest.current = undefined;
+    }
+  }, [adapter, taskGroupCursor, mergeTaskTotal]);
 
   const loadCapabilities = useCallback(async (sessionId: string) => {
     // A mutation may settle after the user has already moved to another
@@ -553,6 +663,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const previous = connectionRef.current;
     connectionAttempt.current += 1;
     taskInventoryAttempt.current += 1;
+    taskReadOwner.current = {};
+    taskPageRequest.current = undefined;
+    taskLastPageCursor.current = undefined;
+    openTaskGroup.current = undefined;
     capabilityAttempt.current += 1;
     connectionRef.current = undefined;
     activeSessionIdRef.current = '';
@@ -562,6 +676,14 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     setOpeningSessionId('');
     setProjection(emptyProjection);
     setTaskInventory([]);
+    setTaskGroups([]);
+    setTaskGroupCursor(undefined);
+    setTaskGroupTotal(0);
+    setLoadedTaskGroups(new Set());
+    taskRowWatermarks.current.clear();
+    taskGroupWatermarks.current.clear();
+    taskTotalWatermark.current = -1;
+    taskPageWatermark.current = -1;
     setTaskInventorySessionId('');
     setTaskInventoryLoading(false);
     setTaskInventoryError(undefined);
@@ -623,8 +745,20 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const attempt = ++connectionAttempt.current;
     setOpeningSessionId(current => current === sessionId ? current : '');
     taskInventoryAttempt.current += 1;
+    taskReadOwner.current = {};
+    taskPageRequest.current = undefined;
+    taskLastPageCursor.current = undefined;
+    openTaskGroup.current = undefined;
     capabilityAttempt.current += 1;
     setTaskInventory([]);
+    setTaskGroups([]);
+    setTaskGroupCursor(undefined);
+    setTaskGroupTotal(0);
+    setLoadedTaskGroups(new Set());
+    taskRowWatermarks.current.clear();
+    taskGroupWatermarks.current.clear();
+    taskTotalWatermark.current = -1;
+    taskPageWatermark.current = -1;
     setTaskInventorySessionId('');
     setTaskInventoryError(undefined);
     setTaskInventoryLoading(Boolean(sessionId));
@@ -901,17 +1035,62 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     publishProjection,
   ]);
 
-  const taskRefreshKey = useMemo(() => projection.agentTasks.map((task) => (
-    `${task.id}:${task.status}:${task.result?.id ?? ''}:${task.completionAccepted ? '1' : '0'}`
-  )).join('|'), [projection.agentTasks]);
+  const refreshTaskGroups = useCallback(async (sessionId: string, ids: readonly string[]) => {
+    const owner = taskReadOwner.current;
+    const visibleIds = new Set(taskGroupsRef.current.map(group => group.id));
+    const visible = [...new Set(ids)].filter(id => visibleIds.has(id));
+    const rows = await Promise.all(visible.map(id => adapter.readSessionTaskGroup(sessionId, id)));
+    if (owner !== taskReadOwner.current || activeSessionIdRef.current !== sessionId) return;
+    for (const row of rows) {
+      mergeTaskTotal(row.totalCount, row.readEventSequence);
+      setTaskGroups(current => {
+        if (row.readEventSequence < (taskGroupWatermarks.current.get(row.group.id) ?? -1)) return current;
+        taskGroupWatermarks.current.set(row.group.id, row.readEventSequence);
+        return current.map(group => group.id === row.group.id ? row.group : group);
+      });
+    }
+    // Unknown batches affect the overview count, not the full task cache.
+    if (ids.some(id => !visibleIds.has(id))) await loadSessionTasks(sessionId);
+  }, [adapter, loadSessionTasks, mergeTaskTotal]);
 
   useEffect(() => {
     if (!activeSessionId || !connection || connection.sessionId !== activeSessionId) return;
+    taskReadOwner.current = {};
+    taskPageRequest.current = undefined;
+    taskRowWatermarks.current.clear();
+    taskGroupWatermarks.current.clear();
+    taskTotalWatermark.current = -1;
+    taskPageWatermark.current = -1;
+    const groupId = openTaskGroup.current;
+    const visibleIds = taskGroupsRef.current.map(group => group.id);
     const frame = window.requestAnimationFrame(() => {
-      void loadSessionTasks(activeSessionId);
+      void Promise.all([
+        loadSessionTasks(activeSessionId),
+        refreshTaskGroups(activeSessionId, visibleIds),
+        ...(groupId ? [loadTaskGroup(groupId)] : []),
+      ]).catch(error => setTaskInventoryError(productMessage(error instanceof Error ? error.message : undefined, '任务清单暂时无法读取。')));
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeSessionId, connection, loadSessionTasks, taskRefreshKey]);
+  }, [activeSessionId, connection, projection.taskSnapshotRevision, loadSessionTasks, refreshTaskGroups, loadTaskGroup]);
+
+  const taskGroupInvalidationKey = (projection.taskGroupInvalidations ?? []).join('|');
+  const taskInvalidationKey = (projection.taskInvalidations ?? []).join('|');
+  useEffect(() => {
+    if (!activeSessionId || !connection || connection.sessionId !== activeSessionId || !taskGroupInvalidationKey) return;
+    const owner = taskReadOwner.current;
+    const ids = [...new Set(taskGroupInvalidationKey.split('|'))];
+    const groupId = openTaskGroup.current;
+    const changedTasks = new Set(taskInvalidationKey.split('|'));
+    const dependencyChanged = taskInventoryRef.current.some(task => task.dependencyIds.some(id => changedTasks.has(id)));
+    void Promise.all([
+      refreshTaskGroups(activeSessionId, ids),
+      ...(groupId && (ids.includes(groupId) || dependencyChanged) ? [loadTaskGroup(groupId)] : []),
+    ]).catch(error => {
+      if (owner === taskReadOwner.current && activeSessionIdRef.current === activeSessionId) setTaskInventoryError(productMessage(
+        error instanceof Error ? error.message : undefined, '任务变化暂时无法读取。',
+      ));
+    });
+  }, [activeSessionId, connection, refreshTaskGroups, loadTaskGroup, taskGroupInvalidationKey, taskInvalidationKey, projection.eventSequence]);
 
   useEffect(() => {
     if (!activeSessionId || !connection || connection.sessionId !== activeSessionId) return;
@@ -1041,6 +1220,9 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   ), [activeSessionId, projection, taskInventory, taskInventorySessionId]);
   const taskActivities = useMemo(() => {
     const activities = new Map<string, NonNullable<(typeof mergedProjection.messages)[number]['subagentRuns']>[number]['activities']>();
+    // Exact task-ID observations also serve a dependency opened on demand.
+    // Its canonical task row governs terminal filtering in TaskGraphDialog.
+    for (const run of projection.subagentRuns ?? []) activities.set(run.id, run.activities);
     for (const message of mergedProjection.messages) {
       for (const run of message.subagentRuns ?? []) {
         const byId = new Map((activities.get(run.id) ?? []).map((item) => [item.id, item]));
@@ -1049,7 +1231,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       }
     }
     return activities;
-  }, [mergedProjection]);
+  }, [mergedProjection, projection.subagentRuns]);
   const renderedMessages = mergedProjection.messages;
 
   const navigate = (view: AppView, settingsSection?: SettingsSection) => {
@@ -2328,37 +2510,19 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           session={activeSession}
           isOpen={inspectorOpen}
           agentTasks={mergedProjection.agentTasks}
+          modelConfigurations={bootstrap?.model_configurations ?? []}
+          taskGroups={taskGroups}
+          loadedTaskGroups={loadedTaskGroups}
+          taskGroupTotal={taskGroupTotal}
+          onLoadTask={loadTask}
+          onLoadTaskGroup={loadTaskGroup}
+          onUnloadTaskGroup={unloadTaskGroup}
+          onLoadMoreTaskGroups={loadMoreTaskGroups}
+          onReadSubagentCapacity={readSubagentCapacity}
           taskActivities={taskActivities}
           taskArtifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
           onReadToolArtifact={readToolArtifact}
-          onLoadTaskActivities={async (taskId, cursor) => {
-            const sessionId = activeSession.id;
-            const page = await adapter.listSessionTaskActivities(sessionId, taskId, cursor);
-            if (activeSessionIdRef.current !== sessionId) {
-              throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
-            }
-            const active = connectionRef.current;
-            if (!active || active.sessionId !== sessionId) {
-              throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
-            }
-            const activities = [];
-            for (const activity of page.activities) {
-              if (activity.body !== undefined || activity.contentSize === 0) {
-                activities.push({ ...activity, body: activity.body ?? '' });
-                continue;
-              }
-              const body = await active.readCanonicalEntryContent(
-                activity.entryId,
-                activity.contentDigest,
-                activity.contentSize,
-              );
-              if (!ownsConnection(active)) {
-                throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
-              }
-              activities.push({ ...activity, body });
-            }
-            return { ...page, activities };
-          }}
+          onLoadTaskActivities={loadTaskActivities}
           loading={taskInventoryLoading}
           canControl={canControl}
           capabilities={capabilities}
@@ -2371,13 +2535,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           backgroundOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}:${projection.hostSessionId ?? ''}`}
           backgroundHostSessionId={projection.hostSessionId}
           backgroundControlAdmissionDeadlineMs={projection.controlAdmissionDeadlineMs}
-          onLoadBackgroundProcesses={async (cursor) => {
-            const active = connectionRef.current;
-            if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
-            const page = await active.listBackgroundProcesses(cursor);
-            if (!ownsConnection(active)) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
-            return page;
-          }}
+          onLoadBackgroundProcesses={loadTaskBackgroundProcesses}
           onReadBackgroundProcessLog={async (processId, cursor) => {
             const active = connectionRef.current;
             if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);

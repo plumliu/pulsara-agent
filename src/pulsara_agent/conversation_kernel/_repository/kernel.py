@@ -241,6 +241,7 @@ class _RepositoryKernel:
                 """
                 UPDATE pulsara_v3.subagent_tasks
                 SET status = 'INTERRUPTED',
+                    pending_reason = NULL,
                     terminal_reason = 'HOST_TAKEOVER',
                     terminal_public_detail =
                         'The Pulsara runtime changed and the delegated task was interrupted.',

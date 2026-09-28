@@ -756,6 +756,7 @@ class KernelHostSession:
             live_bus=self.live_bus,
             todo_owner=self._tools.todo_owner,
             launch_preparation=CanonicalSubagentLaunchPreparationPort(
+                inherit_parent_target=self._input_continuity.subagent_parent_target,
                 repository=repository,
                 guard=self._lease.guard,
                 io_owner=self._io,
@@ -5142,6 +5143,27 @@ class KernelHostSession:
         async with self._lock:
             self._finish_control_attempt_locked(attempt, outcome)
 
+    async def subagent_capacity_state(self) -> tuple[int, int]:
+        return await self._subagents.capacity_state()
+
+    async def set_subagent_capacity(self, target: int) -> tuple[int, int]:
+        """Apply a controller's Host-local worker target under writer ownership."""
+
+        async with self._lock:
+            if self._closing or self._closed:
+                raise RuntimeError("Host owner is closing")
+            await self._io.run(
+                self.repository.validate_host_writer,
+                self._lease.guard,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            raised = await self._subagents.set_capacity_target(target)
+        # Child admission finalizes TODO under this Host lock. Join the shared
+        # scheduler only after releasing it; target admission stays owner-bound.
+        if raised:
+            await self._subagents.fill_available_capacity()
+        return await self._subagents.capacity_state()
+
     async def request_cancel_subagent(
         self,
         *,
@@ -7840,6 +7862,7 @@ class KernelHostCore:
         after_accepted_at: datetime | None = None,
         after_task_id: str | None = None,
         batch_id: str | None = None,
+        task_id: str | None = None,
     ) -> tuple[
         tuple[Mapping[str, object], ...],
         tuple[Mapping[str, object], ...],
@@ -7859,20 +7882,17 @@ class KernelHostCore:
             after_accepted_at=after_accepted_at,
             after_task_id=after_task_id,
             batch_id=batch_id,
+            task_id=task_id,
             include_lookahead=True,
             deadline_monotonic=deadline,
         )
-        task_ids = tuple(str(row["id"]) for row in rows[:maximum_items])
-        dependencies: list[Mapping[str, object]] = []
-        for start in range(0, len(task_ids), 32):
-            dependencies.extend(
-                await asyncio.to_thread(
-                    repository.read_subagent_dependencies,
-                    session_id=session_id,
-                    task_ids=task_ids[start : start + 32],
-                    deadline_monotonic=deadline,
-                )
-            )
+        # Rows, their dependency view, and the read watermark come from one
+        # repeatable-read transaction in list_subagent_tasks.
+        dependencies = [
+            edge
+            for row in rows[:maximum_items]
+            for edge in row["dependency_rows"]
+        ]
         return rows, tuple(dependencies)
 
     async def read_subagent_task_group_page(
@@ -7882,6 +7902,7 @@ class KernelHostCore:
         maximum_items: int,
         after_first_accepted_at: datetime | None = None,
         after_batch_id: str | None = None,
+        batch_id: str | None = None,
     ) -> tuple[Mapping[str, object], ...]:
         """Cold-read real batch aggregates without activating a Host."""
 
@@ -7896,6 +7917,7 @@ class KernelHostCore:
             maximum_items=maximum_items,
             after_first_accepted_at=after_first_accepted_at,
             after_batch_id=after_batch_id,
+            batch_id=batch_id,
             include_lookahead=True,
             deadline_monotonic=self._canonical_deadline(),
         )
@@ -7944,7 +7966,7 @@ class KernelHostCore:
 
     async def prepare_session_archive(self, operation: KernelSessionRetirement):
         """Freeze existing Host admission before checking canonical idle; do not stop work."""
-        from ._repository.deletion import SessionDeletionBusy
+        from .repository_errors import SessionDeletionBusy
         if operation.owner is not self or self._session_retirements.get(operation.session_id) is not operation:
             raise RuntimeError('session archive lacks admission authority')
         repository = await self._ensure_resources()

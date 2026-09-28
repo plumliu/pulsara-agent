@@ -24,7 +24,7 @@ describe('Markdown Mermaid diagrams', () => {
     const { container } = render(<MarkdownBody body={body} onNotify={notify} />);
     await waitFor(() => expect(screen.getAllByRole('img', { name: 'Mermaid 图表' })).toHaveLength(2));
     expect(renderDiagram.mock.calls.map(call => call[0])).toEqual([source, 'sequenceDiagram\nA->>B: 你好']);
-    expect(container.querySelector('code.language-js')?.textContent).toContain('const x = 1;');
+    expect(container.querySelector('.code-card[aria-label="js 代码块"]')?.textContent).toContain('const x = 1;');
     expect(container.querySelector('p code')?.textContent).toBe('mermaid');
     expect(container.querySelector('.katex')).toBeTruthy();
     expect(container.querySelector('pre .mermaid-block')).toBeNull();

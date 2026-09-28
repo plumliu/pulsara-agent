@@ -100,6 +100,7 @@ from pulsara_agent.llm.request import (
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
 )
+from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
 from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
@@ -211,6 +212,7 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
 from pulsara_agent.conversation_kernel.steer_consumption import (
     PreparedSteerPlanStale,
 )
+from pulsara_agent.conversation_kernel.repository_errors import PreparedCompletionSuffixStale
 from pulsara_agent.conversation_kernel.steer import (
     PreparedActiveRootInputCandidate,
     PreparedRootProviderInputCandidate,
@@ -271,6 +273,7 @@ from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
+    freeze_json,
     thaw_json,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
@@ -629,6 +632,7 @@ def _root_completion_followup_upper(
             result_id=None,
             result_source=None,
             result_summary=None,
+            result_data=None,
         )
         projections.append(
             project_subagent_completion_for_provider(
@@ -649,6 +653,7 @@ def _root_completion_followup_upper(
         result_id=control_fill * 512,
         result_source=SubagentResultSource.EXPLICIT.value,
         result_summary=control_fill * MAXIMUM_RESULT_SUMMARY_UTF8_BYTES,
+        result_data=None,
     )
     projections.append(
         project_subagent_completion_for_provider(
@@ -656,6 +661,22 @@ def _root_completion_followup_upper(
             source_task_id=task_id,
         )
     )
+    structured_body = build_subagent_completion_storage_body(
+        task_id=task_id,
+        task_key="a" * 64,
+        label=control_fill * 256,
+        display_role=control_fill * 256,
+        profile=profile,
+        status=SubagentTaskStatus.COMPLETED,
+        terminal_reason=None,
+        terminal_public_detail=None,
+        failed_dependency_task_ids=(),
+        result_id=control_fill * 512,
+        result_source=SubagentResultSource.EXPLICIT.value,
+        result_summary="x",
+        result_data=freeze_json({"value": "x" * (MAXIMUM_RESULT_SUMMARY_UTF8_BYTES - 13)}),
+    )
+    projections.append(project_subagent_completion_for_provider(structured_body, source_task_id=task_id))
     projection = max(projections, key=lambda value: len(value.encode("utf-8")))
     message = LLMMessage.user(projection)
     canonical = len(projection.encode("utf-8"))
@@ -1258,7 +1279,7 @@ class ConversationKernelRunner:
             return await self.run_accepted_turn(
                 launch.child_turn_id,
                 cancellation_intent=cancellation_intent,
-                expected_first_model_identity=launch.configured_model_identity,
+                expected_first_model_target_fact=launch.accepted_model_target_fact,
             )
         finally:
             self._continuity.retire_terminal_subagent_scope(scope)
@@ -1615,7 +1636,7 @@ class ConversationKernelRunner:
         turn_id: str,
         *,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
-        expected_first_model_identity: str | None = None,
+        expected_first_model_target_fact: FrozenSubagentModelTarget | None = None,
         prospective_root_dispatch: PreparedProspectiveRootDispatch | None = None,
     ) -> KernelRunResult:
         """Execute a ROOT/task turn whose user entry is already canonical."""
@@ -1628,7 +1649,7 @@ class ConversationKernelRunner:
             scope_kind=intent.scope_kind,
             scope_subagent_task_id=intent.scope_subagent_task_id,
         )
-        if expected_first_model_identity is not None and (
+        if expected_first_model_target_fact is not None and (
             intent.scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
             or not intent.scope_subagent_task_id
         ):
@@ -1942,7 +1963,7 @@ class ConversationKernelRunner:
                             headroom_admission = None
                             session_start_context = None
                             break
-                        except PreparedSteerPlanStale:
+                        except (PreparedSteerPlanStale, PreparedCompletionSuffixStale):
                             headroom_admission = None
                             if direct_switch_admission is not None:
                                 raise ConversationKernelConflict(
@@ -1973,16 +1994,18 @@ class ConversationKernelRunner:
                 try:
                     if (
                         model_call_count == 1
-                        and expected_first_model_identity is not None
-                        and dispatch.prepared_call.call.target.fact.model_id
-                        != expected_first_model_identity
+                        and expected_first_model_target_fact is not None
+                        and FrozenSubagentModelTarget.freeze(
+                            dispatch.prepared_call.call.target.fact,
+                            dispatch.prepared_call.epoch_call_target.target_bundle.reasoning_contract,
+                        ) != expected_first_model_target_fact
                     ):
                         if reusable_wire_observation is not None:
                             reusable_wire_observation.discard()
                             reusable_wire_observation = None
                         dispatch.close()
                         raise ConversationKernelConflict(
-                            "child first provider target drifted from launch carrier"
+                            "child first provider target drifted from accepted task"
                         )
                     auto_trigger = (
                         CompactionTrigger.MID_TURN_FOLLOWUP
@@ -2186,23 +2209,40 @@ class ConversationKernelRunner:
                                 deadline_monotonic=self._canonical_deadline(),
                             )
                         )
-                    output_quote = self._quote_post_response_resources(
-                        request=request,
-                        permit=permit,
-                        collected=collected,
-                        canonical_facts=canonical_facts,
-                        root_completion_followup_items=(root_completion_followup_items),
-                        pending_root_dynamic_followup=(
-                            pending_control_feedback or pending_steer_before_settlement
-                        ),
-                    )
                     try:
-                        self._require_post_response_resources(
-                            output_quote,
-                            effective_input_budget_tokens=(
-                                request.wire_input_plan.quote.effective_input_budget_tokens
-                            ),
+                        completion_counts = (
+                            range(root_completion_followup_items, 0, -1)
+                            if calls and root_completion_followup_items
+                            else (root_completion_followup_items,)
                         )
+                        for count in completion_counts:
+                            output_quote = self._quote_post_response_resources(
+                                request=request,
+                                permit=permit,
+                                collected=collected,
+                                canonical_facts=canonical_facts,
+                                root_completion_followup_items=count,
+                                pending_root_dynamic_followup=(
+                                    pending_control_feedback or pending_steer_before_settlement
+                                ),
+                            )
+                            try:
+                                self._require_post_response_resources(
+                                    output_quote,
+                                    effective_input_budget_tokens=(
+                                        request.wire_input_plan.quote.effective_input_budget_tokens
+                                    ),
+                                )
+                            except OutputResourceInterruption:
+                                if count > 1 and calls:
+                                    continue
+                                raise
+                            root_completion_followup_items = count
+                            break
+                        if calls and root_completion_followup_items and self._subagent_runtime is not None:
+                            await self._subagent_runtime.set_root_completion_delivery_limit(
+                                turn_id, root_completion_followup_items
+                            )
                     except OutputResourceInterruption as exc:
                         if root_answer_fenced and self._subagent_runtime is not None:
                             await (

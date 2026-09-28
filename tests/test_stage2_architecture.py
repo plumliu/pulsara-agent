@@ -246,7 +246,7 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
     # model-call count/deadline admission caps; Round 5B removes the final
     # durable-job family, its four now-ownerless limits, and the independent
     # 128K provider-input cap.  The resolved model target now owns input budget.
-    assert len(fields(Stage2RuntimeLimits)) == 53
+    assert len(fields(Stage2RuntimeLimits)) == 52
     assert all(value > 0 for value in asdict(STAGE2_LIMITS).values())
     assert report["structural_budgets"] == {
         "contract": "stage2_structural_budgets.v1",

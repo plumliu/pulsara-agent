@@ -2950,6 +2950,7 @@ class _ConversationOperations:
                 or str(result_rows[0]["task_id"]) != subagent_result.task_id
                 or str(result_rows[0]["result_source"]) != "INFERRED"
                 or str(result_rows[0]["summary"]) != subagent_result.summary
+                or result_rows[0]["data"] is not None
                 or result_rows[0]["output_preview"] != subagent_result.output_preview
                 or freeze_json(result_rows[0]["diagnostics"])
                 != subagent_result.diagnostics

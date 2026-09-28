@@ -413,7 +413,7 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
         assert isinstance(session, BlockingSession)
         assert session.closed
         assert core._sessions == {}  # noqa: SLF001
-        assert core._open_attempts == set()  # noqa: SLF001
+        assert core._open_attempts == {}  # noqa: SLF001
         assert not core._bundled_skill_binding.is_bound  # noqa: SLF001
         with pytest.raises(KernelHostCoreClosing):
             await core.open_session(

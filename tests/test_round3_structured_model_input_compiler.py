@@ -577,6 +577,26 @@ _SOURCE_FACTS = {
         (ContextRenderMode.FULL,),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
+    ContextSourceKind.TERMINAL_MATERIAL: (
+        "pulsara.subagent-terminal-material.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        44,
+        5,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    ContextSourceKind.WORKER_HISTORY: (
+        "pulsara.subagent-worker-history.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        45,
+        5,
+        (ContextRenderMode.FULL,),
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
         "pulsara.tool-observation-freshness.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -739,6 +759,8 @@ def _sources(
         ),
         ContextSourceKind.PARENT_CONTEXT: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.DEPENDENCY_RESULTS: (ContextSourceAbsenceKind.NOT_APPLICABLE),
+        ContextSourceKind.TERMINAL_MATERIAL: ContextSourceAbsenceKind.NOT_APPLICABLE,
+        ContextSourceKind.WORKER_HISTORY: ContextSourceAbsenceKind.NOT_APPLICABLE,
     }
     for kind, absence_kind in default_absences.items():
         if kind not in candidate_kinds and kind not in absent_by_kind:
@@ -3830,15 +3852,15 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:9ec9771ff3e59c2aa2e643422e08f8428b8851f21694edb42bb377e3ba660afd"
+        "sha256:0dd8bbade8b48666081e71747c04d7e283aeaeca66ba97633b44ce16e56b821d"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # Provider-output policy changes the frozen target's input ceiling;
-        # source selection and its decision digest above stay byte-identical.
-        "sha256:d95fc4d59cffecff64ba7305f74bb505e126eb7b8c18500135841da154238965"
+        # The two additional absent source leaves change the source collection
+        # and the compiled semantic root without changing the budget decision.
+        "sha256:5baa37974f8fa1337324c4721c004d2c0461b381541d8c8636a8075c2e82ca84"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 
@@ -5127,9 +5149,7 @@ def test_round5b_retained_skill_survives_same_turn_and_clears_on_next_turn() -> 
 
 def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
     compiler = StructuredModelInputCompiler()
-    owner = new_test_provider_input_continuity_owner(
-        maximum_child_scopes=2
-    )
+    owner = new_test_provider_input_continuity_owner()
 
     def install_child(task_id: str, sequence: int):
         scope = ProviderInputContinuityScope(
@@ -5167,24 +5187,11 @@ def test_round3_1_child_epochs_are_exactly_scoped_and_released() -> None:
     second = install_child("task:b", 2)
     assert first.epoch_revision == second.epoch_revision == 1
     assert first.scope != second.scope
-    with pytest.raises(ProviderInputContinuityConflict, match="capacity"):
-        scope = ProviderInputContinuityScope(
-            session_id="session:test",
-            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id="task:c",
-        )
-        owner.authorize_new_subagent_scope(
-            scope,
-            source=new_test_subagent_lease_source(
-                session_id=scope.session_id,
-                task_id="task:c",
-            ),
-        )
-
-    owner.retire_terminal_subagent_scope(first.scope)
     third = install_child("task:c", 3)
     assert third.epoch_revision == 1
+    owner.retire_terminal_subagent_scope(first.scope)
     assert owner.current_view(first.scope) is None
+    assert owner.current_view(third.scope) is not None
 
     owner.close()
     assert owner.current_view(second.scope) is None

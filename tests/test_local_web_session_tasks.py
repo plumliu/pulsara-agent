@@ -53,10 +53,12 @@ def _task_row(
         "result_entry_id": f"entry-{ordinal}" if status == "COMPLETED" else None,
         "result_source": "EXPLICIT" if status == "COMPLETED" else None,
         "result_summary": f"第 {ordinal} 部分完成" if status == "COMPLETED" else None,
+        "result_data": None,
         "result_output_preview": "可见输出" if status == "COMPLETED" else None,
         "result_diagnostics": [{"message": "验证通过"}] if status == "COMPLETED" else None,
         "accepted_root_entry_id": None,
         "total_count": total_count,
+        "read_event_sequence": 100,
     }
 
 
@@ -184,6 +186,7 @@ def test_session_task_inventory_pages_every_durable_status_and_dependency(
             "entry_id": "entry-1",
             "source": "EXPLICIT",
             "summary": "第 1 部分完成",
+            "data": None,
             "output_preview": "可见输出",
             "diagnostics": [{"message": "验证通过"}],
             "accepted": False,

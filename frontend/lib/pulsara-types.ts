@@ -373,7 +373,7 @@ export interface SubagentRun {
   label: string;
   role: string;
   objective: string;
-  status: TaskStatus | 'ended';
+  status: TaskStatus | 'ended' | 'unknown';
   parentId?: string;
   summary?: string;
   color: 'blue' | 'amber' | 'violet' | 'green';
@@ -430,9 +430,14 @@ export interface AgentTask {
   batchId?: string;
   taskKey?: string;
   context?: {
-    mode: 'none' | 'last-n';
+    mode: 'none' | 'last-n' | 'worker-history';
     lastNTurns?: number;
+    historyTaskId?: string;
   };
+  modelConnectionId?: string;
+  modelId?: string;
+  reasoning?: unknown;
+  materialTaskIds?: string[];
   pendingReason?: string;
   terminalReason?: string;
   terminalPublicDetail?: string;
@@ -459,6 +464,7 @@ export interface AgentTaskResult {
   id: string;
   entryId?: string;
   summary: string;
+  data?: Record<string, unknown>;
   outputPreview?: string;
   diagnostics: Array<Record<string, unknown>>;
 }

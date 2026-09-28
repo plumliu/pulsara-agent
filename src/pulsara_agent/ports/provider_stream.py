@@ -172,7 +172,11 @@ class ProviderModelOutputIncomplete(RuntimeError):
 class ProviderModelExecutionFailed(RuntimeError):
     def __init__(self, error: ProviderSanitizedErrorFact) -> None:
         self.error = error
-        super().__init__(f"provider model execution failed: {error.code.value}")
+        # Terminal task details retain the exception text. Keep the message from
+        # the existing sanitization boundary instead of losing it at settlement.
+        super().__init__(
+            f"provider model execution failed: {error.code.value}\n{error.message}"
+        )
 
 
 ProviderNormalizedStreamItem: TypeAlias = ProviderStreamPayload | ProviderStreamTerminal

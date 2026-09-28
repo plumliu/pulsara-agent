@@ -212,6 +212,10 @@ export interface LocalSettingsReadModel {
 }
 
 export interface RuntimeProjection {
+  /** Derived from the retained transcript/live window, joined to task pages on demand. */
+  subagentRuns?: SubagentRun[];
+  /** Advisory live text; canonical task status remains authoritative. */
+  subagentProgress?: Record<string, string>;
   /** Canonical ROOT admission order, before lossy transcript presentation. */
   canonicalRootTurnIds?: readonly string[];
   messages: Message[];
@@ -229,6 +233,9 @@ export interface RuntimeProjection {
   control: ProtocolCanonicalControl;
   liveControl: ProtocolLiveControlSnapshot;
   agentTasks: AgentTask[];
+  taskInvalidations?: readonly string[];
+  taskGroupInvalidations?: readonly string[];
+  taskSnapshotRevision?: number;
   todo?: TodoRun;
   eventSequence: number;
   liveOwnerEpoch: number;
@@ -509,7 +516,9 @@ export interface RuntimeAdapter {
   readSession(sessionId: string): Promise<SessionSummary | null>;
   listSessions(): Promise<SessionSummary[]>;
   listSessionTaskGroups(sessionId: string, cursor?: string): Promise<AgentTaskGroupPage>;
+  readSessionTaskGroup(sessionId: string, groupId: string): Promise<{ group: AgentTaskGroup; readEventSequence: number; totalCount: number }>;
   listSessionTasks(sessionId: string, cursor?: string, batchId?: string): Promise<AgentTaskPage>;
+  readSessionTask(sessionId: string, taskId: string): Promise<{ task: AgentTask; readEventSequence: number }>;
   listSessionTaskActivities(sessionId: string, taskId: string, cursor?: string): Promise<AgentTaskActivityPage>;
   inspectCapabilities(sessionId: string): Promise<CapabilitySnapshot>;
   reconnectMcpServer(sessionId: string, serverId: string): Promise<CapabilitySnapshot>;
@@ -598,6 +607,7 @@ export interface RuntimeAdapter {
 
 export interface AgentTaskPage {
   tasks: AgentTask[];
+  readEventSequence: number;
   totalCount: number;
   remainingCount: number;
   nextCursor?: string;
@@ -614,6 +624,7 @@ export interface AgentTaskGroup {
 
 export interface AgentTaskGroupPage {
   groups: AgentTaskGroup[];
+  readEventSequence: number;
   totalCount: number;
   remainingCount: number;
   nextCursor?: string;
@@ -622,6 +633,7 @@ export interface AgentTaskGroupPage {
 export interface AgentTaskActivityRecord {
   entryId: string;
   turnId: string;
+  turnStatus?: string;
   entrySequence: number;
   entryKind: string;
   acceptedAt: string;
@@ -631,7 +643,7 @@ export interface AgentTaskActivityRecord {
   contentKind: 'INLINE' | 'CANONICAL_BLOB';
   contentDigest: string;
   contentSize: number;
-  blocks: Array<{ blockId: string; ordinal: number; kind: string; toolCallId?: string; toolName?: string }>;
+  blocks: Array<{ blockId: string; ordinal: number; kind: string; toolCallId?: string; toolName?: string; attemptId?: string }>;
   toolResults: Array<{ attemptId?: string; assistantEntryId: string; toolCallId: string; resultEntryId: string; resultState: string }>;
 }
 
@@ -834,6 +846,8 @@ export interface RuntimeConnection {
   cancelSubagentTask(reference: UserControlCommandRef): Promise<CommandReceipt>;
   terminateBackgroundProcess(reference: UserControlCommandRef): Promise<CommandReceipt>;
   queryControlCommand(reference: UserControlCommandRef): Promise<UserControlQueryResult>;
+  readSubagentCapacity(): Promise<{ target: number; occupied: number }>;
+  setSubagentCapacity(target: number): Promise<{ target: number; occupied: number }>;
   listBackgroundProcesses(cursor?: string): Promise<BackgroundProcessPage>;
   readBackgroundProcessLog(processId: string, outputCursor?: string): Promise<BackgroundProcessLog>;
   readCanonicalEntryContent(entryId: string, digest: string, size: number): Promise<string>;
@@ -957,27 +971,6 @@ interface ProtocolActiveTurn {
   scope_kind?: string;
 }
 
-interface ProtocolSubagentTask {
-  task_id: string;
-  parent_turn_id?: string;
-  batch_id?: string;
-  task_key?: string;
-  status: string;
-  objective: string;
-  label?: string;
-  profile?: string;
-  display_role?: string;
-  context_mode?: string;
-  context_last_n_turns?: string | number;
-  pending_reason?: string;
-  terminal_reason?: string;
-  terminal_public_detail?: string;
-  result_id?: string;
-  completion_accepted?: boolean;
-  result_summary?: string;
-  dependency_task_ids?: string[];
-}
-
 interface ProtocolTaskInventoryRecord {
   id: string;
   parent_turn_id?: string;
@@ -986,7 +979,10 @@ interface ProtocolTaskInventoryRecord {
   label?: string;
   profile?: string;
   display_role?: string;
-  context?: { mode?: string; last_n_turns?: string | number | null };
+  context?: { mode?: string; last_n_turns?: string | number | null; history_task_id?: string | null };
+  model_call_binding?: { connection_id?: string; reasoning?: unknown } | null;
+  model_target?: { model_id?: string } | null;
+  material_refs?: Array<{ task_id?: string }>;
   objective?: string;
   status?: string;
   pending_reason?: string | null;
@@ -1007,6 +1003,7 @@ interface ProtocolTaskInventoryRecord {
     entry_id?: string | null;
     source?: string | null;
     summary?: string | null;
+    data?: Record<string, unknown> | null;
     output_preview?: string | null;
     diagnostics?: Array<Record<string, unknown>>;
   } | null;
@@ -1014,6 +1011,7 @@ interface ProtocolTaskInventoryRecord {
 
 interface ProtocolTaskInventoryPage {
   tasks?: ProtocolTaskInventoryRecord[];
+  read_event_sequence?: string | number;
   total_count?: string | number;
   remaining_count?: string | number;
   next_cursor?: string | null;
@@ -1043,7 +1041,10 @@ export interface ProtocolCanonicalControl {
   }>;
   prompt_queue_total_count?: string | number;
   tool_attempts?: ProtocolToolAttempt[];
-  subagent_tasks?: ProtocolSubagentTask[];
+  task_total_count?: string | number;
+  task_unreceived_count?: string | number;
+  active_turn_total_count?: string | number;
+  tool_attempt_total_count?: string | number;
   active_plan_workflow?: Record<string, unknown>;
   open_plan_interaction?: Record<string, unknown>;
   latest_context_compaction?: {
@@ -1153,6 +1154,9 @@ interface ObservationPayload {
     projection_kind: string;
     entry?: ProtocolEntry;
     current_control?: ProtocolCanonicalControl;
+    affected_subagent_task_id?: string;
+    affected_subagent_batch_id?: string;
+    control_read_event_sequence?: string | number;
   }>;
   live_owner_epoch?: string | number;
   through_live_revision?: string | number;
@@ -1431,6 +1435,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         single_task_label?: string | null;
       }>;
       total_count?: string | number;
+      read_event_sequence?: string | number;
       remaining_count?: string | number;
       next_cursor?: string | null;
     }>(`/api/sessions/${encodeURIComponent(sessionId)}/task-groups?${query.toString()}`);
@@ -1453,8 +1458,43 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         singleTaskLabel: group.single_task_label || undefined,
       })),
       totalCount: numeric(payload.total_count),
+      readEventSequence: numeric(payload.read_event_sequence),
       remainingCount: numeric(payload.remaining_count),
       nextCursor: payload.next_cursor || undefined,
+    };
+  }
+
+  async readSessionTaskGroup(sessionId: string, groupId: string): Promise<{ group: AgentTaskGroup; readEventSequence: number; totalCount: number }> {
+    const payload = await apiRequest<{
+      group: {
+        group_id: string; parent_turn_id: string; first_accepted_at: string;
+        task_count: string | number; status_counts?: Record<string, string | number>;
+        single_task_label?: string | null;
+      };
+      read_event_sequence?: string | number;
+      total_count?: string | number;
+    }>(`/api/sessions/${encodeURIComponent(sessionId)}/task-groups/${encodeURIComponent(groupId)}`);
+    const item = payload.group;
+    return {
+      group: {
+        id: item.group_id,
+        parentTurnId: item.parent_turn_id,
+        firstAcceptedAt: item.first_accepted_at,
+        taskCount: numeric(item.task_count),
+        statusCounts: {
+          pending: numeric(item.status_counts?.pending),
+          active: numeric(item.status_counts?.active),
+          waiting: numeric(item.status_counts?.waiting),
+          completed: numeric(item.status_counts?.completed),
+          cancelled: numeric(item.status_counts?.cancelled),
+          failed: numeric(item.status_counts?.failed),
+          interrupted: numeric(item.status_counts?.interrupted),
+          blocked: numeric(item.status_counts?.blocked),
+        },
+        singleTaskLabel: item.single_task_label || undefined,
+      },
+      readEventSequence: numeric(payload.read_event_sequence),
+      totalCount: numeric(payload.total_count),
     };
   }
 
@@ -1467,9 +1507,21 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     );
     return {
       tasks: (payload.tasks ?? []).map(projectTaskInventoryRecord),
+      readEventSequence: numeric(payload.read_event_sequence),
       totalCount: numeric(payload.total_count),
       remainingCount: numeric(payload.remaining_count),
       nextCursor: payload.next_cursor || undefined,
+    };
+  }
+
+  async readSessionTask(sessionId: string, taskId: string): Promise<{ task: AgentTask; readEventSequence: number }> {
+    const payload = await apiRequest<{
+      task: ProtocolTaskInventoryRecord;
+      read_event_sequence?: string | number;
+    }>(`/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}`);
+    return {
+      task: projectTaskInventoryRecord(payload.task),
+      readEventSequence: numeric(payload.read_event_sequence),
     };
   }
 
@@ -1480,12 +1532,13 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       activities?: Array<{
         entry_id: string;
         turn_id: string;
+        turn_status?: string;
         entry_sequence: string | number;
         entry_kind: string;
         accepted_at: string;
         objective: string;
         content: { kind: 'INLINE' | 'CANONICAL_BLOB'; inline_content?: string; digest: string; size: string | number; media_type?: string; codec?: string };
-        blocks?: Array<{ block_id: string; ordinal: string | number; kind: string; tool_call_id?: string | null; tool_name?: string | null }>;
+        blocks?: Array<{ block_id: string; ordinal: string | number; kind: string; tool_call_id?: string | null; tool_name?: string | null; attempt_id?: string | null }>;
         tool_results?: Array<{ attempt_id?: string | null; assistant_entry_id: string; tool_call_id: string; result_entry_id: string; result_state: string }>;
       }>;
       next_cursor?: string | null;
@@ -1501,6 +1554,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         return {
         entryId: activity.entry_id,
         turnId: activity.turn_id,
+        turnStatus: activity.turn_status,
         entrySequence: numeric(activity.entry_sequence),
         entryKind: activity.entry_kind,
         acceptedAt: activity.accepted_at,
@@ -1520,6 +1574,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
           kind: block.kind,
           toolCallId: block.tool_call_id || undefined,
           toolName: block.tool_name || undefined,
+          attemptId: block.attempt_id || undefined,
         })),
         toolResults: (activity.tool_results ?? []).map((result) => ({
           attemptId: result.attempt_id || undefined,
@@ -1928,6 +1983,9 @@ class LocalRuntimeConnection implements RuntimeConnection {
   private liveResults = new Map<string, LiveToolResult>();
   private promptTransitions = new Map<string, LocalPromptSubmission>();
   private taskProgress = new Map<string, LiveTaskProgress>();
+  private taskInvalidations: string[] = [];
+  private taskGroupInvalidations: string[] = [];
+  private taskSnapshotRevision = 0;
   private control: ProtocolCanonicalControl = {};
   private liveControl: ProtocolLiveControlSnapshot = {};
   private eventSequence = 0;
@@ -1939,6 +1997,38 @@ class LocalRuntimeConnection implements RuntimeConnection {
   private writerGeneration = 0;
   private olderHistoryCursor?: ProtocolHistoryCursor;
   private closed = false;
+
+  async readSubagentCapacity(): Promise<{ target: number; occupied: number }> {
+    return this.subagentCapacity(true, 0);
+  }
+
+  async setSubagentCapacity(target: number): Promise<{ target: number; occupied: number }> {
+    if (this.role !== 'controller') throw new RuntimeApiError('CONTROL_UNAVAILABLE', '当前窗口没有控制权限。', false);
+    if (!Number.isSafeInteger(target) || target < 1 || target > 2_147_483_647) {
+      throw new RuntimeApiError('CAPACITY_REQUEST_INVALID', '并发目标必须是有效正整数。', false);
+    }
+    return this.subagentCapacity(false, target);
+  }
+
+  private async subagentCapacity(readOnly: boolean, target: number): Promise<{ target: number; occupied: number }> {
+    const hostSessionId = this.liveControl.host_session_id;
+    if (!hostSessionId) throw new RuntimeApiError('OWNER_UNAVAILABLE', '当前运行时尚未就绪。', true);
+    const frame = await this.post<{
+      subagent_capacity?: { target?: string | number; occupied?: string | number };
+      error?: ProtocolError;
+    }>('subagent-capacity', {
+      expected_session_id: this.sessionId,
+      expected_host_session_id: hostSessionId,
+      read_only: readOnly,
+      target,
+    });
+    assertProtocolFrame(frame);
+    if (!frame.subagent_capacity) throw new RuntimeApiError('CAPACITY_RESPONSE_INVALID', '并发状态暂时无法读取。', true);
+    return {
+      target: numeric(frame.subagent_capacity.target),
+      occupied: numeric(frame.subagent_capacity.occupied),
+    };
+  }
 
   constructor(payload: ConnectPayload) {
     this.connectionId = payload.connection_id;
@@ -2036,10 +2126,17 @@ class LocalRuntimeConnection implements RuntimeConnection {
       throw new RuntimeGapError(observation.gap.kind, '连接状态需要刷新。');
     }
     this.presentationNotices = [...(observation.presentation_notices ?? [])];
+    this.taskInvalidations = [...new Set((observation.committed ?? [])
+      .map((item) => item.affected_subagent_task_id)
+      .filter((item): item is string => Boolean(item)))];
+    this.taskGroupInvalidations = [...new Set((observation.committed ?? [])
+      .map((item) => item.affected_subagent_batch_id)
+      .filter((item): item is string => Boolean(item)))];
     for (const committed of observation.committed ?? []) {
       if (committed.projection_kind === 'IMMUTABLE_ENTRY' && committed.entry) {
         this.entries.set(committed.entry.entry_id, committed.entry);
-      } else if (committed.projection_kind === 'CURRENT_CONTROL' && committed.current_control) {
+      }
+      if (committed.current_control) {
         this.control = committed.current_control;
       }
     }
@@ -2644,6 +2741,9 @@ class LocalRuntimeConnection implements RuntimeConnection {
     this.entries = new Map((snapshot.entries ?? []).map((entry) => [entry.entry_id, entry]));
     this.olderHistoryCursor = snapshot.older_history_cursor;
     this.control = snapshot.control ?? {};
+    this.taskInvalidations = [];
+    this.taskGroupInvalidations = [];
+    this.taskSnapshotRevision += 1;
     this.eventSequence = numeric(snapshot.event_sequence_cut);
     this.writerGeneration = numeric(snapshot.writer_generation);
   }
@@ -3175,7 +3275,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
       draftIdentity: augmented.draft_identity,
       generationId: augmented.generation_id,
       blockId: augmented.block_id,
-      assistantEntryId: attempt?.assistant_entry_id ?? proposed?.tool_result?.assistant_entry_id,
+      assistantEntryId: String(item.assistant_entry_id ?? '') || attempt?.assistant_entry_id || proposed?.tool_result?.assistant_entry_id,
       toolCallId: augmented.channel_tool_call_id || attempt?.tool_call_id || proposed?.tool_result?.tool_call_id,
       attemptId: augmented.channel_attempt_id,
       proposedEntryId: augmented.proposed_entry_id,
@@ -3187,7 +3287,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
     current.blockId ||= augmented.block_id;
     current.attemptId ||= augmented.channel_attempt_id;
     current.proposedEntryId ||= augmented.proposed_entry_id;
-    current.assistantEntryId ||= attempt?.assistant_entry_id ?? proposed?.tool_result?.assistant_entry_id;
+    current.assistantEntryId ||= String(item.assistant_entry_id ?? '') || attempt?.assistant_entry_id || proposed?.tool_result?.assistant_entry_id;
     current.toolCallId ||= augmented.channel_tool_call_id || attempt?.tool_call_id || proposed?.tool_result?.tool_call_id;
     if (event.event_type === 'TOOL_RESULT_DELTA') {
       current.text += String(item.text ?? '');
@@ -3252,21 +3352,15 @@ class LocalRuntimeConnection implements RuntimeConnection {
     const canonical = [...this.entries.values()].sort(
       (a, b) => numeric(a.entry_sequence) - numeric(b.entry_sequence),
     );
-    const agentTasks = projectAgentTasks(
-      this.control.subagent_tasks ?? [],
-      this.taskProgress,
-    );
-    const activeTaskIds = new Set(
-      agentTasks
-        .filter((task) => !isTerminalTaskStatus(task.status))
-        .map((task) => task.id),
-    );
+    const agentTasks: AgentTask[] = [];
     const activeTurnIds = new Set(
       (this.control.active_turns ?? []).map((turn) => turn.turn_id),
     );
     const visibleDrafts = [...this.drafts.values()].filter((draft) => {
       if (draft.scopeKind === 'SUBAGENT_TASK' || draft.taskId) {
-        return Boolean(draft.taskId) && activeTaskIds.has(draft.taskId);
+        // The draft is a process-local active observation.  Inventory pages
+        // are sparse and their absence cannot establish task termination.
+        return Boolean(draft.taskId);
       }
       return Boolean(draft.turnId) && activeTurnIds.has(draft.turnId);
     });
@@ -3296,15 +3390,9 @@ class LocalRuntimeConnection implements RuntimeConnection {
         traces: draft.traces.length ? draft.traces : undefined,
       });
     }
-    attachSubagentRuns(
-      messages,
-      projectSubagentRuns(
-        canonical,
-        agentTasks,
-        visibleDrafts,
-      ),
-    );
-    this.applyProjectedLiveResults(messages, activeTurnIds);
+    const subagentRuns = projectSubagentRuns(canonical, agentTasks, visibleDrafts);
+    attachSubagentRuns(messages, subagentRuns);
+    this.applyProjectedLiveResults(messages, subagentRuns, activeTurnIds);
     const hasActiveDraft = visibleDrafts.length > 0;
     const activeTurn = (this.control.active_turns ?? []).find(
       (turn) => turn.scope_kind !== 'SUBAGENT_TASK',
@@ -3314,6 +3402,8 @@ class LocalRuntimeConnection implements RuntimeConnection {
     return {
       messages,
       canonicalRootTurnIds,
+      subagentRuns,
+      subagentProgress: Object.fromEntries([...this.taskProgress].map(([id, progress]) => [id, progress.summary])),
       presentationNotices: this.presentationNotices,
       contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base,
@@ -3333,6 +3423,9 @@ class LocalRuntimeConnection implements RuntimeConnection {
       control: this.control,
       liveControl: this.liveControl,
       agentTasks,
+      taskInvalidations: this.taskInvalidations,
+      taskGroupInvalidations: this.taskGroupInvalidations,
+      taskSnapshotRevision: this.taskSnapshotRevision,
       todo,
       eventSequence: this.eventSequence,
       liveOwnerEpoch: this.liveOwnerEpoch,
@@ -3358,19 +3451,19 @@ class LocalRuntimeConnection implements RuntimeConnection {
     return [...this.promptTransitions.values()];
   }
 
-  private applyProjectedLiveResults(messages: Message[], activeTurnIds: Set<string>) {
+  private applyProjectedLiveResults(messages: Message[], subagentRuns: SubagentRun[], activeTurnIds: Set<string>) {
     const traceTargets = new Map<string, ToolTrace>();
     for (const message of messages) {
       for (const trace of message.traces ?? []) traceTargets.set(`${message.id}:${trace.id}`, trace);
-      for (const run of message.subagentRuns ?? []) {
-        for (const activity of run.activities) {
-          for (const trace of activity.traces ?? []) traceTargets.set(`${activity.id}:${trace.id}`, trace);
-        }
+    }
+    for (const run of subagentRuns) {
+      for (const activity of run.activities) {
+        for (const trace of activity.traces ?? []) traceTargets.set(`${run.id}:${activity.id}:${trace.id}`, trace);
       }
     }
     for (const result of this.liveResults.values()) {
       const trace = result.assistantEntryId && result.toolCallId
-        ? traceTargets.get(`${result.assistantEntryId}:${result.toolCallId}`)
+        ? traceTargets.get(`${result.taskId ? `${result.taskId}:` : ''}${result.assistantEntryId}:${result.toolCallId}`)
         : undefined;
       if (trace && !trace.resultEntryId) {
         if (result.hasText) trace.resultText = result.text;
@@ -3381,7 +3474,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
           : '正在接收结果';
         continue;
       }
-      if (trace || !activeTurnIds.has(result.turnId)) continue;
+      if (trace || (!result.taskId && !activeTurnIds.has(result.turnId))) continue;
       const detachedTrace: ToolTrace = {
         id: result.id,
         kind: 'artifact',
@@ -3393,13 +3486,14 @@ class LocalRuntimeConnection implements RuntimeConnection {
         ...(result.hasText ? { resultText: result.text } : {}),
       };
       if (result.taskId) {
-        const run = messages.flatMap((message) => message.subagentRuns ?? [])
-          .find((candidate) => candidate.id === result.taskId);
-        if (run) {
-          run.activities.push({
-            id: `live-result:${result.id}`, time: '现在', body: '', status: 'running', traces: [detachedTrace],
-          });
+        let run = subagentRuns.find((candidate) => candidate.id === result.taskId);
+        if (!run) {
+          run = {id: result.taskId, label: '', role: '子任务', objective: '', status: 'unknown', color: 'blue', activities: []};
+          subagentRuns.push(run);
         }
+        run.activities.push({
+          id: `live:${result.id}`, time: '现在', body: '', status: 'running', traces: [detachedTrace],
+        });
       } else {
         messages.push({
           id: `live-result:${result.id}`, turnId: result.turnId, role: 'assistant',
@@ -4041,11 +4135,8 @@ function projectSubagentRuns(
       label: task?.label || `子任务 ${index + 1}`,
       role: task?.role || '子任务',
       objective: task?.objective || '',
-      // Active and queued tasks are always present in canonical control. A
-      // transcript-only task has already left that control surface; until a
-      // successful final reply below proves completion, present the neutral
-      // terminal state instead of falsely leaving it running forever.
-      status: task?.status || 'ended',
+      // Task rows are loaded on demand; absence says nothing about liveness.
+      status: task?.status || 'unknown',
       parentId: task?.parentId,
       summary: task?.summary,
       color: task?.color ?? (['blue', 'amber', 'violet', 'green'] as const)[index % 4],
@@ -4108,7 +4199,6 @@ function projectSubagentRuns(
       });
       if (entry.entry_kind === 'ASSISTANT_MESSAGE' && body) {
         run.summary ??= body;
-        if (!taskById.has(taskId)) run.status = 'completed';
       }
       continue;
     }
@@ -4194,7 +4284,7 @@ function projectSubagentRuns(
   }
 
   for (const run of runs.values()) {
-    if (['pending', 'running', 'waiting'].includes(run.status)) continue;
+    if (!isTerminalTaskStatus(run.status)) continue;
     for (const activity of run.activities) {
       for (const trace of activity.traces ?? []) settleHistoricalTrace(trace);
     }
@@ -4442,6 +4532,7 @@ function toolDisplayName(name: string): string {
   if (normalized.includes('wait_agent')) return '等待子任务';
   if (normalized.includes('send_agent_message')) return '发送子任务消息';
   if (normalized.includes('stop_agent')) return '停止子任务';
+  if (normalized === 'list_agent_models') return '查看可用模型';
   if (normalized.includes('list_agents')) return '查看子任务';
   if (normalized === 'todo') return '更新 TODO';
   if (normalized.includes('ask_plan_question')) return '提出规划问题';
@@ -4482,6 +4573,7 @@ function toolArgumentSummary(name: string, content: string): string {
     if (normalized.includes('wait_agent')) return '等待指定子任务出现新进展';
     if (normalized.includes('send_agent_message')) return '向子任务发送补充信息';
     if (normalized.includes('stop_agent')) return '停止指定子任务';
+    if (normalized === 'list_agent_models') return '正在读取已保存的模型配置';
     if (normalized.includes('list_agents')) return '读取当前子任务状态';
     if (normalized === 'todo') return '更新当前工作清单';
     if (name.toLowerCase().includes('ask_plan_question')) return String(value.question ?? '等待你的选择');
@@ -4593,45 +4685,6 @@ function projectInteraction(
   return undefined;
 }
 
-function projectAgentTasks(
-  tasks: ProtocolSubagentTask[],
-  progress: ReadonlyMap<string, LiveTaskProgress>,
-): AgentTask[] {
-  return tasks.map((task, index) => {
-    const live = progress.get(task.task_id);
-    const status = taskStatus(task.status);
-    return {
-      id: task.task_id,
-      label: task.label || `子任务 ${index + 1}`,
-      role: task.display_role || profileLabel(task.profile),
-      profile: task.profile,
-      objective: task.objective,
-      status,
-      parentId: task.parent_turn_id,
-      batchId: task.batch_id,
-      taskKey: task.task_key,
-      context: projectTaskContext(task.context_mode, task.context_last_n_turns),
-      pendingReason: task.pending_reason || undefined,
-      terminalReason: task.terminal_reason || undefined,
-      terminalPublicDetail: task.terminal_public_detail
-        ? task.terminal_public_detail
-        : undefined,
-      completionAccepted: Boolean(task.completion_accepted),
-      dependencyIds: task.dependency_task_ids ?? [],
-      summary: task.result_summary || undefined,
-      progress: !isTerminalTaskStatus(status) && live?.summary
-        ? live.summary
-        : undefined,
-      result: task.result_id ? {
-        id: task.result_id,
-        summary: task.result_summary ?? '',
-        diagnostics: [],
-      } : undefined,
-      color: taskColor(task.task_id),
-    };
-  });
-}
-
 function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTask {
   const dependencies = (task.dependencies ?? []).map((dependency) => ({
     id: String(dependency.task_id ?? ''),
@@ -4646,6 +4699,7 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
     id: task.result.id,
     entryId: task.result.entry_id || undefined,
     summary: task.result.summary ?? '',
+    data: task.result.data ?? undefined,
     outputPreview: task.result.output_preview
       ? task.result.output_preview
       : undefined,
@@ -4663,7 +4717,11 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
     parentId: task.parent_turn_id,
     batchId: task.batch_id,
     taskKey: task.task_key,
-    context: projectTaskContext(task.context?.mode, task.context?.last_n_turns),
+    context: projectTaskContext(task.context?.mode, task.context?.last_n_turns, task.context?.history_task_id),
+    modelConnectionId: task.model_call_binding?.connection_id,
+    modelId: task.model_target?.model_id,
+    reasoning: task.model_call_binding?.reasoning,
+    materialTaskIds: task.material_refs?.map((item) => String(item.task_id ?? '')).filter(Boolean),
     pendingReason: task.pending_reason || undefined,
     terminalReason: task.terminal_reason || undefined,
     terminalPublicDetail: task.terminal_public_detail
@@ -4683,10 +4741,11 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
 function projectTaskContext(
   mode: string | undefined,
   turns: string | number | null | undefined,
+  historyTaskId?: string | null,
 ): AgentTask['context'] {
-  return String(mode ?? '').toUpperCase() === 'LAST_N'
-    ? { mode: 'last-n', lastNTurns: numeric(turns) || undefined }
-    : { mode: 'none' };
+  if (String(mode ?? '').toUpperCase() === 'LAST_N') return { mode: 'last-n', lastNTurns: numeric(turns) || undefined };
+  if (String(mode ?? '').toUpperCase() === 'WORKER_HISTORY') return { mode: 'worker-history', historyTaskId: historyTaskId || undefined };
+  return { mode: 'none' };
 }
 
 function profileLabel(profile?: string): string {
@@ -4742,21 +4801,33 @@ function annotateSubagentCompletionSources(
   }
 }
 
+export function projectTaskActivities(task: AgentTask, source: readonly SubagentActivity[]): SubagentActivity[] {
+  const terminal = isTerminalTaskStatus(task.status);
+  const activities = source
+    .filter(activity => !terminal || !activity.id.startsWith('live:'))
+    .map(activity => ({ ...activity, traces: activity.traces?.map(trace => ({ ...trace })) }));
+  if (terminal) for (const activity of activities) {
+    for (const trace of activity.traces ?? []) settleHistoricalTrace(trace);
+  }
+  return activities;
+}
+
 export function mergeRuntimeTaskInventory(
   projection: RuntimeProjection,
   inventory: AgentTask[],
 ): RuntimeProjection {
   const liveById = new Map(projection.agentTasks.map((task) => [task.id, task]));
-  const merged = inventory.map((durable) => {
+  const merged: AgentTask[] = inventory.map((durable) => {
     const live = liveById.get(durable.id);
     liveById.delete(durable.id);
-    if (!live) return durable;
+    const progress = projection.subagentProgress?.[durable.id];
+    if (!live) return {...durable, progress: isTerminalTaskStatus(durable.status) ? undefined : progress ?? durable.progress};
     const durableTerminal = isTerminalTaskStatus(durable.status);
     return {
       ...live,
       ...durable,
       status: durableTerminal ? durable.status : live.status,
-      progress: durableTerminal ? undefined : live.progress ?? durable.progress,
+      progress: durableTerminal ? undefined : progress ?? live.progress ?? durable.progress,
       summary: durable.summary ?? live.summary,
       dependencies: durable.dependencies?.length
         ? durable.dependencies
@@ -4781,36 +4852,21 @@ export function mergeRuntimeTaskInventory(
     merged,
     projection.canonicalRootTurnIds ?? [],
   );
-  const runById = new Map<string, SubagentRun>();
-  for (const message of messages) {
-    for (const run of message.subagentRuns ?? []) runById.set(run.id, run);
-  }
-  const missing: SubagentRun[] = [];
+  // Only join rows that the user actually loaded. Derived activity remains
+  // available for the next open without making its absence execution truth.
+  const runById = new Map((projection.subagentRuns ?? []).map(run => [run.id, run]));
+  const attached: SubagentRun[] = [];
   for (const task of merged) {
-    const run = runById.get(task.id);
-    if (run) {
-      run.label = task.label;
-      run.role = task.role;
-      run.objective = task.objective;
-      run.status = task.status;
-      run.parentId = task.parentId;
-      run.summary = task.summary;
-      run.color = task.color;
-      continue;
-    }
-    missing.push({
-      id: task.id,
-      label: task.label,
-      role: task.role,
-      objective: task.objective,
-      status: task.status,
-      parentId: task.parentId,
-      summary: task.summary,
-      color: task.color,
-      activities: [],
+    const source = runById.get(task.id);
+    const activities = projectTaskActivities(task, source?.activities ?? []);
+    attached.push({
+      id: task.id, label: task.label, role: task.role, objective: task.objective,
+      status: task.status, parentId: task.parentId, summary: task.summary ?? source?.summary,
+      color: task.color, activities,
     });
   }
-  attachSubagentRuns(messages, missing);
+  for (const message of messages) message.subagentRuns = undefined;
+  attachSubagentRuns(messages, attached);
   return { ...projection, messages, agentTasks: merged };
 }
 

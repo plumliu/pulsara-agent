@@ -9,13 +9,10 @@ from psycopg.errors import DeadlockDetected, SerializationFailure
 from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
+from pulsara_agent.conversation_kernel.repository_errors import SessionDeletionBusy
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .locking import lock_canonical_identities
-
-
-class SessionDeletionBusy(RuntimeError):
-    """Deletion has no authority over the current canonical writer."""
 
 
 @dataclass(frozen=True, slots=True)

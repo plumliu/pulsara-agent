@@ -82,6 +82,7 @@ from pulsara_agent.terminal_protocol.canonical_v3 import (
 )
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
+    StaleHostWriter,
     PlanDraftIdentityConflict,
     PlanQuestionAnswer,
 )
@@ -108,7 +109,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 3
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:686b72fc1c2d965a64c67043c16a60154131985cb81c2f0c71612bb0aac07baf"
+    "sha256:fa79420a390032845b66c3f50e5cac4de5aead56bde3f15835d85928d9102e72"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -315,6 +316,8 @@ class TerminalKernelProtocolServer:
             )
         if kind == "live_control_snapshot":
             return self._live_control_snapshot(state, request)
+        if kind == "subagent_capacity":
+            return await self._subagent_capacity(state, request)
         if kind == "resolve_interaction":
             return await self._resolve_interaction(state, request)
         if kind == "resolve_plan_interaction":
@@ -456,6 +459,36 @@ class TerminalKernelProtocolServer:
             result
             if self._fits_frame(result)
             else _error(request.request_id, "HISTORY_RESOURCE_EXHAUSTED")
+        )
+
+    async def _subagent_capacity(
+        self, state: _Connection, request: wire.SubagentCapacityRequest
+    ) -> wire.ServerFrame:
+        session = state.host_session
+        if (
+            request.expected_session_id != session.session_id
+            or request.expected_host_session_id != session.host_session_id
+        ):
+            return _error(request.request_id, "OWNER_UNAVAILABLE")
+        if request.read_only:
+            if request.target:
+                return _error(request.request_id, "CAPACITY_REQUEST_INVALID")
+            target, occupied = await session.subagent_capacity_state()
+        else:
+            if not self._has_controller_capability(state):
+                return _error(request.request_id, "CONTROL_UNAVAILABLE")
+            try:
+                target, occupied = await session.set_subagent_capacity(int(request.target))
+            except StaleHostWriter:
+                return _error(request.request_id, "OWNER_UNAVAILABLE")
+            except (ValueError, RuntimeError):
+                return _error(request.request_id, "CAPACITY_REQUEST_INVALID")
+        return wire.ServerFrame(
+            subagent_capacity=wire.SubagentCapacityResponse(
+                request_id=request.request_id,
+                target=target,
+                occupied=occupied,
+            )
         )
 
     def _live_control_snapshot(
@@ -1605,6 +1638,7 @@ def _live_payload_to_wire(payload: object) -> wire.LiveEventPayload:
                 block_identity=payload.block_identity,
                 tool_call_id=payload.tool_call_id,
                 attempt_id=payload.attempt_id,
+                assistant_entry_id=payload.assistant_entry_id,
             )
         )
     if isinstance(payload, ToolResultDeltaPayload):

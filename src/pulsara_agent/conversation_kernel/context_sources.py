@@ -332,6 +332,30 @@ _BINDINGS = (
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
+        ContextSourceKind.TERMINAL_MATERIAL,
+        "pulsara.subagent-terminal-material.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        44,
+        5,
+        (ContextRenderMode.FULL,),
+        "pulsara.subagent-terminal-material-collector.v1",
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    _SourceBinding(
+        ContextSourceKind.WORKER_HISTORY,
+        "pulsara.subagent-worker-history.v1",
+        ContextChannel.RUNTIME_OBSERVATION,
+        ContextTrustClass.UNTRUSTED_OBSERVATION,
+        ContextBudgetClass.MUST_KEEP,
+        45,
+        5,
+        (ContextRenderMode.FULL,),
+        "pulsara.subagent-worker-history-collector.v1",
+        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+    ),
+    _SourceBinding(
         ContextSourceKind.SKILL_CATALOG,
         "pulsara.skill-catalog.v2",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -748,6 +772,8 @@ class KernelContextSourceCollector:
                     ContextSourceKind.DEPENDENCY_RESULTS,
                     ContextSourceAbsenceKind.NOT_APPLICABLE,
                 ),
+                self._absent(ContextSourceKind.TERMINAL_MATERIAL, ContextSourceAbsenceKind.NOT_APPLICABLE),
+                self._absent(ContextSourceKind.WORKER_HISTORY, ContextSourceAbsenceKind.NOT_APPLICABLE),
             )
         )
 
@@ -1457,6 +1483,8 @@ def build_subagent_context_source(
     if kind not in {
         ContextSourceKind.PARENT_CONTEXT,
         ContextSourceKind.DEPENDENCY_RESULTS,
+        ContextSourceKind.TERMINAL_MATERIAL,
+        ContextSourceKind.WORKER_HISTORY,
     }:
         raise ValueError("subagent source builder received a foreign source kind")
     registry = ContextSourceRegistry()
@@ -1529,8 +1557,10 @@ def replace_subagent_context_sources(
     allowed = {
         ContextSourceKind.PARENT_CONTEXT,
         ContextSourceKind.DEPENDENCY_RESULTS,
+        ContextSourceKind.TERMINAL_MATERIAL,
+        ContextSourceKind.WORKER_HISTORY,
     }
-    if kinds != allowed or len(replacements) != 2:
+    if kinds != allowed or len(replacements) != 4:
         raise ValueError("subagent context replacement set is not closed")
     candidates = tuple(
         item for item in sources.candidates if item.source_kind not in kinds

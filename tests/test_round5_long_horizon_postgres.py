@@ -5,6 +5,7 @@ from pulsara_agent.llm.input import FrozenPromptContent
 
 import asyncio
 import json
+from dataclasses import replace
 from collections.abc import Callable
 from datetime import datetime, timezone
 from threading import Event
@@ -24,6 +25,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.direct_model import KernelModelExecutionRequest
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.repository import (
+    ConversationKernelConflict,
     ConversationKernelRepository,
     StaleHostWriter,
     ToolRemoteIdentityConfirmationKind,
@@ -964,6 +966,34 @@ def test_round5_subagent_turn_lost_ack_confirms_exact_winner_once(
     assert session_id == lease.guard.session_id
 
 
+def test_subagent_first_provider_call_rejects_full_target_drift(
+    stage2_migrated_postgres_database,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    _session_id, _workspace_id, lease = _lease(repository)
+    fixture = _prepare_subagent_task(repository, lease)
+    model = ScriptedKernelModel([_text_stream("must not execute", block_id="answer")])
+    runner = _runner(
+        repository, lease, model,
+        subagent_runtime=_round10_subagent_runtime(repository, lease, fixture),
+    )
+    drifted = replace(
+        fixture.launch,
+        accepted_model_target_fact=fixture.launch.accepted_model_target_fact.model_copy(
+            update={"canonical_endpoint_base_url": "https://drift.invalid/v1"},
+        ),
+    )
+
+    async def exercise() -> None:
+        intent = await runner.admit_subagent_turn(launch=drifted)
+        with pytest.raises(ConversationKernelConflict, match="target drifted"):
+            await runner.run_admitted_subagent_turn(launch=drifted, cancellation_intent=intent)
+
+    asyncio.run(exercise())
+    assert model.requests == []
+
+
 def test_round5_subagent_lost_ack_joins_transient_confirmation_failures(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -1269,6 +1299,7 @@ def test_round5_stale_writer_never_accepts_or_hands_off_late_tool_result(
         await asyncio.wait_for(tool.started.wait(), timeout=5)
         await asyncio.to_thread(
             repository.acquire_host_writer,
+            intent="EXISTING",
             session_id=session_id,
             workspace_id=workspace_id,
             writer_owner_id=_name("replacement-host"),

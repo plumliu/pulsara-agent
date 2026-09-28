@@ -9689,24 +9689,26 @@ def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
         deadline_monotonic=monotonic() + 30,
     )
     objective = "use the virtual terminal and finish"
+    profile = RouteWireProfile(
+        id=f"test:{api}:round10-child",
+        wire_api=api,
+    )
+    model_runtime = test_model_runtime(
+        api_key="sk-fixture-secret",
+        base_url="https://example.invalid/v1",
+        model_id="test-pro",
+        wire_api=api,
+        route_wire_profile=profile,
+    )
     task_id = accept_active_subagent_fixture(
         repository,
         lease,
         parent_turn_id=parent_turn_id,
         objective=objective,
-    )
-    profile = RouteWireProfile(
-        id=f"test:{api}:round10-child",
-        wire_api=api,
+        model_runtime=model_runtime,
     )
     model = _SequencedDirectKernelModel(
-        model_runtime=test_model_runtime(
-            api_key="sk-fixture-secret",
-            base_url="https://example.invalid/v1",
-            model_id="test-pro",
-            wire_api=api,
-            route_wire_profile=profile,
-        ),
+        model_runtime=model_runtime,
         scripts=scripts,
     )
     tools = _AssertingTool(provider, session_id)
@@ -10297,3 +10299,187 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
     )
     assert page.text == "z" * 32_000
     assert page.has_more
+
+
+@pytest.mark.parametrize("drift", ["model", "reasoning"])
+def test_subagent_default_target_is_inherited_from_the_dispatched_parent_epoch(
+    stage2_migrated_postgres_database, drift,
+) -> None:
+    from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
+    from pulsara_agent.conversation_kernel.execution_watchdogs import KernelExecutionDeadlineFactory
+    from pulsara_agent.conversation_kernel.subagents.launch import CanonicalSubagentLaunchPreparationPort
+    from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
+    from pulsara_agent.primitives.permission import PermissionMode
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, workspace_id = _name('session'), _name('workspace')
+    lease = _acquire_bound_host_writer(repository, session_id=session_id, workspace_id=workspace_id,
+        writer_owner_id=_name('host'), lease_seconds=30, deadline_monotonic=monotonic()+30)
+    model = _ScriptedModel([
+        _named_tool_stream(tool_name='spawn_agent', tool_call_id='call:delegate', arguments={'task': 'inherit exact parent target'}),
+        _text_stream('parent stays usable'),
+    ])
+    original_runtime = model.model_runtime
+    from pulsara_agent.llm.model_catalog import ReasoningFixedOn
+    changed_runtime = test_model_runtime(
+        model_id='changed-after-dispatch' if drift == 'model' else 'test-pro',
+        reasoning=ReasoningFixedOn() if drift == 'reasoning' else None,
+        wire_api='openai_chat_completions')
+    observed = {}
+    io = KernelSessionIO()
+
+    class Delegate(_AssertingTool):
+        async def invoke(self, *, tool_name, arguments, invocation_context, **kwargs):
+            scope = ProviderInputContinuityScope(session_id, ModelInputScopeKind.ROOT, None)
+            cohort = runner._continuity.current_cohort(scope)
+            assert cohort is not None
+            observed['cohort'] = cohort
+            # The saved connection ID stays identical while its target metadata changes.
+            launch._model_runtime = changed_runtime
+            result = await manager.invoke(tool_name=tool_name, arguments=arguments, invocation_context=invocation_context)
+            observed['result'] = result
+            assert runner._continuity.current_cohort(scope) is cohort
+            return result
+
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=original_runtime.freeze_resolution_snapshot,
+        repository=repository, writer_lease=lease, model=model,
+        tools=StructuredToolPort(Delegate(provider, session_id), tool_names=('spawn_agent',)),
+        live_bus=LiveAgentEventBus(), context_source_collector=StaticContextSourceCollector(),
+        workspace_id=workspace_id,
+    )
+    launch = CanonicalSubagentLaunchPreparationPort(
+        repository=repository, guard=lease.guard, io_owner=io, model_runtime=original_runtime,
+        deadline_factory=KernelExecutionDeadlineFactory(),
+        inherit_parent_target=runner._continuity.subagent_parent_target,
+    )
+    manager = KernelSubagentManager(repository=repository, guard=lease.guard,
+        host_owner_id='test:parent-target', io_owner=io, live_bus=LiveAgentEventBus(),
+        todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch='test:parent-target'),
+        launch_preparation=launch, hook_workspace_root=Path.cwd)
+    def unexpected_runner(_scope):
+        raise AssertionError('drifted child must fail before runner creation')
+    manager.bind_runner_factory(unexpected_runner)
+
+    async def exercise():
+        try:
+            result = await runner.run_turn(frozen_test_prompt('delegate'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            assert result.final_text == 'parent stays usable'
+            assert observed['result'].state == 'SUCCESS'
+            rows = repository.list_subagent_tasks(session_id=session_id, maximum_items=50, deadline_monotonic=monotonic()+30)
+            assert len(rows) == 1
+            binding, fact = repository.read_subagent_task_model_target(lease.guard, task_id=rows[0]['id'], deadline_monotonic=monotonic()+30)
+            from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
+            bundle = observed['cohort'].target_bundle
+            assert fact == FrozenSubagentModelTarget.freeze(bundle.target_fact, bundle.reasoning_contract)
+            assert fact.model_id == 'test-pro'
+            assert rows[0]['status'] == 'FAILED'
+            assert 'target changed' in str(rows[0]['terminal_public_detail'])
+            explicit_binding, explicit_fact = launch.freeze_target(binding, use_default=False)
+            assert explicit_binding == binding
+            assert explicit_fact.model_id == ('changed-after-dispatch' if drift == 'model' else 'test-pro')
+            assert explicit_fact != fact
+            if drift == 'reasoning':
+                assert explicit_fact.reasoning_contract.kind == 'fixed_on'
+                assert fact.reasoning_contract.kind == 'provider_default'
+            first, second = model.requests
+            assert first.compiled_input.system_prompt == second.compiled_input.system_prompt
+            assert first.compiled_input.tools == second.compiled_input.tools
+        finally:
+            await manager.aclose(deadline_monotonic=monotonic()+5)
+            await io.aclose(deadline_monotonic=monotonic()+5)
+    asyncio.run(exercise())
+
+
+def test_subagent_completion_reservation_reduces_from_sixteen_to_one(
+    stage2_migrated_postgres_database,
+) -> None:
+    from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
+    from pulsara_agent.conversation_kernel.execution_watchdogs import KernelExecutionDeadlineFactory
+    from pulsara_agent.conversation_kernel.subagents.launch import CanonicalSubagentLaunchPreparationPort
+    from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
+    from pulsara_agent.primitives.permission import PermissionMode
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, workspace_id = _name('session'), _name('workspace')
+    lease = _acquire_bound_host_writer(repository, session_id=session_id, workspace_id=workspace_id,
+        writer_owner_id=_name('host'), lease_seconds=30, deadline_monotonic=monotonic()+30)
+    model = _ScriptedModel([
+        _named_tool_stream(tool_name='create_agent_tasks', tool_call_id='call:delegate', arguments={'tasks': [{'task': 'one task'}]}),
+        _text_stream('parent stays usable'),
+        _text_stream('parent stays usable'),
+    ])
+    original_runtime = model.model_runtime
+    observed = {}
+    io = KernelSessionIO()
+
+    class Delegate(_AssertingTool):
+        async def invoke(self, *, tool_name, arguments, invocation_context, **kwargs):
+            scope = ProviderInputContinuityScope(session_id, ModelInputScopeKind.ROOT, None)
+            cohort = runner._continuity.current_cohort(scope)
+            assert cohort is not None
+            observed['cohort'] = cohort
+            result = await manager.invoke(tool_name=tool_name, arguments=arguments, invocation_context=invocation_context)
+            observed['result'] = result
+            assert runner._continuity.current_cohort(scope) is cohort
+            return result
+
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=original_runtime.freeze_resolution_snapshot,
+        repository=repository, writer_lease=lease, model=model,
+        tools=StructuredToolPort(Delegate(provider, session_id), tool_names=('create_agent_tasks',)),
+        live_bus=LiveAgentEventBus(), context_source_collector=StaticContextSourceCollector(),
+        workspace_id=workspace_id,
+    )
+    launch = CanonicalSubagentLaunchPreparationPort(
+        repository=repository, guard=lease.guard, io_owner=io, model_runtime=original_runtime,
+        deadline_factory=KernelExecutionDeadlineFactory(),
+        inherit_parent_target=runner._continuity.subagent_parent_target,
+    )
+    manager = KernelSubagentManager(repository=repository, guard=lease.guard,
+        host_owner_id='test:parent-target', io_owner=io, live_bus=LiveAgentEventBus(),
+        todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch='test:parent-target'),
+        launch_preparation=launch, hook_workspace_root=Path.cwd)
+    def unexpected_runner(_scope):
+        raise AssertionError('drifted child must fail before runner creation')
+    manager.bind_runner_factory(unexpected_runner)
+
+    runner._subagent_runtime = manager
+    runner._provider_dispatch._subagent_runtime = manager
+    quote_counts = []
+    original_quote = runner._quote_post_response_resources
+    original_require = runner._require_post_response_resources
+    def quote(**kwargs):
+        observed['count'] = kwargs['root_completion_followup_items']
+        quote_counts.append(observed['count'])
+        return original_quote(**kwargs)
+    def require(value, **kwargs):
+        if observed['count'] > 1:
+            raise OutputResourceInterruption('provider_wire_input', value)
+        return original_require(value, **kwargs)
+    runner._quote_post_response_resources = quote
+    runner._require_post_response_resources = require
+
+    async def exercise():
+        try:
+            result = await runner.run_turn(frozen_test_prompt('delegate'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            assert result.final_text == 'parent stays usable'
+            assert observed['result'].state == 'SUCCESS'
+            rows = repository.list_subagent_tasks(session_id=session_id, maximum_items=50, deadline_monotonic=monotonic()+30)
+            assert len(rows) == 1
+            binding, fact = repository.read_subagent_task_model_target(lease.guard, task_id=rows[0]['id'], deadline_monotonic=monotonic()+30)
+            from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
+            bundle = observed['cohort'].target_bundle
+            assert fact == FrozenSubagentModelTarget.freeze(bundle.target_fact, bundle.reasoning_contract)
+            assert quote_counts[:16] == list(range(16, 0, -1))
+            assert len(rows) == 1
+            assert manager._root_completion_delivery_limit == 1
+            first, second = model.requests[:2]
+            assert first.compiled_input.system_prompt == second.compiled_input.system_prompt
+            assert first.compiled_input.tools == second.compiled_input.tools
+        finally:
+            await manager.aclose(deadline_monotonic=monotonic()+5)
+            await io.aclose(deadline_monotonic=monotonic()+5)
+    asyncio.run(exercise())

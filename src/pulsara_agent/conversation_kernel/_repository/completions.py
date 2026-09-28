@@ -44,7 +44,9 @@ from pulsara_agent.model_input.contracts import (
     PreparedProviderInputCut,
 )
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource
+from pulsara_agent.conversation_kernel.repository_errors import PreparedCompletionSuffixStale
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
 from .contracts import (
@@ -348,7 +350,7 @@ class _SubagentCompletionOperations:
                     deadline_monotonic=deadline_monotonic,
                 )
                 if outcome.disposition is not SubagentCompletionDisposition.CREATED:
-                    raise ConversationKernelConflict(
+                    raise PreparedCompletionSuffixStale(
                         "prepared completion suffix changed before publication"
                     )
                 accepted.append(outcome)
@@ -810,7 +812,7 @@ class _SubagentCompletionOperations:
                    t.profile_kind, t.status, t.terminal_reason,
                    t.terminal_public_detail,
                    result.id AS result_id, result.result_source,
-                   result.summary AS result_summary
+                   result.summary AS result_summary, result.data AS result_data
             FROM pulsara_v3.subagent_tasks AS t
             LEFT JOIN pulsara_v3.subagent_task_children AS result
               ON result.session_id = t.session_id AND result.task_id = t.id
@@ -882,6 +884,9 @@ class _SubagentCompletionOperations:
             ),
             result_summary=(
                 None if task["result_summary"] is None else str(task["result_summary"])
+            ),
+            result_data=(
+                None if task["result_data"] is None else freeze_json(task["result_data"])
             ),
         )
 

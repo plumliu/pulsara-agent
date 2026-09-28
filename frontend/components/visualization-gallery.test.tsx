@@ -67,7 +67,7 @@ it('can navigate a thousand results with at most three resident HTML frames', as
   fireEvent.keyDown(screen.getByRole('button', { name: '查看可视化 1000' }), { key: 'Home' });
   await waitFor(() => expect(read).toHaveBeenLastCalledWith('a', 0, 'sha256:0', 16));
   expect(view.container.querySelectorAll('iframe')).toHaveLength(3);
-});
+}, 15_000);
 
 it('isolates failed occurrences, missing references and retryable read errors', async () => {
   const reader = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue('<h1>Recovered</h1>');

@@ -186,9 +186,10 @@ class ToolResultStartPayload:
     block_identity: str
     tool_call_id: str
     attempt_id: str
+    assistant_entry_id: str
 
     def __post_init__(self) -> None:
-        _require_identity(self.block_identity, self.tool_call_id, self.attempt_id)
+        _require_identity(self.block_identity, self.tool_call_id, self.attempt_id, self.assistant_entry_id)
 
 
 @dataclass(frozen=True, slots=True)

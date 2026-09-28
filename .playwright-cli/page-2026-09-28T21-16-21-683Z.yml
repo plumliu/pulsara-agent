@@ -1,0 +1,156 @@
+- main [ref=e3]:
+  - navigation "主要功能" [ref=e4]:
+    - button "返回 Pulsara 总览" [ref=e5] [cursor=pointer]
+    - generic [ref=e7]:
+      - button "总览" [ref=e8] [cursor=pointer]
+      - button "会话" [ref=e12] [cursor=pointer]
+      - button "能力" [ref=e15] [cursor=pointer]
+      - button "记忆" [ref=e19] [cursor=pointer]
+    - generic [ref=e28]:
+      - button "命令面板" [ref=e29] [cursor=pointer]: 命令面板 ⌘K
+      - button "设置" [ref=e32] [cursor=pointer]
+      - generic "本地用户" [ref=e36]: PL
+  - complementary [ref=e267]:
+    - generic [ref=e268]:
+      - generic [ref=e270]:
+        - paragraph [ref=e271]: 本地智能工作台
+        - heading "Pulsara" [level=1] [ref=e272]
+      - generic "已连接本地服务" [ref=e273]
+    - button "搜索与命令 ⌘ K" [ref=e274] [cursor=pointer]:
+      - generic [ref=e278]: 搜索与命令
+      - generic [ref=e279]: ⌘ K
+    - button "新建会话 ⌘ N" [ref=e280] [cursor=pointer]:
+      - generic [ref=e282]: 新建会话
+      - generic [ref=e283]: ⌘ N
+    - region "会话目录" [ref=e284]:
+      - generic [ref=e285]:
+        - region "从目录中打开" [ref=e286]:
+          - generic [ref=e287]:
+            - button [expanded] [ref=e288] [cursor=pointer]:
+              - strong [ref=e289]: 从目录中打开
+            - button "选择目录并创建会话" [ref=e292] [cursor=pointer]
+          - region "workflow_release_review 会话" [ref=e296]:
+            - generic [ref=e297]:
+              - button [expanded] [ref=e298] [cursor=pointer]:
+                - strong [ref=e301]: workflow_release_review
+              - button "在 workflow_release_review 中创建会话" [ref=e304] [cursor=pointer]
+            - generic [ref=e309]:
+              - button "会话 6118dd51 0 条记录 · 当前会话" [ref=e310] [cursor=pointer]:
+                - generic [ref=e312]:
+                  - strong [ref=e313]: 会话 6118dd51
+                  - generic [ref=e314]: 0 条记录 · 当前会话
+              - group [ref=e315]:
+                - generic "会话 6118dd51 更多操作" [ref=e316] [cursor=pointer]
+        - region "快速开始" [ref=e321]:
+          - generic [ref=e322]:
+            - button [expanded] [ref=e323] [cursor=pointer]:
+              - strong [ref=e324]: 快速开始
+            - button "创建快速开始会话" [ref=e327] [cursor=pointer]
+          - generic [ref=e331]: 还没有快速开始会话
+    - generic [ref=e333]:
+      - generic [ref=e334]:
+        - generic [ref=e336]: 已连接本地服务
+        - code [ref=e337]: 本机
+      - generic [ref=e338]: 数据保存在这台设备上
+  - generic [ref=e340]:
+    - region "会话工作台" [ref=e341]:
+      - generic [ref=e342]:
+        - generic [ref=e343]:
+          - generic [ref=e344]: 草稿
+          - generic [ref=e345]:
+            - heading "会话 6118dd51" [level=2] [ref=e346]
+            - paragraph [ref=e347]: 指定目录 · /Users/plumliu/Desktop/little_snake/workflow_release_review
+        - generic [ref=e348]:
+          - button "更多会话操作" [ref=e350] [cursor=pointer]
+          - button "压缩上下文" [disabled] [ref=e355]
+          - button "切换检查器" [ref=e359] [cursor=pointer]
+      - generic [ref=e365]:
+        - generic:
+          - heading "Ready when you are." [level=1]:
+            - generic [aria-hidden]:
+              - generic:
+                - generic: Ready when you a
+                - generic: _
+        - generic [ref=e366]:
+          - generic [ref=e368]:
+            - textbox "发送给 Pulsara" [ref=e370]:
+              - paragraph [ref=e371]
+            - generic [aria-hidden]: 让 Pulsara 处理复杂工作…
+          - generic [ref=e372]:
+            - generic [ref=e373]:
+              - button "添加文件、技能或规划" [ref=e375] [cursor=pointer]
+              - button "完全访问" [ref=e378] [cursor=pointer]
+            - generic [ref=e383]:
+              - generic [ref=e384]:
+                - button "选择模型" [expanded] [active] [ref=e385] [cursor=pointer]
+                - generic [ref=e419]:
+                  - generic [ref=e420]:
+                    - generic [ref=e421]: 此会话的模型
+                    - button "模型设置" [ref=e422] [cursor=pointer]
+                  - generic [ref=e426]:
+                    - button "Alibaba (China) · Qwen3.8 Flash Chat Completions · 密钥已配置" [ref=e427] [cursor=pointer]:
+                      - generic [ref=e428]:
+                        - strong [ref=e429]: Alibaba (China) · Qwen3.8 Flash
+                        - generic [ref=e430]: Chat Completions · 密钥已配置
+                    - button "OpenRouter · Muse Spark 1.3 Contributor Chat Completions · 密钥已配置" [ref=e431] [cursor=pointer]:
+                      - generic [ref=e432]:
+                        - strong [ref=e433]: OpenRouter · Muse Spark 1.3 Contributor
+                        - generic [ref=e434]: Chat Completions · 密钥已配置
+                    - button "OpenRouter · GPT-6 Luna Chat Completions · 密钥已配置" [ref=e435] [cursor=pointer]:
+                      - generic [ref=e436]:
+                        - strong [ref=e437]: OpenRouter · GPT-6 Luna
+                        - generic [ref=e438]: Chat Completions · 密钥已配置
+                    - button "test-qwen · Qwen3.8-27B Chat Completions · 密钥已配置" [ref=e439] [cursor=pointer]:
+                      - generic [ref=e440]:
+                        - strong [ref=e441]: test-qwen · Qwen3.8-27B
+                        - generic [ref=e442]: Chat Completions · 密钥已配置
+                    - button "DeepSeek · DeepSeek V4.1 Flash Chat Completions · 密钥已配置" [ref=e443] [cursor=pointer]:
+                      - generic [ref=e444]:
+                        - strong [ref=e445]: DeepSeek · DeepSeek V4.1 Flash
+                        - generic [ref=e446]: Chat Completions · 密钥已配置
+                    - button "Zhipu AI · GLM-5.3-Flash Chat Completions · 密钥已配置" [ref=e447] [cursor=pointer]:
+                      - generic [ref=e448]:
+                        - strong [ref=e449]: Zhipu AI · GLM-5.3-Flash
+                        - generic [ref=e450]: Chat Completions · 密钥已配置
+                    - button "DeepSeek · DeepSeek V4.1 Flash Responses · 密钥已配置" [ref=e451] [cursor=pointer]:
+                      - generic [ref=e452]:
+                        - strong [ref=e453]: DeepSeek · DeepSeek V4.1 Flash
+                        - generic [ref=e454]: Responses · 密钥已配置
+                    - button "testQwenFlash · qwen3.8-flash-next-nvfp4 Chat Completions · 密钥已配置" [ref=e455] [cursor=pointer]:
+                      - generic [ref=e456]:
+                        - strong [ref=e457]: testQwenFlash · qwen3.8-flash-next-nvfp4
+                        - generic [ref=e458]: Chat Completions · 密钥已配置
+                    - button "teststepfun · step-5-preview Chat Completions · 密钥已配置" [ref=e459] [cursor=pointer]:
+                      - generic [ref=e460]:
+                        - strong [ref=e461]: teststepfun · step-5-preview
+                        - generic [ref=e462]: Chat Completions · 密钥已配置
+              - button "推理不可用" [disabled] [ref=e390]
+              - button "发送" [disabled] [ref=e405]
+    - complementary "当前会话详情":
+      - generic:
+        - generic:
+          - strong: 当前会话
+          - generic: 会话 6118dd51
+        - button "关闭检查器"
+        - navigation "详情视图":
+          - button "项目能力": 能力
+          - button "任务"
+          - button "后台终端"
+      - generic:
+        - generic:
+          - generic:
+            - generic: 项目能力
+            - paragraph: 这里的修改会应用到同一目录的所有会话。
+            - generic:
+              - tablist "能力类型":
+                - tab "技能 27" [selected]
+                - tab "MCP 1"
+              - group "能力操作":
+                - button "添加"
+          - generic:
+            - generic:
+              - generic:
+                - button "继承的能力 27":
+                  - generic: 继承的能力
+                  - generic: "27"
+                - button "管理"

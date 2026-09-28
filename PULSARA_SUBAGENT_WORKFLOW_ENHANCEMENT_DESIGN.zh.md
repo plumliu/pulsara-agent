@@ -1,8 +1,8 @@
 # Pulsara Subagent Workflow 增强设计
 
-状态：**独立静态审阅通过，可作为 P1–P4 分阶段实施依据；尚未实施**。日期：2026-09-28。
+状态：**P1–P4 已按本文 hard cut 实施并完成本轮回归；独立代码审阅已完成**。设计审阅日期：2026-09-28；实施日期：2026-09-29。
 
-本轮交付为设计文档，不修改运行代码。文档依据当前工作树代码、仓库 [AGENTS.md](AGENTS.md)、GPT-6 Luna max 对 ZCode v3.14.3 的完整链路调研，以及随后关于语义任务图的产品讨论。Pulsara 调研基线为 Git `2701aa61` 加当前工作树；ZCode 基线为 `29628c9acdb81b703bbd4080c207a0e7ce5e276e`。这些 Git 标识用于定位阅读对象，不增加内容 fingerprint。
+本文最初是设计文档；本轮依此实施 P1–P4。设计依据当时工作树代码、仓库 [AGENTS.md](AGENTS.md)、GPT-6 Luna max 对 ZCode v3.14.3 的完整链路调研，以及随后关于语义任务图的产品讨论。Pulsara 调研基线为 Git `2701aa61`；实施起点为 `27e8334b`；ZCode 基线为 `29628c9acdb81b703bbd4080c207a0e7ce5e276e`。这些 Git 标识用于定位阅读对象，不增加内容 fingerprint。
 
 ## 1. 产品决策与实施顺序
 
@@ -81,9 +81,11 @@ P4 为 `report_agent_result` 增加可选结构化 `data`，复用已有 JSON �
 
 首版 `data` 只供主 Agent 阅读和引用，不增加每任务任意 JSON Schema、条件解释器或供应商 structured-output 强制机制。不能从自然语言猜测、补造字段；没有显式 `data` 的推断结果保持缺省。
 
-小 `data` 与 summary 一起随 ROOT completion 交付，也进入明确选择的结果材料。将现有 16 KiB summary 边界定义为本次主交付材料预算：`summary UTF-8 字节数 + 非缺省 data 的 canonical JSON 字节数 <= 16 KiB`。data 缺省时保留原 summary 容量；这是两种表现形式共用已有单次材料预算，不新增图/任务/历史总量上限。output_preview、diagnostics 继续服从原有独立边界；大数据使用文件或现有 artifact 引用。外层 result ID、状态等包装还必须进入完整 suffix 报价，不能把材料预算误作完整消息预算。
+小 `data` 与 summary 一起随 ROOT completion 交付，也进入明确选择的结果材料。首版 `data` 是 JSON 对象；缺省与 JSON null 不混用，使现有可空 result child 字段能精确表示未提供。将现有 16 KiB summary 边界定义为本次主交付材料预算：`summary UTF-8 字节数 + 非缺省 data 的 canonical JSON 字节数 <= 16 KiB`。data 缺省时保留原 summary 容量；这是两种表现形式共用已有单次材料预算，不新增图/任务/历史总量上限。output_preview、diagnostics 继续服从原有独立边界；大数据使用文件或现有 artifact 引用。外层 result ID、状态等包装还必须进入完整 suffix 报价，不能把材料预算误作完整消息预算。
 
 P4 必须同时修改 result canonical codec/确认读取、`build_subagent_completion_storage_body`、provider 投影、依赖与材料编译、查询/UI，并更新 `runner.py::_root_completion_followup_upper` 及实际 suffix admission。缺少这一闭环不能宣称结构化结果可用；也不能只把 data 存进数据库，或直接加到消息里却沿用低估的资源报价。
+
+实施采用同一 provider input 预算逐档报价待交付 ROOT completion 批次，最多保留原有每安全点 16 件，首次未完成报价前只投递 1 件。报价实际可容纳数后再扩大，单件仍不能容纳时返回原有输入资源错误。这个数仅限制一次 suffix 的物理载荷，不限制总结果数、任务图或会话寿命；队列余项留到后续安全点。准备批次与提交之间若有新终态结果改变了待交付前缀，按精确过期错误重读并重报，不替换已安装的 SYSTEM/tools 或既有 messages。
 
 未来自动分支若立项，必须先定义需要的字段类型、缺失/无效值的失败路径，以及规则的接纳者；不得以缺省值把未知结论当成通过。
 
@@ -94,6 +96,7 @@ P4 必须同时修改 result canonical codec/确认读取、`build_subagent_comp
 - **循环修订**：每轮新增任务，完成任务不回退为 ACTIVE；实际启动依赖始终无环。循环退出由任务要求、证据、用户控制和 ROOT 判断决定，不增加固定总轮数。
 - **批量展开**：ROOT 根据真实输入清单分批创建任务，物理容量只控制执行数量。大输入清单可保存在普通工作文件中，模型按需读取；不要求把所有项一次塞进工具参数。
 - **失败处理**：ROOT 获得真实失败结果后选择停止、修复或新任务。修复任务引用终态诊断，不成功依赖失败任务。取消不代表外部副作用已回滚。
+- 模型调用失败详情沿现有 `terminal_public_detail` 保存错误分类和经现有脱敏边界处理的具体消息，供节点详情和后续任务读取；不能在异常转为文本时丢掉具体消息。adapter 复用当前请求的凭据边界，先替换错误消息中实际密钥值，再交给既有错误规范化；保留错误原因和请求编号。历史未保存的错误详情不推测补写。
 - **复用结果**：明确引用旧结果和产物；不以输入相似或 hash 命中为由自动跳过新任务。文件路径指向当前文件，旧结论不证明文件仍是旧内容。
 
 ```mermaid
@@ -125,11 +128,17 @@ flowchart TD
 
 P1 对 task 控制投影做一次完整 hard cut：常驻控制信息携带任务计数/摘要；任务行使用有界页与按 task ID 的完整条目更新。前端不再要求“所有活跃/待接收任务必须放入一张控制表”。其他控制区的既有保护不在此阶段顺带删除。
 
-1. 首次快照给出已有 session 事件水位、摘要及初始任务页；历史结果与依赖详情按需读取。
+1. 首次快照给出已有 session 事件水位 S 与任务总数/未接收数摘要；首个任务组页另以有界读取取得，展开组后再取该组任务页。历史结果与依赖详情按需读取。未接收数包括待开始、等依赖、执行中以及尚未进入 ROOT transcript 的终态任务，并非只数终态结果。
 2. 观察已有事件，提取受影响 task ID；同一批重复 ID 合并，从同一数据库读取视图获得最新完整任务摘要。无需新 durable event、task change journal 或每字段 patch。
 3. 复用现有 event cursor 推进；每批公共控制快照最多携带一次。所有原有事件的语义与顺序仍可观察，合并的是重复派生数据。
 4. 行更新携带完整的轻量字段，正文/历史/大结果走既有详情读取。移出“待处理集合”与“任务被删除”分开表达；完成后仍可从历史任务页找到。
 5. 超过单次传输预算时分页或返回可继续读取的变更范围，不拒绝更多逻辑任务。单条大材料走已有内容读取，不能让重取相同超大快照成为无限错误循环。
+
+worker 活动由已保留的 transcript/live 窗口派生，按准确 task ID 与已加载任务页合并；页中缺席不表示终止。既有 `TOOL_RESULT_START` 携带接纳时的 `assistant_entry_id`，工具结果按 task/assistant entry/tool call 关联，不依赖有界 active-turn/tool-attempt 控制页。`SUBAGENT_PROGRESS` 只提供已加载任务的临时进度文字；canonical 终态与已提交结果优先。
+
+任务图由浏览器原生滚动承载视口，显式滚动尺寸包含缩放后的完整图形。鼠标可拖动空白区域，触摸使用原生滑动，节点点击继续打开详情；提供全图适应、缩放和 1:1。画布窄于 600px 时依赖方向上下排列，其余从左到右。首次打开聚焦本组节点，普通状态更新和滚动条尺寸变化不重排或重置视角。600px 为呈现断点，不是任务数量边界。
+
+会话内的子任务结果接纳通知属于该轮“处理过程”，完成后随过程折叠；用户 steer 继续可见。过程内的思考、工具、通知和 steer 卡片采用紧凑间距。通知的说明浮层复用现有 hover 生命周期并通过 portal 显示，避免被折叠动画容器裁切；折叠、滚动、失焦和 Escape 会关闭浮层。左侧会话列表只显示名称和当前／已载入／可恢复状态，隐藏记录数及子任务计数。右侧并发摘要为只读“子任务并发数 · x 运行”，字体与任务 tab 留白沿用能力面板；节点模型仅展示名称与推理强度。跨组依赖节点可点击，通过现有单任务查询按需打开详情；不递归扩图或加载整个来源任务组，正文流式变化不触发重复读取，canonical 状态变化刷新所选任务。隐藏内部历史来源 ID、终态材料 ID 和结构化 JSON，保留可读任务对话与结果；取消操作位于详情右上角，仅控制窗口的未结束任务可用。
 
 字段和消息包装应扩展现有 Protocol v3 的观察/查询载体，不复制 ZCode 的协议栈。允许增加必要的 wire 字段或 projection 类型；它们不成为新的 committed/live event kind。现有 canonical/live gap 路径继续负责重新同步。
 
@@ -166,7 +175,7 @@ P1 对 task 控制投影做一次完整 hard cut：常驻控制信息携带任�
 
 `KernelSubagentManager` 是唯一物理容量所有者，计算 `ACTIVE 执行 + 启动 reservation`。terminal 后的结果交付/清理尾部不继续占执行槽，但释放顺序必须保证 TODO/Hook/runner 的子资源不冲突。
 
-首版提供会话任务面板中的用户控制入口；沿现有连接认证、控制权和 Host writer 检查调用 manager。模型侧暂不新增并发配置工具，也不改变正在运行的 SYSTEM/tools。
+kernel 和协议保留动态并发调整能力，沿现有连接认证、控制权和 Host writer 检查调用 manager。根据最新产品决定，前端不提供修改入口，只显示运行数量。模型侧暂不新增并发配置工具，也不改变正在运行的 SYSTEM/tools。
 
 - 提高目标：在同一 owner 锁内修改并触发调度，等待任务及时补位。
 - 降低目标：已有执行与启动 reservation 继续；待其退出使占用低于目标后再放新任务。UI 分别显示当前占用与目标，允许暂时 `6 / 2`。
@@ -188,7 +197,7 @@ TODO owner 不再自行定义另一份物理容量；它只接纳当前 manager 
 
 高并发也会扩大控制快照的 `active_turns` 和未完成 `tool_attempts`。P2 将与 worker 相关的这两部分接入 P1 的有界页/增量观察方式，保留 ROOT 当前执行和精确控制引用；不能只扩大 task 容量而让另一控制区超过 128 项后阻断整个会话。无关 Plan/交互控制区不顺带重构。
 
-并发调节是当前 Host 的进程内设置；关闭/重启恢复默认值 4，UI 明示“当前运行时”。首版不写全局配置、会话 journal 或并发变更 durable event。若以后需要持久偏好，复用设置 owner 并另行确定作用域。
+并发调节是当前 Host 的进程内设置；关闭/重启恢复默认值 4；前端只读展示运行数量，不展示目标输入或上限。首版不写全局配置、会话 journal 或并发变更 durable event。若以后需要持久偏好，复用设置 owner 并另行确定作用域。
 
 没有新增总任务上限。没有为降并发暂停现有模型请求或工具调用，也不增加 ZCode SeatGate。供应商跨会话排队/公平性/自适应限流是后续独立议题，需要实际限流与并发测量。
 
@@ -223,7 +232,7 @@ TODO owner 不再自行定义另一份物理容量；它只接纳当前 manager 
 
 ### 7.2 接纳、来源与生命周期
 
-接纳事务在验证权限、源任务终态和归属后，为目标任务冻结来源 task ID、适用时的 result ID、规范历史 cut 与适用的既有 context binding/snapshot 引用。利用源任务的不可变结果和已提交历史；不靠文件 hash 判断历史等价，不新增缓存命中表。
+接纳事务在验证权限、源任务终态和归属后，为目标任务冻结来源 task ID、适用时的 result ID、规范历史 cut 与源 turn 的既有 context binding revision ID；该不可变 revision 精确指向适用的 snapshot。利用源任务的不可变结果和已提交历史；不靠文件 hash 判断历史等价，不新增缓存命中表。
 
 当前 worker 的初始 parent LAST_N 材料来自 `_start_materials`，终态后会清理；canonical 初始消息只保存 objective，任务行的 LAST_N 数字不能还原当时选中的具体材料。因此 P4 必须为**新接纳的任务**保存可回看的公开上下文来源：parent 选中内容在接纳事务冻结，成功依赖材料在 start 事务冻结，后续 inter-agent 消息沿现有 canonical entry 保存。使用现有 task/blob owner 的不可变内容或可精确重建的 canonical refs/cut，并纳入 blob 可达性；不能把进程内 cache 当作跨重载保证。
 
@@ -285,7 +294,7 @@ clean-v0 baseline、canonical contracts、协议生成物、前后端和测试�
 | P1 | 协议 task 投影、分页读取水位、前端局部合并、任务组/详情按需加载、live 成员判断改造 | 规模及乱序/重连测试，真实浏览器渲染和测量 |
 | P2 | manager 容量 owner、所有 4 槽耦合清理、控制入口和 UI | reservation/关闭/调节竞争与排队公平性验证 |
 | P3 | 创建 schema、任务绑定、模型解析、child admission、UI 目标展示 | 多模型确定绑定、等待期间配置变化、真实供应商小规模 dogfood |
-| P4 | data、终态材料、worker 历史 cut/编译、后续任务 UI 来源 | 跨轮修订、失败恢复材料、源 compaction/重载及异模型输入验证 |
+| P4 | data、终态材料、worker 历史 cut/编译、后续任务查询来源 | 跨轮修订、失败恢复材料、源 compaction/重载及异模型输入验证 |
 
 各阶段测试只证明自己的产品合同，不复制第三方库 conformance suite。以下规模是测试样本，不是生产总量上限。
 
@@ -317,7 +326,7 @@ clean-v0 baseline、canonical contracts、协议生成物、前后端和测试�
 - 未完成 tool call、不支持的多模态材料、损坏/缺失 blob、非法来源 ID、来源仍 ACTIVE、会话 fork 后父 ID 不可用等明确错误。
 - 运行时重启不会执行旧任务；同会话已有终态材料可用于显式新任务。
 
-真实模型验收优先使用用户已配置的 GPT-6 Luna max；只有独立高难审阅需要 Astra。通过 LocalSettingsStore/现有 home resolver 读取设置，保留可复核输入输出并去除实际秘密。此文档的静态审阅不等于运行验收。
+真实模型验收优先使用用户已配置的 GPT-6 Luna high；只有独立高难审阅需要 Astra。通过 LocalSettingsStore/现有 home resolver 读取设置，保留可复核输入输出并去除实际秘密。此文档的静态审阅不等于运行验收。
 
 ## 11. ZCode 调研依据与取舍
 
@@ -380,3 +389,57 @@ Luna 调研及本文对照均主要来自源码静态阅读。没有声称 ZCode
 | 未启动失败任务也应能提供诊断 | 终态失败材料与 worker-history 分别验明可用来源 |
 
 收口结论：**可作为 P1–P4 分阶段实施依据，没有剩余阻塞或实质矛盾。** 该结论仅为独立静态审阅；具体方法签名、最小列/约束、前端布局及性能测量属于实施工作，不能据此跳过第 10 节的测试、浏览器规模验证与真实供应商验收。审阅未修改生产代码。
+
+## 13. 本轮实施与验收记录
+
+实施从 Git `27e8334b` 起，完成 clean-v0、后端、协议、浏览器和测试的单路径 hard cut。未增加 committed/live event kind、subject、guard、product relation 或 durable job 类别。保留的摘要用于既有协议身份、canonical 内容完整性和跨重启确认；没有增加 DTO 指纹或工作树代码 SHA。`0000_conversation_kernel_expected_catalog_v1.json` 的 catalog 指纹核验真实数据库结构，不充当执行权或代码版本证明。
+
+交叉审阅后的代码包含：
+
+- **P1**：S/C/R 各自推进；精确 task/batch 失效、同批合并、当前任务组按需读取；页请求与会话/快照 owner 绑定，重复“更多”请求合并。已加载 worker 的对话、实时文本、工具结果与进度均保持可见，超过 128 个控制页成员仍按身份关联。canonical 终态优先，不把缺席当结束。
+- **P2**：manager 统一物理容量；降低目标时逐个复查 reservation，提高目标可唤醒调度。取消调用方先等共享调度结算，不取消别人的 scheduler；ROOT 不占 worker 槽。ROOT completion suffix 按完整输入报价，16 份放不下时逐步减到 1 份。
+- **P3**：冻结实际已安装父 cohort 的非秘密目标及完整 typed reasoning contract；显式目标亦冻结。启动和首个 provider call 核验，同 connection ID 的模型或推理合同改变不会静默替换。没有新的 fingerprint DTO。
+- **P4**：结果、失败材料与 worker-history 走既有 owner；task 行保存实际带入的公开来源。历史使用扁平 frames，采用源 compaction 后用其摘要/保留内容覆盖先前材料，避免递归包装与指数转义；不搬运旧 SYSTEM/tools、私有思考或执行权。已验证三代真实存储、重载/GC 与 1,000 代扁平读取。
+
+### 13.1 自动化验证
+
+根 agent 在修复后使用仓库 `.venv`、只读保存配置和核验后的本地临时 PostgreSQL，完整运行 **2,232 个 Python 测试通过**，51 个既有 aiohttp shutdown deprecation warning。日志：`/tmp/pulsara-workflow-root-full-python-final.log`。测试入口为 `/tmp/pulsara_review_test_env.py`，只向测试进程提供已核验的 PostgreSQL DSN，不导出模型凭据；它带标准主入口保护，避免 multiprocessing 子进程重复执行 pytest。早期错误测试入口产生的超时记录保留，随后原断言完整重跑通过。
+
+前端最终完整运行 **546 个测试通过**，包含画布方向切换/滚动条变化不重置视口回归；TaskWorkspace **9 个测试通过**。完整前端日志：`/tmp/pulsara-workflow-root-full-frontend-final.log`；画布回归：`/tmp/pulsara-review-viewport-regression.log`。额外断言覆盖第 144 个 worker 的 START/DELTA/END 和 progress、同 call ID 不串消息、终态清理、迟到分页与重连快照、重复加载更多、跨组依赖失效、关闭组后释放任务缓存。`npx tsc --noEmit --pretty false`、协议生成物 `--check`、关键 Python 文件 Ruff 和 `git diff --check` 均通过。`npm run lint` 为 0 error/5 个既有 warning；`npm run build:local` 通过，保留既有大 chunk 提示，没有为了消除提示而提高阈值。
+
+### 13.2 真实 HTTP 与浏览器规模验收
+
+使用同一临时数据库的 **1,024 个 canonical 任务、64 个任务组**，通过生产 HTTP 读取接口和真实 `TaskWorkspace`/adapter 展示；页面壳为临时验收入口，应用完整连接竞态另由 app 测试覆盖。实际响应体测值：
+
+| 操作 | HTTP 请求 | 响应体字节 | 浏览器观测耗时 |
+|---|---:|---:|---:|
+| 初始 50 个任务组 | 1 | 20,309 B | 26.5 ms |
+| 初始展开 16 个任务 | 1 | 38,720 B | 27.9 ms |
+| 已展开组状态稳定后刷新 | 2 | 41,160 B | 68 ms，总布局计数 2 → 2 |
+| 同一当前数据全部任务页 | 21 | 2,620,402 B | 1,260 ms |
+
+表中最后一行用于对比整表读取策略，不是运行旧版本二进制得出的整体提速比例。停止第一个任务并结算跨批次依赖后，一次刷新仍只读取组摘要和已展开页；包含该次结算的请求耗时约 2,682 ms，不等同于纯前端刷新时间。
+
+已实际查看 1440×1000 和 390×844 截图，检查跨批次虚线边、长依赖链末端、鼠标拖拽、CDP 触摸滑动、fit→1:1、放大后两轴滚动，以及跨 600px 方向切换。窄屏改为上下链后，第一屏可以读到多个节点；末端在宽窄屏均可完整滚到并点击详情。验收发现并修复了“滚动条出现触发 resize 后视角回跳”的问题。截图在 `output/playwright/workflow-pan-final-mobile.png`、`workflow-pan-mobile-last.png`、`workflow-pan-mobile-fit.png`、`workflow-pan-mobile-zoomed-last.png`、`workflow-pan-desktop-last.png`、`workflow-pan-desktop-detail.png`。预览脚本位于本地忽略目录，不进入产品构建。
+
+### 13.3 真实供应商与 critic
+
+使用用户已保存的 OpenRouter `openai/gpt-6-luna`、推理 **high**，设置只读、临时数据库隔离。原实施阶段六节点依赖/fork-join 通过记录位于 `/tmp/pulsara-subagent-workflow-dogfood/real-provider.json`，审阅修订通过记录位于 `/tmp/pulsara-subagent-workflow-enhanced-dogfood-v8/real-provider.json`。后续六节点 v2/v3 的严格来源断言失败记录保留，没有弱化断言。
+
+根 agent 修复后重新捕获完整 provider 输入，审阅 source 与 revision 均以显式 `data` 正确结算，通过报告位于 `/tmp/pulsara-workflow-root-review-dogfood-captured/real-provider.json`；8 份实际 SYSTEM/messages/tools 在 `/tmp/pulsara-workflow-root-provider-inputs.jsonl`，仅删除实际凭据值。前一次 source 输出了任务外的旧 MCP ordering 内容，保留在 `/tmp/pulsara-workflow-root-review-dogfood/real-provider.json`；该次没有完整 wire 证据，记为未归因的语义失败，不将其改写为成功。
+
+原 Astra xhigh critic 完成五轮实现复核及新增画布复核，最后未发现剩余实质阻塞。它独立检查了 detached 工具结果、迟到请求关联、同 call ID 的跨 worker 隔离、独立 settlement 和终态优先；独立前端用例与内存探针通过。浏览器手势和尺寸由根 agent 实际验收，静态 review 不替代运行证据。
+
+### 13.4 本地生产入口的真实浏览器验收（2026-09-29）
+
+通过普通 `pulsara app` 与 headed Chromium 使用已保存配置，ROOT 与全部七个 worker 均为 `openai/gpt-6-luna` / `high`。已先核验本机 `localhost:5432/pulsara` 为可重置开发库，按 clean-v0 重置一次；后续修复与重启未再清库。设置文件未改写。
+
+浏览器实测发现并修复三处集成问题：`subagent_capacity` 缺少客户端允许字段；提高容量时 Host 锁内等待 child TODO activation 造成重入死锁；接管旧进程任务时未清空 pending_reason，触发 canonical 表约束。容量目标在原 owner 锁内更新，释放 Host 锁后调用既有调度器；不增加后台调度 owner。旧 manager 清理遇到确认冲突时核验已有 writer 身份，失效 writer 不覆盖新 owner 的终态。
+
+实测时尚保留并发修改 UI，后按用户要求隐藏该入口。实际会话 `51942d37` 先以并发 1 创建事实核对、使用指引审阅及依赖两者的综合审阅；界面调整至 2 后请求约 130ms 返回，两个就绪 worker 同时执行。使用指引任务出现 `unknown_provider_error`，综合任务按规则阻断。失败记录保留；ROOT 随后创建新审阅任务引用该失败材料，再跨批次依赖已完成事实核对，综合审阅得到 `needs_changes`。下一批以该综合任务的 WORKER_HISTORY（冻结 cut sequence 53）创建新修订任务，旧任务保持 COMPLETED；依赖修订的独立验收实际读取 `release-final.md`，返回 `ready`，正文含 769 个汉字。七项中五项 COMPLETED，一项 FAILED，一项 BLOCKED_DEPENDENCY_FAILED；没有把失败分支改写为成功。
+
+工作目录为 `/Users/plumliu/Desktop/little_snake/workflow_release_review`。canonical task、模型绑定和依赖证据保存于 `output/playwright/workflow-live-canonical.json`，并发截图为 `workflow-live-capacity-two.png`，模型展示为 `workflow-live-model-detail.png`。最终重启后会话及任务结果仍可查看，并发恢复默认 4。
+
+相关验证：协议与调度聚焦回归 86 项通过，接管回归所在 round10 模块 35 项通过；过程通知和图片 hover 相关前端 72 项通过，任务面板、应用集成与 runtime adapter 223 项通过，TypeScript 与本地构建通过。既有构建 chunk 大小提示仍存在。
+
+最终界面验收：真实会话的桌面及 390px 窄屏通知浮层均完整显示；通知相邻间距为 8px，单独组合过程视图中工具、通知、steer 和思考之间也均测得 8px。折叠后通知和浮层不可见。跨组“事实核对”可点击并读取真实任务对话；取消按钮的窄屏尺寸为 80×28px，图标间距 6px 且不换行。截图保存于 `output/playwright/workflow-process-tooltip-desktop.png`、`workflow-process-tooltip-mobile.png`、`workflow-process-steer-spacing.png`、`workflow-cross-group-detail-desktop.png`、`workflow-cancel-header-mobile.png`、`workflow-sidebar-final.png`。既有 critic 完成本轮后续 UI/按需读取复核，最后无剩余实质问题。
