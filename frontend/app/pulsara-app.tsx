@@ -2153,6 +2153,16 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return bytes;
   }, [ownsConnection]);
 
+  const readVisualizationThumbnail = useCallback(async (
+    entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal,
+  ) => {
+    const active = connectionRef.current;
+    if (!active) throw new Error('本地服务未连接。');
+    const image = await active.readVisualizationThumbnail(entryId, ordinal, digest, size, signal);
+    if (!ownsConnection(active)) throw new Error('可视化所属的会话已经改变。');
+    return image;
+  }, [ownsConnection]);
+
   const readVisualization = useCallback(async (
     entryId: string, ordinal: number, digest: string, size: number,
   ) => {
@@ -2290,6 +2300,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onReadPromptImage={readPromptImage}
           onLocateAnnotation={locateAnnotationSource}
           onReadVisualization={readVisualization}
+          onReadVisualizationThumbnail={readVisualizationThumbnail}
           promptDraftStore={promptDraftStore}
           onNotify={notify}
           permission={turnPermission}

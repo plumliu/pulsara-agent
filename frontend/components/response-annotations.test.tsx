@@ -49,7 +49,8 @@ describe('draft annotation UI', () => {
     expect(container.querySelector('textarea')).toBeNull(); // Editor is a floating portal, not a tall composer card.
     const inline = screen.getByRole('dialog');
     expect(inline.classList.contains('annotation-editor--inline')).toBe(true);
-    expect(inline.querySelector('blockquote,button')).toBeNull();
+    expect(inline.querySelector('blockquote')).toBeNull();
+    expect(screen.getByRole('button', { name: '删除此批注' })).toBeTruthy();
     expect(inline.textContent).toBe('');
     expect((await store.capture('one')).content.parts).toEqual([first]);
     fireEvent.change(input, { target: { value: '这句话是什么意思？' } });

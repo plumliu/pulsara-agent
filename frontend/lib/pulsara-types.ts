@@ -412,6 +412,7 @@ export interface Message {
 export interface VisualizationOccurrence {
   ordinal: number;
   state: 'READY' | 'FAILED';
+  sourceFilename?: string;
   visualizationRef?: string;
   contentSize?: number;
   failureCode?: string;

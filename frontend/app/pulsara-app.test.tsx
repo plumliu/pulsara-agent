@@ -398,6 +398,10 @@ class FakeConnection implements RuntimeConnection {
     throw new Error('No visualization fixture');
   }
 
+  async readVisualizationThumbnail(): Promise<string> {
+    return 'data:image/png;base64,';
+  }
+
   async readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array> {
     void image;
     throw new Error('No prompt image fixture');

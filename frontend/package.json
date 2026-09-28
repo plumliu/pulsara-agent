@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@floating-ui/dom": "1.8.0",
+    "@speed-highlight/core": "1.2.24",
     "@tiptap/core": "3.31.3",
     "@tiptap/extension-document": "3.31.3",
     "@tiptap/extension-hard-break": "3.31.3",

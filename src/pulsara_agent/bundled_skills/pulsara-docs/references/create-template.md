@@ -2,19 +2,17 @@
 
 ## Choose the source
 
-- **New document:** use `python-docx` for ordinary construction or Pandoc for Markdown, citations, and notes. Apply real heading styles, lists, and fields.
+- **New document:** `python-docx` suits ordinary construction; Pandoc supports Markdown, citations, and notes. Choose structure and layout for the task, using real heading styles, lists, and fields.
 - **Existing design:** preserve its sections, styles, numbering, and headers/footers. Instantiate `.dotx` with a supporting tool; renaming the extension does not make it a `.docx`.
-- **Tagged template:** use `docxtpl` with strict missing-variable handling and XML escaping. Tags must follow its run/paragraph/table syntax; formatting can split a placeholder across runs.
+- **Tagged template:** when using `docxtpl`, enable strict missing-variable handling and XML escaping. Tags must follow its run/paragraph/table syntax; formatting can split a placeholder across runs.
 - **Untagged form:** map labels to actual cells or paragraphs, checking repeated labels, merged cells, checkboxes, and content controls. Preserve intentional blanks and existing values; resolve missing facts instead of inventing them.
 
 ## Optional examples
 
-Resolve these paths from the Skill directory. Read or adapt an example before applying its sample content or design.
-
-- [create_report.py](../examples/create_report.py): headings, table, header/footer, PAGE field, and separate Latin/CJK fonts. Adapt its sample content and A4 layout to the task.
+- [create_report.py](../examples/create_report.py): document elements—headings, a table, header/footer, PAGE field, and separate Latin/CJK fonts.
 - [fill_template.py](../examples/fill_template.py): `template.docx data.json output.docx`; fills a prepared template from a JSON object with strict undefined variables, escaping, and a Jinja sandbox. It does not recognize untagged form fields.
 
-The examples declare dependencies for `uv run --script /absolute/path/to/example.py ...`. An existing suitable Python environment works too. Outputs must be new files; adapt code in the task workspace for other requirements.
+Run with `uv run --script /absolute/path/to/example.py ...`. These demonstrate APIs, not a required document design; they write new files only.
 
 ## Layout details that matter
 

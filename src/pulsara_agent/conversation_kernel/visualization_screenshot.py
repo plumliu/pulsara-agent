@@ -18,7 +18,7 @@ class VisualizationScreenshotOwner:
         self._processes: set[asyncio.subprocess.Process] = set()
         self._closed = False
 
-    async def render(self, html: bytes, *, deadline_monotonic: float) -> bytes:
+    async def render(self, html: bytes, *, deadline_monotonic: float, thumbnail: bool = False) -> bytes:
         if self._closed:
             raise VisualizationScreenshotError("PREVIEW_OWNER_CLOSED")
         remaining = deadline_monotonic - monotonic()
@@ -28,6 +28,7 @@ class VisualizationScreenshotOwner:
             sys.executable,
             "-m",
             "pulsara_agent.conversation_kernel.visualization_screenshot_worker",
+            *(["--thumbnail"] if thumbnail else []),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

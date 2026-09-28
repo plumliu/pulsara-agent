@@ -201,6 +201,7 @@ message CanonicalVisualization {
   uint64 content_size = 4;
   string failure_code = 5;
   string failure_detail = 6;
+  string source_filename = 7;
 }
 
 message CanonicalEntry {

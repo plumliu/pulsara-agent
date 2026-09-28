@@ -125,6 +125,9 @@ The current Kernel supports:
   for spreadsheet reading, editing, formulas, formatting, native charts, format
   conversion, and verification; analysis methods remain a separate Skill scope,
   and optional helpers use task-selected environments and dependencies;
+- bundled [pulsara-pdf](src/pulsara_agent/bundled_skills/pulsara-pdf/SKILL.md)
+  for PDF reading, text/table/image extraction, creation, and visual verification;
+  OCR methods and dependencies are selected per task;
 - bundled [pulsara-data-analysis](src/pulsara_agent/bundled_skills/pulsara-data-analysis/SKILL.md)
   for EDA, ETL, comparisons, statistical methods, and interactive HTML findings
   through `visualization_render`; dependencies are prepared per task, and deeper

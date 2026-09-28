@@ -71,6 +71,7 @@ from pulsara_agent.web_app.file_import import LocalImport, receive_file, receive
 from pulsara_agent.web_app.directory_picker import NativeDirectoryPicker
 from pulsara_agent.web_app.file_preview import FilePreviewError
 from pulsara_agent.web_app.file_preview_http import FilePreviewHttp
+from pulsara_agent.web_app.visualization_preview import VisualizationPreviews
 from pulsara_agent.web_app.session_controller import (
     LocalSessionController,
     OldHostCloseQuarantined,
@@ -322,6 +323,7 @@ class LocalHttpServer:
         self._reset_postgres_data = reset_postgres
         self._postgres_operation_lock = asyncio.Lock()
         self._directory_picker = NativeDirectoryPicker()
+        self._visualization_previews = VisualizationPreviews(bridge)
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._port: int | None = None
@@ -379,6 +381,7 @@ class LocalHttpServer:
         self._runner = None
         self._site = None
         await self._directory_picker.aclose()
+        await self._visualization_previews.aclose()
         if runner is not None:
             await runner.cleanup()
 
@@ -623,6 +626,7 @@ class LocalHttpServer:
             "read-plan-draft",
             "read-content",
             "read-tool-artifact",
+            "visualization-thumbnail",
             "list-background-processes",
             "read-background-process-log",
         ):
@@ -2375,6 +2379,9 @@ class LocalHttpServer:
                     connection_id, body
                 ),
                 "read-content": lambda: self.bridge.read_content(connection_id, body),
+                "visualization-thumbnail": lambda: self._visualization_previews.read(
+                    connection_id, body, cancelled=lambda: request.transport is None or request.transport.is_closing(),
+                ),
                 "read-tool-artifact": lambda: self.bridge.read_tool_artifact(
                     connection_id, body
                 ),

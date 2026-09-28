@@ -187,8 +187,13 @@ def test_visualization_tool_explains_authoring_and_each_path() -> None:
 
 
 @pytest.mark.postgres
+@pytest.mark.parametrize("source_arguments, filename", [
+    ({"path": "reports/客户结构 <完整 & 复核>.html"}, "客户结构 <完整 & 复核>.html"),
+    ({"visualization_ref": "sha256:" + "0" * 64}, ""),
+])
 def test_visualization_publication_fork_and_reference(
     stage2_migrated_postgres_database,
+    source_arguments, filename,
 ) -> None:
     from tests.test_conversation_fork import fork, rows
 
@@ -225,7 +230,7 @@ def test_visualization_publication_fork_and_reference(
         parent_content=InlineContent.from_bytes(b""),
         blocks=(AssistantToolCallBlock(
             _id("block"), call_id, "visualization_render",
-            freeze_json({"path": "chart.html", "review": False}),
+            freeze_json({**source_arguments, "review": False}),
         ),),
         occurred_at=datetime.now(timezone.utc), actor_id="model:test",
         deadline_monotonic=monotonic() + 30,
@@ -281,6 +286,16 @@ def test_visualization_publication_fork_and_reference(
         deadline_monotonic=monotonic() + 30,
     )
     occurrence = rows(repo, "SELECT * FROM pulsara_v3.assistant_visualizations WHERE session_id=%s", (lease.guard.session_id,))[0]
+    from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
+
+    def displayed_filename(session_id):
+        snapshot = CanonicalProtocolReader(repo.connection_provider).snapshot(
+            session_id=session_id, maximum_entries=100, maximum_control_items=100,
+            deadline_monotonic=monotonic() + 30,
+        )
+        return next(v.source_filename for e in snapshot.entries for v in e.visualizations)
+
+    assert displayed_filename(lease.guard.session_id) == filename
     assert occurrence["state"] == "READY" and occurrence["ordinal"] == 0
     digest = rows(repo, "SELECT logical_digest FROM pulsara_v3.blobs WHERE id=%s", (occurrence["blob_id"],))[0]["logical_digest"]
     assert PostgresCanonicalVisualizationReadPort(
@@ -323,6 +338,7 @@ def test_visualization_publication_fork_and_reference(
     assert copied["turn_id"] is None and copied["imported_history_group_id"] is not None
     from tests.test_conversation_fork import assert_session_aggregate_deleted
     assert_session_aggregate_deleted(repo, lease.guard)
+    assert displayed_filename(child.child_session_id) == filename
     assert PostgresCanonicalVisualizationReadPort(
         repo.connection_provider, session_id=child.child_session_id,
         workspace_id=workspace_id,

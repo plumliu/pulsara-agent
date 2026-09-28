@@ -1,0 +1,17 @@
+- main [ref=f1e3]:
+  - region "text 代码块" [ref=f1e5]:
+    - generic [ref=f1e6]:
+      - generic [ref=f1e7]: TEXT
+      - generic [ref=f1e12]:
+        - button "按宽度换行" [active] [ref=f1e30] [cursor=pointer]
+        - button "复制代码" [ref=f1e17] [cursor=pointer]
+    - code [ref=f1e22]:
+      - generic [ref=f1e23]:
+        - text: "1"
+        - generic [ref=f1e24]: "斐波那契数列前 10 项: [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]"
+      - generic [ref=f1e25]:
+        - text: "2"
+        - generic [ref=f1e26]: 这是第二行。
+      - generic [ref=f1e27]:
+        - text: "3"
+        - generic [ref=f1e28]: 第三行也有较长的文本，用来检查续行的左侧是否保持空白，同时下一原始行的行号是否出现在正确的位置。

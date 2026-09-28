@@ -350,6 +350,7 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         "pulsara-data-analysis",
         "pulsara-docs",
         "pulsara-mcp-installer",
+        "pulsara-pdf",
         "pulsara-plugin-installer",
         "pulsara-sheets",
         "pulsara-skill-creator",
@@ -468,6 +469,25 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         resource_read = ReadFileTool(tmp_path).execute(
             ToolCall(
                 f"call:docs-resource:{relative_path}",
+                "read_file",
+                {"path": str(resource)},
+            )
+        )
+        assert resource_read.status is ToolResultState.SUCCESS
+        assert json.loads(resource_read.output)["path"] == str(resource)
+
+    pdf = next(item for item in result.candidates if item.name == "pulsara-pdf")
+    assert pdf.source is SkillSource.BUNDLED
+    assert pdf.origin == BundledSkillOrigin("bundled_skills/pulsara-pdf")
+    for relative_path in (
+        "SKILL.md",
+        "references/read-extract.md",
+        "references/create-verify.md",
+    ):
+        resource = pdf.base_dir / relative_path
+        resource_read = ReadFileTool(tmp_path).execute(
+            ToolCall(
+                f"call:pdf-resource:{relative_path}",
                 "read_file",
                 {"path": str(resource)},
             )

@@ -11,6 +11,7 @@ import codecs
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
@@ -817,10 +818,19 @@ class CanonicalProtocolReader:
             visualizations = connection.execute(
                 """SELECT v.ordinal, v.state, v.blob_id,
                           v.failure_code, v.failure_detail,
-                          b.logical_digest, b.logical_size, b.media_type, b.codec
+                          b.logical_digest, b.logical_size, b.media_type, b.codec,
+                          source.tool_arguments ->> 'path' AS source_path
                    FROM pulsara_v3.assistant_visualizations AS v
                    LEFT JOIN pulsara_v3.blobs AS b
                      ON b.id = v.blob_id AND b.workspace_id = v.workspace_id
+                   LEFT JOIN pulsara_v3.tool_results AS r
+                     ON r.session_id = v.session_id
+                    AND r.result_entry_id = v.source_result_entry_id
+                   LEFT JOIN pulsara_v3.assistant_message_blocks AS source
+                     ON source.session_id = r.session_id
+                    AND source.assistant_entry_id = r.tool_call_entry_id
+                    AND source.tool_call_id = r.tool_call_id
+                    AND source.tool_name = 'visualization_render'
                    WHERE v.session_id = %s AND v.assistant_entry_id = %s
                    ORDER BY v.ordinal""",
                 (row["session_id"], entry_id),
@@ -831,6 +841,10 @@ class CanonicalProtocolReader:
                 target = result.visualizations.add(
                     ordinal=ordinal,
                     state=str(visualization["state"]),
+                    source_filename=(
+                        Path(visualization["source_path"]).name
+                        if visualization["source_path"] else ""
+                    ),
                 )
                 if visualization["state"] == "READY":
                     if (

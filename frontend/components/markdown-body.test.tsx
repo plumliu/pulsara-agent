@@ -1,10 +1,47 @@
-import { fireEvent, render, waitFor } from '@testing-library/react';
+import { fireEvent, render, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { MarkdownBody, normalizeMathMarkdown } from './markdown-body';
 
 const noopNotify = () => undefined;
 
 describe('MarkdownBody math rendering', () => {
+  it('shows fenced code with a language toolbar, line numbers, safe highlighting and source-only copy', async () => {
+    const body = '```python\ndef fibonacci(n):\n    return "<unsafe>"\n```';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const onNotify = vi.fn();
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const { container } = render(<MarkdownBody body={body} onNotify={onNotify} />);
+    const card = container.querySelector('.code-card')!;
+    expect(card.querySelector('.code-card__toolbar')?.textContent).toContain('PYTHON');
+    expect([...card.querySelectorAll('.code-card__line')].map(node => node.getAttribute('data-line'))).toEqual(['1', '2']);
+    expect([...card.querySelectorAll('.code-card__line-content')].map(node => node.textContent)).toEqual(['def fibonacci(n):', '    return "<unsafe>"']);
+    await waitFor(() => expect(card.querySelectorAll('[class*="code-card__token--"]').length).toBeGreaterThan(0));
+    expect([...card.querySelectorAll('.code-card__line-content')].map(node => node.textContent)).toEqual(['def fibonacci(n):', '    return "<unsafe>"']);
+    expect(card.querySelector('unsafe')).toBeNull();
+    fireEvent.click(card.querySelector('button[aria-label="复制代码"]')!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('def fibonacci(n):\n    return "<unsafe>"'));
+    expect(onNotify).toHaveBeenCalledWith('代码已复制', undefined, 'success');
+  });
+
+  it('keeps long text fences in a scrollable card and expands on request', () => {
+    const body = `\`\`\`text\n${Array.from({ length: 16 }, (_, i) => `line ${i}`).join('\n')}\n\`\`\``;
+    const { container } = render(<MarkdownBody body={body} onNotify={noopNotify} />);
+    const card = container.querySelector('.code-card')!;
+    const buttons = within(card as HTMLElement);
+    expect(card.querySelectorAll('.code-card__line')).toHaveLength(16);
+    expect(card.querySelector('.code-card__body.is-expanded')).toBeNull();
+    fireEvent.click(buttons.getByRole('button', { name: '按宽度换行' }));
+    expect(card.querySelector('.code-card__body.is-wrapped')).not.toBeNull();
+    expect([...card.querySelectorAll('.code-card__line')].map(node => node.getAttribute('data-line'))).toEqual(Array.from({ length: 16 }, (_, i) => String(i + 1)));
+    expect(buttons.getByRole('button', { name: '关闭自动换行' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(buttons.getByRole('button', { name: '关闭自动换行' }));
+    expect(card.querySelector('.code-card__body.is-wrapped')).toBeNull();
+    fireEvent.click(buttons.getByRole('button', { name: '展开代码' }));
+    expect(card.querySelector('.code-card__body.is-expanded')).not.toBeNull();
+    fireEvent.click(buttons.getByRole('button', { name: '收起代码' }));
+    expect(card.querySelector('.code-card__body.is-expanded')).toBeNull();
+  });
+
   it('normalizes standalone dollar displays without rewriting TeX delimiters or code', () => {
     const source = [
       '行内 \\(x^2\\) 与 $y^2$。',
@@ -85,14 +122,13 @@ describe('MarkdownBody math rendering', () => {
     ].join('\n');
 
     const { container } = render(<MarkdownBody body={body} onNotify={noopNotify} />);
-    const code = Array.from(container.querySelectorAll('pre code'), (node) => node.textContent).join('');
+    const codeLines = Array.from(container.querySelectorAll('.code-card__line-content'), node => node.textContent);
 
-    expect(code).toBe([
+    expect(codeLines).toEqual([
       'from api import read_file, edit_file',
       'ROOT = "read-only"',
       'exit_code = 0',
-      '',
-    ].join('\n'));
+    ]);
     expect(container.querySelector('p code')?.textContent).toBe('read_file');
     expect(container.querySelector('script')).toBeNull();
     expect(container.querySelectorAll('.katex-display')).toHaveLength(1);

@@ -14,6 +14,7 @@ import { normalizeMathWithSource, rehypeSourceMapping } from '../lib/markdown-so
 import { markdownDiagramFormat } from '../lib/markdown-diagram';
 import { MermaidBlock } from './mermaid-block';
 import { DiagramBlock } from './diagram-block';
+import { CodeBlock } from './code-block';
 import { renderSvg, startsWithSvg } from '../lib/svg-renderer';
 import { FileLinkContext } from './file-link-context';
 import { classifyFileLink, markdownImageUrl } from '../lib/file-preview';
@@ -299,6 +300,14 @@ export function MarkdownBody({ body, onNotify, streaming = false, annotationSour
         if (format === 'svg') {
           return <div data-source-atom={node?.properties['data-source-atom']}><DiagramBlock source={source} streaming={streaming} onNotify={onNotify} format="SVG" renderImage={renderSvg} /></div>;
         }
+      }
+      if (code?.type === 'element' && code.tagName === 'code') {
+        const language = elementClasses(code).find(name => name.startsWith('language-'))?.slice(9).toLowerCase();
+        const source = toText(code, { whitespace: 'pre' });
+        return <CodeBlock source={source} language={language}
+          sourceMap={annotationSource && typeof code.properties['data-source-text'] === 'string' ? code.properties['data-source-text'] : undefined}
+          invalidSource={annotationSource && node?.properties['data-source-invalid'] !== undefined}
+          streaming={streaming} onNotify={onNotify} />;
       }
       return <pre {...props}>{children}</pre>;
     },

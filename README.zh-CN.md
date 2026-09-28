@@ -113,6 +113,8 @@ Kernel 当前支持：
 - 内置 [pulsara-sheets](src/pulsara_agent/bundled_skills/pulsara-sheets/SKILL.md)，支持
   表格读取、编辑、公式、格式、原生图表、格式转换与验证；分析方法属于独立 Skill
   的职责，可选脚本使用任务选定的环境和依赖；
+- 内置 [pulsara-pdf](src/pulsara_agent/bundled_skills/pulsara-pdf/SKILL.md)，支持
+  PDF 阅读、文本／表格／图片提取、创建与视觉验证；OCR 技术和依赖按任务选择；
 - 内置 [pulsara-data-analysis](src/pulsara_agent/bundled_skills/pulsara-data-analysis/SKILL.md)，
   支持 EDA、ETL、比较分析、统计方法，并通过 `visualization_render` 展示交互式 HTML
   结果；依赖按任务准备，深入方法按需阅读；

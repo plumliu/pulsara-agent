@@ -10,15 +10,15 @@ Inspect library warnings. If an important feature would be dropped, choose a cap
 
 ## Create an ordinary workbook
 
-Use the simplest structure that fits the requested deliverable. Put editable inputs and meaningful calculations in identifiable cells; separate sheets when they help navigation or preserve a supplied template. Do not add analysis, audit, or instruction tabs for their own sake.
+Organize sheets, inputs, and calculations around the requested deliverable or supplied template.
 
-The optional [creation example](../examples/create_workbook.py) makes a small demonstration workbook with typed dates, leading-zero identifiers, formulas with independently supplied sample results, a table, and an editable chart:
+The optional [creation example](../examples/create_workbook.py) demonstrates typed dates, leading-zero identifiers, formulas, a table, and an editable chart:
 
 ```sh
 uv run --script /path/to/pulsara-sheets/examples/create_workbook.py demo.xlsx
 ```
 
-Adapt the example's clearly marked sample data to the task. It refuses to overwrite a file. Its supplied formula results are sample caches, not evidence of spreadsheet-engine recalculation.
+It demonstrates APIs, not a required workbook design, and writes new files only. Supplied formula results are sample caches, not evidence of spreadsheet-engine recalculation.
 
 Write numbers as numbers and identifiers as text. Write intended formulas through a formula API; write imported literal text through a text API. In XlsxWriter, `write_string()` keeps literal text literal; disabling `strings_to_formulas` and `strings_to_urls` also prevents automatic interpretation by generic writes. In openpyxl, explicitly set `cell.data_type = 's'` after assigning a formula-like literal. Preserve dates, precision, and locale semantics as described in [formats](formats-passwords.md).
 

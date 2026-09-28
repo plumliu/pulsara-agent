@@ -1030,7 +1030,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         name="visualization_render",
         description=(
             "Embed interactive HTML charts, dashboards, or page layouts beneath your "
-            "next tool-free assistant message. For an existing local image, reply with "
+            "next tool-free assistant message. When mentioning its location in your "
+            "reply, say below the reply text (下方). For an existing local image, reply with "
             "![description](path); the user can click it to open the image preview. "
             "Relative image paths start at the session workspace root; absolute paths "
             "also work. For a static SVG diagram, reply with a fenced svg code block; "

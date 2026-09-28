@@ -1,0 +1,56 @@
+- main [ref=f2e3]:
+  - generic [ref=f2e4]:
+    - paragraph [ref=f2e5]: 下面是一段 Python 示例，展示如何生成斐波那契数列。
+    - region "python 代码块" [ref=f2e82]:
+      - generic [ref=f2e83]:
+        - generic [ref=f2e84]: PYTHON
+        - generic [ref=f2e89]:
+          - button "按宽度换行" [ref=f2e90] [cursor=pointer]
+          - button "复制代码" [ref=f2e94] [cursor=pointer]
+      - generic [ref=f2e98]:
+        - generic [aria-hidden] [ref=f2e99]:
+          - generic [ref=f2e100]: "1"
+          - generic [ref=f2e101]: "2"
+          - generic [ref=f2e102]: "3"
+          - generic [ref=f2e103]: "4"
+          - generic [ref=f2e104]: "5"
+          - generic [ref=f2e105]: "6"
+          - generic [ref=f2e106]: "7"
+          - generic [ref=f2e107]: "8"
+        - code [ref=f2e108]: "def fibonacci_sequence(n): \"\"\"生成斐波那契数列的前 n 项。\"\"\" if n <= 0: return [] sequence = [0, 1] for index in range(2, n): sequence.append(sequence[-1] + sequence[-2]) return sequence[:n]"
+    - paragraph [ref=f2e29]: 这段代码会输出：
+    - region "text 代码块" [ref=f2e109]:
+      - generic [ref=f2e110]:
+        - generic [ref=f2e111]: TEXT
+        - generic [ref=f2e116]:
+          - button "关闭自动换行" [active] [pressed] [ref=f2e168] [cursor=pointer]
+          - button "复制代码" [ref=f2e121] [cursor=pointer]
+      - code [ref=f2e128]: "斐波那契数列前 10 项: [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]"
+    - paragraph [ref=f2e46]: 再看一段较长的 JSON，验证卡片高度和滚动：
+    - region "json 代码块" [ref=f2e129]:
+      - generic [ref=f2e130]:
+        - generic [ref=f2e131]: JSON
+        - generic [ref=f2e136]:
+          - button "按宽度换行" [ref=f2e137] [cursor=pointer]
+          - button "复制代码" [ref=f2e141] [cursor=pointer]
+          - button "展开代码" [ref=f2e145] [cursor=pointer]
+      - generic [ref=f2e148]:
+        - generic [aria-hidden] [ref=f2e149]:
+          - generic [ref=f2e150]: "1"
+          - generic [ref=f2e151]: "2"
+          - generic [ref=f2e152]: "3"
+          - generic [ref=f2e153]: "4"
+          - generic [ref=f2e154]: "5"
+          - generic [ref=f2e155]: "6"
+          - generic [ref=f2e156]: "7"
+          - generic [ref=f2e157]: "8"
+          - generic [ref=f2e158]: "9"
+          - generic [ref=f2e159]: "10"
+          - generic [ref=f2e160]: "11"
+          - generic [ref=f2e161]: "12"
+          - generic [ref=f2e162]: "13"
+          - generic [ref=f2e163]: "14"
+          - generic [ref=f2e164]: "15"
+          - generic [ref=f2e165]: "16"
+          - generic [ref=f2e166]: "17"
+        - code [ref=f2e167]: "{\"item\": 1, \"name\": \"第 1 项\"} {\"item\": 2, \"name\": \"第 2 项\"} {\"item\": 3, \"name\": \"第 3 项\"} {\"item\": 4, \"name\": \"第 4 项\"} {\"item\": 5, \"name\": \"第 5 项\"} {\"item\": 6, \"name\": \"第 6 项\"} {\"item\": 7, \"name\": \"第 7 项\"} {\"item\": 8, \"name\": \"第 8 项\"} {\"item\": 9, \"name\": \"第 9 项\"} {\"item\": 10, \"name\": \"第 10 项\"} {\"item\": 11, \"name\": \"第 11 项\"} {\"item\": 12, \"name\": \"第 12 项\"} {\"item\": 13, \"name\": \"第 13 项\"} {\"item\": 14, \"name\": \"第 14 项\"} {\"item\": 15, \"name\": \"第 15 项\"} {\"item\": 16, \"name\": \"第 16 项\"} {\"item\": 17, \"name\": \"第 17 项\"}"

@@ -158,6 +158,8 @@ function AnnotationEditor({ item, anchor, store, sessionId, onClose }: {
           if (event.shiftKey) store.getEditor(sessionId).commands.redo(); else store.getEditor(sessionId).commands.undo();
         }
       }} />
+    {!preview && <button type="button" className="annotation-editor__delete" aria-label="删除此批注" title="删除此批注"
+      onClick={() => { store.removeAnnotation(sessionId, item.id); onClose(true); }}><Trash2 size={14} /></button>}
   </div>;
 }
 

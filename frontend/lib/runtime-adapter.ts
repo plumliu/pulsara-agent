@@ -837,6 +837,7 @@ export interface RuntimeConnection {
   listBackgroundProcesses(cursor?: string): Promise<BackgroundProcessPage>;
   readBackgroundProcessLog(processId: string, outputCursor?: string): Promise<BackgroundProcessLog>;
   readCanonicalEntryContent(entryId: string, digest: string, size: number): Promise<string>;
+  readVisualizationThumbnail(entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal): Promise<string>;
   readVisualizationHtml(entryId: string, ordinal: number, digest: string, size: number): Promise<string>;
   readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
   readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent>;
@@ -946,6 +947,7 @@ interface ProtocolEntry {
   visualizations?: Array<{
     ordinal: string | number; state: string; visualization_ref?: string;
     content_size?: string | number; failure_code?: string; failure_detail?: string;
+    source_filename?: string;
   }>;
 }
 
@@ -2245,6 +2247,14 @@ class LocalRuntimeConnection implements RuntimeConnection {
     );
     if (reference.inline_content === undefined) return '';
     return decodeContent(reference, { kind: 'entry', entryId });
+  }
+
+  async readVisualizationThumbnail(entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal): Promise<string> {
+    const result = await this.post<{ image: string }>('visualization-thumbnail', {
+      entry_id: entryId, ordinal, digest, size,
+    }, signal);
+    if (!result.image?.startsWith('data:image/png;base64,')) throw new Error('缩略图暂时无法生成。');
+    return result.image;
   }
 
   async readVisualizationHtml(
@@ -3912,6 +3922,7 @@ function projectEntries(
         traces: traces.length ? traces : undefined,
         visualizations: (entry.visualizations ?? []).map((item) => ({
           ordinal: numeric(item.ordinal),
+          sourceFilename: item.source_filename || undefined,
           state: item.state === 'READY' ? 'READY' as const : 'FAILED' as const,
           visualizationRef: item.visualization_ref || undefined,
           contentSize: item.state === 'READY' ? numeric(item.content_size) : undefined,

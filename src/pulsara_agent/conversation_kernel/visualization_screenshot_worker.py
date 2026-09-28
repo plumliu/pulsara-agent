@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from io import BytesIO
 from math import isfinite
 import re
 
@@ -66,6 +67,15 @@ def main() -> None:
                 screenshot = roots.screenshot(type="png", timeout=10_000)
             else:
                 screenshot = page.screenshot(type="png", full_page=False, timeout=10_000)
+            if "--thumbnail" in sys.argv:
+                from PIL import Image
+
+                image = Image.open(BytesIO(screenshot))
+                # High-density navigation pixels, not a content size limit.
+                image.thumbnail((320, 214), Image.Resampling.LANCZOS)
+                output = BytesIO()
+                image.save(output, format="PNG")
+                screenshot = output.getvalue()
             sys.stdout.buffer.write(screenshot)
         finally:
             browser.close()

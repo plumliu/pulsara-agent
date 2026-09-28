@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { MarkdownBody, normalizeMathMarkdown } from '../components/markdown-body';
 import { FileLinkContext } from '../components/file-link-context';
 import { AnnotationBody } from '../components/response-annotations';
@@ -47,7 +47,8 @@ describe('canonical response selection', () => {
   it.each(['```js\nSECRET\n```', '    SECRET', '```\n\nSECRET\r\n\n```', '    A\n    SECRET', '  ```\n\tSECRET\n  ```'])('maps ordinary code with parser whitespace: %s', code => {
     const body = `${code}\n\nafter`;
     const { container, leaves } = mount(body);
-    const text = container.querySelector('pre code')!.firstChild!;
+    const text = [...container.querySelectorAll<HTMLElement>('pre code [data-source-text]')]
+      .find(node => node.textContent?.includes('SECRET'))!.firstChild!;
     const index = text.textContent!.indexOf('SECRET');
     expect(select(text, index, text, index + 6)).toEqual({ type: 'annotation', quote: 'SECRET', source: { entry_id: 'entry:a', start: body.indexOf('SECRET'), end: body.indexOf('SECRET') + 6 } });
     expect(select(text, index, leaves.at(-1)!.firstChild!, 5)?.quote).toBe(body.slice(body.indexOf('SECRET')));
@@ -60,9 +61,30 @@ describe('canonical response selection', () => {
   });
   it.each(['jsx', 'mermaid-example'])('keeps ordinary %s fences selectable as code', language => {
     const { container } = mount(`\`\`\`${language}\n<svg><text>hello</text></svg>\n\`\`\``);
-    const text = container.querySelector('pre code')!.firstChild!;
+    const text = [...container.querySelectorAll<HTMLElement>('pre code [data-source-text]')]
+      .find(node => node.textContent?.includes('hello'))!.firstChild!;
     const from = text.textContent!.indexOf('hello');
     expect(select(text, from, text, from + 5)?.quote).toBe('hello');
+  });
+  it('maps colored code tokens to the canonical reply and ignores the gutter and toolbar', async () => {
+    const body = '前言\n\n```python\ndef fibonacci(n):\n    return "值😀"\n```\n\n结尾';
+    const { container } = mount(body);
+    const card = container.querySelector('.code-card')!;
+    await waitFor(() => expect(card.querySelector('[class*="code-card__token--"]')).not.toBeNull());
+    const leaves = [...card.querySelectorAll<HTMLElement>('code [data-source-text]')];
+    const first = leaves.find(leaf => leaf.textContent?.includes('def'))!;
+    const last = leaves.find(leaf => leaf.textContent?.includes('fibonacci'))!;
+    expect(select(first.firstChild!, 0, last.firstChild!, last.textContent!.length)?.quote).toBe('def fibonacci');
+    fireEvent.click(card.querySelector('button[aria-label="按宽度换行"]')!);
+    expect(select(first.firstChild!, 0, last.firstChild!, last.textContent!.length)?.quote).toBe('def fibonacci');
+    const secondLine = [...card.querySelectorAll<HTMLElement>('code [data-source-text]')]
+      .find(leaf => leaf.textContent?.includes('return'))!.firstChild!;
+    expect(select(first.firstChild!, 0, secondLine, secondLine.textContent!.length)?.quote).toBe('def fibonacci(n):\n    return');
+    const ending = [...container.querySelectorAll<HTMLElement>('[data-source-text]')].at(-1)!.firstChild!;
+    expect(select(first.firstChild!, 0, ending, 2)?.quote).toBe(body.slice(body.indexOf('def')));
+    expect([...card.querySelectorAll('.code-card__line')].map(line => line.getAttribute('data-line'))).toEqual(['1', '2']);
+    const header = card.querySelector('.code-card__toolbar > span')!.lastChild!;
+    expect(select(header, 0)).toBeUndefined();
   });
   it('clips element endpoints against text contents, excluding boundary-only contact', () => {
     const { container, leaves } = mount('first\n\nsecond');

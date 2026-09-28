@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../lib/runtime-adapter';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { promptContentTextProjection } from '../lib/prompt-content';
-import { visualizationLayoutMessageType } from '../lib/visualization-frame';
 import { ConversationMessages, WorkbenchView } from './workbench-view';
 import { WELCOME_TYPEWRITER_PHRASES } from './welcome-typewriter';
 
@@ -26,74 +25,28 @@ beforeEach(() => {
 });
 
 describe('visualization occurrence layout', () => {
-  it('crops only a measured root from its own iframe and falls back to the page', async () => {
-    let notifyResize: ResizeObserverCallback | null = null;
-    let availableWidth = 962;
-    vi.stubGlobal('ResizeObserver', class {
-      constructor(private readonly callback: ResizeObserverCallback) { notifyResize = callback; }
-      observe() { this.callback([], this as unknown as ResizeObserver); }
-      disconnect() {}
-    });
-    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) {
-      return this instanceof HTMLIFrameElement ? availableWidth - 2 : availableWidth;
-    });
-    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      return this instanceof HTMLIFrameElement ? 560 : 0;
-    });
-    const html = '<!doctype html><html><body><main data-pulsara-visualization-root>Chart</main></body></html>';
-    const read = vi.fn(async () => html);
+  it('groups occurrences by message and only reads the selected HTML after opening', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+    vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+    const read = vi.fn(async () => '<h1>Chart</h1>');
     const view = render(<ConversationMessages
-      messages={[{
-        id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
-        time: '13:04', body: '图表如下。', visualizations: [{
-          ordinal: 0, state: 'READY', visualizationRef: 'sha256:test', contentSize: html.length,
-        }],
-      }]}
-      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
-      onReadVisualization={read}
-    />);
-    const toggle = screen.getByRole('button', { name: '展开可视化 1' });
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+      messages={[{ id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
+        time: '13:04', body: '图表如下。', visualizations: [0, 1].map(ordinal => ({
+          ordinal, state: 'READY', visualizationRef: 'sha256:test', contentSize: 14,
+        })) }]}
+      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
     expect(read).not.toHaveBeenCalled();
-    expect(view.container.querySelector('iframe')).toBeNull();
-    fireEvent.click(toggle);
-    const panel = await waitFor(() => {
-      const element = view.container.querySelector<HTMLElement>('.assistant-visualization[data-visualization-layout]');
-      expect(element?.querySelector('iframe')).toBeTruthy();
-      return element!;
-    });
-    const frame = panel.querySelector('iframe')!;
-    await waitFor(() => expect(frame.style.width).toBe('960px'));
-    const announce = (source: MessageEventSource, mode: string, rect?: object) => {
-      act(() => window.dispatchEvent(new MessageEvent('message', {
-        source, data: { type: visualizationLayoutMessageType, mode, rect },
-      })));
-    };
-    announce(window, 'root', { x: 100, y: 20, width: 420, height: 300 });
-    expect(panel.dataset.visualizationLayout).toBe('page');
-    announce(frame.contentWindow!, 'root', { x: 100, y: 20, width: 420, height: 300 });
-    expect(panel.dataset.visualizationLayout).toBe('root');
-    expect(panel.style.width).toBe('422px');
-    expect(frame.style.transform).toBe('translate(-100px, -20px)');
-    fireEvent.click(screen.getByRole('button', { name: '收起可视化 1' }));
-    expect(panel.classList.contains('is-expanded')).toBe(false);
-    expect(panel.style.width).toBe('');
-    expect(panel.querySelector('.animated-disclosure')?.getAttribute('aria-hidden')).toBe('true');
-    expect(panel.querySelector('iframe')).toBe(frame);
-    fireEvent.click(screen.getByRole('button', { name: '展开可视化 1' }));
-    expect(panel.style.width).toBe('422px');
-    expect(panel.querySelector('iframe')).toBe(frame);
+    expect(view.container.querySelectorAll('.assistant-visualization')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: '展开可视化图集' }));
+    await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
     expect(read).toHaveBeenCalledOnce();
-    availableWidth = 602;
-    act(() => notifyResize?.([], {} as ResizeObserver));
-    expect(panel.dataset.visualizationLayout).toBe('page');
-    expect(frame.style.width).toBe('600px');
-    announce(frame.contentWindow!, 'root', { x: 40, y: 20, width: 420, height: 300 });
-    expect(panel.dataset.visualizationLayout).toBe('root');
-    announce(frame.contentWindow!, 'root', { x: 100, y: 20, width: 900, height: 300 });
-    expect(panel.dataset.visualizationLayout).toBe('page');
-    announce(frame.contentWindow!, 'page');
-    expect(panel.dataset.visualizationLayout).toBe('page');
+    const frame = view.container.querySelector('iframe');
+    fireEvent.click(screen.getByRole('button', { name: '收起可视化图集' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开可视化图集' }));
+    expect(view.container.querySelector('iframe')).toBe(frame);
+    expect(read).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole('button', { name: '下一张可视化' }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
 });
 afterEach(() => {

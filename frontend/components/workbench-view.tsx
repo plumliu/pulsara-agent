@@ -1,6 +1,6 @@
 'use client';
 
-import { SandboxedHtmlPreview } from './sandboxed-html-preview';
+import { VisualizationGallery, type ReadVisualizationThumbnail } from './visualization-gallery';
 
 
 import { CapabilityInteractionEditor } from './capability-interaction-editor';
@@ -52,7 +52,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useId,
   useMemo,
   useLayoutEffect,
   useRef,
@@ -75,7 +74,7 @@ import type {
   CanonicalPromptImagePart,
   EditablePromptContent,
 } from '../lib/runtime-adapter';
-import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, VisualizationOccurrence, Workspace } from '../lib/pulsara-types';
+import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, SubagentRun, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
 import { AnnotationBody, ResponseAnnotations } from './response-annotations';
@@ -88,11 +87,7 @@ import { ToolResultDisplayContext } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { useWorkbenchFileDrop } from '../lib/workbench-file-drop';
 import { promptContentTextProjection } from '../lib/prompt-content';
-import {
-  usableVisualizationRootRect,
-  visualizationLayoutMessageType,
-  type VisualizationRootRect,
-} from '../lib/visualization-frame';
+
 
 interface WorkbenchViewProps {
   onLocateAnnotation?: (entryId: string, signal: AbortSignal) => Promise<void>;
@@ -155,6 +150,7 @@ interface WorkbenchViewProps {
   artifactOwnerKey: string;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
   onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
+  onReadVisualizationThumbnail?: ReadVisualizationThumbnail;
   onReadVisualization?: (entryId: string, ordinal: number, digest: string, size: number) => Promise<string>;
   promptDraftStore: PromptDraftStore;
   onNotify: MarkdownNotify;
@@ -970,95 +966,6 @@ const unavailableVisualization = async (): Promise<string> => {
 
 
 
-function VisualizationPanel({ entryId, visualization, onRead }: {
-  entryId: string;
-  visualization: VisualizationOccurrence;
-  onRead: NonNullable<WorkbenchViewProps['onReadVisualization']>;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [opened, setOpened] = useState(false);
-  const contentId = useId();
-  const [state, setState] = useState<{ html?: string; error?: string }>({});
-  const [probeWidth, setProbeWidth] = useState<number | null>(null);
-  const [rootRect, setRootRect] = useState<VisualizationRootRect | null>(null);
-  const probeWidthRef = useRef<number | null>(null);
-  const widthProbeRef = useRef<HTMLDivElement>(null);
-  const frameRef = useRef<HTMLIFrameElement>(null);
-  const ordinal = visualization.ordinal;
-  const digest = visualization.visualizationRef;
-  const size = visualization.contentSize;
-  useEffect(() => {
-    if (!opened || visualization.state !== 'READY' || !digest || !size) return;
-    let active = true;
-    void onRead(entryId, ordinal, digest, size).then(
-      (html) => { if (active) { setRootRect(null); setState({ html }); } },
-      () => { if (active) setState({ error: '已保存的可视化暂时无法读取。' }); },
-    );
-    return () => { active = false; };
-  }, [entryId, ordinal, digest, size, onRead, visualization.state, opened]);
-  useEffect(() => {
-    const probe = widthProbeRef.current;
-    if (!probe) return;
-    const measure = () => {
-      const width = Math.max(1, probe.clientWidth - 2);
-      if (probeWidthRef.current === width) return;
-      probeWidthRef.current = width;
-      setProbeWidth(width);
-      setRootRect(null);
-    };
-    const observer = new ResizeObserver(measure);
-    observer.observe(probe);
-    measure();
-    return () => observer.disconnect();
-  }, [state.html]);
-  useEffect(() => {
-    const receive = (event: MessageEvent) => {
-      const frame = frameRef.current;
-      if (!frame || event.source !== frame.contentWindow) return;
-      const message = event.data;
-      if (!message || typeof message !== 'object' || message.type !== visualizationLayoutMessageType) return;
-      if (message.mode === 'page') {
-        setRootRect(null);
-      } else if (message.mode === 'root') {
-        setRootRect(usableVisualizationRootRect(message.rect, frame.clientWidth, frame.clientHeight));
-      }
-    };
-    window.addEventListener('message', receive);
-    return () => window.removeEventListener('message', receive);
-  }, []);
-  const error = visualization.state === 'FAILED'
-    ? visualization.failureDetail ?? '可视化未能生成。'
-    : !digest || !size ? '可视化引用不完整。' : state.error;
-  return <div className={`assistant-visualization${expanded ? ' is-expanded' : ''}`} data-visualization-ordinal={ordinal}
-    data-visualization-layout={rootRect ? 'root' : 'page'}
-    style={expanded && rootRect ? { width: Math.ceil(rootRect.width) + 2 } : undefined}>
-    <div className="assistant-visualization__width-probe" ref={widthProbeRef} aria-hidden="true" />
-    <button type="button" className="assistant-visualization__toggle"
-      aria-expanded={expanded} aria-controls={contentId}
-      aria-label={`${expanded ? '收起' : '展开'}可视化 ${ordinal + 1}`}
-      onClick={() => { setOpened(true); setExpanded(value => !value); }}>
-      <Eye size={15} aria-hidden="true" />
-      <span>可视化 {ordinal + 1}</span>
-      <small>{error ? '无法显示' : expanded ? '收起' : '展开'}</small>
-      <ChevronRight size={14} className="assistant-visualization__chevron" aria-hidden="true" />
-    </button>
-    <div id={contentId}>
-      <AnimatedDisclosure open={expanded}>
-        {error ? <div className="assistant-visualization__status" role="status">{error}</div>
-          : state.html === undefined ? <div className="assistant-visualization__status" role="status">正在加载可视化…</div>
-            : <div className="assistant-visualization__viewport" style={rootRect ? { height: Math.ceil(rootRect.height) } : undefined}>
-              <SandboxedHtmlPreview frameRef={frameRef} title={`可视化 ${ordinal + 1}`}
-                source={{ html: state.html, measure: true, allowTextSelection: false }}
-                style={{
-                  width: probeWidth === null ? '100%' : probeWidth,
-                  transform: rootRect ? `translate(${-rootRect.x}px, ${-rootRect.y}px)` : undefined,
-                }} />
-            </div>}
-      </AnimatedDisclosure>
-    </div>
-  </div>;
-}
-
 function UserMessage({
   message,
   label = '你',
@@ -1183,6 +1090,7 @@ function AssistantMessage({
   onReadToolArtifact,
   onReadPromptImage,
   onReadVisualization,
+  onReadVisualizationThumbnail,
   assistantLabel,
 }: {
   message: Message;
@@ -1201,6 +1109,7 @@ function AssistantMessage({
   onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
   onReadVisualization: NonNullable<WorkbenchViewProps['onReadVisualization']>;
+  onReadVisualizationThumbnail?: ReadVisualizationThumbnail;
   assistantLabel?: string;
 }) {
   const [forking, setForking] = useState(false);
@@ -1273,14 +1182,11 @@ function AssistantMessage({
       {message.subagentRuns?.length ? (
         <SubagentGroup runs={message.subagentRuns} focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision} focusTaskHighlighted={focusTaskHighlighted} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />
       ) : null}
-      {message.visualizations?.map((visualization) => (
-        <VisualizationPanel
-          key={`${artifactOwnerKey}:${message.id}:${visualization.ordinal}`}
-          entryId={message.id}
-          visualization={visualization}
-          onRead={onReadVisualization}
-        />
-      ))}
+      {Boolean(message.visualizations?.length) && <VisualizationGallery
+        key={`${artifactOwnerKey}:${message.id}`}
+        entryId={message.id} items={message.visualizations!}
+        onRead={onReadVisualization} onReadThumbnail={onReadVisualizationThumbnail}
+      />}
     </article>
   );
 }
@@ -1372,6 +1278,7 @@ export function ConversationMessages({
   onFork = async () => undefined,
   onReadPromptImage = unavailablePromptImage,
   onReadVisualization = unavailableVisualization,
+  onReadVisualizationThumbnail,
   userLabel = '你',
   assistantLabel = 'Pulsara',
   taskFinalAnswerId,
@@ -1389,6 +1296,7 @@ export function ConversationMessages({
   onNotify: MarkdownNotify;
   onFork?: (entryId: string) => Promise<void>;
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
+  onReadVisualizationThumbnail?: ReadVisualizationThumbnail;
   onReadVisualization?: WorkbenchViewProps['onReadVisualization'];
   userLabel?: string;
   assistantLabel?: string;
@@ -1416,6 +1324,7 @@ export function ConversationMessages({
             onNotify={onNotify} onFork={onFork} artifactOwnerKey={artifactOwnerKey}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
+            onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             assistantLabel={assistantLabel} />}
     </div>
   );
@@ -1712,6 +1621,7 @@ export function WorkbenchView({
   onReadToolArtifact,
   onReadPromptImage,
   onReadVisualization = unavailableVisualization,
+  onReadVisualizationThumbnail,
   promptDraftStore: draftStore,
   onLocateAnnotation,
   onCompletePaths,
@@ -2340,6 +2250,7 @@ export function WorkbenchView({
           <ConversationMessages messages={messages} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
             onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
+            onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             onNotify={onNotify} onFork={onFork} contextCompactionIndex={contextCompactionIndex}
             focusTaskId={focusTaskId} focusTaskRevision={focusTaskRevision}
             focusTaskHighlighted={focusTaskHighlighted} focusSourceEntry={focusSourceEntry} />
