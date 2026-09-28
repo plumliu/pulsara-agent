@@ -773,7 +773,7 @@ class EditFileTool(WorkspaceTool):
                         "No current read_file observation authorizes this edit.",
                         hint=_read_hint_for_operations(operations),
                     )
-                after_text = _stage_edit(
+                after_text, operations_applied = _stage_edit(
                     before_layout,
                     operations,
                     observation.seen_line_intervals,
@@ -786,7 +786,7 @@ class EditFileTool(WorkspaceTool):
                     raise _FileApplicationError(
                         "NO_OP",
                         "The requested operations do not change the file.",
-                        hint="Remove the no-op operation or re-read before editing again.",
+                        hint="Submit edits that change the file, or skip editing if it is already correct.",
                     )
                 staged_layout = _decode_text_bytes(after_bytes, path=path)
                 new_revision = _content_revision(after_bytes)
@@ -827,14 +827,14 @@ class EditFileTool(WorkspaceTool):
                     "path": _relpath(path, self.workspace_root),
                     "base_revision": base_revision,
                     "content_revision": new_revision,
-                    "operations_applied": len(operations),
+                    "operations_applied": operations_applied,
                     "changed_windows": changed_windows,
                     "changed_windows_truncated": windows_truncated,
                     "diff": diff,
                     "files_modified": [_relpath(path, self.workspace_root)],
                 }
             ),
-            metadata={"path": str(path), "operations_applied": len(operations)},
+            metadata={"path": str(path), "operations_applied": operations_applied},
         )
 
 
@@ -1166,13 +1166,13 @@ def _stage_edit(
     layout: _TextLayout,
     operations: tuple[_LineOperation, ...],
     seen_intervals: tuple[tuple[int, int], ...],
-) -> str:
+) -> tuple[str, int]:
     replace_file = tuple(item for item in operations if item.kind == "replace_file")
     if replace_file:
         if len(operations) != 1:
             raise _invalid_operation("replace_file must be the only operation.")
         assert replace_file[0].content is not None
-        return _stage_replace_file(layout, replace_file[0].content)
+        return _stage_replace_file(layout, replace_file[0].content), 1
     if layout.newline == "mixed":
         raise _FileApplicationError(
             "UNSUPPORTED_MIXED_LINE_ENDINGS",
@@ -1191,15 +1191,6 @@ def _stage_edit(
                 raise _line_range_error(start, end, total_lines)
             if not _interval_fully_seen(seen_intervals, start, end):
                 raise _unseen_error(start, end)
-            if (
-                operation.kind == "replace_lines"
-                and tuple(layout.lines[start - 1 : end]) == operation.lines
-            ):
-                raise _FileApplicationError(
-                    "NO_OP",
-                    f"replace_lines {start}..{end} is identical to the current lines.",
-                    hint="Remove the no-op operation or submit changed logical lines.",
-                )
             for prior_start, prior_end, _ in ranges:
                 if max(start, prior_start) <= min(end, prior_end):
                     raise _FileApplicationError(
@@ -1232,7 +1223,19 @@ def _stage_edit(
                     f"Insertion gap {gap} falls inside replaced range {start}..{end}.",
                     hint="Move the insertion outside the range or combine it with replace_lines.",
                 )
-    return _materialize_line_operations(layout, ranges, gaps)
+    # Validate the complete batch first: an unchanged replacement must not
+    # bypass observed-range or overlap checks. Only effective edits are staged
+    # and counted; execute() rejects NO_OP only if the final bytes are unchanged.
+    effective_ranges = [
+        (start, end, operation)
+        for start, end, operation in ranges
+        if operation.kind != "replace_lines"
+        or tuple(layout.lines[start - 1 : end]) != operation.lines
+    ]
+    return (
+        _materialize_line_operations(layout, effective_ranges, gaps),
+        len(effective_ranges) + len(gaps),
+    )
 
 
 def _stage_replace_file(layout: _TextLayout, content: str) -> str:

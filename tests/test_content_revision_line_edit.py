@@ -425,6 +425,83 @@ def test_operations_share_original_line_coordinate_system(tmp_path: Path) -> Non
     assert "diff" in payload
 
 
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_identical_replacement_is_skipped_in_changed_batch(
+    tmp_path: Path, newline: bytes
+) -> None:
+    target = tmp_path / "sample.txt"
+    target.write_bytes(newline.join([b"one", b"two", b"three", b""]))
+    revision, _ = _read(tmp_path, "sample.txt")
+
+    result = _edit(
+        tmp_path,
+        "sample.txt",
+        revision,
+        [
+            {"kind": "insert_after", "line": 1, "lines": ["inserted"]},
+            {"kind": "replace_lines", "start_line": 2, "end_line": 2, "lines": ["two"]},
+            {"kind": "replace_lines", "start_line": 3, "end_line": 3, "lines": ["THREE"]},
+        ],
+    )
+
+    assert result.status is ToolResultState.SUCCESS
+    assert target.read_bytes() == newline.join([b"one", b"inserted", b"two", b"THREE", b""])
+    payload = _payload(result)
+    assert payload["operations_applied"] == 2
+    assert result.metadata["operations_applied"] == 2
+    assert payload["content_revision"] == f"sha256:{sha256(target.read_bytes()).hexdigest()}"
+    assert "error" not in payload and "_hint" not in payload
+
+
+@pytest.mark.parametrize("whole_file", [False, True])
+def test_entire_unchanged_edit_does_not_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, whole_file: bool
+) -> None:
+    target = tmp_path / "sample.txt"
+    original = b"one\ntwo\n"
+    target.write_bytes(original)
+    revision, _ = _read(tmp_path, "sample.txt")
+
+    def unexpected_write(*args, **kwargs):
+        pytest.fail("An unchanged batch must not write the file")
+
+    monkeypatch.setattr(filesystem, "_atomic_replace_bytes", unexpected_write)
+    operations = (
+        [{"kind": "replace_file", "content": "one\ntwo\n"}]
+        if whole_file
+        else [
+            {"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["one"]},
+            {"kind": "replace_lines", "start_line": 2, "end_line": 2, "lines": ["two"]},
+        ]
+    )
+    result = _edit(tmp_path, "sample.txt", revision, operations)
+
+    assert result.status is ToolResultState.ERROR
+    assert _payload(result)["error"] == "NO_OP"
+    assert target.read_bytes() == original
+
+
+def test_identical_replacement_does_not_hide_later_invalid_operation(tmp_path: Path) -> None:
+    target = tmp_path / "sample.txt"
+    original = b"one\ntwo\n"
+    target.write_bytes(original)
+    revision, _ = _read(tmp_path, "sample.txt")
+    result = _edit(
+        tmp_path,
+        "sample.txt",
+        revision,
+        [
+            {"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["one"]},
+            {"kind": "insert_after", "line": 2, "lines": ["valid"]},
+            {"kind": "delete_lines", "start_line": 3, "end_line": 3},
+        ],
+    )
+
+    assert result.status is ToolResultState.ERROR
+    assert _payload(result)["error"] == "INVALID_LINE_RANGE"
+    assert target.read_bytes() == original
+
+
 def test_line_operations_cover_boundaries_blank_lines_and_unicode(
     tmp_path: Path,
 ) -> None:
