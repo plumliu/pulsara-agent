@@ -252,7 +252,6 @@ from .mcp.supervisor import (
     McpHostSupervisor,
     McpInstalledRuntimeGeneration,
     McpKnownToolResult,
-    McpPhysicalOutcomeUnknown,
     McpSnapshotStale,
 )
 from .mcp.contracts import McpDiscoveryCatalogInspection
@@ -2910,38 +2909,7 @@ class DirectKernelToolPort:
                 ),
                 name=f"mcp-meta-operation:{tool_call_id}",
             )
-            try:
-                known, caller_cancelled = await _await_mcp_operation(operation_task)
-            except McpPhysicalOutcomeUnknown as exc:
-                raise KernelToolPhysicalInvocationError(
-                    effect_class=(
-                        "read_only"
-                        if prepared_meta.executor.policy.effect_kind
-                        is McpEffectKind.READ_ONLY
-                        else "unknown_effect"
-                    ),
-                    error=exc,
-                    timing="ON_TIME",
-                    caller_cancelled=bool(getattr(exc, "caller_cancelled", False)),
-                    physical_observation=_freeze_physical_observation(
-                        invocation_started, observation_origin
-                    ),
-                ) from exc
-            except BaseException as exc:
-                raise KernelToolPhysicalInvocationError(
-                    effect_class=(
-                        "read_only"
-                        if prepared_meta.executor.policy.effect_kind
-                        is McpEffectKind.READ_ONLY
-                        else "unknown_effect"
-                    ),
-                    error=exc,
-                    timing="ON_TIME",
-                    caller_cancelled=False,
-                    physical_observation=_freeze_physical_observation(
-                        invocation_started, observation_origin
-                    ),
-                ) from exc
+            known, caller_cancelled = await _await_mcp_operation(operation_task)
             return _kernel_result_from_mcp_known(
                 known,
                 caller_cancelled=caller_cancelled,
@@ -2970,40 +2938,7 @@ class DirectKernelToolPort:
                 executor.invoke(permit, arguments),
                 name=f"mcp-tool-operation:{tool_call_id}",
             )
-            try:
-                known, caller_cancelled = await _await_mcp_operation(operation_task)
-            except McpPhysicalOutcomeUnknown as exc:
-                observation = _freeze_physical_observation(
-                    invocation_started, observation_origin
-                )
-                raise KernelToolPhysicalInvocationError(
-                    effect_class=(
-                        "read_only"
-                        if binding.execution_policy.effect_kind
-                        is McpEffectKind.READ_ONLY
-                        else "unknown_effect"
-                    ),
-                    error=exc,
-                    timing="ON_TIME",
-                    caller_cancelled=bool(getattr(exc, "caller_cancelled", False)),
-                    physical_observation=observation,
-                ) from exc
-            except BaseException as exc:
-                observation = _freeze_physical_observation(
-                    invocation_started, observation_origin
-                )
-                raise KernelToolPhysicalInvocationError(
-                    effect_class=(
-                        "read_only"
-                        if binding.execution_policy.effect_kind
-                        is McpEffectKind.READ_ONLY
-                        else "unknown_effect"
-                    ),
-                    error=exc,
-                    timing="ON_TIME",
-                    caller_cancelled=False,
-                    physical_observation=observation,
-                ) from exc
+            known, caller_cancelled = await _await_mcp_operation(operation_task)
             text = known.content.decode("utf-8")
             return KernelToolResult(
                 state=known.state,
@@ -3054,19 +2989,11 @@ class DirectKernelToolPort:
             )
             try:
                 known, caller_cancelled = await _await_mcp_operation(operation_task)
-            except BaseException as exc:
+            except BaseException:
                 if permit is not None and permit.state.value != "RELEASED":
                     with suppress(RuntimeError):
                         permit.release()
-                raise KernelToolPhysicalInvocationError(
-                    effect_class="read_only",
-                    error=exc,
-                    timing="ON_TIME",
-                    caller_cancelled=False,
-                    physical_observation=_freeze_physical_observation(
-                        invocation_started, observation_origin
-                    ),
-                ) from exc
+                raise
             text = known.content.decode("utf-8")
             return KernelToolResult(
                 state=known.state,
@@ -4137,11 +4064,7 @@ async def _await_mcp_operation(
             continue
         except BaseException:
             break
-    try:
-        return task.result(), caller_cancelled
-    except McpPhysicalOutcomeUnknown as exc:
-        exc.caller_cancelled = caller_cancelled  # type: ignore[attr-defined]
-        raise
+    return task.result(), caller_cancelled
 
 
 def _execute_tool_call(

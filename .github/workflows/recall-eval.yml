@@ -6,9 +6,16 @@ on:
       - "src/pulsara_agent/memory/**"
       - "src/pulsara_agent/conversation_kernel/memory/**"
       - "src/pulsara_agent/conversation_kernel/memory_tools.py"
+      - "src/pulsara_agent/conversation_kernel/_repository/memory*.py"
       - "src/pulsara_agent/storage/migrations/**"
       - "tests/test_memory_*"
-      - "tests/test_round8_advisory_memory.py"
+      - "tests/test_direct_*memory*.py"
+      - "tests/test_local_web_memory_management.py"
+      - "tests/support/postgres*.py"
+      - "tests/conftest.py"
+      - "docker/postgres-init/**"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/recall-eval.yml"
   push:
     branches:
@@ -17,17 +24,43 @@ on:
 jobs:
   recall-eval:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: pulsara
+          POSTGRES_USER: pulsara_admin
+          POSTGRES_PASSWORD: pulsara_admin
+          PULSARA_RUNTIME_DB_USER: pulsara_runtime
+          PULSARA_RUNTIME_DB_PASSWORD: pulsara_runtime
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pulsara_admin -d pulsara"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: Install Python
         run: uv python install 3.12
       - name: Sync dev dependencies
         run: uv sync --dev
       - name: Ruff
         run: uv run ruff check
+      - name: Initialize PostgreSQL runtime role
+        run: docker exec -i "${{ job.services.postgres.id }}" bash -s < docker/postgres-init/001-runtime-role.sh
       - name: Advisory memory contract gate
+        env:
+          PULSARA_POSTGRES_ADMIN_DSN: "postgresql://pulsara_admin:pulsara_admin@127.0.0.1:5432/pulsara?options=-csearch_path%3Dpublic"
+          PULSARA_POSTGRES_DSN: "postgresql://pulsara_runtime:pulsara_runtime@127.0.0.1:5432/pulsara?options=-csearch_path%3Dpublic"
         run: >-
           uv run pytest -q
-          tests/test_memory_governance_semantics.py
-          tests/test_round8_advisory_memory.py
+          tests/test_direct_advisory_memory.py
+          tests/test_direct_memory_preference_refresh.py
+          tests/test_direct_memory_prompt_contract.py
+          tests/test_direct_memory_related_fallback.py
+          tests/test_memory_management_contracts.py
+          tests/test_memory_tool_result_rejection.py
+          tests/test_local_web_memory_management.py

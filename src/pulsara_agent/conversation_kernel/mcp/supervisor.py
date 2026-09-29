@@ -130,10 +130,6 @@ class McpSnapshotStale(RuntimeError):
     pass
 
 
-class McpPhysicalOutcomeUnknown(RuntimeError):
-    pass
-
-
 class _McpOutputSchemaMismatch(ValueError):
     """An exact MCP result contradicts its frozen advertised output schema."""
 
@@ -538,6 +534,8 @@ class McpConnectionSlot:
 
 @dataclass(frozen=True, slots=True)
 class McpKnownToolResult:
+    """Known tool observation, including delivery failure with remote outcome unknown."""
+
     state: str
     content: bytes
     remote_identity: str
@@ -629,14 +627,14 @@ class McpBoundToolExecutor:
                                 return _known_mcp_system_failure(
                                     error_code="MCP_INPUT_REQUIRED_UNSUPPORTED",
                                     remote_identity=remote_identity,
+                                    message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                                 )
-                            # tools/call already crossed the physical effect
-                            # boundary.  Without a terminal decline/final
-                            # result an external-effect operation is unknown,
-                            # never a fabricated known SYSTEM_ERROR.
-                            raise McpPhysicalOutcomeUnknown(
-                                "MCP external effect requested unsupported input"
-                            ) from exc
+                            return _mcp_invocation_failure(
+                                error=exc,
+                                client=self.lease._slot.client,  # noqa: SLF001
+                                remote_identity=remote_identity,
+                                effect_kind=self.policy.effect_kind,
+                            )
                         result = await self.lease._slot.client.session.call_tool(  # noqa: SLF001
                             self.semantic.remote_tool_name,
                             arguments=dict(arguments),
@@ -652,15 +650,14 @@ class McpBoundToolExecutor:
                                 result
                             )
                         )
-                except McpPhysicalOutcomeUnknown:
-                    raise
-                except McpProtocolConformanceError:
+                except McpProtocolConformanceError as exc:
                     self.lease._slot.report_transport_failure(  # noqa: SLF001
                         "MCP_PROTOCOL_CONFORMANCE_FAILED", retryable=False
                     )
                     return _known_mcp_system_failure(
                         error_code="MCP_RESULT_TYPE_CONFORMANCE_FAILED",
                         remote_identity=remote_identity,
+                        message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                     )
                 except McpTransportOperationError as exc:
                     self.lease._slot.report_transport_failure(  # noqa: SLF001
@@ -671,18 +668,24 @@ class McpBoundToolExecutor:
                             error_code="MCP_TRANSPORT_UNWRITTEN",
                             remote_identity=remote_identity,
                         )
-                    raise McpPhysicalOutcomeUnknown(
-                        "MCP physical outcome cannot be proved"
-                    ) from exc
-                except asyncio.CancelledError:
+                    return _mcp_invocation_failure(
+                        error=exc,
+                        client=self.lease._slot.client,  # noqa: SLF001
+                        remote_identity=remote_identity,
+                        effect_kind=self.policy.effect_kind,
+                    )
+                except (asyncio.CancelledError, MemoryError):
                     raise
-                except BaseException as exc:
+                except Exception as exc:
                     self.lease._slot.report_transport_failure(  # noqa: SLF001
                         "MCP_TRANSPORT_FAILED", retryable=True
                     )
-                    raise McpPhysicalOutcomeUnknown(
-                        "MCP physical outcome cannot be proved"
-                    ) from exc
+                    return _mcp_invocation_failure(
+                        error=exc,
+                        client=self.lease._slot.client,  # noqa: SLF001
+                        remote_identity=remote_identity,
+                        effect_kind=self.policy.effect_kind,
+                    )
 
                 # At this boundary an exact response is already present.  Any
                 # carrier/rendering failure is therefore a known protocol
@@ -695,15 +698,19 @@ class McpBoundToolExecutor:
                         )
                     _validate_tool_output_schema(self.semantic, result)
                     body = _render_typed_result(result)
-                except _McpOutputSchemaMismatch:
+                except _McpOutputSchemaMismatch as exc:
                     return _known_mcp_system_failure(
                         error_code="MCP_OUTPUT_SCHEMA_MISMATCH",
                         remote_identity=remote_identity,
+                        message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                     )
-                except BaseException:
+                except MemoryError:
+                    raise
+                except Exception as exc:
                     return _known_mcp_system_failure(
                         error_code="MCP_RESULT_LOWERING_FAILED",
                         remote_identity=remote_identity,
+                        message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                     )
                 return McpKnownToolResult(
                     state="APPLICATION_ERROR" if result.is_error else "SUCCESS",
@@ -989,13 +996,14 @@ class McpInstalledRuntimeGeneration:
                             arguments=arguments,
                             input_owner=input_owner,
                         )
-                except McpProtocolConformanceError:
+                except McpProtocolConformanceError as exc:
                     runtime_lease._slot.report_transport_failure(  # noqa: SLF001
                         "MCP_PROTOCOL_CONFORMANCE_FAILED", retryable=False
                     )
                     return _known_mcp_system_failure(
                         error_code="MCP_RESULT_TYPE_CONFORMANCE_FAILED",
                         remote_identity=remote_identity,
+                        message=client.diagnostic_message(exc),
                     )
                 except McpTransportOperationError as exc:
                     runtime_lease._slot.report_transport_failure(  # noqa: SLF001
@@ -1006,13 +1014,27 @@ class McpInstalledRuntimeGeneration:
                             error_code="MCP_TRANSPORT_UNWRITTEN",
                             remote_identity=remote_identity,
                         )
-                    raise McpPhysicalOutcomeUnknown(
-                        "MCP physical outcome cannot be proved"
-                    ) from exc
-                except McpInputRequiredUnsupported:
+                    return _mcp_invocation_failure(
+                        error=exc,
+                        client=client,
+                        remote_identity=remote_identity,
+                        effect_kind=McpEffectKind.READ_ONLY,
+                    )
+                except MCPError as exc:
+                    runtime_lease._slot.report_transport_failure(  # noqa: SLF001
+                        "MCP_TRANSPORT_FAILED", retryable=True
+                    )
+                    return _mcp_invocation_failure(
+                        error=exc,
+                        client=client,
+                        remote_identity=remote_identity,
+                        effect_kind=McpEffectKind.READ_ONLY,
+                    )
+                except McpInputRequiredUnsupported as exc:
                     return _known_mcp_system_failure(
                         error_code="MCP_INPUT_REQUIRED_UNSUPPORTED",
                         remote_identity=remote_identity,
+                        message=client.diagnostic_message(exc),
                     )
                 except TimeoutError:
                     # Standard resource/prompt operations are frozen read-only
@@ -1022,15 +1044,18 @@ class McpInstalledRuntimeGeneration:
                         error_code="MCP_STANDARD_READ_TIMEOUT",
                         remote_identity=remote_identity,
                     )
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, MemoryError):
                     raise
-                except BaseException as exc:
+                except Exception as exc:
                     runtime_lease._slot.report_transport_failure(  # noqa: SLF001
                         "MCP_TRANSPORT_FAILED", retryable=True
                     )
-                    raise McpPhysicalOutcomeUnknown(
-                        "MCP physical outcome cannot be proved"
-                    ) from exc
+                    return _mcp_invocation_failure(
+                        error=exc,
+                        client=client,
+                        remote_identity=remote_identity,
+                        effect_kind=McpEffectKind.READ_ONLY,
+                    )
             finally:
                 input_owner.close()
             try:
@@ -1043,13 +1068,16 @@ class McpInstalledRuntimeGeneration:
                 )
                 if len(body) > MAXIMUM_MCP_REMOTE_BODY_BYTES:
                     raise RuntimeError("MCP_REMOTE_BODY_BOUND_EXCEEDED")
-            except BaseException:
+            except MemoryError:
+                raise
+            except Exception as exc:
                 # resources/read and prompts/get already returned an exact
                 # response.  A carrier/rendering bound failure is known and
                 # must not be rewritten into physical ambiguity or replayed.
                 return _known_mcp_system_failure(
                     error_code="MCP_RESULT_LOWERING_FAILED",
                     remote_identity=remote_identity,
+                    message=client.diagnostic_message(exc),
                 )
             return McpKnownToolResult(
                 state="SUCCESS",
@@ -3358,10 +3386,12 @@ def _validate_tool_output_schema(
         validator_type.check_schema(schema)
         validator = validator_type(schema)
         error = next(validator.iter_errors(result.structured_content), None)
-    except BaseException as exc:
-        raise _McpOutputSchemaMismatch("MCP output schema cannot validate") from exc
+    except MemoryError:
+        raise
+    except Exception as exc:
+        raise _McpOutputSchemaMismatch(f"MCP output schema cannot validate: {exc}") from exc
     if error is not None:
-        raise _McpOutputSchemaMismatch("MCP structured result does not match schema")
+        raise _McpOutputSchemaMismatch(f"{error.json_path}: {error.message}")
 
 
 def _mcp_remote_identity(
@@ -3382,8 +3412,43 @@ def _mcp_remote_identity(
     )
 
 
+def _mcp_invocation_failure(
+    *,
+    error: Exception,
+    client: BoundedMcpSdkClient,
+    remote_identity: str,
+    effect_kind: McpEffectKind,
+) -> McpKnownToolResult:
+    # The failed observation is known; the remote operation's outcome is not.
+    # Settle this call so the model can continue, without replaying tools/call
+    # or claiming that an external effect did not happen. See the MCP failure
+    # continuation specification.
+    guidance = (
+        "No reliable observation was received. You may continue with another "
+        "source or retry this read when the connection is available."
+        if effect_kind is McpEffectKind.READ_ONLY
+        else "The remote operation may have executed. Do not assume success or "
+        "that nothing happened. Before repeating an operation with side effects, "
+        "verify its outcome or idempotency; otherwise ask the user. You may "
+        "continue with independent work or another read-only source."
+    )
+    return McpKnownToolResult(
+        state="SYSTEM_ERROR",
+        content=canonical_json_bytes(
+            {
+                "error": "MCP_CALL_FAILED",
+                "message": client.diagnostic_message(error),
+                "remote_outcome": "UNKNOWN",
+                "retry_performed": False,
+                "guidance": guidance,
+            }
+        ),
+        remote_identity=remote_identity,
+    )
+
+
 def _known_mcp_system_failure(
-    *, error_code: str, remote_identity: str
+    *, error_code: str, remote_identity: str, message: str | None = None
 ) -> McpKnownToolResult:
     return McpKnownToolResult(
         state="SYSTEM_ERROR",
@@ -3391,6 +3456,7 @@ def _known_mcp_system_failure(
             {
                 "error": error_code,
                 "retry_performed": False,
+                **({"message": message} if message is not None else {}),
             }
         ),
         remote_identity=remote_identity,
@@ -3403,7 +3469,6 @@ __all__ = [
     "McpHostSupervisor",
     "McpInstalledRuntimeGeneration",
     "McpKnownToolResult",
-    "McpPhysicalOutcomeUnknown",
     "McpSlotLease",
     "McpSnapshotStale",
 ]

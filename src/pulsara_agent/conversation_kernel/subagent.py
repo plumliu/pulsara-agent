@@ -24,6 +24,7 @@ from time import monotonic
 from typing import Callable, Mapping
 
 from psycopg import InterfaceError, OperationalError
+from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
 
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.cancellation import (
@@ -775,7 +776,11 @@ class KernelSubagentManager:
         if tool_name == "list_agents":
             return await self._list(arguments)
         if tool_name == "list_agent_models":
-            return _result("SUCCESS", {"models": self._launch_preparation.list_models()})
+            try:
+                models = self._launch_preparation.list_models()
+            except ModelRuntimeUnavailable as exc:
+                return _result("SYSTEM_ERROR", {"error": str(exc)})
+            return _result("SUCCESS", {"models": models})
         if tool_name == "wait_agent":
             return await self._wait(arguments, invocation_context)
         if tool_name == "stop_agent":
@@ -1094,6 +1099,8 @@ class KernelSubagentManager:
                 occurred_at=occurred_at,
                 actor_id=self._host_owner_id,
             )
+        except ModelRuntimeUnavailable as exc:
+            return _result("SYSTEM_ERROR", {"error": str(exc)})
         except (TypeError, ValueError, KeyError) as exc:
             return _result("INVALID_ARGUMENTS", {"error": str(exc)})
 

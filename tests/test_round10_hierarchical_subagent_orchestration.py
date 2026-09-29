@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.llm.input import FrozenPromptContent
+from pulsara_agent.llm.runtime import ModelRuntimeUnavailable
 
 import asyncio
 from dataclasses import replace
@@ -1172,6 +1173,85 @@ def test_round10_all_root_orchestration_tools_are_bypass_only_before_owner_io(
         )
         assert stale.state == "PERMISSION_DENIED"
         assert b"subagent_authority_mismatch" in stale.content
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "tool_name", ("list_agent_models", "spawn_agent", "create_agent_tasks")
+)
+def test_model_configuration_failure_is_returned_before_creating_workers(
+    tool_name: str,
+) -> None:
+    class UnavailableModels(StaticSubagentLaunchPreparationPort):
+        def list_models(self):
+            raise ModelRuntimeUnavailable("local model settings are unavailable")
+
+        def freeze_target(self, *_args, **_kwargs):
+            raise ModelRuntimeUnavailable("local model settings are unavailable")
+
+    async def exercise():
+        binding = test_model_binding(test_model_runtime())
+        # Only the read before launch preparation is allowed. No admission or
+        # task execution method exists on this repository double.
+        repository = SimpleNamespace(
+            read_turn_model_call_binding=lambda *_args, **_kwargs: binding
+        )
+        manager = KernelSubagentManager(
+            launch_preparation=UnavailableModels(),
+            hook_workspace_root=Path.cwd,
+            repository=repository,
+            guard=HostWriterGuard("session:test", 1, "host:test"),
+            host_owner_id="host:test",
+            io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id="session:test", owner_epoch="todo:test"
+            ),
+        )
+        subject = build_parent_context_call_subject(
+            session_id="session:test",
+            caller_turn_id="turn:test",
+            provider_input_cut_fingerprint="cut:test",
+            continuity_epoch_nonce="epoch:test",
+            continuity_epoch_revision=0,
+            compiled_semantic_input_fingerprint="semantic:test",
+            compiled_message_placements_fingerprint="placements:test",
+            ordered_eligible_units=(),
+        )
+        context = SimpleNamespace(
+            session_id="session:test",
+            workspace_id="workspace:test",
+            turn_id="turn:test",
+            attempt_id="attempt:test",
+            conversation_scope_kind="ROOT",
+            scope_subagent_task_id=None,
+            host_owner_epoch=1,
+            effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+            permission_snapshot_fingerprint="permission:test",
+            attempt_permission_snapshot_fingerprint="permission:test",
+            subagent_parent_context_subject=subject,
+        )
+        task = {
+            "task": "inspect source",
+            "model": {"connection_id": binding.connection_id.value},
+        }
+        arguments = (
+            {}
+            if tool_name == "list_agent_models"
+            else task
+            if tool_name == "spawn_agent"
+            else {"tasks": [task]}
+        )
+        result = await manager.invoke(
+            tool_name=tool_name, arguments=arguments, invocation_context=context
+        )
+        assert result.state == "SYSTEM_ERROR"
+        assert (
+            json.loads(result.content)["error"]
+            == "local model settings are unavailable"
+        )
+        assert not manager.has_active_work()
 
     asyncio.run(exercise())
 

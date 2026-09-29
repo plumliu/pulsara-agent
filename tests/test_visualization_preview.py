@@ -56,7 +56,8 @@ def test_thumbnail_uses_exact_owner_chunks_and_checks_owner_after_render():
 @pytest.mark.parametrize('mutation', [dict(ordinal=-1), dict(ordinal=True), dict(size=0), dict(digest='sha256:bad'), dict(size=999), dict(entry_id='')])
 def test_invalid_reference_never_starts_browser(mutation):
     async def run():
-        bridge = Bridge(); owner = VisualizationPreviews(bridge)
+        bridge = Bridge()
+        owner = VisualizationPreviews(bridge)
         owner.screenshots.render = AsyncMock()
         with pytest.raises(ValueError):
             await owner.read('connection', target(bridge) | mutation)
@@ -67,13 +68,18 @@ def test_invalid_reference_never_starts_browser(mutation):
 
 def test_thumbnail_browser_slot_serializes_and_does_not_reject_more_work():
     async def run():
-        bridge = Bridge(); owner = VisualizationPreviews(bridge)
-        active = 0; peak = 0; completed = 0
+        bridge = Bridge()
+        owner = VisualizationPreviews(bridge)
+        active = 0
+        peak = 0
+        completed = 0
         async def screenshot(*args, **kwargs):
             nonlocal active, peak, completed
-            active += 1; peak = max(peak, active)
+            active += 1
+            peak = max(peak, active)
             await asyncio.sleep(.002)
-            active -= 1; completed += 1
+            active -= 1
+            completed += 1
             return b'PNG'
         owner.screenshots.render = screenshot
         await asyncio.gather(*(owner.read('connection', target(bridge)) for _ in range(100)))
@@ -105,7 +111,8 @@ def test_real_thumbnail_keeps_aspect_and_owner_cancellation_reaps_process():
 
 def test_disconnected_queued_thumbnail_does_not_start_a_browser():
     async def run():
-        bridge = Bridge(); owner = VisualizationPreviews(bridge)
+        bridge = Bridge()
+        owner = VisualizationPreviews(bridge)
         owner.screenshots.render = AsyncMock()
         with pytest.raises(asyncio.CancelledError):
             await owner.read('connection', target(bridge), cancelled=lambda: True)

@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from threading import Event
 from time import monotonic
 from uuid import uuid4
+from pathlib import Path
 
 import pytest
+from psycopg import OperationalError
 
 from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
@@ -23,6 +25,9 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
 from pulsara_agent.conversation_kernel.direct_model import KernelModelExecutionRequest
+from pulsara_agent.conversation_kernel.io import KernelSessionIOClosed
+from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
@@ -78,6 +83,7 @@ from tests.support.round3 import (
     ScriptedKernelModel,
     StaticContextSourceCollector,
     StructuredToolPort,
+    seal_test_direct_tool_port,
 )
 
 
@@ -282,19 +288,29 @@ class _CancelledSubagentAdmissionRepository(ConversationKernelRepository):
 
 
 class _PhysicalFailureTool(_KnownReadOnlyTool):
-    def __init__(self, effect_class: str) -> None:
+    def __init__(
+        self,
+        effect_class: str,
+        *,
+        error: BaseException | None = None,
+        raw: bool = False,
+        caller_cancelled: bool = False,
+    ) -> None:
         super().__init__()
         self.effect_class = effect_class
+        self.error = error or OSError("injected physical failure")
+        self.raw = raw
+        self.caller_cancelled = caller_cancelled
 
     async def invoke(self, **_kwargs: object) -> KernelToolResult:
         self.invocations += 1
-        if self.effect_class == "admission":
-            raise OSError("injected private admission failure")
+        if self.effect_class == "admission" or self.raw:
+            raise self.error
         raise KernelToolPhysicalInvocationError(
             effect_class=self.effect_class,
-            error=OSError("injected physical failure"),
+            error=self.error,
             timing="LATE_AFTER_WATCHDOG",
-            caller_cancelled=False,
+            caller_cancelled=self.caller_cancelled,
         )
 
 
@@ -1211,8 +1227,8 @@ def test_round5_observation_physical_exception_becomes_one_known_failure_result(
     ]
     assert len(bodies) == 1
     assert "reliable result" in bodies[0]
-    assert "OSError" not in bodies[0]
-    assert "injected" not in bodies[0]
+    assert json.loads(bodies[0])["error"] == "OSError"
+    assert json.loads(bodies[0])["message"] == "injected physical failure"
     assert "not started" not in bodies[0]
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -1233,28 +1249,52 @@ def test_round5_observation_physical_exception_becomes_one_known_failure_result(
         ("TERMINAL_EFFECT", "terminal_process", '{"action":"write"}'),
     ),
 )
-def test_round5_effectful_physical_exception_keeps_attempt_without_result(
+@pytest.mark.parametrize("caller_cancelled", (False, True))
+def test_effectful_tool_failure_preserves_unknown_result_and_continues(
     stage2_migrated_postgres_database,
     effect_class: str,
     tool_name: str,
     arguments: str,
+    caller_cancelled: bool,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id, _workspace_id, lease = _lease(repository)
-    tool = _PhysicalFailureTool(effect_class)
+    tool = _PhysicalFailureTool(effect_class, caller_cancelled=caller_cancelled)
+    model = ScriptedKernelModel(
+        [
+            _tool_stream(1, tool_name=tool_name, arguments=arguments),
+            _text_stream("inspect before retrying", block_id="answer"),
+        ]
+    )
     runner = _runner(
         repository,
         lease,
-        ScriptedKernelModel(
-            [_tool_stream(1, tool_name=tool_name, arguments=arguments)]
-        ),
+        model,
         tool,
         tool_names=(tool_name,),
     )
 
-    with pytest.raises(KernelToolPhysicalInvocationError):
-        asyncio.run(runner.run_turn(frozen_test_prompt("start")))
+    if caller_cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(runner.run_turn(frozen_test_prompt("start")))
+        assert len(model.requests) == 1
+    else:
+        result = asyncio.run(runner.run_turn(frozen_test_prompt("start")))
+        assert result.final_text == "inspect before retrying"
+        bodies = [
+            json.loads(part.text)["pulsara_tool_result"]["body"]
+            for message in model.requests[-1].compiled_input.messages
+            if message.role is MessageRole.TOOL_RESULT
+            for part in message.content
+            if isinstance(part, LLMTextPart)
+        ]
+        assert len(bodies) == 1
+        body = json.loads(bodies[0])
+        assert body["message"] == "injected physical failure"
+        assert body["physical_outcome"] == "UNKNOWN"
+        assert body["retry_performed"] is False
+        assert "Check the actual state" in body["guidance"]
 
     assert tool.invocations == 1
     with provider.connection(
@@ -1275,8 +1315,178 @@ def test_round5_effectful_physical_exception_keeps_attempt_without_result(
             (session_id,),
         ).fetchone()[0]
     assert attempt_count == 1
-    assert result_count == 0
-    assert turn_status == "INTERRUPTED"
+    assert result_count == 1
+    assert turn_status == ("INTERRUPTED" if caller_cancelled else "COMPLETED")
+
+
+@pytest.mark.parametrize(
+    "tool_name,arguments",
+    (
+        ("write_file", "{}"),
+        ("terminal_process", '{"action":"write"}'),
+    ),
+)
+def test_write_tool_io_error_is_model_visible(
+    stage2_migrated_postgres_database,
+    tool_name: str,
+    arguments: str,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    _, _, lease = _lease(repository)
+    tool = _PhysicalFailureTool("bounded_write", raw=True)
+    model = ScriptedKernelModel(
+        [
+            _tool_stream(1, tool_name=tool_name, arguments=arguments),
+            _text_stream("can continue", block_id="answer"),
+        ]
+    )
+    result = asyncio.run(
+        _runner(repository, lease, model, tool, tool_names=(tool_name,)).run_turn(
+            frozen_test_prompt("start")
+        )
+    )
+    assert result.final_text == "can continue"
+    assert tool.invocations == 1
+    bodies = [
+        json.loads(part.text)["pulsara_tool_result"]["body"]
+        for message in model.requests[-1].compiled_input.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for part in message.content
+        if isinstance(part, LLMTextPart)
+    ]
+    assert len(bodies) == 1
+    assert json.loads(bodies[0])["message"] == "injected physical failure"
+    assert json.loads(bodies[0])["physical_outcome"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("raw", (False, True))
+@pytest.mark.parametrize(
+    "error_type",
+    (
+        StaleHostWriter,
+        ConversationKernelConflict,
+        KernelSessionIOClosed,
+        OperationalError,
+        MemoryError,
+        asyncio.CancelledError,
+    ),
+)
+def test_tool_failure_never_swallows_kernel_or_stop_boundaries(
+    stage2_migrated_postgres_database,
+    raw: bool,
+    error_type: type[BaseException],
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, _, lease = _lease(repository)
+    model = ScriptedKernelModel([_tool_stream(1, tool_name="read_file")])
+    tool = _PhysicalFailureTool(
+        "read_only", error=error_type("boundary failure"), raw=raw
+    )
+    with pytest.raises(error_type):
+        asyncio.run(
+            _runner(repository, lease, model, tool, tool_names=("read_file",)).run_turn(
+                frozen_test_prompt("start")
+            )
+        )
+    assert len(model.requests) == 1
+    assert tool.invocations == 1
+    rows = repository.rehydrate_session(
+        session_id=session_id, deadline_monotonic=monotonic() + 30
+    )
+    assert not any(row["entry_kind"] == "TOOL_RESULT" for row in rows)
+
+
+@pytest.mark.parametrize("after_write", (False, True))
+def test_real_file_write_failure_can_be_inspected_without_replaying_write(
+    stage2_migrated_postgres_database,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    after_write: bool,
+) -> None:
+    from pulsara_agent.tools.builtins import filesystem
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, _, lease = _lease(repository)
+    actual_create = filesystem._atomic_create_bytes
+    calls = 0
+
+    def failing_create(path, content):
+        nonlocal calls
+        calls += 1
+        if after_write:
+            actual_create(path, content)
+            raise RuntimeError("post-write inspection failed")
+        raise PermissionError("target filesystem denied creation")
+
+    monkeypatch.setattr(filesystem, "_atomic_create_bytes", failing_create)
+    model = ScriptedKernelModel(
+        [
+            _tool_stream(
+                1,
+                tool_name="write_file",
+                arguments='{"path":"result.txt","content":"written before failure"}',
+            ),
+            _tool_stream(2, tool_name="read_file", arguments='{"path":"result.txt"}'),
+            _text_stream("actual file state checked", block_id="answer"),
+        ]
+    )
+
+    async def exercise():
+        port = DirectKernelToolPort(
+            workspace_root=tmp_path,
+            host_owner_id="host:file-failure",
+            session_id=session_id,
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        )
+        seal_test_direct_tool_port(port)
+        runner = ConversationKernelRunner(
+            model_resolution_snapshot_provider=test_model_resolution_snapshot,
+            repository=repository,
+            writer_lease=lease,
+            model=model,
+            tools=port,
+            live_bus=LiveAgentEventBus(),
+            context_source_collector=StaticContextSourceCollector(),
+        )
+        try:
+            result = await runner.run_turn(
+                frozen_test_prompt("create result.txt and inspect any failure")
+            )
+            assert result.final_text == "actual file state checked"
+        finally:
+            await port.aclose()
+
+    asyncio.run(exercise())
+    assert calls == 1
+    assert (tmp_path / "result.txt").exists() is after_write
+    bodies = [
+        json.loads(part.text)["pulsara_tool_result"]["body"]
+        for message in model.requests[-1].compiled_input.messages
+        if message.role is MessageRole.TOOL_RESULT
+        for part in message.content
+        if isinstance(part, LLMTextPart)
+    ]
+    assert len(bodies) == 2
+    failure = json.loads(bodies[0])
+    assert failure["physical_outcome"] == "UNKNOWN"
+    assert failure["message"] == (
+        "post-write inspection failed"
+        if after_write
+        else "target filesystem denied creation"
+    )
+    if after_write:
+        assert "written before failure" in bodies[1]
+    for before, after in zip(model.requests, model.requests[1:]):
+        assert after.compiled_input.tools == before.compiled_input.tools
+        assert after.compiled_input.system_prompt == before.compiled_input.system_prompt
+        assert (
+            after.compiled_input.messages[: len(before.compiled_input.messages)]
+            == before.compiled_input.messages
+        )
 
 
 def test_round5_stale_writer_never_accepts_or_hands_off_late_tool_result(

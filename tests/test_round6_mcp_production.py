@@ -57,6 +57,7 @@ from pulsara_agent.conversation_kernel.mcp.contracts import (
 from pulsara_agent.conversation_kernel.mcp.naming import mangle_mcp_tool_names
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
     BoundedMcpSdkClient,
+    MCPError,
     McpAdvertisedCapabilities,
     McpProtocolConformanceError,
     McpTransportOperationError,
@@ -68,7 +69,6 @@ from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import _BoundedTransport
 from pulsara_agent.conversation_kernel.mcp.supervisor import (
     McpHostSupervisor as _McpHostSupervisor,
-    McpPhysicalOutcomeUnknown,
     McpPhysicalConcurrencyKind,
     McpServerState,
     McpSnapshotStale,
@@ -1160,7 +1160,9 @@ class _FakeMcpClient:
         notification_callback,
         credential_boundary: ProcessCredentialBoundary,
     ) -> None:
-        del workspace_root, credential_boundary
+        del workspace_root
+        self._credential_boundary = credential_boundary
+        self._transport = None
         self.config = config
         self.notification_callback = notification_callback
         self.session = _FakeMcpSession()
@@ -1177,6 +1179,8 @@ class _FakeMcpClient:
 
     async def open(self) -> None:
         return None
+
+    diagnostic_message = BoundedMcpSdkClient.diagnostic_message
 
     def require_closed_result_type(self, result=None) -> str:
         return str(getattr(result, "result_type", "complete"))
@@ -2172,6 +2176,8 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
     assert output_mismatch.state == "SYSTEM_ERROR"
     assert b"MCP_OUTPUT_SCHEMA_MISMATCH" in output_mismatch.content
     assert b"private mismatch" not in output_mismatch.content
+    assert "$.count" in json.loads(output_mismatch.content)["message"]
+    assert "not-an-integer" in json.loads(output_mismatch.content)["message"]
 
     monkeypatch.setattr(
         "pulsara_agent.conversation_kernel.mcp.supervisor._render_typed_result",
@@ -2180,7 +2186,7 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
     lowering_failure = asyncio.run(invoke_with(_FakeMcpClient, call_id="call:lowering"))
     assert lowering_failure.state == "SYSTEM_ERROR"
     assert b"MCP_RESULT_LOWERING_FAILED" in lowering_failure.content
-    assert b"private payload" not in lowering_failure.content
+    assert json.loads(lowering_failure.content)["message"] == "ValueError: private payload"
 
     _TransportFailureFakeMcpSession.may_have_reached_server = False
     unwritten = asyncio.run(
@@ -2190,8 +2196,346 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
     assert b"MCP_TRANSPORT_UNWRITTEN" in unwritten.content
 
     _TransportFailureFakeMcpSession.may_have_reached_server = True
-    with pytest.raises(McpPhysicalOutcomeUnknown):
-        asyncio.run(invoke_with(_TransportFailureFakeMcpClient, call_id="call:unknown"))
+    unknown = asyncio.run(
+        invoke_with(_TransportFailureFakeMcpClient, call_id="call:unknown")
+    )
+    assert unknown.state == "SYSTEM_ERROR"
+    assert json.loads(unknown.content)["remote_outcome"] == "UNKNOWN"
+    assert json.loads(unknown.content)["retry_performed"] is False
+
+
+@pytest.mark.parametrize("default_effect", ("READ_ONLY", "EXTERNAL_EFFECT"))
+@pytest.mark.parametrize("failure", ("sse", "timeout", "cancel", "bug"))
+def test_mcp_call_failure_preserves_outcome_and_cancellation(
+    tmp_path: Path,
+    default_effect: str,
+    failure: str,
+) -> None:
+    async def exercise():
+        calls = 0
+
+        class Client(_FakeMcpClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.session.call_tool = self.fail
+
+            async def fail(self, *_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if failure == "sse":
+                    raise MCPError(
+                        code=types.CONNECTION_CLOSED,
+                        message="SSE stream ended and reconnection attempts were exhausted",
+                    )
+                if failure == "timeout":
+                    raise TimeoutError("MCP tool operation deadline expired")
+                if failure == "cancel":
+                    raise asyncio.CancelledError()
+                raise RuntimeError("injected implementation defect")
+
+        supervisor = McpHostSupervisor(
+            session_id="session:failure-continuation",
+            workspace_root=tmp_path,
+            configs=(_config(tmp_path, default_effect=default_effect),),
+            client_factory=Client,
+        )
+        await supervisor.start()
+        runtime = supervisor.install_pending_at_safe_point()
+        assert runtime is not None
+        try:
+            executor = next(iter(runtime.executors.values()))
+            permit = executor.admit(
+                session_id="session:failure-continuation",
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+                turn_id="turn:failure-continuation",
+                tool_call_id="call:failure-continuation",
+            )
+            permit.mark_attempt_accepted()
+            if failure == "cancel":
+                with pytest.raises(asyncio.CancelledError):
+                    await executor.invoke(permit, {"text": "observe"})
+            else:
+                result = await executor.invoke(permit, {"text": "observe"})
+                assert result.state == "SYSTEM_ERROR"
+                body = json.loads(result.content)
+                assert body["remote_outcome"] == "UNKNOWN"
+                assert body["retry_performed"] is False
+                assert ("verify its outcome or idempotency" in body["guidance"]) == (
+                    default_effect == "EXTERNAL_EFFECT"
+                )
+                expected = {
+                    "sse": "SSE stream ended",
+                    "timeout": "deadline expired",
+                    "bug": "injected implementation defect",
+                }
+                assert expected[failure] in body["message"]
+            assert calls == 1
+            assert permit.state.value == "RELEASED"
+        finally:
+            runtime.release()
+            await supervisor.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_mcp_sdk_diagnostic_keeps_details_and_scrubs_actual_credentials(
+    tmp_path: Path,
+) -> None:
+    boundary = ProcessCredentialBoundary("private-process-value")
+    client = BoundedMcpSdkClient(
+        _config(tmp_path),
+        workspace_root=tmp_path,
+        notification_callback=lambda _method: asyncio.sleep(0),
+        credential_boundary=boundary,
+    )
+    transport = _BoundedTransport(DEFAULT_MCP_WIRE_BOUNDS)
+    transport._secret_values = ("private-mcp-value",)
+    client._transport = transport
+    error = MCPError(
+        code=types.CONNECTION_CLOSED,
+        message="SSE stream ended: private-process-value private-mcp-value; request /page failed",
+    )
+    message = client.diagnostic_message(error)
+    assert "SSE stream ended" in message
+    assert "request /page failed" in message
+    assert "private-process-value" not in message
+    assert "private-mcp-value" not in message
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("dynamic", (False, True))
+@pytest.mark.parametrize("default_effect", ("READ_ONLY", "EXTERNAL_EFFECT"))
+@pytest.mark.parametrize("stop_during_call", (False, True))
+def test_mcp_sse_failure_continues_batch_and_agent_loop(
+    stage2_migrated_postgres_database,
+    tmp_path: Path,
+    dynamic: bool,
+    default_effect: str,
+    stop_during_call: bool,
+) -> None:
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id = f"session:mcp-continuation:{uuid4().hex}"
+    lease = acquire_bound_test_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=f"ctx:workspace/{uuid4().hex}",
+        writer_owner_id=f"host:{uuid4().hex}",
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    (tmp_path / "independent.txt").write_text(
+        "independent work continues", encoding="utf-8"
+    )
+
+    async def exercise():
+        physical_calls = 0
+        started, release = asyncio.Event(), asyncio.Event()
+        if not stop_during_call:
+            release.set()
+
+        class Client(_MixedSchemaFakeMcpClient if dynamic else _FakeMcpClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.session.call_tool = self.fail
+
+            async def fail(self, *_args, **_kwargs):
+                nonlocal physical_calls
+                physical_calls += 1
+                started.set()
+                await release.wait()
+                raise MCPError(
+                    code=types.CONNECTION_CLOSED,
+                    message="SSE stream ended and reconnection attempts were exhausted",
+                )
+
+        supervisor = McpHostSupervisor(
+            session_id=session_id,
+            workspace_root=tmp_path,
+            configs=(_config(tmp_path, default_effect=default_effect),),
+            client_factory=Client,
+        )
+        port = DirectKernelToolPort(
+            workspace_root=tmp_path,
+            host_owner_id="host:mcp-continuation",
+            session_id=session_id,
+            live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        )
+        port.bind_mcp_supervisor(supervisor)
+        _seal_mcp_test_port(port)
+        await supervisor.start()
+
+        async def stream(request):
+            if dynamic and request.model_call_index == 1:
+                events = _generic_tool_stream(
+                    block_id="call:inspect",
+                    tool_name="inspect_new_mcp_tool",
+                    arguments={
+                        "server_id": "fixture",
+                        "tool_name": "intersecting_unions",
+                    },
+                )
+            elif request.model_call_index == (2 if dynamic else 1):
+                name, arguments = "mcp__fixture__fake_echo", {"text": "observe"}
+                if dynamic:
+                    previous = next(
+                        item
+                        for item in reversed(request.compiled_input.messages)
+                        if item.role is MessageRole.TOOL_RESULT
+                    )
+                    inspected = json.loads(
+                        json.loads(join_text_content(previous.content))[
+                            "pulsara_tool_result"
+                        ]["body"]
+                    )
+                    name, arguments = (
+                        "use_new_mcp_tool",
+                        {
+                            "tool_ref": inspected["tool_ref"],
+                            "arguments": {"value": "observe"},
+                        },
+                    )
+                events = [
+                    *_generic_tool_stream(
+                        block_id="call:broken-mcp", tool_name=name, arguments=arguments
+                    ),
+                    *_generic_tool_stream(
+                        block_id="call:independent",
+                        tool_name="read_file",
+                        arguments={"path": "independent.txt"},
+                    ),
+                ]
+            else:
+                events = _text_stream("connection failed; independent work completed")
+            for event in events:
+                yield event
+
+        model = CallbackScriptedKernelModel(stream)
+        runner = ConversationKernelRunner(
+            model_resolution_snapshot_provider=test_model_resolution_snapshot,
+            repository=repository,
+            writer_lease=lease,
+            model=model,
+            tools=port,
+            live_bus=LiveAgentEventBus(),
+            context_source_collector=StaticContextSourceCollector(),
+        )
+        try:
+            task = asyncio.create_task(
+                runner.run_turn(
+                    frozen_test_prompt(
+                        "inspect the remote source and read independent.txt"
+                    )
+                )
+            )
+            if stop_during_call:
+                await asyncio.wait_for(started.wait(), timeout=5)
+                task.cancel()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert physical_calls == 1
+                assert len(model.requests) == (2 if dynamic else 1)
+                return
+            result = await task
+            assert result.final_text == "connection failed; independent work completed"
+            assert result.tool_call_count == (3 if dynamic else 2)
+            assert physical_calls == 1
+            before, after = (
+                model.requests[-2].compiled_input,
+                model.requests[-1].compiled_input,
+            )
+            assert after.system_prompt == before.system_prompt
+            assert after.tools == before.tools
+            assert after.messages[: len(before.messages)] == before.messages
+            bodies = [
+                json.loads(join_text_content(item.content))["pulsara_tool_result"][
+                    "body"
+                ]
+                for item in after.messages
+                if item.role is MessageRole.TOOL_RESULT
+            ]
+            failed = json.loads(bodies[-2])
+            assert failed["error"] == "MCP_CALL_FAILED"
+            assert "SSE stream ended" in failed["message"]
+            assert failed["remote_outcome"] == "UNKNOWN"
+            assert failed["retry_performed"] is False
+            assert "independent work continues" in bodies[-1]
+        finally:
+            supervisor.stop_admission()
+            close = asyncio.create_task(supervisor.aclose())
+            await port.aclose(timeout_seconds=5)
+            await close
+
+    asyncio.run(exercise())
+    rows = repository.rehydrate_session(
+        session_id=session_id, deadline_monotonic=monotonic() + 30
+    )
+    results = [row for row in rows if row["entry_kind"] == "TOOL_RESULT"]
+    assert len(results) == (1 if stop_during_call else 2) + int(dynamic)
+
+
+@pytest.mark.parametrize("failure", ("sse", "transport"))
+def test_mcp_standard_read_keeps_connection_failure_detail(
+    tmp_path: Path, failure: str
+) -> None:
+    async def exercise():
+        class Client(_SlowStandardReadFakeMcpClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.session.read_resource = self.fail
+
+            async def fail(self, *_args, **_kwargs):
+                if failure == "transport":
+                    raise McpTransportOperationError(may_have_reached_server=True)
+                raise MCPError(
+                    code=types.CONNECTION_CLOSED,
+                    message="SSE stream ended and reconnection attempts were exhausted",
+                )
+
+        supervisor = McpHostSupervisor(
+            session_id="session:read-failure",
+            workspace_root=tmp_path,
+            configs=(_config(tmp_path),),
+            client_factory=Client,
+        )
+        await supervisor.start()
+        runtime = supervisor.install_pending_at_safe_point()
+        assert runtime is not None
+        arguments = {"server_id": "fixture", "uri": "fixture://slow/resource"}
+        try:
+            permit = runtime.admit_standard_operation(
+                tool_name="read_mcp_resource",
+                arguments=arguments,
+                descriptor_fingerprint="resource-descriptor",
+                session_id="session:read-failure",
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+                turn_id="turn:read-failure",
+                tool_call_id="call:read-failure",
+            )
+            result = await runtime.invoke_standard(
+                tool_name="read_mcp_resource",
+                arguments=arguments,
+                permit=permit,
+                scope_kind=ModelInputScopeKind.ROOT,
+            )
+            assert result.state == "SYSTEM_ERROR"
+            body = json.loads(result.content)
+            assert (
+                "SSE stream ended"
+                if failure == "sse"
+                else "MCP_TRANSPORT_OUTCOME_UNKNOWN"
+            ) in body["message"]
+            assert body["remote_outcome"] == "UNKNOWN"
+            assert body["retry_performed"] is False
+        finally:
+            runtime.release()
+            await supervisor.aclose()
+
+    asyncio.run(exercise())
 
 
 def test_round6_unsupported_input_required_preserves_external_effect_unknown(
@@ -2225,8 +2569,12 @@ def test_round6_unsupported_input_required_preserves_external_effect_unknown(
     read_only = asyncio.run(invoke("READ_ONLY"))
     assert read_only.state == "SYSTEM_ERROR"
     assert b"MCP_INPUT_REQUIRED_UNSUPPORTED" in read_only.content
-    with pytest.raises(McpPhysicalOutcomeUnknown):
-        asyncio.run(invoke("EXTERNAL_EFFECT"))
+    external = asyncio.run(invoke("EXTERNAL_EFFECT"))
+    assert external.state == "SYSTEM_ERROR"
+    body = json.loads(external.content)
+    assert body["remote_outcome"] == "UNKNOWN"
+    assert "MCP_INPUT_REQUIRED_ELICITATION_UNSUPPORTED" in body["message"]
+    assert body["retry_performed"] is False
 
 
 def test_round6_direct_surface_over_64_tools_fails_without_truncation(

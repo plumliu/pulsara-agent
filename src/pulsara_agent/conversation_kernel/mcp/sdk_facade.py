@@ -861,6 +861,14 @@ class BoundedMcpSdkClient:
             raise RuntimeError("MCP SDK client is not open")
         return self._session
 
+    def diagnostic_message(self, error: Exception) -> str:
+        """Keep useful SDK errors while applying the existing credential boundary."""
+
+        message = f"{type(error).__name__}: {error}"
+        if self._transport is not None:
+            message = self._transport._scrub(message)
+        return self._credential_boundary.capture_scrub_set().scrub_text(message)
+
     @property
     def last_result_presence(self) -> McpWireResultPresence:
         if self._transport is None:

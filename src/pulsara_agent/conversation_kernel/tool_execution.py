@@ -18,7 +18,7 @@ from typing import Callable, Mapping
 
 from uuid import uuid4
 
-from psycopg import InterfaceError, OperationalError
+from psycopg import Error as PostgresError, InterfaceError, OperationalError
 
 
 from pulsara_agent.conversation_kernel.assembler import (
@@ -71,7 +71,7 @@ from pulsara_agent.conversation_kernel.live import (
     LiveSettlementKind,
 )
 
-from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.io import KernelSessionIO, KernelSessionIOClosed
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -173,6 +173,8 @@ from pulsara_agent.primitives.context import (
 
 from pulsara_agent.conversation_kernel.tool_surface import (
     BuiltinExecutionPolicyRef,
+    McpEffectKind,
+    McpToolExecutionPolicyFact,
     PreparedToolExecutionBinding,
     ProcessLocalToolSurfaceBorrow,
     tool_observation_origin_for_binding,
@@ -1509,10 +1511,17 @@ class ToolBatchExecutor:
                                 },
                             )
                         )
-                        if exc.effect_class not in {
-                            "read_only",
-                            "TERMINAL_OBSERVATION",
-                        }:
+                        error = exc.physical_error
+                        if not isinstance(error, Exception) or isinstance(
+                            error,
+                            (
+                                StaleHostWriter,
+                                ConversationKernelConflict,
+                                KernelSessionIOClosed,
+                                PostgresError,
+                                MemoryError,
+                            ),
+                        ):
                             if live_sink is not None:
                                 await asyncio.shield(live_sink.close())
                             assert live_attribution is not None
@@ -1524,34 +1533,36 @@ class ToolBatchExecutor:
                                 reason_code="TOOL_EFFECT_OUTCOME_UNKNOWN",
                                 **live_attribution,
                             )
-                            raise
-                        result = KernelToolResult(
-                            state="SYSTEM_ERROR",
-                            content=(
-                                "The tool could not provide a reliable result. "
-                                "Do not treat this as successful observation or "
-                                "as evidence that the resource is absent."
-                            ).encode("utf-8"),
+                            raise error
+                        result = replace(
+                            _tool_invocation_failure(error, exc.effect_class),
                             physical_timing=exc.timing,
                             caller_cancelled_while_running=exc.caller_cancelled,
                             physical_observation=exc.physical_observation,
                         )
-                    except Exception:
-                        severity = builtin_tool_catalog_entry(
-                            call.tool_name
-                        ).recovery_contract.severity
-                        if severity != "read_only":
+                    except Exception as error:
+                        if isinstance(error, (RuntimeError, PostgresError, MemoryError)):
                             if live_sink is not None:
                                 await asyncio.shield(live_sink.close())
                             raise
-                        result = KernelToolResult(
-                            state="SYSTEM_ERROR",
-                            content=(
-                                "The tool request did not produce a reliable result. "
-                                "Do not assume success or repeat the same request "
-                                "without new information."
-                            ).encode("utf-8"),
-                        )
+                        if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
+                            severity = (
+                                "read_only"
+                                if binding.execution_policy.effect_kind is McpEffectKind.READ_ONLY
+                                else "unknown_effect"
+                            )
+                        else:
+                            severity = _tool_effect_class(
+                                call.tool_name, invocation_arguments
+                            )
+                        if (
+                            severity not in {"read_only", "TERMINAL_OBSERVATION"}
+                            and not isinstance(error, OSError)
+                        ):
+                            if live_sink is not None:
+                                await asyncio.shield(live_sink.close())
+                            raise
+                        result = _tool_invocation_failure(error, severity)
 
                 # Once a physical call has returned an exact outcome, this
                 # process-local task owns every remaining settlement step.
@@ -2560,6 +2571,36 @@ def _id(prefix: str) -> str:
 
 def _stable_id(prefix: str, *parts: str) -> str:
     return f"{prefix}:{sha256(chr(0).join(parts).encode()).hexdigest()}"
+
+
+def _tool_invocation_failure(error: Exception, effect_class: str) -> KernelToolResult:
+    """Observe an execution failure without claiming effects were rolled back."""
+
+    read_only = effect_class in {"read_only", "TERMINAL_OBSERVATION"}
+    return KernelToolResult(
+        state="SYSTEM_ERROR",
+        content=json.dumps(
+            {
+                "error": type(error).__name__,
+                "message": str(error),
+                "physical_outcome": (
+                    "NO_RELIABLE_OBSERVATION" if read_only else "UNKNOWN"
+                ),
+                "retry_performed": False,
+                "guidance": (
+                    "The tool could not provide a reliable result. This does not "
+                    "prove the resource is absent. Use the error to choose the next step."
+                    if read_only else
+                    "The operation may have partially or fully executed. Do not assume "
+                    "success, no changes, or rollback. Check the actual state or "
+                    "idempotency before repeating it; otherwise ask the user. "
+                    "You may continue with independent work."
+                ),
+            },
+            ensure_ascii=False,
+        ).encode("utf-8"),
+        effect_class=effect_class,
+    )
 
 
 def _tool_effect_class(

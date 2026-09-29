@@ -9,6 +9,8 @@ import pytest
 
 from pulsara_agent.conversation_kernel.compaction.prompt import build_compaction_snapshot_carrier, freeze_compaction_summary_output
 from pulsara_agent.conversation_kernel.compaction.contracts import CONTEXT_SNAPSHOT_CODEC, CONTEXT_SNAPSHOT_MEDIA_TYPE
+from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
+from pulsara_agent.conversation_kernel.subagents.history import read_terminal_worker_public_history
 from pulsara_agent.model_input.contracts import CompactionContinuationMode
 
 _SNAPSHOT = build_compaction_snapshot_carrier(
@@ -16,10 +18,6 @@ _SNAPSHOT = build_compaction_snapshot_carrier(
     recent_human_requests=(), continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
     active_request=None,
 ).body
-
-
-from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
-from pulsara_agent.conversation_kernel.subagents.history import read_terminal_worker_public_history
 
 
 def _content(body: bytes) -> dict[str, object]:
