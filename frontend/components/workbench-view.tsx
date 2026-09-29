@@ -1018,25 +1018,22 @@ function UserMessage({
   }
 
   if (message.userKind === 'steer') {
-    return (
+    const renderSteer = (body: ReactNode) => (
       <article className="user-steer" aria-label="引导">
         <span className="user-steer__icon"><CornerDownRight size={13} /></span>
         <div className="user-steer__content">
           <header><strong>引导</strong><time>{message.time}</time></header>
-          {content
-            ? <PromptContentView
-                content={content}
-                variant="message"
-                onReadImage={onReadPromptImage}
-              />
-            : <p style={sourceTextStyle}>{message.body}</p>}
+          {body}
         </div>
       </article>
     );
+    return content ? <div className="user-steer-turn"><PromptContentView content={content} variant="message"
+      onReadImage={onReadPromptImage} renderMessageBody={renderSteer} /></div>
+      : renderSteer(<p style={sourceTextStyle}>{message.body}</p>);
   }
 
   const renderBubble = (body: ReactNode) => (
-    <div className="user-message">
+    <div className={body ? 'user-message' : 'user-message-meta'}>
       {body}
       <div className="message-foot">{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
     </div>

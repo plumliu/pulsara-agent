@@ -4533,6 +4533,7 @@ function toolDisplayName(name: string): string {
   if (normalized.includes('send_agent_message')) return '发送子任务消息';
   if (normalized.includes('stop_agent')) return '停止子任务';
   if (normalized === 'list_agent_models') return '查看可用模型';
+  if (normalized === 'visualization_render') return '渲染可视化';
   if (normalized.includes('list_agents')) return '查看子任务';
   if (normalized === 'todo') return '更新 TODO';
   if (normalized.includes('ask_plan_question')) return '提出规划问题';
@@ -4574,6 +4575,7 @@ function toolArgumentSummary(name: string, content: string): string {
     if (normalized.includes('send_agent_message')) return '向子任务发送补充信息';
     if (normalized.includes('stop_agent')) return '停止指定子任务';
     if (normalized === 'list_agent_models') return '正在读取已保存的模型配置';
+    if (normalized === 'visualization_render') return value.review === true ? '正在生成可视化预览' : '正在准备可视化';
     if (normalized.includes('list_agents')) return '读取当前子任务状态';
     if (normalized === 'todo') return '更新当前工作清单';
     if (name.toLowerCase().includes('ask_plan_question')) return String(value.question ?? '等待你的选择');

@@ -1,6 +1,7 @@
 'use client';
 
 import { AnnotationCard } from './response-annotations';
+import { SentAnnotationChip } from './sent-annotation-chip';
 import { splitFileReferences } from '../lib/file-reference';
 import { FileReferenceChip } from './file-reference-chip';
 import { PromptImageChip } from './prompt-image-chip';
@@ -21,6 +22,7 @@ import type {
   CanonicalPromptImagePart,
   DisplayPromptContent,
   LocalPromptImagePart,
+  PromptAnnotationPart,
 } from '../lib/prompt-content';
 import { promptImageCount } from '../lib/prompt-content';
 
@@ -49,6 +51,7 @@ export function PromptContentView({
     () => content.parts.filter((part): part is ImagePart => part.type === 'image'),
     [content],
   );
+  const annotations = content.parts.filter((part): part is PromptAnnotationPart => part.type === 'annotation');
   const [expanded, setExpanded] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState<number>();
   const [states, setStates] = useState<Record<number, LoadState>>({});
@@ -110,7 +113,7 @@ export function PromptContentView({
     void load(index);
   }, [load]);
 
-  const body = (
+  const body = variant === 'message' && content.parts.every(part => part.type === 'annotation' || (part.type === 'text' && !part.text)) ? null : (
     <div className="prompt-content-body" onCopy={event => {
       const selection = window.getSelection();
       if (!selection?.rangeCount || !event.currentTarget.contains(selection.anchorNode)
@@ -125,7 +128,7 @@ export function PromptContentView({
       {renderPromptBody(content, index => <PromptImageChip number={index + 1}
         state={states[index]?.kind} reason={states[index]?.kind === 'failed' ? states[index].reason : undefined}
         previewSrc={states[index]?.kind === 'ready' ? states[index].url : undefined} onPreview={() => void load(index)}
-        onClick={event => open(index, event.currentTarget)} />)}
+        onClick={event => open(index, event.currentTarget)} />, variant !== 'message')}
     </div>
   );
 
@@ -134,6 +137,9 @@ export function PromptContentView({
       {variant === 'message' && images.length > 0 && (
         <PromptThumbnailStrip images={images} states={states} load={load} open={open} />
       )}
+      {variant === 'message' && annotations.length > 0 && <div className="sent-annotation-strip" aria-label="消息批注">
+        {annotations.map((annotation, index) => <SentAnnotationChip key={index} value={annotation} number={index + 1} />)}
+      </div>}
       {variant === 'tool' ? (
         <div className="tool-image-content">
           {images.map((_, index) => (
@@ -302,10 +308,11 @@ function LazyImage({
 function renderPromptBody(
   content: DisplayPromptContent,
   renderImage: (index: number) => ReactNode,
+  showAnnotations: boolean,
 ) {
   let imageIndex = 0;
   return content.parts.map((part, partIndex) => {
-    if (part.type === 'annotation') return <AnnotationCard key={partIndex} value={part} />;
+    if (part.type === 'annotation') return showAnnotations ? <AnnotationCard key={partIndex} value={part} /> : null;
     if (part.type === 'text') {
       return <span key={partIndex} className="prompt-content-text">{splitFileReferences(part.text).map((piece, index) =>
         typeof piece === 'string' ? splitSkillReferences(piece).map((reference, skillIndex) =>

@@ -53,8 +53,8 @@ jobs:
         run: docker exec -i "${{ job.services.postgres.id }}" bash -s < docker/postgres-init/001-runtime-role.sh
       - name: Advisory memory contract gate
         env:
-          PULSARA_POSTGRES_ADMIN_DSN: "postgresql://pulsara_admin:pulsara_admin@127.0.0.1:5432/pulsara?options=-csearch_path%3Dpublic"
-          PULSARA_POSTGRES_DSN: "postgresql://pulsara_runtime:pulsara_runtime@127.0.0.1:5432/pulsara?options=-csearch_path%3Dpublic"
+          PULSARA_POSTGRES_ADMIN_DSN: "postgresql://pulsara_admin:pulsara_admin@127.0.0.1:5432/pulsara"
+          PULSARA_POSTGRES_DSN: "postgresql://pulsara_runtime:pulsara_runtime@127.0.0.1:5432/pulsara"
         run: >-
           uv run pytest -q
           tests/test_direct_advisory_memory.py

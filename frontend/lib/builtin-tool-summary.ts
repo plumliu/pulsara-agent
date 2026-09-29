@@ -5,6 +5,7 @@ import type { ToolTrace } from './pulsara-types';
 const labels: Record<string, [title: string, pending: string, completed: string]> = {
   read_file: ['读取文件', '正在读取文件', '已读取文件'],
   view_image: ['查看图片', '正在读取图片', '已读取图片'],
+  visualization_render: ['渲染可视化', '正在准备可视化', '已安排展示'],
   search_files: ['搜索文件', '正在搜索', '搜索已结束'],
   edit_file: ['修改文件', '正在修改文件', '已修改文件'],
   write_file: ['写入文件', '正在写入文件', '已写入文件'],
@@ -100,6 +101,7 @@ function failure(trace: ToolTrace, result: Record<string, unknown>): string {
     IMAGE_DECODE_FAILED: '图片无法解码，文件可能已损坏',
     IMAGE_FORMAT_UNSUPPORTED: '暂不支持这种图片格式',
     IMAGE_VALIDATION_DEADLINE_EXPIRED: '图片检查超时',
+    VISUALIZATION_PATH_INVALID: '可视化文件路径无效',
   };
   const states: Record<string, string> = {
     PERMISSION_DENIED: '未获授权，未执行操作', INVALID_ARGUMENTS: '参数不正确，未执行操作',
@@ -135,15 +137,17 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
   const title = (name === 'terminal_process' ? processActions[action]
     : name === 'terminal_monitor' ? monitorActions[action] : undefined) ?? label[0];
   let target = '';
-  if (['read_file', 'view_image', 'edit_file', 'write_file', 'search_files'].includes(name)) {
+  if (['read_file', 'view_image', 'visualization_render', 'edit_file', 'write_file', 'search_files'].includes(name)) {
     target = text(result.path) || text(args.path);
     if (name === 'view_image' && args.image_ref) target = '对话中已保存的图片';
+    if (name === 'visualization_render' && args.visualization_ref) target = '已保存的可视化';
     if (name === 'search_files') target = [text(args.pattern), target].filter(Boolean).join(' · ');
   } else if (name === 'terminal') target = trace.command ?? text(args.command);
   else if (name === 'spawn_agent') target = text(args.task_name);
   else if (name === 'memory_search') target = text(args.query);
 
   let detail = label[1];
+  if (name === 'visualization_render' && args.review === true) detail = '正在生成可视化预览';
   if (name === 'mark_memory_relation' && trace.status === 'running') {
     detail = args.relation_kind === 'SUPERSEDES' ? '正在标记取代关系'
       : args.relation_kind === 'CONTRADICTS' ? '正在标记冲突关系' : detail;
@@ -155,6 +159,10 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
     detail = label[2];
     const status = text(result.status).toLowerCase();
     switch (name) {
+      case 'visualization_render':
+        if (trace.resultContent?.parts.some(part => part.type === 'image')) detail = '已安排展示 · 预览已生成';
+        else if (trace.resultText?.includes('Current preview was not generated:')) detail = '已安排展示，预览未生成';
+        break;
       case 'read_file': {
         const total = number(result.total_lines);
         if (total !== undefined) detail = `已读取文件 · 共 ${total} 行${result.truncated === true || (number(result.offset) ?? 1) > 1 ? '，本次仅返回部分内容' : ''}`;

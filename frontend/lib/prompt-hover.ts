@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 // Shared by path details and image previews; content and image loading stay with their owners.
-export function usePromptHover<T extends HTMLElement = HTMLButtonElement>(maxWidth: number, onShow?: () => void) {
+export function usePromptHover<T extends HTMLElement = HTMLButtonElement, D extends HTMLElement = HTMLSpanElement>(maxWidth: number, onShow?: () => void) {
   const [position, setPosition] = useState<{ left: number; top: number; above: boolean }>();
   const trigger = useRef<T>(null);
-  const details = useRef<HTMLSpanElement>(null);
+  const details = useRef<D>(null);
   const closing = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const keep = () => clearTimeout(closing.current);
   const dismiss = useCallback(() => {

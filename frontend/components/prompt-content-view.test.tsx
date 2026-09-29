@@ -41,6 +41,53 @@ afterEach(() => {
 });
 
 describe('PromptContentView', () => {
+  it('keeps sent annotations outside the bubble and opens frozen details without reading their source', async () => {
+    const read = vi.fn();
+    const quote = '<script>quoted text stays inert</script>\n完整引用';
+    const content: CanonicalPromptContent = { parts: [
+      { type: 'annotation', quote, comment: '解释一下这一段', source: { entry_id: 'unloaded', start: 0, end: quote.length } },
+      { type: 'annotation', quote: '来源已不存在的引用', source: null },
+      { type: 'text', text: '结合这两处说明。' },
+    ] };
+    const view = render(<PromptContentView content={content} variant="message" onReadImage={read}
+      renderMessageBody={body => <div data-testid="bubble">{body}</div>} />);
+    const bubble = screen.getByTestId('bubble');
+    expect(bubble.textContent).toBe('结合这两处说明。');
+    expect(view.container.querySelector('.sent-annotation-strip')?.nextElementSibling).toBe(bubble);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const trigger = screen.getByRole('button', { name: '查看批注 1' });
+    await userEvent.hover(trigger);
+    const preview = await screen.findByRole('dialog', { name: 'Annotation 1' });
+    expect(preview.querySelector('blockquote')?.textContent).toBe(quote);
+    expect(within(preview).getByText('解释一下这一段')).toBeTruthy();
+    expect(preview.querySelector('textarea, input, [contenteditable], script')).toBeNull();
+    expect(within(preview).queryByRole('button')).toBeNull();
+    await userEvent.unhover(trigger);
+    await userEvent.hover(preview);
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(screen.getByRole('dialog', { name: 'Annotation 1' })).toBeTruthy();
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: '查看批注 2' }));
+    expect(screen.getByRole('dialog', { name: 'Annotation 2' }).querySelector('blockquote')?.textContent).toBe('来源已不存在的引用');
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+    expect(content.parts[0]).toMatchObject({ quote, comment: '解释一下这一段' });
+  });
+
+  it('keeps image numbering separate and avoids an empty body for an annotation-only message', () => {
+    const annotation = { type: 'annotation' as const, quote: '仅有引用', source: null };
+    const renderBody = vi.fn(body => <div data-testid="bubble">{body}</div>);
+    const view = render(<PromptContentView content={{ parts: [annotation] }} variant="message" onReadImage={vi.fn()}
+      renderMessageBody={renderBody} />);
+    expect(renderBody).toHaveBeenLastCalledWith(null);
+    expect(screen.getByRole('button', { name: '查看批注 1' })).toBeTruthy();
+    view.rerender(<PromptContentView content={{ parts: [annotation, canonicalImage(0, 'a'), annotation, canonicalImage(1, 'b')] }}
+      variant="message" onReadImage={vi.fn()} renderMessageBody={renderBody} />);
+    expect(view.container.querySelector('.prompt-thumbnail-strip')?.nextElementSibling?.className).toBe('sent-annotation-strip');
+    expect(within(screen.getByTestId('bubble')).getAllByRole('button', { name: /^打开 Figure [12]$/ })).toHaveLength(2);
+    expect(screen.getByRole('button', { name: '查看批注 2' })).toBeTruthy();
+  });
+
   it('reuses image loading and lightbox for a tool preview without Figure captions or status text', async () => {
     vi.stubGlobal('IntersectionObserver', undefined);
     const read = vi.fn(async () => Uint8Array.from([1, 2, 3]));

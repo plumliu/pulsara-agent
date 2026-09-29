@@ -731,6 +731,11 @@
 .node-image.ProseMirror-selectednode .prompt-image-chip { outline: 2px solid var(--blue); outline-offset: 2px; }
 
 .prompt-thumbnail-strip { display: flex; justify-content: flex-end; gap: 8px; width: 100%; min-width: 0; margin: 0 0 10px; overflow: hidden; font-family: var(--sans); }
+.prompt-thumbnail-strip:has(+ .sent-annotation-strip) { margin-bottom: 6px; }
+.sent-annotation-strip { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 0; margin-bottom: 8px; }
+.user-steer-turn { min-width: 0; }
+.user-steer-turn .sent-annotation-strip { margin-bottom: 5px; }
+.user-message-meta .message-foot { margin-top: 0; padding-right: 4px; }
 .prompt-thumbnail, .prompt-thumbnail-more { flex: none; width: 74px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: var(--type-micro); text-align: center; }
 .prompt-thumbnail__image, .prompt-thumbnail-more { display: grid; place-items: center; width: 72px; height: 72px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-deep); }
 .prompt-thumbnail__image img { display: block; width: 100%; height: 100%; object-fit: contain; }
@@ -786,6 +791,14 @@
 .annotation-chip__summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .annotation-chip .annotation-chip__remove { flex: none; padding: 6px 5px; margin-right: 2px; }
 .annotation-chip__remove:hover { color: var(--red); }
+.annotation-chip--sent { max-width: min(240px, 100%); background: color-mix(in srgb, var(--paper-solid) 75%, transparent); }
+.annotation-chip--sent .annotation-chip__open { width: 100%; padding: 5px 8px; }
+.annotation-chip--sent button:focus-visible { outline: 2px solid var(--annotation-accent); outline-offset: 2px; border-radius: 7px; }
+.sent-annotation-preview { position: fixed; z-index: 1200; width: min(350px, calc(100vw - 16px)); max-height: min(360px, calc(100dvh - 16px)); overflow-y: auto; overscroll-behavior: contain; margin: 0; padding: 10px 12px; border-radius: 12px; color: var(--ink); box-shadow: var(--shadow-md); animation: annotation-reveal .18s cubic-bezier(.2, .7, .2, 1); }
+.sent-annotation-preview__title { color: var(--annotation-accent); font-weight: 500; }
+.sent-annotation-preview blockquote { max-height: 72px; margin: 8px 0 4px; color: var(--ink); border-left-color: color-mix(in srgb, var(--annotation-accent) 45%, transparent); }
+.sent-annotation-preview .sent-annotation-preview__comment { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.sent-annotation-preview:focus-visible { outline: 2px solid var(--annotation-accent); outline-offset: -2px; }
 .annotation-marker { position: fixed; z-index: 80; display: grid; place-items: center; min-width: 22px; height: 22px; padding: 0 5px; border: 1px solid color-mix(in srgb, var(--annotation-accent) 70%, transparent); border-radius: 12px 12px 12px 3px; background: var(--annotation-accent); color: var(--annotation-marker-ink); font: 11px/1 var(--sans); font-variant-numeric: tabular-nums; cursor: pointer; box-shadow: 0 1px 4px #0001; user-select: none; }
 .annotation-marker:hover, .annotation-marker.is-active { box-shadow: 0 0 0 3px color-mix(in srgb, var(--annotation-accent) 18%, transparent); }
 .annotation-editor { position: fixed; z-index: 160; max-height: calc(100dvh - 40px); overflow-y: auto; overscroll-behavior: contain; margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-solid); color: var(--ink); box-shadow: 0 6px 24px #0002; }
@@ -819,7 +832,7 @@
 @keyframes annotation-reveal { from { opacity: 0; transform: translateY(4px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes annotation-marker-reveal { from { opacity: 0; transform: scale(.8); } to { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) {
-  .annotation-selection-menu, .annotation-editor, .annotation-chip, .annotation-marker { animation: none; transition: none; }
+  .annotation-selection-menu, .annotation-editor, .annotation-chip, .annotation-marker, .sent-annotation-preview { animation: none; transition: none; }
   .annotation-chip button, .annotation-editor button { transition: none; }
   .annotation-marker:hover, .annotation-marker:focus-visible, .annotation-marker.is-active, .annotation-marker:active { scale: 1; }
 }
