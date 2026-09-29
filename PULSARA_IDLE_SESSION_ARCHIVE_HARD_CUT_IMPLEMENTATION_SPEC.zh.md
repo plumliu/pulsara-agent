@@ -20,6 +20,7 @@ DB 事务不得等待物理关闭或网络。接纳后的操作由已有 process
 ## API / UI
 
 - `POST /api/sessions/{id}/archive`、`POST /api/sessions/{id}/unarchive`：严格空对象。返回 session_id 与 ARCHIVED / OPEN；不存在 404，忙或非 idle 409，结果不确定 503。
+- writer generation/owner 不匹配或其他有效 writer 以类型化冲突返回 `SESSION_ARCHIVE_BUSY`（409），与真实未完成工作的 `SESSION_NOT_IDLE` 分开；预检拒绝不关闭连接、不改 lifecycle，不自动接管或绕过 guard。归档/删除拒绝均返回标准 JSON error，包含 retryable 标志，不能在错误处理中再次抛出异常；此标志不触发自动重试。
 - `GET /api/sessions/archived`：同 memory domain 的完整已归档清单，不加载运行时、不加总量上限。
 - 普通列表与读取仅 OPEN；菜单增加“归档会话”，服务端返回可否归档供 UI 禁用及说明，但执行时必须重新检查。
 - 侧栏目录的展开箭头紧跟目录名，长名称仍可省略。单个会话的操作菜单点击菜单外任意位置即收起，点击其他会话的菜单入口同时收起前一个；Escape 收起并将焦点返回原入口。菜单内的归档与删除沿用各自原有操作及确认语义。

@@ -487,6 +487,7 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  searchSessions = vi.fn(async () => ({ items: this.sessions.map(session => ({ session, matchKind: 'recent' as const, snippet: '' })), nextCursor: null }));
   renameSession = vi.fn(async (sessionId: string, title: string) => {
     this.sessions = this.sessions.map(item => item.id === sessionId ? { ...item, title } : item);
     return { session_id: sessionId, title };
@@ -2537,8 +2538,9 @@ describe('PulsaraApp', () => {
       expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
     }
     fireEvent.keyDown(window, { key: 'k', metaKey: true });
-    const palette = screen.getByRole('dialog', { name: '命令面板' });
-    expect((within(palette).getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('dialog', { name: '搜索会话' })).toBeTruthy();
+    expect(adapter.searchSessions).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: '命令面板' })).toBeNull();
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.click(screen.getByRole('button', { name: '总览' }));
     expect((screen.getByRole('button', { name: '开始新任务' }) as HTMLButtonElement).disabled).toBe(true);
@@ -2639,7 +2641,8 @@ describe('PulsaraApp', () => {
     fireEvent.keyDown(window, { key: 'n', metaKey: true });
     expect(screen.queryByRole('dialog', { name: '新建会话' })).toBeNull();
     fireEvent.keyDown(window, { key: 'k', metaKey: true });
-    expect((within(screen.getByRole('dialog', { name: '命令面板' })).getByRole('button', { name: /新建会话/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole('dialog', { name: '搜索会话' })).toBeTruthy();
+    expect(adapter.searchSessions).not.toHaveBeenCalled();
     fireEvent.keyDown(window, { key: 'Escape' });
 
     fireEvent.click(screen.getByRole('button', { name: /前往本地服务设置/ }));
@@ -3270,10 +3273,15 @@ describe('PulsaraApp', () => {
     fireEvent.click(within(tree).getByRole('button', { name: 'project' }));
     fireEvent.click(within(tree).getByRole('button', { name: '从目录中打开' }));
     const add = within(tree).getByRole('button', { name: '选择目录并创建会话' });
+    const connectionsBeforePicker = adapter.connectCalls.length;
     fireEvent.click(add);
     fireEvent.click(add);
     expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledTimes(1);
     expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith('/tmp/project', expect.any(AbortSignal));
+    expect(add.getAttribute('aria-busy')).toBe('false');
+    expect(add.getAttribute('title')).toBe('等待选择目录');
+    expect(adapter.connectCalls).toHaveLength(connectionsBeforePicker);
+    expect(screen.getByRole('heading', { name: '准备发布' })).toBeTruthy();
     expect((within(tree).getByRole('button', { name: '创建快速开始会话' }) as HTMLButtonElement).disabled).toBe(true);
     expect(adapter.createSession).not.toHaveBeenCalled();
     await act(async () => picked.resolve('/tmp/project'));
@@ -4746,4 +4754,28 @@ it.each(['sidebar', 'topbar'])('renames the session from %s and updates shared t
   expect(adapter.renameSession).toHaveBeenCalledExactlyOnceWith(initialSession.id, '新的会话标题');
   expect(screen.getByLabelText('新的会话标题 更多操作')).toBeTruthy();
   expect(screen.getByRole('heading', { name: '新的会话标题' })).toBeTruthy();
+});
+
+it('replaces commands with session search and opens a result outside the loaded sidebar', async () => {
+  const adapter = new FakeAdapter();
+  const hidden = { ...initialSession, id: 'search-hidden', title: '搜索找到的旧会话', live: false };
+  adapter.searchSessions.mockImplementation(async () => {
+    adapter.sessions = [initialSession, hidden]; // Created elsewhere after the initial sidebar load.
+    return { items: [{ session: hidden, matchKind: 'recent', snippet: '' }], nextCursor: null };
+  });
+  adapter.readSession.mockImplementation(async id => id === hidden.id ? hidden : initialSession);
+  render(<PulsaraApp adapter={adapter} />);
+  await screen.findByLabelText(`${initialSession.title} 更多操作`);
+  expect(screen.queryByRole('button', { name: '命令面板' })).toBeNull();
+  expect(screen.queryByText(hidden.title)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: /搜索会话/ }));
+  fireEvent.click(await screen.findByRole('button', { name: new RegExp(hidden.title) }));
+  await waitFor(() => expect(adapter.connectCalls.some(call => call.sessionId === hidden.id)).toBe(true));
+  expect(adapter.readSession).toHaveBeenCalledWith(hidden.id);
+  expect(screen.queryByRole('dialog', { name: '搜索会话' })).toBeNull();
+  expect(await screen.findByRole('heading', { name: hidden.title })).toBeTruthy();
+  fireEvent.keyDown(window, { key: 'k', metaKey: true });
+  expect(await screen.findByRole('dialog', { name: '搜索会话' })).toBeTruthy();
+  fireEvent.keyDown(screen.getByLabelText('搜索关键词'), { key: 'Escape' });
+  expect(screen.queryByRole('dialog', { name: '搜索会话' })).toBeNull();
 });

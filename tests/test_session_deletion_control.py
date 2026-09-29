@@ -215,6 +215,26 @@ def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
                         assert (await response.json())['status'] == status
                 sessions.archive_session.assert_awaited_once_with('target', bridge=bridge)
                 sessions.unarchive_session.assert_awaited_once_with('target')
+                for action, code, status in (
+                    ('archive', 'SESSION_ARCHIVE_BUSY', 409),
+                    ('archive', 'SESSION_NOT_IDLE', 409),
+                    ('archive', 'SESSION_ARCHIVE_UNCONFIRMED', 503),
+                    ('unarchive', 'SESSION_ARCHIVE_FAILED', 500),
+                    ('delete', 'SESSION_DELETE_BUSY', 409),
+                    ('delete', 'SESSION_DELETE_UNCONFIRMED', 503),
+                ):
+                    owner = sessions.delete_session if action == 'delete' else getattr(sessions, action + '_session')
+                    owner.side_effect = SessionDeleteRejected(code, '会话控制请求未完成', status)
+                    method = client.delete if action == 'delete' else client.post
+                    endpoint = url if action == 'delete' else url + '/' + action
+                    body = {'confirm_permanent_delete': True} if action == 'delete' else {}
+                    async with method(endpoint, json=body) as response:
+                        assert response.status == status
+                        assert response.content_type == 'application/json'
+                        assert await response.json() == {'error': {
+                            'code': code, 'message': '会话控制请求未完成', 'retryable': True,
+                        }}
+                    owner.side_effect = None
                 async with client.get(server.origin + '/api/sessions/archived') as response:
                     assert response.status == 200
                     assert (await response.json())['sessions'][0]['lifecycle'] == 'ARCHIVED'

@@ -8,10 +8,11 @@ import { CapabilityView } from '../components/capability-view';
 import { DatabaseSetupGuide } from '../components/database-setup-guide';
 import { MemoryView } from '../components/memory-view';
 import { InspectorPanel } from '../components/inspector-panel';
-import { CommandPalette, NewSessionDialog, ToastStack } from '../components/overlays';
+import { NewSessionDialog, ToastStack } from '../components/overlays';
 import { OverviewView } from '../components/overview-view';
 import { SessionSidebar } from '../components/session-sidebar';
 import { SessionOpeningView } from '../components/session-opening-view';
+import { SessionSearchDialog } from '../components/session-search-dialog';
 import { SessionRenameDialog } from '../components/session-rename-dialog';
 import { SessionDeletionDialog } from '../components/session-deletion-dialog';
 import { SettingsView, type SettingsSection } from '../components/settings-view';
@@ -269,7 +270,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return () => desktop.removeEventListener('change', onResize);
   }, []);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [commandOpen, setCommandOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   useEffect(() => () => promptDraftStore.destroy(), [promptDraftStore]);
   const [theme, setTheme] = useState<'light' | 'dark'>(readSavedTheme);
@@ -1189,7 +1190,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     const handleKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        setCommandOpen((value) => !value);
+        setSearchOpen((value) => !value);
       }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'n') {
         event.preventDefault();
@@ -1198,7 +1199,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         }
       }
       if (event.key === 'Escape') {
-        setCommandOpen(false);
+        setSearchOpen(false);
         setNewSessionOpen(false);
         setSidebarOpen(false);
       }
@@ -2368,7 +2369,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   return (
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main className={`pulsara-shell${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !openingSession ? ' has-inspector' : ''}`}>
-      <ActivityRail activeView={activeView} onNavigate={navigate} onOpenCommand={() => setCommandOpen(true)} />
+      <ActivityRail activeView={activeView} onNavigate={navigate} />
 
       {activeView === 'workbench' && !databaseBlocked && (
         <SessionSidebar
@@ -2390,7 +2391,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onPickDirectory={(initialPath, signal) => adapter.pickWorkspaceDirectory(initialPath, signal)}
           onNotify={(title, detail) => notify(title, detail, 'warning')}
           canCreateSession={canCreateSession}
-          onOpenCommand={() => setCommandOpen(true)}
+          onOpenSearch={() => setSearchOpen(true)}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
         />
       )}
@@ -2636,15 +2637,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
 
       {activeView === 'memory' && <MemoryView api={adapter.memory} databaseState={databaseState} runtimeStatus={runtimeStatus} onReconnect={reconnect} onOpenSettings={() => navigate('settings')} onOpenSource={source => { setFocusSourceEntry({ sessionId: source.session_id, entryId: source.entry_id }); openSession(source.session_id); }} />}
 
-      <CommandPalette
-        open={commandOpen}
-        theme={theme}
-        onClose={() => setCommandOpen(false)}
-        onNavigate={navigate}
-        onNewSession={openNewSession}
-        canCreateSession={canCreateSession}
-        onThemeChange={setTheme}
-      />
+      {searchOpen && <SessionSearchDialog adapter={adapter} available={databaseState === 'ready' && Boolean(bootstrap)}
+        onClose={() => setSearchOpen(false)} onOpen={session => {
+          setSessionList(current => current.some(item => item.id === session.id)
+            ? current.map(item => item.id === session.id ? session : item) : [...current, session]);
+          setSessionRevision(value => value + 1);
+          openSession(session.id);
+        }} />}
       {newSessionOpen && <NewSessionDialog
         open={newSessionOpen}
         canCreateSession={canCreateSession}

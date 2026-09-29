@@ -15,6 +15,7 @@ from pulsara_agent.conversation_kernel.host import (
     _list_resumable_session_rows_across_workspaces,
 )
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
+from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
 from pulsara_agent.conversation_kernel.session_deletion import SessionDeleteRejected
 from tests.test_conversation_fork import repo as repo, new_session, turn, rows, identity
 from tests.test_session_deletion_control import control
@@ -152,9 +153,9 @@ def test_cold_archive_checks_domain_live_lease_and_exact_writer(
     )
     with pytest.raises(KeyError):
         repo.archive_session(memory_domain_id="other", **params)
-    with pytest.raises(SessionDeletionBusy, match="live writer"):
+    with pytest.raises(SessionWriterConflict, match="live writer"):
         repo.archive_session(memory_domain_id="u_local", **params)
-    with pytest.raises(SessionDeletionBusy, match="changed"):
+    with pytest.raises(SessionWriterConflict, match="changed"):
         archive(
             repo,
             SimpleNamespace(
@@ -271,4 +272,54 @@ def test_unarchive_uncertain_retry_confirms_without_second_write(tmp_path):
         core.begin_session_retirement.assert_not_awaited()
         assert session.session_id not in c._operations
 
+    asyncio.run(run())
+
+
+
+def test_writer_conflict_is_not_reported_as_unfinished_work_or_detached(tmp_path):
+    async def run():
+        c, core, bridge, session, connection = control(tmp_path)
+        core.prepare_session_archive = AsyncMock(side_effect=SessionWriterConflict("session writer changed"))
+        core.commit_session_archive = AsyncMock()
+        with pytest.raises(SessionDeleteRejected) as error:
+            await c.archive_session(session.session_id, bridge=bridge)
+        assert error.value.public_code == "SESSION_ARCHIVE_BUSY"
+        assert error.value.status == 409
+        assert "运行权已改变" in str(error.value)
+        assert "仍有任务" not in str(error.value)
+        core.quiesce_session_retirement.assert_not_awaited()
+        core.commit_session_archive.assert_not_awaited()
+        assert not connection.close_attempted
+        assert session.session_id in c._by_session
+        assert session.session_id not in c._operations
+        assert not core.finish_session_retirement.await_args.kwargs["quarantine"]
+    asyncio.run(run())
+
+
+def test_archive_preflight_after_real_writer_takeover_preserves_new_owner_and_releases_gate(repo):
+    from pulsara_agent.conversation_kernel.host import KernelHostCore
+    from pulsara_agent.conversation_kernel.session_deletion import KernelSessionRetirement
+
+    async def run():
+        old = new_session(repo)
+        sid = old.guard.session_id
+        workspace_id = rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (sid,))[0]["workspace_id"]
+        new = repo.acquire_host_writer(intent="EXISTING", session_id=sid, workspace_id=workspace_id,
+            writer_owner_id=identity("host"), lease_seconds=300, deadline_monotonic=monotonic()+30)
+        assert new.guard.writer_generation > old.guard.writer_generation
+        before = rows(repo, "SELECT * FROM pulsara_v3.sessions WHERE id=%s", (sid,))
+        gate = object()
+        session = SimpleNamespace(session_id=sid, _lease=old,
+            prepare_safe_runtime_reopen=AsyncMock(return_value=gate),
+            archive_has_terminal_work=lambda: False,
+            abort_safe_runtime_reopen=AsyncMock(), commit_safe_runtime_reopen=AsyncMock())
+        core = SimpleNamespace(_lock=asyncio.Lock(), _sessions={"old":session},
+            _ensure_resources=AsyncMock(return_value=repo), _canonical_deadline=lambda:monotonic()+30)
+        operation = KernelSessionRetirement(sid, "u_local", core, asyncio.get_running_loop().create_future())
+        core._session_retirements = {sid:operation}
+        with pytest.raises(SessionWriterConflict, match="writer changed"):
+            await KernelHostCore.prepare_session_archive(core, operation)
+        session.abort_safe_runtime_reopen.assert_awaited_once_with(gate)
+        session.commit_safe_runtime_reopen.assert_not_awaited()
+        assert rows(repo, "SELECT * FROM pulsara_v3.sessions WHERE id=%s", (sid,)) == before
     asyncio.run(run())

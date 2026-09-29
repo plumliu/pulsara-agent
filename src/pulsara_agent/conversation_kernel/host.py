@@ -7835,6 +7835,13 @@ class KernelHostCore:
         )
         return [_kernel_session_summary(row) for row in rows]
 
+    async def search_sessions(self, *, memory_domain_id: str, query: str, lifecycle: str = "ALL", cursor: str | None = None, limit: int = 20):
+        from pulsara_agent.conversation_kernel.session_search import search_session_page
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(search_session_page, repository,
+            memory_domain_id=memory_domain_id, query=query, lifecycle=lifecycle,
+            cursor=cursor, limit=limit, deadline_monotonic=self._canonical_deadline())
+
     async def rename_session(self, session_id: str, *, memory_domain_id: str, title: str) -> str:
         repository = await self._ensure_resources()
         return await asyncio.to_thread(
@@ -7977,7 +7984,7 @@ class KernelHostCore:
 
     async def prepare_session_archive(self, operation: KernelSessionRetirement):
         """Freeze existing Host admission before checking canonical idle; do not stop work."""
-        from .repository_errors import SessionDeletionBusy
+        from .repository_errors import SessionDeletionBusy, SessionWriterConflict
         if operation.owner is not self or self._session_retirements.get(operation.session_id) is not operation:
             raise RuntimeError('session archive lacks admission authority')
         repository = await self._ensure_resources()
@@ -7986,7 +7993,7 @@ class KernelHostCore:
         gates = []
         try:
             if len(sessions) > 1:
-                raise SessionDeletionBusy('multiple Host owners have not settled')
+                raise SessionWriterConflict('multiple Host owners have not settled')
             for session in sessions:
                 gate = await session.prepare_safe_runtime_reopen()
                 gates.append((session, gate))

@@ -1,63 +1,14 @@
 'use client';
 
 import {
-  Blocks,
-  Brain,
   Check,
-  Command,
-  Gauge,
   FolderOpen,
   FolderPlus,
-  MessageCircle,
-  Moon,
-  Plus,
-  Search,
-  Settings,
-  Sun,
   X,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import type { AppView, SessionWorkspaceSelection, ToastMessage } from '../lib/pulsara-types';
-
-interface CommandPaletteProps {
-  open: boolean;
-  theme: 'light' | 'dark';
-  onClose: () => void;
-  onNavigate: (view: AppView) => void;
-  onNewSession: () => void;
-  canCreateSession: boolean;
-  onThemeChange: (theme: 'light' | 'dark') => void;
-}
-
-const commandItems = [
-  { id: 'memory', label: '打开记忆', detail: '查看背景、偏好与记忆关系', icon: Brain, view: 'memory' as AppView },
-  { id: 'overview', label: '打开总览', detail: '查看运行状态与最近活动', icon: Gauge, view: 'overview' as AppView },
-  { id: 'workbench', label: '打开会话工作台', detail: '回到当前活动会话', icon: MessageCircle, view: 'workbench' as AppView },
-  { id: 'capabilities', label: '打开能力', detail: '管理插件、MCP 与技能', icon: Blocks, view: 'capabilities' as AppView },
-  { id: 'settings', label: '打开设置', detail: '外观、模型与本地服务', icon: Settings, view: 'settings' as AppView },
-];
-
-export function CommandPalette({ open, theme, onClose, onNavigate, onNewSession, canCreateSession, onThemeChange }: CommandPaletteProps) {
-  const [query, setQuery] = useState('');
-  const filtered = useMemo(() => commandItems.filter((item) => `${item.label} ${item.detail}`.toLowerCase().includes(query.toLowerCase())), [query]);
-  if (!open) return null;
-
-  return (
-    <div className="overlay-root" role="dialog" aria-modal="true" aria-label="命令面板">
-      <button className="overlay-scrim" onClick={onClose} aria-label="关闭命令面板" />
-      <section className="command-palette">
-        <label><Search size={17} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入命令或搜索…" /><kbd>ESC</kbd></label>
-        <div className="command-results">
-          <span className="menu-label">建议</span>
-          <button disabled={!canCreateSession} onClick={() => { onNewSession(); onClose(); }}><span className="command-icon"><Plus size={14} /></span><span><strong>新建会话</strong><small>选择快速开始或指定目录</small></span><kbd>⌘ N</kbd></button>
-          {filtered.map(({ id, label, detail, icon: Icon, view }) => <button key={id} onClick={() => { onNavigate(view); onClose(); }}><span className="command-icon"><Icon size={14} /></span><span><strong>{label}</strong><small>{detail}</small></span></button>)}
-        </div>
-        <footer><span><Command size={11} /> Pulsara 快捷操作</span><button onClick={() => onThemeChange(theme === 'light' ? 'dark' : 'light')}>{theme === 'light' ? <Moon size={11} /> : <Sun size={11} />}{theme === 'light' ? '深色模式' : '浅色模式'}</button></footer>
-      </section>
-    </div>
-  );
-}
+import type { SessionWorkspaceSelection, ToastMessage } from '../lib/pulsara-types';
 
 interface NewSessionDialogProps {
   open: boolean;

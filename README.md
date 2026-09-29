@@ -60,6 +60,9 @@ runtime-write admission epoch.
 
 The current Kernel supports:
 
+- session search from the sidebar or ⌘K / Ctrl+K across project titles, user text,
+  and assistant replies/commentary, with one result per conversation, snippets,
+  pagination and archive filters; replaces the command palette;
 - persistent session renaming from the sidebar and conversation header menus;
   titles survive archive/restore without changing activity or archive timestamps;
 

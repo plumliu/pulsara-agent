@@ -6,7 +6,9 @@ from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
-from .deletion import SessionDeletionBusy
+from pulsara_agent.conversation_kernel.repository_errors import (
+    SessionDeletionBusy, SessionWriterConflict,
+)
 
 
 # Used both for UI eligibility and, authoritatively, under the session writer lock.
@@ -88,9 +90,9 @@ class _SessionArchiveOperations:
                     or row["writer_lease_owner_id"]
                     not in (None, closed_writer.writer_owner_id)
                 ):
-                    raise SessionDeletionBusy("session writer changed")
+                    raise SessionWriterConflict("session writer changed")
             elif row["writer_lease_owner_id"] is not None and row["lease_live"]:
-                raise SessionDeletionBusy("session has a live writer")
+                raise SessionWriterConflict("session has a live writer")
             if row["lifecycle"] == "ARCHIVED":
                 return "ARCHIVED"
             # Fresh statement after acquiring the writer lock, not a lock-wait snapshot.

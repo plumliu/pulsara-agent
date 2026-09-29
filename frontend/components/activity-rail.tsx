@@ -1,7 +1,6 @@
 import {
   Blocks,
   Brain,
-  Command,
   Gauge,
   MessageCircle,
   Settings,
@@ -19,10 +18,9 @@ const navigation = [
 interface ActivityRailProps {
   activeView: AppView;
   onNavigate: (view: AppView) => void;
-  onOpenCommand: () => void;
 }
 
-export function ActivityRail({ activeView, onNavigate, onOpenCommand }: ActivityRailProps) {
+export function ActivityRail({ activeView, onNavigate }: ActivityRailProps) {
   return (
     <nav className="activity-rail" aria-label="主要功能">
       <button className="rail-logo" onClick={() => onNavigate('overview')} aria-label="返回 Pulsara 总览">
@@ -45,9 +43,6 @@ export function ActivityRail({ activeView, onNavigate, onOpenCommand }: Activity
       </div>
 
       <div className="rail-nav rail-nav--bottom">
-        <button className="rail-button" onClick={onOpenCommand} aria-label="命令面板" data-tooltip="命令面板  ⌘K">
-          <Command size={17} strokeWidth={1.8} />
-        </button>
         <button
           className={`rail-button${activeView === 'settings' ? ' is-active' : ''}`}
           onClick={() => onNavigate('settings')}

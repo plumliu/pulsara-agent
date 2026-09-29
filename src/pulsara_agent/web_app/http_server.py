@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, cast
 from uuid import UUID
 
 from aiohttp import web
+from psycopg.errors import QueryCanceled
 from pulsara_agent.web_app.memory_controller import LocalMemoryController
 from pulsara_agent.conversation_kernel.memory.management import MemoryManagementError
 
@@ -519,6 +520,7 @@ class LocalHttpServer:
             self._plugin_mcp_authorization,
         )
         self._app.router.add_get("/api/sessions", self._list_sessions)
+        self._app.router.add_post("/api/sessions/search", self._search_sessions)
         self._app.router.add_put("/api/sessions/{session_id}/title", self._rename_session)
         self._app.router.add_post("/api/sessions/{session_id}/path-candidates", self._workspace_path_candidates)
         self._app.router.add_get(
@@ -665,7 +667,7 @@ class LocalHttpServer:
         except FilePreviewError as exc:
             return self._error_response(exc.code, exc.message, status=exc.status, retryable=False)
         except SessionDeleteRejected as exc:
-            return self._error_response(exc.public_code, str(exc), status=exc.status)
+            return self._error_response(exc.public_code, str(exc), status=exc.status, retryable=True)
         except ProtocolBridgeError as exc:
             return self._error_response(
                 exc.code, exc.public_message, status=409, retryable=True
@@ -2071,6 +2073,19 @@ class LocalHttpServer:
         return web.json_response(await self.sessions.delete_session(
             request.match_info["session_id"], bridge=self.bridge,
         ))
+
+    async def _search_sessions(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if "query" not in body or set(body) - {"query", "lifecycle", "cursor", "limit"}:
+            raise ValueError("invalid session search fields")
+        if not isinstance(body["query"], str) or body.get("lifecycle", "ALL") not in ("ALL", "OPEN", "ARCHIVED"):
+            raise ValueError("invalid session search query")
+        if (body.get("cursor") is not None and not isinstance(body["cursor"], str)) or type(body.get("limit", 20)) is not int or not 1 <= body.get("limit", 20) <= 50:
+            raise ValueError("invalid session search page")
+        try:
+            return web.json_response(await self.sessions.search_sessions(**body))
+        except (TimeoutError, QueryCanceled) as exc:
+            raise HttpPublicError("SESSION_SEARCH_TIMEOUT", "本次搜索超时，请稍后重试。", status=503, retryable=True) from exc
 
     async def _rename_session(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)

@@ -15,6 +15,10 @@ class SessionDeletionBusy(RuntimeError):
     """Deletion has no authority over the current canonical writer."""
 
 
+class SessionWriterConflict(SessionDeletionBusy):
+    """The requested retirement does not own the current session writer."""
+
+
 # Preserve the long-standing public/pickle identity owned by the repository
 # facade while allowing neutral readers and blob helpers to avoid importing the
 # private ``_repository`` implementation package (or the facade's SQL owners).
@@ -23,4 +27,4 @@ ConversationKernelConflict.__module__ = (
 )
 
 
-__all__ = ["ConversationKernelConflict", "PreparedCompletionSuffixStale", "SessionDeletionBusy"]
+__all__ = ["ConversationKernelConflict", "PreparedCompletionSuffixStale", "SessionDeletionBusy", "SessionWriterConflict"]

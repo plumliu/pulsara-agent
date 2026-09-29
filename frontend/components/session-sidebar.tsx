@@ -35,7 +35,7 @@ interface SessionSidebarProps {
   onPickDirectory: (initialPath: string, signal: AbortSignal) => Promise<string | null>;
   onNotify: (title: string, detail: string) => void;
   canCreateSession: boolean;
-  onOpenCommand: () => void;
+  onOpenSearch: () => void;
   onTakeControl: () => void;
 }
 
@@ -152,12 +152,13 @@ export function SessionSidebar({
   onPickDirectory,
   onNotify,
   canCreateSession,
-  onOpenCommand,
+  onOpenSearch,
   onTakeControl,
 }: SessionSidebarProps) {
   const sidebarRef = useRef<HTMLElement>(null);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const [creatingGroup, setCreatingGroup] = useState<string | null>(null);
+  const [pickingDirectory, setPickingDirectory] = useState(false);
   const createRequest = useRef<AbortController | null>(null);
   // A picker result must not create a session after this sidebar disappears or
   // creation becomes unavailable. Already submitted creates keep their owner.
@@ -168,12 +169,14 @@ export function SessionSidebar({
     const request = new AbortController();
     createRequest.current = request;
     setCreatingGroup(key);
+    setPickingDirectory(!selection);
     try {
       if (!selection) {
         const path = await onPickDirectory(workspace.path, request.signal);
         if (request.signal.aborted || path === null) return;
         selection = { kind: 'project', path };
       }
+      setPickingDirectory(false);
       const selected = selection;
       setCollapsedGroups(current => {
         const next = new Set(current);
@@ -191,6 +194,7 @@ export function SessionSidebar({
       if (createRequest.current === request) {
         createRequest.current = null;
         setCreatingGroup(null);
+        setPickingDirectory(false);
       }
     }
   };
@@ -199,12 +203,12 @@ export function SessionSidebar({
       className="session-group-add"
       type="button"
       aria-label={label}
-      title={label}
-      aria-busy={creatingGroup === key}
+      title={creatingGroup === key && pickingDirectory ? '等待选择目录' : label}
+      aria-busy={creatingGroup === key && !pickingDirectory}
       disabled={!canCreateSession || creatingGroup !== null || (selection?.kind === 'project' && !selection.path)}
       onClick={() => void createFromShortcut(key, selection)}
     >
-      {creatingGroup === key
+      {creatingGroup === key && !pickingDirectory
         ? <LoaderCircle size={13} className="is-spinning" />
         : selection ? <SquarePen size={13} /> : <FolderOpen size={13} />}
     </button>
@@ -266,9 +270,9 @@ export function SessionSidebar({
           <span className={`runtime-dot runtime-dot--${runtimeStatus}`} title={connectionLabels[runtimeStatus]} />
         </header>
 
-        <button className="sidebar-search" onClick={onOpenCommand}>
+        <button className="sidebar-search" onClick={onOpenSearch}>
           <Search size={14} />
-          <span>搜索与命令</span>
+          <span>搜索会话</span>
           <kbd>⌘ K</kbd>
         </button>
 

@@ -2816,3 +2816,28 @@ it('does not let a pre-rename session list response overwrite a confirmed title'
     method: 'PUT', body: JSON.stringify({ title: 'new title' }),
   }));
 });
+
+it('searches sessions through the scoped paginated endpoint with cancellation', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [{
+    session: { id: 'session:one', title: '自定义标题', lifecycle: 'ARCHIVED', workspace_id: 'workspace:one' },
+    match_kind: 'assistant', snippet: '中间 commentary 命中',
+  }], next_cursor: 'page-two' })));
+  vi.stubGlobal('fetch', fetchMock);
+  const signal = new AbortController().signal;
+  const result = await new LocalHttpRuntimeAdapter().searchSessions('中文', 'ARCHIVED', 'page-one', signal);
+  expect(fetchMock).toHaveBeenCalledWith('/api/sessions/search', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ query: '中文', lifecycle: 'ARCHIVED', cursor: 'page-one' }), signal,
+  }));
+  expect(result.nextCursor).toBe('page-two');
+  expect(result.items[0]).toMatchObject({ session: { id: 'session:one', title: '自定义标题', lifecycle: 'ARCHIVED' }, matchKind: 'assistant', snippet: '中间 commentary 命中' });
+});
+
+
+it.each(['ALL', 'OPEN', 'ARCHIVED'] as const)('requests five recent sessions within %s for an empty query', async lifecycle => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], next_cursor: null })));
+  vi.stubGlobal('fetch', fetchMock);
+  await new LocalHttpRuntimeAdapter().searchSessions('  ', lifecycle);
+  expect(fetchMock).toHaveBeenCalledWith('/api/sessions/search', expect.objectContaining({
+    body: JSON.stringify({ query: '  ', lifecycle, limit: 5 }),
+  }));
+});

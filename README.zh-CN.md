@@ -58,6 +58,7 @@ epoch。
 
 Kernel 当前支持：
 
+- 侧栏「搜索会话」与 ⌘K / Ctrl+K 支持跨项目搜索标题、用户文本和助手正文/commentary，按会话聚合并提供命中片段、分页及归档筛选；已替代原命令面板；
 - 会话侧栏和顶部菜单均支持「重命名」，标题持久保存；归档与取消归档保留标题，改名不改变归档时间或会话活动排序；
 
 - 从已结算最终回复发起[会话分叉](PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md)：

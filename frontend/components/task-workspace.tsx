@@ -52,7 +52,7 @@ function TaskCapacitySummary({ readCapacity }: {
     return () => { current = false; window.clearInterval(timer); };
   }, [readCapacity]);
   return <div className="task-capacity-summary">
-    <span>子任务并发数</span>
+    <span className="section-label">子任务并发数</span>
     <small className={occupied ? 'is-running' : undefined}>{error ? '暂不可用' : occupied === undefined ? '读取中' : `${occupied} 运行`}</small>
     {error && <p role="alert">{error}</p>}
   </div>;

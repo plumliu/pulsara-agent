@@ -479,7 +479,15 @@ export type RuntimeInteractionSubmission =
   | { kind: 'tool'; decision: 'allow' | 'deny'; commandId: string };
 
 /** Browser boundary for the local Pulsara application. */
+export interface SessionSearchItem {
+  session: SessionSummary;
+  matchKind: 'title' | 'user' | 'assistant' | 'recent';
+  snippet: string;
+}
+export interface SessionSearchPage { items: SessionSearchItem[]; nextCursor: string | null }
+
 export interface RuntimeAdapter {
+  searchSessions(query: string, lifecycle: 'ALL' | 'OPEN' | 'ARCHIVED', cursor?: string, signal?: AbortSignal): Promise<SessionSearchPage>;
   readonly memory: LocalMemoryApi;
   bootstrap(): Promise<RuntimeBootstrap>;
   modelCatalog(refresh?: boolean): Promise<ModelCatalogReadModel>;
@@ -1404,6 +1412,13 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       modelCallBinding: value.model_call_binding,
       reasoningPreferenceReset: value.reasoning_preference_reset,
     };
+  }
+
+  async searchSessions(query: string, lifecycle: 'ALL' | 'OPEN' | 'ARCHIVED' = 'ALL', cursor?: string, signal?: AbortSignal): Promise<SessionSearchPage> {
+    const payload = await apiRequest<{ items: Array<{ session: Record<string, unknown>; match_kind: SessionSearchItem['matchKind']; snippet: string }>; next_cursor: string | null }>('/api/sessions/search', {
+      method: 'POST', body: JSON.stringify({ query, lifecycle, ...(!query.trim() ? { limit: 5 } : {}), ...(cursor ? { cursor } : {}) }), signal,
+    });
+    return { items: payload.items.map(item => ({ session: projectSessionSummary(item.session), matchKind: item.match_kind, snippet: item.snippet })), nextCursor: payload.next_cursor };
   }
 
   async listSessions(): Promise<SessionSummary[]> {

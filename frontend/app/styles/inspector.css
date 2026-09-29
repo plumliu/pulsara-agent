@@ -52,6 +52,7 @@
 
 .task-workspace { display: grid; gap: 8px; padding: 0 14px 12px; }
 .task-capacity-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; padding: 9px 0; border-bottom: 1px solid var(--line); font-family: var(--sans); font-size: var(--type-label); color: var(--muted); }
+.task-capacity-summary > .section-label { margin: 0; }
 .task-capacity-summary > small { font-size: var(--type-caption); color: var(--faint); font-variant-numeric: tabular-nums; }
 .task-capacity-summary > small.is-running { color: var(--green); }
 .task-capacity-summary > p { flex-basis: 100%; margin: 0; color: var(--red); font-size: var(--type-caption); }
@@ -191,7 +192,8 @@
   .task-graph-edges > path.is-selected { animation: none; }
 }
 
-.project-capability-overview > p { margin: -2px 0 12px; color: var(--muted); font-size: var(--type-caption); line-height: 1.45; }
+.project-capability-overview > p { margin: -2px 0 12px; }
+.project-capability-overview > p, .session-search-recent { color: var(--muted); font-size: var(--type-caption); line-height: 1.45; }
 .project-capability-pending { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 11px; padding: 9px; border: 1px solid color-mix(in srgb,var(--violet) 22%,var(--line)); border-radius: 9px; background: var(--violet-soft); color: var(--violet); }
 .project-capability-pending strong, .project-capability-pending small { display: block; }
 .project-capability-pending strong { color: var(--ink-soft); font-size: var(--type-caption); }

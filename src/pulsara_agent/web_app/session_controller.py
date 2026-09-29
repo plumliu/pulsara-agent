@@ -16,7 +16,7 @@ from uuid import uuid4
 from pulsara_agent.conversation_kernel.session_deletion import (
     KernelSessionRetirement, SessionDeleteRejected,
 )
-from pulsara_agent.conversation_kernel.repository_errors import SessionDeletionBusy
+from pulsara_agent.conversation_kernel.repository_errors import SessionDeletionBusy, SessionWriterConflict
 
 from pulsara_agent.capability.local_skill_management import (
     InstallLooseLocalSkillRequest,
@@ -420,6 +420,15 @@ class LocalSessionController:
             payload['can_archive'] = idle
             result.append(payload)
         return result
+
+    async def search_sessions(self, *, query: str, lifecycle: str = "ALL", cursor: str | None = None, limit: int = 20):
+        from pulsara_agent.conversation_kernel.host import _kernel_session_summary
+        rows, next_cursor = await self.core.search_sessions(
+            memory_domain_id=self.workspace_input.memory_domain_id,
+            query=query, lifecycle=lifecycle, cursor=cursor, limit=limit)
+        return {"items": [{"session": self._summary_payload(_kernel_session_summary(row), False),
+                           "match_kind": row["match_kind"], "snippet": row["snippet"]} for row in rows],
+                "next_cursor": next_cursor}
 
     async def rename_session(self, session_id: str, title: str):
         async with self._lock:
@@ -2093,6 +2102,11 @@ class LocalSessionController:
             if operation.action == 'archive':
                 try:
                     await self.core.prepare_session_archive(operation.core_operation)
+                except SessionWriterConflict as exc:
+                    raise SessionDeleteRejected(
+                        'SESSION_ARCHIVE_BUSY',
+                        '会话的运行权已改变，或正被其他 Pulsara 实例使用。请关闭重复实例，重新打开此会话后再归档。',
+                    ) from exc
                 except (SessionDeletionBusy, RuntimeError) as exc:
                     raise SessionDeleteRejected('SESSION_NOT_IDLE', '会话仍有任务、后台进程或待处理事项，暂时无法归档。') from exc
                 operation.archive_ready = True
