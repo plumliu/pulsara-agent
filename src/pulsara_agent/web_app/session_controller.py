@@ -421,6 +421,15 @@ class LocalSessionController:
             result.append(payload)
         return result
 
+    async def rename_session(self, session_id: str, title: str):
+        async with self._lock:
+            if self._closing:
+                raise SessionControlRejected("SESSION_RENAME_UNAVAILABLE", "服务正在关闭，请稍后重试。")
+        saved = await self.core.rename_session(
+            session_id, memory_domain_id=self.workspace_input.memory_domain_id, title=title,
+        )
+        return {"session_id": session_id, "title": saved}
+
     async def list_archived_sessions(self):
         summaries = await self.core.list_resumable_sessions_across_workspaces(
             memory_domain_id=self.workspace_input.memory_domain_id, include_archived=True,
@@ -2537,7 +2546,7 @@ class LocalSessionController:
             updated_value = str(updated)
         return {
             "id": summary.session_id,
-            "title": f"会话 {_display_session_id(summary.session_id)}",
+            "title": summary.title or f"会话 {_display_session_id(summary.session_id)}",
             "subtitle": f"{summary.latest_entry_sequence} 条记录",
             "lifecycle": summary.lifecycle,
             "status": "waiting" if live else "completed",

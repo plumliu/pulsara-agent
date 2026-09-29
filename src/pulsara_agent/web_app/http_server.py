@@ -519,6 +519,7 @@ class LocalHttpServer:
             self._plugin_mcp_authorization,
         )
         self._app.router.add_get("/api/sessions", self._list_sessions)
+        self._app.router.add_put("/api/sessions/{session_id}/title", self._rename_session)
         self._app.router.add_post("/api/sessions/{session_id}/path-candidates", self._workspace_path_candidates)
         self._app.router.add_get(
             "/api/sessions/{session_id}/tasks", self._list_session_tasks
@@ -2070,6 +2071,16 @@ class LocalHttpServer:
         return web.json_response(await self.sessions.delete_session(
             request.match_info["session_id"], bridge=self.bridge,
         ))
+
+    async def _rename_session(self, request: web.Request) -> web.Response:
+        body = await self._json_body(request)
+        if set(body) != {"title"} or not isinstance(body["title"], str):
+            raise HttpPublicError("INVALID_SESSION_TITLE", "请输入会话标题。", status=400)
+        try:
+            result = await self.sessions.rename_session(request.match_info["session_id"], body["title"])
+        except ValueError as exc:
+            raise HttpPublicError("INVALID_SESSION_TITLE", "标题不能为空，且不能包含换行或控制字符。", status=400) from exc
+        return web.json_response(result)
 
     async def _list_archived_sessions(self, request: web.Request) -> web.Response:
         return web.json_response({'sessions': await self.sessions.list_archived_sessions()})

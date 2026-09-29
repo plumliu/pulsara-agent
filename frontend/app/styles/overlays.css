@@ -63,3 +63,12 @@
 @keyframes file-preview-in { from { opacity: 0; transform: translateY(6px) scale(.99); } to { opacity: 1; transform: none; } }
 @media (max-width: 640px) { .file-preview-dialog { width: calc(100vw - 12px); height: calc(100dvh - 20px); border-radius: 12px; } .file-preview-header { padding: 10px; gap: 6px; } .file-preview-header nav { gap: 0; } .file-preview-title small { max-width: 40vw; } .file-preview-page-position { display: none; } .file-preview-pagebar { flex-wrap: wrap; } }
 @media (prefers-reduced-motion: reduce) { .file-preview-dialog[open] { animation: none; } }
+
+.session-rename-dialog { width: min(440px, calc(100vw - 32px)); }
+.memory-delete-dialog.session-rename-dialog > header { display: flex; align-items: center; gap: 10px; border-bottom: 0; padding: 12px 20px 4px; }
+.session-rename-dialog > header h2 { flex: 1; margin: 0; font-size: var(--type-body); }
+.session-rename-dialog .memory-delete-body { padding: 6px 20px 12px; }
+.session-rename-dialog input { width: 100%; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; }
+.session-rename-dialog form > footer { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 20px; border-top: 1px solid var(--line); }
+.session-rename-dialog footer button { padding: 7px 14px; border-radius: 8px; background: var(--paper-deep); }
+.session-rename-dialog footer .session-rename-save { background: var(--ink); color: var(--paper); }

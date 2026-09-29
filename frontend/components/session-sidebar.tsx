@@ -1,4 +1,4 @@
-import { Archive, ChevronRight, Ellipsis, Eye, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
+import { Archive, ChevronRight, Ellipsis, Pencil, Eye, Folder, FolderOpen, LoaderCircle, Plus, Search, SquarePen, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { RuntimeStatus, SessionSummary, SessionWorkspaceSelection, Workspace } from '../lib/pulsara-types';
 import { BrandMark } from './brand-mark';
@@ -28,6 +28,7 @@ interface SessionSidebarProps {
   onSelectSession: (id: string) => void;
   onDeleteSession: (session: SessionSummary) => void;
   onArchiveSession: (session: SessionSummary) => void;
+  onRenameSession: (session: SessionSummary) => void;
   onRefreshSessions: () => void;
   onNewSession: () => void;
   onCreateSession: (selection: SessionWorkspaceSelection) => Promise<boolean>;
@@ -83,6 +84,7 @@ function SessionItem({
   onSelectSession,
   onDeleteSession,
   onArchiveSession,
+  onRenameSession,
   onRefreshSessions,
 }: {
   session: SessionSummary;
@@ -91,6 +93,7 @@ function SessionItem({
   onSelectSession: (id: string) => void;
   onDeleteSession: (session: SessionSummary) => void;
   onArchiveSession: (session: SessionSummary) => void;
+  onRenameSession: (session: SessionSummary) => void;
   onRefreshSessions: () => void;
 }) {
   const presence = getSessionPresence(session, activeSessionId);
@@ -111,6 +114,11 @@ function SessionItem({
     <details className="session-row__menu" onToggle={event => { if (event.currentTarget.open) onRefreshSessions(); }}>
       <summary aria-label={`${session.title} 更多操作`}><Ellipsis size={15} /></summary>
       <div className="session-row__menu-actions">
+      <button type="button" onClick={event => {
+        const menu = event.currentTarget.closest('details');
+        menu?.removeAttribute('open'); menu?.querySelector('summary')?.focus();
+        onRenameSession(session);
+      }}><Pencil size={13} />重命名</button>
       <button type="button" disabled={!session.canArchive} title={session.canArchive ? undefined : '会话仍有任务或待处理事项，暂时无法归档'} onClick={event => {
         event.currentTarget.closest('details')?.removeAttribute('open');
         onArchiveSession(session);
@@ -137,6 +145,7 @@ export function SessionSidebar({
   onSelectSession,
   onDeleteSession,
   onArchiveSession,
+  onRenameSession,
   onRefreshSessions,
   onNewSession,
   onCreateSession,
@@ -314,7 +323,7 @@ export function SessionSidebar({
                                 activeSessionId={activeSessionId}
                                 opening={openingSessionId === session.id}
                                 onSelectSession={onSelectSession}
-                                onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRefreshSessions={onRefreshSessions}
+                                onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRenameSession={onRenameSession} onRefreshSessions={onRefreshSessions}
                               />
                             ))}
                           </div>
@@ -348,7 +357,7 @@ export function SessionSidebar({
                       activeSessionId={activeSessionId}
                       opening={openingSessionId === session.id}
                       onSelectSession={onSelectSession}
-                      onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRefreshSessions={onRefreshSessions}
+                      onDeleteSession={onDeleteSession} onArchiveSession={onArchiveSession} onRenameSession={onRenameSession} onRefreshSessions={onRefreshSessions}
                     />
                   ))}
                 </div>

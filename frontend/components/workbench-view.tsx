@@ -141,6 +141,7 @@ interface WorkbenchViewProps {
   onStop: () => void;
   onCompact: () => Promise<void>;
   onReopenRuntime: () => void;
+  onRenameSession: () => void;
   runtimeReopenBusy: boolean;
   onReadInteraction: (
     interaction: RuntimeInteractionSummary,
@@ -1619,6 +1620,7 @@ export function WorkbenchView({
   onStop,
   onCompact,
   onReopenRuntime,
+  onRenameSession,
   runtimeReopenBusy,
   onReadInteraction,
   onResolveInteraction,
@@ -2199,6 +2201,9 @@ export function WorkbenchView({
               {runtimeReopenBusy ? <LoaderCircle size={15} className="session-actions__busy" /> : <MoreHorizontal size={16} />}
             </button>
             {sessionActionsOpen && <div className="menu-popover session-actions-menu" aria-label="会话操作">
+              <button type="button" onClick={() => { setSessionActionsOpen(false); sessionActionsTriggerRef.current?.focus(); onRenameSession(); }}>
+                <Pencil size={15} /><span><strong>重命名</strong></span>
+              </button>
               <button type="button" onClick={() => { setSessionActionsOpen(false); onReopenRuntime(); }}>
                 <RotateCcw size={15} />
                 <span><strong>重新载入当前会话运行时</strong><small>仅作用于当前会话；空闲时从已保存记录重建</small></span>

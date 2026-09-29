@@ -487,6 +487,10 @@ class FakeConnection implements RuntimeConnection {
 }
 
 class FakeAdapter implements RuntimeAdapter {
+  renameSession = vi.fn(async (sessionId: string, title: string) => {
+    this.sessions = this.sessions.map(item => item.id === sessionId ? { ...item, title } : item);
+    return { session_id: sessionId, title };
+  });
   archived: SessionSummary[] = [];
   listArchivedSessions = vi.fn(async () => this.archived);
   archiveSession = vi.fn(async (sessionId: string) => {
@@ -4724,4 +4728,22 @@ it.each([false, true])('PR05 later unknown command recovers independently of old
   await act(async () => active.emit({...next, eventSequence: 9, liveControlRevision: 9}));
   expect(queries.get(firstCommand!)).toBe(oldQueries); // Ended old intent is retired.
   expect(nextAllow.hasAttribute('disabled')).toBe(true); // Accepted is never re-enabled by an empty read.
+});
+
+
+it.each(['sidebar', 'topbar'])('renames the session from %s and updates shared title displays', async (entry) => {
+  const adapter = new FakeAdapter();
+  render(<PulsaraApp adapter={adapter} />);
+  await screen.findByLabelText(`${initialSession.title} 更多操作`);
+  if (entry === 'sidebar') fireEvent.click(screen.getByLabelText(`${initialSession.title} 更多操作`));
+  else fireEvent.click(await screen.findByRole('button', { name: '更多会话操作' }));
+  const buttons = screen.getAllByRole('button', { name: '重命名' });
+  fireEvent.click(buttons.at(-1)!);
+  const dialog = await screen.findByRole('dialog', { name: '重命名会话' });
+  fireEvent.change(within(dialog).getByLabelText('会话标题'), { target: { value: '新的会话标题' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '重命名会话' })).toBeNull());
+  expect(adapter.renameSession).toHaveBeenCalledExactlyOnceWith(initialSession.id, '新的会话标题');
+  expect(screen.getByLabelText('新的会话标题 更多操作')).toBeTruthy();
+  expect(screen.getByRole('heading', { name: '新的会话标题' })).toBeTruthy();
 });

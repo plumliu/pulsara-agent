@@ -4,7 +4,7 @@
 
 ## 产品与 schema
 
-- `sessions.lifecycle` 硬切为 `OPEN / ARCHIVED`，无 CLOSED、归档布尔字段或兼容读取。表数不变，不新增事件、任务、回执或墓碑。归档时间使用该次状态转换写入的 `updated_at`，归档中不接纳执行写入。
+- `sessions.lifecycle` 硬切为 `OPEN / ARCHIVED`，无 CLOSED、归档布尔字段或兼容读取。表数不变，不新增事件、任务、回执或墓碑。归档时间使用该次状态转换写入的 `updated_at`，归档中不接纳执行写入。独立展示元数据允许按《会话标题修改》规格改名；只更新 title，不修改 lifecycle 或作为归档时间的 updated_at。
 - 普通运行时关闭和 CLI 退出只释放运行时，保持 OPEN；移除 `close_conversation` 参数、canonical close 升级及旧强制结束会话分支。`POST /api/sessions/{id}/close` 仅接受空对象，仍可停止运行时。
 - 仅 idle 可归档；不存在运行中 turn、待消费输入、未结算工具 attempt、未结束子任务、ACTIVE plan workflow 或 OPEN plan interaction。已加载 Host 还须通过现有安全重载的进程内空闲门禁，且没有运行中的后台进程、监控或待交付终端观察。归档不替用户取消工作。
 - 冷会话只检查 canonical idle 和 writer；不为归档启动 Host、模型或 MCP。其他有效 writer 拒绝；过期 writer 遵循已有冷删除的有限权限边界，不声称停止不可观察的远端进程。有遗留待处理工作时拒绝，需先打开并处理。

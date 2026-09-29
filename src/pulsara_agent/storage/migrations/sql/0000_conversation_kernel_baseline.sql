@@ -52,6 +52,7 @@ CREATE TABLE pulsara_v3.sessions (
     latest_prompt_queue_sequence bigint NOT NULL DEFAULT 0 CHECK (latest_prompt_queue_sequence >= 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    title text CHECK (title IS NULL OR btrim(title) <> ''),
     UNIQUE (id, workspace_id),
     CHECK ((writer_lease_owner_id IS NULL) = (writer_lease_expires_at IS NULL)),
     CHECK (

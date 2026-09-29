@@ -58,6 +58,8 @@ epoch。
 
 Kernel 当前支持：
 
+- 会话侧栏和顶部菜单均支持「重命名」，标题持久保存；归档与取消归档保留标题，改名不改变归档时间或会话活动排序；
+
 - 从已结算最终回复发起[会话分叉](PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md)：
   把分叉点当时的有效摘要与保留历史复制到独立、空闲的新会话，不重跑原来的执行。
   保留该点的历史模型选择；文件与当前 advisory memory 仍共享同一 workspace/domain；

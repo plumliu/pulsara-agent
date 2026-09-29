@@ -332,6 +332,7 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onSend: vi.fn(async () => true),
     onStop: vi.fn(),
     onCompact: vi.fn(async () => undefined),
+    onRenameSession: vi.fn(),
     onReopenRuntime: vi.fn(),
     runtimeReopenBusy: false,
     onReadInteraction: vi.fn(),

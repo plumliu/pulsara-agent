@@ -366,6 +366,7 @@ class KernelSessionSummary:
     writer_generation: int
     latest_entry_sequence: int
     updated_at: datetime
+    title: str | None = None
     model_call_binding: ModelCallBinding | None = None
     subagent_task_total: int = 0
     subagent_task_active: int = 0
@@ -379,6 +380,7 @@ class KernelSessionSummary:
     def to_dict(self) -> dict[str, object]:
         return {
             "runtime_session_id": self.session_id,
+            "title": self.title,
             "workspace_id": self.workspace_id,
             "workspace_kind": self.workspace_kind,
             "workspace_root": self.workspace_root,
@@ -7044,7 +7046,7 @@ def _list_resumable_session_rows(
     ) as connection:
         return connection.execute(
             """
-            SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
+            SELECT s.id, s.title, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
                    CASE WHEN s.lifecycle='ARCHIVED' THEN s.updated_at ELSE GREATEST(s.created_at, (
@@ -7093,7 +7095,7 @@ def _list_resumable_session_rows_across_workspaces(
     ) as connection:
         return connection.execute(
             """
-            SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
+            SELECT s.id, s.title, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
                    CASE WHEN s.lifecycle='ARCHIVED' THEN s.updated_at ELSE GREATEST(s.created_at, (
@@ -7142,7 +7144,7 @@ def _read_resumable_session_row(
     ) as connection:
         return connection.execute(
             """
-            SELECT s.id, s.workspace_id, w.workspace_kind, w.workspace_root,
+            SELECT s.id, s.title, s.workspace_id, w.workspace_kind, w.workspace_root,
                    w.workspace_label, s.memory_domain_id, s.lifecycle,
                    s.writer_generation, s.latest_entry_sequence,
                    CASE WHEN s.lifecycle='ARCHIVED' THEN s.updated_at ELSE GREATEST(s.created_at, (SELECT e.accepted_at
@@ -7173,6 +7175,7 @@ def _read_resumable_session_row(
 def _kernel_session_summary(row) -> KernelSessionSummary:
     return KernelSessionSummary(
         session_id=str(row["id"]),
+        title=row["title"],
         workspace_id=str(row["workspace_id"]),
         workspace_kind=str(row["workspace_kind"]),
         workspace_root=str(row["workspace_root"]),
@@ -7831,6 +7834,14 @@ class KernelHostCore:
             self._canonical_deadline(),
         )
         return [_kernel_session_summary(row) for row in rows]
+
+    async def rename_session(self, session_id: str, *, memory_domain_id: str, title: str) -> str:
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.rename_session, session_id=session_id,
+            memory_domain_id=memory_domain_id, title=title,
+            deadline_monotonic=self._canonical_deadline(),
+        )
 
     async def read_resumable_session(
         self,

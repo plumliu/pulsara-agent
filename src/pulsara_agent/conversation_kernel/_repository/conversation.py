@@ -138,6 +138,30 @@ def _manual_compaction_turn_matches(
 
 
 class _ConversationOperations:
+    def rename_session(
+        self, *, session_id: str, memory_domain_id: str, title: str,
+        deadline_monotonic: float,
+    ) -> str:
+        # Display metadata is independent of the execution writer and lifecycle.
+        # UPDATE takes the same row lock as archive/delete, without touching their
+        # timestamps (updated_at is the archive time while archived).
+        if not isinstance(title, str):
+            raise ValueError("title must be text")
+        title = title.strip()
+        if not title or any(ord(char) < 32 or 127 <= ord(char) <= 159 or char in "\u2028\u2029" for char in title):
+            raise ValueError("title must be non-empty single-line text without control characters")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                "UPDATE pulsara_v3.sessions SET title=%s WHERE id=%s AND memory_domain_id=%s RETURNING title",
+                (title, session_id, memory_domain_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(session_id)
+            return row[0]
+
     def read_turn_model_call_binding(
         self,
         guard: HostWriterGuard,

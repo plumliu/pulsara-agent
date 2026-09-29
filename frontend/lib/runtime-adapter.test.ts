@@ -2799,3 +2799,20 @@ describe('annotation source history ownership', () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
+
+it('does not let a pre-rename session list response overwrite a confirmed title', async () => {
+  let deliverOld!: (response: Response) => void;
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => new Promise<Response>(resolve => { deliverOld = resolve; }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ session_id: 'session:one', title: 'new title' })))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ sessions: [{ id: 'session:one', title: 'new title' }] })));
+  vi.stubGlobal('fetch', fetchMock);
+  const adapter = new LocalHttpRuntimeAdapter();
+  const pending = adapter.listSessions();
+  await adapter.renameSession('session:one', 'new title');
+  deliverOld(new Response(JSON.stringify({ sessions: [{ id: 'session:one', title: 'old title' }] })));
+  expect((await pending)[0].title).toBe('new title');
+  expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/sessions/session%3Aone/title', expect.objectContaining({
+    method: 'PUT', body: JSON.stringify({ title: 'new title' }),
+  }));
+});

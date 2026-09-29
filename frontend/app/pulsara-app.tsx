@@ -12,6 +12,7 @@ import { CommandPalette, NewSessionDialog, ToastStack } from '../components/over
 import { OverviewView } from '../components/overview-view';
 import { SessionSidebar } from '../components/session-sidebar';
 import { SessionOpeningView } from '../components/session-opening-view';
+import { SessionRenameDialog } from '../components/session-rename-dialog';
 import { SessionDeletionDialog } from '../components/session-deletion-dialog';
 import { SettingsView, type SettingsSection } from '../components/settings-view';
 import { WorkbenchView } from '../components/workbench-view';
@@ -184,6 +185,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
   const [sessionRevision, setSessionRevision] = useState(0);
   const archivingSession = useRef<string | undefined>(undefined);
+  const [renameTarget, setRenameTarget] = useState<SessionSummary>();
   const [deleteTarget, setDeleteTarget] = useState<SessionSummary>();
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string>();
@@ -2381,6 +2383,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onSelectSession={openSession}
           onDeleteSession={session => { setDeleteTarget(session); setDeleteError(undefined); }}
           onArchiveSession={session => void archiveSession(session)}
+          onRenameSession={setRenameTarget}
           onRefreshSessions={() => { void adapter.listSessions().then(setSessionList).catch(() => {}); }}
           onNewSession={openNewSession}
           onCreateSession={createSession}
@@ -2474,6 +2477,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onStop={() => void stopRun()}
           onCompact={compact}
           onReopenRuntime={() => void reopenRuntime()}
+          onRenameSession={() => setRenameTarget(activeSession)}
           runtimeReopenBusy={runtimeReopenBusy}
           onReadInteraction={readInteraction}
           onResolveInteraction={resolveInteraction}
@@ -2653,6 +2657,13 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
         toasts={toasts}
         onDismiss={(id) => setToasts((current) => current.filter((toast) => toast.id !== id))}
       />
+      {renameTarget && <SessionRenameDialog key={renameTarget.id} session={renameTarget}
+        onClose={() => setRenameTarget(undefined)} onSave={async title => {
+          const result = await adapter.renameSession(renameTarget.id, title);
+          if (result.session_id !== renameTarget.id || result.title !== title) throw new Error('未能确认保存结果，请刷新确认或重试。');
+          setSessionList(current => current.map(item => item.id === result.session_id ? { ...item, title: result.title } : item));
+          setSessionRevision(value => value + 1);
+        }} />}
       {deleteTarget && <SessionDeletionDialog session={deleteTarget} busy={deleteBusy} error={deleteError}
         onConfirm={() => void confirmSessionDelete()} onClose={() => { if (!deleteBusy) setDeleteTarget(undefined); }} />}
     </main>

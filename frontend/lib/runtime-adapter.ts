@@ -511,6 +511,7 @@ export interface RuntimeAdapter {
   forkConversation(sessionId: string, anchorEntryId: string): Promise<ForkOutcome>;
   deleteSession(sessionId: string): Promise<{ status: 'DELETED' | 'ABSENT'; session_id: string }>;
   listArchivedSessions(): Promise<SessionSummary[]>;
+  renameSession(sessionId: string, title: string): Promise<{ session_id: string; title: string }>;
   archiveSession(sessionId: string): Promise<{ status: 'ARCHIVED'; session_id: string }>;
   unarchiveSession(sessionId: string): Promise<{ status: 'OPEN'; session_id: string }>;
   readSession(sessionId: string): Promise<SessionSummary | null>;
@@ -1273,6 +1274,7 @@ function resolveBrowserInstanceId(): string {
 }
 
 export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
+  private sessionTitleRevision = 0;
   readonly memory = new LocalMemoryApi();
   private readonly browserInstanceId: string;
 
@@ -1405,8 +1407,12 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async listSessions(): Promise<SessionSummary[]> {
-    const payload = await apiRequest<{ sessions: Array<Record<string, unknown>> }>('/api/sessions');
-    return payload.sessions.map(projectSessionSummary);
+    // A response started before a confirmed rename must not undo its display.
+    for (;;) {
+      const revision = this.sessionTitleRevision;
+      const payload = await apiRequest<{ sessions: Array<Record<string, unknown>> }>('/api/sessions');
+      if (revision === this.sessionTitleRevision) return payload.sessions.map(projectSessionSummary);
+    }
   }
 
   async reopenRuntime(sessionId: string): Promise<{
@@ -1912,6 +1918,14 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   async listArchivedSessions(): Promise<SessionSummary[]> {
     const result = await apiRequest<{ sessions: Record<string, unknown>[] }>('/api/sessions/archived');
     return result.sessions.map(projectSessionSummary);
+  }
+
+  async renameSession(sessionId: string, title: string): Promise<{ session_id: string; title: string }> {
+    const result = await apiRequest<{ session_id: string; title: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+      method: 'PUT', body: JSON.stringify({ title }),
+    });
+    this.sessionTitleRevision += 1;
+    return result;
   }
 
   async archiveSession(sessionId: string): Promise<{ status: 'ARCHIVED'; session_id: string }> {

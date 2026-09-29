@@ -60,6 +60,9 @@ runtime-write admission epoch.
 
 The current Kernel supports:
 
+- persistent session renaming from the sidebar and conversation header menus;
+  titles survive archive/restore without changing activity or archive timestamps;
+
 - [Conversation Fork](PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md)
   from settled final replies: copy the anchor's effective snapshot and retained
   history into an independent, idle conversation without replaying execution.
