@@ -68,6 +68,12 @@ class ToolArtifactRecordView:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolArtifactBodyView:
+    record: ToolArtifactRecordView
+    content: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class ToolArtifactTextSliceView:
     record: ToolArtifactRecordView
     text: str
@@ -85,10 +91,13 @@ class ToolArtifactReadPort(Protocol):
         self, artifact_id: str, *, offset_chars: int, max_chars: int
     ) -> ToolArtifactTextSliceView: ...
 
+    def read_body(self, artifact_id: str) -> ToolArtifactBodyView: ...
+
 
 __all__ = [
     "ArtifactContentError",
     "ToolArtifactMode",
+    "ToolArtifactBodyView",
     "ToolArtifactReadPort",
     "ToolArtifactRecordView",
     "ToolArtifactTextSliceView",

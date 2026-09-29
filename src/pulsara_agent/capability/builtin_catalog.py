@@ -91,6 +91,7 @@ class BuiltinToolLongHorizonPolicyKind(StrEnum):
 _LONG_HORIZON_POLICY_KIND_BY_NAME = {
     "manage_capability": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
     "artifact_read": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
+    "artifact_export": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
     "ask_plan_question": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
     "create_agent_tasks": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
     "edit_file": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
@@ -595,7 +596,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         name="artifact_read",
         description=(
             "Read retained text from a previous tool result when that result "
-            "explicitly provides an artifact_id. This reads the saved output as it "
+            "explicitly provides an artifact_id. Prefer this paged read by default; "
+            "stop once you have enough information. This reads the saved output as it "
             "was recorded; it does not rerun the original tool or fetch fresh remote "
             "data. Copy the handle exactly and never invent or probe artifact IDs. "
             "Each call returns one content page together with its size and source "
@@ -607,7 +609,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "says the artifact is unavailable or supplies no artifact_id, omitted text "
             "cannot be recovered through this tool; do not automatically rerun the "
             "original operation. Handles are readable only in the conversation and "
-            "project where they were produced."
+            "project where they were produced. When repeated paging would be cumbersome "
+            "or complex extraction, aggregation or scripts are needed, use "
+            "artifact_export when available, then "
+            "file tools or terminal. You do not need to read a page before exporting."
         ),
         input_schema=object_schema(
             properties={
@@ -650,6 +655,51 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_read_only=True,
         is_concurrency_safe=True,
         permission_category="artifact_read",
+        artifact_mode=ToolArtifactMode.NEVER,
+    ),
+    "artifact_export": _descriptor(
+        name="artifact_export",
+        description=(
+            "Create a new local file containing the exact retained UTF-8 body of a "
+            "previous tool-result artifact. Prefer artifact_read pagination by default; "
+            "export when repeated paging would be cumbersome or complex extraction, "
+            "aggregation or scripts are needed. A prior page read is not required. "
+            "For terminal artifacts the file contains "
+            "the command output text itself, not the terminal JSON response wrapper "
+            "with an output field. Inspect the saved body before choosing a parser. "
+            "Copy artifact_id exactly; never invent "
+            "or probe handles. Handles are scoped to the conversation and project "
+            "where they were produced. Relative paths start at the workspace root; "
+            "absolute paths and ~ require the current file-write permission. Missing "
+            "parent directories are created. Existing paths are never overwritten. "
+            "Use the returned absolute path with file tools or terminal for searches, "
+            "filters, aggregation, or scripts. For a small direct excerpt, use "
+            "artifact_read instead. Export preserves saved source coverage: "
+            "RETAINED_SNAPSHOT is only the retained part, and COMPLETE covers the "
+            "original observation, which may itself be an incremental range. This "
+            "does not rerun the original tool or recover output never retained. "
+            "The exported copy is an ordinary local file, remains until explicitly "
+            "deleted, and is not automatically removed with its conversation."
+        ),
+        input_schema=object_schema(
+            properties={
+                "artifact_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Exact artifact_id from a previous tool result; not a file path, blob ID, or tool-call ID.",
+                },
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "New file to create. Relative to the workspace, or an allowed absolute/~ path. Existing paths are never overwritten.",
+                },
+            },
+            required=["artifact_id", "path"],
+        ),
+        is_read_only=False,
+        is_concurrency_safe=False,
+        permission_category="filesystem_write",
+        is_destructive=True,
         artifact_mode=ToolArtifactMode.NEVER,
     ),
     "list_mcp_servers": _descriptor(
@@ -2144,6 +2194,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
 class BuiltinToolBindingKind(StrEnum):
     FILESYSTEM = "filesystem"
     ARTIFACT_READ = "artifact_read"
+    ARTIFACT_EXPORT = "artifact_export"
     MEMORY_MUTATION = "memory_mutation"
     MEMORY_RECALL = "memory_recall"
     MEMORY_QUERY = "memory_query"
@@ -2413,9 +2464,10 @@ def _catalog_shape(name: str):
         ToolInvocationOwnerKind.HOST_MAIN_RUN,
         ToolInvocationOwnerKind.SUBAGENT_CHILD,
     )
-    if name == "artifact_read":
+    if name in {"artifact_read", "artifact_export"}:
         return (
-            BuiltinToolBindingKind.ARTIFACT_READ,
+            BuiltinToolBindingKind.ARTIFACT_READ
+            if name == "artifact_read" else BuiltinToolBindingKind.ARTIFACT_EXPORT,
             BuiltinToolAvailabilityKind.REQUIRES_ARTIFACT_READ_PORT,
             both,
             "artifact",
@@ -2577,7 +2629,7 @@ def _permission_contract(
 def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
     if name in {"terminal", "terminal_monitor", "terminal_process"}:
         severity = "terminal"
-    elif name in {"edit_file", "write_file"}:
+    elif name in {"edit_file", "write_file", "artifact_export"}:
         severity = "bounded_write"
     elif name in {
         "artifact_read",

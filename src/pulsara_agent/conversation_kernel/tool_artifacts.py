@@ -19,6 +19,7 @@ from pulsara_agent.conversation_kernel.contracts import BlobContent, InlineConte
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 from pulsara_agent.ports.artifact import (
     ArtifactContentError,
+    ToolArtifactBodyView,
     ToolArtifactRecordView,
     ToolArtifactTextSliceView,
     ToolOutputArtifactDisposition,
@@ -127,14 +128,16 @@ class ToolOutputArtifactProcessor:
         result_entry_id: str,
         public_output: str,
         candidate: ToolOutputArtifactCandidate | None,
-        artifact_source_read: bool,
+        artifact_inline_result: bool,
         deadline_monotonic: float,
     ) -> PreparedToolOutputProjection:
         if not workspace_id or not result_entry_id:
             raise ValueError("tool output artifact identity is incomplete")
         public_output.encode("utf-8")
-        if artifact_source_read and candidate is not None:
-            raise ValueError("artifact_read cannot recursively publish an artifact")
+        if artifact_inline_result and candidate is not None:
+            raise ValueError(
+                "artifact inline results cannot recursively publish an artifact"
+            )
         primary = candidate or ToolOutputArtifactCandidate(
             role="OUTPUT",
             text=public_output,
@@ -145,7 +148,7 @@ class ToolOutputArtifactProcessor:
         artifact_id: str | None = None
         blob: BlobContent | None = None
         unavailable_reason: ToolOutputArtifactUnavailabilityReason | None = None
-        needs_artifact = not artifact_source_read and (
+        needs_artifact = not artifact_inline_result and (
             primary.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
             or len(body) > ARTIFACT_ARCHIVE_THRESHOLD_BYTES
         )
@@ -174,7 +177,7 @@ class ToolOutputArtifactProcessor:
         display = _build_final_preview(
             public_output=public_output,
             candidate=primary,
-            artifact_source_read=artifact_source_read,
+            artifact_inline_result=artifact_inline_result,
             artifact_disposition=disposition,
             artifact_id=artifact_id,
             artifact_unavailability_reason=unavailable_reason,
@@ -281,7 +284,7 @@ def _build_final_preview(
     *,
     public_output: str,
     candidate: ToolOutputArtifactCandidate,
-    artifact_source_read: bool,
+    artifact_inline_result: bool,
     artifact_disposition: ToolOutputArtifactDisposition,
     artifact_id: str | None,
     artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None,
@@ -289,13 +292,12 @@ def _build_final_preview(
     envelope = _preview_envelope(public_output, candidate)
     candidate_utf8_bytes = len(candidate.text.encode("utf-8"))
     prefer_complete = (
-        candidate_utf8_bytes
-        <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+        candidate_utf8_bytes <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
     )
     if prefer_complete:
         complete_body = candidate.text + _complete_footer(
             candidate=candidate,
-            artifact_source_read=artifact_source_read,
+            artifact_inline_result=artifact_inline_result,
             disposition=artifact_disposition,
             artifact_id=artifact_id,
             unavailable_reason=artifact_unavailability_reason,
@@ -309,14 +311,14 @@ def _build_final_preview(
                 0,
                 0,
             )
-        if artifact_source_read:
+        if artifact_inline_result:
             raise ValueError(
-                "artifact_read response exceeds its non-recursive inline bound"
+                "artifact inline response exceeds its non-recursive inline bound"
             )
 
-    if artifact_source_read:
+    if artifact_inline_result:
         raise ValueError(
-            "artifact_read response exceeds the provider logical FULL bound"
+            "artifact inline response exceeds the provider logical FULL bound"
         )
 
     maximum_visible = min(HEAD_TAIL_PREVIEW_CHARS, len(candidate.text))
@@ -383,22 +385,25 @@ def _render_envelope(envelope: dict[str, object] | None, body: str) -> bytes:
 def _complete_footer(
     *,
     candidate: ToolOutputArtifactCandidate,
-    artifact_source_read: bool,
+    artifact_inline_result: bool,
     disposition: ToolOutputArtifactDisposition,
     artifact_id: str | None,
     unavailable_reason: ToolOutputArtifactUnavailabilityReason | None,
 ) -> str:
-    if artifact_source_read:
+    if artifact_inline_result:
         return ""
     parts: list[str] = []
     if artifact_id is not None:
         parts.append(
             "\n\n[TOOL OUTPUT ARTIFACT: full retained output is available as "
             f"artifact_id={artifact_id}. If an exact reread is necessary for "
-            "the current task, read the retained artifact with artifact_read("
+            "the current task, prefer pagination with artifact_read("
             f'{{"artifact_id":"{artifact_id}","offset_chars":0,'
             '"max_chars":20000}); otherwise continue from the complete visible '
-            "result without opening the artifact.]"
+            "result without opening the artifact. When repeated paging would be cumbersome "
+            "or complex extraction, aggregation or scripts are needed, use "
+            "artifact_export when available to create a local file "
+            "and process it with file tools or terminal.]"
         )
     elif disposition is ToolOutputArtifactDisposition.UNAVAILABLE:
         reason = (
@@ -453,11 +458,16 @@ def _omission_marker(
         return (
             f"\n\n[OUTPUT TRUNCATED / PREVIEW: omitted {omitted} chars from the middle.\n"
             f"Full retained output: artifact_id={artifact_id}\n"
-            "If the omitted content is necessary for the current task, read the "
+            "Prefer artifact_read pagination when more content is needed. "
+            "For a small needed excerpt, read the "
             f'retained artifact with artifact_read({{"artifact_id":"{artifact_id}",'
             f'"offset_chars":{head},"max_chars":20000}}) '
             "to inspect content after the visible head; otherwise continue from "
-            "the visible result without opening the artifact.]\n\n"
+            "the visible result without opening the artifact. When repeated paging would "
+            "be cumbersome or complex extraction, aggregation or scripts are needed, "
+            "use artifact_export when available to create "
+            "a local file, then use file tools or terminal; no prior page read is "
+            "required.]\n\n"
         )
     reason = (
         "" if unavailable_reason is None else f" reason={unavailable_reason.value}."
@@ -508,11 +518,9 @@ class PostgresToolArtifactReadPort:
     ) -> ToolArtifactTextSliceView:
         if offset_chars < 0 or not 1 <= max_chars <= ARTIFACT_READ_HARD_CHARS:
             raise ValueError("artifact text range is outside the closed bound")
-        row = self._fetch(artifact_id)
-        if row is None:
-            raise KeyError(artifact_id)
-        record = self._record(row)
-        text = self._verified_text(row, record)
+        body = self.read_body(artifact_id)
+        record = body.record
+        text = body.content.decode("utf-8")
         total = len(text)
         value = text[offset_chars : offset_chars + max_chars]
         returned = len(value)
@@ -528,19 +536,27 @@ class PostgresToolArtifactReadPort:
             next_offset_chars=next_offset if has_more else None,
         )
 
+    def read_body(self, artifact_id: str) -> ToolArtifactBodyView:
+        row = self._fetch(artifact_id)
+        if row is None:
+            raise KeyError(artifact_id)
+        record = self._record(row)
+        return ToolArtifactBodyView(record, self._verified_body(row, record))
+
     @staticmethod
-    def _verified_text(
+    def _verified_body(
         row: Mapping[str, object], record: ToolArtifactRecordView
-    ) -> str:
+    ) -> bytes:
         content = bytes(row["body"])
         if len(content) != record.size_bytes or (
             "sha256:" + sha256(content).hexdigest() != record.digest
         ):
             raise ArtifactContentError("artifact_content_integrity_failed")
         try:
-            return content.decode("utf-8")
+            content.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ArtifactContentError("artifact_content_codec_failed") from exc
+        return content
 
     def _fetch(self, artifact_id: str) -> Mapping[str, object] | None:
         if not artifact_id:

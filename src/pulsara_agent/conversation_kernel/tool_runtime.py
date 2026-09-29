@@ -145,7 +145,7 @@ from pulsara_agent.tools.builtins.todo import (
     TodoValidationError,
     parse_todo_replacement,
 )
-from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
+from pulsara_agent.tools.builtins.artifact import ArtifactExportTool, ArtifactReadTool
 from pulsara_agent.conversation_kernel.io import (
     KernelSessionIO,
     PhysicalToolInvocationDisposition,
@@ -748,7 +748,14 @@ class DirectKernelToolPort:
             _DirectMcpCatalogTool("get_mcp_prompt"),
         )
         if artifact_read_port is not None:
-            tools = (*tools, ArtifactReadTool(artifact_read_port))
+            tools = (
+                *tools,
+                ArtifactReadTool(artifact_read_port),
+                ArtifactExportTool(
+                    workspace_root=workspace_root,
+                    artifact_read_port=artifact_read_port,
+                ),
+            )
         self._tools = {tool.name: tool for tool in tools}
         self._authorization_policy = authorization_policy
         self._close_lock = Lock()
@@ -3536,7 +3543,7 @@ class DirectKernelToolPort:
             content=encoded,
             remote_identity=remote_identity,
             output_artifact_candidate=result.output_artifact_candidate,
-            artifact_source_read=result.artifact_source_read,
+            artifact_inline_result=result.artifact_inline_result,
             process_local_settlement=settlement_token,
             physical_timing=(
                 "ON_TIME"
@@ -4079,7 +4086,7 @@ def _execute_tool_call(
     # the physical thread and makes a close timeout explicit; adapters with
     # their own timeouts continue to enforce them inside execute().
     del deadline_monotonic
-    if isinstance(tool, (EditFileTool, WriteFileTool)):
+    if isinstance(tool, (EditFileTool, WriteFileTool, ArtifactExportTool)):
         write_scope = (
             WritePathScope.HOST_LOCAL
             if effective_permission_mode is PermissionMode.BYPASS_PERMISSIONS

@@ -82,7 +82,7 @@ The current Kernel supports:
   SHA-256 revision and records process-local seen lines, `edit_file` applies
   deterministic operations only to that observed revision, and `write_file`
   atomically creates without clobbering; plus `terminal`, `terminal_process`,
-  `terminal_monitor`, and scoped `artifact_read` tools;
+  `terminal_monitor`, and scoped `artifact_read` / `artifact_export` tools;
 - an exact-run, process-local `todo(items=[...])` tool that atomically replaces
   one bounded pending/in-progress/completed snapshot; an empty list clears it,
   ROOT and child runs remain isolated, and Host replacement intentionally starts
@@ -305,6 +305,20 @@ or stop before provider open. Artifact guidance is conditional, canonical
 results are never rewritten for budget, and installed same-epoch messages
 remain append-only. Verification is recorded in
 [`round7_1_provider_visible_tool_result_projection_activation.json`](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json).
+Prefer `artifact_read` pagination for saved output, stopping when sufficient.
+When repeated paging would be cumbersome or complex extraction, aggregation or
+scripts are needed, `artifact_export(artifact_id, path)` creates a
+new UTF-8 file containing the exact retained body, without overwriting any existing
+path. Its successful location and source-coverage response also requires FULL
+delivery. The file can then be processed with existing file or terminal tools;
+terminal artifacts contain command output itself, not the terminal JSON wrapper.
+`COMPLETE` covers the original observation (which can be an incremental range);
+`RETAINED_SNAPSHOT` cannot recover earlier lost output. Export requires ordinary
+file-write permission and produces an ordinary host-local copy: it remains until
+explicitly deleted, including after conversation deletion, and does not retain
+artifact session isolation. Read-only mode retains paged reading. See
+[`PULSARA_ARTIFACT_EXPORT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_ARTIFACT_EXPORT_IMPLEMENTATION_SPEC.zh.md).
+
 Round 9 replaces the old parallel tool/Skill exposure structures with one pure,
 provider-neutral capability registry assembled only from owner-issued Builtin,
 MCP, and aggregate-Skill snapshots. Exact target-aware native preflight occurs

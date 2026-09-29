@@ -88,7 +88,7 @@ class KernelToolResult:
     memory_mutation: PreparedMemoryMutation | None = None
     remote_identity: str | None = None
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
-    artifact_source_read: bool = False
+    artifact_inline_result: bool = False
     process_local_settlement: ProcessLocalEffectSettlementToken | None = None
     physical_timing: str = "ON_TIME"
     caller_cancelled_while_running: bool = False
@@ -112,8 +112,8 @@ class KernelToolResult:
                 raise ValueError("typed image content is invalid for this Tool result")
         else:
             raise TypeError("kernel Tool result content must be bytes or frozen content")
-        if self.artifact_source_read and self.output_artifact_candidate is not None:
-            raise ValueError("artifact_read cannot recursively own an artifact")
+        if self.artifact_inline_result and self.output_artifact_candidate is not None:
+            raise ValueError("artifact inline results cannot recursively own an artifact")
 
 
 class KernelToolPhysicalInvocationError(RuntimeError):

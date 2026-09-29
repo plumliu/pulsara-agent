@@ -261,7 +261,7 @@ def test_round1_preview_threshold_matrix(
         result_entry_id="entry",
         public_output=text,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     assert projection.artifact_disposition is expected_disposition
@@ -306,7 +306,7 @@ def test_round7_1_canonical_complete_uses_candidate_utf8_bytes(
         result_entry_id="entry",
         public_output=text,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     assert projection.candidate_utf8_bytes == len(text.encode("utf-8"))
@@ -334,7 +334,7 @@ def test_round2_cursor_artifact_replaces_only_the_selected_terminal_delta() -> N
         result_entry_id="entry:cursor-delta",
         public_output=public_output,
         candidate=candidate,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     rendered = json.loads(projection.canonical_preview.canonical_bytes)
@@ -350,7 +350,7 @@ def test_round1_archive_bytes_and_display_chars_are_independent() -> None:
         result_entry_id="entry",
         public_output=text,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     assert len(text) < 8_000
@@ -370,7 +370,7 @@ def test_round1_multibyte_preview_and_unavailable_wording_are_exact() -> None:
         result_entry_id="entry",
         public_output=text,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     preview = projection.canonical_preview.canonical_bytes.decode("utf-8")
@@ -390,7 +390,7 @@ def test_round1_multibyte_preview_and_unavailable_wording_are_exact() -> None:
         result_entry_id="entry:complete",
         public_output="x" * 9_000,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     complete_preview = complete.canonical_preview.canonical_bytes.decode()
@@ -438,7 +438,7 @@ def test_round1_blob_ack_unknown_reissues_only_the_exact_candidate() -> None:
         result_entry_id="entry",
         public_output=source,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     assert projection.artifact_disposition is ToolOutputArtifactDisposition.AVAILABLE
@@ -454,7 +454,7 @@ def test_round1_same_body_dedupes_blob_but_not_result_artifact_handle() -> None:
         result_entry_id="entry:one",
         public_output=source,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     second = processor.prepare(
@@ -462,7 +462,7 @@ def test_round1_same_body_dedupes_blob_but_not_result_artifact_handle() -> None:
         result_entry_id="entry:two",
         public_output=source,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     assert first.artifact_blob == second.artifact_blob
@@ -478,7 +478,7 @@ def test_round1_oversized_artifact_keeps_known_output_without_publishing() -> No
         result_entry_id="entry",
         public_output=source,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     assert publisher.calls == []
@@ -512,7 +512,7 @@ def test_round1_retained_snapshot_keeps_both_failure_axes() -> None:
             ensure_ascii=False,
         ),
         candidate=candidate,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     preview = projection.canonical_preview.canonical_bytes.decode()
@@ -550,7 +550,7 @@ def test_round2_sanitizer_unavailable_remains_distinct_from_retention_gap(
             {"status": "success", "output": candidate.text}, ensure_ascii=False
         ),
         candidate=candidate,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
 
@@ -645,7 +645,7 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
         result_entry_id="entry",
         public_output=result.content.decode("utf-8"),
         candidate=candidate,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 10,
     )
     assert publisher.calls == [source.encode("utf-8")]
@@ -655,7 +655,9 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
     assert preview_envelope["cwd"] == str(tmp_path)
     assert preview_envelope["process_id"] == public_envelope["process_id"]
     assert "MIDDLE-SENTINEL" not in preview_envelope["output"]
-    assert "If the omitted content is necessary" in preview_envelope["output"]
+    assert "For a small needed excerpt" in preview_envelope["output"]
+    assert "artifact_export when available" in preview_envelope["output"]
+    assert "no prior page read is required" in preview_envelope["output"]
 
 
 class _ScriptedModel(ScriptedKernelModel):
@@ -823,7 +825,7 @@ def test_round1_blob_before_event_conflict_rolls_back_all_canonical_rows(
         result_entry_id=result_entry_id,
         public_output="x" * 9_000,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 30,
     )
     candidate = build_prepared_tool_result_acceptance(
@@ -1033,7 +1035,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         result_entry_id=result_entry_id,
         public_output=source,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 30,
     )
     memory_id = _name("memory")
@@ -1190,7 +1192,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         )
     )
     assert read_result.status is ToolResultState.SUCCESS
-    assert read_result.artifact_source_read
+    assert read_result.artifact_inline_result
     assert read_result.output_artifact_candidate is None
     response = json.loads(read_result.output)
     assert response["text"] == source[3:10]
@@ -1325,7 +1327,7 @@ def test_round1_retention_gap_and_blob_failure_persist_as_independent_reasons(
             {"status": "success", "output": retained.text}, ensure_ascii=False
         ),
         candidate=retained,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 30,
     )
     candidate = build_prepared_tool_result_acceptance(
@@ -1454,7 +1456,7 @@ def test_round1_retained_snapshot_artifact_offset_zero_is_retained_body_start(
             {"status": "success", "output": retained.text}, ensure_ascii=False
         ),
         candidate=retained,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 30,
     )
     assert projection.artifact_disposition is ToolOutputArtifactDisposition.INCOMPLETE
@@ -1515,7 +1517,7 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
         result_entry_id=result_entry_id,
         public_output="x" * 9_000,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 30,
     )
     candidate = build_prepared_tool_result_acceptance(
@@ -1632,6 +1634,14 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     specs = {item.name: item for item in surface.model_surface.tool_specs}
     bindings = {item.tool_name: item for item in port.executor_bindings}
     assert "artifact_read" in specs
+    assert "artifact_export" in specs
+    export = bindings["artifact_export"].catalog_entry
+    assert export.execution_binding_kind.value == "artifact_export"
+    assert not export.descriptor.is_read_only
+    assert export.descriptor.permission_category == "filesystem_write"
+    export_schema = thaw_json(specs["artifact_export"].parameters)
+    assert export_schema["required"] == ["artifact_id", "path"]
+    assert export_schema["additionalProperties"] is False
     assert set(specs) == set(bindings)
     binding = bindings["artifact_read"]
     entry = binding.catalog_entry
@@ -1664,6 +1674,9 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     )
     hidden_surface = prepare_test_direct_tool_surface(hidden)
     assert "artifact_read" not in {
+        item.name for item in hidden_surface.model_surface.tool_specs
+    }
+    assert "artifact_export" not in {
         item.name for item in hidden_surface.model_surface.tool_specs
     }
     asyncio.run(hidden.aclose())

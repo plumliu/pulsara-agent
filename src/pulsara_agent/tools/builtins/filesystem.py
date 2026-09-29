@@ -22,7 +22,12 @@ from enum import StrEnum
 from pathlib import Path
 from shutil import which
 from typing import Any, Mapping
+from uuid import uuid4
 
+from pulsara_agent.local_source_binding import (
+    open_absolute_directory_nofollow,
+    open_or_create_absolute_directory_nofollow,
+)
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.primitives.tool_observation import (
@@ -188,6 +193,15 @@ class _AtomicTargetExists(FileExistsError):
 
 class _AtomicNoClobberUnavailable(OSError):
     pass
+
+
+class _AtomicFileCreationError(OSError):
+    """A local write failed; publication may already have happened."""
+
+    def __init__(self, cause: Exception, *, published: bool | None) -> None:
+        super().__init__(str(cause))
+        self.published = published
+        self.failure_errno = getattr(cause, "errno", None)
 
 
 _STATES: dict[Path, _WorkspaceFileState] = {}
@@ -881,11 +895,21 @@ class WriteFileTool(WorkspaceTool):
                         "This filesystem cannot provide atomic no-clobber publication.",
                         hint="Choose a supported local filesystem or create the file explicitly outside this tool.",
                     ) from exc
-                verified_bytes = path.read_bytes()
-                if verified_bytes != raw_bytes:
-                    raise RuntimeError(
-                        "post-write verification failed; the file may already be created"
-                    )
+                except _AtomicFileCreationError as exc:
+                    raise _FileApplicationError(
+                        "FILE_PUBLICATION_UNCONFIRMED"
+                        if exc.published is not False
+                        else "FILE_CREATE_FAILED",
+                        (
+                            "The file was published but successful completion could not be confirmed."
+                            if exc.published is True
+                            else "The destination may have been created; completion is uncertain."
+                            if exc.published is None
+                            else "The destination file was not created."
+                        ),
+                        hint="Inspect the requested path before deciding whether to retry.",
+                    ) from exc
+                verified_bytes = raw_bytes
                 state.clear_observation(path)
         except _FileApplicationError as exc:
             return _application_error_result(self, call, path, exc)
@@ -1579,18 +1603,44 @@ def _atomic_replace_bytes(path: Path, content: bytes) -> None:
 
 
 def _atomic_create_bytes(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
+    # Artifact export and write_file share this byte-preserving publication.
+    # Bind the already permission-resolved parent, rather than re-following
+    # mutable path components when creating, linking, verifying or cleaning up.
+    parent_fd: int | None = None
+    fd: int | None = None
+    tmp_name = f".pulsara-{uuid4().hex}.tmp"
+    temporary_created = False
     published = False
+    publication_attempted = False
     try:
-        with os.fdopen(fd, "wb") as handle:
+        parent_fd = open_or_create_absolute_directory_nofollow(path.parent)
+        fd = os.open(
+            tmp_name,
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=parent_fd,
+        )
+        temporary_created = True
+        with os.fdopen(fd, "w+b", closefd=False) as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+            handle.seek(0)
+            if handle.read() != content:
+                raise OSError("written bytes differ from source")
         try:
-            os.link(tmp_name, path)
+            publication_attempted = True
+            os.link(
+                tmp_name,
+                path.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
             published = True
         except FileExistsError as exc:
             raise _AtomicTargetExists(str(path)) from exc
@@ -1603,13 +1653,67 @@ def _atomic_create_bytes(path: Path, content: bytes) -> None:
             if exc.errno in unsupported:
                 raise _AtomicNoClobberUnavailable(str(path)) from exc
             raise
-        _fsync_directory(path.parent)
-    finally:
+        _fsync_directory_fd(parent_fd)
+        # A normal local file may change after this call. At publication time,
+        # both the bound leaf and the returned absolute location must name the
+        # object whose bytes were checked above.
+        actual = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        written = os.fstat(fd)
+        if not stat.S_ISREG(actual.st_mode) or not os.path.samestat(actual, written):
+            raise OSError("published file was replaced")
+        visible_parent = open_absolute_directory_nofollow(path.parent)
         try:
-            os.unlink(tmp_name)
-        except OSError:
-            if not published:
-                pass
+            if not os.path.samestat(os.fstat(visible_parent), os.fstat(parent_fd)):
+                raise OSError("published parent location changed")
+            visible = os.stat(path.name, dir_fd=visible_parent, follow_symlinks=False)
+            if not stat.S_ISREG(visible.st_mode) or not os.path.samestat(
+                visible, written
+            ):
+                raise OSError("published file location changed")
+        finally:
+            os.close(visible_parent)
+    except (_AtomicTargetExists, _AtomicNoClobberUnavailable):
+        raise
+    except Exception as exc:
+        if (
+            publication_attempted
+            and not published
+            and parent_fd is not None
+            and fd is not None
+        ):
+            # The publication syscall may have succeeded before an error was
+            # observed (for example on a mounted filesystem). Inspect the bound
+            # entry rather than equating an exception with no file creation.
+            try:
+                actual = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                published = True if os.path.samestat(actual, os.fstat(fd)) else None
+            except FileNotFoundError:
+                published = False
+            except OSError:
+                published = None
+        raise _AtomicFileCreationError(exc, published=published) from exc
+    finally:
+        close_error: OSError | None = None
+        if parent_fd is not None:
+            if temporary_created:
+                try:
+                    # Only remove our own temporary entry, never a substituted
+                    # entry or the final file after publication.
+                    current = os.stat(tmp_name, dir_fd=parent_fd, follow_symlinks=False)
+                    if fd is not None and os.path.samestat(current, os.fstat(fd)):
+                        os.unlink(tmp_name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+        for descriptor in (parent_fd, fd):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    close_error = close_error or exc
+        if close_error is not None:
+            raise _AtomicFileCreationError(
+                close_error, published=published
+            ) from close_error
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1621,13 +1725,17 @@ def _fsync_directory(path: Path) -> None:
             return
         raise
     try:
-        try:
-            os.fsync(fd)
-        except OSError as exc:
-            if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
-                raise
+        _fsync_directory_fd(fd)
     finally:
         os.close(fd)
+
+
+def _fsync_directory_fd(fd: int) -> None:
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            raise
 
 
 def _unified_diff(before: str, after: str, filename: str) -> str:

@@ -153,7 +153,7 @@ class ToolExecutionResult:
     output: str | FrozenPromptContent
     metadata: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
-    artifact_source_read: bool = False
+    artifact_inline_result: bool = False
     trusted_observation: TrustedToolObservationSupplement | None = None
     model_visible_memory_fact_ids: tuple[str, ...] = ()
 
@@ -177,8 +177,8 @@ class ToolExecutionResult:
                 raise ValueError("typed image output is invalid for this Tool result")
         else:
             raise TypeError("tool output must be text or frozen prompt content")
-        if self.artifact_source_read and self.output_artifact_candidate is not None:
-            raise ValueError("artifact_read results cannot recursively own artifacts")
+        if self.artifact_inline_result and self.output_artifact_candidate is not None:
+            raise ValueError("artifact inline results cannot recursively own artifacts")
         if (
             len(self.model_visible_memory_fact_ids) > 50
             or len(set(self.model_visible_memory_fact_ids))

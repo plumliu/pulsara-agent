@@ -166,7 +166,7 @@ def test_tool_result_preview_is_utf8_safe_and_obeys_final_hard_cap() -> None:
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
             original_utf8_bytes=len(text.encode("utf-8")),
         ),
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=float("inf"),
     )
     assert prepared.display_kind is ToolResultDisplayKind.HEAD_TAIL

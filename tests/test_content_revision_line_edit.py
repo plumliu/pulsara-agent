@@ -851,7 +851,7 @@ def test_write_file_concurrent_create_never_clobbers(tmp_path: Path) -> None:
 def test_write_file_reports_unsupported_atomic_no_clobber(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def unsupported(_source: str, _target: Path) -> None:
+    def unsupported(_source: str, _target: Path, **_binding) -> None:
         raise OSError(errno.EOPNOTSUPP, "unsupported")
 
     monkeypatch.setattr(os, "link", unsupported)

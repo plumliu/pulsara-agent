@@ -77,7 +77,7 @@ Kernel 当前支持：
 - revision 锚定的 filesystem tools：`read_file` 返回原始字节的精确 SHA-256
   revision 并记录 process-local seen lines，`edit_file` 只对该已观察 revision
   执行确定性行操作，`write_file` 以 atomic no-clobber 方式仅创建新文件；以及
-  `terminal`、`terminal_process`、`terminal_monitor` 与 scoped `artifact_read`
+  `terminal`、`terminal_process`、`terminal_monitor` 与 scoped `artifact_read`／`artifact_export`
   tools；
 - exact-run、process-local 的 `todo(items=[...])` 工具：一次原子替换一个
   bounded pending/in_progress/completed snapshot，空list显式清除，ROOT与child
@@ -262,6 +262,15 @@ exact wire plan拥有。FULL不合法时variant可从COMPACT/REF_ONLY/OMITTED开
 boundary停止。Artifact guidance保持conditional，canonical result不因budget被改写，
 same-epoch已安装message仍只允许append suffix。验证证据记录在
 [`round7_1_provider_visible_tool_result_projection_activation.json`](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json)。
+默认优先 `artifact_read` 分页补读，信息足够即停止；反复分页繁琐或需要复杂提取、聚合、脚本时可调用
+`artifact_export(artifact_id, path)`，原样创建 UTF-8 文件，再用现有文件或终端工具处理。
+导出不覆盖已有目标，成功返回的绝对路径和来源覆盖必须完整交付。终端 artifact
+导出的是命令输出正文，不包含终端响应的 JSON 外壳。`COMPLETE` 只覆盖原调用的观察
+范围（可能是增量区间），`RETAINED_SNAPSHOT` 不能找回已丢失部分。导出沿用文件写权限，
+产生普通本地副本，不再具有 artifact 会话隔离；副本在会话删除后仍保留，直到显式删除。
+路径只对同主机文件系统视图有效；只读模式仍可分页补读。详见
+[`PULSARA_ARTIFACT_EXPORT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_ARTIFACT_EXPORT_IMPLEMENTATION_SPEC.zh.md)。
+
 Round 9用一个pure、provider-neutral capability registry替换旧Tool/Skill平行
 exposure结构；registry只能由Builtin、MCP与聚合Skill三个原owner签发的snapshot组装。
 Exact target-aware native preflight先于parent dispatch cut，Tool planner与Skill

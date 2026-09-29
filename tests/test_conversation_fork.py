@@ -584,7 +584,7 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
         result_entry_id=result_id,
         public_output=source,
         candidate=None,
-        artifact_source_read=False,
+        artifact_inline_result=False,
         deadline_monotonic=monotonic() + 30,
     )
     candidate = build_prepared_tool_result_acceptance(

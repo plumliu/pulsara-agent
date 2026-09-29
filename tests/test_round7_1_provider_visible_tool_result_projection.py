@@ -349,12 +349,16 @@ def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result(
     assert tool_result_ids == tuple(call.tool_call_id for call in calls)
 
 
-def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures() -> None:
+@pytest.mark.parametrize("reason", [
+    ToolResultFullDeliveryReason.ARTIFACT_PAGE,
+    ToolResultFullDeliveryReason.ARTIFACT_EXPORT_LOCATION,
+])
+def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(reason) -> None:
     oversized, _body = _body_with_exact_logical_bytes(40_001, seed="中")
     oversized = replace(
         oversized,
         tool_result_delivery=full_required_tool_result_delivery(
-            ToolResultFullDeliveryReason.ARTIFACT_PAGE
+            reason
         ),
     )
     with pytest.raises(StructuredModelInputCompileError) as missing:
@@ -372,7 +376,7 @@ def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures() 
     inlineable = replace(
         inlineable,
         tool_result_delivery=full_required_tool_result_delivery(
-            ToolResultFullDeliveryReason.ARTIFACT_PAGE
+            reason
         ),
     )
     with pytest.raises(StructuredModelInputCompileError) as aggregate:

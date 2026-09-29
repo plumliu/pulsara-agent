@@ -685,7 +685,10 @@ def _compact_tool_result_body(
             + json.dumps(metadata.artifact_id, ensure_ascii=False)
             + ", starting at offset_chars=0. While has_more is true, pass "
             "next_offset_chars as offset_chars to read the next page. If the "
-            "visible result is sufficient, continue without opening the artifact."
+            "visible result is sufficient, continue without opening the artifact. Prefer "
+            "pagination by default; when repeated paging would be cumbersome or "
+            "complex extraction, aggregation or scripts are needed, use artifact_export when "
+            "available, then process the file with file tools or terminal."
             if readable_artifact
             else ""
         )
@@ -766,7 +769,10 @@ def _artifact_reference_body(item: FrozenProviderInputItem) -> str:
         + json.dumps(metadata.artifact_id, ensure_ascii=False)
         + ", starting at offset_chars=0. While has_more is true, pass "
         "next_offset_chars as offset_chars to read the next page. If the visible "
-        "result is sufficient, continue without opening the artifact.\n"
+        "result is sufficient, continue without opening the artifact. Prefer pagination "
+        "by default; when repeated paging would be cumbersome or complex extraction, "
+        "aggregation or scripts are needed, use artifact_export when available, "
+        "then process the file with file tools or terminal.\n"
         "[/PULSARA_TOOL_RESULT_REFERENCE]"
     )
 

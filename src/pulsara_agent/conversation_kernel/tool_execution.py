@@ -2041,7 +2041,7 @@ class ToolBatchExecutor:
             result_entry_id=result_entry_id,
             public_output=acknowledgement.content.decode("utf-8"),
             candidate=None,
-            artifact_source_read=None,
+            artifact_inline_result=False,
             deadline_monotonic=self._canonical_deadline(),
         )
         tool_candidate = build_prepared_tool_result_acceptance(
@@ -2216,7 +2216,7 @@ class ToolBatchExecutor:
             artifact_unavailability_reason = None
             result_text = ""
         elif isinstance(result.content, FrozenPromptContent):
-            if result.output_artifact_candidate is not None or result.artifact_source_read:
+            if result.output_artifact_candidate is not None or result.artifact_inline_result:
                 raise ValueError("image ToolResult cannot enter text artifact handling")
             canonical_prompt = freeze_canonical_prompt(result.content)
             canonical_preview = InlineContent.from_bytes(
@@ -2239,7 +2239,7 @@ class ToolBatchExecutor:
                 result_entry_id=result_entry_id,
                 public_output=result.content.decode("utf-8"),
                 candidate=result.output_artifact_candidate,
-                artifact_source_read=result.artifact_source_read,
+                artifact_inline_result=result.artifact_inline_result,
                 deadline_monotonic=self._canonical_deadline(),
             )
             canonical_preview = prepared_output.canonical_preview

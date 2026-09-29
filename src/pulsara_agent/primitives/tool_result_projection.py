@@ -54,6 +54,7 @@ class ToolResultDeliveryRequirement(StrEnum):
 
 class ToolResultFullDeliveryReason(StrEnum):
     ARTIFACT_PAGE = "ARTIFACT_PAGE"
+    ARTIFACT_EXPORT_LOCATION = "ARTIFACT_EXPORT_LOCATION"
     MCP_DIRECTORY_PAGE = "MCP_DIRECTORY_PAGE"
     MCP_INSPECT_SCHEMA = "MCP_INSPECT_SCHEMA"
     SKILL_ACTIVATION = "SKILL_ACTIVATION"
@@ -128,6 +129,10 @@ def classify_tool_result_delivery(
     if tool_name == "inspect_new_mcp_tool":
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
+        )
+    if tool_name == "artifact_export":
+        return full_required_tool_result_delivery(
+            ToolResultFullDeliveryReason.ARTIFACT_EXPORT_LOCATION
         )
     if tool_name != "artifact_read":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
@@ -284,12 +289,12 @@ def conservative_artifact_page_logical_utf8_bytes(
     body: str,
     model_visible_memory_ids: tuple[str, ...],
 ) -> int:
-    """Quote an artifact page under the largest legal call-local augmentation.
+    """Quote a bounded artifact result under the largest call-local augmentation.
 
     The exact call ID and memory provenance are already frozen by the tool
     invocation. Timing uses its closed maximum. Taking
     the maximum of ordinary and late carriers keeps a cancelled/late exact
-    page representable without changing its canonicalized body.
+    page or export location representable without changing its canonicalized body.
     """
 
     timing = _maximum_artifact_page_timing()

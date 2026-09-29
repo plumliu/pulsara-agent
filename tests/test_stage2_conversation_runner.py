@@ -10274,7 +10274,8 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
     preview = text_part_values(tool_messages[0].content)[0]
     assert len(preview.encode("utf-8")) <= 65_536
     assert "OUTPUT TRUNCATED / PREVIEW" in preview
-    assert "If the omitted content is necessary" in preview
+    assert "For a small needed excerpt" in preview
+    assert "artifact_export when available" in preview
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
