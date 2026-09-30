@@ -22,12 +22,6 @@ from pulsara_agent.capability.descriptor import (
 )
 from pulsara_agent.ports.artifact import ToolArtifactMode
 from pulsara_agent.capability.result_contracts import result_render_contract_for_tool
-from pulsara_agent.capability.tool_action import (
-    fixed_tool_action_policy,
-    terminal_monitor_tool_action_policy,
-    terminal_process_tool_action_policy,
-    terminal_tool_action_policy,
-)
 from pulsara_agent.ports.tool_execution import ToolInvocationOwnerKind
 from pulsara_agent.ports.tool_registry import (
     BuiltinToolBindingContract,
@@ -36,7 +30,6 @@ from pulsara_agent.ports.tool_registry import (
     tool_binding_contract_identity_fingerprint,
 )
 from pulsara_agent.primitives.context import context_fingerprint
-from pulsara_agent.primitives.long_horizon import LongHorizonActionClass
 from pulsara_agent.primitives.todo import (
     MAXIMUM_TODO_CANONICAL_JSON_BYTES,
     MAXIMUM_TODO_ITEMS,
@@ -75,60 +68,6 @@ _VERIFICATION_STATUSES = [
     "stale",
 ]
 
-
-class BuiltinToolLongHorizonPolicyKind(StrEnum):
-    EVIDENCE_HYDRATION = "evidence_hydration"
-    EVIDENCE_ACQUISITION = "evidence_acquisition"
-    SYNTHESIS_MUTATION = "synthesis_mutation"
-    PROCESS_CONTROL = "process_control"
-    SYNCHRONIZATION = "synchronization"
-    USER_INTERACTION = "user_interaction"
-    TERMINAL_COMMAND = "terminal_command"
-    TERMINAL_PROCESS = "terminal_process"
-    TERMINAL_MONITOR = "terminal_monitor"
-
-
-_LONG_HORIZON_POLICY_KIND_BY_NAME = {
-    "manage_capability": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
-    "artifact_read": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "artifact_export": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "ask_plan_question": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
-    "create_agent_tasks": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "edit_file": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "enter_plan": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
-    "exit_plan": BuiltinToolLongHorizonPolicyKind.USER_INTERACTION,
-    "list_agents": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "list_agent_models": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "memory_explain": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "memory_get": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "memory_search": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "get_mcp_prompt": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "list_mcp_prompts": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "list_mcp_resource_templates": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "list_mcp_resources": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "list_mcp_servers": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "inspect_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_HYDRATION,
-    "use_new_mcp_tool": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "read_file": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "view_image": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "visualization_render": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "reload_hooks": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
-    "reload_capabilities": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
-    "read_mcp_resource": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "remember": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "mark_memory_relation": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "report_agent_result": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "search_files": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "spawn_agent": BuiltinToolLongHorizonPolicyKind.EVIDENCE_ACQUISITION,
-    "stop_agent": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
-    "send_agent_message": BuiltinToolLongHorizonPolicyKind.PROCESS_CONTROL,
-    "terminal": BuiltinToolLongHorizonPolicyKind.TERMINAL_COMMAND,
-    "terminal_monitor": BuiltinToolLongHorizonPolicyKind.TERMINAL_MONITOR,
-    "terminal_process": BuiltinToolLongHorizonPolicyKind.TERMINAL_PROCESS,
-    "todo": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-    "wait_agent": BuiltinToolLongHorizonPolicyKind.SYNCHRONIZATION,
-    "write_file": BuiltinToolLongHorizonPolicyKind.SYNTHESIS_MUTATION,
-}
 
 _ACTION_PERMISSION_OVERRIDE_SPECS: dict[str, tuple[tuple[str, str, str, bool], ...]] = {
     "terminal_process": tuple(
@@ -293,7 +232,6 @@ def _descriptor(
     input_schema: dict[str, Any],
     provider_kind: BuiltinToolDomainKind = BuiltinToolDomainKind.BUILTIN,
     is_read_only: bool,
-    is_concurrency_safe: bool,
     permission_category: str,
     artifact_mode: ToolArtifactMode = ToolArtifactMode.DEFAULT,
     is_destructive: bool = False,
@@ -309,43 +247,14 @@ def _descriptor(
         provider_id=provider_kind.value,
         is_model_callable=True,
         is_read_only=is_read_only,
-        is_concurrency_safe=is_concurrency_safe,
         is_destructive=is_destructive,
         is_open_world=is_open_world,
         permission_category=permission_category,
         result_render_contract=result_render_contract_for_tool(name),
-        long_horizon_policy=_long_horizon_policy(name),
         advertise_policy=BuiltinToolAdvertisePolicy.DIRECT,
         artifact_mode=artifact_mode,
         metadata={"source": "explicit_builtin_descriptor"},
     )
-
-
-def _long_horizon_policy(name: str):
-    try:
-        kind = _LONG_HORIZON_POLICY_KIND_BY_NAME[name]
-    except KeyError as exc:
-        raise ValueError(
-            f"builtin tool lacks a catalog-owned Long-Horizon policy: {name}"
-        ) from exc
-    if kind is BuiltinToolLongHorizonPolicyKind.TERMINAL_COMMAND:
-        return terminal_tool_action_policy()
-    observe_actions = tuple(
-        discriminator_value
-        for discriminator_field, discriminator_value, _category, allowed in (
-            _ACTION_PERMISSION_OVERRIDE_SPECS.get(name, ())
-        )
-        if discriminator_field == "action" and allowed
-    )
-    if kind is BuiltinToolLongHorizonPolicyKind.TERMINAL_PROCESS:
-        return terminal_process_tool_action_policy(
-            observe_actions=observe_actions,
-        )
-    if kind is BuiltinToolLongHorizonPolicyKind.TERMINAL_MONITOR:
-        return terminal_monitor_tool_action_policy(
-            observe_actions=observe_actions,
-        )
-    return fixed_tool_action_policy(LongHorizonActionClass(kind.value))
 
 
 _MEMORY_CONTEXT_GUIDE = MEMORY_CONTEXT_PRODUCT_GUIDE
@@ -544,12 +453,15 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_capability": _descriptor(
         name="manage_capability",
         description=(
-            "Manage local MCP connections and Plugins in USER or the current WORKSPACE "
+            "Inspect and manage loose Skills, local MCP connections, Plugins and Hook sources in USER or the current WORKSPACE "
             "scope. Supply non-secret configuration fields, or leave missing values "
             "for the user to complete in the editor. Never request "
             "or include API keys, secret values or tokens. Expected guards may be "
             "omitted for fresh inspection, but must not be guessed. Plugin install "
-            "always starts disabled; enable always requires user review. Main agent only, "
+            "always starts disabled; enable always requires user review. Hook TRUST_HOOK_SOURCE requires "
+            "review of the full current definitions in the user editor; never supply acceptance or a digest. "
+            "Skill source_path and installed skill_path must be absolute; WORKSPACE is the current GUI directory. "
+            "INSPECT_LOOSE_SKILLS and INSPECT_HOOK_SOURCES are read operations; use them to verify current copies and sources. Main agent only, "
             "available in every permission mode. Wait for the result; after RELOADED, "
             "verify with list/inspect without routinely calling reload_capabilities. "
             "APPLIED reports the completed change, not whether a user form appeared: "
@@ -557,7 +469,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         input_schema=capability_management_input_schema(),
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="plugin_control",
         artifact_mode=ToolArtifactMode.NEVER,
     ),
@@ -572,7 +483,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         input_schema=object_schema(properties={}, required=[]),
         is_read_only=True,
-        is_concurrency_safe=False,
         permission_category="plugin_control",
         artifact_mode=ToolArtifactMode.NEVER,
     ),
@@ -588,7 +498,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         input_schema=object_schema(properties={}, required=[]),
         is_read_only=True,
-        is_concurrency_safe=False,
         permission_category="hook_control",
         artifact_mode=ToolArtifactMode.NEVER,
     ),
@@ -653,7 +562,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["artifact_id"],
         ),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="artifact_read",
         artifact_mode=ToolArtifactMode.NEVER,
     ),
@@ -697,7 +605,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["artifact_id", "path"],
         ),
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="filesystem_write",
         is_destructive=True,
         artifact_mode=ToolArtifactMode.NEVER,
@@ -750,7 +657,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=[],
         ),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="mcp_read",
     ),
     "inspect_new_mcp_tool": _descriptor(
@@ -796,7 +702,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["server_id", "tool_name"],
         ),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="mcp_read",
         artifact_mode=ToolArtifactMode.NEVER,
     ),
@@ -841,7 +746,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["tool_ref", "arguments"],
         ),
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="mcp_dynamic",
         artifact_mode=ToolArtifactMode.DEFAULT,
     ),
@@ -857,7 +761,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         input_schema=_mcp_item_list_schema(),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="mcp_read",
     ),
     "list_mcp_resource_templates": _descriptor(
@@ -873,7 +776,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         input_schema=_mcp_item_list_schema(),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="mcp_read",
     ),
     "read_mcp_resource": _descriptor(
@@ -913,7 +815,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["server_id", "uri"],
         ),
         is_read_only=True,
-        is_concurrency_safe=False,
         permission_category="mcp_read",
     ),
     "list_mcp_prompts": _descriptor(
@@ -928,7 +829,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         input_schema=_mcp_item_list_schema(),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="mcp_read",
     ),
     "get_mcp_prompt": _descriptor(
@@ -975,7 +875,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["server_id", "prompt_name"],
         ),
         is_read_only=True,
-        is_concurrency_safe=False,
         permission_category="mcp_read",
     ),
     "read_file": _descriptor(
@@ -1032,7 +931,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["path"],
         ),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="filesystem_read",
     ),
     "view_image": _descriptor(
@@ -1074,7 +972,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=[],
         ),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="filesystem_read",
     ),
     "visualization_render": _descriptor(
@@ -1151,7 +1048,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=[],
         ),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="filesystem_read",
     ),
     "search_files": _descriptor(
@@ -1239,7 +1135,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["pattern"],
         ),
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="filesystem_read",
     ),
     "edit_file": _descriptor(
@@ -1293,7 +1188,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["path", "base_revision", "operations"],
         ),
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="filesystem_write",
         is_destructive=True,
     ),
@@ -1332,7 +1226,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             required=["path", "content"],
         ),
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="filesystem_write",
         is_destructive=True,
     ),
@@ -1341,7 +1234,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=TERMINAL_TOOL_DESCRIPTION,
         input_schema=terminal_input_schema(),
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="terminal",
         artifact_mode=ToolArtifactMode.LARGE_OUTPUT,
         is_open_world=True,
@@ -1351,7 +1243,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=TERMINAL_PROCESS_TOOL_DESCRIPTION,
         input_schema=terminal_process_input_schema(),
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="terminal",
         artifact_mode=ToolArtifactMode.LARGE_OUTPUT,
         is_destructive=True,
@@ -1362,7 +1253,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=TERMINAL_MONITOR_TOOL_DESCRIPTION,
         input_schema=terminal_monitor_input_schema(),
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="terminal",
         artifact_mode=ToolArtifactMode.DEFAULT,
         is_destructive=True,
@@ -1429,7 +1319,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True,
-        is_concurrency_safe=False,
         permission_category="agent_local",
     ),
     "list_agent_models": _descriptor(
@@ -1442,7 +1331,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema=object_schema(properties={}, required=[]),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="subagent_runtime",
     ),
     "spawn_agent": _descriptor(
@@ -1531,7 +1419,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="subagent_runtime",
     ),
     "wait_agent": _descriptor(
@@ -1592,7 +1479,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="subagent_runtime",
     ),
     "stop_agent": _descriptor(
@@ -1629,7 +1515,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="subagent_runtime",
         is_destructive=True,
     ),
@@ -1677,7 +1562,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="subagent_runtime",
     ),
     "create_agent_tasks": _descriptor(
@@ -1815,7 +1699,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="subagent_runtime",
     ),
     "send_agent_message": _descriptor(
@@ -1852,7 +1735,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="subagent_runtime",
     ),
     "report_agent_result": _descriptor(
@@ -1902,7 +1784,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="agent_local",
     ),
     "enter_plan": _descriptor(
@@ -1935,7 +1816,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="plan_workflow",
     ),
     "ask_plan_question": _descriptor(
@@ -2022,7 +1902,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="plan_workflow",
     ),
     "exit_plan": _descriptor(
@@ -2065,7 +1944,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         ),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="plan_workflow",
     ),
     "memory_search": _descriptor(
@@ -2088,7 +1966,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema=_MEMORY_SEARCH_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="memory_read",
     ),
     "memory_get": _descriptor(
@@ -2103,7 +1980,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema=_MEMORY_GET_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="memory_read",
     ),
     "memory_explain": _descriptor(
@@ -2120,7 +1996,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema=_MEMORY_EXPLAIN_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=True,
-        is_concurrency_safe=True,
         permission_category="memory_read",
     ),
     "remember": _descriptor(
@@ -2168,7 +2043,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema=_REMEMBER_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="memory_write",
     ),
     "mark_memory_relation": _descriptor(
@@ -2185,7 +2059,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema=_MARK_MEMORY_RELATION_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
         is_read_only=False,
-        is_concurrency_safe=False,
         permission_category="memory_write",
     ),
 }
@@ -2268,7 +2141,6 @@ class BuiltinToolCatalogEntry:
     execution_binding_kind: BuiltinToolBindingKind
     availability_requirement: BuiltinToolAvailabilityRequirement
     permission_contract: BuiltinToolPermissionContract
-    long_horizon_policy_kind: BuiltinToolLongHorizonPolicyKind
     recovery_contract: BuiltinToolRecoveryContract
     tool_family: Literal[
         "filesystem",
@@ -2425,7 +2297,6 @@ def _catalog_entry(
         raise TypeError("builtin catalog produced a non-builtin binding")
     permission = _permission_contract(name, binding_kind)
     recovery = _recovery_contract(name)
-    long_horizon_policy_kind = _LONG_HORIZON_POLICY_KIND_BY_NAME[name]
     payload = {
         "name": name,
         "descriptor_fingerprint": descriptor.fingerprint(),
@@ -2439,7 +2310,6 @@ def _catalog_entry(
         "permission_contract_fingerprint": (
             builtin_permission_contract_identity_fingerprint(permission)
         ),
-        "long_horizon_policy_kind": long_horizon_policy_kind.value,
         "recovery_contract_fingerprint": (
             _recovery_contract_identity_fingerprint(recovery)
         ),
@@ -2452,7 +2322,6 @@ def _catalog_entry(
         execution_binding_kind=binding_kind,
         availability_requirement=availability,
         permission_contract=permission,
-        long_horizon_policy_kind=long_horizon_policy_kind,
         recovery_contract=recovery,
         tool_family=family,  # type: ignore[arg-type]
         entry_fingerprint=context_fingerprint("builtin-tool-catalog-entry:v1", payload),
@@ -2702,7 +2571,6 @@ __all__ = [
     "BuiltinToolAvailabilityRequirement",
     "BuiltinToolBindingKind",
     "BuiltinToolCatalogEntry",
-    "BuiltinToolLongHorizonPolicyKind",
     "BuiltinToolPermissionContract",
     "BuiltinToolRecoveryContract",
     "FILE_WRITE_TOOL_NAMES",

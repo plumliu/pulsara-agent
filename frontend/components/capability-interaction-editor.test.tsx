@@ -61,3 +61,23 @@ it('cancels without a boolean ALLOW and without submitting a draft', async () =>
   fireEvent.click(screen.getByRole('button', {name: '取消'}));
   await waitFor(() => expect(resolve).toHaveBeenCalledWith({kind: 'capability', decision: 'CANCEL'}));
 });
+
+
+it('requires a full Hook source review and submits only private user acceptance', async () => {
+  const resolve = vi.fn().mockResolvedValue(true);
+  render(<CapabilityInteractionEditor form={{action: 'TRUST_HOOK_SOURCE', scope: 'WORKSPACE',
+    prefill: {hook_source: {path: '/project/.pulsara/hooks.json', source_disposition: 'COMPLETE', trust_disposition: 'UNTRUSTED',
+      declaration_environment: {PLUGIN_ROOT: '/package'}, definitions: [{event: 'PreToolUse', matcher: 'read_file',
+        command: "printf 'original  bytes'", commandWindows: 'Write-Output original', timeout: 7, async: false,
+        statusMessage: 'status text', additionalContextLimit: 300}]}}}} onResolve={resolve} />);
+  expect(screen.getByText("printf 'original  bytes'", {normalizer: value => value})).toBeTruthy();
+  expect(screen.getByText('Write-Output original')).toBeTruthy();
+  expect(screen.getByText(/additionalContextLimit: 300/)).toBeTruthy();
+  expect(screen.getByText(/PLUGIN_ROOT/)).toBeTruthy();
+  const submit = screen.getByRole('button', {name: '确认并继续'});
+  expect(submit.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByRole('checkbox'));
+  fireEvent.click(submit);
+  await waitFor(() => expect(resolve).toHaveBeenCalledWith({kind: 'capability', decision: 'SUBMIT',
+    submission: {hook_review_accepted: true}}));
+});

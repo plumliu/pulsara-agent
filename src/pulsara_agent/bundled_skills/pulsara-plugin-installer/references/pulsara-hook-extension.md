@@ -1,8 +1,9 @@
 # Pulsara Hook Extension Target
 
-Read this file only when a source Plugin contains behavior-bearing Hooks. It
-defines the exact Pulsara conversion target; it is not a second Hook parser or a
-claim that arbitrary vendor Hooks are compatible.
+Read this file when a Hook conversion diagnostic, uncommon event or output-control
+question needs the detailed contract. For ordinary local source authoring and
+management, use `hook-source-management.md`. The official importer/parser owns
+admission; these details do not require a second model-run conformance audit.
 
 Agent Plugins 1.0 has no portable Hook component. Pulsara Hooks are a client
 extension stored at exactly:
@@ -243,10 +244,13 @@ guaranteed context delivery is not equivalent.
 
 ## Conversion Decision
 
-For every source Hook, record an explicit event, matcher, stdin, environment,
-execution, output, and control mapping. Preserve command and script bytes. A
-renamed event is valid only when the owner timing and control effect are the same,
-not merely because the names sound similar.
+The official importer determines supported event, matcher, stdin, environment,
+execution, output and control mappings while preserving command and script bytes.
+Use its diagnostics to explain a blocked conversion. When a user asks for a
+compatibility analysis, explain the specific mismatch; do not manufacture a
+mapping or proof artifact to override failed admission. A renamed event is valid
+only when the owner timing and control effect are the same, not merely because
+the names sound similar.
 
 Refuse whole-Plugin conversion when any required Hook depends on an unsupported
 event or handler, matcher dialect, transcript path, automatic dependency setup,

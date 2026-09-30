@@ -1,6 +1,6 @@
 ---
 name: pulsara-mcp-installer
-description: Add, edit, authorize, test and remove MCP connections through Pulsara's capability management tool and shared user forms.
+description: Add, edit, authorize, inspect and remove MCP connections through Pulsara's manage_capability tool and shared user forms. Verify a connection through the ordinary MCP list/inspect/use tools.
 ---
 
 # Pulsara MCP Installer
@@ -14,7 +14,8 @@ Do not use a checkout, private script, raw YAML editing or a second installer.
 1. Establish the authoritative MCP endpoint or exact stdio command/args/cwd.
    A vendor CLI is not necessarily an MCP server. Streamable HTTP and explicit
    legacy SSE are supported by the official SDK; never guess transport by name.
-2. Choose USER or WORKSPACE from the user's intent. Inspect `list_mcp_servers`
+2. Reuse USER or WORKSPACE from the user's intent; ask only if it is ambiguous.
+   Inspect `list_mcp_servers`
    before adding a duplicate. Do not silently broaden workspace trust or network access.
 3. Call `manage_capability` with ADD_LOCAL_MCP, UPDATE_LOCAL_MCP or REMOVE_LOCAL_MCP,
    exact server_id and scope. Public config uses the native structured schema,
@@ -39,6 +40,20 @@ Do not use a checkout, private script, raw YAML editing or a second installer.
 
 ## Public candidate example
 
+Every call includes `action` and explicit uppercase `scope`. Minimal calls are:
+
+```json
+{"action":"ADD_LOCAL_MCP","scope":"USER","server_id":"docs"}
+```
+
+This opens the shared editor for missing connection settings. For updates use
+`UPDATE_LOCAL_MCP` with the same `server_id`; omit `config` to edit current truth.
+For removal use `REMOVE_LOCAL_MCP`. OAuth authorization and clearing local grants
+use `AUTHORIZE_MCP` and `CLEAR_MCP_AUTHORIZATION` with `server_id`; include the
+exact `plugin_id` only for a Plugin connection. Optional expected guards may be
+omitted for fresh native inspection; never guess them. Hook trust and Plugin
+enablement are separate actions.
+
 For a known public Streamable HTTP endpoint, `config` can be:
 
 ```json
@@ -61,7 +76,9 @@ files or execute headersHelper commands. Unknown behavior is not silently droppe
 For out-of-band administration, the installed launcher exposes `pulsara mcp list`,
 `add`, `doctor`, `enable`, `disable`, and `remove`; inspect `--help`
 for supported arguments. Such a CLI process does not own an already running
-Host: follow its change with one explicit `reload_capabilities`.
+Host. Adopt its change through GUI refresh or the existing Host
+`reload_capabilities` operation when permitted. A successful CLI mutation does
+not promise automatic adoption in live sessions.
 If the launcher is missing, report the distribution problem instead of using a
 repository runtime. Tool availability in the current Host is independent of PATH.
 

@@ -10,6 +10,20 @@ import asyncio
 from dataclasses import asdict
 from pathlib import Path
 
+from pulsara_agent.capability.local_skill_management import (
+    InstallLooseLocalSkillRequest,
+    EventLocalSkillCancellationProbe,
+)
+from pulsara_agent.capability.local_skill_publisher import (
+    LocalSkillInstallScope,
+    LocalSkillInstallDisposition,
+)
+from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalDisposition
+from pulsara_agent.hooks.trust import normalized_definition_digest
+from pulsara_agent.plugins.contracts import (
+    InspectLocalPluginsRequest,
+    PluginInspectionDisposition,
+)
 from pulsara_agent.capability.management_form import (
     AcceptedCapabilityFormSubmission,
     CapabilityFormValues,
@@ -103,32 +117,57 @@ class CapabilityManagementCall:
         editor = {}
         plugin = prepared.plugin
         if plugin is None and "server_id" in fields:
-            editor["credential_owner"] = asdict(LocalMcpTarget(fields["server_id"], self._root()).owner)
+            editor["credential_owner"] = asdict(
+                LocalMcpTarget(fields["server_id"], self._root()).owner
+            )
         if plugin is not None:
             connections = []
             for server in plugin.summary.mcp.mcp_servers:
                 config = self.service._connection(plugin, server)
-                connections.append({
-                    "server_id": server.local_server_id,
-                    "config": config_to_entry(config),
-                    "credentials": credential_presence(config),
-                })
+                connections.append(
+                    {
+                        "server_id": server.local_server_id,
+                        "config": config_to_entry(config),
+                        "credentials": credential_presence(config),
+                    }
+                )
             editor["plugin"] = {
-                "id": plugin.identity.plugin_id, "name": plugin.summary.manifest.name,
-                "enabled": plugin.enabled, "package_install_id": plugin.package_install_id,
+                "id": plugin.identity.plugin_id,
+                "name": plugin.summary.manifest.name,
+                "enabled": plugin.enabled,
+                "package_install_id": plugin.package_install_id,
                 "skills": [asdict(item) for item in plugin.summary.skills.skills],
                 "mcp": connections,
-                "hooks": [asdict(item) for item in plugin.summary.hooks.hook_definitions],
+                "hooks": [
+                    asdict(item) for item in plugin.summary.hooks.hook_definitions
+                ],
             }
             if "server_id" in fields:
-                server = next(item for item in plugin.summary.mcp.mcp_servers if item.local_server_id == fields["server_id"])
+                server = next(
+                    item
+                    for item in plugin.summary.mcp.mcp_servers
+                    if item.local_server_id == fields["server_id"]
+                )
                 overlay = thaw_json(prepared.public_prefill).get("overlay")
-                defaults, config = connection_editor_definition(server, overlay_from_dict(overlay) if overlay is not None else None,
-                    owner=plugin_connection_owner(plugin.identity, server.local_server_id))
-                editor["connection"] = {"server_id": fields["server_id"], "defaults": defaults,
-                    "connection_inputs": [asdict(value) for value in server.connection_inputs.inputs],
-                    "config": config, "overlay": overlay,
-                    "credential_owner": asdict(plugin_connection_owner(plugin.identity, fields["server_id"]))}
+                defaults, config = connection_editor_definition(
+                    server,
+                    overlay_from_dict(overlay) if overlay is not None else None,
+                    owner=plugin_connection_owner(
+                        plugin.identity, server.local_server_id
+                    ),
+                )
+                editor["connection"] = {
+                    "server_id": fields["server_id"],
+                    "defaults": defaults,
+                    "connection_inputs": [
+                        asdict(value) for value in server.connection_inputs.inputs
+                    ],
+                    "config": config,
+                    "overlay": overlay,
+                    "credential_owner": asdict(
+                        plugin_connection_owner(plugin.identity, fields["server_id"])
+                    ),
+                }
         return PendingCapabilityForm(
             freeze_json(
                 {
@@ -160,13 +199,27 @@ class CapabilityManagementCall:
             "secret_changes",
             "retain_credentials_confirmed",
             "enable_review_accepted",
+            "hook_review_accepted",
         }:
             raise ValueError("unsupported capability submission fields")
-        for flag in ("retain_credentials_confirmed", "enable_review_accepted"):
+        for flag in (
+            "retain_credentials_confirmed",
+            "enable_review_accepted",
+            "hook_review_accepted",
+        ):
             if flag in body and type(body[flag]) is not bool:
                 raise ValueError("capability review must be an explicit boolean")
         prepared = self.prepared
         action = prepared.intent.action
+        if body.get("hook_review_accepted") and action is not Action.TRUST_HOOK_SOURCE:
+            raise ValueError("Hook review acceptance belongs only to Hook trust")
+        if (
+            body.get("enable_review_accepted")
+            and action is not Action.SET_PLUGIN_ENABLED
+        ):
+            raise ValueError(
+                "Plugin review acceptance belongs only to Plugin enablement"
+            )
         editable = (
             {"config"}
             if action in {Action.ADD_LOCAL_MCP, Action.UPDATE_LOCAL_MCP}
@@ -200,6 +253,12 @@ class CapabilityManagementCall:
             "enable_review_accepted"
         ):
             raise ValueError("review the current Plugin before enabling it")
+        if "hook_source_review" in candidate.user_inputs and not body.get(
+            "hook_review_accepted"
+        ):
+            raise ValueError(
+                "review the complete current Hook definitions before trusting them"
+            )
         retained = body.get("retain_credentials_confirmed", False)
         if (
             "credential_destination_confirmation" in candidate.user_inputs
@@ -225,6 +284,7 @@ class CapabilityManagementCall:
             changes,
             retained,
             body.get("enable_review_accepted", False),
+            body.get("hook_review_accepted", False),
         )
 
     def accept(self, submission: AcceptedCapabilityFormSubmission) -> None:
@@ -240,10 +300,21 @@ class CapabilityManagementCall:
         self._submission = None
 
     def _same_target(self, candidate):
+        if (
+            candidate.skill_target != self.prepared.skill_target
+            or candidate.skill_validation != self.prepared.skill_validation
+            or candidate.skill_removal != self.prepared.skill_removal
+            or candidate.hook != self.prepared.hook
+        ):
+            raise McpManagementConflict(
+                "Skill or Hook source changed after preparation"
+            )
         if candidate.expected_current != self.prepared.expected_current:
             raise McpManagementConflict("capability changed while the form was open")
         if candidate.plugin_connection_review != self.prepared.plugin_connection_review:
-            raise McpManagementConflict("Plugin connection review changed while the form was open")
+            raise McpManagementConflict(
+                "Plugin connection review changed while the form was open"
+            )
         if candidate.plugin is not None or self.prepared.plugin is not None:
             root = self._root()
             if _plugin_observation(candidate, root) != _plugin_observation(
@@ -280,6 +351,20 @@ class CapabilityManagementCall:
         action = prepared.intent.action
         root = self._root()
         service = self.service
+        if action in {
+            Action.INSTALL_LOOSE_SKILL,
+            Action.SET_LOOSE_SKILL_ENABLED,
+            Action.REMOVE_LOOSE_SKILL,
+            Action.INSPECT_LOOSE_SKILLS,
+        }:
+            return await self._skill(prepared, fields, root)
+        if action in {
+            Action.TRUST_HOOK_SOURCE,
+            Action.REVOKE_HOOK_TRUST,
+            Action.SET_HOOK_SOURCE_ENABLED,
+            Action.INSPECT_HOOK_SOURCES,
+        }:
+            return await self._hook(prepared, fields, root, values)
         if prepared.local_mutation is not None:
             mutation = prepared.local_mutation
             if values is None:
@@ -398,7 +483,7 @@ class CapabilityManagementCall:
         else:
             raise ValueError("unsupported capability operation")
         disposition = outcome.disposition.value
-        return self._result(
+        result = self._result(
             prepared,
             "APPLIED"
             if applied
@@ -411,6 +496,243 @@ class CapabilityManagementCall:
                 "operation_status": disposition,
                 "cleanup_attention": getattr(outcome, "cleanup_attention", False),
             },
+        )
+        if isinstance(outcome, SuccessfulPluginInstallOutcome):
+            result["identity"]["plugin_id"] = outcome.identity.plugin_id
+        return result
+
+    async def _skill(self, prepared, fields, root):
+        service = self.service
+        scope = LocalSkillInstallScope(prepared.intent.scope.value.lower())
+        action = prepared.intent.action
+        if action is Action.INSPECT_LOOSE_SKILLS:
+            # Read current native sources; do not replay a prepared inventory.
+            inventory, _, _ = await asyncio.to_thread(
+                service.skills.inspect_loose_skills,
+                scope=scope,
+                workspace_root=root,
+                plugin_definitions=await asyncio.to_thread(
+                    service.inspect_plugin_skill_definitions, root
+                ),
+            )
+            if "skill_path" in fields:
+                for name in ("items", "issues"):
+                    inventory[name] = [
+                        item
+                        for item in inventory[name]
+                        if item["path"] == fields["skill_path"]
+                    ]
+            return self._result(prepared, "OBSERVED", inventory)
+        candidate = await service.prepare(prepared.intent.to_dict())
+        self._same_target(candidate)
+        if action is Action.INSTALL_LOOSE_SKILL:
+            cancellation = EventLocalSkillCancellationProbe()
+            outcome = await _settled_call(
+                service.skills.install_loose_local_skill,
+                InstallLooseLocalSkillRequest(
+                    Path(fields["source_path"]),
+                    scope,
+                    root,
+                    fields.get("name"),
+                    fields.get("description"),
+                ),
+                cancellation=cancellation,
+                _cancellation=cancellation,
+            )
+            applied = outcome.disposition is LocalSkillInstallDisposition.INSTALLED
+            status = (
+                "APPLIED"
+                if applied
+                else "CONFLICT"
+                if outcome.disposition
+                is LocalSkillInstallDisposition.DESTINATION_EXISTS
+                else "CANCELLED"
+                if outcome.disposition is LocalSkillInstallDisposition.CANCELLED
+                else "REJECTED"
+            )
+            return self._result(
+                prepared,
+                status,
+                {
+                    "operation_status": outcome.disposition.value,
+                    "path": str(outcome.destination_path)
+                    if outcome.destination_path is not None
+                    else None,
+                    "cleanup_attention": outcome.disposition
+                    is LocalSkillInstallDisposition.CLEANUP_UNAVAILABLE,
+                    "prior_operation_status": outcome.prior_disposition.value
+                    if outcome.prior_disposition
+                    else None,
+                    "staging_path": str(outcome.attempted_staging_path)
+                    if outcome.attempted_staging_path
+                    else None,
+                    "cleanup_location_status": outcome.cleanup_location_status.value
+                    if outcome.cleanup_location_status
+                    else None,
+                },
+            )
+        if action is Action.SET_LOOSE_SKILL_ENABLED:
+            await _settled_call(
+                service.skills.set_loose_skill_enabled,
+                skill_path=Path(fields["skill_path"]),
+                scope=scope,
+                enabled=fields["enabled"],
+                expected=prepared.skill_target,
+                workspace_root=root,
+            )
+            return self._result(
+                prepared,
+                "APPLIED",
+                {"path": fields["skill_path"], "enabled": fields["enabled"]},
+            )
+        outcome = await _settled_call(
+            service.skills.remove_loose_local_skill,
+            skill_path=Path(fields["skill_path"]),
+            scope=scope,
+            expected=prepared.skill_removal,
+            workspace_root=root,
+        )
+        applied = outcome.disposition in {
+            LocalSkillRemovalDisposition.REMOVED,
+            LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
+        }
+        return self._result(
+            prepared,
+            "APPLIED" if applied else "CONFLICT",
+            {
+                "operation_status": outcome.disposition.value,
+                "cleanup_attention": outcome.disposition
+                is LocalSkillRemovalDisposition.CLEANUP_ATTENTION,
+            },
+        )
+
+    def _current_hook(self, prepared, root):
+        service = self.service
+        snapshot = prepared.hook
+        if prepared.plugin is None:
+            view = service.hooks.discover(
+                deadline_monotonic=service.deadline(),
+                visibility_scope=snapshot.provenance.identity.visibility_scope,
+            )
+            current = next(
+                (
+                    item
+                    for item in view.source_snapshots
+                    if item.provenance.identity == snapshot.provenance.identity
+                ),
+                None,
+            )
+        else:
+            observed = service.plugins.inspect_local_plugins(
+                InspectLocalPluginsRequest(service.deadline(), workspace_root=root)
+            )
+            try:
+                if observed.disposition is not PluginInspectionDisposition.COMPLETE:
+                    raise McpManagementConflict("Plugin Hook inventory is unavailable")
+                plugin = next(
+                    (
+                        item
+                        for item in observed.instances
+                        if item.identity == prepared.plugin.identity
+                    ),
+                    None,
+                )
+                if (
+                    plugin is None
+                    or plugin.package_install_id != prepared.plugin.package_install_id
+                    or plugin.enabled != prepared.plugin.enabled
+                ):
+                    raise McpManagementConflict("Plugin changed before Hook mutation")
+                current = service._plugin_hook_snapshot(plugin)
+            finally:
+                observed.close()
+        if current != snapshot:
+            raise McpManagementConflict(
+                "Hook source or trust state changed after review"
+            )
+        return normalized_definition_digest(current.provenance, current.definitions)
+
+    async def _hook(self, prepared, fields, root, values):
+        service = self.service
+        action = prepared.intent.action
+        if action is Action.INSPECT_HOOK_SOURCES:
+            snapshots, observation = await service.inspect_hook_sources(
+                root=root,
+                source_kind=fields.get("source_kind"),
+                plugin_id=fields.get("plugin_id"),
+                allow_unavailable=True,
+            )
+            composition_complete = observation["hook_composition_status"] == "COMPLETE"
+            sources = []
+            for snapshot, plugin in snapshots:
+                public = await service.public_hook_snapshot(snapshot)
+                public.update(
+                    {
+                        "source_kind": "PLUGIN" if plugin is not None else "LOCAL",
+                        "plugin_enabled": plugin.enabled
+                        if plugin is not None
+                        else None,
+                        "effective": (
+                            plugin.effective_hook if composition_complete else None
+                        )
+                        if plugin is not None
+                        else snapshot.runnable,
+                        "shadowed": (
+                            bool(plugin.enabled and not plugin.effective_hook)
+                            if composition_complete
+                            else None
+                        )
+                        if plugin is not None
+                        else False,
+                    }
+                )
+                sources.append(public)
+            return self._result(
+                prepared,
+                "OBSERVED",
+                {
+                    "status": "UNAVAILABLE"
+                    if observation["plugin_inventory_status"] == "UNAVAILABLE"
+                    or observation["hook_composition_status"] == "UNAVAILABLE"
+                    or any(
+                        item["source_disposition"] == "UNAVAILABLE"
+                        or item["trust_disposition"] == "UNAVAILABLE"
+                        for item in sources
+                    )
+                    else "COMPLETE",
+                    **observation,
+                    "sources": sources,
+                },
+            )
+        snapshot = prepared.hook
+        subject = snapshot.provenance.trust_subject
+        store = service.hooks.trust_store
+
+        def current():
+            return self._current_hook(prepared, root)
+
+        if action is Action.TRUST_HOOK_SOURCE:
+            if not values or not values.hook_review_accepted:
+                raise ValueError("Hook trust requires user review")
+            await _settled_call(
+                store.trust_after_revalidation,
+                subject,
+                expected_digest=snapshot.trust.current_definition_digest,
+                current_digest_reader=current,
+            )
+        elif action is Action.REVOKE_HOOK_TRUST:
+            await _settled_call(store.revoke, subject, require_current=current)
+        else:
+            await _settled_call(
+                store.set_enabled,
+                subject,
+                enabled=fields["enabled"],
+                require_current=current,
+            )
+        return self._result(
+            prepared,
+            "APPLIED",
+            {"path": str(snapshot.provenance.identity.canonical_path)},
         )
 
     async def _authorization(self, prepared):
@@ -462,8 +784,23 @@ class CapabilityManagementCall:
             "action": prepared.intent.action.value,
             "scope": prepared.intent.scope.value,
             "identity": {
-                key: fields[key] for key in ("server_id", "plugin_id") if key in fields
+                key: fields[key]
+                for key in ("server_id", "plugin_id", "skill_path", "source_kind")
+                if key in fields
             },
             "current": current,
             "adoption": "NOT_APPLICABLE",
         }
+
+
+async def _settled_call(function, *args, _cancellation=None, **kwargs):
+    """Join native synchronous effects before publishing their settled outcome."""
+    work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    while True:
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            if _cancellation is not None:
+                _cancellation.cancel()
+            if work.done():
+                return work.result()

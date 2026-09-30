@@ -6,10 +6,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from pulsara_agent.primitives.model_call import sha256_fingerprint
-from pulsara_agent.primitives.long_horizon import (
-    LongHorizonToolPolicyFact,
-    long_horizon_tool_policy_identity_payload,
-)
 from pulsara_agent.primitives.tool_result import (
     CapabilityResultRenderContractFact,
     capability_result_render_contract_identity_payload,
@@ -59,9 +55,7 @@ class BuiltinToolDescriptor:
     provider_id: str
     is_model_callable: bool
     is_read_only: bool
-    is_concurrency_safe: bool
     result_render_contract: CapabilityResultRenderContractFact
-    long_horizon_policy: LongHorizonToolPolicyFact
     is_destructive: bool = False
     is_open_world: bool = False
     requires_user_interaction: bool = False
@@ -97,7 +91,6 @@ class BuiltinToolDescriptor:
             "provider_id": self.provider_id,
             "is_model_callable": self.is_model_callable,
             "is_read_only": self.is_read_only,
-            "is_concurrency_safe": self.is_concurrency_safe,
             "is_destructive": self.is_destructive,
             "is_open_world": self.is_open_world,
             "permission_category": self.permission_category,
@@ -105,9 +98,6 @@ class BuiltinToolDescriptor:
                 capability_result_render_contract_identity_payload(
                     self.result_render_contract
                 )
-            ),
-            "long_horizon_policy": long_horizon_tool_policy_identity_payload(
-                self.long_horizon_policy
             ),
             "advertise_policy": self.advertise_policy.value,
             "artifact_mode": self.artifact_mode.value,
@@ -127,7 +117,6 @@ class BuiltinToolDescriptor:
             "provider_id": self.provider_id,
             "is_model_callable": self.is_model_callable,
             "is_read_only": self.is_read_only,
-            "is_concurrency_safe": self.is_concurrency_safe,
             "is_destructive": self.is_destructive,
             "is_open_world": self.is_open_world,
             "requires_user_interaction": self.requires_user_interaction,
@@ -136,9 +125,6 @@ class BuiltinToolDescriptor:
                 capability_result_render_contract_identity_payload(
                     self.result_render_contract
                 )
-            ),
-            "long_horizon_policy": long_horizon_tool_policy_identity_payload(
-                self.long_horizon_policy
             ),
             "approval_policy_hint": self.approval_policy_hint,
             "advertise_policy": self.advertise_policy.value,

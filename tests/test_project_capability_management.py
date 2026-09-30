@@ -807,7 +807,7 @@ def test_live_session_refresh_is_lazy_until_the_next_turn_safe_point() -> None:
             _capability_refresh_applied_revision=0,
             _capability_refresh_attention=None,
             _require_open=lambda: None,
-            reload_capabilities=AsyncMock(return_value={"mcp": "RELOADED"}),
+            reload_capabilities=AsyncMock(return_value={"status": "RELOADED", "mcp": "RELOADED", "local_hooks": "RELOADED"}),
         )
 
         await KernelHostSession.request_capability_refresh(session)

@@ -380,6 +380,8 @@ class PolicyPermissionGate:
         self,
         effects: ResolvedCapabilityEffectProjection,
     ) -> PermissionDecision:
+        if effects.read_only:
+            return PermissionDecision.allow()
         # The same preset fields govern ordinary writes and this resolved
         # multi-effect operation. READ_ONLY remains DENY, not a write permit;
         # the execution owner may separately ask the user to perform the edit.

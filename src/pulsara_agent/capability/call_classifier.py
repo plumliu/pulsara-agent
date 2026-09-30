@@ -20,7 +20,6 @@ class BuiltinToolCallClassification:
     descriptor_id: str
     tool_name: str
     effective_read_only: bool
-    effective_concurrency_safe: bool
     effective_permission_category: str
     effective_is_destructive: bool
     effective_is_open_world: bool
@@ -37,7 +36,6 @@ class BuiltinToolCallClassification:
             "descriptor_id": self.descriptor_id,
             "tool_name": self.tool_name,
             "effective_read_only": self.effective_read_only,
-            "effective_concurrency_safe": self.effective_concurrency_safe,
             "effective_permission_category": self.effective_permission_category,
             "effective_is_destructive": self.effective_is_destructive,
             "effective_is_open_world": self.effective_is_open_world,
@@ -79,8 +77,7 @@ class DefaultBuiltinToolCallClassifier:
             return BuiltinToolCallClassification(
                 descriptor_id="builtin:manage_capability",
                 tool_name=call.name,
-                effective_read_only=False,
-                effective_concurrency_safe=False,
+                effective_read_only=capability_effects.read_only,
                 effective_permission_category="capability_management",
                 effective_is_destructive=capability_effects.destructive,
                 effective_is_open_world=False,
@@ -119,7 +116,6 @@ class DefaultBuiltinToolCallClassifier:
                 descriptor_id=descriptor.id,
                 tool_name=call.name,
                 effective_read_only=override.allowed_in_read_only,
-                effective_concurrency_safe=descriptor.is_concurrency_safe,
                 effective_permission_category=override.permission_category,
                 effective_is_destructive=False,
                 effective_is_open_world=descriptor.is_open_world,
@@ -135,7 +131,6 @@ class DefaultBuiltinToolCallClassifier:
             descriptor_id=descriptor.id,
             tool_name=call.name,
             effective_read_only=descriptor.is_read_only,
-            effective_concurrency_safe=descriptor.is_concurrency_safe,
             effective_permission_category=descriptor.permission_category,
             effective_is_destructive=descriptor.is_destructive,
             effective_is_open_world=descriptor.is_open_world,

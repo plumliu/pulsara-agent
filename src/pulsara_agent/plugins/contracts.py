@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol, TypeAlias
 
 from pulsara_agent.hooks.contracts import HookTrustDisposition
+from pulsara_agent.hooks.config_parser import ParsedHookConfig
 from pulsara_agent.plugins.mcp_connection import PluginMcpConnectionOverlay, PluginConnectionReview
 from pulsara_agent.plugins.connection_inputs import PluginConnectionInputs
 
@@ -811,6 +812,7 @@ class PluginInstanceInspection:
     effective_hook_definition_count: int = 0
     effective_hook_trust_disposition: HookTrustDisposition | None = None
     mcp_connection_overlays: tuple[PluginMcpConnectionOverlay, ...] = ()
+    hook_config: ParsedHookConfig | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         for values, label in (

@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -140,5 +141,61 @@ def test_plugin_enable_always_uses_user_review_then_guarded_existing_owner(tmp_p
         assert outcome["status"] == "APPLIED", outcome
         assert outcome["current"]["operation_status"] == "ENABLED"
         await service.mcp.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("scope", ["USER", "WORKSPACE"])
+def test_plugin_install_returns_published_identity_for_followup_management(tmp_path, scope):
+    async def run():
+        service = preparation(tmp_path)
+        source = tmp_path / "directory-name-is-not-plugin-id"
+        source.mkdir()
+        (source / "plugin.json").write_text(
+            json.dumps(
+                {
+                    "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                    "name": "published-plugin",
+                }
+            )
+        )
+        args = {
+            "action": "INSTALL_PLUGIN",
+            "scope": scope,
+            "source_path": str(source),
+        }
+        try:
+            for replace in (False, True):
+                call = CapabilityManagementCall(
+                    service, await service.prepare({**args, "replace": replace})
+                )
+                result = await call.execute()
+                assert result["status"] == "APPLIED", result
+                assert result["current"]["operation_status"] == (
+                    "REPLACED" if replace else "INSTALLED"
+                )
+                assert result["identity"] == {"plugin_id": "published-plugin"}
+                assert result["scope"] == scope
+
+            conflict = await CapabilityManagementCall(
+                service, await service.prepare(args)
+            ).execute()
+            assert conflict["status"] == "CONFLICT", conflict
+            assert conflict["identity"] == {}
+
+            remove = await CapabilityManagementCall(
+                service,
+                await service.prepare(
+                    {
+                        "action": "REMOVE_PLUGIN",
+                        "scope": result["scope"],
+                        "plugin_id": result["identity"]["plugin_id"],
+                    }
+                ),
+            ).execute()
+            assert remove["status"] == "APPLIED", remove
+            assert remove["current"]["operation_status"] == "REMOVED"
+        finally:
+            await service.mcp.aclose()
 
     asyncio.run(run())

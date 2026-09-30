@@ -212,7 +212,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     expect(within(detail).queryByText(/启动主助手继续处理/)).toBeNull();
     await waitFor(() => expect(within(detail).getByText('UI_SLOW_DONE')).toBeTruthy());
     expect(within(detail).queryByRole('heading', { name: '任务结果' })).toBeNull();
-    expect(within(detail).getByRole('heading', { name: '任务对话 · 2 条消息' })).toBeTruthy();
+    expect(within(detail).getByRole('heading', { name: '任务对话' })).toBeTruthy();
     expect(detail.querySelectorAll('.task-conversation .assistant-turn--response')).toHaveLength(1);
     expect(within(detail).getByRole('button', { name: '复制回复' })).toBeTruthy();
   });

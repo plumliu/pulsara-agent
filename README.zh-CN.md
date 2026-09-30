@@ -204,6 +204,8 @@ uv run pulsara config-check
 uv run pulsara db verify --deep
 ```
 
+日常能力安装与配置可以直接使用能力页，或在对话中让模型通过 `manage_capability` 操作。模型用 terminal 准备来源，Host 决定安装目录、私密输入、Hook/Plugin 审阅与采用。高级管理 CLI 保留：项目写操作显式带 `--workspace`，不带目录的列表与诊断只观察 USER 范围；相对来源路径仍相对命令 cwd。`mcp add --tool-visibility ROOT_ONLY|ROOT_AND_SUBAGENTS` 表示调用可见范围，独立 `mcp reconnect` 已删除。USER `mcp doctor` 的物理测试目录是有效 Pulsara home，结果包含 `test_cwd`；doctor 可以启动 stdio 进程。详见[应用与能力管理边界](PULSARA_APP_AND_CAPABILITY_MANAGEMENT_BOUNDARY_DESIGN.zh.md)。
+
 第一条命令会启动仅限本机访问的 Web 应用并打开浏览器；使用 `--no-open` 可以只启动
 服务。页面关闭或服务重启后，持久会话与其原工作目录仍可继续。
 

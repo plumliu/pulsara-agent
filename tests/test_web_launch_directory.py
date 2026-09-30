@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.capability.local_skill_management import LocalSkillManagementService
+
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -70,7 +72,8 @@ def test_user_inventory_does_not_scan_the_launch_project(tmp_path, monkeypatch):
     assert {root.root_kind for root in policy.roots} == {
         LocalSkillRootKind.USER_PULSARA, LocalSkillRootKind.USER_AGENTS,
     }
-    monkeypatch.setattr(module, "LooseSkillDefinitionProducer", lambda: producer)
+    monkeypatch.setattr(module, "LocalSkillManagementService",
+        lambda: LocalSkillManagementService(loose_producer=producer))
     inventory = module._inspect_user_skills()
     assert inventory["status"] == "ready"
     assert [item["name"] for item in inventory["items"]] == ["example"]

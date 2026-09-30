@@ -4308,20 +4308,9 @@ def test_round6_cli_config_edit_and_standalone_reconnect_boundary(
         )
     )
     assert disabled["status"] == "ok"
-    with pytest.raises(RuntimeError, match="active Host-owned supervisor"):
-        asyncio.run(
-            _mcp_command(
-                parser.parse_args(
-                    [
-                        "mcp",
-                        "reconnect",
-                        "local_fixture",
-                        "--workspace",
-                        workspace,
-                    ]
-                )
-            )
-        )
+    with pytest.raises(SystemExit) as rejected:
+        parser.parse_args(["mcp", "reconnect", "local_fixture", "--workspace", workspace])
+    assert rejected.value.code == 2
 
 
 def test_round6_config_is_closed_whole_entry_and_secret_safe(

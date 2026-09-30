@@ -28,10 +28,6 @@ from pulsara_agent.capability.local_skill_management import (
 from pulsara_agent.capability.skill_import import enumerate_skill_import_sources
 from pulsara_agent.capability.mcp_import import read_mcp_import, materialize_mcp_import
 from pulsara_agent.capability.contracts import LocalSkillRootKind
-from pulsara_agent.capability.local_skills import (
-    LooseSkillDefinitionProducer,
-    LooseSkillDefinitionsDisposition,
-)
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.capability.resolver import (
     CompleteEffectiveSkillCatalogInspection,
@@ -40,13 +36,11 @@ from pulsara_agent.capability.resolver import (
 from pulsara_agent.capability.types import (
     ConflictingSkillCandidateIssue,
     InvalidSkillCandidateIssue,
-    LooseSkillOrigin,
     ProducerUnavailableCause,
     ResolutionUnavailableCause,
     ShadowedSkillCandidateIssue,
 )
 from pulsara_agent.capability.user_skill_config import (
-    load_user_skill_config,
     set_user_skill_enabled as write_user_skill_enabled,
     workspace_skill_config_path,
 )
@@ -2630,183 +2624,23 @@ def _skill_removal_identity(
 
 
 def _inspect_user_skills() -> dict[str, object]:
-    producer = LooseSkillDefinitionProducer()
-    config = load_user_skill_config()
-    policy = producer.prepare_root_policy()
-    observed = producer.observe(policy)
-    roots = [
-        {
-            "kind": (
-                "pulsara"
-                if item.root_kind is LocalSkillRootKind.USER_PULSARA
-                else "agents"
-            ),
-            "path": str(item.path),
-        }
-        for item in policy.roots
-        if item.root_kind in _USER_SKILL_ROOTS
-    ]
-    if observed.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE:
-        cause = observed.unavailable_cause
-        return {
-            "status": "attention",
-            "items": [],
-            "issues": [],
-            "details": [
-                *(
-                    [item.message for item in cause.diagnostics]
-                    if cause is not None
-                    else []
-                ),
-                *([config.error] if config.error is not None else []),
-            ],
-            "roots": roots,
-            "config_path": str(config.config_path),
-        }
-    items = []
-    for item in observed.candidates:
-        origin = item.origin
-        if (
-            not isinstance(origin, LooseSkillOrigin)
-            or origin.root_kind not in _USER_SKILL_ROOTS
-        ):
-            continue
-        items.append(
-            {
-                "name": item.name,
-                "description": item.description,
-                "location": item.location,
-                "path": str(item.path),
-                "removal_identity": _skill_removal_identity(
-                    item.path, LocalSkillInstallScope.USER
-                ),
-                "enabled": config.enabled_for(item.path),
-                "root": (
-                    "pulsara"
-                    if origin.root_kind is LocalSkillRootKind.USER_PULSARA
-                    else "agents"
-                ),
-                "authoring_notes": [
-                    code.value for code in item.authoring_diagnostic_codes
-                ],
-            }
-        )
-    issues = []
-    for issue in observed.invalid_issues:
-        origin = issue.origin
-        if (
-            not isinstance(origin, LooseSkillOrigin)
-            or origin.root_kind not in _USER_SKILL_ROOTS
-        ):
-            continue
-        issues.append(
-            {
-                "kind": "invalid",
-                "title": "有一个技能没有通过检查",
-                "path": str(issue.path),
-                "details": [item.message for item in issue.diagnostics],
-            }
-        )
-    return {
-        "status": "ready" if config.available else "attention",
-        "items": sorted(items, key=lambda item: (str(item["name"]), str(item["path"]))),
-        "issues": issues,
-        "details": [config.error] if config.error is not None else [],
-        "roots": roots,
-        "config_path": str(config.config_path),
-    }
-
-
-def _workspace_skill_root_key(root_kind: LocalSkillRootKind) -> str:
-    if root_kind is LocalSkillRootKind.WORKSPACE_PULSARA:
-        return "pulsara"
-    if root_kind is LocalSkillRootKind.WORKSPACE_AGENTS:
-        return "agents"
-    raise ValueError("Skill is not in a project capability directory")
+    return _inspect_loose_skill_management(LocalSkillInstallScope.USER, None)
 
 
 def _inspect_workspace_skills(workspace_root: Path) -> dict[str, object]:
-    producer = LooseSkillDefinitionProducer()
-    config = load_user_skill_config(
-        config_path=workspace_skill_config_path(workspace_root)
-    )
-    policy = producer.prepare_root_policy(workspace_root)
-    observed = producer.observe(policy)
-    roots = [
-        {
-            "kind": _workspace_skill_root_key(item.root_kind),
-            "path": str(item.path),
-        }
-        for item in policy.roots
-        if item.root_kind in _WORKSPACE_SKILL_ROOTS
-    ]
-    if observed.disposition is LooseSkillDefinitionsDisposition.UNAVAILABLE:
-        cause = observed.unavailable_cause
-        return {
-            "status": "attention",
-            "items": [],
-            "issues": [],
-            "details": [
-                *(
-                    [item.message for item in cause.diagnostics]
-                    if cause is not None
-                    else []
-                ),
-                *([config.error] if config.error is not None else []),
-            ],
-            "roots": roots,
-            "config_path": str(config.config_path),
-        }
-    items: list[dict[str, object]] = []
-    for item in observed.candidates:
-        origin = item.origin
-        if (
-            not isinstance(origin, LooseSkillOrigin)
-            or origin.root_kind not in _WORKSPACE_SKILL_ROOTS
-        ):
-            continue
-        root = _workspace_skill_root_key(origin.root_kind)
-        items.append(
-            {
-                "id": f"{root}:{item.name}",
-                "removal_identity": _skill_removal_identity(
-                    item.path, LocalSkillInstallScope.WORKSPACE, workspace_root
-                ),
-                "name": item.name,
-                "description": item.description,
-                "location": item.location,
-                "path": str(item.path),
-                "enabled": config.enabled_for(item.path),
-                "root": root,
-                "authoring_notes": [
-                    code.value for code in item.authoring_diagnostic_codes
-                ],
-            }
-        )
-    issues: list[dict[str, object]] = []
-    for issue in observed.invalid_issues:
-        origin = issue.origin
-        if (
-            not isinstance(origin, LooseSkillOrigin)
-            or origin.root_kind not in _WORKSPACE_SKILL_ROOTS
-        ):
-            continue
-        issues.append(
-            {
-                "kind": "invalid",
-                "title": "有一个项目技能没有通过检查",
-                "path": str(issue.path),
-                "details": [item.message for item in issue.diagnostics],
-            }
-        )
-    return {
-        "status": "ready" if config.available else "attention",
-        "items": sorted(items, key=lambda item: (str(item["name"]), str(item["path"]))),
-        "issues": issues,
-        "details": [config.error] if config.error is not None else [],
-        "roots": roots,
-        "config_path": str(config.config_path),
-    }
+    return _inspect_loose_skill_management(LocalSkillInstallScope.WORKSPACE, workspace_root)
+
+
+def _inspect_loose_skill_management(scope, workspace_root) -> dict[str, object]:
+    observed, _, _ = LocalSkillManagementService().inspect_loose_skills(
+        scope=scope, workspace_root=workspace_root)
+    observed["status"] = "ready" if observed["status"] == "COMPLETE" and observed["config_available"] else "attention"
+    for item in observed["items"]:
+        path = Path(item["path"])
+        item["removal_identity"] = _skill_removal_identity(path, scope, workspace_root)
+        if workspace_root is not None:
+            item["id"] = f"{item['root']}:{item['name']}"
+    return observed
 
 
 def _workspace_skill_path(observed: dict[str, object], skill_id: str) -> Path:

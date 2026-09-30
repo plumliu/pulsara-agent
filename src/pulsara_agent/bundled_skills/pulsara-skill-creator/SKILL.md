@@ -9,8 +9,11 @@ Use this skill to create or improve a portable Agent Skills bundle for Pulsara.
 
 ## Workflow
 
-1. Clarify the concrete workflow the skill should help with.
-2. Create a skill directory named with lowercase letters, digits, and hyphens.
+1. Use the concrete workflow already supplied; ask only for missing information
+   that changes the Skill's design.
+2. Create a source directory named with lowercase letters, digits, and hyphens.
+   Authoring a source is separate from installation; do not write into a managed
+   installation directory to bypass the installer.
 3. Write `SKILL.md` with YAML frontmatter:
 
 ```yaml
@@ -24,13 +27,19 @@ description: A concise sentence that explains what the skill does and when to us
 4. Put long guidance in the body, not in frontmatter. When editing an existing skill, preserve valid portable fields and resources that still have consumers.
 5. Create `references/`, `scripts/`, or `assets/` only when the workflow genuinely needs them.
 6. Keep the skill progressive: the root `SKILL.md` should route to deeper files instead of inlining every detail.
-7. Validate the finished directory with the installed Pulsara launcher:
+7. For authoring-only validation, use the installed Pulsara launcher:
 
 ```bash
 pulsara skills validate <skill-directory>
 ```
 
-Report the real result. If `pulsara` is not on `PATH`, report a Pulsara distribution or launcher setup problem; do not fall back to a repository `.venv`, `uv run`, or a private validator.
+This command validates source files only; it does not install or adopt them.
+Report the real result. If `pulsara` is not on `PATH`, report standalone validation
+as unavailable; do not use a repository `.venv`, `uv run`, or a private validator.
+For an already authorized installation, use the running Host's
+`INSTALL_LOOSE_SKILL`, which performs native validation; a separate preliminary
+CLI validation is unnecessary. Follow `pulsara-skill-installer` for that flow;
+do not describe authoring or a passed validation as installation.
 
 ## Guardrails
 

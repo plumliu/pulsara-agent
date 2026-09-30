@@ -11,11 +11,12 @@ not copied into the native candidate. An import never grants enablement acceptan
 
 ## Inspect
 
-Read the exact Codex manifest and every referenced local declaration. Also inspect
-default `skills/`, `.mcp.json`, `.app.json`, Hook configuration, package-relative
-launchers, relevant Skill instructions, and referenced scripts. Determine which
-parts are merely interface metadata and which parts are necessary to the Plugin's
-stated behavior.
+Read the exact Codex manifest to select the distribution. The official importer
+observes its declarations, format defaults and complete admitted resources.
+Inspect a referenced declaration, Skill or script when a concrete import
+diagnostic or user question needs it; routine installation does not require
+repeating the importer's complete source audit. Its supported field set decides
+which components are presentation metadata and which require active behavior.
 
 Do not infer semantics from the examples in this reference when the source says
 something different.

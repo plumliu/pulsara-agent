@@ -21,6 +21,11 @@ The production Runtime discovers these roots together with workspace and user `.
 
 The official installer validates and copies one frozen source observation into a hidden sibling stage, verifies exact contents and portable modes, and publishes with the platform's exclusive no-replace directory rename. Existing destinations are never overwritten. The exclusive primitive guarantees final-name no-replace within the held root; it is not a sandbox or a power-loss durability promise, and same-UID replacement of the private stage or target-root namespace after the final binding cut is outside the product concurrency contract.
 
-After installation, use `pulsara skills list` to see the selected Skills and `pulsara skills doctor` to diagnose invalid, shadowed, or unavailable entries. Updated Skills can be discovered when Pulsara next prepares a model request.
+After installation, use `manage_capability` with `INSPECT_LOOSE_SKILLS` and the
+same explicit scope to inspect the installed copy, its effective selection,
+diagnostics and management eligibility. Read its instructions and resources
+through the ordinary Skill/read-file route. First-party changes notify affected
+live sessions at their existing safe points; inspect adoption separately from
+the completed filesystem mutation. Current provider roots remain unchanged.
 
 Pulsara package Skills are read-only defaults loaded directly from the installed package. They are not copied into these roots and have no sync, status, reset, manifest, backup, or opt-out state. A loose same-name Skill shadows the package definition until the user removes that loose directory.

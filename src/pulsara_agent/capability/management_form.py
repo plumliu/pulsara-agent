@@ -38,6 +38,7 @@ class CapabilityFormValues:
     secret_changes: tuple[McpSecretMutation, ...] = field(default=(), repr=False)
     retain_credentials_confirmed: bool = False
     enable_review_accepted: bool = False
+    hook_review_accepted: bool = False
 
 
 class AcceptedCapabilityFormSubmission:

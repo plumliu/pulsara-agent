@@ -342,7 +342,6 @@ def production_builtin_executor_binding_identity_fingerprint(
             ),
             "execution_binding_kind": entry.execution_binding_kind.value,
             "is_read_only": descriptor.is_read_only,
-            "is_concurrency_safe": descriptor.is_concurrency_safe,
             "permission_category": descriptor.permission_category,
             "physical_effect_contract_fingerprint": (
                 physical_effect_contract_fingerprint
@@ -2777,9 +2776,9 @@ class DirectKernelToolPort:
                 except Exception:
                     values["adoption"] = "PARTIAL"
             return KernelToolResult(
-                state="SUCCESS" if values["status"] == "APPLIED" else "APPLICATION_ERROR",
+                state="SUCCESS" if values["status"] in {"APPLIED", "OBSERVED"} else "APPLICATION_ERROR",
                 content=json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode(),
-                effect_class="unknown_effect",
+                effect_class="read_only" if call.prepared.effects.read_only else "unknown_effect",
                 physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
             )
         if tool_name == "reload_hooks":

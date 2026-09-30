@@ -962,6 +962,7 @@ def _safe_inspection_outcome(
         PluginInstanceInspection(
             identity=_safe_identity(item.identity, scrub_set),
             mcp_connection_overlays=item.mcp_connection_overlays,
+            hook_config=item.hook_config,
             package_install_id=_safe_package_install_id(
                 item.package_install_id, scrub_set
             ),

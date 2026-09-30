@@ -32,6 +32,31 @@ from pulsara_agent.capability.mcp_management import (
     _require_destination_confirmation,
 )
 from pulsara_agent.mcp_config import OAuthAuthorization
+from pulsara_agent.capability.local_skill_management import (
+    LocalSkillManagementService,
+    InstallLooseLocalSkillRequest,
+    LocalSkillValidationDisposition,
+    LocalSkillValidationOutcome,
+    LooseSkillTargetObservation,
+)
+from pulsara_agent.capability.local_skill_publisher import LocalSkillInstallScope
+from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalIdentity
+from pulsara_agent.capability.plugin_skill_contracts import FrozenPluginSkillDefinitions
+from pulsara_agent.hooks.source import LocalHookSourceProvider
+from pulsara_agent.hooks.contracts import (
+    FrozenHookSourceSnapshot,
+    FrozenHookSourceProvenance,
+    HookDiagnostic,
+    HookSourceSnapshotDisposition,
+    HookSourceTrustAssessment,
+    HookTrustDisposition,
+    HookVisibilityScope,
+    PluginHookSourceIdentity,
+    PluginHookTrustSubject,
+)
+from pulsara_agent.hooks.presentation import hook_snapshot_public
+from pulsara_agent.capability.inspection_presentation import diagnostic_payload
+from pulsara_agent.hooks.trust import normalized_definition_digest
 from pulsara_agent.plugins.contracts import (
     InspectLocalPluginsRequest,
     PluginInspectionOutcome,
@@ -70,6 +95,10 @@ class PreparedCapabilityManagementInvocation:
     local_mutation: PreparedLocalMcpMutation | None = None
     plugin: PluginInstanceInspection | None = None
     plugin_connection_review: tuple[PluginConnectionReview, ...] = ()
+    skill_target: LooseSkillTargetObservation | None = None
+    skill_validation: LocalSkillValidationOutcome | None = None
+    skill_removal: LocalSkillRemovalIdentity | None = None
+    hook: FrozenHookSourceSnapshot | None = None
 
 
 class CapabilityManagementPreparation:
@@ -80,11 +109,17 @@ class CapabilityManagementPreparation:
         plugins: PluginManagementService,
         workspace_root: Path,
         deadline: Callable[[], float],
+        skills: LocalSkillManagementService,
+        hooks: LocalHookSourceProvider,
+        workspace_kind: str = "project",
     ):
         self.mcp = mcp
         self.plugins = plugins
         self.workspace_root = workspace_root.resolve()
         self.deadline = deadline
+        self.skills = skills
+        self.hooks = hooks
+        self.workspace_kind = workspace_kind
 
     async def prepare(
         self, arguments: Mapping[str, object]
@@ -96,6 +131,40 @@ class CapabilityManagementPreparation:
             if intent.scope is CapabilityManagementScope.WORKSPACE
             else None
         )
+        if (
+            root is not None
+            and self.workspace_kind != "project"
+            and intent.action
+            in {
+                Action.INSTALL_LOOSE_SKILL,
+                Action.SET_LOOSE_SKILL_ENABLED,
+                Action.REMOVE_LOOSE_SKILL,
+                Action.INSPECT_LOOSE_SKILLS,
+                Action.TRUST_HOOK_SOURCE,
+                Action.REVOKE_HOOK_TRUST,
+                Action.SET_HOOK_SOURCE_ENABLED,
+                Action.INSPECT_HOOK_SOURCES,
+                Action.INSTALL_PLUGIN,
+                Action.SET_PLUGIN_ENABLED,
+                Action.REMOVE_PLUGIN,
+                Action.CONFIGURE_PLUGIN_MCP_CONNECTION,
+            }
+        ):
+            raise ValueError("this operation requires a GUI project working directory")
+        if intent.action in {
+            Action.INSTALL_LOOSE_SKILL,
+            Action.SET_LOOSE_SKILL_ENABLED,
+            Action.REMOVE_LOOSE_SKILL,
+            Action.INSPECT_LOOSE_SKILLS,
+        }:
+            return await self._skill(intent, fields, root)
+        if intent.action in {
+            Action.TRUST_HOOK_SOURCE,
+            Action.REVOKE_HOOK_TRUST,
+            Action.SET_HOOK_SOURCE_ENABLED,
+            Action.INSPECT_HOOK_SOURCES,
+        }:
+            return await self._hook(intent, fields, root)
         if intent.action in {
             Action.ADD_LOCAL_MCP,
             Action.UPDATE_LOCAL_MCP,
@@ -134,7 +203,11 @@ class CapabilityManagementPreparation:
             source = Path(fields["source_path"])
             validation = await asyncio.to_thread(
                 self.plugins.validate_local_plugin_source,
-                ValidateLocalPluginSourceRequest(source, self.deadline(), source_format=fields.get("source_format", "native")),
+                ValidateLocalPluginSourceRequest(
+                    source,
+                    self.deadline(),
+                    source_format=fields.get("source_format", "native"),
+                ),
             )
             if not isinstance(validation, ValidPluginValidationOutcome):
                 raise ValueError("Plugin source did not pass native package validation")
@@ -170,8 +243,10 @@ class CapabilityManagementPreparation:
             if fields["enabled"]:
                 user_inputs.append("plugin_enable_review")
             review = connection_review(
-                plugin.mcp_connection_overlays, self.mcp.settings.read().mcp_secret,
-                servers=plugin.summary.mcp.mcp_servers, identity=plugin.identity,
+                plugin.mcp_connection_overlays,
+                self.mcp.settings.read().mcp_secret,
+                servers=plugin.summary.mcp.mcp_servers,
+                identity=plugin.identity,
             )
         elif intent.action is Action.REMOVE_PLUGIN:
             process = plugin.enabled and self._has_process(plugin)
@@ -245,8 +320,13 @@ class CapabilityManagementPreparation:
                 )
                 # Keep executable/package-root fields in the immutable editor
                 # definition, not a fabricated editable local-MCP cwd.
-                _, prefill["config"] = connection_editor_definition(server, overlay,
-                    owner=plugin_connection_owner(plugin.identity, server.local_server_id))
+                _, prefill["config"] = connection_editor_definition(
+                    server,
+                    overlay,
+                    owner=plugin_connection_owner(
+                        plugin.identity, server.local_server_id
+                    ),
+                )
                 process = plugin.enabled and isinstance(server, PluginMcpStdioSummary)
             elif intent.action is Action.AUTHORIZE_MCP:
                 if not isinstance(current.auth, OAuthAuthorization):
@@ -271,6 +351,230 @@ class CapabilityManagementPreparation:
             plugin=plugin,
             plugin_connection_review=review,
         )
+
+    async def _skill(self, intent, fields, root):
+        scope = LocalSkillInstallScope(intent.scope.value.lower())
+        effects = (
+            ResolvedCapabilityEffectProjection()
+            if intent.action is Action.INSPECT_LOOSE_SKILLS
+            else (
+                ResolvedCapabilityEffectProjection(
+                    workspace_write=root is not None,
+                    outside_workspace_write=root is None,
+                    destructive=intent.action is Action.REMOVE_LOOSE_SKILL,
+                )
+            )
+        )
+        target = validation = removal = None
+        if intent.action is Action.INSTALL_LOOSE_SKILL:
+            # Native publisher owns candidate overrides and exclusive publication.
+            request = InstallLooseLocalSkillRequest(
+                Path(fields["source_path"]),
+                scope,
+                root,
+                fields.get("name"),
+                fields.get("description"),
+            )
+            validation = await asyncio.to_thread(
+                self.skills.validate_loose_skill_install, request
+            )
+            if validation.disposition is not LocalSkillValidationDisposition.VALID:
+                raise ValueError("Skill source did not pass native validation")
+        elif intent.action is Action.REMOVE_LOOSE_SKILL:
+            removal = await asyncio.to_thread(
+                self.skills.inspect_loose_skill_removal,
+                skill_path=Path(fields["skill_path"]),
+                scope=scope,
+                workspace_root=root,
+            )
+        elif intent.action is Action.SET_LOOSE_SKILL_ENABLED:
+            target = await asyncio.to_thread(
+                self.skills.inspect_loose_skill_target,
+                skill_path=Path(fields["skill_path"]),
+                scope=scope,
+                workspace_root=root,
+            )
+        return PreparedCapabilityManagementInvocation(
+            intent,
+            effects,
+            (),
+            freeze_json(intent.to_dict()),
+            freeze_json({}),
+            skill_target=target,
+            skill_validation=validation,
+            skill_removal=removal,
+        )
+
+    async def inspect_hook_sources(
+        self, *, root, source_kind=None, plugin_id=None, allow_unavailable=False
+    ):
+        scope = "WORKSPACE" if root is not None else "USER"
+        snapshots = []
+        observation = {
+            "plugin_inventory_status": "NOT_OBSERVED",
+            "hook_composition_status": "NOT_OBSERVED",
+            "diagnostics": [],
+        }
+        if source_kind in {None, "LOCAL"}:
+            local = await asyncio.to_thread(
+                self.hooks.discover,
+                deadline_monotonic=self.deadline(),
+                visibility_scope=HookVisibilityScope(scope),
+            )
+            snapshots.extend(
+                (item, None)
+                for item in local.source_snapshots
+                if item.provenance.identity.visibility_scope.value == scope
+            )
+        if source_kind in {None, "PLUGIN"}:
+            observed = await asyncio.to_thread(
+                self.plugins.inspect_local_plugins,
+                InspectLocalPluginsRequest(self.deadline(), workspace_root=root),
+            )
+            try:
+                observation = {
+                    "plugin_inventory_status": observed.disposition.value,
+                    "hook_composition_status": observed.hook_composition_disposition.value,
+                    "diagnostics": [
+                        diagnostic_payload(item) for item in observed.diagnostics
+                    ],
+                }
+                if (
+                    observed.disposition is not PluginInspectionDisposition.COMPLETE
+                    and not allow_unavailable
+                ):
+                    raise ValueError("Plugin Hook inventory is unavailable")
+                for plugin in observed.instances:
+                    if plugin.identity.scope.value != scope or (
+                        plugin_id is not None and plugin.identity.plugin_id != plugin_id
+                    ):
+                        continue
+                    if plugin.summary.hooks.disposition.value != "MISSING":
+                        snapshots.append((self._plugin_hook_snapshot(plugin), plugin))
+            finally:
+                observed.close()
+        return tuple(snapshots), observation
+
+    def _plugin_hook_snapshot(self, plugin):
+        parsed = plugin.hook_config
+        if parsed is not None:
+            provenance = parsed.provenance
+            digest = normalized_definition_digest(provenance, parsed.definitions)
+            try:
+                trust = self.hooks.trust_store.assess(provenance.trust_subject, digest)
+            except (OSError, ValueError):
+                trust = HookSourceTrustAssessment(
+                    HookTrustDisposition.UNAVAILABLE, digest, None, True, None
+                )
+            return FrozenHookSourceSnapshot(
+                provenance,
+                HookSourceSnapshotDisposition.COMPLETE,
+                parsed.definitions,
+                parsed.diagnostics,
+                trust,
+            )
+        visibility = HookVisibilityScope(plugin.identity.scope.value)
+        identity = PluginHookSourceIdentity(
+            visibility,
+            plugin.identity.plugin_id,
+            plugin.package_install_id,
+            "dev.pulsara/hooks/hooks.json",
+            plugin.package_root / "dev.pulsara/hooks/hooks.json",
+            plugin.identity.workspace_state_key,
+        )
+        provenance = FrozenHookSourceProvenance(
+            identity,
+            PluginHookTrustSubject(
+                visibility,
+                plugin.identity.plugin_id,
+                plugin.identity.workspace_state_key,
+            ),
+            None,
+            f"PLUGIN {visibility.value} {plugin.identity.plugin_id}",
+            (
+                ("PLUGIN_DATA", str(plugin.data_root)),
+                ("PLUGIN_ROOT", str(plugin.package_root)),
+            ),
+        )
+        return FrozenHookSourceSnapshot(
+            provenance,
+            HookSourceSnapshotDisposition.UNAVAILABLE,
+            (),
+            (
+                HookDiagnostic(
+                    "PLUGIN_HOOK_SOURCE_UNAVAILABLE",
+                    "Plugin has no complete Hook definitions",
+                ),
+            ),
+            HookSourceTrustAssessment(
+                HookTrustDisposition.UNAVAILABLE, None, None, True, None
+            ),
+        )
+
+    async def _hook(self, intent, fields, root):
+        if intent.action is Action.INSPECT_HOOK_SOURCES:
+            return PreparedCapabilityManagementInvocation(
+                intent,
+                ResolvedCapabilityEffectProjection(),
+                (),
+                freeze_json(intent.to_dict()),
+                freeze_json({}),
+            )
+        snapshots, _ = await self.inspect_hook_sources(
+            root=root,
+            source_kind=fields["source_kind"],
+            plugin_id=fields.get("plugin_id"),
+        )
+        if len(snapshots) != 1:
+            raise McpManagementConflict("Hook source is absent or ambiguous")
+        snapshot, plugin = snapshots[0]
+        if intent.action is Action.TRUST_HOOK_SOURCE and (
+            snapshot.disposition is not HookSourceSnapshotDisposition.COMPLETE
+            or snapshot.trust.disposition is HookTrustDisposition.UNAVAILABLE
+        ):
+            raise ValueError("complete current Hook definitions are required for trust")
+        prefill = {
+            **intent.to_dict(),
+            "hook_source": await self.public_hook_snapshot(snapshot),
+        }
+        return PreparedCapabilityManagementInvocation(
+            intent,
+            ResolvedCapabilityEffectProjection(outside_workspace_write=True),
+            ("hook_source_review",)
+            if intent.action is Action.TRUST_HOOK_SOURCE
+            else (),
+            freeze_json(prefill),
+            freeze_json({}),
+            plugin=plugin,
+            hook=snapshot,
+        )
+
+    def inspect_plugin_skill_definitions(self, root) -> FrozenPluginSkillDefinitions:
+        # Same native package view and producer used by Host activation and CLI.
+        from pulsara_agent.plugins.view import EnabledPluginViewOwner
+        from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
+        from pulsara_agent.plugins.contracts import NeverCancelPluginOperation
+
+        store = self.plugins._store()
+        if store is None:
+            raise ValueError("Plugin inventory home is unavailable")
+        view = EnabledPluginViewOwner(
+            store=store, credential_boundary=self.plugins._credential_boundary
+        ).observe(
+            workspace_root=root,
+            deadline_monotonic=self.deadline(),
+            cancellation=NeverCancelPluginOperation(),
+        )
+        try:
+            return PluginSkillDefinitionProducer().observe(view)
+        finally:
+            view.close()
+
+    async def public_hook_snapshot(self, snapshot):
+        scrub = await asyncio.to_thread(
+            self.plugins._capture_scrub_set, InspectLocalPluginsRequest(self.deadline())
+        )
+        return scrub.scrub_json(hook_snapshot_public(snapshot, inspect=True))
 
     async def _local(self, intent, fields, root):
         target = LocalMcpTarget(fields["server_id"], root)

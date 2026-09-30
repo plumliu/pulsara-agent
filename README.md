@@ -237,6 +237,8 @@ uv run pulsara config-check
 uv run pulsara db verify --deep
 ```
 
+Use the capability page or ask the model to manage capabilities through `manage_capability`. Terminal prepares sources; the Host resolves installation targets, private inputs, Hook/Plugin review and live-session adoption. Advanced administrative CLI commands remain available. Project writes require explicit `--workspace`; lists and diagnostics without it observe USER sources only. Relative source paths still use command cwd. MCP invocation visibility uses `mcp add --tool-visibility ROOT_ONLY|ROOT_AND_SUBAGENTS`; standalone `mcp reconnect` is removed. USER `mcp doctor` uses the effective Pulsara home as its physical test cwd and reports `test_cwd`; it may start stdio processes. See the [application and management boundary](PULSARA_APP_AND_CAPABILITY_MANAGEMENT_BOUNDARY_DESIGN.zh.md).
+
 The first command starts the loopback-only Web application and opens it in a
 browser. Pass `--no-open` to start the service without opening a page. Durable
 sessions resume with their exact workspace after the page or service restarts.

@@ -1,8 +1,8 @@
 # Pulsara 应用入口与能力管理边界
 
-日期：2026-09-30。状态：主 agent 与 GPT-6.1 Sol / xhigh critic 已共同修订、复审并冻结，供用户审阅；尚未实施。
+日期：2026-09-30。状态：用户批准的 hard cut 已实施；非真实会话测试、GPT-6.1 Sol / xhigh critic 交叉审核与真实 Pulsara dogfood 均已通过。
 
-本文只冻结下一次实现的产品边界，不表示新动作已经实现，也不授权本轮修改运行时。以根目录 [AGENTS.md](AGENTS.md) 为约束；现行启动、terminal 和能力 owner 的事实与本文提出的改动分别说明。
+本文是当前已实施的产品边界，以根目录 [AGENTS.md](AGENTS.md) 为约束。第 2 节记录实施前的边界问题，其余合同描述本次 hard cut 后的行为；实施与验收结果见第 12 节。
 
 ## 1. 决定
 
@@ -20,12 +20,12 @@
 
 用户提出的两层入口成立；模型运行 shell 时有合理默认 cwd，也成立。但 shell 的当前目录不能完整表示能力安装目标。
 
-| 当前事实 | 对边界的影响 |
+| 实施前的事实 | 对边界的影响 |
 | --- | --- |
 | `app` 启动 cwd 已与 GUI 会话目录分离。 | 不再改动这部分；应用启动不带项目身份。 |
 | terminal 每次独立启动，省略 `workdir` 时从当前会话根启动；单次 `workdir` 或命令内 `cd` 可以改变该次 cwd，不能改变后续调用的默认根。 | 默认从根运行 CLI 时通常正确；进入下载目录后，CLI 的 cwd 不再等于安装的项目根。 |
 | Skills/Plugins 的项目 CLI 可默认 cwd；MCP 不给 `--workspace` 则操作 USER；Hooks 另有源作用域。 | 模型必须记住各命令不同的缺省语义。 |
-| terminal 的默认环境过滤不携带 `PULSARA_HOME`，创建 TerminalManager 时也未注入 Host 已解析的 home。 | custom-home Host 中的裸 CLI 存在操作默认 `~/.pulsara` 的风险；这是代码检查发现的缺口，本轮未修复或运行复现。 |
+| terminal 的默认环境过滤不携带 `PULSARA_HOME`，创建 TerminalManager 时也未注入 Host 已解析的 home。 | custom-home Host 中的裸 CLI 存在操作默认 `~/.pulsara` 的风险；本轮由 typed 管理直接使用 Host 的 frozen home，保留 terminal 的原环境过滤规则。 |
 | MCP/Plugin 已有原生 typed 管理、私密表单、精确当前值检查、Plugin 启用 review 与自动采用。 | 改成 terminal 主路径会让模型承担这些协调，或要求新增 Host IPC/表单桥接。 |
 | standalone CLI 无运行中 Host supervisor；显式 reload 也有 ROOT/权限模式限制。 | CLI 与首方管理不是在所有角色和权限下等价的入口。 |
 
@@ -57,7 +57,7 @@
 
 ### 3.3 独立 CLI
 
-CLI 保留显式项目参数 `--workspace`：它在管理命令中是目标参数，和已经删除的 app 启动参数用途不同。下一次 hard cut 去掉项目管理的 cwd fallback：
+CLI 保留显式项目参数 `--workspace`：它在管理命令中是目标参数，和已经删除的 app 启动参数用途不同。本轮 hard cut 已去掉项目管理的 cwd fallback：
 
 - 项目写操作必须提供目标 `--workspace`；缺少目标时在副作用发生前报用法错误。
 - 无项目参数的列表与诊断只观察 USER/bundled 及相应用户 Plugin，不扫描 cwd 项目。带项目参数时才观察该项目与可见用户来源。
@@ -89,7 +89,7 @@ Skill 正文与 frontmatter 仍是 untrusted instructional data，不授予工�
 
 Plugin 的 immutable package、安装实例和 persistent data 沿用原生命周期：安装/replace 后实例为 disabled，enable review 针对确切当前包。Replace 产生新 package identity，即使命令文本相同，旧 Hook trust 也不能授权新包，需重新信任。Remove 清理既有专用凭据、保留实例 data；已借出的 consumer 持旧包完成结算，回收沿原 GC/anchor 合同，不引入新的自动清理任务。
 
-## 5. 下一次实现的操作范围
+## 5. 管理操作范围
 
 复用现有闭合 `manage_capability` 动作联合和 call-local preparation/form/execution。只补下表缺口，保持 action-specific strict parser，不增加一个模型需要同时学习的通用 capability DSL。
 
@@ -149,7 +149,7 @@ source mutation、local Hook 发布、Plugin/Skill 发布和 MCP reload 没有�
 
 ## 8. 最小落地与验收
 
-用户审阅同意后，以一次覆盖上述新增动作与旧默认路径的 hard cut 实施：
+本轮以一次覆盖上述新增动作与旧默认路径的 hard cut 实施：
 
 1. 在现有管理 preparation/execution/form 内接入 loose Skill 和 Hook owners 及两项必要只读观察；沿用绑定的 canonical workspace kind/root 与 frozen home。GUI 与模型共享业务服务、确认/私密输入和采用 owner；模型动作仍经过现有 run permission，GUI 用户控制面沿原权限合同，不要求把 GUI HTTP 路由反向包装成模型工具。
 2. 同步模型 schema、strict parser、权限/effect 分类、结果、bundled installers、GUI 所需的 Hook review 与文档；删除 loose Skill 模型安装的 CLI 主路径指令，保留高级独立管理说明。只读动作单独按真实阅读效果分类，不走写确认；新增写动作的 effects 由实际 owner/storage/执行行为确定，不由模型自报。模型 schema 的新入口仅在获准 cold/compaction 边界安装，不热改旧 epoch。
@@ -200,4 +200,32 @@ source mutation、local Hook 发布、Plugin/Skill 发布和 MCP reload 没有�
 | [Round 9.2 Hook](archived_docs/ROUND_9_2_HOOK_SUBSYSTEM_IMPLEMENTATION_SPEC.zh.md) | 用户信任完整 normalized declarations；未来事件采用与 predecessor view 结算；trust 不递归证明脚本或依赖。 |
 | [Round 9.3 Plugin](archived_docs/ROUND_9_3_AGENT_PLUGIN_BUNDLE_AND_HOOK_ADAPTER_IMPLEMENTATION_SPEC.zh.md) | 一个包生命周期，接入既有 Skill/MCP/Hook consumers；disabled 安装、exact enable review、replace 后重新信任、data 保留及旧 consumer 排空。 |
 
-历史中的“模型主要调用 CLI、没有 provider-visible 管理工具”已被后续能力页 hard cut 与当前 `manage_capability` 取代，不能据此恢复旧入口。旧 tool-surface 自动 reset/rebase、冗余 fingerprint/activation SHA、固定旧 bundled 清单与数量 oracle、旧环境凭据路径等，也不作为本次实现要求。完整会话来源规则以当前代码/现行规格为准；新增无项目 USER 管理观察不恢复 cwd 伪项目。第 4、6、7 节已明确这些保留语义，下一次实现只改变管理接线，不重写底层能力系统。
+历史中的“模型主要调用 CLI、没有 provider-visible 管理工具”已被后续能力页 hard cut 与当前 `manage_capability` 取代，不能据此恢复旧入口。旧 tool-surface 自动 reset/rebase、冗余 fingerprint/activation SHA、固定旧 bundled 清单与数量 oracle、旧环境凭据路径等，也不作为本次实现要求。完整会话来源规则以当前代码/现行规格为准；新增无项目 USER 管理观察不恢复 cwd 伪项目。第 4、6、7 节已明确这些保留语义，本轮实现改变管理接线，不重写底层能力系统。
+
+## 12. 实施与验收结果
+
+现有闭合管理工具已接入第 5 节的八项 loose Skill / Hook 动作；模型、GUI 与高级 CLI 复用原生来源、配置、信任及公开观察 owners。Hook 信任使用完整定义审阅和私密表单布尔值，模型不能提供同意或摘要。查询按实际只读效果分类。首方采用补齐 local Hook slice，并分别报告各 owner 的结果；没有新增表、事件、registry 或 provider rebase 边界。
+
+先完成全部非真实会话测试，再由 GPT-6.1 Sol / xhigh critic 交叉审核。四项首轮阻塞涉及已采用 MCP 的取消结算、Skill 发布前取消、Hook composition 不可用观察，以及 Plugin Hook 部分采用的失败定位；均已修复并补回归。复审发现的“先超时、join 时再取消”标记遗漏也已修复。最终复审无阻塞。
+
+最终检查：Python `pytest -q -n 4 -m 'not retrieval_live'` 为 **2,395 passed**；前端为 **581 passed**。Ruff、编译检查、协议生成检查、TypeScript、前端构建和本地静态产物构建通过；ESLint 无错误，保留 5 项既有 warning。边界故障注入测试为 29 项。
+
+真实测试复用了只读保存的生产配置：本机 PostgreSQL `localhost:5432/pulsara`，GPT-6 Luna / xhigh。全局 `pulsara app` 从 `/tmp` 启动，会话根为 `/Users/plumliu/Desktop/test1/pulsara-boundary-dogfood`。原生目录选择器的自动化连接超时，因此本次目录绑定通过现有 GUI 后端 create-session API 完成；对话、工具调用与审阅均在 GUI 中完成。
+
+- 模型准备 `source/boundary-probe`，通过 `INSTALL_LOOSE_SKILL` 安装到绑定项目根。结果为 `APPLIED` / `RELOADED`，检查 enabled/effective 为 true，并从安装副本读到 `BOUNDARY_SKILL_OK`。
+- 模型准备唯一的 PostToolUse 声明：matcher 为 `manage_capability|read_file`，命令为 `printf 'HOOK_POST\n' >> hook-events.log`，timeout 为 5，async 为 false。完整 GUI 审阅后信任成功；紧接着 terminal 检查日志为 ABSENT，随后 read_file 才产生 `HOOK_POST`，验证没有管理调用自身的 PostTool 自触发。
+- Skill 禁用后 enabled/effective 为 false；Hook 禁用后保留信任记录、公开状态为 DISABLED。后续读取前后日志均为 4 行，没有新增执行。Skill 再启用后重新有效。
+- dogfood 发现侧栏依赖旧缓存 `adoption.pending`，模型变更结束后仍显示旧状态。已沿原读取 owner 修复运行结束时的刷新条件并补界面回归；critic 复审通过，真实重新启用后侧栏无需刷新页面自动更新。
+- 最后一轮 admitted permission 的 requested/effective 均为 READ_ONLY，两项 inspection 均 SUCCESS / OBSERVED，没有写入或信任表单。
+
+测试中模型首次信任误传 `source_path`，被闭合 schema 拒绝后改用绑定来源成功；没有放宽 parser 或恢复任意路径目标。Skill installer 的参考文档也已同步为首方 inspection/read 路线。测试 Skill 保持启用、测试 Hook 保持禁用；会话和测试文件保留在隔离目录便于查看。
+
+## 13. 内置能力 Skill 说明复核
+
+四项内置说明（Skill installer、Skill creator、MCP installer、Plugin installer）已按当前闭合 parser 和原生 owner 对齐。主说明提供最小合法调用、来源与安装路径的区别、固定 USER/WORKSPACE 目标、私密表单及变更/采用结果；普通安装不再要求模型重复 CLI 验证或审计全部脚本。转换、原生校验和完整信任审阅分别由 importer、validator 和 Host 承担，较深参考文档只用于具体诊断。LOCAL Hook 已加入 Plugin installer 的发现描述与主说明，并新增简短来源管理参考；Hook 调用明确禁止 `source_path`、模型提供的 digest 和同意字段。
+
+新增的 10 个管理示例通过工具 schema 与闭合 parser，2 个 Hook 配置示例通过原生解析；相关 79 项测试通过。GPT-6.1 Sol / xhigh critic 最终文案复审无阻塞。
+
+使用新 GUI 冷会话 `session:84142103e9d246af8a0f741c0fdfe0c6`、GPT-6 Luna / xhigh，以自然语言要求检查项目 Hook、撤销信任、重新发起完整审阅并保持禁用，没有提示动作名或字段。模型仅读取 Plugin installer 主说明一次，随后依次调用 `INSPECT_HOOK_SOURCES`、`REVOKE_HOOK_TRUST`、`TRUST_HOOK_SOURCE`，全部 SUCCESS；完整 GUI 审阅后信任变更 APPLIED / RELOADED，来源仍为 DISABLED。没有 CLI、实现源码查询、重复采用或错误参数。这验证了普通 LOCAL Hook 路径的说明足够；不据此宣称全部复杂导入场景都已验证。
+
+`INSTALL_PLUGIN` 成功安装或替换后，管理结果的 `identity.plugin_id` 直接取自原生 `SuccessfulPluginInstallOutcome.identity`，与顶层 `scope` 一同供后续配置、启用和删除使用。模型无需再从 manifest 推导操作目标；失败或冲突不伪称成功安装的身份。不新增查询、持久状态或权限，安装后 disabled、审阅与采用语义均沿用原合同。

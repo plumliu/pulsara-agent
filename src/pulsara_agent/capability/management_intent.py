@@ -20,6 +20,14 @@ from pulsara_agent.primitives.context import (
 
 
 class CapabilityManagementAction(StrEnum):
+    INSTALL_LOOSE_SKILL = "INSTALL_LOOSE_SKILL"
+    SET_LOOSE_SKILL_ENABLED = "SET_LOOSE_SKILL_ENABLED"
+    REMOVE_LOOSE_SKILL = "REMOVE_LOOSE_SKILL"
+    INSPECT_LOOSE_SKILLS = "INSPECT_LOOSE_SKILLS"
+    TRUST_HOOK_SOURCE = "TRUST_HOOK_SOURCE"
+    REVOKE_HOOK_TRUST = "REVOKE_HOOK_TRUST"
+    SET_HOOK_SOURCE_ENABLED = "SET_HOOK_SOURCE_ENABLED"
+    INSPECT_HOOK_SOURCES = "INSPECT_HOOK_SOURCES"
     ADD_LOCAL_MCP = "ADD_LOCAL_MCP"
     UPDATE_LOCAL_MCP = "UPDATE_LOCAL_MCP"
     REMOVE_LOCAL_MCP = "REMOVE_LOCAL_MCP"
@@ -53,13 +61,36 @@ class CapabilityManagementIntent:
 # Presence and null are deliberately distinct for expected_overlay: an omitted
 # guard is resolved by inspection, whereas explicit null asserts no overlay.
 _FIELDS = {
+    CapabilityManagementAction.INSTALL_LOOSE_SKILL: (
+        {"source_path"},
+        {"name", "description"},
+    ),
+    CapabilityManagementAction.SET_LOOSE_SKILL_ENABLED: (
+        {"skill_path", "enabled"},
+        set(),
+    ),
+    CapabilityManagementAction.REMOVE_LOOSE_SKILL: ({"skill_path"}, set()),
+    CapabilityManagementAction.INSPECT_LOOSE_SKILLS: (set(), {"skill_path"}),
+    CapabilityManagementAction.TRUST_HOOK_SOURCE: ({"source_kind"}, {"plugin_id"}),
+    CapabilityManagementAction.REVOKE_HOOK_TRUST: ({"source_kind"}, {"plugin_id"}),
+    CapabilityManagementAction.SET_HOOK_SOURCE_ENABLED: (
+        {"source_kind", "enabled"},
+        {"plugin_id"},
+    ),
+    CapabilityManagementAction.INSPECT_HOOK_SOURCES: (
+        set(),
+        {"source_kind", "plugin_id"},
+    ),
     CapabilityManagementAction.ADD_LOCAL_MCP: ({"server_id"}, {"config"}),
     CapabilityManagementAction.UPDATE_LOCAL_MCP: (
         {"server_id"},
         {"config", "expected_identity"},
     ),
     CapabilityManagementAction.REMOVE_LOCAL_MCP: ({"server_id"}, {"expected_identity"}),
-    CapabilityManagementAction.INSTALL_PLUGIN: ({"source_path"}, {"replace", "source_format"}),
+    CapabilityManagementAction.INSTALL_PLUGIN: (
+        {"source_path"},
+        {"replace", "source_format"},
+    ),
     CapabilityManagementAction.SET_PLUGIN_ENABLED: (
         {"plugin_id", "enabled"},
         {"expected_package_install_id"},
@@ -86,33 +117,72 @@ _FIELDS = {
 def capability_management_input_schema() -> dict[str, object]:
     """Closed action union; nested candidates use the sole native parser."""
     properties = {
-        "action": {"type": "string", "enum": [item.value for item in CapabilityManagementAction]},
-        "scope": {"type": "string", "enum": [item.value for item in CapabilityManagementScope]},
-        **{name: {"type": "string", "minLength": 1} for name in (
-            "server_id", "plugin_id", "source_path", "expected_identity", "expected_package_install_id")},
-        "enabled": {"type": "boolean"}, "replace": {"type": "boolean"},
-        "source_format": {"type": "string", "enum": ["native", "claude", "codex", "cursor"]},
-        "config": {"type": "object", "description": (
-            'Complete native public MCP entry, not a patch. HTTP example: '
-            '{"display_name":"Docs","enabled":true,"transport":{"type":"streamable_http",'
-            '"endpoint":"https://example.org/mcp"},"auth":{"type":"none"}}. '
-            'For an explicitly approved loopback HTTP endpoint put allow_http_localhost:true inside transport. '
-            'stdio transport uses type:"stdio", command, args (array), cwd (workspace-relative), env (public only). '
-            'UPDATE replaces the whole entry: preserve existing settings; if you do not have the complete '
-            'configuration, omit config to open the user editor prefilled from current truth. '
-            'Never read private settings or repository source to construct this object. '
-            'For credentials omit config and let the user select authentication and enter secrets in the editor.'
-        )},
-        "overlay": {"type": ["object", "null"], "description": "Finite Plugin MCP connection overlay; null clears it. Executable fields cannot be overridden."},
+        "action": {
+            "type": "string",
+            "enum": [item.value for item in CapabilityManagementAction],
+        },
+        "scope": {
+            "type": "string",
+            "enum": [item.value for item in CapabilityManagementScope],
+        },
+        **{
+            name: {"type": "string", "minLength": 1}
+            for name in (
+                "server_id",
+                "plugin_id",
+                "source_path",
+                "skill_path",
+                "name",
+                "description",
+                "expected_identity",
+                "expected_package_install_id",
+            )
+        },
+        "source_kind": {"type": "string", "enum": ["LOCAL", "PLUGIN"]},
+        "enabled": {"type": "boolean"},
+        "replace": {"type": "boolean"},
+        "source_format": {
+            "type": "string",
+            "enum": ["native", "claude", "codex", "cursor"],
+        },
+        "config": {
+            "type": "object",
+            "description": (
+                "Complete native public MCP entry, not a patch. HTTP example: "
+                '{"display_name":"Docs","enabled":true,"transport":{"type":"streamable_http",'
+                '"endpoint":"https://example.org/mcp"},"auth":{"type":"none"}}. '
+                "For an explicitly approved loopback HTTP endpoint put allow_http_localhost:true inside transport. "
+                'stdio transport uses type:"stdio", command, args (array), cwd (workspace-relative), env (public only). '
+                "UPDATE replaces the whole entry: preserve existing settings; if you do not have the complete "
+                "configuration, omit config to open the user editor prefilled from current truth. "
+                "Never read private settings or repository source to construct this object. "
+                "For credentials omit config and let the user select authentication and enter secrets in the editor."
+            ),
+        },
+        "overlay": {
+            "type": ["object", "null"],
+            "description": "Finite Plugin MCP connection overlay; null clears it. Executable fields cannot be overridden.",
+        },
         "expected_overlay": {"type": ["object", "null"]},
     }
-    return {"type": "object", "oneOf": [
-        {"type": "object", "properties": {
-            **{name: properties[name] for name in sorted(required | optional | {"scope"})},
-            "action": {"type": "string", "const": action.value},
-        }, "required": sorted(required | {"action", "scope"}), "additionalProperties": False}
-        for action, (required, optional) in _FIELDS.items()
-    ]}
+    return {
+        "type": "object",
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **{
+                        name: properties[name]
+                        for name in sorted(required | optional | {"scope"})
+                    },
+                    "action": {"type": "string", "const": action.value},
+                },
+                "required": sorted(required | {"action", "scope"}),
+                "additionalProperties": False,
+            }
+            for action, (required, optional) in _FIELDS.items()
+        ],
+    }
 
 
 def parse_capability_management_intent(
@@ -135,6 +205,9 @@ def parse_capability_management_intent(
         "server_id",
         "plugin_id",
         "source_path",
+        "skill_path",
+        "name",
+        "description",
         "expected_identity",
         "expected_package_install_id",
     ):
@@ -145,9 +218,25 @@ def parse_capability_management_intent(
     for name in ("enabled", "replace"):
         if name in fields and type(fields[name]) is not bool:
             raise ValueError("capability enable/replace selection must be boolean")
-    if "source_path" in fields and not Path(fields["source_path"]).is_absolute():
-        raise ValueError("Plugin source must be an existing absolute local source path")
-    if fields.get("source_format", "native") not in {"native", "claude", "codex", "cursor"}:
+    for name in ("source_path", "skill_path"):
+        if name in fields and not Path(fields[name]).is_absolute():
+            raise ValueError("capability source paths must be absolute")
+    if "source_kind" in fields and fields["source_kind"] not in {"LOCAL", "PLUGIN"}:
+        raise ValueError("Hook source kind must be LOCAL or PLUGIN")
+    if "HOOK" in action.value:
+        kind = fields.get("source_kind")
+        if "plugin_id" in fields and kind != "PLUGIN":
+            raise ValueError("Plugin Hook identity requires source_kind PLUGIN")
+        if action is not CapabilityManagementAction.INSPECT_HOOK_SOURCES and (
+            (kind == "PLUGIN") != ("plugin_id" in fields)
+        ):
+            raise ValueError("select the exact Plugin Hook identity")
+    if fields.get("source_format", "native") not in {
+        "native",
+        "claude",
+        "codex",
+        "cursor",
+    }:
         raise ValueError("Plugin source format must be explicitly selected")
     for name in ("config", "overlay", "expected_overlay"):
         if name not in fields:

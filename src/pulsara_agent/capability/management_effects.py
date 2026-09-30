@@ -16,7 +16,13 @@ class ResolvedCapabilityEffectProjection:
             self.outside_workspace_write,
             self.process_control,
         )
-        if any(
-            type(value) is not bool for value in (*values, self.destructive)
-        ) or not any(values):
+        if any(type(value) is not bool for value in (*values, self.destructive)) or (
+            self.destructive and not any(values)
+        ):
             raise ValueError("capability management requires resolved physical effects")
+
+    @property
+    def read_only(self) -> bool:
+        return not (
+            self.workspace_write or self.outside_workspace_write or self.process_control
+        )

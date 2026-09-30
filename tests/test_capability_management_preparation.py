@@ -7,6 +7,12 @@ import pytest
 from pulsara_agent.conversation_kernel.capability_management import (
     CapabilityManagementPreparation,
 )
+from pulsara_agent.capability.local_skill_management import LocalSkillManagementService
+from pulsara_agent.capability.pulsara_home import (
+    UserHomeResolution,
+    PulsaraHomeDisposition,
+)
+from pulsara_agent.hooks.source import LocalHookSourceProvider
 from pulsara_agent.capability.mcp_management import (
     LocalMcpManagementService,
     LocalMcpTarget,
@@ -44,11 +50,23 @@ def preparation(tmp_path):
             pulsara_home_resolution=resolve_pulsara_home(str(tmp_path / "private")),
         ),
         workspace_root=workspace,
+        skills=LocalSkillManagementService(
+            pulsara_home_resolution=resolve_pulsara_home(str(tmp_path / "private")),
+            user_home_resolution=UserHomeResolution(
+                PulsaraHomeDisposition.RESOLVED, tmp_path / "user-home"
+            ),
+        ),
+        hooks=LocalHookSourceProvider(
+            workspace_root=workspace,
+            workspace_kind="project",
+            workspace_state_key=str(workspace),
+            pulsara_home=tmp_path / "private",
+        ),
         deadline=lambda: monotonic() + 5,
     )
 
 
-async def install_plugin(owner, tmp_path, *, stdio=False):
+async def install_plugin(owner, tmp_path, *, stdio=False, hooks=None):
     source = tmp_path / "source"
     source.mkdir()
     (source / "plugin.json").write_text(
@@ -71,6 +89,10 @@ async def install_plugin(owner, tmp_path, *, stdio=False):
             }
         )
     )
+    if hooks is not None:
+        hook_path = source / "dev.pulsara" / "hooks" / "hooks.json"
+        hook_path.parent.mkdir(parents=True)
+        hook_path.write_text(json.dumps(hooks))
     installed = await owner.plugins.install_local_plugin(
         InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 10),
         connections=owner.mcp,

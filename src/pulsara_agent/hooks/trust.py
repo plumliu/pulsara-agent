@@ -149,6 +149,7 @@ def _read_regular_file_nofollow(path: Path) -> bytes:
             chunks.append(chunk)
         after = os.fstat(descriptor)
         current = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+
         def evidence(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
             return (
                 value.st_dev,
@@ -158,6 +159,7 @@ def _read_regular_file_nofollow(path: Path) -> bytes:
                 value.st_mtime_ns,
                 value.st_ctime_ns,
             )
+
         if evidence(before) != evidence(after) or evidence(after) != evidence(current):
             raise OSError("Hook trust state changed during observation")
         return b"".join(chunks)
@@ -237,8 +239,15 @@ class HookTrustStore:
                 )
             )
 
-    def revoke(self, subject: HookTrustSubject) -> None:
+    def revoke(
+        self,
+        subject: HookTrustSubject,
+        *,
+        require_current: Callable[[], object] | None = None,
+    ) -> None:
         with self._locked(subject):
+            if require_current is not None:
+                require_current()
             state = self._read_for_mutation(subject)
             self._write(
                 HookSourceTrustState(
@@ -249,8 +258,16 @@ class HookTrustStore:
                 )
             )
 
-    def set_enabled(self, subject: HookTrustSubject, *, enabled: bool) -> None:
+    def set_enabled(
+        self,
+        subject: HookTrustSubject,
+        *,
+        enabled: bool,
+        require_current: Callable[[], object] | None = None,
+    ) -> None:
         with self._locked(subject):
+            if require_current is not None:
+                require_current()
             state = self._read_for_mutation(subject)
             self._write(
                 HookSourceTrustState(
@@ -387,11 +404,7 @@ class HookTrustStore:
             raise TypeError("Hook trust subject union is open")
         if subject.visibility_scope.value == "USER":
             return (
-                self._root
-                / "trust"
-                / "plugin"
-                / "user"
-                / f"{subject.plugin_id}.json"
+                self._root / "trust" / "plugin" / "user" / f"{subject.plugin_id}.json"
             )
         assert subject.workspace_state_key is not None
         return (
@@ -418,11 +431,7 @@ class HookTrustStore:
             raise TypeError("Hook trust subject union is open")
         if subject.visibility_scope.value == "USER":
             return (
-                self._root
-                / "locks"
-                / "plugin"
-                / "user"
-                / f"{subject.plugin_id}.lock"
+                self._root / "locks" / "plugin" / "user" / f"{subject.plugin_id}.lock"
             )
         assert subject.workspace_state_key is not None
         return (

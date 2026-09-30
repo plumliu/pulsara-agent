@@ -97,3 +97,31 @@ def test_model_arguments_cannot_supply_preparation_or_claim_write_authority(tmp_
         assert result.kind.value == "DENY"
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", list(PermissionMode))
+def test_native_inspection_is_read_only_in_every_permission_mode(tmp_path, mode):
+    async def run():
+        permission = build_run_permission_snapshot(
+            snapshot_id="permission:read",
+            requested_mode=mode,
+            effective_mode=mode,
+            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
+        )
+        effects = ResolvedCapabilityEffectProjection()
+        assert effects.read_only
+        result = await DefaultToolDispatchAuthorizationPolicy().decide(
+            ToolDispatchAuthorizationRequest(
+                "manage_capability",
+                "call:read",
+                {"action": "INSPECT_LOOSE_SKILLS", "scope": "USER"},
+                "turn:read",
+                "entry:read",
+                permission,
+                tmp_path,
+                effects,
+            )
+        )
+        assert result.kind.value == "ALLOW"
+
+    asyncio.run(run())

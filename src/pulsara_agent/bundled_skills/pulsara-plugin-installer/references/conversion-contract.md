@@ -44,7 +44,10 @@ import notices; there is no separate conversion-report artifact or registry.
 
 ## Semantic Preservation Test
 
-Conversion succeeds only when all of these statements are true:
+The official importer/native validator owns these checks. Use its supported
+conversion and diagnostics; this list explains admission rather than requiring
+the model to build a second validator or audit every script. Conversion succeeds
+only when all of these statements are true:
 
 1. Every active source component has one exact supported destination.
 2. Skill instructions and invocation expectations retain their meaning.

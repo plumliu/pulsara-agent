@@ -1108,7 +1108,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       !activeSessionId
       || !connection
       || connection.sessionId !== activeSessionId
-      || !capabilities?.adoption.pending
       || projection.isRunning
     ) return;
     const frame = window.requestAnimationFrame(() => {
@@ -1117,7 +1116,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return () => window.cancelAnimationFrame(frame);
   }, [
     activeSessionId,
-    capabilities?.adoption.pending,
     connection,
     loadCapabilities,
     projection.isRunning,

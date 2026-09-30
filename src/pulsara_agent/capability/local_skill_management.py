@@ -20,9 +20,14 @@ from pulsara_agent.capability.local_skill_removal import (
     observe_loose_skill_removal,
     remove_inspected_loose_skill,
 )
+from pulsara_agent.capability.skill_import import normalize_skill_import_document
+import yaml
 from pulsara_agent.capability.user_skill_config import (
     USER_SKILL_CONFIG_NAME,
     workspace_skill_config_path,
+    load_user_skill_config,
+    set_user_skill_enabled,
+    UserSkillConfigSnapshot,
 )
 
 from pulsara_agent.capability.local_skill_publisher import (
@@ -53,6 +58,8 @@ from pulsara_agent.capability.pulsara_home import (
     resolve_user_home,
 )
 from pulsara_agent.capability.types import (
+    LooseSkillOrigin,
+    SkillManifest,
     SkillDiagnostic,
     SkillDiagnosticCode,
     SkillDiagnosticSeverity,
@@ -120,11 +127,11 @@ class InstallLooseLocalSkillRequest:
 
 @dataclass(frozen=True, slots=True)
 class InspectEffectiveSkillCatalogRequest:
-    workspace_root: Path
+    workspace_root: Path | None
     plugin_definitions: FrozenPluginSkillDefinitions
 
     def __post_init__(self) -> None:
-        if not self.workspace_root.is_absolute():
+        if self.workspace_root is not None and not self.workspace_root.is_absolute():
             raise ValueError("Skill inspection workspace must be resolved and absolute")
         if not isinstance(self.plugin_definitions, FrozenPluginSkillDefinitions):
             raise TypeError("Skill inspection lacks its Plugin definition batch")
@@ -174,8 +181,14 @@ class EventLocalSkillCancellationProbe:
         return self._event.is_set()
 
 
+@dataclass(frozen=True, slots=True)
+class LooseSkillTargetObservation:
+    manifest: SkillManifest
+    config: UserSkillConfigSnapshot
+
+
 class LocalSkillManagementService:
-    """CLI-independent owner of the three local Skill management operations."""
+    """Native owner of loose Skill observation and management operations."""
 
     def __init__(
         self,
@@ -199,6 +212,16 @@ class LocalSkillManagementService:
         request: ValidateLocalSkillSourceRequest,
     ) -> LocalSkillValidationOutcome:
         return _validate_source(request.source_path)
+
+    def validate_loose_skill_install(
+        self, request: InstallLooseLocalSkillRequest
+    ) -> LocalSkillValidationOutcome:
+        return _validate_source(
+            request.source_path,
+            normalize=True,
+            name=request.name,
+            description=request.description,
+        )
 
     def inspect_loose_skill_removal(
         self,
@@ -237,7 +260,7 @@ class LocalSkillManagementService:
             ),
             user_home_resolution=user_home,
         )
-        policy = producer.prepare_root_policy(workspace_root or Path.cwd())
+        policy = producer.prepare_root_policy(workspace_root)
         allowed = (
             {LocalSkillRootKind.USER_PULSARA, LocalSkillRootKind.USER_AGENTS}
             if scope is LocalSkillInstallScope.USER
@@ -308,6 +331,181 @@ class LocalSkillManagementService:
             if owns_binding:
                 owner.close()
 
+    def inspect_loose_skills(
+        self,
+        *,
+        scope: LocalSkillInstallScope,
+        workspace_root: Path | None = None,
+        plugin_definitions: FrozenPluginSkillDefinitions | None = None,
+    ):
+        if (scope is LocalSkillInstallScope.WORKSPACE) != (workspace_root is not None):
+            raise ValueError("Skill inspection workspace conflicts with scope")
+        user_home = self._user_home_resolution or resolve_user_home()
+        home = self._home_resolution(user_home_resolution=user_home)
+        producer = self._loose_producer or LooseSkillDefinitionProducer(
+            pulsara_home_resolution=home, user_home_resolution=user_home
+        )
+        policy = producer.prepare_root_policy(workspace_root)
+        observed = producer.observe(policy)
+        allowed = (
+            {LocalSkillRootKind.USER_PULSARA, LocalSkillRootKind.USER_AGENTS}
+            if workspace_root is None
+            else {
+                LocalSkillRootKind.WORKSPACE_PULSARA,
+                LocalSkillRootKind.WORKSPACE_AGENTS,
+            }
+        )
+        if home.path is None:
+            raise ValueError("Pulsara home is unavailable")
+        config = load_user_skill_config(
+            config_path=(
+                home.path / USER_SKILL_CONFIG_NAME
+                if workspace_root is None
+                else workspace_skill_config_path(workspace_root)
+            )
+        )
+        candidates = tuple(
+            item
+            for item in observed.candidates
+            if isinstance(item.origin, LooseSkillOrigin)
+            and item.origin.root_kind in allowed
+        )
+        inventory = {
+            "status": observed.disposition.value,
+            "config_available": config.available,
+            "config_path": str(config.config_path),
+            "details": [config.error] if config.error else [],
+            "roots": [
+                {
+                    "kind": "pulsara"
+                    if item.root_kind
+                    in {
+                        LocalSkillRootKind.USER_PULSARA,
+                        LocalSkillRootKind.WORKSPACE_PULSARA,
+                    }
+                    else "agents",
+                    "path": str(item.path),
+                }
+                for item in policy.roots
+                if item.root_kind in allowed
+            ],
+            "items": [],
+            "issues": [],
+        }
+        if observed.unavailable_cause is not None:
+            inventory["details"].extend(
+                item.message for item in observed.unavailable_cause.diagnostics
+            )
+        effective = (
+            self.inspect_effective_skill_catalog(
+                InspectEffectiveSkillCatalogRequest(workspace_root, plugin_definitions)
+            )
+            if plugin_definitions is not None
+            else None
+        )
+        winner_paths = (
+            {item.path for item in effective.winners} if effective is not None else None
+        )
+        for item in candidates:
+            removable = item.origin.root_kind is not LocalSkillRootKind.WORKSPACE_AGENTS
+            inventory["items"].append(
+                {
+                    "name": item.name,
+                    "description": item.description,
+                    "location": item.location,
+                    "path": str(item.path),
+                    "root": "agents"
+                    if item.origin.root_kind
+                    in {
+                        LocalSkillRootKind.USER_AGENTS,
+                        LocalSkillRootKind.WORKSPACE_AGENTS,
+                    }
+                    else "pulsara",
+                    "root_kind": item.origin.root_kind.value,
+                    "authoring_notes": [
+                        code.value for code in item.authoring_diagnostic_codes
+                    ],
+                    "enabled": config.enabled_for(item.path),
+                    "enable_eligible": config.available,
+                    "remove_eligible": removable,
+                    "effective": item.path in winner_paths
+                    and config.enabled_for(item.path)
+                    if winner_paths is not None
+                    and effective.disposition.value == "COMPLETE"
+                    else None,
+                    "shadowed": item.path not in winner_paths
+                    if winner_paths is not None
+                    and effective.disposition.value == "COMPLETE"
+                    else None,
+                }
+            )
+        inventory["issues"] = [
+            {
+                "kind": "invalid",
+                "title": "有一个技能没有通过检查",
+                "path": str(issue.path),
+                "details": [item.message for item in issue.diagnostics],
+            }
+            for issue in observed.invalid_issues
+            if isinstance(issue.origin, LooseSkillOrigin)
+            and issue.origin.root_kind in allowed
+        ]
+        for issue in inventory["issues"]:
+            issue["enable_eligible"] = False
+            try:
+                self.inspect_loose_skill_removal(
+                    skill_path=Path(issue["path"]),
+                    scope=scope,
+                    workspace_root=workspace_root,
+                )
+            except (ValueError, OSError):
+                issue["remove_eligible"] = False
+            else:
+                issue["remove_eligible"] = True
+        if effective is not None:
+            inventory["effective_catalog_status"] = effective.disposition.value
+        return inventory, candidates, config
+
+    def inspect_loose_skill_target(
+        self,
+        *,
+        skill_path: Path,
+        scope: LocalSkillInstallScope,
+        workspace_root: Path | None = None,
+    ):
+        inventory, candidates, config = self.inspect_loose_skills(
+            scope=scope, workspace_root=workspace_root
+        )
+        if inventory["status"] != "COMPLETE" or not config.available:
+            raise ValueError(
+                "Skill inventory or enablement configuration is unavailable"
+            )
+        candidate = next((item for item in candidates if item.path == skill_path), None)
+        if candidate is None:
+            raise ValueError("Skill is not a manageable installed copy in this scope")
+        return LooseSkillTargetObservation(candidate, config)
+
+    def set_loose_skill_enabled(
+        self,
+        *,
+        skill_path: Path,
+        scope: LocalSkillInstallScope,
+        enabled: bool,
+        expected: LooseSkillTargetObservation,
+        workspace_root: Path | None = None,
+    ):
+        current = self.inspect_loose_skill_target(
+            skill_path=skill_path, scope=scope, workspace_root=workspace_root
+        )
+        if current != expected:
+            raise ValueError("Skill or enablement configuration changed")
+        return set_user_skill_enabled(
+            skill_path=skill_path,
+            enabled=enabled,
+            config_path=current.config.config_path,
+            expected=current.config,
+        )
+
     def _home_resolution(
         self, *, user_home_resolution: UserHomeResolution | None = None
     ) -> PulsaraHomeResolution:
@@ -316,7 +514,13 @@ class LocalSkillManagementService:
         )
 
 
-def _validate_source(source_path: Path) -> LocalSkillValidationOutcome:
+def _validate_source(
+    source_path: Path,
+    *,
+    normalize: bool = False,
+    name: str | None = None,
+    description: str | None = None,
+) -> LocalSkillValidationOutcome:
     source = prepare_local_source_path(source_path)
     try:
         source_fd = open_absolute_directory_nofollow(source)
@@ -427,10 +631,28 @@ def _validate_source(source_path: Path) -> LocalSkillValidationOutcome:
                 LocalSkillValidationUnavailableReason.SOURCE_RACED,
             )
         try:
-            result = parse_skill_document(b"".join(chunks))
+            raw = b"".join(chunks)
+            if normalize:
+                raw = normalize_skill_import_document(
+                    raw, name=name, description=description
+                )
+            result = parse_skill_document(raw)
             diagnostics = tuple(
                 diagnostic_at(item, source / SKILL_FILE_NAME)
                 for item in result.diagnostics
+            )
+        except (ValueError, UnicodeError, yaml.YAMLError):
+            return LocalSkillValidationOutcome(
+                LocalSkillValidationDisposition.INVALID,
+                source,
+                diagnostics=(
+                    SkillDiagnostic(
+                        SkillDiagnosticSeverity.WARNING,
+                        SkillDiagnosticCode.INVALID_FRONTMATTER_YAML,
+                        "Skill frontmatter cannot be normalized",
+                        source / SKILL_FILE_NAME,
+                    ),
+                ),
             )
         except MemoryError:
             return _validation_unavailable(

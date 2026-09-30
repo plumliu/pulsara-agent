@@ -296,6 +296,8 @@ from pulsara_agent.hooks.dispatcher import (
 )
 from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.hooks.source import LocalHookSourceProvider
+from pulsara_agent.hooks.presentation import hook_snapshot_public
+from pulsara_agent.capability.local_skill_management import LocalSkillManagementService
 from pulsara_agent.hooks.matcher import event_matcher_subject
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.storage.schema_verification_service import (
@@ -745,6 +747,12 @@ class KernelHostSession:
                     pulsara_home_resolution=pulsara_home_resolution,
                 ),
                 workspace_root=workspace.workspace_root,
+                workspace_kind=workspace.workspace_kind,
+                hooks=hook_source_provider,
+                skills=LocalSkillManagementService(
+                    pulsara_home_resolution=pulsara_home_resolution,
+                    user_home_resolution=user_home_resolution,
+                ),
                 deadline=lambda: self._deadlines.deadline(
                     KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
                 ),
@@ -1171,12 +1179,38 @@ class KernelHostSession:
                 ),
             )
             predecessor_local_mcp_configs = self._local_mcp_configs
+            predecessor_plugin_view = self._plugin_view
             self._local_mcp_configs = local_mcp_configs
             try:
-                return await self._reload_capabilities_serialized(deadline)
+                result = await self._reload_capabilities_serialized(deadline)
             except BaseException:
-                self._local_mcp_configs = predecessor_local_mcp_configs
+                # Only a publication abort still owns the complete predecessor.
+                # Published Plugin/Skill and native MCP cuts cannot be rolled back
+                # by changing this Host's source tuple.
+                if self._plugin_view is predecessor_plugin_view:
+                    self._local_mcp_configs = predecessor_local_mcp_configs
                 raise
+            if result.get("interruption") == "CANCELLED":
+                result["local_hooks"] = "PENDING"
+                result["status"] = "PARTIAL"
+                return result
+            try:
+                local = await self.reload_hooks(deadline_monotonic=deadline)
+                local_sources = [item for item in local["sources"] if item["source"] != HookSourceKind.PLUGIN.value]
+                result["local_hook_sources"] = local_sources
+                local_complete = all(item["scan"] == "COMPLETE" and
+                                     item["trust"] != "UNAVAILABLE" for item in local_sources)
+                result["local_hooks"] = "RELOADED" if local_complete else "PARTIAL"
+            except asyncio.CancelledError:
+                # Prior cuts already settled. The local publisher owns whether
+                # its candidate was admitted; keep the exact completed parts.
+                result["local_hooks"] = "PARTIAL"
+                result["interruption"] = "CANCELLED"
+            except Exception:
+                result["local_hooks"] = "PARTIAL"
+            if result["local_hooks"] != "RELOADED":
+                result["status"] = "PARTIAL"
+            return result
         finally:
             self._capability_reload_settlement_lock.release()
 
@@ -1185,13 +1219,16 @@ class KernelHostSession:
         if self._capability_change_notifier is not None:
             pending = await self._capability_change_notifier(workspace_root)
         await self.request_capability_refresh()
-        await self._adopt_capabilities_if_requested()
+        parts = {}
+        await self._adopt_capabilities_if_requested(outcome_sink=parts)
         attention = bool(self.capability_refresh_attention)
         return {
             "status": "PARTIAL" if attention else "RELOADED",
             "reloaded_sessions": int(not attention),
             "pending_sessions": max(0, pending - 1),
             "attention_sessions": int(attention),
+            "parts": parts,
+            "attention": self.capability_refresh_attention,
         }
 
     async def request_capability_refresh(self) -> int:
@@ -1214,7 +1251,7 @@ class KernelHostSession:
     def capability_refresh_attention(self) -> str | None:
         return self._capability_refresh_attention
 
-    async def _adopt_capabilities_if_requested(self) -> bool:
+    async def _adopt_capabilities_if_requested(self, *, outcome_sink: dict[str, object] | None = None) -> bool:
         """Adopt marked user/directory sources before the next provider preparation."""
 
         async with self._lock:
@@ -1229,8 +1266,10 @@ class KernelHostSession:
         except Exception:
             attention = "PROJECT_CAPABILITY_ADOPTION_FAILED"
         else:
-            if outcome.get("mcp") != "RELOADED":
-                attention = "PROJECT_MCP_ADOPTION_INCOMPLETE"
+            if outcome_sink is not None:
+                outcome_sink.update(outcome)
+            if outcome.get("status") != "RELOADED":
+                attention = "PROJECT_CAPABILITY_ADOPTION_INCOMPLETE"
         async with self._lock:
             self._capability_refresh_applied_revision = max(
                 self._capability_refresh_applied_revision,
@@ -1321,6 +1360,7 @@ class KernelHostSession:
             else "BOUND_EXCEEDED"
         )
         changed: frozenset[str] = frozenset()
+        interrupted = False
         if not mcp.configured_bound_exceeded and monotonic() < deadline:
             reload_task = asyncio.create_task(
                 self._tools.reload_mcp_configs(
@@ -1343,15 +1383,17 @@ class KernelHostSession:
                 # confirmation cleanup.  Join that exact owner so caller
                 # cancellation cannot strand a half-settled cut or close
                 # anchors already adopted by the supervisor.
-                with suppress(BaseException):
-                    await asyncio.shield(reload_task)
-                raise
+                await _join_task_beyond_logical_deadline(reload_task, deadline_monotonic=deadline)
+                mcp_status = "PARTIAL"
+                interrupted = True
             except TimeoutError:
                 # The native owner decides whether its synchronous config cut
                 # became FULL.  Join its exact confirmation/cleanup owner, but
                 # retain the caller's logical timeout as a partial reload.
-                with suppress(BaseException):
-                    await asyncio.shield(reload_task)
+                _, waiter_cancellation, _ = await _join_task_beyond_logical_deadline(
+                    reload_task, deadline_monotonic=deadline
+                )
+                interrupted = waiter_cancellation is not None
                 mcp_status = "PARTIAL"
             except BaseException:
                 # Hook/Skill publication is already FULL and has no cross-owner
@@ -1365,7 +1407,10 @@ class KernelHostSession:
         if mcp_status != "RELOADED":
             reload_diagnostics.append(PluginDiagnosticCode.RELOAD_PARTIAL.value)
         result = {
-            "status": "RELOADED" if mcp_status == "RELOADED" else "PARTIAL",
+            "status": "RELOADED" if mcp_status == "RELOADED" and replacement.disposition.value == "COMPLETE"
+                      and skill_definitions.disposition.value == "COMPLETE" and all(
+                          item.disposition.value == "COMPLETE" and item.trust.disposition.value != "UNAVAILABLE"
+                          for item in plugin_only_hooks) else "PARTIAL",
             "plugin_view": replacement.disposition.value,
             "skill_producer": skill_definitions.disposition.value,
             "hook_sources": len(
@@ -1375,11 +1420,14 @@ class KernelHostSession:
                     if item.provenance.identity.kind is HookSourceKind.PLUGIN
                 )
             ),
+            "plugin_hook_sources": [hook_snapshot_public(item, inspect=False) for item in plugin_only_hooks],
             "mcp": mcp_status,
             "mcp_changed_server_ids": sorted(changed),
             "diagnostics": reload_diagnostics,
             "same_epoch_prefix": "UNCHANGED",
         }
+        if interrupted:
+            result["interruption"] = "CANCELLED"
         safe = HookSecretScrubSet.capture().scrub_json(result)
         if not isinstance(safe, dict):
             raise RuntimeError("Capability reload result lost its JSON object shape")

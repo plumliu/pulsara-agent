@@ -159,6 +159,7 @@ class PluginInspectionService:
                             diagnostics=observation.diagnostics,
                             package_in_use=package_in_use,
                             mcp_connection_overlays=state.mcp_connection_overlays,
+                            hook_config=_detached_hook_config(observation.hook_config),
                         )
                     )
                     if state.enabled:
@@ -213,7 +214,7 @@ class PluginInspectionService:
                     loose_producer = LooseSkillDefinitionProducer(
                         pulsara_home_resolution=self._home_resolution
                     )
-                    skill_workspace = workspace_root or Path.cwd()
+                    skill_workspace = workspace_root
                     policy = loose_producer.prepare_root_policy(skill_workspace)
                     loose = loose_producer.observe(
                         policy,
@@ -461,3 +462,20 @@ def _diagnostic(
 
 
 __all__ = ["PluginInspectionService"]
+
+
+def _detached_hook_config(parsed):
+    if parsed is None:
+        return None
+    provenance = replace(
+        parsed.provenance,
+        physical_lifetime_anchor=None,
+        identity=replace(parsed.provenance.identity, physical_lifetime_anchor=None),
+    )
+    return replace(
+        parsed,
+        provenance=provenance,
+        definitions=tuple(
+            replace(item, provenance=provenance) for item in parsed.definitions
+        ),
+    )

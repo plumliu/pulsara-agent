@@ -46,15 +46,23 @@ class LocalHookSourceProvider:
     def __init__(
         self,
         *,
-        workspace_root: Path,
-        workspace_kind: str,
-        workspace_state_key: str,
+        workspace_root: Path | None,
+        workspace_kind: str | None,
+        workspace_state_key: str | None,
         pulsara_home: Path | None = None,
         trust_store: HookTrustStore | None = None,
     ) -> None:
-        if workspace_kind not in {"project", "transient"}:
+        if workspace_kind not in {None, "project", "transient"}:
             raise ValueError("Hook workspace kind is invalid")
-        self._workspace_root = workspace_root.expanduser().resolve()
+        if (workspace_root is None) != (workspace_kind is None):
+            raise ValueError("USER-only Hook discovery has no workspace")
+        self._workspace_root = (
+            workspace_root.expanduser().resolve()
+            if workspace_root is not None
+            else None
+        )
+        if (workspace_kind is None) != (workspace_state_key is None):
+            raise ValueError("Hook project identity must accompany its workspace")
         self._workspace_kind = workspace_kind
         self._workspace_state_key = workspace_state_key
         self._pulsara_home = (
@@ -69,18 +77,28 @@ class LocalHookSourceProvider:
         return self._trust
 
     def discover(
-        self, *, deadline_monotonic: float | None = None
+        self,
+        *,
+        deadline_monotonic: float | None = None,
+        visibility_scope: HookVisibilityScope | None = None,
     ) -> FrozenHookDefinitionView:
-        snapshots = [
-            self._read_source(
-                kind=HookSourceKind.USER_FILE,
-                expected=self._pulsara_home / "hooks.json",
-                allowed_root=self._pulsara_home,
-                workspace_key=None,
-                deadline_monotonic=deadline_monotonic,
-            )
-        ]
-        if self._workspace_kind == "project":
+        snapshots = (
+            [
+                self._read_source(
+                    kind=HookSourceKind.USER_FILE,
+                    expected=self._pulsara_home / "hooks.json",
+                    allowed_root=self._pulsara_home,
+                    workspace_key=None,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            ]
+            if visibility_scope is not HookVisibilityScope.WORKSPACE
+            else []
+        )
+        if (
+            self._workspace_kind == "project"
+            and visibility_scope is not HookVisibilityScope.USER
+        ):
             snapshots.append(
                 self._read_source(
                     kind=HookSourceKind.WORKSPACE_FILE,

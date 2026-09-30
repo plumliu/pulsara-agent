@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.hooks.presentation import hook_snapshot_public
+from pulsara_agent.capability.inspection_presentation import diagnostic_payload
+
 import argparse
 import asyncio
 from contextlib import contextmanager
@@ -34,6 +37,7 @@ from pulsara_agent.capability import (
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
     resolve_pulsara_home,
+    require_pulsara_home,
     resolve_user_home,
 )
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -185,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--required", action="store_true")
     add.add_argument("--disabled", action="store_true")
     add.add_argument(
-        "--scope",
+        "--tool-visibility",
         choices=("ROOT_ONLY", "ROOT_AND_SUBAGENTS"),
         default="ROOT_ONLY",
     )
@@ -194,7 +198,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("AUTO", "READ_ONLY", "EXTERNAL_EFFECT"),
         default="AUTO",
     )
-    for name in ("remove", "enable", "disable", "reconnect"):
+    for name in ("remove", "enable", "disable"):
         command = mcp_commands.add_parser(name)
         command.add_argument("server_id")
         command.add_argument("--workspace", default=None)
@@ -404,6 +408,8 @@ def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
         scope = LocalSkillInstallScope(args.scope)
         if scope is LocalSkillInstallScope.USER and args.workspace is not None:
             raise _SkillCliUsageError("--workspace is not valid with --scope user")
+        if scope is LocalSkillInstallScope.WORKSPACE and args.workspace is None:
+            raise _SkillCliUsageError("--scope workspace requires --workspace")
         workspace = (
             _resolved_skill_workspace(args.workspace)
             if scope is LocalSkillInstallScope.WORKSPACE
@@ -454,15 +460,17 @@ def _skills_command(args: argparse.Namespace) -> tuple[str, int]:
     raise _SkillCliUsageError("unknown skills command")
 
 
-def _resolved_skill_workspace(raw: str | None) -> Path:
-    root = Path(raw) if raw is not None else Path.cwd()
+def _resolved_skill_workspace(raw: str | None) -> Path | None:
+    if raw is None:
+        return None
+    root = Path(raw)
     return resolve_workspace(
         HostWorkspaceInput(workspace_kind="project", workspace_root=root)
     ).workspace_root
 
 
 def _cli_plugin_skill_definitions(
-    workspace: Path,
+    workspace: Path | None,
 ):
     boundary = ProcessCredentialBoundary()
     user_home = resolve_user_home()
@@ -986,6 +994,8 @@ def _plugin_scope_and_workspace(
         if args.workspace is not None:
             raise _PluginCliUsageError("--workspace is not valid with --scope user")
         return scope, None
+    if args.workspace is None:
+        raise _PluginCliUsageError("--scope workspace requires --workspace")
     return scope, _resolved_skill_workspace(args.workspace)
 
 
@@ -999,7 +1009,7 @@ def _plugin_validation_payload(result) -> dict[str, object]:
         payload["summary"] = _plugin_summary_payload(result.summary)
     diagnostics = getattr(result, "diagnostics", ())
     if diagnostics:
-        payload["diagnostics"] = [_diagnostic_payload(item) for item in diagnostics]
+        payload["diagnostics"] = [diagnostic_payload(item) for item in diagnostics]
     return payload
 
 
@@ -1011,7 +1021,7 @@ def _plugin_install_payload(result) -> dict[str, object]:
             "prior": _plugin_install_payload(result.prior),
             "attempted_path": str(result.attempted_path),
             "location_status": result.location_status.value,
-            "diagnostic": _diagnostic_payload(result.diagnostic),
+            "diagnostic": diagnostic_payload(result.diagnostic),
         }
     payload: dict[str, object] = {
         "operation": "install_local_plugin",
@@ -1039,7 +1049,7 @@ def _plugin_install_payload(result) -> dict[str, object]:
             payload[name] = value
     diagnostics = getattr(result, "diagnostics", ())
     if diagnostics:
-        payload["diagnostics"] = [_diagnostic_payload(item) for item in diagnostics]
+        payload["diagnostics"] = [diagnostic_payload(item) for item in diagnostics]
     return payload
 
 
@@ -1063,7 +1073,7 @@ def _plugin_enablement_payload(result, *, reviewed: dict[str, object]):
             payload[name] = value
     diagnostics = getattr(result, "diagnostics", ())
     if diagnostics:
-        payload["diagnostics"] = [_diagnostic_payload(item) for item in diagnostics]
+        payload["diagnostics"] = [diagnostic_payload(item) for item in diagnostics]
     return payload
 
 
@@ -1079,7 +1089,7 @@ def _plugin_removal_payload(result) -> dict[str, object]:
             payload[name] = value
     diagnostics = getattr(result, "diagnostics", ())
     if diagnostics:
-        payload["diagnostics"] = [_diagnostic_payload(item) for item in diagnostics]
+        payload["diagnostics"] = [diagnostic_payload(item) for item in diagnostics]
     return payload
 
 
@@ -1123,7 +1133,7 @@ def _plugin_inspection_payload(
         ]
     if inspection.diagnostics:
         payload["diagnostics"] = [
-            _diagnostic_payload(item) for item in inspection.diagnostics
+            diagnostic_payload(item) for item in inspection.diagnostics
         ]
     return payload
 
@@ -1149,7 +1159,7 @@ def _plugin_instance_payload(item, *, include_diagnostics: bool) -> dict[str, ob
     }
     if include_diagnostics and item.diagnostics:
         payload["diagnostics"] = [
-            _diagnostic_payload(value) for value in item.diagnostics
+            diagnostic_payload(value) for value in item.diagnostics
         ]
     return payload
 
@@ -1207,14 +1217,14 @@ def _plugin_summary_payload(summary) -> dict[str, object]:
                 for item in summary.skills.skills
             ],
             "diagnostics": [
-                _diagnostic_payload(item) for item in summary.skills.diagnostics
+                diagnostic_payload(item) for item in summary.skills.diagnostics
             ],
         },
         "mcp": {
             "disposition": summary.mcp.disposition.value,
             "servers": [_plugin_mcp_summary(item) for item in summary.mcp.mcp_servers],
             "diagnostics": [
-                _diagnostic_payload(item) for item in summary.mcp.diagnostics
+                diagnostic_payload(item) for item in summary.mcp.diagnostics
             ],
         },
         "hooks": {
@@ -1232,7 +1242,7 @@ def _plugin_summary_payload(summary) -> dict[str, object]:
                 for item in summary.hooks.hook_definitions
             ],
             "diagnostics": [
-                _diagnostic_payload(item) for item in summary.hooks.diagnostics
+                diagnostic_payload(item) for item in summary.hooks.diagnostics
             ],
         },
     }
@@ -1286,7 +1296,7 @@ def _plugin_gc_payload(result) -> dict[str, object]:
             ),
             "unvisited_suffix": progress.unvisited_suffix,
         },
-        "diagnostics": [_diagnostic_payload(item) for item in result.diagnostics],
+        "diagnostics": [diagnostic_payload(item) for item in result.diagnostics],
     }
 
 
@@ -1305,68 +1315,6 @@ def _plugin_identity_payload(identity) -> dict[str, object]:
         "workspace_state_key": identity.workspace_state_key,
     }
 
-
-def _diagnostic_payload(item) -> dict[str, object]:
-    if isinstance(item, ProducerUnavailableCause):
-        return {
-            "kind": "SKILL_PRODUCER_UNAVAILABLE",
-            "producer_kind": item.producer_kind.value,
-            "reason": item.reason.value,
-            "diagnostics": [value.to_dict() for value in item.diagnostics],
-        }
-    if isinstance(item, ResolutionUnavailableCause):
-        return {
-            "kind": "SKILL_RESOLUTION_UNAVAILABLE",
-            "reason": item.reason.value,
-            "diagnostics": [item.diagnostic.to_dict()],
-        }
-    if isinstance(item, InvalidSkillCandidateIssue):
-        return {
-            "kind": item.kind.value,
-            "path": str(item.path),
-            "origin_label": skill_origin_label(item.origin),
-            "declared_name": item.declared_name,
-            "diagnostics": [value.to_dict() for value in item.diagnostics],
-        }
-    if isinstance(item, ShadowedSkillCandidateIssue):
-        return {
-            "kind": item.kind.value,
-            "path": str(item.path),
-            "origin_label": skill_origin_label(item.origin),
-            "name": item.name,
-            "winner_origin_label": skill_origin_label(item.winner_origin),
-            "winner_path": str(item.winner_path),
-            "diagnostic_codes": [value.value for value in item.diagnostic_codes],
-        }
-    if isinstance(item, ConflictingSkillCandidateIssue):
-        return {
-            "kind": item.kind.value,
-            "name": item.name,
-            "tier": item.tier.value,
-            "candidates": [
-                {
-                    "path": str(candidate.path),
-                    "origin_label": skill_origin_label(candidate.origin),
-                }
-                for candidate in item.candidates
-            ],
-            "diagnostic_codes": [item.diagnostic_code.value],
-        }
-    if hasattr(item, "to_dict"):
-        return item.to_dict()
-    value: dict[str, object] = {
-        "code": getattr(
-            getattr(item, "code", None),
-            "value",
-            getattr(item, "code", type(item).__name__),
-        ),
-        "message": getattr(item, "message", type(item).__name__),
-    }
-    for name in ("severity", "path", "component", "source_label"):
-        field = getattr(item, name, None)
-        if field is not None:
-            value[name] = getattr(field, "value", field)
-    return value
 
 
 def _plugin_enable_review_text(review: dict[str, object]) -> str:
@@ -1538,7 +1486,7 @@ async def _mcp_command(
             "enabled": not args.disabled,
             "required": args.required,
             "transport": transport,
-            "scope_policy": args.scope,
+            "scope_policy": args.tool_visibility,
             "effect_policy": {"default_effect": args.effect},
             "catalog_refresh_interval_ms": 300_000,
         }
@@ -1588,7 +1536,7 @@ async def _mcp_command(
                 continue
             supervisor = McpHostSupervisor(
                 session_id=f"mcp-doctor:{config.server_id}",
-                workspace_root=workspace_root or Path.cwd(),
+                workspace_root=workspace_root or require_pulsara_home(),
                 configs=(config,),
                 credential_boundary=boundary,
             )
@@ -1624,24 +1572,23 @@ async def _mcp_command(
                 )
             finally:
                 await supervisor.aclose()
-        return {"status": "ok", "servers": results}
-    if command == "reconnect":
-        raise RuntimeError(
-            "mcp reconnect requires an active Host-owned supervisor; "
-            "a standalone CLI process cannot control another Host"
-        )
+        return {"status": "ok", "test_cwd": str(workspace_root or require_pulsara_home()), "servers": results}
     raise ValueError("mcp requires a subcommand")
 
 
 def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
-    workspace_root = Path(args.workspace or Path.cwd()).expanduser().resolve()
-    workspace = resolve_workspace(
-        HostWorkspaceInput(workspace_kind="project", workspace_root=workspace_root)
-    )
+    requested_scope = getattr(args, "scope", None)
+    if requested_scope == "workspace" and args.workspace is None:
+        raise ValueError("--scope workspace requires --workspace")
+    if requested_scope == "user" and args.workspace is not None:
+        raise ValueError("--workspace is not valid with --scope user")
+    workspace_root = _resolved_skill_workspace(args.workspace)
+    workspace = (resolve_workspace(HostWorkspaceInput(workspace_kind="project", workspace_root=workspace_root))
+                 if workspace_root is not None else None)
     provider = LocalHookSourceProvider(
-        workspace_root=workspace.workspace_root,
-        workspace_kind=workspace.workspace_kind,
-        workspace_state_key=workspace.workspace_key,
+        workspace_root=workspace_root,
+        workspace_kind=workspace.workspace_kind if workspace is not None else None,
+        workspace_state_key=workspace.workspace_key if workspace is not None else None,
     )
     boundary = ProcessCredentialBoundary()
     user_home = resolve_user_home()
@@ -1666,7 +1613,7 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
                 ),
                 credential_boundary=boundary,
             ).observe(
-                workspace_root=workspace.workspace_root,
+                workspace_root=workspace_root,
                 deadline_monotonic=float("inf"),
                 cancellation=NeverCancelPluginOperation(),
             )
@@ -1730,7 +1677,7 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
         try:
             snapshots = selected_snapshots(view)
             values = [
-                _hook_snapshot_public(item, inspect=command != "list")
+                hook_snapshot_public(item, inspect=command != "list")
                 for item in snapshots
             ]
         finally:
@@ -1788,49 +1735,10 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
     snapshot = current_snapshot()
     return {
         "status": "ok",
-        "source": _hook_snapshot_public(snapshot, inspect=False),
+        "source": hook_snapshot_public(snapshot, inspect=False),
         "notice": "running Hosts require reload_hooks or restart",
     }
 
-
-def _hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
-    value: dict[str, object] = {
-        "scope": snapshot.provenance.identity.visibility_scope.value.lower(),
-        "path": str(snapshot.provenance.identity.canonical_path),
-        "description": snapshot.provenance.description,
-        "source_disposition": snapshot.disposition.value,
-        "trust_disposition": snapshot.trust.disposition.value,
-        "enabled": snapshot.trust.enabled,
-        "definition_digest": snapshot.trust.current_definition_digest,
-        "trusted_definition_digest": snapshot.trust.trusted_definition_digest,
-        "trusted_at": snapshot.trust.trusted_at,
-        "runnable_handler_count": len(snapshot.definitions) if snapshot.runnable else 0,
-        "declaration_environment": dict(snapshot.provenance.declaration_environment),
-        "diagnostics": [
-            {"code": item.code, "message": item.message}
-            for item in snapshot.diagnostics
-        ],
-    }
-    identity = snapshot.provenance.identity
-    if isinstance(identity, PluginHookSourceIdentity):
-        value["plugin_id"] = identity.plugin_id
-        value["package_install_id"] = identity.package_install_id
-    if inspect:
-        value["definitions"] = [
-            {
-                "ordinal": item.source_local_definition_ordinal,
-                "event": item.event_type.external_name,
-                "matcher": item.matcher.pattern,
-                "command": item.command,
-                "commandWindows": item.command_windows,
-                "timeout": item.timeout_seconds,
-                "async": item.asynchronous,
-                "statusMessage": item.status_message,
-                "additionalContextLimit": item.additional_context_limit,
-            }
-            for item in snapshot.definitions
-        ]
-    return value
 
 
 def _mcp_config_public(config: McpServerConfig) -> dict[str, object]:

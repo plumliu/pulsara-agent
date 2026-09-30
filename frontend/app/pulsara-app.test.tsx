@@ -1257,6 +1257,32 @@ describe('PulsaraApp', () => {
     expect(screen.queryByRole('dialog', { name: '导入技能' })).toBeNull();
   });
 
+  it('refreshes project skills after model management settles without a cached pending adoption', async () => {
+    const adapter = new FakeAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+    const inspector = await screen.findByLabelText('当前会话详情');
+    await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1'));
+    expect(screen.queryByRole('switch', {name: '关闭 boundary-probe'})).toBeNull();
+    adapter.inspectCapabilities.mockResolvedValue({
+      ...capabilitySnapshot,
+      skills: {...capabilitySnapshot.skills, items: [{
+        ...capabilitySnapshot.skills.items[0]!,
+        id: 'boundary-probe', name: 'boundary-probe', source: 'workspace',
+        editable: true, path: '/tmp/pulsara_agent/.pulsara/skills/boundary-probe/SKILL.md',
+      }]},
+    });
+    adapter.inspectCapabilities.mockClear();
+    await act(async () => adapter.lastConnection?.emit({
+      ...projection('Skill installed'), isRunning: false, eventSequence: 2,
+      messages: [{id: 'managed-skill', role: 'assistant', time: '现在', body: 'Skill installed',
+        status: 'completed', traces: [{id: 'install', kind: 'artifact', toolName: 'manage_capability',
+          title: '管理扩展能力', subtitle: '配置变更已应用', status: 'completed',
+          resultText: '{"status":"APPLIED","adoption":{"status":"RELOADED"}}'}]}],
+    }));
+    expect(await within(inspector).findByRole('switch', {name: '关闭 boundary-probe'})).toBeTruthy();
+    expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session-1');
+  });
+
   it('refreshes a stale MCP snapshot after a rejected project mutation', async () => {
     const adapter = new FakeAdapter();
     const projectMcp: CapabilitySnapshot['mcp']['servers'][number] = {

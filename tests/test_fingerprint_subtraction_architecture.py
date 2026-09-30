@@ -9,7 +9,9 @@ from pathlib import Path
 from pulsara_agent.capability.contracts import (
     FrozenToolCapabilityExposureSelection,
 )
-from pulsara_agent.capability import tool_action
+from pulsara_agent.capability.builtin_catalog import BuiltinToolCatalogEntry
+from pulsara_agent.capability.call_classifier import BuiltinToolCallClassification
+from pulsara_agent.capability.descriptor import BuiltinToolDescriptor
 from pulsara_agent.conversation_kernel.assistant_settlement import (
     PreparedAssistantMessageSettlement,
 )
@@ -49,6 +51,9 @@ def _field_names(value: type[object]) -> set[str]:
 
 def test_hard_cut_mandatory_process_local_fingerprint_fields_are_absent() -> None:
     forbidden_by_type = {
+        BuiltinToolDescriptor: {"is_concurrency_safe", "long_horizon_policy"},
+        BuiltinToolCallClassification: {"effective_concurrency_safe"},
+        BuiltinToolCatalogEntry: {"long_horizon_policy_kind"},
         FrozenToolCapabilityExposureSelection: {"selection_fingerprint"},
         McpInstallationCandidate: {"candidate_fingerprint"},
         PreparedSkillCatalogSourceSnapshot: {"root_policy_fingerprint"},
@@ -65,7 +70,7 @@ def test_hard_cut_mandatory_process_local_fingerprint_fields_are_absent() -> Non
     }
     for value, forbidden in forbidden_by_type.items():
         assert _field_names(value).isdisjoint(forbidden), value.__name__
-    assert not hasattr(tool_action, "ToolActionClassifierBinding")
+    assert not (ROOT / "src/pulsara_agent/capability/tool_action.py").exists()
 
 
 def test_hard_cut_subagent_process_local_aggregate_fields_are_absent() -> None:

@@ -16,7 +16,7 @@ from typing import get_args
 
 import pytest
 
-from pulsara_agent.cli import _hook_snapshot_public
+from pulsara_agent.hooks.presentation import hook_snapshot_public
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
@@ -489,7 +489,7 @@ def test_round9_2_parser_recovery_trust_and_exact_sources(tmp_path: Path) -> Non
             HookEventType.PRE_TOOL_USE_EVENT
         )
     ] == [(0, "printf user"), (1, "printf user")]
-    public = _hook_snapshot_public(trusted.source_snapshots[0], inspect=True)
+    public = hook_snapshot_public(trusted.source_snapshots[0], inspect=True)
     assert public["description"] == "reviewed user hooks"
     assert public["trusted_at"]
     assert public["definitions"][0]["command"] == "printf user"

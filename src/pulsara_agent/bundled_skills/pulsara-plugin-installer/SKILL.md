@@ -1,6 +1,6 @@
 ---
 name: pulsara-plugin-installer
-description: Import, install, configure, enable and delete native or portable Claude/Codex/Cursor plugins through Pulsara's existing capability owners.
+description: Install, configure, enable and remove native or portable Claude/Codex/Cursor plugins through manage_capability. Also inspect, trust, revoke trust or enable/disable local and Plugin Hook sources with user review.
 ---
 
 # Pulsara Plugin Installer
@@ -11,13 +11,15 @@ sole native validator/publisher. Do not ask a model to rewrite supported formats
 
 ## Workflow
 
-1. Identify the exact local source directory, selected distribution format and
-   USER/WORKSPACE scope. Acquiring a repository is separate from installing it;
+1. Identify the exact local absolute source directory and selected distribution
+   format. Reuse the user's USER/WORKSPACE scope; ask only if it is ambiguous.
+   Acquiring a repository is separate from installing it;
    preserve licenses and do not run downloaded code while inspecting it.
-2. Read the selected manifest and declarations. Empty component declarations
-   mean empty; never union neighboring host manifests. Portable Skills must
-   retain references/scripts/assets. Unsupported active Apps, agents, JS/TS
-   host entrypoints or non-equivalent Hooks block whole-package import.
+2. Read the selected manifest to identify the format and components. The official
+   importer owns exact conversion and native admission; use its result and
+   diagnostics rather than auditing every script or reimplementing its checks.
+   Empty declarations mean empty; never union neighboring host manifests.
+   Unsupported active components block the whole import; do not drop them.
 3. Use `manage_capability` INSTALL_PLUGIN with source_path and source_format
    (`native`, `claude`, `codex`, `cursor`). Use replace only for an
    explicitly requested replacement. The native parser and held-source
@@ -31,8 +33,8 @@ sole native validator/publisher. Do not ask a model to rewrite supported formats
 5. Installation creates a disabled instance. Configure its MCP connections with
    CONFIGURE_PLUGIN_MCP_CONNECTION or the shared connection editor; the user
    supplies private values there. OAuth uses AUTHORIZE_MCP for the exact instance.
-6. Enable separately using SET_PLUGIN_ENABLED. Show the current full component
-   and credential-destination review; only user submission accepts launching
+6. Enable separately using SET_PLUGIN_ENABLED. The Host presents the current full
+   component and credential-destination review; only user submission accepts launching
    external processes. A model cannot assert acceptance or treat missing keys
    as a failed package installation.
 7. First-party changes automatically adopt at the existing safe point. Read
@@ -42,16 +44,69 @@ sole native validator/publisher. Do not ask a model to rewrite supported formats
    Plugin data, and lets old consumers drain before package GC. It never edits
    the source or rewrites installed provider input.
 
+## Minimal calls
+
+Every `manage_capability` call includes `action` and explicit uppercase `scope`.
+For a selected Claude distribution:
+
+```json
+{"action":"INSTALL_PLUGIN","scope":"WORKSPACE","source_path":"/absolute/source/plugin","source_format":"claude"}
+```
+
+Use the actual format (`native`, `claude`, `codex`, `cursor`). After a successful
+install or replacement, reuse the returned `identity.plugin_id` and `scope` for
+subsequent management; do not derive the target from the source directory name.
+Installed means disabled, not enabled or trusted.
+
+```json
+{"action":"SET_PLUGIN_ENABLED","scope":"WORKSPACE","plugin_id":"example","enabled":true}
+```
+
+Enable requires the current user review. For disable set `enabled:false`; for
+removal use `REMOVE_PLUGIN` with `plugin_id`. To edit a Plugin MCP connection use
+`CONFIGURE_PLUGIN_MCP_CONNECTION` with `plugin_id` and exact local `server_id`;
+omit `overlay` to open the current shared editor. `overlay:null` explicitly clears
+it. OAuth uses `AUTHORIZE_MCP` / `CLEAR_MCP_AUTHORIZATION` with both IDs. Expected
+guards may be omitted for fresh native inspection; never invent them or secrets.
+
+## Hook source management
+
+Local and Plugin Hooks use the same `manage_capability` actions. A local source
+is bound by Host scope, not an arbitrary path:
+
+```json
+{"action":"TRUST_HOOK_SOURCE","scope":"WORKSPACE","source_kind":"LOCAL"}
+```
+
+For a Plugin source use `source_kind:"PLUGIN"` and the exact `plugin_id` instead.
+Do not add `source_path`, a digest or a user-acceptance flag to Hook calls.
+Trust presents the full current definitions in the GUI even under full access.
+Hook enablement does not grant trust; Plugin enablement remains separate.
+
+Use `INSPECT_HOOK_SOURCES` to observe sources, `SET_HOOK_SOURCE_ENABLED` with
+`enabled` to switch one, and `REVOKE_HOOK_TRUST` to revoke trust. Inspection is
+allowed in READ_ONLY. Read `references/hook-source-management.md` for local
+source authoring or exact mutation examples; it is enough for ordinary Hook work.
+
+## Import diagnostics and advanced administration
+
 The installed global `pulsara plugins` CLI remains an out-of-band administration
 path (`validate`, `add`, `list`, `doctor`, `enable`, `disable`, `remove`,
 `gc`). Check its actual help; foreign-format import belongs to the typed tool/UI
-unless the CLI explicitly exposes it. CLI changes need explicit Host reload.
+unless the CLI explicitly exposes it. Adopt CLI changes through GUI refresh or
+the existing Host reload operation when permitted; CLI does not automatically
+update live sessions.
 Do not use a checkout, raw copy, private installer or direct managed-state edits.
 
-Read `references/conversion-contract.md` and `references/codex-compatible.md`
-for importer semantics. Read `references/pulsara-hook-extension.md` before
-claiming that a behavior-bearing Hook has an exact supported mapping.
+Read `references/conversion-contract.md` when import diagnostics need explanation,
+`references/codex-compatible.md` for Codex-specific incompatibility, and
+`references/pulsara-hook-extension.md` for detailed Hook conversion or control
+semantics. These are troubleshooting references, not mandatory pre-install reads.
 
 Never guess credentials, endpoints, dependencies or compatibility. Do not create
 a smaller Plugin by dropping active components; a separately requested authoring
 task is different from importing an existing package. Ordinary permissions apply.
+
+Use terminal/file tools to prepare sources, then the typed management tool to
+install, configure and authorize them. Do not use terminal Hook trust/`--yes` to
+bypass user review.

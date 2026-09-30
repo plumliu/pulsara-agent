@@ -1643,6 +1643,10 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     assert export_schema["required"] == ["artifact_id", "path"]
     assert export_schema["additionalProperties"] is False
     assert set(specs) == set(bindings)
+    for builtin_binding in bindings.values():
+        descriptor = builtin_binding.catalog_entry.descriptor
+        for payload in (descriptor.to_diagnostic_dict(), descriptor.to_event_payload()):
+            assert {"is_concurrency_safe", "long_horizon_policy"}.isdisjoint(payload)
     binding = bindings["artifact_read"]
     entry = binding.catalog_entry
     assert entry.descriptor.id == "builtin:artifact_read"
@@ -1651,7 +1655,6 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     assert entry.entry_fingerprint.startswith("sha256:")
     assert entry.execution_binding_kind.value == "artifact_read"
     assert entry.descriptor.is_read_only
-    assert entry.descriptor.is_concurrency_safe
     assert entry.descriptor.permission_category == "artifact_read"
     assert binding.executor_identity.endswith("ArtifactReadTool#artifact_read")
     assert production_builtin_executor_binding_identity_fingerprint(binding).startswith(

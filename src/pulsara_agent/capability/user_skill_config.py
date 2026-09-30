@@ -120,10 +120,13 @@ def set_user_skill_enabled(
     skill_path: Path,
     enabled: bool,
     config_path: Path | None = None,
+    expected: UserSkillConfigSnapshot | None = None,
 ) -> Path:
     """Atomically upsert one exact path rule in the user configuration."""
 
     snapshot = load_user_skill_config(config_path=config_path)
+    if expected is not None and snapshot != expected:
+        raise ValueError("Skill enablement configuration changed")
     if not snapshot.available:
         raise ValueError(snapshot.error)
     normalized = _normalize_skill_path(skill_path)

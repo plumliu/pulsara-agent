@@ -1,69 +1,72 @@
 ---
 name: pulsara-skill-installer
-description: Install and inspect portable loose Agent Skills through Pulsara's official local management commands. Use when the user asks to install a local skill, choose workspace or user scope, list effective skills, or diagnose why a local skill is not effective.
+description: Install and inspect portable loose Agent Skills through the running Host's manage_capability tool. Use when the user asks to install a local skill, choose workspace or user scope, list effective skills, or diagnose why a local skill is not effective.
 ---
 
 # Pulsara Skill Installer
 
-Use this skill to install a complete local Skill directory through Pulsara's official loose-Skill management service and global CLI.
-
-The capability page also provides a model-free import workflow: select a local
-directory (including `.opencode/skills`, `.claude/skills` or `.agents/skills`),
-preview candidates, supply a missing description and install selected Skills.
-It preserves the original source and all references/scripts/assets; metadata
-normalization happens only in the native installation candidate. It does not
-execute JS/TS host plugins found alongside independent Skills.
-
-User/workspace loose installations can be removed through the capability page.
-Only an explicitly selected
-managed copy is removed; bundled definitions and Plugin children are not loose
-deletion targets. A same-name lower-priority Skill may become effective again.
+Use `manage_capability` for loose Skill management. Use terminal and file tools
+only to obtain or edit a local source directory; the current Host owns the
+installation target and its frozen Pulsara home.
 
 ## Workflow
 
-1. Identify the source Skill directory and ask which scope the user wants if it is not already explicit:
-   - `workspace` publishes under `<workspace>/.pulsara/skills`;
-   - `user` publishes under `${PULSARA_HOME}/skills` and does not depend on the current workspace.
-2. For workspace scope, identify the intended workspace root. A relative source path is relative to this command's working directory: the workspace root unless this call supplies `workdir` or changes directory inside the command. Earlier terminal calls do not change it.
-3. Install with the global launcher:
+1. Identify the exact local absolute source directory. Reuse the user's scope
+   choice: `WORKSPACE` means the current GUI project, `USER` means all projects.
+   Ask once only if the intended scope is genuinely ambiguous.
+2. Call `manage_capability` with `INSTALL_LOOSE_SKILL`, the selected `scope` and
+   absolute `source_path`. Optional `name` and `description` use the native
+   candidate normalization; source files and references/scripts/assets remain
+   intact. Never specify a destination workspace or propagate home environment.
+3. Verify with `INSPECT_LOOSE_SKILLS` using the same scope, optionally filtering
+   by the installed absolute `skill_path` (the copy's `SKILL.md`). Inspect
+   disabled, shadowed, invalid, unavailable and operation eligibility separately.
+4. Use `SET_LOOSE_SKILL_ENABLED` with the exact `skill_path` and boolean `enabled`
+   when requested. Use `REMOVE_LOOSE_SKILL` only for an authorized exact copy;
+   discoverable workspace `.agents` copies are not deletion targets.
+5. When using the Skill or verifying its instructions is requested, read it through
+   the ordinary Skill/read-file route. Installation alone does not require loading
+   all resources. It does not rewrite the current provider prefix/running request.
 
-```bash
-pulsara skills install --scope workspace --workspace <workspace-root> <source-skill-directory>
+## Minimal calls
+
+Pass these objects to `manage_capability`; substitute the observed absolute
+paths and reuse the user's scope. `source_path` is a directory; `skill_path` is
+the installed copy's `SKILL.md`, not its directory.
+
+```json
+{"action":"INSTALL_LOOSE_SKILL","scope":"WORKSPACE","source_path":"/absolute/source/example-skill"}
 ```
 
-or:
-
-```bash
-pulsara skills install --scope user <source-skill-directory>
+```json
+{"action":"INSPECT_LOOSE_SKILLS","scope":"WORKSPACE","skill_path":"/absolute/project/.pulsara/skills/example-skill/SKILL.md"}
 ```
 
-4. Confirm the effective winner with:
+For enable/disable use `SET_LOOSE_SKILL_ENABLED` with the same `skill_path` and
+`enabled:true` or `false`. For removal use `REMOVE_LOOSE_SKILL` with `skill_path`.
+`INSPECT_LOOSE_SKILLS` is allowed in READ_ONLY; mutations follow current
+permissions. The installed path comes from the result; do not reconstruct it
+from a terminal cwd or guessed home.
 
-```bash
-pulsara skills list --workspace <workspace-root>
-```
+An existing destination is a conflict. An explicit request to update an exact
+installed copy authorizes its separate remove/install sequence; reuse that scope
+and do not ask again. Report a completed deletion if the later installation fails.
+Never promise an atomic replacement or automatically retry a settled mutation.
 
-   Pulsara's own bundled Skills are read-only package defaults. A same-name
-   workspace or user Skill is an ordinary higher-priority override; deleting
-   that loose directory makes the bundled definition eligible again at the
-   next complete safe point.
+`APPLIED` describes the source change; inspect adoption separately. Successful
+first-party changes notify affected live sessions and use their existing safe
+points. Do not routinely call reload. An adoption `PARTIAL` warrants inspecting
+its reported parts; retry observation/adoption, never the completed install.
 
-5. If the Skill is invalid, shadowed, absent, or the catalog is unavailable, inspect the same catalog truth with:
+The capability page also offers direct directory import and management without a
+model. Bundled Skills are read-only defaults and Plugin children belong to their
+Plugin owner. Installing a loose directory does not execute neighboring host
+plugins or create a receipt, ownership marker or managed provenance.
 
-```bash
-pulsara skills doctor --workspace <workspace-root>
-```
+Standalone `pulsara skills` commands remain advanced offline administration.
+They do not supply live-Host review/adoption. Do not use CLI, raw copies or private
+managed-state writes to bypass the supported conversation flow.
 
-6. Report the installation directory. Updated Skills can be discovered when Pulsara next prepares a model request; an already-running request is unchanged.
-
-Read `references/directory-contract.md` when the user needs the filesystem and race semantics explained.
-
-## Guardrails
-
-- Do not choose workspace or user scope on the user's behalf when their intent is ambiguous.
-- Do not overwrite, merge, roll back or force an existing destination. Use the
-  official removal operation only when the user requests that exact deletion.
-- Do not use raw `cp`, `copytree`, or a private script to imitate official installation.
-- Loose Skill installation does not create a receipt, ownership marker, or managed provenance.
-- Ordinary terminal and permission ownership still applies to every CLI invocation.
-- If `pulsara` is not on `PATH`, report a Pulsara distribution or launcher setup problem. Do not search for a source checkout, use `.venv/bin/pulsara`, `python -m`, or `uv run`.
+Read `references/directory-contract.md` only when directory admission, copying
+or source-change diagnostics need explanation; ordinary installation needs no
+filesystem implementation audit.
