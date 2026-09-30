@@ -120,11 +120,14 @@ Important tool aliases and public names are:
 
 | Pulsara tool | Matcher candidates | Public `tool_name` |
 |---|---|---|
-| `terminal` | `terminal`, `Bash` | `Bash` |
+| `terminal` | `terminal`, `Bash` | `terminal` |
 | `terminal_process` | `terminal_process` | `terminal_process` |
 | `terminal_monitor` | `terminal_monitor` | `terminal_monitor` |
-| `edit_file` | `edit_file`, `apply_patch`, `Edit` | `apply_patch` |
-| `write_file` | `write_file`, `apply_patch`, `Write` | `apply_patch` |
+| `edit_file` | `edit_file`, `apply_patch`, `Edit` | `edit_file` |
+| `write_file` | `write_file`, `apply_patch`, `Write` | `write_file` |
+| `read_file` | `read_file`, `Read` | `read_file` |
+| `search_content` | `search_content`, `Grep` | `search_content` |
+| `find_files` | `find_files`, `Glob` | `find_files` |
 | `spawn_agent` | `spawn_agent`, `Agent` | `spawn_agent` |
 | `create_agent_tasks` | `create_agent_tasks` | `create_agent_tasks` |
 | MCP tool | exact provider-qualified remote identity | same identity |
@@ -138,7 +141,7 @@ depends on those vendor transport semantics is not convertible.
 For the filesystem hard cut, an `edit_file` Hook receives the native closed
 `path + base_revision + operations` object verbatim. A `write_file` Hook receives
 only the native create-only `path + content` object. The `apply_patch`, `Edit`, and
-`Write` aliases affect matcher selection and the public `tool_name` only: Hook
+`Write` aliases affect matcher selection only: Hook
 dispatch never translates unified diffs, text-search replacements, or vendor
 patch bodies into Pulsara operations.
 
@@ -175,8 +178,7 @@ Event-specific fields are:
 | `Stop` | `turn_id`, `stop_hook_active`, `last_assistant_message`, `permission_mode` |
 
 `permission_mode` is one of `default`, `acceptEdits`, `plan`, `dontAsk`, or
-`bypassPermissions`. A conditional `pulsara_tool_name` appears only when the
-Pulsara exposed or outer name differs from the compatibility primary name.
+`bypassPermissions`. Scripts always receive native tool names and native parameters; aliases never translate stdin or script-internal comparisons. There is no pulsara_tool_name field. Configuration conversion does not prove arbitrary vendor scripts work.
 
 `transcript_path` and `agent_transcript_path` are deliberately null. Hook stdin
 does not contain Plugin identity, install paths, private replay, raw artifacts, or

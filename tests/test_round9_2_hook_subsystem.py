@@ -249,7 +249,6 @@ def _inputs() -> tuple[object, ...]:
             tool_use_id="call:1",
             tool_input={"command": "pwd"},
             permission_mode="bypassPermissions",
-            pulsara_tool_name="terminal",
         ),
         PermissionRequestInput(
             **common,
@@ -257,7 +256,6 @@ def _inputs() -> tuple[object, ...]:
             tool_name="remote.tool",
             tool_input={"value": 1},
             permission_mode="default",
-            pulsara_tool_name="use_new_mcp_tool",
         ),
         PostToolUseInput(
             **common,
@@ -267,7 +265,6 @@ def _inputs() -> tuple[object, ...]:
             tool_input={"value": 1},
             tool_response={"status": "ok"},
             permission_mode="default",
-            pulsara_tool_name="use_new_mcp_tool",
         ),
         PreCompactInput(**common, turn_id="turn:1", trigger="auto"),
         PostCompactInput(**common, turn_id="turn:1", trigger="auto"),
@@ -681,14 +678,14 @@ def test_round9_2_matcher_aliases_and_no_exact_alternative_bypass(
         "use_new_mcp_tool", resolved_remote_identity="server.remote_tool"
     )
 
-    assert terminal.external_primary == "Bash" and "Bash" in terminal.candidates
-    assert terminal_process.external_primary == "terminal_process"
+    assert terminal.canonical_subject == "terminal" and "Bash" in terminal.candidates
+    assert terminal_process.canonical_subject == "terminal_process"
     assert "Bash" not in terminal_process.candidates
-    assert edit.external_primary == "apply_patch" and "Edit" in edit.candidates
-    assert write.external_primary == "apply_patch" and "Write" in write.candidates
+    assert edit.canonical_subject == "edit_file" and "Edit" in edit.candidates
+    assert write.canonical_subject == "write_file" and "Write" in write.candidates
     assert "Agent" in agent.candidates and "Agent" not in task_batch.candidates
     assert remote.candidates == ("server.remote_tool",)
-    assert remote.pulsara_tool_name == "use_new_mcp_tool"
+    assert remote.canonical_subject == "server.remote_tool"
 
     definition = _definition(
         tmp_path, HookEventType.PRE_TOOL_USE_EVENT, "noop", matcher="Bash|apply_patch"
@@ -726,15 +723,14 @@ def test_round9_2_edit_alias_preserves_native_line_operation_input() -> None:
         cwd="/workspace",
         model="model",
         turn_id="turn:1",
-        tool_name="apply_patch",
+        tool_name="edit_file",
         tool_use_id="call:1",
         tool_input=native_input,
         permission_mode="default",
-        pulsara_tool_name="edit_file",
     ).to_wire()
 
-    assert public["tool_name"] == "apply_patch"
-    assert public["pulsara_tool_name"] == "edit_file"
+    assert public["tool_name"] == "edit_file"
+    assert "pulsara_tool_name" not in public
     assert public["tool_input"] == native_input
 
 
@@ -2037,19 +2033,19 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             return SimpleNamespace(**kwargs)
 
     class _SafePoint:
-            @staticmethod
-            def retire_full_adoption_without_continuation_and_arm_empty(
-                *, continuity, fence, evidence, dispatch, verify_physical_release
-            ) -> None:
-                assert fence.predecessor is continuity.cohort
-                assert evidence.kind in {
-                    "DURABLE_TURN_NOT_RUNNING",
-                    "SUCCESSOR_FINAL_ABANDONMENT",
-                }
-                if dispatch is not None:
-                    dispatch.close()
-                verify_physical_release()
-                continuity.discarded = True
+        @staticmethod
+        def retire_full_adoption_without_continuation_and_arm_empty(
+            *, continuity, fence, evidence, dispatch, verify_physical_release
+        ) -> None:
+            assert fence.predecessor is continuity.cohort
+            assert evidence.kind in {
+                "DURABLE_TURN_NOT_RUNNING",
+                "SUCCESSOR_FINAL_ABANDONMENT",
+            }
+            if dispatch is not None:
+                dispatch.close()
+            verify_physical_release()
+            continuity.discarded = True
 
     async def invoke(status_or_error):
         order = []
@@ -2150,10 +2146,10 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             hook_scope=None,
             hook_model_id="model:1",
             hook_cwd=str(ROOT),
-                session_start_compact_port=None,
-                session_start_boundary_port=None,
-                pending_empty_adoption=None,
-            )
+            session_start_compact_port=None,
+            session_start_boundary_port=None,
+            pending_empty_adoption=None,
+        )
         return result, order, dry, owner, continuity
 
     async def exercise() -> None:
@@ -2232,3 +2228,63 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             assert outer_owner.settled == (manual, carrier.outcome)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('scope', [HookVisibilityScope.USER, HookVisibilityScope.WORKSPACE])
+@pytest.mark.parametrize('plugin', [False, True])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_joint_v2_invalidates_old_trust_without_changing_enabled_or_time(tmp_path, monkeypatch, scope, plugin, enabled):
+    from dataclasses import replace
+    from pulsara_agent.hooks import trust
+    from pulsara_agent.hooks.contracts import PluginHookSourceIdentity, PluginHookTrustSubject
+    key = 'future-project' if scope is HookVisibilityScope.WORKSPACE else None
+    if plugin:
+        provenance = FrozenHookSourceProvenance(
+            PluginHookSourceIdentity(scope, 'sample', 'pkg_' + '1' * 32,
+                'dev.pulsara/hooks/hooks.json', tmp_path / 'hooks.json', key),
+            PluginHookTrustSubject(scope, 'sample', key), None, 'sample')
+    else:
+        provenance = _provenance(tmp_path, kind=HookSourceKind.WORKSPACE_FILE if key else HookSourceKind.USER_FILE)
+    definition = replace(_definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, 'printf test', matcher='Read|Grep|Glob'), provenance=provenance)
+    store = trust.HookTrustStore(tmp_path)
+    with monkeypatch.context() as old:
+        old.setattr(trust, 'TRUST_DIGEST_CONTRACT', 'pulsara.hook-definition-trust.v1')
+        digest = trust.normalized_definition_digest(provenance, (definition,))
+    store.trust(provenance.trust_subject, expected_digest=digest)
+    store.set_enabled(provenance.trust_subject, enabled=enabled)
+    previous = store.read(provenance.trust_subject)
+    current = trust.normalized_definition_digest(provenance, (definition,))
+    assert current != digest
+    # A new store loading a later project also refuses the old semantic trust.
+    restarted = trust.HookTrustStore(tmp_path)
+    assessment = restarted.assess(provenance.trust_subject, current)
+    assert assessment.disposition is (HookTrustDisposition.MODIFIED if enabled else HookTrustDisposition.DISABLED)
+    assert restarted.read(provenance.trust_subject) == previous
+    restarted.set_enabled(provenance.trust_subject, enabled=True)
+    assert restarted.assess(provenance.trust_subject, current).disposition is HookTrustDisposition.MODIFIED
+    restarted.set_enabled(provenance.trust_subject, enabled=False)
+    restarted.trust(provenance.trust_subject, expected_digest=current)
+    assert restarted.assess(provenance.trust_subject, current).disposition is HookTrustDisposition.DISABLED
+    restarted.set_enabled(provenance.trust_subject, enabled=True)
+    assert restarted.assess(provenance.trust_subject, current).disposition is HookTrustDisposition.TRUSTED
+
+
+@pytest.mark.parametrize('event', [HookEventType.PRE_TOOL_USE_EVENT, HookEventType.USER_PROMPT_SUBMIT_EVENT, HookEventType.STOP_EVENT, HookEventType.SUBAGENT_STOP_EVENT])
+def test_async_exit_two_has_explicit_unsupported_control_diagnostic(tmp_path, event):
+    definition = _definition(tmp_path, event, 'deny', asynchronous=True)
+    parsed = parse_handler_output(_execution(definition, exit_code=2, stderr=b'deny', stdout=b'{invalid ignored}'))
+    assert isinstance(parsed, InvalidHandlerOutput)
+    assert 'HOOK_ASYNC_CONTROL_UNSUPPORTED' in {item.code for item in parsed.diagnostics}
+
+
+def test_hook_review_uses_production_matcher_native_remote_and_is_advisory(tmp_path):
+    from pulsara_agent.hooks.presentation import add_matching_tool_review
+    definition = _definition(tmp_path, HookEventType.POST_TOOL_USE_EVENT, 'full command', matcher='^(Read|Grep|Glob|mcp__real__lookup)$')
+    snapshot = _view(tmp_path, (definition,)).source_snapshots[0]
+    value = hook_snapshot_public(snapshot, inspect=True)
+    subjects = tuple(tool_matcher_subject(name) for name in ['read_file', 'search_content', 'find_files', 'terminal']) + (tool_matcher_subject('use_new_mcp_tool', resolved_remote_identity='mcp__real__lookup'),)
+    before = normalized_definition_digest(snapshot.provenance, snapshot.definitions)
+    add_matching_tool_review(value, snapshot, subjects=subjects, complete=False, workspace_root=tmp_path)
+    assert value['definitions'][0]['matched_operations'] == ['读取文件', '搜索内容', '查找文件', 'mcp__real__lookup']
+    assert value['tool_inventory_complete'] is False
+    assert normalized_definition_digest(snapshot.provenance, snapshot.definitions) == before

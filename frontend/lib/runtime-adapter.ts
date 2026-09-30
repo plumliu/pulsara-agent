@@ -3084,6 +3084,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
         const closed = payload.interaction_closed ?? {};
         if (closed.interaction_id === this.liveControl.current_interaction?.interaction_id) {
           const reasons: Record<string, string> = {
+            CANCELLED: '已取消这次配置。',
             'interaction:expired': '确认已过期，本次操作未获授权。',
             'interaction:turn-cancelled': '原任务已停止，这项待确认操作已结束。',
             'interaction:host-closing': '运行环境已关闭，原确认已结束。',
@@ -3091,7 +3092,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
             'interaction:admission-rejected': '操作条件已变化，这项确认已失效。',
             'interaction:outcome-unknown': '运行已中断，操作结果待核实。',
           };
-          if (String(closed.reason) !== 'RESOLVED') this.presentationNotices.push(
+          if (!['RESOLVED', 'SUBMITTED'].includes(String(closed.reason))) this.presentationNotices.push(
             reasons[String(closed.reason)] ?? '这项确认已结束；原因暂不可确认。',
           );
         }

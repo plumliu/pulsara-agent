@@ -67,12 +67,15 @@ it('requires a full Hook source review and submits only private user acceptance'
   const resolve = vi.fn().mockResolvedValue(true);
   render(<CapabilityInteractionEditor form={{action: 'TRUST_HOOK_SOURCE', scope: 'WORKSPACE',
     prefill: {hook_source: {path: '/project/.pulsara/hooks.json', source_disposition: 'COMPLETE', trust_disposition: 'UNTRUSTED',
-      declaration_environment: {PLUGIN_ROOT: '/package'}, definitions: [{event: 'PreToolUse', matcher: 'read_file',
-        command: "printf 'original  bytes'", commandWindows: 'Write-Output original', timeout: 7, async: false,
+      workspace_path: '/project', enabled: true, tool_inventory_complete: false, declaration_environment: {PLUGIN_ROOT: '/package'}, definitions: [{event: 'PreToolUse', matcher: 'read_file',
+        is_tool_event: true, matched_operations: ['读取文件', '搜索内容'], matching_aliases: [{tool_name: 'read_file', aliases: ['Read']}], command: "printf 'original  bytes'", commandWindows: 'Write-Output original', timeout: 7, async: false,
         statusMessage: 'status text', additionalContextLimit: 300}]}}}} onResolve={resolve} />);
   expect(screen.getByText("printf 'original  bytes'", {normalizer: value => value})).toBeTruthy();
   expect(screen.getByText('Write-Output original')).toBeTruthy();
-  expect(screen.getByText(/additionalContextLimit: 300/)).toBeTruthy();
+  expect(screen.getByText(/读取文件、搜索内容/)).toBeTruthy();
+  expect(screen.getByText(/该项目的对话/)).toBeTruthy();
+  expect(screen.getByText(/当前远端工具目录尚不完整/)).toBeTruthy();
+  expect(screen.getByText(/上下文阈值：300/)).toBeTruthy();
   expect(screen.getByText(/PLUGIN_ROOT/)).toBeTruthy();
   const submit = screen.getByRole('button', {name: '确认并继续'});
   expect(submit.hasAttribute('disabled')).toBe(true);

@@ -577,7 +577,7 @@ def _write_skill(workspace: Path, *, changed: bool = False) -> Path:
     target = workspace / ".pulsara" / "skills" / _SKILL_NAME / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     instruction = (
-        "After this file body is available, call search_files on this SKILL.md "
+        "After this file body is available, call search_content on this SKILL.md "
         "once for the exact phrase 'Retention checkpoint sentinel'. Wait for its "
         "result. Then call the "
         "native MCP tool mcp__late__direct_echo exactly once with the text value "
@@ -672,7 +672,9 @@ async def _run_traced_turn(
 ):
     record = trace.begin_turn(command_id=command_id, prompt=prompt)
     try:
-        result = await session.run_turn(PromptContent.text(prompt), command_id=command_id)
+        result = await session.run_turn(
+            PromptContent.text(prompt), command_id=command_id
+        )
     except BaseException as exc:
         trace.fail_turn(record, exc)
         raise
@@ -878,7 +880,7 @@ def _install_read_activation(session, observed_tools: list[str]) -> None:
         result = await original(**kwargs)
         name = str(kwargs["tool_name"])
         observed_tools.append(name)
-        if name == "search_files" and observed_tools.count("search_files") == 1:
+        if name == "search_content" and observed_tools.count("search_content") == 1:
             session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
                 automatic_enabled=True,
                 auto_trigger_ratio=0.35,
@@ -1233,7 +1235,7 @@ async def _run_retained_and_repeated(
             and skill_turn_trajectory.count("read_file") == 1
             and skill_turn_trajectory.count("mcp__late__direct_echo") == 1
             and skill_mcp_index > 0
-            and skill_turn_trajectory[1:skill_mcp_index].count("search_files") >= 1
+            and skill_turn_trajectory[1:skill_mcp_index].count("search_content") >= 1
         )
         result = {
             "initial_epoch_revision": initial_epoch.epoch_revision,
@@ -1262,7 +1264,7 @@ async def _run_retained_and_repeated(
             ),
             "skill_final_sentinel": _SENTINEL in skill_result.final_text,
             "read_file_calls": observed_tools.count("read_file"),
-            "search_file_calls": observed_tools.count("search_files"),
+            "search_file_calls": observed_tools.count("search_content"),
             "late_direct_calls": observed_tools.count("mcp__late__direct_echo"),
             "second_epoch_changed": (
                 second_successor.epoch_nonce != first_successor.epoch_nonce

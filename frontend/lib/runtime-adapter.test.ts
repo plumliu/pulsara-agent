@@ -1598,7 +1598,7 @@ describe('exact prompt projection', () => {
       entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
       blocks: [
         { block_id: 'block-a', block_kind: 'TOOL_CALL', tool_call_id: 'call-a', tool_name: 'read_file' },
-        { block_id: 'block-b', block_kind: 'TOOL_CALL', tool_call_id: 'call-b', tool_name: 'search_files' },
+        { block_id: 'block-b', block_kind: 'TOOL_CALL', tool_call_id: 'call-b', tool_name: 'search_content' },
       ],
     }];
     const control = {
@@ -2708,6 +2708,31 @@ it.each([undefined, 'interaction:expired', 'unrecognized-reason'])('PR05 removes
   expect(closed.presentationNotices).toEqual([reason === 'interaction:expired'
     ? '确认已过期，本次操作未获授权。' : '这项确认已结束；原因暂不可确认。']);
   expect((await connection.observe()).presentationNotices).toEqual([]);
+});
+
+it.each([
+  ['SUBMITTED', []],
+  ['CANCELLED', ['已取消这次配置。']],
+  ['unknown-form-reason', ['这项确认已结束；原因暂不可确认。']],
+])('closes a capability form using its observed outcome: %s', async (reason, notices) => {
+  const responses = [connectPayload([], {}, [], {
+    current_interaction: {
+      interaction_id: 'interaction:form', interaction_kind: 'CAPABILITY_FORM',
+      public_prompt: 'Review Hook definitions', public_options: ['SUBMIT', 'CANCEL'],
+    },
+  }), { observation: {
+    live: [{ event_type: 'INTERACTION_CLOSED', payload: {
+      interaction_closed: { interaction_id: 'interaction:form', reason },
+    } }],
+    live_control: [{ kind: 'LIVE_INTERACTION_CLOSED' }],
+  } }];
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().interaction?.kind).toBe('capability-form');
+  const closed = await connection.observe();
+  expect(closed.interaction).toBeUndefined();
+  expect(closed.presentationNotices).toEqual(notices);
+  expect(closed.messages).toEqual([]);
 });
 
 it('imports raw file bytes and multipart directories outside JSON commands using current controller generation', async () => {

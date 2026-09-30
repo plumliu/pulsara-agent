@@ -112,6 +112,7 @@ class CapabilityManagementPreparation:
         skills: LocalSkillManagementService,
         hooks: LocalHookSourceProvider,
         workspace_kind: str = "project",
+        hook_review_tools: Callable | None = None,
     ):
         self.mcp = mcp
         self.plugins = plugins
@@ -120,6 +121,7 @@ class CapabilityManagementPreparation:
         self.skills = skills
         self.hooks = hooks
         self.workspace_kind = workspace_kind
+        self.hook_review_tools = hook_review_tools
 
     async def prepare(
         self, arguments: Mapping[str, object]
@@ -574,7 +576,22 @@ class CapabilityManagementPreparation:
         scrub = await asyncio.to_thread(
             self.plugins._capture_scrub_set, InspectLocalPluginsRequest(self.deadline())
         )
-        return scrub.scrub_json(hook_snapshot_public(snapshot, inspect=True))
+        subjects, complete = (
+            self.hook_review_tools()
+            if self.hook_review_tools is not None
+            else ((), False)
+        )
+        value = hook_snapshot_public(snapshot, inspect=True)
+        from pulsara_agent.hooks.presentation import add_matching_tool_review
+
+        add_matching_tool_review(
+            value,
+            snapshot,
+            subjects=subjects,
+            complete=complete,
+            workspace_root=self.workspace_root,
+        )
+        return scrub.scrub_json(value)
 
     async def _local(self, intent, fields, root):
         target = LocalMcpTarget(fields["server_id"], root)

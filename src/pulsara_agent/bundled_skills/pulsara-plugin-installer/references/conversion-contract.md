@@ -42,21 +42,18 @@ not modify an executable or rewrite Skill instructions to make a Plugin portable
 The GUI preview shows selected components, ordinary connection parameters and
 import notices; there is no separate conversion-report artifact or registry.
 
-## Semantic Preservation Test
+## Declaration Conversion
 
 The official importer/native validator owns these checks. Use its supported
 conversion and diagnostics; this list explains admission rather than requiring
-the model to build a second validator or audit every script. Conversion succeeds
-only when all of these statements are true:
+the model to build a second validator or audit every script. The importer checks supported declarations, not arbitrary script semantics:
 
 1. Every active source component has one exact supported destination.
-2. Skill instructions and invocation expectations retain their meaning.
+2. Selected Skill resources are copied unchanged.
 3. MCP commands, arguments, working directories, URLs, headers, and environment
    declarations remain exact apart from a standard package-root placeholder
    representation with the same resolved value.
-4. Every Hook has an exact supported event, matcher, handler, and control meaning.
-   The full target is defined by `pulsara-hook-extension.md`, including stdin,
-   environment, output, authority, and lifecycle differences.
+4. Every declared Hook configuration has a supported event, matcher and command handler. Scripts receive Pulsara native names and parameters; conversion does not validate behavior or vendor harness equivalence. Ordinary installation never executes scripts, follows their dependencies recursively, or requires model-run semantic proof. See `pulsara-hook-extension.md` for input/output limits.
 5. Required host tools, Apps, permissions, dependency installation, PATH changes,
    background services, and UI behavior are either natively represented or absent.
 6. License and compatibility statements remain truthful.

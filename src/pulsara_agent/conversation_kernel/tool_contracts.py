@@ -372,8 +372,6 @@ class KernelToolAuthorization:
 class PreparedResolvedToolInvocation:
     requested_tool_name: str
     canonical_tool_name: str
-    external_tool_name: str
-    pulsara_tool_name: str | None
     resolved_arguments: FrozenJsonObjectFact
 
     def __post_init__(self) -> None:
@@ -381,7 +379,6 @@ class PreparedResolvedToolInvocation:
             (
                 self.requested_tool_name,
                 self.canonical_tool_name,
-                self.external_tool_name,
             )
         ) or not isinstance(self.resolved_arguments, FrozenJsonObjectFact):
             raise ValueError("prepared resolved Tool invocation is invalid")
@@ -391,8 +388,6 @@ class PreparedResolvedToolInvocation:
 class PreparedToolPreparationRejection:
     requested_tool_name: str
     post_tool_name: str
-    post_external_tool_name: str
-    post_pulsara_tool_name: str | None
     post_arguments: FrozenJsonObjectFact
     authorization: KernelToolAuthorization
 
@@ -400,7 +395,6 @@ class PreparedToolPreparationRejection:
         if (
             not self.requested_tool_name
             or not self.post_tool_name
-            or not self.post_external_tool_name
             or self.authorization.kind
             not in {
                 KernelToolAuthorizationKind.INVALID_ARGUMENTS,

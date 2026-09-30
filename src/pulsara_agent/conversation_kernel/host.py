@@ -749,6 +749,7 @@ class KernelHostSession:
                 workspace_root=workspace.workspace_root,
                 workspace_kind=workspace.workspace_kind,
                 hooks=hook_source_provider,
+                hook_review_tools=self._tools.observe_hook_review_tools,
                 skills=LocalSkillManagementService(
                     pulsara_home_resolution=pulsara_home_resolution,
                     user_home_resolution=user_home_resolution,
@@ -7885,16 +7886,28 @@ class KernelHostCore:
 
     async def search_sessions(self, *, memory_domain_id: str, query: str, lifecycle: str = "ALL", cursor: str | None = None, limit: int = 20):
         from pulsara_agent.conversation_kernel.session_search import search_session_page
-        repository = await self._ensure_resources()
-        return await asyncio.to_thread(search_session_page, repository,
-            memory_domain_id=memory_domain_id, query=query, lifecycle=lifecycle,
-            cursor=cursor, limit=limit, deadline_monotonic=self._canonical_deadline())
 
-    async def rename_session(self, session_id: str, *, memory_domain_id: str, title: str) -> str:
         repository = await self._ensure_resources()
         return await asyncio.to_thread(
-            repository.rename_session, session_id=session_id,
-            memory_domain_id=memory_domain_id, title=title,
+            search_session_page,
+            repository,
+            memory_domain_id=memory_domain_id,
+            query=query,
+            lifecycle=lifecycle,
+            cursor=cursor,
+            limit=limit,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+
+    async def rename_session(
+        self, session_id: str, *, memory_domain_id: str, title: str
+    ) -> str:
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            repository.rename_session,
+            session_id=session_id,
+            memory_domain_id=memory_domain_id,
+            title=title,
             deadline_monotonic=self._canonical_deadline(),
         )
 

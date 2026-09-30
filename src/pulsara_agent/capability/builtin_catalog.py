@@ -1050,89 +1050,72 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_read_only=True,
         permission_category="filesystem_read",
     ),
-    "search_files": _descriptor(
-        name="search_files",
-        description=(
-            "Search file contents or find files by name within one file or directory. "
-            "With target=content, pattern is a regular expression; with target=files, "
-            "pattern is a file-name fragment or glob. Relative paths start in the current "
-            "workspace and may traverse outside it with ../. Outside it, search only a "
-            "specific file or subdirectory because "
-            "broad local roots are rejected. Use offset to continue a truncated result "
-            "instead of repeating the same page."
-        ),
+    "search_content": _descriptor(
+        name="search_content",
+        description="Relative paths start in the current workspace and may traverse outside it with ../. Search text with a Rust regular expression. Results sort by path and line; content returns matching lines, files_only returns matching files, count returns matching-line counts per file. All modes paginate. Use read_file before editing.",
         input_schema=object_schema(
             properties={
-                "pattern": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "Required search expression. For target=content, use a regular "
-                        "expression and escape special characters when matching literal "
-                        "text. For target=files, use a name fragment or glob such as *.py."
-                    ),
-                },
-                "target": {
-                    "type": "string",
-                    "enum": ["content", "files"],
-                    "default": "content",
-                    "description": (
-                        "content searches inside text files; files finds matching file names. "
-                        "Omit to search content."
-                    ),
-                },
                 "path": {
                     "type": "string",
                     "minLength": 1,
                     "default": ".",
-                    "description": (
-                        "File or directory to search. Relative paths start in the current "
-                        "workspace and may traverse outside it with ../. Absolute paths "
-                        "and ~ are accepted only for a specific "
-                        "file or subdirectory, not broad roots such as ~, /, /Users, or /tmp."
-                    ),
-                },
-                "file_glob": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "Optional file filter for target=content, for example *.py. "
-                        "It has no effect when target=files."
-                    ),
+                    "description": "File or directory. Relative paths start in the current workspace and may traverse outside it with ../; specific external paths are allowed, broad external roots are rejected.",
                 },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_SEARCH_LIMIT,
                     "default": DEFAULT_SEARCH_LIMIT,
-                    "description": (
-                        f"Maximum results on this page, defaulting to "
-                        f"{DEFAULT_SEARCH_LIMIT} and capped at {MAX_SEARCH_LIMIT}. "
-                        "It does not limit output_mode=count."
-                    ),
                 },
                 "offset": {
                     "type": "integer",
                     "minimum": 0,
                     "default": 0,
-                    "description": (
-                        "0-based result offset for pagination. When truncated is true, "
-                        "copy the next offset from the response hint. It does not apply "
-                        "to output_mode=count."
-                    ),
+                    "description": "Zero-based page offset; count mode pages files, not lines. Continue using the response hint.",
+                },
+                "pattern": {"type": "string", "minLength": 1},
+                "file_glob": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Optional basename/relative-path glob filtering results, including single-file queries.",
                 },
                 "output_mode": {
                     "type": "string",
                     "enum": ["content", "files_only", "count"],
                     "default": "content",
-                    "description": (
-                        "For target=content: content returns matching lines with paths and "
-                        "line numbers; files_only returns matching paths; count returns "
-                        "match totals by file. It has no effect when target=files."
-                    ),
                 },
             },
             required=["pattern"],
+        ),
+        is_read_only=True,
+        permission_category="filesystem_read",
+    ),
+    "find_files": _descriptor(
+        name="find_files",
+        description="Relative paths start in the current workspace and may traverse outside it with ../. Find files by exact basename or relative-path glob, without reading bodies. *.py matches all depths; src/*.py is one level; src/**/*.py is recursive. Use *name* for fragments. Results sort by path and paginate.",
+        input_schema=object_schema(
+            properties={
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "default": ".",
+                    "description": "File or directory. Relative paths start in the current workspace and may traverse outside it with ../; specific external paths are allowed, broad external roots are rejected.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_SEARCH_LIMIT,
+                    "default": DEFAULT_SEARCH_LIMIT,
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Zero-based file offset. Continue using the response hint.",
+                },
+                "glob": {"type": "string", "minLength": 1},
+            },
+            required=["glob"],
         ),
         is_read_only=True,
         permission_category="filesystem_read",
@@ -2158,7 +2141,15 @@ class BuiltinToolCatalogEntry:
 
 
 _FILESYSTEM = frozenset(
-    {"edit_file", "read_file", "search_files", "view_image", "visualization_render", "write_file"}
+    {
+        "edit_file",
+        "read_file",
+        "search_content",
+        "find_files",
+        "view_image",
+        "visualization_render",
+        "write_file",
+    }
 )
 _MEMORY_MUTATION = frozenset({"remember", "mark_memory_relation"})
 _MEMORY_QUERY = frozenset({"memory_explain", "memory_get"})
@@ -2514,7 +2505,8 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "read_mcp_resource",
         "reload_hooks",
         "reload_capabilities",
-        "search_files",
+        "search_content",
+        "find_files",
         "todo",
     }:
         severity = "read_only"

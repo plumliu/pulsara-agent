@@ -365,7 +365,7 @@ class PlanToolBatchCoordinator:
             cwd=cwd,
             model=model,
             turn_id=turn_id,
-            tool_name=subject.external_primary,
+            tool_name=subject.canonical_subject,
             tool_use_id=tool_call_id,
             tool_input=thaw_json(prepared.resolved_arguments),
             permission_mode=external_permission_mode(
@@ -444,7 +444,7 @@ class PlanToolBatchCoordinator:
             cwd=cwd,
             model=model,
             turn_id=settlement.turn_id,
-            tool_name=subject.external_primary,
+            tool_name=subject.canonical_subject,
             tool_use_id=settlement.tool_call_id,
             tool_input=thaw_json(settlement.public_arguments),
             tool_response=projected.value,
@@ -644,8 +644,6 @@ class PlanToolBatchCoordinator:
             selected_prepared = PreparedResolvedToolInvocation(
                 selected.tool_name,
                 selected.tool_name,
-                selected.tool_name,
-                None,
                 selected.arguments,
             )
             pre_outcome, pre_causal_ref = await self._dispatch_pre(

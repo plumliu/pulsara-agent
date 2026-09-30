@@ -41,3 +41,49 @@ def hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
             for item in snapshot.definitions
         ]
     return value
+
+
+def add_matching_tool_review(
+    value, snapshot, *, subjects, complete: bool, workspace_root
+):
+    """Display-only matching, sharing the production matcher and real identities."""
+    from pulsara_agent.hooks.contracts import HookEventType
+    from pulsara_agent.hooks.matcher import definition_matches
+
+    labels = {
+        "terminal": "运行终端命令",
+        "read_file": "读取文件",
+        "edit_file": "编辑文件",
+        "write_file": "写入文件",
+        "search_content": "搜索内容",
+        "find_files": "查找文件",
+        "spawn_agent": "创建子任务",
+    }
+    value["workspace_path"] = str(workspace_root)
+    value["tool_inventory_complete"] = complete
+    for public, definition in zip(
+        value["definitions"], snapshot.definitions, strict=True
+    ):
+        tool_event = definition.event_type in {
+            HookEventType.PRE_TOOL_USE_EVENT,
+            HookEventType.POST_TOOL_USE_EVENT,
+            HookEventType.PERMISSION_REQUEST_EVENT,
+        }
+        matched = [
+            subject
+            for subject in subjects
+            if tool_event and definition_matches(definition, subject)
+        ]
+        public["matched_operations"] = list(
+            dict.fromkeys(
+                labels.get(subject.canonical_subject, subject.canonical_subject)
+                for subject in matched
+            )
+        )
+        public["matching_aliases"] = [
+            {"tool_name": subject.canonical_subject, "aliases": list(subject.aliases)}
+            for subject in matched
+            if subject.aliases
+        ]
+        public["is_tool_event"] = tool_event
+        public["matches_all"] = definition.matcher.matches_all

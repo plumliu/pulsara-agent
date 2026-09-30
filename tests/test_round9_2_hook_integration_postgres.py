@@ -921,8 +921,8 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
         "PermissionRequest",
         "PostToolUse",
     ]
-    assert all(value["tool_name"] == "apply_patch" for value in tool_logs)
-    assert all(value["pulsara_tool_name"] == "write_file" for value in tool_logs)
+    assert all(value["tool_name"] == "write_file" for value in tool_logs)
+    assert all(value["tool_name"] == "write_file" and "pulsara_tool_name" not in value for value in tool_logs)
     assert tool_logs[0]["tool_input"]["path"] == "denied.txt"  # type: ignore[index]
     assert tool_logs[2]["tool_input"]["path"] == "allowed.txt"  # type: ignore[index]
     assert logs[-1]["stdin"]["hook_event_name"] == "SessionEnd"  # type: ignore[index]
@@ -1199,7 +1199,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
             "PostToolUse",
         ]
         assert before_tool[0]["tool_name"] == "ask_plan_question"
-        assert before_tool[1]["tool_name"] == "apply_patch"
+        assert before_tool[1]["tool_name"] == "write_file"
         assert before_tool[1]["tool_use_id"] == "call:barrier-sibling"
         with session.repository.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -1715,3 +1715,30 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
     assert lifecycle[1]["trigger"] == "manual"
     assert lifecycle[2]["trigger"] == "manual"
     assert logs[-1]["stdin"]["hook_event_name"] == "SessionEnd"  # type: ignore[index]
+
+
+def test_joint_hook_review_full_production_host_includes_agent_owner(tmp_path, monkeypatch, stage2_migrated_postgres_database):
+    import pulsara_agent.conversation_kernel.host as kernel_host
+    from pulsara_agent.primitives.context import thaw_json
+    home = tmp_path / 'home'
+    workspace = tmp_path / 'workspace'
+    (workspace / '.pulsara').mkdir(parents=True)
+    (workspace / '.pulsara/hooks.json').write_text(json.dumps({'hooks': {'PreToolUse': [{'matcher': '^Agent$', 'hooks': [{'type': 'command', 'command': 'printf reviewed'}]}]}}))
+    monkeypatch.setenv('PULSARA_HOME', str(home))
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, 'load_configs', lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(kernel_host, 'DirectKernelModelPort', lambda **_: ScriptedKernelModel([]))
+    async def exercise():
+        core = KernelHostCore.production(model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn))
+        session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=workspace))
+        try:
+            prepared = await session._tools._capability_management.prepare({'action': 'TRUST_HOOK_SOURCE', 'scope': 'WORKSPACE', 'source_kind': 'LOCAL'})
+            hook = thaw_json(prepared.public_prefill)['hook_source']
+            assert hook['definitions'][0]['matched_operations'] == ['创建子任务']
+            assert hook['definitions'][0]['matching_aliases'] == [{'tool_name': 'spawn_agent', 'aliases': ['Agent']}]
+            assert hook['workspace_path'] == str(workspace)
+            assert hook['tool_inventory_complete'] is True
+            assert hook['trust_disposition'] == 'UNTRUSTED'
+        finally:
+            await core.close_session(session.host_session_id)
+            await core.shutdown()
+    asyncio.run(exercise())

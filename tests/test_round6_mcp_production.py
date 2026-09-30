@@ -897,7 +897,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
     resolved_hook_calls = [
         (wire, subject)
         for wire, subject in hooks.calls
-        if wire.get("pulsara_tool_name") == "use_new_mcp_tool"
+        if wire.get("tool_use_id") == "call:use-meta" and wire.get("tool_name") == "mcp__fixture__intersecting_unions"
     ]
     assert len(resolved_hook_calls) == 2
     assert [wire["hook_event_name"] for wire, _subject in resolved_hook_calls] == [

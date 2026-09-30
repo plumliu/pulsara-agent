@@ -19,6 +19,7 @@ dependencies = [
     "mcp-types==2.1.0",
     "pillow>=12.3.0",
     "playwright>=1.58,<2",
+    "wcmatch==10.1",
 ]
 
 [project.scripts]
@@ -30,6 +31,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pulsara_agent"]
+exclude = ["src/pulsara_agent/_vendor/ripgrep"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["src/pulsara_agent/_vendor/ripgrep"]
 
 [tool.hatch.build.hooks.custom]
 path = "tools/hatch_build.py"
@@ -51,4 +56,6 @@ dev = [
     "pytest>=9.0.3",
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.16",
+    "hatchling>=1.32.4,<2",
+    "editables>=0.5,<1",
 ]

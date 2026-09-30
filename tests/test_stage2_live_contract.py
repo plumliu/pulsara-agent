@@ -83,7 +83,7 @@ def test_interleaved_multiple_tool_calls_freeze_start_order() -> None:
         ToolCallStartPayload(
             block_identity="call:second",
             tool_call_id="call:second",
-            tool_name="search_files",
+            tool_name="search_content",
         ),
         ToolCallDeltaPayload(
             block_identity="call:second",
@@ -93,7 +93,7 @@ def test_interleaved_multiple_tool_calls_freeze_start_order() -> None:
         ToolCallEndPayload(
             block_identity="call:second",
             tool_call_id="call:second",
-            tool_name="search_files",
+            tool_name="search_content",
             arguments_json='{"query":"second"}',
             utf8_bytes=18,
             digest=live_digest('{"query":"second"}'),

@@ -1,8 +1,8 @@
 # Pulsara 内容搜索与文件查找拆分实施规范
 
-状态：2026-09-30 已由同一 GPT-6.1 Sol / xhigh critic 完成与下游 Hook 设计的联合复审，主 agent 最终校对通过，无剩余实施前阻塞；文档冻结，待用户审阅。搜索拆分仍只完成文档设计，尚未实施；用户后续授权的工具元数据减法已实施，见第 1.1 节。
+状态：2026-09-30 用户已授权实施；搜索拆分、私有 ripgrep 与下游 Hook 契约已联合实现。同一 GPT-6.1 Sol / xhigh critic 完成代码复审，无剩余阻塞。macOS arm64 成品安装检查已通过；真实 GUI dogfood 已通过，完成本次激活验收。详细记录见第 12 节。
 
-本文是 [Hook 有限 Codex 支持与用户审阅设计](PULSARA_HOOK_WEAK_CODEX_SUPPORT_AND_REVIEW_DESIGN.zh.md) 的搜索与依赖上游规格：本文拥有两项搜索工具的参数、执行、结果、ripgrep 打包和 terminal PATH；下游设计拥有整体 Hook 原生输入、闭合别名表、支持输出及用户审阅。当前计划联合实施一次 hard cut，首次发布的 trust contract v2 同时覆盖两项搜索、最终别名与 Hook 输入/控制语义；不先独立发布其中一部分再复用同一个 v2。两份文档的联合审阅及实现验收均不由原版搜索文档的审阅结论代替。
+本文是 [Hook 有限 Codex 支持与用户审阅设计](PULSARA_HOOK_WEAK_CODEX_SUPPORT_AND_REVIEW_DESIGN.zh.md) 的搜索与依赖上游规格：本文拥有两项搜索工具的参数、执行、结果、ripgrep 打包和 terminal PATH；下游设计拥有整体 Hook 原生输入、闭合别名表、支持输出及用户审阅。本轮联合实施一次 hard cut，首次发布的 trust contract v2 同时覆盖两项搜索、最终别名与 Hook 输入/控制语义；不先独立发布其中一部分再复用同一个 v2。两份文档的联合审阅及实现验收均不由原版搜索文档的审阅结论代替。
 
 ## 1. 目标与范围
 
@@ -15,19 +15,19 @@
 
 两者保留 `permission_category="filesystem_read"`、`is_read_only=True` 与 `tool_family="filesystem"`。只读属性由现有权限策略消费；filesystem_read 和 filesystem family 当前只是分类标签，不决定读取路径或并行调度。共享已有路径解析、权限、搜索执行、结果封装与大结果 artifact 机制；不复制两套权限或状态系统。
 
-本轮包含：两个闭合 schema、执行器接线、结果语义、私有 ripgrep 依赖打包、terminal 进程级 PATH 接线及 Python 搜索 fallback 删除、前端工具摘要、搜索 Hook 名称接线、现行说明及测试/dogfood 的同步。Hook 确认页重新排版、其他工具别名、供应商脚本 stdin 转换、搜索索引、持久缓存、通用查询 DSL、全文检索及内容编辑均不在本轮。
+本规范拥有两个闭合 schema、执行器接线、结果语义、私有 ripgrep 依赖打包、terminal 进程级 PATH 接线及 Python 搜索 fallback 删除、前端工具摘要、搜索 Hook 名称接线、现行说明及测试/dogfood 的同步。联合实施同时按下游规范完成 Hook 确认页与其他工具别名；供应商脚本 stdin 转换、搜索索引、持久缓存、通用查询 DSL、全文检索及内容编辑均不在本轮。
 
 ### 1.1 已实施的工具元数据减法
 
 按用户后续决定，全局删除 BuiltinToolDescriptor 的 `is_concurrency_safe` 和 `long_horizon_policy`，删除调用分类中的 `effective_concurrency_safe`、catalog 中的 `long_horizon_policy_kind`，以及只为该闲置策略生成动作分类、阶段、成本和 classifier fingerprints 的代码。上述字段此前没有实际调度或 agent loop 执行消费点；不保留兼容字段、别名或旧策略生成器。观察 rollup renderer 的现有结果渲染合同仍保留。
 
-权限判断、实际工具并行调度、物理资源边界和上下文压缩不因本次减法改变。descriptor/catalog 语义摘要自然随新字段集合重新计算；builtin 稳定 ID 仍按既有名字构造，不重建旧策略以保持旧摘要。现有 epoch 的 SYSTEM/tools 与历史消息不得重写；新代码只在既有冷 epoch 或明确采用的 compaction successor 边界建立新工具根，不对旧进程做热补丁，也不引入新 rebase 边界。搜索工具拆分本身仍未实施。
+权限判断、实际工具并行调度、物理资源边界和上下文压缩不因本次减法改变。descriptor/catalog 语义摘要自然随新字段集合重新计算；builtin 稳定 ID 仍按既有名字构造，不重建旧策略以保持旧摘要。现有 epoch 的 SYSTEM/tools 与历史消息不得重写；新代码只在既有冷 epoch 或明确采用的 compaction successor 边界建立新工具根，不对旧进程做热补丁，也不引入新 rebase 边界。搜索工具拆分的后续实施记录见第 12 节。
 
 减法验证（2026-09-30）：两组 focused pytest 共 326 项通过，覆盖 descriptor/executor 闭合、权限、前缀连续性、图像工具、压缩、计划、artifact 与架构基线；新增序列化字段缺席断言后重跑对应闭合测试通过。受影响 Python 文件 Ruff 与 `git diff --check` 通过。本次未启动真实 Pulsara 会话或热更新现有进程。
 
-## 2. 当前实现与 ownership
+## 2. 实施前基线与 ownership
 
-当前事实来自生产代码，而不是历史文档：
+以下为本次 hard cut 之前的生产基线，用于说明被替换的路径；不代表实施后的现状：
 
 - `capability/builtin_catalog.py`：一个 `search_files` descriptor，`target=content|files`；`pattern` 同时代表内容正则和名称片段/glob。`file_glob`、`output_mode` 在 files 路径被忽略。
 - `tools/builtins/filesystem.py`：`SearchFilesTool` 在执行时分支；优先调用安装在 PATH 的 `rg`，没有 `rg` 时走既有 Python 实现。两条路径的正则、文件发现和排序并不完全一致。名称搜索会隐式补 `*`。
@@ -225,3 +225,25 @@ Hook 信任激活顺序：停止旧 runtime，再以 v2 digest 合同和两个�
 同日联合审阅准备：明确本文与 Hook 下游设计的 owner 分工、唯一别名表、全部原生 Hook 输入和一次完整 v2 信任切换，消除“保留其他工具 public name”与联合 hard cut 的冲突；同步联合验收与直接 terminal rg。此次只修改文档，联合 critic 审阅进行中。
 
 2026-09-30 同一 GPT-6.1 Sol / xhigh critic 联合复审通过，无剩余实施前阻塞。修订闭合：上游/下游 owner 和唯一 Hook 输入/别名；一次完整 v2 信任切换；Hatch 离线构建与源码/sdist/PEP660 显式准备；稳定包资源路径；terminal 只对 rg 依赖失败记录现有诊断并继续其他命令；下游精确输出解析顺序、异步控制诊断、项目共享范围及 Host/MCP 派生匹配观察。主 agent 已按意见修订并完成 JSON 示例、两文档本地链接及 diff 空白校对。文档审阅不代表构建、运行代码、平台安装测试或真实 dogfood 已完成；除第 1.1 节既有元数据减法外，其余目标仍待用户决定实施。
+
+
+## 12. 联合实施记录
+
+2026-09-30，实施前工作与冻结规范已提交为 `ab16b002`。随后联合删除旧搜索入口、Python fallback 和系统 rg 探测，接入两个闭合工具、wcmatch 纯 matcher、固定私有 rg、terminal 子进程 PATH、原生 Hook 输入与最终别名表、一次 v2 信任契约及派生审阅清单；同一 critic 代码复审通过。没有新增 relational schema 或 durability 类别，没有热改已有 provider prefix。
+
+打包目前只开放已实测的 macOS arm64，平台 wheel 标签为 `py3-none-macosx_11_0_arm64`。Hatch 验证真实架构、最低系统版本与固定 rg 版本；包内包含 MIT 与 PCRE2 notices。显式准备工具可选择其他上游资产，但这些目标尚未经过 Pulsara 成品安装验证，禁止发布。源码先 `uv venv`，显式准备资源，再 `uv sync --locked`；构建 hook 不下载。路径含空格的干净成品安装已运行实际 rg、两个内置工具与裸 terminal rg，均通过。
+
+最终非真实会话检查：Python 全量 2444 passed（包含 PostgreSQL 与架构检查）；前端 35 个文件、587 passed；受影响 Python Ruff、TypeScript、terminal 协议生成检查、前端 production 构建、Hatch wheel/sdist 与 `git diff --check` 通过。依赖未准备的 wheel/sdist/editable 离线失败、准备后的构建成功，以及路径含空格的干净成品安装均有实际检查。
+
+真实 GUI dogfood 通过：新 runtime 读取保存生产设置，隔离项目 `/Users/plumliu/Desktop/test1/search_split_20260930`，GPT-6 Luna / xhigh。用户完成原生目录选择后，在会话 `6395e367` 通过 GUI 一次审阅全部 3 条定义并提交信任；确认页显示项目共享范围、完整命令、实际适用操作和原生输入边界。随后在同项目新冷会话 `2736bf6e` 完成自然语言验收：
+
+- `find_files` 使用 `glob=config.py,path=src`，返回 `src/config.py` 与 `src/deep/config.py`。
+- `search_content` 使用 `pattern=needle,path=src,file_glob=*.py`；content 返回 4 行，files_only 返回 3 个文件，count 每页 1 文件，offset 依提示为 0 → 1 → 2，计数依次 2、1、1，全量 `total_count=4`；最后一页 `truncated=false`，前端仍显示部分页提示。
+- 实际 `read_file` 读取 `src/config.py`；Read/Grep/Glob 代表 Hook 均触发，脚本记录的名字为 `read_file/search_content/find_files`，参数原生且没有 `target` 或 `pulsara_tool_name`。
+- 同一新会话的无 stdin SessionStart 写出 `SESSION_START_NO_STDIN`；terminal 裸 `rg --version` 输出 15.2.0。
+- `printf PULSARA_BLOCK_ME` 的 PreTool Hook 收到 `tool_name=terminal` 与原生 `command`，stderr 为 `dogfood native command blocked`、退出码 2；GUI 显示未获授权且未执行，模型没有绕过拒绝。
+
+实际脚本输入与搜索结果保存在隔离项目 `.pulsara/events.jsonl`，启动输出在 `.pulsara/start.log`；GUI 工具详情与日志已交叉核对。此验收仅覆盖本机 macOS arm64，不扩张其他平台的发行声明。
+
+
+真实 dogfood 发现并修复一处 P2 前端提示问题：后端 capability 表单正常关闭发送 `SUBMITTED`，adapter 曾仅将 `RESOLVED` 视为正常，因此误报未知结束原因。现在 `SUBMITTED` 静默收尾，`CANCELLED` 显示普通取消，未知原因继续提示；不把提交当成配置已应用，也没有新增协议、缓存或事件。三个回归通过，runtime-adapter 共 80 项通过，最终前端全量 587 项与 TypeScript/构建通过，同一 critic 对窄修订复审无阻塞。重新加载前端后，在会话 `2736bf6e` 对同一份已信任定义再次提交 GUI 审阅，实际只显示正常提交且配置已应用，错误提示未再出现；未撤销信任、修改定义或再次切换 v2。

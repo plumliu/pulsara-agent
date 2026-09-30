@@ -135,9 +135,8 @@ def test_round2_terminal_child_receives_nearest_venv_and_not_parent_secret(
         parent_env=parent,
     )
     environment = owner.build(cwd=nested)
-    assert environment.values["PATH"].split(os.pathsep)[0] == str(
-        nested / ".venv" / "bin"
-    )
+    from pulsara_agent.ripgrep import private_ripgrep
+    assert environment.values["PATH"].split(os.pathsep)[:2] == [str(private_ripgrep().parent), str(nested / ".venv" / "bin")]
     assert "OPENAI_API_KEY" not in environment.values
     owner.close(timeout_seconds=1)
 

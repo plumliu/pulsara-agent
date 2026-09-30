@@ -13,8 +13,6 @@ from pulsara_agent.hooks.contracts import FrozenHookDefinition, HookEventType
 class FrozenHookMatcherSubject:
     canonical_subject: str
     aliases: tuple[str, ...]
-    external_primary: str
-    pulsara_tool_name: str | None = None
 
     @property
     def candidates(self) -> tuple[str, ...]:
@@ -43,7 +41,9 @@ def definition_matches(
     if fact.matches_all or fact.ignored_by_profile:
         return True
     compiled = compile_matcher(fact.pattern)
-    return any(compiled.search(candidate) is not None for candidate in subject.candidates)
+    return any(
+        compiled.search(candidate) is not None for candidate in subject.candidates
+    )
 
 
 def event_matcher_subject(
@@ -59,26 +59,38 @@ def event_matcher_subject(
         HookEventType.USER_PROMPT_SUBMIT_EVENT,
         HookEventType.STOP_EVENT,
     }:
-        return FrozenHookMatcherSubject("*", (), "*")
+        return FrozenHookMatcherSubject("*", ())
     if event_type is HookEventType.SESSION_START_EVENT and source is not None:
-        return FrozenHookMatcherSubject(source, (), source)
+        return FrozenHookMatcherSubject(source, ())
     if event_type is HookEventType.SESSION_END_EVENT and reason is not None:
-        return FrozenHookMatcherSubject(reason, (), reason)
-    if event_type in {
-        HookEventType.PRE_COMPACT_EVENT,
-        HookEventType.POST_COMPACT_EVENT,
-    } and trigger is not None:
-        return FrozenHookMatcherSubject(trigger, (), trigger)
-    if event_type in {
-        HookEventType.SUBAGENT_START_EVENT,
-        HookEventType.SUBAGENT_STOP_EVENT,
-    } and agent_type is not None:
-        return FrozenHookMatcherSubject(agent_type, (), agent_type)
-    if event_type in {
-        HookEventType.PRE_TOOL_USE_EVENT,
-        HookEventType.PERMISSION_REQUEST_EVENT,
-        HookEventType.POST_TOOL_USE_EVENT,
-    } and tool is not None:
+        return FrozenHookMatcherSubject(reason, ())
+    if (
+        event_type
+        in {
+            HookEventType.PRE_COMPACT_EVENT,
+            HookEventType.POST_COMPACT_EVENT,
+        }
+        and trigger is not None
+    ):
+        return FrozenHookMatcherSubject(trigger, ())
+    if (
+        event_type
+        in {
+            HookEventType.SUBAGENT_START_EVENT,
+            HookEventType.SUBAGENT_STOP_EVENT,
+        }
+        and agent_type is not None
+    ):
+        return FrozenHookMatcherSubject(agent_type, ())
+    if (
+        event_type
+        in {
+            HookEventType.PRE_TOOL_USE_EVENT,
+            HookEventType.PERMISSION_REQUEST_EVENT,
+            HookEventType.POST_TOOL_USE_EVENT,
+        }
+        and tool is not None
+    ):
         return tool
     raise ValueError("event matcher subject is incomplete")
 
@@ -87,30 +99,17 @@ def tool_matcher_subject(
     pulsara_name: str, *, resolved_remote_identity: str | None = None
 ) -> FrozenHookMatcherSubject:
     if resolved_remote_identity is not None:
-        return FrozenHookMatcherSubject(
-            canonical_subject=resolved_remote_identity,
-            aliases=(),
-            external_primary=resolved_remote_identity,
-            pulsara_tool_name=(
-                pulsara_name if pulsara_name != resolved_remote_identity else None
-            ),
-        )
-    aliases: dict[str, tuple[tuple[str, ...], str]] = {
-        "terminal": (("Bash",), "Bash"),
-        "terminal_process": ((), "terminal_process"),
-        "terminal_monitor": ((), "terminal_monitor"),
-        "edit_file": (("apply_patch", "Edit"), "apply_patch"),
-        "write_file": (("apply_patch", "Write"), "apply_patch"),
-        "spawn_agent": (("Agent",), "spawn_agent"),
-        "create_agent_tasks": ((), "create_agent_tasks"),
+        return FrozenHookMatcherSubject(resolved_remote_identity, ())
+    aliases = {
+        "terminal": ("Bash",),
+        "read_file": ("Read",),
+        "edit_file": ("apply_patch", "Edit"),
+        "write_file": ("apply_patch", "Write"),
+        "spawn_agent": ("Agent",),
+        "search_content": ("Grep",),
+        "find_files": ("Glob",),
     }
-    tool_aliases, primary = aliases.get(pulsara_name, ((), pulsara_name))
-    return FrozenHookMatcherSubject(
-        canonical_subject=pulsara_name,
-        aliases=tool_aliases,
-        external_primary=primary,
-        pulsara_tool_name=pulsara_name if primary != pulsara_name else None,
-    )
+    return FrozenHookMatcherSubject(pulsara_name, aliases.get(pulsara_name, ()))
 
 
 __all__ = [

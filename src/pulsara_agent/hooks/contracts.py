@@ -43,9 +43,7 @@ class HookEventType(StrEnum):
 
 
 HOOK_EVENT_TYPES = tuple(item.value for item in HookEventType)
-_HOOK_EVENT_BY_EXTERNAL_NAME = {
-    item.external_name: item for item in HookEventType
-}
+_HOOK_EVENT_BY_EXTERNAL_NAME = {item.external_name: item for item in HookEventType}
 
 
 class HookSourceKind(StrEnum):
@@ -101,10 +99,7 @@ class LocalFileHookSourceIdentity:
     def __post_init__(self) -> None:
         if not self.canonical_path.is_absolute():
             raise ValueError("Hook source path must be absolute")
-        if (
-            self.kind is HookSourceKind.WORKSPACE_FILE
-            and not self.workspace_state_key
-        ):
+        if self.kind is HookSourceKind.WORKSPACE_FILE and not self.workspace_state_key:
             raise ValueError("workspace Hook source requires a state key")
         if (
             self.kind is HookSourceKind.USER_FILE
@@ -481,7 +476,6 @@ class PreToolUseInput(_HookInputBase):
     tool_use_id: str
     tool_input: JsonValue
     permission_mode: str
-    pulsara_tool_name: str | None = None
     event_type = HookEventType.PRE_TOOL_USE_EVENT
 
     def to_wire(self) -> dict[str, JsonValue]:
@@ -492,8 +486,6 @@ class PreToolUseInput(_HookInputBase):
             "tool_input": self.tool_input,
             "permission_mode": self.permission_mode,
         }
-        if self.pulsara_tool_name is not None:
-            value["pulsara_tool_name"] = self.pulsara_tool_name
         return value
 
 
@@ -503,7 +495,6 @@ class PermissionRequestInput(_HookInputBase):
     tool_name: str
     tool_input: JsonValue
     permission_mode: str
-    pulsara_tool_name: str | None = None
     event_type = HookEventType.PERMISSION_REQUEST_EVENT
 
     def to_wire(self) -> dict[str, JsonValue]:
@@ -513,8 +504,6 @@ class PermissionRequestInput(_HookInputBase):
             "tool_input": self.tool_input,
             "permission_mode": self.permission_mode,
         }
-        if self.pulsara_tool_name is not None:
-            value["pulsara_tool_name"] = self.pulsara_tool_name
         return value
 
 
@@ -526,7 +515,6 @@ class PostToolUseInput(_HookInputBase):
     tool_input: JsonValue
     tool_response: JsonValue
     permission_mode: str
-    pulsara_tool_name: str | None = None
     event_type = HookEventType.POST_TOOL_USE_EVENT
 
     def to_wire(self) -> dict[str, JsonValue]:
@@ -538,8 +526,6 @@ class PostToolUseInput(_HookInputBase):
             "tool_response": self.tool_response,
             "permission_mode": self.permission_mode,
         }
-        if self.pulsara_tool_name is not None:
-            value["pulsara_tool_name"] = self.pulsara_tool_name
         return value
 
 

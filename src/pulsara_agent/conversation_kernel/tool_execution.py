@@ -453,7 +453,7 @@ class ToolBatchExecutor:
             cwd=str(self._tools.snapshot_workspace_root()),
             model=self._hook_model_id(request),
             turn_id=turn_id,
-            tool_name=subject.external_primary,
+            tool_name=subject.canonical_subject,
             tool_use_id=tool_call_id,
             tool_input=arguments,
             permission_mode=external_permission_mode(
@@ -463,7 +463,6 @@ class ToolBatchExecutor:
                     is not None
                 ),
             ),
-            pulsara_tool_name=subject.pulsara_tool_name,
         )
         outcome = await self._hooks.dispatch(
             HookDispatchEnvelope(
@@ -507,7 +506,7 @@ class ToolBatchExecutor:
             cwd=str(self._tools.snapshot_workspace_root()),
             model=self._hook_model_id(request),
             turn_id=turn_id,
-            tool_name=subject.external_primary,
+            tool_name=subject.canonical_subject,
             tool_input=thaw_json(prepared.resolved_arguments),
             permission_mode=external_permission_mode(
                 canonical_facts.run_permission_snapshot.effective_mode.value,
@@ -516,7 +515,6 @@ class ToolBatchExecutor:
                     is not None
                 ),
             ),
-            pulsara_tool_name=subject.pulsara_tool_name,
         )
         return await self._hooks.dispatch(
             HookDispatchEnvelope(
@@ -588,7 +586,7 @@ class ToolBatchExecutor:
             cwd=str(self._tools.snapshot_workspace_root()),
             model=self._hook_model_id(request),
             turn_id=settlement.turn_id,
-            tool_name=subject.external_primary,
+            tool_name=subject.canonical_subject,
             tool_use_id=settlement.tool_call_id,
             tool_input=thaw_json(settlement.public_arguments),
             tool_response=projected.value,
@@ -599,7 +597,6 @@ class ToolBatchExecutor:
                     is not None
                 ),
             ),
-            pulsara_tool_name=subject.pulsara_tool_name,
         )
         outcome = await self._hooks.dispatch(
             HookDispatchEnvelope(
@@ -780,8 +777,6 @@ class ToolBatchExecutor:
                     rejected_invocation = PreparedResolvedToolInvocation(
                         call.tool_name,
                         call.tool_name,
-                        call.tool_name,
-                        None,
                         call.arguments,
                     )
                     rejected = await self._settle_known_tool_result(
@@ -887,8 +882,6 @@ class ToolBatchExecutor:
                     else PreparedResolvedToolInvocation(
                         call.tool_name,
                         call.tool_name,
-                        call.tool_name,
-                        None,
                         call.arguments,
                     )
                 )
@@ -916,8 +909,6 @@ class ToolBatchExecutor:
                         else PreparedResolvedToolInvocation(
                             prepared_invocation.requested_tool_name,
                             prepared_invocation.post_tool_name,
-                            prepared_invocation.post_external_tool_name,
-                            prepared_invocation.post_pulsara_tool_name,
                             prepared_invocation.post_arguments,
                         )
                     )
@@ -928,8 +919,6 @@ class ToolBatchExecutor:
                     post_invocation = PreparedResolvedToolInvocation(
                         prepared_invocation.requested_tool_name,
                         prepared_invocation.post_tool_name,
-                        prepared_invocation.post_external_tool_name,
-                        prepared_invocation.post_pulsara_tool_name,
                         prepared_invocation.post_arguments,
                     )
                 else:

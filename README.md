@@ -472,3 +472,28 @@ The active long-term contracts are indexed in
 [contracts/README.zh.md](contracts/README.zh.md). Root-level research and
 hard-cut documents explain design history; they are not runtime registries or
 compatibility specifications.
+
+### Private search dependency
+
+`search_content` searches text; `find_files` matches names and relative-path globs.
+Pulsara includes ripgrep 15.2.0 in platform wheels. Its terminal subprocesses
+receive the private executable directory first in PATH; external terminals are
+unchanged. Built-in searches always use the private executable with no rg config.
+
+For a new clone or extracted sdist, bootstrap explicitly:
+
+```bash
+uv venv
+.venv/bin/python tools/prepare_ripgrep.py
+uv sync --locked
+```
+
+Preparation uses only the standard library. Repeat it explicitly before offline
+wheel/sdist builds when the target resource is absent.
+macOS source builds use Apple Command Line Tools (`lipo`/`otool`) to validate
+the actual resource architecture and minimum OS before assigning the wheel tag. Build and
+runtime never download it. The sdist excludes native resources and requires the
+same preparation after extraction. Currently only macOS arm64 wheels are enabled,
+with the official binary's minimum OS 11.0; other asset mappings await real target
+installation verification. Missing resources fail clearly, without system/Python
+search fallback.

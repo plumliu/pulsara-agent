@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.ripgrep import RipgrepUnavailable, private_ripgrep
+
 from dataclasses import dataclass, field
 from enum import StrEnum
 import os
@@ -181,6 +183,11 @@ class TerminalEnvironmentOwner:
                 "/sbin",
             )
         )
+        ripgrep_error: str | None = None
+        try:
+            path_entries.insert(0, str(private_ripgrep().parent))
+        except RipgrepUnavailable as exc:
+            ripgrep_error = str(exc)
         base["PATH"] = os.pathsep.join(
             dict.fromkeys(item for item in path_entries if item)
         )
@@ -189,6 +196,7 @@ class TerminalEnvironmentOwner:
             values=base,
             shell=shell,
             diagnostic={
+                "ripgrep_error": ripgrep_error,
                 "shell_path": str(shell.path),
                 "shell_name": shell.name,
                 "shell_snapshot_used": snapshot is not None,

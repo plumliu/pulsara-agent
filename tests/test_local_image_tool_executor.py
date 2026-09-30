@@ -86,8 +86,6 @@ class _AuthorizationPort:
         return PreparedResolvedToolInvocation(
             tool_name,
             tool_name,
-            tool_name,
-            tool_name,
             freeze_json(source.provider_value()),
         )
 
@@ -301,8 +299,6 @@ def test_reverse_physical_completion_still_releases_settlement_in_call_order() -
         prepared = tuple(
             (
                 PreparedResolvedToolInvocation(
-                    call.tool_name,
-                    call.tool_name,
                     call.tool_name,
                     call.tool_name,
                     call.arguments,
@@ -621,8 +617,6 @@ def test_concurrent_view_window_queues_tail_until_physical_completion() -> None:
                 PreparedResolvedToolInvocation(
                     call.tool_name,
                     call.tool_name,
-                    call.tool_name,
-                    call.tool_name,
                     call.arguments,
                 ),
                 allow,
@@ -685,8 +679,6 @@ def test_cancelling_concurrent_view_segment_drains_started_calls() -> None:
         prepared = tuple(
             (
                 PreparedResolvedToolInvocation(
-                    call.tool_name,
-                    call.tool_name,
                     call.tool_name,
                     call.tool_name,
                     call.arguments,

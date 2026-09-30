@@ -388,7 +388,7 @@ class PluginSourceImport:
             "skills": [path.name for path in skills],
             "hooks": list(hooks["hooks"]),
             "mcp": mcp,
-            "notices": ["仅转换所选发行版；资源和脚本不执行，安装后保持关闭。"],
+            "notices": ["仅转换所选发行版；资源和脚本不执行，安装后保持关闭。"] + (["已转换 Hook 配置与匹配规则。脚本收到 Pulsara 原生工具名与参数；不保证外部脚本无需适配即可运行，脚本行为尚未验证。"] if hooks["hooks"] else []),
         }
 
     def convert(self, *, classifications=(), public_values=()):

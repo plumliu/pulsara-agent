@@ -9,7 +9,7 @@
 本次提供两条互补路径：
 
 - 少量原文补读：保留现有 `artifact_read` 字符分页与成功页 exact FULL 交付。
-- 需要本地处理：新增 `artifact_export(artifact_id, path)`，将已保存正文原样创建为一个本地文件；模型自行使用既有 `read_file`、`search_files` 或 `terminal`，通过现有工具和 Python 等脚本处理。
+- 需要本地处理：新增 `artifact_export(artifact_id, path)`，将已保存正文原样创建为一个本地文件；模型自行使用既有 `read_file`、`search_content / find_files` 或 `terminal`，通过现有工具和 Python 等脚本处理。
 
 默认优先 `artifact_read` 分页补读，信息足够即停止；反复分页明显繁琐，或需要复杂提取、聚合、脚本时再选导出。模型可直接导出，不必强制先读取一页。不由 runtime 判定任务“简单／复杂”，不设强制分页次数或导出阈值。已经可见的结果足够时，两者都不必调用。
 

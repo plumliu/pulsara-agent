@@ -107,7 +107,8 @@ from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
     LocalImageReadCandidate,
     ReadFileTool,
-    SearchFilesTool,
+    SearchContentTool,
+    FindFilesTool,
     ViewImageSourceKind,
     ViewImageTool,
     WriteFileTool,
@@ -712,7 +713,12 @@ class DirectKernelToolPort:
                 pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
-            SearchFilesTool(
+            SearchContentTool(
+                root,
+                pulsara_home_resolution=frozen_pulsara_home,
+                user_home_resolution=frozen_user_home,
+            ),
+            FindFilesTool(
                 root,
                 pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
@@ -1061,6 +1067,33 @@ class DirectKernelToolPort:
             scope_subagent_task_id=scope_subagent_task_id,
         )
 
+    def observe_hook_review_tools(self):
+        """Disposable observation; never installs provider tools or grants authority."""
+        from pulsara_agent.hooks.matcher import tool_matcher_subject
+
+        with self._surface_lock:
+            if self._sealed_builtin_bindings is None:
+                raise RuntimeError("builtin composition is not sealed")
+            subjects = tuple(tool_matcher_subject(binding.tool_name)
+                for binding in self._sealed_builtin_bindings
+                if binding.tool_name != "report_agent_result")
+            supervisor = self._mcp_supervisor
+        if supervisor is None:
+            return subjects, False
+        inspection = supervisor.inspect_discovery_catalog()
+        subjects += tuple(
+            tool_matcher_subject(
+                item.semantic.provider_tool_name,
+                resolved_remote_identity=item.semantic.provider_tool_name,
+            )
+            for item in inspection.tools
+        )
+        complete = all(
+            server.tool_surface_semantic_fingerprint is not None
+            for server in inspection.catalog_snapshot.servers
+        )
+        return subjects, complete
+
     def inspect_mcp_discovery_catalog(self) -> McpDiscoveryCatalogInspection:
         supervisor = self._mcp_supervisor
         if supervisor is None:
@@ -1208,15 +1241,11 @@ class DirectKernelToolPort:
             message: str,
             *,
             post_name: str = tool_name,
-            post_external_name: str = tool_name,
-            post_pulsara_name: str | None = None,
             post_arguments: FrozenJsonObjectFact = frozen_original,
         ) -> PreparedToolPreparationRejection:
             return PreparedToolPreparationRejection(
                 tool_name,
                 post_name,
-                post_external_name,
-                post_pulsara_name,
                 post_arguments,
                 KernelToolAuthorization(kind, reference, message),
             )
@@ -1291,15 +1320,11 @@ class DirectKernelToolPort:
                     f"mcp-meta:{executor.semantic.descriptor_fingerprint}",
                     "invalid MCP tool arguments",
                     post_name=resolved_name,
-                    post_external_name=resolved_name,
-                    post_pulsara_name=tool_name,
                     post_arguments=frozen_inner,
                 )
             return PreparedResolvedToolInvocation(
                 requested_tool_name=tool_name,
                 canonical_tool_name=resolved_name,
-                external_tool_name=resolved_name,
-                pulsara_tool_name=tool_name,
                 resolved_arguments=frozen_inner,
             )
         if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
@@ -1324,8 +1349,6 @@ class DirectKernelToolPort:
         return PreparedResolvedToolInvocation(
             requested_tool_name=tool_name,
             canonical_tool_name=tool_name,
-            external_tool_name=tool_name,
-            pulsara_tool_name=None,
             resolved_arguments=frozen_original,
         )
 
@@ -3473,11 +3496,13 @@ class DirectKernelToolPort:
                 invocation_context.effective_permission_mode,
                 deadline_monotonic=self._deadlines.deadline(owner),
                 on_caller_cancelled=(
-                    lambda: tool.manager.process_registry.abort_foreground_decision(
-                        attempt_id
+                    lambda: (
+                        tool.manager.process_registry.abort_foreground_decision(
+                            attempt_id
+                        )
+                        if isinstance(tool, _DirectTerminalTool)
+                        else None
                     )
-                    if isinstance(tool, _DirectTerminalTool)
-                    else None
                 ),
             )
         else:

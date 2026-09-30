@@ -6,7 +6,8 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   read_file: ['读取文件', '正在读取文件', '已读取文件'],
   view_image: ['查看图片', '正在读取图片', '已读取图片'],
   visualization_render: ['渲染可视化', '正在准备可视化', '已安排展示'],
-  search_files: ['搜索文件', '正在搜索', '搜索已结束'],
+  search_content: ['搜索内容', '正在搜索内容', '搜索已结束'],
+  find_files: ['查找文件', '正在查找文件', '查找已结束'],
   edit_file: ['修改文件', '正在修改文件', '已修改文件'],
   write_file: ['写入文件', '正在写入文件', '已写入文件'],
   artifact_read: ['读取完整输出', '正在读取之前保留的输出', '已读取保留的输出'],
@@ -137,11 +138,11 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
   const title = (name === 'terminal_process' ? processActions[action]
     : name === 'terminal_monitor' ? monitorActions[action] : undefined) ?? label[0];
   let target = '';
-  if (['read_file', 'view_image', 'visualization_render', 'edit_file', 'write_file', 'search_files'].includes(name)) {
+  if (['read_file', 'view_image', 'visualization_render', 'edit_file', 'write_file', 'search_content', 'find_files'].includes(name)) {
     target = text(result.path) || text(args.path);
     if (name === 'view_image' && args.image_ref) target = '对话中已保存的图片';
     if (name === 'visualization_render' && args.visualization_ref) target = '已保存的可视化';
-    if (name === 'search_files') target = [text(args.pattern), target].filter(Boolean).join(' · ');
+    if (name === 'search_content' || name === 'find_files') target = [text(name === 'find_files' ? args.glob : args.pattern), target].filter(Boolean).join(' · ');
   } else if (name === 'terminal') target = trace.command ?? text(args.command);
   else if (name === 'spawn_agent') target = text(args.task_name);
   else if (name === 'memory_search') target = text(args.query);
@@ -168,9 +169,10 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
         if (total !== undefined) detail = `已读取文件 · 共 ${total} 行${result.truncated === true || (number(result.offset) ?? 1) > 1 ? '，本次仅返回部分内容' : ''}`;
         break;
       }
-      case 'search_files': {
+      case 'search_content':
+      case 'find_files': {
         const total = number(result.total_count);
-        if (total !== undefined) detail = `找到 ${total} ${Array.isArray(result.files) ? '个文件' : '处匹配'}${result.truncated === true ? '，本次仅返回部分结果' : ''}`;
+        if (total !== undefined) detail = `找到 ${total} ${name === 'find_files' ? '个文件' : Array.isArray(result.files) ? '个包含匹配的文件' : '行匹配'}${result.truncated === true || (number(args.offset) ?? 0) > 0 ? '，本次仅返回部分结果' : ''}`;
         break;
       }
       case 'write_file': {

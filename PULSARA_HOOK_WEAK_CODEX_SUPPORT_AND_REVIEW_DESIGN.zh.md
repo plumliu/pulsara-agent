@@ -1,12 +1,12 @@
 # Pulsara Hook 有限 Codex 支持与用户审阅设计
 
-日期：2026-09-30。状态：已由同一 GPT-6.1 Sol / xhigh critic 与上游搜索规格联合复审通过，主 agent 最终校对通过，无剩余实施前阻塞；文档冻结，待用户审阅；尚未实施。
+日期：2026-09-30。状态：用户已授权与上游搜索规格联合实施；代码复审通过，无剩余阻塞。原生输入、别名、v2 信任契约与审阅 UI 已实现，真实 GUI dogfood 已通过，完成本次激活验收；结果见第 11 节。
 
-本文定义下一次 Hook hard cut 的目标，不把目标描述成当前已经存在的行为。实施前继续以现行生产代码和已实施规格为准；本文获准实施后，在本主题内取代旧的混合工具名输入与“完整脚本等价转换”承诺。能力管理入口、安装作用域、权限与采用仍遵循 [应用与能力管理边界设计](PULSARA_APP_AND_CAPABILITY_MANAGEMENT_BOUNDARY_DESIGN.zh.md)。
+本文拥有本次联合 Hook hard cut 的合同，取代旧的混合工具名输入与“完整脚本等价转换”承诺。能力管理入口、安装作用域、权限与采用仍遵循 [应用与能力管理边界设计](PULSARA_APP_AND_CAPABILITY_MANAGEMENT_BOUNDARY_DESIGN.zh.md)。
 
-本稿已按 [搜索工具拆分实施规范](PULSARA_SEARCH_TOOL_SPLIT_IMPLEMENTATION_SPEC.zh.md) 修订，以 `search_content` / `find_files` 的目标工具表为配套边界。搜索规格拥有工具参数、结果、私有 ripgrep 打包与 terminal PATH；本文拥有整体 Hook 输入、匹配别名与用户审阅。两者计划联合完成一次 hard cut 和一次 v1 → v2 信任契约切换。搜索规格第 7 节已明确引用本文的原生输入与唯一闭合别名表；其他工具的原生名字切换和完整审阅由本文负责，两份规格不并行保留不同 public tool_name 契约。
+本稿已按 [搜索工具拆分实施规范](PULSARA_SEARCH_TOOL_SPLIT_IMPLEMENTATION_SPEC.zh.md) 修订，以 `search_content` / `find_files` 的目标工具表为配套边界。搜索规格拥有工具参数、结果、私有 ripgrep 打包与 terminal PATH；本文拥有整体 Hook 输入、匹配别名与用户审阅。两者联合完成一次 hard cut 和一次 v1 → v2 信任契约切换。搜索规格第 7 节已明确引用本文的原生输入与唯一闭合别名表；其他工具的原生名字切换和完整审阅由本文负责，两份规格不并行保留不同 public tool_name 契约。
 
-搜索拆分与私有 rg 接线尚未实施；搜索规格记录的工具元数据减法已经实施，不在本文重做。私有 rg 打包、terminal PATH 与本稿已经过同一 critic 联合复审；其结论是当前文档无实施前阻塞，不代表用户已批准实施或代码/实际行为已经验收。
+搜索拆分与私有 rg 接线已按上游规格实施；工具元数据减法不在本文重做。同一 critic 已完成联合代码复审，真实 GUI 行为仍须通过以下激活验收。
 
 ## 1. 产品决定
 
@@ -243,3 +243,15 @@ ripgrep 拥有搜索与文件发现，wcmatch 拥有纯 glob 匹配，现有 Ter
 同日联合复审完成：同一 GPT-6.1 Sol / xhigh critic 完整核对两篇文档及现行生产 owner，主 agent 修订后获“无剩余实施前阻塞”结论。主要闭合点为退出码 2/0 的解析顺序、hookEventName 和嵌套许可、同对象控制冲突/跨 handler veto、异步退出码 2 的既有诊断接线、WORKSPACE 项目共享范围、Host 生产 matcher 派生 review 清单以及 MCP 观察身份与 dispatch 一致。上游同步闭合离线准备、稳定资源路径和 terminal 窄依赖失败；联合首次发布只有一组最终 v2 语义。两文档本地链接及空白检查通过。当前只完成设计与审阅，不把文档结论描述成实现、平台验证或真实会话测试已通过。
 
 同日用户澄清：新增第 1.1 节，将有限支持明确拆为配置/事件、匹配、原生输入与有限输出控制；明确外部插件脚本实际收到 Pulsara 工具名与参数、别名不改写脚本内部判断，参数字段一致的脚本可能直接适用但不保证整包行为。同步别名表表头、安装说明与验收；这是既有原生输入合同的语义澄清，不新增翻译层、脚本审计或信任切换。本次仅修订本文，未实施或运行测试，也未启动新一轮 critic 审阅。
+
+
+## 11. 联合实施记录
+
+2026-09-30，本文与上游规格联合实现；同一 GPT-6.1 Sol / xhigh critic 修订后代码复审通过。public stdin 使用 Pulsara 原生输入，别名只用于 matcher；Host 以完整冻结 builtin 组合与当前 MCP 实际身份派生审阅清单，前端没有别名引擎。v2 只切换一次，不迁移信任或自动开启来源。新增异步退出码 2 不支持控制的明确诊断，安装说明仅承诺配置转换。
+
+代表脚本、输出控制、信任失配、权限/前缀、完整 Host 审阅观察和前端已通过非真实会话检查。最终 Python 全量 2444 passed，前端 587 passed，相关类型、Ruff、协议及构建检查通过。
+
+真实 GUI dogfood 已通过：用户选择隔离项目 `/Users/plumliu/Desktop/test1/search_split_20260930`，保存的 GPT-6 Luna / xhigh；会话 `6395e367` 在 GUI 一次完整审阅并接受三条定义，同项目新冷会话 `2736bf6e` 运行无 stdin SessionStart、Read/Grep/Glob 观察和读取 native terminal command 的 PreTool 拒绝。实际脚本收到原生名字与参数，PostTool 追加上下文正常，`printf PULSARA_BLOCK_ME` 退出码 2 被拒且未执行；内容计数三页及裸 rg 15.2.0 通过。GUI 的完整命令、项目范围、适用操作和高级原生输入边界均已实看。实际输入与结果位于隔离项目 `.pulsara/events.jsonl` 与 `.pulsara/start.log`。详细平台及验收记录见上游第 12 节。
+
+
+真实 dogfood 发现并修复一处 P2 前端提示问题：后端 capability 表单正常关闭发送 `SUBMITTED`，adapter 曾仅将 `RESOLVED` 视为正常，因此误报未知结束原因。现在 `SUBMITTED` 静默收尾，`CANCELLED` 显示普通取消，未知原因继续提示；不把提交当成配置已应用，也没有新增协议、缓存或事件。三个回归通过，runtime-adapter 共 80 项通过，最终前端全量 587 项与 TypeScript/构建通过，同一 critic 对窄修订复审无阻塞。重新加载前端后，在会话 `2736bf6e` 对同一份已信任定义再次提交 GUI 审阅，实际只显示正常提交且配置已应用，错误提示未再出现；未撤销信任、修改定义或再次切换 v2。

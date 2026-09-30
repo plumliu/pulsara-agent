@@ -14,7 +14,10 @@ describe('builtin tool summaries', () => {
   it.each([
     ['read_file', { path: 'src/main.py', total_lines: 42, truncated: true }, {}, '读取文件', '共 42 行，本次仅返回部分内容'],
     ['view_image', {}, { image_ref: 'opaque-private-ref' }, '查看图片', '对话中已保存的图片'],
-    ['search_files', { total_count: 3, matches: [], truncated: false }, { pattern: 'TODO', path: 'src' }, '搜索文件', '找到 3 处匹配'],
+    ['search_content', { total_count: 3, matches: [], truncated: false }, { pattern: 'TODO', path: 'src' }, '搜索内容', '找到 3 行匹配'],
+    ['find_files', {total_count: 4, files: ['src/a.py'], truncated: true}, {glob: '*.py', path: 'src'}, '查找文件', '找到 4 个文件，本次仅返回部分结果'],
+    ['search_content', {total_count: 8, counts: {'z.py': 2}, truncated: false}, {pattern: 'TODO', output_mode: 'count', offset: 3}, '搜索内容', '找到 8 行匹配，本次仅返回部分结果'],
+    ['search_content', {total_count: 3, files: ['z.py'], truncated: false}, {pattern: 'TODO', output_mode: 'files_only', offset: 2}, '搜索内容', '找到 3 个包含匹配的文件，本次仅返回部分结果'],
     ['edit_file', { path: 'main.py', diff: 'RAW DIFF' }, {}, '修改文件', '已修改文件'],
     ['write_file', { bytes_written: 123, path: 'new.txt' }, {}, '写入文件', '已写入 123 字节'],
     ['artifact_read', { returned_chars: 300, has_more: true, source_coverage: 'RETAINED_SNAPSHOT', text: 'RAW OUTPUT' }, {}, '读取完整输出', '已读取 300 个字符，还有后续内容 · 仅保留了部分原始输出'],

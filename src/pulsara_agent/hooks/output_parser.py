@@ -104,6 +104,13 @@ def parse_handler_output(execution: HookCommandExecution) -> ParsedHandlerOutput
     if stderr:
         diagnostics.append(_diag(execution, "HOOK_STDERR", stderr))
     if execution.exit_code == 2:
+        if definition.asynchronous and event in {
+            HookEventType.PRE_TOOL_USE_EVENT,
+            HookEventType.USER_PROMPT_SUBMIT_EVENT,
+            HookEventType.STOP_EVENT,
+            HookEventType.SUBAGENT_STOP_EVENT,
+        }:
+            return _invalid(execution, "HOOK_ASYNC_CONTROL_UNSUPPORTED", diagnostics)
         reason = stderr.strip() or None
         if reason is None:
             diagnostics.append(_diag(execution, "HOOK_EXIT_2_EMPTY_REASON", "exit 2"))
@@ -252,9 +259,7 @@ def _parse_json_object(
     if specific is not None:
         if not isinstance(specific, dict):
             raise ValueError("hookSpecificOutput must be an object")
-        context, gate_block, permission, reason = _parse_specific(
-            execution, specific
-        )
+        context, gate_block, permission, reason = _parse_specific(execution, specific)
 
     if event in _COMMON_CONTROL_EVENTS:
         suppress = value.get("suppressOutput")
@@ -490,9 +495,7 @@ def _invalid(
     )
 
 
-def _diag(
-    execution: HookCommandExecution, code: str, message: str
-) -> HookDiagnostic:
+def _diag(execution: HookCommandExecution, code: str, message: str) -> HookDiagnostic:
     try:
         safe = execution.scrub_set.scrub_text(message)
     except ValueError:

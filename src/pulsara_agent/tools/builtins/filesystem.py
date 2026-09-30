@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import difflib
 import errno
-import fnmatch
+import base64
+import json
 from hashlib import sha256
 import os
 import re
@@ -20,7 +21,9 @@ import stat
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from shutil import which
+from wcmatch import glob
+
+from pulsara_agent.ripgrep import private_ripgrep
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -279,7 +282,9 @@ class ViewImageTool(WorkspaceTool):
         try:
             descriptor = os.open(
                 path,
-                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+                os.O_RDONLY
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_CLOEXEC", 0),
             )
             facts = os.fstat(descriptor)
             if not stat.S_ISREG(facts.st_mode):
@@ -450,31 +455,57 @@ class ReadFileTool(WorkspaceTool):
 
 
 @dataclass(slots=True)
-class SearchFilesTool(WorkspaceTool):
-    name: str = "search_files"
-
+class _SearchTool(WorkspaceTool):
     def execute(self, call: ToolCall) -> ToolExecutionResult:
-        pattern = str_arg(call.arguments, "pattern")
-        if not pattern:
-            raise ValueError("pattern is required")
-        raw_target = str_arg(call.arguments, "target") or "content"
-        target = raw_target
-        if target not in {"content", "files"}:
-            raise ValueError(f"unsupported search target: {raw_target}")
-        path = self._resolve_read_path(str_arg(call.arguments, "path") or ".")
+        content_search = self.name == "search_content"
+        expression_name = "pattern" if content_search else "glob"
+        allowed = {expression_name, "path", "limit", "offset"}
+        if content_search:
+            allowed.update({"file_glob", "output_mode"})
+        if set(call.arguments) - allowed:
+            raise ValueError(
+                "Unknown search arguments: "
+                + ", ".join(sorted(set(call.arguments) - allowed))
+            )
+        expression = _search_string(call.arguments, expression_name)
+        raw_path = _search_string(call.arguments, "path", ".")
+        limit = _search_integer(
+            call.arguments, "limit", DEFAULT_SEARCH_LIMIT, 1, MAX_SEARCH_LIMIT
+        )
+        offset = _search_integer(call.arguments, "offset", 0, 0)
+        mode = (
+            _search_string(call.arguments, "output_mode", "content")
+            if content_search
+            else None
+        )
+        if mode is not None and mode not in {"content", "files_only", "count"}:
+            raise ValueError("unsupported output_mode")
+        pattern = (
+            _search_string(call.arguments, "file_glob")
+            if "file_glob" in call.arguments
+            else (None if content_search else expression)
+        )
+        matcher = (
+            glob.compile(
+                pattern,
+                flags=glob.GLOBSTAR
+                | glob.MATCHBASE
+                | glob.FORCEUNIX
+                | glob.CASE
+                | glob.DOTMATCH,
+            )
+            if pattern is not None
+            else None
+        )
+        path = self._resolve_read_path(raw_path)
         user_home = self._resolved_user_home()
         access_scope = _path_access_scope(path, self.workspace_root, user_home)
         workspace_relative = access_scope == "workspace"
-        limit = int_arg(call.arguments, "limit", DEFAULT_SEARCH_LIMIT)
-        limit = _normalize_limit(limit, MAX_SEARCH_LIMIT)
-        offset = max(0, int_arg(call.arguments, "offset", 0))
-        file_glob = str_arg(call.arguments, "file_glob")
-        output_mode = str_arg(call.arguments, "output_mode") or "content"
-        if output_mode not in {"content", "files_only", "count"}:
-            raise ValueError(f"unsupported output_mode: {output_mode}")
         if not path.exists():
             return _application_error_result(
-                self, call, path,
+                self,
+                call,
+                path,
                 _FileApplicationError(
                     "FILE_NOT_FOUND",
                     "The requested search path does not exist.",
@@ -483,27 +514,19 @@ class SearchFilesTool(WorkspaceTool):
             )
         if _is_broad_search_root(path, self.workspace_root, user_home):
             return _application_error_result(
-                self, call, path,
+                self,
+                call,
+                path,
                 _FileApplicationError(
                     "SEARCH_ROOT_TOO_BROAD",
                     "This search root outside the workspace is too broad.",
                     hint="Choose a specific file or subdirectory.",
                 ),
             )
-
         state = _state_for_workspace(self.workspace_root)
-        search_key = (
-            "search",
-            pattern,
-            target,
-            path,
-            file_glob or "",
-            limit,
-            offset,
-            output_mode,
-        )
+        key = (self.name, expression, path, pattern, limit, offset, mode)
         with state.lock:
-            _track_lookup(state, search_key)
+            _track_lookup(state, key)
             consecutive = state.consecutive_lookup_count
         if consecutive >= 4:
             return self._result(
@@ -512,245 +535,164 @@ class SearchFilesTool(WorkspaceTool):
                 output=json_text(
                     {
                         "error": "Repeated search blocked: this exact search has already been returned.",
-                        "pattern": pattern,
                         "access_scope": access_scope,
                         "workspace_relative": workspace_relative,
                         "already_searched": consecutive,
                     }
                 ),
-                metadata={
-                    "path": str(path),
-                    "pattern": pattern,
-                    "access_scope": access_scope,
-                    "workspace_relative": workspace_relative,
-                },
+                metadata={"path": str(path)},
             )
+        base = path.parent if path.is_file() else path
 
-        if target == "files":
-            payload = self._search_files(pattern, path=path, limit=limit, offset=offset)
+        def selected(file: Path) -> bool:
+            return matcher is None or matcher.match(file.relative_to(base).as_posix())
+
+        command = [str(private_ripgrep()), "--no-config", "--color", "never"]
+        if not content_search:
+            command.extend(["--files", "--null"])
+        elif mode == "content":
+            command.append("--json")
         else:
-            payload = self._search_content(
-                pattern,
-                path=path,
-                file_glob=file_glob,
-                limit=limit,
-                offset=offset,
-                output_mode=output_mode,
+            command.extend(
+                ["--with-filename", "--null", "-l" if mode == "files_only" else "-c"]
+            )
+        if content_search:
+            command.extend(["-e", expression])
+        command.extend(["--", str(path)])
+        completed = subprocess.run(
+            command,
+            cwd=self.workspace_root,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        if completed.returncode not in {0, 1}:
+            raise RuntimeError(
+                (completed.stderr or completed.stdout)
+                .decode("utf-8", "replace")
+                .strip()
+            )
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "access_scope": access_scope,
+            "workspace_relative": workspace_relative,
+        }
+        if content_search:
+            payload["output_mode"] = mode
+        if not content_search or mode == "files_only":
+            files = [
+                Path(os.fsdecode(item))
+                for item in completed.stdout.split(b"\0")
+                if item
+            ]
+            entries = sorted(
+                _relpath(file, self.workspace_root) for file in files if selected(file)
+            )
+            page = entries[offset : offset + limit]
+            payload.update(files=page, total_count=len(entries))
+        elif mode == "count":
+            counts: dict[str, int] = {}
+            remaining = completed.stdout
+            while remaining:
+                filename, separator, rest = remaining.partition(b"\0")
+                count, newline, remaining = rest.partition(b"\n")
+                if not separator or not newline:
+                    raise ValueError("Malformed ripgrep count output")
+                file = Path(os.fsdecode(filename))
+                if selected(file):
+                    counts[_relpath(file, self.workspace_root)] = int(count)
+            entries = sorted(counts)
+            page = entries[offset : offset + limit]
+            payload.update(
+                counts={file: counts[file] for file in page},
+                total_count=sum(counts.values()),
+            )
+        else:
+            entries = []
+            for record in completed.stdout.splitlines():
+                event = json.loads(record)
+                if event["type"] != "match":
+                    continue
+                data = event["data"]
+                file = Path(os.fsdecode(_rg_json_bytes(data["path"])))
+                if selected(file):
+                    entries.append(
+                        {
+                            "path": _relpath(file, self.workspace_root),
+                            "line": data["line_number"],
+                            "content": _rg_json_bytes(data["lines"])
+                            .decode("utf-8", "replace")
+                            .rstrip("\r\n")[:500],
+                        }
+                    )
+            entries.sort(key=lambda item: (item["path"], item["line"]))
+            page = entries[offset : offset + limit]
+            payload.update(matches=page, total_count=len(entries))
+        payload["truncated"] = offset + len(page) < len(entries)
+        if payload["truncated"]:
+            payload["_hint"] = (
+                f"Results truncated. Continue with offset={offset + len(page)}."
             )
         if consecutive >= 3:
             payload["_warning"] = (
-                f"You have run this exact search {consecutive} times consecutively. "
-                "Use the information you already have."
+                f"You have run this exact search {consecutive} times consecutively. Use the information you already have."
             )
-        if payload.get("truncated"):
-            payload["_hint"] = (
-                f"Results truncated. Continue with offset={offset + limit}."
-            )
-        payload["access_scope"] = access_scope
-        payload["workspace_relative"] = workspace_relative
         return self._result(
             call,
             status=ToolResultState.SUCCESS,
             output=json_text(payload),
             metadata={
                 "path": str(path),
-                "pattern": pattern,
-                "total_count": payload.get("total_count", 0),
+                expression_name: expression,
+                "total_count": payload["total_count"],
                 "access_scope": access_scope,
                 "workspace_relative": workspace_relative,
             },
         )
 
-    def _search_files(
-        self, pattern: str, *, path: Path, limit: int, offset: int
-    ) -> dict[str, Any]:
-        files = (
-            _rg_files(pattern, path)
-            if which("rg")
-            else _python_find_files(pattern, path)
-        )
-        files = _sort_paths_by_mtime(files)
-        page = files[offset : offset + limit]
-        return {
-            "status": "ok",
-            "target": "files",
-            "total_count": len(files),
-            "truncated": offset + limit < len(files),
-            "files": [_relpath(file, self.workspace_root) for file in page],
-        }
 
-    def _search_content(
-        self,
-        pattern: str,
-        *,
-        path: Path,
-        file_glob: str | None,
-        limit: int,
-        offset: int,
-        output_mode: str,
-    ) -> dict[str, Any]:
-        if which("rg"):
-            return self._search_content_with_rg(
-                pattern,
-                path=path,
-                file_glob=file_glob,
-                limit=limit,
-                offset=offset,
-                output_mode=output_mode,
-            )
-        return self._search_content_with_python(
-            pattern,
-            path=path,
-            file_glob=file_glob,
-            limit=limit,
-            offset=offset,
-            output_mode=output_mode,
-        )
+def _search_string(
+    arguments: Mapping[str, Any], name: str, default: str | None = None
+) -> str:
+    value = arguments.get(name, default)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a nonempty string")
+    return value
 
-    def _search_content_with_rg(
-        self,
-        pattern: str,
-        *,
-        path: Path,
-        file_glob: str | None,
-        limit: int,
-        offset: int,
-        output_mode: str,
-    ) -> dict[str, Any]:
-        cmd = [
-            "rg",
-            "--line-number",
-            "--no-heading",
-            "--with-filename",
-            "--color",
-            "never",
-        ]
-        if file_glob:
-            cmd.extend(["--glob", file_glob])
-        if output_mode == "files_only":
-            cmd.append("-l")
-        elif output_mode == "count":
-            cmd.append("-c")
-        cmd.extend([pattern, str(path)])
-        completed = subprocess.run(
-            cmd,
-            cwd=self.workspace_root,
-            text=True,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
-        if completed.returncode not in {0, 1}:
-            raise RuntimeError((completed.stderr or completed.stdout).strip())
-        lines = [
-            line for line in completed.stdout.splitlines() if line and line != "--"
-        ]
-        if output_mode == "files_only":
-            files = [Path(line).resolve() for line in lines]
-            return {
-                "status": "ok",
-                "target": "content",
-                "output_mode": "files_only",
-                "total_count": len(files),
-                "truncated": offset + limit < len(files),
-                "files": [
-                    _relpath(file, self.workspace_root)
-                    for file in files[offset : offset + limit]
-                ],
-            }
-        if output_mode == "count":
-            counts: dict[str, int] = {}
-            for line in lines:
-                path_part, _, count_part = line.rpartition(":")
-                try:
-                    counts[_relpath(Path(path_part).resolve(), self.workspace_root)] = (
-                        int(count_part)
-                    )
-                except ValueError:
-                    continue
-            return {
-                "status": "ok",
-                "target": "content",
-                "output_mode": "count",
-                "total_count": sum(counts.values()),
-                "counts": counts,
-            }
-        matches = [_parse_rg_match_line(line, self.workspace_root) for line in lines]
-        matches = [match for match in matches if match is not None]
-        page = matches[offset : offset + limit]
-        return {
-            "status": "ok",
-            "target": "content",
-            "output_mode": "content",
-            "total_count": len(matches),
-            "truncated": offset + limit < len(matches),
-            "matches": page,
-        }
 
-    def _search_content_with_python(
-        self,
-        pattern: str,
-        *,
-        path: Path,
-        file_glob: str | None,
-        limit: int,
-        offset: int,
-        output_mode: str,
-    ) -> dict[str, Any]:
-        regex = re.compile(pattern)
-        files = (
-            [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
-        )
-        if file_glob:
-            files = [p for p in files if fnmatch.fnmatch(p.name, file_glob)]
-        matches: list[dict[str, Any]] = []
-        counts: dict[str, int] = {}
-        matching_files: set[Path] = set()
-        for file_path in files:
-            if _has_binary_extension(file_path):
-                continue
-            try:
-                lines = file_path.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
-            except OSError:
-                continue
-            for line_number, line in enumerate(lines, start=1):
-                if regex.search(line):
-                    rel = _relpath(file_path, self.workspace_root)
-                    counts[rel] = counts.get(rel, 0) + 1
-                    matching_files.add(file_path)
-                    matches.append(
-                        {"path": rel, "line": line_number, "content": line[:500]}
-                    )
-        if output_mode == "files_only":
-            files_page = _sort_paths_by_mtime(list(matching_files))[
-                offset : offset + limit
-            ]
-            return {
-                "status": "ok",
-                "target": "content",
-                "output_mode": "files_only",
-                "total_count": len(matching_files),
-                "truncated": offset + limit < len(matching_files),
-                "files": [_relpath(file, self.workspace_root) for file in files_page],
-            }
-        if output_mode == "count":
-            return {
-                "status": "ok",
-                "target": "content",
-                "output_mode": "count",
-                "total_count": sum(counts.values()),
-                "counts": counts,
-            }
-        return {
-            "status": "ok",
-            "target": "content",
-            "output_mode": "content",
-            "total_count": len(matches),
-            "truncated": offset + limit < len(matches),
-            "matches": matches[offset : offset + limit],
-        }
+def _search_integer(
+    arguments: Mapping[str, Any],
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    value = arguments.get(name, default)
+    if (
+        type(value) is not int
+        or value < minimum
+        or (maximum is not None and value > maximum)
+    ):
+        raise ValueError(f"{name} must be an integer in the allowed range")
+    return value
+
+
+def _rg_json_bytes(value: dict[str, str]) -> bytes:
+    return (
+        value["text"].encode("utf-8")
+        if "text" in value
+        else base64.b64decode(value["bytes"], validate=True)
+    )
+
+
+@dataclass(slots=True)
+class SearchContentTool(_SearchTool):
+    name: str = "search_content"
+
+
+@dataclass(slots=True)
+class FindFilesTool(_SearchTool):
+    name: str = "find_files"
 
 
 @dataclass(slots=True)
@@ -1536,48 +1478,6 @@ def _temp_roots() -> set[Path]:
         if candidate_path.exists():
             roots.add(candidate_path.resolve())
     return roots
-
-
-def _sort_paths_by_mtime(paths: list[Path]) -> list[Path]:
-    return sorted(
-        paths,
-        key=lambda path: path.stat().st_mtime_ns if path.exists() else 0,
-        reverse=True,
-    )
-
-
-def _rg_files(pattern: str, path: Path) -> list[Path]:
-    glob = pattern
-    if "/" not in glob and not glob.startswith("*"):
-        glob = f"*{glob}*"
-    completed = subprocess.run(
-        ["rg", "--files", "-g", glob, str(path)],
-        text=True,
-        capture_output=True,
-        timeout=60,
-        check=False,
-    )
-    if completed.returncode not in {0, 1}:
-        raise RuntimeError((completed.stderr or completed.stdout).strip())
-    return [Path(line).resolve() for line in completed.stdout.splitlines() if line]
-
-
-def _python_find_files(pattern: str, path: Path) -> list[Path]:
-    glob = pattern if any(ch in pattern for ch in "*?[]") else f"*{pattern}*"
-    files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
-    return [file for file in files if fnmatch.fnmatch(file.name, glob)]
-
-
-def _parse_rg_match_line(line: str, root: Path) -> dict[str, Any] | None:
-    match = re.match(r"^([A-Za-z]:)?(.*?):(\d+):(.*)$", line)
-    if match is None:
-        return None
-    path_text = (match.group(1) or "") + match.group(2)
-    return {
-        "path": _relpath(Path(path_text).resolve(), root),
-        "line": int(match.group(3)),
-        "content": match.group(4)[:500],
-    }
 
 
 def _atomic_replace_bytes(path: Path, content: bytes) -> None:

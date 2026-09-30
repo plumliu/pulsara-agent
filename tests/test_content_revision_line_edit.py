@@ -24,7 +24,7 @@ from pulsara_agent.tools.builtins import filesystem
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
     ReadFileTool,
-    SearchFilesTool,
+    SearchContentTool,
     LocalImageReadCandidate,
     ViewImageTool,
     WriteFileTool,
@@ -178,8 +178,8 @@ def test_search_result_does_not_authorize_edit(tmp_path: Path) -> None:
     raw = b"one\ntwo\n"
     target.write_bytes(raw)
     search = _call(
-        SearchFilesTool(tmp_path),
-        {"path": "sample.txt", "pattern": "one", "target": "content"},
+        SearchContentTool(tmp_path),
+        {"path": "sample.txt", "pattern": "one"},
     )
     assert search.status is ToolResultState.SUCCESS
 
@@ -201,7 +201,7 @@ def test_search_result_does_not_authorize_edit(tmp_path: Path) -> None:
 def test_search_rejection_explains_how_to_select_a_path(
     tmp_path: Path, path: str, error: str, hint: str,
 ) -> None:
-    result = _call(SearchFilesTool(tmp_path), {"path": path, "pattern": "needle"})
+    result = _call(SearchContentTool(tmp_path), {"path": path, "pattern": "needle"})
     assert result.status is ToolResultState.ERROR
     payload = _payload(result)
     assert payload["error"] == error
@@ -225,8 +225,8 @@ def test_read_only_file_tools_accept_relative_paths_outside_workspace(
     assert _payload(read)["content"] == "1|needle"
 
     search = _call(
-        SearchFilesTool(workspace),
-        {"path": relative, "pattern": "needle", "target": "content"},
+        SearchContentTool(workspace),
+        {"path": relative, "pattern": "needle"},
     )
     assert search.status is ToolResultState.SUCCESS
     assert "needle" in str(_payload(search)["matches"])
@@ -235,7 +235,7 @@ def test_read_only_file_tools_accept_relative_paths_outside_workspace(
         _call(WriteFileTool(workspace), {"path": "../external/new.txt", "content": "x"})
 
 
-@pytest.mark.parametrize("tool_name", ("read_file", "search_files", "view_image"))
+@pytest.mark.parametrize("tool_name", ("read_file", "search_content", "view_image"))
 def test_read_only_file_tool_catalog_allows_relative_paths_outside_workspace(
     tool_name: str,
 ) -> None:
