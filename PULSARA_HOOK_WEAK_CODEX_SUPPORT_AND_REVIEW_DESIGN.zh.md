@@ -6,7 +6,7 @@
 
 本稿已按 [搜索工具拆分实施规范](PULSARA_SEARCH_TOOL_SPLIT_IMPLEMENTATION_SPEC.zh.md) 修订，以 `search_content` / `find_files` 的目标工具表为配套边界。搜索规格拥有工具参数、结果、私有 ripgrep 打包与 terminal PATH；本文拥有整体 Hook 输入、匹配别名与用户审阅。两者联合完成一次 hard cut 和一次 v1 → v2 信任契约切换。搜索规格第 7 节已明确引用本文的原生输入与唯一闭合别名表；其他工具的原生名字切换和完整审阅由本文负责，两份规格不并行保留不同 public tool_name 契约。
 
-搜索拆分与私有 rg 接线已按上游规格实施；工具元数据减法不在本文重做。同一 critic 已完成联合代码复审，真实 GUI 行为仍须通过以下激活验收。
+搜索拆分与私有 rg 接线已按上游规格实施；工具元数据减法不在本文重做。同一 critic 已完成联合代码复审，第 9 节的真实 GUI 激活验收已通过，记录见第 11 节。
 
 ## 1. 产品决定
 
@@ -186,7 +186,7 @@ Bundled installer 的常规指令只需告诉模型：选择发行版、调用�
 
 搜索拆分后的 `^(Grep|Glob)$` 显示“搜索内容、查找文件”；展开后显示 Grep → search_content、Glob → find_files。count/files_only 都属于“搜索内容”。通过 terminal 执行 rg 的匹配仍显示“运行终端命令”，不由 UI 分析命令内容猜测成另一类工具。
 
-匹配列表由 Host 在现有 review 准备阶段，使用当前可观察 tool snapshot 与生产 tool_matcher_subject/definition_matches 得出；Frontend 只展示 Host 提供的派生名称与目录完整性说明，不在 JavaScript 复制 RE2、别名表或名称推断。当前 public_hook_snapshot 只有 definitions，实施时需在现有 review/result DTO 接线加入这份进程内派生观察，不把现有 JSON 误当成已包含清单。MCP 匹配候选必须复用既有 MCP 观察/dispatch 的已解析 provider_tool_name 身份，再交同一个生产 matcher；不能从 call_mcp_tool、tool_ref 或模型入口名猜测远端身份。无法从当前观察确认的目录说明不完整，不创建新 inventory owner、工具 ref 或发现调用来证明清单完整。观察不加入 trust digest、canonical rows 或新的 authority，也不为目录变化增加 nonce/generation；信任提交仍只按既有 exact-definition revalidation 确认定义，目录变化不变成逐工具重新审批。复杂正则只列实际命中，不猜测一句宽泛概括。无命中显示“当前未发现匹配工具”；远端目录尚不完整时如实说明。通配符说明其覆盖后续满足原规则的工具，当前匹配清单只是观察，不是新的授权白名单，也不承诺永远不会触发。
+匹配列表由 Host 在现有 review 准备阶段，使用当前可观察 tool snapshot 与生产 tool_matcher_subject/definition_matches 得出；Frontend 只展示 Host 提供的派生名称与目录完整性说明，不在 JavaScript 复制 RE2、别名表或名称推断。public_hook_snapshot 已在现有 review/result DTO 中接入这份进程内派生观察，包含 definitions、匹配操作、别名与目录完整性说明。MCP 匹配候选必须复用既有 MCP 观察/dispatch 的已解析 provider_tool_name 身份，再交同一个生产 matcher；不能从 call_mcp_tool、tool_ref 或模型入口名猜测远端身份。无法从当前观察确认的目录说明不完整，不创建新 inventory owner、工具 ref 或发现调用来证明清单完整。观察不加入 trust digest、canonical rows 或新的 authority，也不为目录变化增加 nonce/generation；信任提交仍只按既有 exact-definition revalidation 确认定义，目录变化不变成逐工具重新审批。复杂正则只列实际命中，不猜测一句宽泛概括。无命中显示“当前未发现匹配工具”；远端目录尚不完整时如实说明。通配符说明其覆盖后续满足原规则的工具，当前匹配清单只是观察，不是新的授权白名单，也不承诺永远不会触发。
 
 不通过扫描命令文本或让模型总结来声称脚本“只读取文件”“不会修改文件”。如展示控制能力，描述该事件允许的返回控制，不冒充脚本实际会做的事情。
 
@@ -206,7 +206,7 @@ RE2 继续拥有正则执行；现有进程 owner 拥有命令生命周期；工
 
 ripgrep 拥有搜索与文件发现，wcmatch 拥有纯 glob 匹配，现有 TerminalEnvironmentOwner 拥有 terminal 环境构建；本文不复制其机制，也不扩大其作用到 Hook 命令。搜索工具仍直接供模型调用，模型无需拼 terminal rg 命令或记忆二进制位置。工具参数、排序、分页、错误、发行平台与资源边界完整沿搜索规格实施，不由本稿另写一套。
 
-获准实施后作为一次 hard cut 完成：
+本次联合实施作为一次 hard cut 完成：
 
 1. matcher/input 路径改为真实 tool_name 与原生参数，删除 external_primary 与 pulsara_tool_name 的生产用途，不保留旧输入 fallback。
 2. 配套完成搜索规格的两个 descriptor 与旧入口删除，加入 Read/Grep/Glob 的闭合映射；runtime 与 review 使用同一 matcher，不为底层搜索进程重复发 Hook。
@@ -232,11 +232,11 @@ ripgrep 拥有搜索与文件发现，wcmatch 拥有纯 glob 匹配，现有 Ter
 - 不依赖逐脚本模型审计即可完成普通安装；已知不支持的活动配置不被静默删除；显式空 hooks 不加载其他发行版文件。
 - prefix 连续性、管理调用 predecessor view、取消与实际副作用结算保持原合同。
 
-联合实施先完成非真实会话检查，再按搜索规格要求由 GPT-6.1 Sol / xhigh critic 审阅完整代码及证据，修订无阻塞后运行真实 Pulsara GUI dogfood。文档编写不自动触发实施或真实会话测试；本次按用户单独要求开展同一 critic 的联合文档审阅，不把文档审阅或先前规格记录当作新代码通过的证据。
+联合实施先完成非真实会话检查，再按搜索规格要求由 GPT-6.1 Sol / xhigh critic 审阅完整代码及证据，修订无阻塞后运行真实 Pulsara GUI dogfood。上述流程已经完成，实际实现与验收记录见第 11 节；文档审阅本身不作为代码通过的证据。
 
 真实 dogfood 使用保存的生产配置作为只读输入，绑定隔离项目并使用 GPT-6 Luna / xhigh；覆盖搜索规格要求的文件查找、正文搜索、files_only、count 下一页与直接 terminal rg。通过现有 GUI 一次审阅最终 Hook 契约，验证 Read/Grep/Glob、无 stdin 读取的启动 Hook，以及读取 terminal 原生 command 并可阻止的 Hook；后续可追加实际新定义需要的审阅，不为同一联合契约安排第二轮失效。只在获准实施后运行，不把其他 harness 的完整市场插件强行跑通作为本契约的验收条件，不以本机 dogfood 冒充其他发行平台安装验证。
 
-## 10. 本次修订记录
+## 10. 实施前修订记录
 
 2026-09-30 按最新搜索规格，将 Grep/Glob 从暂缓事项改为联合目标表，补齐原生搜索输入、结果与读取观察边界；明确私有 ripgrep、terminal PATH 和 Hook executor 的不同责任；复用一次最终 v1 → v2 信任切换及完整激活顺序，并同步 UI、实施与验收。不修改搜索规格或运行代码。本稿仍待用户审阅；搜索依赖打包修订和联合实现仍须按上述门槛验证。
 
@@ -246,6 +246,8 @@ ripgrep 拥有搜索与文件发现，wcmatch 拥有纯 glob 匹配，现有 Ter
 
 
 ## 11. 联合实施记录
+
+联合实现、测试与验收记录已提交于 `807ef701`。用户后续单独要求实施本文时，主 agent 与同一 critic 再次对照第 3–9 节核对当前生产代码，确认目标已经全部联合落地，没有剩余功能实施项；仅澄清正文的实施前措辞，不再次切换信任契约或重复要求用户授信。
 
 2026-09-30，本文与上游规格联合实现；同一 GPT-6.1 Sol / xhigh critic 修订后代码复审通过。public stdin 使用 Pulsara 原生输入，别名只用于 matcher；Host 以完整冻结 builtin 组合与当前 MCP 实际身份派生审阅清单，前端没有别名引擎。v2 只切换一次，不迁移信任或自动开启来源。新增异步退出码 2 不支持控制的明确诊断，安装说明仅承诺配置转换。
 
