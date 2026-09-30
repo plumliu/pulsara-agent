@@ -762,7 +762,7 @@ def test_serialized_reload_reports_plugin_hook_failure_and_joins_mcp_cut(
         session = SimpleNamespace(
             _plugin_view=initial,
             _plugin_view_owner=SimpleNamespace(
-                observe=lambda **kwargs: replacement,
+                observe_for_runtime=lambda **kwargs: replacement,
                 current_state=lambda identity: None,
             ),
             workspace=SimpleNamespace(

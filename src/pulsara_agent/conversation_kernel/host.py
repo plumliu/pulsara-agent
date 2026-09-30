@@ -1284,7 +1284,7 @@ class KernelHostSession:
     ) -> dict[str, object]:
         predecessor = self._plugin_view
         replacement = await _shielded_plugin_filesystem_call(
-            self._plugin_view_owner.observe,
+            self._plugin_view_owner.observe_for_runtime,
             workspace_root=(
                 self.workspace.workspace_root
                 if self.workspace.workspace_kind == "project"
@@ -7576,7 +7576,7 @@ class KernelHostCore:
             credential_boundary=self._credential_boundary,
         )
         initial_plugin_view = await _shielded_plugin_filesystem_call(
-            plugin_view_owner.observe,
+            plugin_view_owner.observe_for_runtime,
             workspace_root=(
                 workspace.workspace_root
                 if workspace.workspace_kind == "project"

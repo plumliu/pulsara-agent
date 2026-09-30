@@ -185,7 +185,7 @@ class StreamableHttpTransportConfig:
     endpoint: str
     allow_http_localhost: bool = False
     network_policy: McpHttpNetworkPolicy = McpHttpNetworkPolicy.PUBLIC_ONLY
-    proved_stateless: bool = False
+    stateless_http_asserted: bool = False
     kind: McpTransportKind = McpTransportKind.STREAMABLE_HTTP
 
     def __post_init__(self) -> None:
@@ -208,7 +208,7 @@ class LegacySseTransportConfig(StreamableHttpTransportConfig):
 
     def __post_init__(self) -> None:
         super(LegacySseTransportConfig, self).__post_init__()
-        if self.proved_stateless:
+        if self.stateless_http_asserted:
             raise ValueError("legacy SSE is sessionful")
 
 
@@ -731,7 +731,7 @@ def _parse_server(
                 "endpoint",
                 "allow_http_localhost",
                 "network_policy",
-                "proved_stateless",
+                "stateless_http_asserted",
             },
             "MCP HTTP transport",
         )
@@ -754,9 +754,9 @@ def _parse_server(
                     "MCP HTTP network policy",
                 ).upper()
             ),
-            proved_stateless=_boolean(
-                transport_raw.get("proved_stateless", False),
-                "MCP proved_stateless",
+            stateless_http_asserted=_boolean(
+                transport_raw.get("stateless_http_asserted", False),
+                "MCP stateless_http_asserted",
             ),
         )
     else:
@@ -955,7 +955,7 @@ def _transport_fingerprint_payload(
         "endpoint": value.endpoint,
         "allow_http_localhost": value.allow_http_localhost,
         "network_policy": value.network_policy.value,
-        "proved_stateless": value.proved_stateless,
+        "stateless_http_asserted": value.stateless_http_asserted,
     }
 
 
@@ -1013,7 +1013,7 @@ def _transport_workspace_approval_payload(value: McpTransportConfig) -> object:
         "endpoint": value.endpoint,
         "allow_http_localhost": value.allow_http_localhost,
         "network_policy": value.network_policy.value,
-        "proved_stateless": value.proved_stateless,
+        "stateless_http_asserted": value.stateless_http_asserted,
     }
 
 

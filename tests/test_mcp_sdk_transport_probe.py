@@ -613,3 +613,22 @@ async def test_production_tool_client_does_not_follow_post_redirect(dns):
         )
         assert response.status_code == 307
     assert sent == ["POST"]
+
+
+@pytest.mark.anyio
+async def test_session_header_is_observed_before_delivering_response(dns):
+    observed = []
+    async def observe_session():
+        observed.append('sessionful')
+    async def respond(request):
+        return httpx2.Response(200, headers={'mcp-session-id': 'test-session'}, json=result('settled'))
+    async with _McpHttpClient(
+        config(), bounds=DEFAULT_MCP_WIRE_BOUNDS,
+        credential_boundary=ProcessCredentialBoundary(),
+        observe_session_id=observe_session,
+        transport=httpx2.MockTransport(respond),
+    ) as client:
+        response = await client.post('https://public.example/mcp', json={'method': 'tools/call'})
+        assert observed == ['sessionful']
+        assert client.sessionful is True
+        assert response.json() == result('settled')

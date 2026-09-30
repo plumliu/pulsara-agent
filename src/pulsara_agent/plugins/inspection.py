@@ -165,15 +165,12 @@ class PluginInspectionService:
                     if state.enabled:
                         enabled_instances.append(
                             freeze_enabled_plugin_instance(
-                                store=self._store,
                                 identity=identity,
                                 state=state,
                                 package_root=package_root,
                                 data_root=layout.data_root,
                                 observation=observation,
                                 current_anchor=current_anchor,
-                                deadline_monotonic=deadline_monotonic,
-                                cancellation=cancellation,
                             )
                         )
                 finally:

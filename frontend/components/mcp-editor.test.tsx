@@ -17,7 +17,7 @@ describe('MCP connection editor', () => {
     const save = vi.fn(async () => true);
     render(<McpEditor server={server} onSave={save} onClose={vi.fn()} />);
     fireEvent.click(screen.getByText('更多连接选项'));
-    for (const name of ['允许本机 HTTP 测试地址', '服务明确支持无状态请求', '将此服务标记为必需', '服务明确支持并行工具调用']) {
+    for (const name of ['允许本机 HTTP 测试地址', '按无状态 HTTP 配置此服务', '将此服务标记为必需', '允许并行工具调用']) {
       const input = screen.getByLabelText(name) as HTMLInputElement;
       expect(input.checked).toBe(false);
       fireEvent.click(input.closest('label')!);
@@ -28,7 +28,7 @@ describe('MCP connection editor', () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
       config: expect.objectContaining({
         required: true, supports_parallel_tool_calls: true,
-        transport: expect.objectContaining({allow_http_localhost: true, proved_stateless: true}),
+        transport: expect.objectContaining({allow_http_localhost: true, stateless_http_asserted: true}),
       }),
     })));
   });

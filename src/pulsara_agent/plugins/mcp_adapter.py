@@ -102,7 +102,12 @@ def normalize_plugin_mcp_configs(
             PluginMcpNormalizationDisposition.UNAVAILABLE,
         )
 
-    diagnostics: list[PluginDiagnostic] = []
+    diagnostics: list[PluginDiagnostic] = [
+        diagnostic
+        for instance in view.instances
+        for diagnostic in instance.mcp.diagnostics
+        if isinstance(diagnostic, PluginDiagnostic)
+    ]
     candidates: list[McpServerConfig] = []
     for instance, server in _selected_servers(view):
         try:

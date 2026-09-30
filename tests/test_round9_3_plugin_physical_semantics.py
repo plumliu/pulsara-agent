@@ -348,6 +348,12 @@ def test_round9_3_publish_modes_replace_disable_data_retention_and_gc_grammar(
     assert stat.S_IMODE((first_root / "server.py").stat().st_mode) == 0o500
     assert not layout.data_root.exists()
     _enable(service, first, "physical-plugin", deadline)
+    assert not layout.data_root.exists()
+    view = EnabledPluginViewOwner(store=store, credential_boundary=_boundary).observe_for_runtime(
+        workspace_root=tmp_path, deadline_monotonic=deadline,
+        cancellation=NeverCancelPluginOperation(),
+    )
+    view.close()
     assert stat.S_IMODE(layout.data_root.stat().st_mode) == 0o700
 
     manifest = json.loads((source / "plugin.json").read_text(encoding="utf-8"))

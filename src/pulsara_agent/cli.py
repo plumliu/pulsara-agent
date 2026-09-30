@@ -185,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--arg", action="append", default=[])
     add.add_argument("--allow-http-localhost", action="store_true")
     add.add_argument("--allow-private-network", action="store_true")
-    add.add_argument("--proved-stateless", action="store_true")
+    add.add_argument("--stateless-http-asserted", action="store_true")
     add.add_argument("--required", action="store_true")
     add.add_argument("--disabled", action="store_true")
     add.add_argument(
@@ -1480,7 +1480,7 @@ async def _mcp_command(
                 "network_policy": (
                     "ALLOW_PRIVATE" if args.allow_private_network else "PUBLIC_ONLY"
                 ),
-                "proved_stateless": args.proved_stateless,
+                "stateless_http_asserted": args.stateless_http_asserted,
             }
         entry = {
             "enabled": not args.disabled,

@@ -65,7 +65,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onAuthorization, on
   const [subagents, setSubagents] = useState(server?.availableToSubagents ?? false);
   const [allowLocal, setAllowLocal] = useState(Boolean(previousTransport.allow_http_localhost));
   const [networkPolicy, setNetworkPolicy] = useState(String(previousTransport.network_policy ?? 'PUBLIC_ONLY'));
-  const [stateless, setStateless] = useState(Boolean(previousTransport.proved_stateless));
+  const [stateless, setStateless] = useState(Boolean(previousTransport.stateless_http_asserted));
   const [policies, setPolicies] = useState<Record<string, unknown>>({});
   const [perToolTimeout, setPerToolTimeout] = useState<string>();
   const [perToolEffect, setPerToolEffect] = useState<string>();
@@ -134,7 +134,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onAuthorization, on
       if (!Array.isArray(argv) || argv.some((value) => typeof value !== 'string')) throw new Error('参数需要是字符串数组，例如 ["-y", "包名"]。');
       const transport = kind === 'stdio'
         ? { type: kind, command, args: argv, cwd, env: pairs(env), secret_env: secretPairs(envSecrets, 'env:') }
-        : { ...(previousTransport.type === kind ? previousTransport : {}), type: kind, endpoint, allow_http_localhost: allowLocal, network_policy: networkPolicy, proved_stateless: kind === 'streamable_http' && stateless };
+        : { ...(previousTransport.type === kind ? previousTransport : {}), type: kind, endpoint, allow_http_localhost: allowLocal, network_policy: networkPolicy, stateless_http_asserted: kind === 'streamable_http' && stateless };
       const extra = {...policies};
       if (perToolTimeout !== undefined) {
         const values = JSON.parse(perToolTimeout);
@@ -216,9 +216,9 @@ export function McpEditor({ server, onClose, onSave, onTest, onAuthorization, on
           {!packageDefinition && <>
             {kind !== 'stdio' && <label className="capability-field"><span>连接网络范围</span><select value={networkPolicy} onChange={(event) => setNetworkPolicy(event.target.value)}><option value="PUBLIC_ONLY">仅公开网络（与明确允许的本机地址）</option><option value="ALLOW_PRIVATE">也允许内网地址</option></select></label>}
             <div className="mcp-option-group">
-            {kind === 'streamable_http' && <label className="capability-check"><input type="checkbox" checked={stateless} onChange={(event) => setStateless(event.target.checked)} />服务明确支持无状态请求</label>}
+            {kind === 'streamable_http' && <label className="capability-check"><input type="checkbox" checked={stateless} onChange={(event) => setStateless(event.target.checked)} />按无状态 HTTP 配置此服务</label>}
             <label className="capability-check"><input type="checkbox" checked={Boolean(policy.required)} onChange={(event) => setPolicy('required', event.target.checked)} />将此服务标记为必需</label>
-            <label className="capability-check"><input type="checkbox" checked={Boolean(policy.supports_parallel_tool_calls)} onChange={(event) => setPolicy('supports_parallel_tool_calls', event.target.checked)} />服务明确支持并行工具调用</label>
+            <label className="capability-check"><input type="checkbox" checked={Boolean(policy.supports_parallel_tool_calls)} onChange={(event) => setPolicy('supports_parallel_tool_calls', event.target.checked)} />允许并行工具调用</label>
             </div>
             {kind === 'streamable_http' && stateless && <label className="capability-field"><span>无状态请求并发数</span><input type="number" min={1} max={16} value={String(policy.stateless_http_max_in_flight ?? 1)} onChange={(event) => setPolicy('stateless_http_max_in_flight', Number(event.target.value))} /></label>}
             <label className="capability-field"><span>单次工具超时（毫秒）</span><input type="number" min={1000} max={600000} value={String(policy.default_tool_timeout_ms ?? 600000)} onChange={(event) => setPolicy('default_tool_timeout_ms', Number(event.target.value))} /></label>
@@ -228,7 +228,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onAuthorization, on
             {exposure.include_tool_names != null && <label className="capability-field"><span>提供的工具名（每行一个）</span><textarea value={(exposure.include_tool_names as string[]).join('\n')} onChange={(event) => setExposure('include_tool_names', event.target.value.split('\n').filter(Boolean))} /></label>}
             <label className="capability-field"><span>隐藏的工具名（每行一个）</span><textarea value={((exposure.exclude_tool_names ?? []) as string[]).join('\n')} onChange={(event) => setExposure('exclude_tool_names', event.target.value.split('\n').filter(Boolean))} /></label>
             <label className="capability-field"><span>遇到无效工具定义</span><select value={String(exposure.invalid_tool_policy ?? 'FAIL_SERVER')} onChange={(event) => setExposure('invalid_tool_policy', event.target.value)}><option value="FAIL_SERVER">报告服务目录不可用</option><option value="OMIT_INVALID">略过无效工具，保留其他工具</option></select></label>
-            <label className="capability-field"><span>默认工具作用</span><select value={String(effect.default_effect ?? 'AUTO')} onChange={(event) => setPolicy('effect_policy', {...effect, default_effect: event.target.value})}><option value="AUTO">使用服务声明</option><option value="READ_ONLY">只读</option><option value="EXTERNAL_EFFECT">会改变外部状态</option></select></label>
+            <label className="capability-field"><span>默认工具作用</span><select value={String(effect.default_effect ?? 'AUTO')} onChange={(event) => setPolicy('effect_policy', {...effect, default_effect: event.target.value})}><option value="AUTO">保守默认（需要授权）</option><option value="READ_ONLY">只读</option><option value="EXTERNAL_EFFECT">会改变外部状态</option></select></label>
             <label className="capability-field"><span>单独设置工具超时（JSON：工具名 → 毫秒）</span><textarea value={perToolTimeout ?? pretty(policy.per_tool_timeout_ms)} onChange={(event) => setPerToolTimeout(event.target.value)} /></label>
             <label className="capability-field"><span>单独设置工具作用（JSON）</span><textarea value={perToolEffect ?? pretty(effect.tool_effect_overrides)} onChange={(event) => setPerToolEffect(event.target.value)} /><small>工具名对应 READ_ONLY（只读）或 EXTERNAL_EFFECT（改变外部状态）。</small></label>
           </>}

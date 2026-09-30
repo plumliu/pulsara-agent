@@ -124,7 +124,7 @@ def test_sse_cannot_claim_stateless_parallel_transport():
                 "transport": {
                     "type": "sse",
                     "endpoint": "https://example.org/sse",
-                    "proved_stateless": True,
+                    "stateless_http_asserted": True,
                 }
             },
         )

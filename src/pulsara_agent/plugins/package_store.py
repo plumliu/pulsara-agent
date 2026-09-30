@@ -851,18 +851,6 @@ class ManagedPluginStore:
                     )
                 if previous.enabled == enabled:
                     return StoreEnablementResult(previous, previous)
-                if enabled:
-                    _check_abort(deadline_monotonic, cancellation)
-                    try:
-                        _ensure_data_root(layout.data_root)
-                    except (MemoryError, OSError, ValueError):
-                        return StoreEnablementResult(
-                            None,
-                            previous,
-                            diagnostic=_diagnostic(
-                                PluginDiagnosticCode.DATA_ROOT_UNAVAILABLE
-                            ),
-                        )
                 updated = PluginInstanceState(
                     previous.plugin_id,
                     previous.scope,

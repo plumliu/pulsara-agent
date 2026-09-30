@@ -514,6 +514,7 @@ class _McpHttpClient(ProcessCredentialBoundMcpClient):
         credential_boundary,
         config=None,
         observe_secrets=None,
+        observe_session_id=None,
         **kwargs,
     ):
         follow_redirects = kwargs.pop("follow_redirects", False)
@@ -527,6 +528,7 @@ class _McpHttpClient(ProcessCredentialBoundMcpClient):
         self.bounds = bounds
         self.config = config
         self.observe_secrets = observe_secrets
+        self.observe_session_id = observe_session_id
         self.sessionful = False
         self.static_headers = {}
         if config is not None:
@@ -572,7 +574,10 @@ class _McpHttpClient(ProcessCredentialBoundMcpClient):
         )
         response = await super()._send_single_request(physical)
         response.request = request  # Logical origin for SDK URLs and HTTP redirects.
-        self.sessionful |= bool(response.headers.get("mcp-session-id"))
+        if response.headers.get("mcp-session-id"):
+            self.sessionful = True
+            if self.observe_session_id is not None:
+                await self.observe_session_id()
         if "text/event-stream" in response.headers.get("content-type", "").lower():
             return response
         # HTTPX2 owns decompression; bound the decoded body before SDK materializes
@@ -632,11 +637,12 @@ def _http_origin(url):
 class _SdkHttpTransport(_BoundedTransport):
     """Single task owns official transport contexts; no HTTP/SSE state machine."""
 
-    def __init__(self, config, transport, *, credential_boundary, bounds):
+    def __init__(self, config, transport, *, credential_boundary, bounds, notification_callback=None):
         super().__init__(bounds)
         self.config = config
         self.transport_config = transport
         self.credential_boundary = credential_boundary
+        self._notification_callback = notification_callback
         self._stop = asyncio.Event()
         self._ready = asyncio.get_running_loop().create_future()
         self._owner = None
@@ -655,6 +661,10 @@ class _SdkHttpTransport(_BoundedTransport):
         self._owner = asyncio.create_task(self._run(), name="mcp-sdk-http-owner")
         await asyncio.shield(self._ready)
 
+    async def _observe_session_id(self):
+        if self._notification_callback is not None:
+            await self._notification_callback("pulsara/sessionful_transport")
+
     async def _run(self):
         from contextlib import asynccontextmanager
         from mcp.client.streamable_http import streamable_http_client
@@ -668,6 +678,7 @@ class _SdkHttpTransport(_BoundedTransport):
                 credential_boundary=self.credential_boundary,
                 config=self.config,
                 observe_secrets=self._observe_secrets,
+                observe_session_id=self._observe_session_id,
                 timeout=httpx2.Timeout(connect=10, write=10, pool=10, read=None),
             ) as client:
                 self._client = client
@@ -883,7 +894,7 @@ class BoundedMcpSdkClient:
 
     @property
     def supports_bounded_stateless_parallelism(self) -> bool:
-        """Prove the physical HTTP session is stateless after negotiation.
+        """Apply Host assertions to the observed HTTP transport after negotiation.
 
         Configuration is only an operator assertion.  A peer that returns an
         MCP session identity contradicts it and must stay on the serial lane.
@@ -894,8 +905,17 @@ class BoundedMcpSdkClient:
             isinstance(self._transport, _SdkHttpTransport)
             and self.config.supports_parallel_tool_calls
             and isinstance(self.config.transport, StreamableHttpTransportConfig)
-            and self.config.transport.proved_stateless
+            and self.config.transport.stateless_http_asserted
             and not self._transport.sessionful
+        )
+
+    def complete_tool_catalog(self, tools) -> None:
+        # SDK 2.1.0 has no public complete-paginated-list/cache invalidation
+        # hook. Reuse its one absorber after a full successful discovery while
+        # the slot is exclusive; do not copy header parsing or validators.
+        self.session._absorb_tool_listing(
+            types.ListToolsResult(tools=list(tools), resultType="complete"),
+            complete=True,
         )
 
     async def open(self) -> None:
@@ -940,6 +960,7 @@ class BoundedMcpSdkClient:
                 transport_config,
                 credential_boundary=self._credential_boundary,
                 bounds=self._bounds,
+                notification_callback=self._notification_callback,
             )
         self._transport = transport
         try:

@@ -52,7 +52,7 @@ class McpEffectKind(StrEnum):
 class McpPolicyClassificationSource(StrEnum):
     TOOL_OVERRIDE = "TOOL_OVERRIDE"
     SERVER_OVERRIDE = "SERVER_OVERRIDE"
-    SERVER_ANNOTATIONS = "SERVER_ANNOTATIONS"
+    HOST_DEFAULT = "HOST_DEFAULT"
 
 
 @dataclass(frozen=True, slots=True)

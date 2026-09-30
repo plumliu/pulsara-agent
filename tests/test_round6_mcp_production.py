@@ -389,6 +389,8 @@ def _config(
     enabled: bool = True,
     default_tool_timeout_ms: int | None = None,
     default_effect: str = "AUTO",
+    tool_effect_overrides: dict[str, str] | None = None,
+    catalog_refresh_interval_ms: int | str = "DISABLED",
     invalid_tool_policy: str = "FAIL_SERVER",
     required: bool = True,
 ):
@@ -404,7 +406,7 @@ def _config(
             "type": "streamable_http",
             "endpoint": endpoint,
             "allow_http_localhost": True,
-            "proved_stateless": True,
+            "stateless_http_asserted": True,
         }
     timeout_line = (
         f"    default_tool_timeout_ms: {default_tool_timeout_ms}\n"
@@ -416,6 +418,9 @@ def _config(
         if default_effect != "AUTO"
         else ""
     )
+    if tool_effect_overrides:
+        effect_lines = (f"    effect_policy:\n      default_effect: {default_effect}\n"
+                        f"      tool_effect_overrides: {json.dumps(tool_effect_overrides)}\n")
     exposure_lines = (
         f"    exposure_policy:\n      invalid_tool_policy: {invalid_tool_policy}\n"
     )
@@ -426,7 +431,7 @@ def _config(
         f"    required: {'true' if required else 'false'}\n"
         f"    scope_policy: {scope_policy}\n"
         "    supports_parallel_tool_calls: true\n"
-        "    catalog_refresh_interval_ms: DISABLED\n"
+        f"    catalog_refresh_interval_ms: {catalog_refresh_interval_ms}\n"
         f"{timeout_line}"
         f"{effect_lines}"
         f"{exposure_lines}"
@@ -1176,6 +1181,9 @@ class _FakeMcpClient:
         self.supports_bounded_stateless_parallelism = False
         self.closed = False
         type(self).instances.append(self)
+
+    def complete_tool_catalog(self, tools) -> None:
+        self.completed_tools = tuple(tools)
 
     async def open(self) -> None:
         return None
@@ -2794,22 +2802,23 @@ def test_round6_list_changed_storm_coalesces_and_installs_fresh_lease(
 
             deadline = monotonic() + 3
             while monotonic() < deadline:
-                task = supervisor._tasks.get("fixture")  # noqa: SLF001
+                task = supervisor._refresh_tasks.get("fixture")  # noqa: SLF001
                 if (
                     task is not None
                     and task.done()
-                    and len(_FakeMcpClient.instances) >= 2
                 ):
                     task.result()
                     break
                 await asyncio.sleep(0.01)
             else:
                 pytest.fail("coalesced MCP reconcile did not complete")
-            assert len(_FakeMcpClient.instances) == 2
+            assert len(_FakeMcpClient.instances) == 1
+            assert not _FakeMcpClient.instances[0].closed
             second = supervisor.install_pending_at_safe_point()
             assert second is not None
             try:
                 assert second.runtime_generation_id != first.runtime_generation_id
+                assert second.slot_lease_by_server["fixture"]._slot is old_slot
                 fresh = next(iter(second.executors.values()))
                 permit = fresh.admit(
                     session_id="session:list-changed",
@@ -2867,7 +2876,7 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
         supervisor = McpHostSupervisor(
             session_id="session:surface",
             workspace_root=tmp_path,
-            configs=(_config(tmp_path),),
+            configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
@@ -2957,7 +2966,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
         supervisor = McpHostSupervisor(
             session_id="session:policy",
             workspace_root=tmp_path,
-            configs=(_config(tmp_path),),
+            configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,
@@ -3499,7 +3508,7 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
         supervisor = McpHostSupervisor(
             session_id="session:disable",
             workspace_root=tmp_path,
-            configs=(_config(tmp_path),),
+            configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
         port = DirectKernelToolPort(
             workspace_root=tmp_path,

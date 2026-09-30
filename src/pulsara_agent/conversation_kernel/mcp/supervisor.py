@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -395,6 +395,52 @@ class McpConnectionSlot:
             )
             self._leases.add(lease)
             return lease
+
+    def prepare_refresh_lease(self, discovery_generation: int) -> McpSlotLease:
+        """Prepare a candidate while the current slot remains dirty-fenced."""
+        with self._lock:
+            if (self._dispatch_fence is not McpDispatchFenceState.DIRTY_FENCED
+                    or discovery_generation != self._dirty_generation):
+                raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
+            lease = McpSlotLease(slot=self, authority=self._lease_authority,
+                                 admitted_discovery_generation=discovery_generation)
+            self._leases.add(lease)
+            return lease
+
+    def complete_refresh(self, lease: McpSlotLease) -> None:
+        """Reopen only the observed generation; old leases remain stale."""
+        with self._lock:
+            if (not lease.exactly_joins(self) or lease not in self._leases
+                    or lease.admitted_discovery_generation != self._dirty_generation
+                    or self._dispatch_fence is not McpDispatchFenceState.DIRTY_FENCED):
+                raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
+            self._dispatch_fence = McpDispatchFenceState.OPEN
+            self._accepting_new_leases = True
+
+    @asynccontextmanager
+    async def catalog_operation(self):
+        # SDK listings mutate its output-schema cache. Drain every pre-fence
+        # admission before listing, including bounded HTTP calls, then own the
+        # existing lane. Do not duplicate SDK caches or result validators.
+        while self.active_dispatch_count:
+            await asyncio.sleep(0.01)
+        await self._host_lane.acquire()
+        try:
+            await self._lane.acquire()
+            try:
+                with self._lock:
+                    if self._dispatch_fence is McpDispatchFenceState.CLOSED:
+                        raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
+                    self._active_operation_count += 1
+                try:
+                    yield
+                finally:
+                    with self._lock:
+                        self._active_operation_count -= 1
+            finally:
+                self._lane.release()
+        finally:
+            self._host_lane.release()
 
     def release_lease(self, lease: McpSlotLease) -> None:
         with self._lock:
@@ -1584,6 +1630,12 @@ class McpHostSupervisor:
             slot = box.get("slot")
             if slot is None:
                 return
+            if method == "pulsara/sessionful_transport":
+                if slot.concurrency_kind is McpPhysicalConcurrencyKind.BOUNDED_STATELESS_HTTP:
+                    slot.report_transport_failure(
+                        "MCP_PROTOCOL_CONFORMANCE_FAILED", retryable=False
+                    )
+                return
             if method == "pulsara/protocol_conformance_failure":
                 slot.report_transport_failure(
                     "MCP_PROTOCOL_CONFORMANCE_FAILED", retryable=False
@@ -1650,13 +1702,6 @@ class McpHostSupervisor:
                 # normalized installation candidate is quoted and published.
                 async with self._discovery_reservations:
                     await client.open()
-                    if client.supports_bounded_stateless_parallelism:
-                        mode = McpPhysicalConcurrencyKind.BOUNDED_STATELESS_HTTP
-                        maximum = config.stateless_http_max_in_flight
-                        slot.configure_physical_concurrency(
-                            concurrency_kind=mode,
-                            maximum_in_flight=maximum,
-                        )
                     with self._lock:
                         if (
                             self._closed
@@ -1673,6 +1718,13 @@ class McpHostSupervisor:
                                 server_id, McpServerState.DISCOVERING
                             )
                     snapshot, policies = await discover_mcp_catalog(client, config)
+                    if client.supports_bounded_stateless_parallelism:
+                        mode = McpPhysicalConcurrencyKind.BOUNDED_STATELESS_HTTP
+                        maximum = config.stateless_http_max_in_flight
+                        slot.configure_physical_concurrency(
+                            concurrency_kind=mode,
+                            maximum_in_flight=maximum,
+                        )
                     candidate_lease = slot.issue_lease(0)
                     candidate = _candidate(
                         config=config,
@@ -1720,13 +1772,14 @@ class McpHostSupervisor:
             if superseded_pending is not None:
                 superseded_pending.slot_lease.release()
                 superseded_slot = superseded_pending.slot_lease._slot  # noqa: SLF001
-                superseded_slot.begin_close()
-                task = asyncio.create_task(
-                    self._close_retired_slot(superseded_slot),
-                    name=f"mcp-slot-retire:{superseded_slot.slot_id}",
-                )
-                self._slot_close_tasks.add(task)
-                task.add_done_callback(self._slot_close_tasks.discard)
+                if superseded_slot is not slot:
+                    superseded_slot.begin_close()
+                    task = asyncio.create_task(
+                        self._close_retired_slot(superseded_slot),
+                        name=f"mcp-slot-retire:{superseded_slot.slot_id}",
+                    )
+                    self._slot_close_tasks.add(task)
+                    task.add_done_callback(self._slot_close_tasks.discard)
         except BaseException as exc:
             if candidate_lease is not None:
                 candidate_lease.release()
@@ -1899,12 +1952,60 @@ class McpHostSupervisor:
         self._start_connect(server_id)
 
     async def _refresh_after_dirty(self, server_id: str) -> None:
-        # Coalesce a burst of listChanged notifications into one full relist.
-        # A later notification may still fence an in-flight relist through the
-        # refresh generation join, but it cannot recursively start discovery
-        # from the passive receive callback.
+        # Coalesce notifications, then relist on the same physical owner.
         await asyncio.sleep(0.01)
-        self._start_connect(server_id)
+        while True:
+            with self._lock:
+                slot = self._slots.get(server_id)
+                config = self._config_by_id.get(server_id)
+                if (self._closed or slot is None or config is None or not config.enabled
+                        or slot.dispatch_fence_state is McpDispatchFenceState.CLOSED):
+                    return
+                attempt = self._attempt_generation[server_id]
+                refresh = self._refresh_generation[server_id]
+                dirty = slot.dirty_generation
+            lease = None
+            try:
+                async with slot.catalog_operation():
+                    async with self._discovery_reservations:
+                        async with asyncio.timeout(self._connect_attempt_timeout_seconds):
+                            snapshot, policies = await discover_mcp_catalog(slot.client, config)
+                        with self._lock:
+                            if (self._closed or self._slots.get(server_id) is not slot
+                                    or self._config_by_id.get(server_id) is not config
+                                    or self._attempt_generation[server_id] != attempt
+                                    or slot.dispatch_fence_state is McpDispatchFenceState.CLOSED):
+                                return
+                            if (self._refresh_generation[server_id] != refresh
+                                    or slot.dirty_generation != dirty):
+                                continue
+                            lease = slot.prepare_refresh_lease(dirty)
+                            candidate = _candidate(
+                                config=config, epoch=self._epoch,
+                                attempt_generation=attempt, lease=lease,
+                                snapshot=snapshot, policies=policies,
+                            )
+                            effective = {**self._installed, **self._pending, server_id: candidate}
+                            if sum(item.normalized_physical_bytes for item in effective.values()) > (
+                                DEFAULT_MCP_WIRE_BOUNDS.maximum_discovery_candidate_bytes_per_host
+                            ):
+                                raise ValueError("MCP Host discovery candidate byte bound exceeded")
+                            previous = self._pending.get(server_id)
+                            slot.complete_refresh(lease)
+                            self._pending[server_id] = candidate
+                            lease = None  # Candidate now owns this lease.
+                            self._set_catalog_state_locked(server_id, McpServerState.READY)
+                        if previous is not None:
+                            previous.slot_lease.release()
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                slot.report_transport_failure(type(exc).__name__, retryable=not isinstance(exc, ValueError))
+                return
+            finally:
+                if lease is not None:
+                    lease.release()
 
     async def _periodic_refresh(self, server_id: str) -> None:
         config = self._config_by_id[server_id]
@@ -1913,13 +2014,19 @@ class McpHostSupervisor:
         while True:
             await asyncio.sleep(interval)
             with self._lock:
-                if (
-                    self._closed
-                    or server_id not in self._config_by_id
-                    or not self._config_by_id[server_id].enabled
-                ):
+                if (self._closed or server_id not in self._config_by_id
+                        or not self._config_by_id[server_id].enabled):
                     return
-            self._start_connect(server_id)
+                slot = self._slots.get(server_id)
+                if slot is None or slot.dispatch_fence_state is McpDispatchFenceState.CLOSED:
+                    continue  # Initial connect/failure retry has its own owner.
+                slot.mark_dirty()
+                self._refresh_generation[server_id] += 1
+                refresh = self._refresh_tasks.get(server_id)
+                if refresh is None or refresh.done():
+                    task = asyncio.create_task(self._refresh_after_dirty(server_id),
+                                               name=f"mcp-reconcile:{server_id}")
+                    self._refresh_tasks[server_id] = task
 
     async def _close_retired_slot(self, slot: McpConnectionSlot) -> None:
         while (
@@ -1973,6 +2080,14 @@ class McpHostSupervisor:
             candidates = tuple(
                 next_installed[key] for key in sorted(next_installed)
             )
+            if any(
+                not candidate.slot_lease._slot.lease_is_current(candidate.slot_lease)
+                for candidate in candidates
+            ):
+                # Another server may still be draining its pre-fence calls.
+                # Keep all pending catalogs owned until a complete runtime can
+                # be published; never reopen or rewrite that old lease here.
+                return None
             root, root_collisions = _aggregate_provider_projection(
                 candidates, ModelInputScopeKind.ROOT
             )
@@ -2056,6 +2171,8 @@ class McpHostSupervisor:
         for previous_candidate in replaced_candidates:
             previous_candidate.slot_lease.release()
             previous_slot = previous_candidate.slot_lease._slot  # noqa: SLF001
+            if previous_slot is self._installed[previous_candidate.server_id].slot_lease._slot:
+                continue  # A refreshed catalog still owns this physical connection.
             previous_slot.begin_retire()
             task = asyncio.create_task(
                 self._close_retired_slot(previous_slot),
@@ -2808,6 +2925,7 @@ async def discover_mcp_catalog(
         DEFAULT_MCP_WIRE_BOUNDS.maximum_discovery_candidate_bytes_per_server
     ):
         raise ValueError("MCP discovery candidate byte bound exceeded")
+    client.complete_tool_catalog(tools)
     return snapshot, policy_tuple
 
 
@@ -2944,16 +3062,9 @@ def _effect(
         return McpEffectKind(overrides[tool.name].value), McpPolicyClassificationSource.TOOL_OVERRIDE
     if config.effect_policy.default_effect is not McpConfiguredEffect.AUTO:
         return McpEffectKind(config.effect_policy.default_effect.value), McpPolicyClassificationSource.SERVER_OVERRIDE
-    annotations = tool.annotations
-    read_only = bool(annotations and annotations.read_only_hint is True)
-    destructive = bool(annotations and annotations.destructive_hint is True)
-    open_world = bool(annotations and annotations.open_world_hint is True)
-    effect = (
-        McpEffectKind.READ_ONLY
-        if read_only and not destructive and not open_world
-        else McpEffectKind.EXTERNAL_EFFECT
-    )
-    return effect, McpPolicyClassificationSource.SERVER_ANNOTATIONS
+    # Server hints describe tools; they do not grant Host execution permission.
+    # With no explicit Host override, AUTO remains conservatively external.
+    return McpEffectKind.EXTERNAL_EFFECT, McpPolicyClassificationSource.HOST_DEFAULT
 
 
 def _resource(server_id: str, item: types.Resource) -> McpResourceSemanticFact:

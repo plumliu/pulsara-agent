@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pulsara_agent.hooks.config_parser import ParsedHookConfig
@@ -14,6 +14,7 @@ from pulsara_agent.plugins.contracts import (
     PluginDiagnosticCode,
     PluginInstanceIdentity,
     PluginInstanceState,
+    PluginMcpStdioSummary,
     PluginScopeKind,
     PluginValidationSummary,
 )
@@ -87,9 +88,7 @@ class FrozenEnabledPluginInstance:
     mcp: FrozenPluginMcpComponentObservation
     hooks: FrozenPluginHookComponentObservation
     diagnostics: tuple[object, ...]
-    physical_lifetime_anchor: PhysicalLifetimeAnchor = field(
-        repr=False, compare=False
-    )
+    physical_lifetime_anchor: PhysicalLifetimeAnchor = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.state.enabled or (
@@ -156,6 +155,37 @@ class EnabledPluginViewOwner:
         deadline_monotonic: float,
         cancellation,
     ) -> FrozenEnabledPluginView:
+        """Observe enabled declarations without preparing local runtime data."""
+        return self._observe(
+            workspace_root=workspace_root,
+            deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
+            prepare_local_data=False,
+        )
+
+    def observe_for_runtime(
+        self,
+        *,
+        workspace_root: Path | None,
+        deadline_monotonic: float,
+        cancellation,
+    ) -> FrozenEnabledPluginView:
+        """Observe declarations and prepare data for Host local-process use."""
+        return self._observe(
+            workspace_root=workspace_root,
+            deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
+            prepare_local_data=True,
+        )
+
+    def _observe(
+        self,
+        *,
+        workspace_root: Path | None,
+        deadline_monotonic: float,
+        cancellation,
+        prepare_local_data: bool,
+    ) -> FrozenEnabledPluginView:
         current_anchors: list[PhysicalLifetimeAnchor] = []
         leaf_anchors: list[PhysicalLifetimeAnchor] = []
         try:
@@ -173,8 +203,7 @@ class EnabledPluginViewOwner:
                 )
                 layout = self._store.layout(identity)
                 package_root = (
-                    layout.plugin_package_parent
-                    / state.current_package_install_id
+                    layout.plugin_package_parent / state.current_package_install_id
                 )
                 current_anchor = self._store.acquire_package_anchor(
                     layout,
@@ -210,16 +239,20 @@ class EnabledPluginViewOwner:
                     if observation.summary.manifest.name != state.plugin_id:
                         raise OSError("Plugin state/package identity conflict")
                     instance = freeze_enabled_plugin_instance(
-                        store=self._store,
                         identity=identity,
                         state=state,
                         package_root=package_root,
                         data_root=data_root,
                         observation=observation,
                         current_anchor=current_anchor,
-                        deadline_monotonic=deadline_monotonic,
-                        cancellation=cancellation,
                     )
+                    if prepare_local_data:
+                        instance = _prepare_local_process_data(
+                            instance,
+                            store=self._store,
+                            deadline_monotonic=deadline_monotonic,
+                            cancellation=cancellation,
+                        )
                     instances.append(instance)
                     if (
                         instance.hooks.parsed is not None
@@ -261,17 +294,14 @@ class EnabledPluginViewOwner:
 
 def freeze_enabled_plugin_instance(
     *,
-    store: ManagedPluginStore,
     identity: PluginInstanceIdentity,
     state: PluginInstanceState,
     package_root: Path,
     data_root: Path,
     observation: HeldPluginPackageObservation,
     current_anchor: PhysicalLifetimeAnchor,
-    deadline_monotonic: float,
-    cancellation,
 ) -> FrozenEnabledPluginInstance:
-    """Lower one already-observed package without any second filesystem scan."""
+    """Freeze declarations without preparing runtime directories or rescanning."""
 
     skills = FrozenPluginSkillComponentObservation(
         observation.summary.skills.disposition,
@@ -289,29 +319,6 @@ def freeze_enabled_plugin_instance(
         observation.hook_config,
         observation.summary.hooks.diagnostics,
     )
-    process_bearing = bool(
-        (mcp.parsed is not None and mcp.parsed.valid_servers)
-        or (hooks.parsed is not None and hooks.parsed.definitions)
-    )
-    if process_bearing:
-        try:
-            store.ensure_instance_data_root(
-                identity,
-                deadline_monotonic=deadline_monotonic,
-                cancellation=cancellation,
-            )
-        except (MemoryError, OSError, ValueError):
-            diagnostic = _diagnostic(PluginDiagnosticCode.DATA_ROOT_UNAVAILABLE)
-            if mcp.parsed is not None and mcp.parsed.valid_servers:
-                mcp = FrozenPluginMcpComponentObservation(
-                    PluginComponentObservationDisposition.UNAVAILABLE,
-                    diagnostics=(diagnostic,),
-                )
-            if hooks.parsed is not None and hooks.parsed.definitions:
-                hooks = FrozenPluginHookComponentObservation(
-                    PluginComponentObservationDisposition.UNAVAILABLE,
-                    diagnostics=(diagnostic,),
-                )
     return FrozenEnabledPluginInstance(
         identity,
         state,
@@ -326,6 +333,64 @@ def freeze_enabled_plugin_instance(
     )
 
 
+def _prepare_local_process_data(
+    instance: FrozenEnabledPluginInstance,
+    *,
+    store: ManagedPluginStore,
+    deadline_monotonic: float,
+    cancellation,
+) -> FrozenEnabledPluginInstance:
+    """Prepare private data only for local runtime components, never queries."""
+    mcp, hooks = instance.mcp, instance.hooks
+    has_stdio = bool(
+        mcp.parsed
+        and any(
+            isinstance(server, PluginMcpStdioSummary)
+            for server in mcp.parsed.valid_servers
+        )
+    )
+    has_hooks = bool(hooks.parsed and hooks.parsed.definitions)
+    if not has_stdio and not has_hooks:
+        return instance
+    try:
+        store.ensure_instance_data_root(
+            instance.identity,
+            deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
+        )
+        return instance
+    except (MemoryError, OSError, ValueError):
+        diagnostic = _diagnostic(PluginDiagnosticCode.DATA_ROOT_UNAVAILABLE)
+        if has_stdio:
+            assert mcp.parsed is not None
+            # Keep declaration claims so a failed workspace stdio definition
+            # cannot accidentally expose a lower-scope server of the same name.
+            mcp = replace(
+                mcp,
+                parsed=replace(
+                    mcp.parsed,
+                    valid_servers=tuple(
+                        server
+                        for server in mcp.parsed.valid_servers
+                        if not isinstance(server, PluginMcpStdioSummary)
+                    ),
+                    diagnostics=(*mcp.parsed.diagnostics, diagnostic),
+                ),
+                diagnostics=(*mcp.diagnostics, diagnostic),
+            )
+        if has_hooks:
+            hooks = FrozenPluginHookComponentObservation(
+                PluginComponentObservationDisposition.UNAVAILABLE,
+                diagnostics=(diagnostic,),
+            )
+        return replace(
+            instance,
+            mcp=mcp,
+            hooks=hooks,
+            diagnostics=(*instance.diagnostics, diagnostic),
+        )
+
+
 def _instance_key(
     value: FrozenEnabledPluginInstance,
 ) -> tuple[str, str, str]:
@@ -337,9 +402,7 @@ def _instance_key(
 
 
 def _diagnostic(code: PluginDiagnosticCode) -> PluginDiagnostic:
-    return PluginDiagnostic(
-        code, code.value.removeprefix("plugin_").replace("_", " ")
-    )
+    return PluginDiagnostic(code, code.value.removeprefix("plugin_").replace("_", " "))
 
 
 __all__ = [
