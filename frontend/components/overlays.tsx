@@ -13,15 +13,14 @@ import type { SessionWorkspaceSelection, ToastMessage } from '../lib/pulsara-typ
 interface NewSessionDialogProps {
   open: boolean;
   canCreateSession: boolean;
-  defaultWorkspacePath: string;
   onClose: () => void;
   onCreate: (selection: SessionWorkspaceSelection) => Promise<boolean>;
   onPickDirectory: (initialPath: string, signal: AbortSignal) => Promise<string | null>;
 }
 
-export function NewSessionDialog({ open, canCreateSession, defaultWorkspacePath, onClose, onCreate, onPickDirectory }: NewSessionDialogProps) {
+export function NewSessionDialog({ open, canCreateSession, onClose, onCreate, onPickDirectory }: NewSessionDialogProps) {
   const [workspaceKind, setWorkspaceKind] = useState<'quick' | 'project'>('quick');
-  const [workspacePath, setWorkspacePath] = useState(defaultWorkspacePath);
+  const [workspacePath, setWorkspacePath] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [pickerError, setPickerError] = useState('');
@@ -60,7 +59,7 @@ export function NewSessionDialog({ open, canCreateSession, defaultWorkspacePath,
     setSubmitting(false);
     if (created) {
       setWorkspaceKind('quick');
-      setWorkspacePath(defaultWorkspacePath);
+      setWorkspacePath('');
       onClose();
     }
   };
@@ -76,7 +75,7 @@ export function NewSessionDialog({ open, canCreateSession, defaultWorkspacePath,
             <span><strong>快速开始</strong><small>Pulsara 创建并管理一个持久目录</small></span>
             <i>{workspaceKind === 'quick' && <Check size={11} />}</i>
           </button>
-          <button type="button" role="radio" aria-checked={workspaceKind === 'project'} className={`workspace-kind-card${workspaceKind === 'project' ? ' is-selected' : ''}`} onClick={() => { setWorkspaceKind('project'); if (!workspacePath) setWorkspacePath(defaultWorkspacePath); }}>
+          <button type="button" role="radio" aria-checked={workspaceKind === 'project'} className={`workspace-kind-card${workspaceKind === 'project' ? ' is-selected' : ''}`} onClick={() => setWorkspaceKind('project')}>
             <span className="workspace-kind-icon"><FolderOpen size={18} /></span>
             <span><strong>指定目录</strong><small>使用一个已有的本地工作目录</small></span>
             <i>{workspaceKind === 'project' && <Check size={11} />}</i>

@@ -32,7 +32,6 @@ import type {
   ToolTrace,
   UserCapabilitySnapshot,
   UserSkillCapability,
-  Workspace,
 } from './pulsara-types';
 import { protocolPermissionModes } from './pulsara-types';
 import {
@@ -53,7 +52,6 @@ export type {
 
 export interface RuntimeBootstrap {
   application: { name: string; version: string; transport: string };
-  workspace: Workspace;
   protocol: { major: number; minor: number };
   runtime: { status: string; origin: string; database_state: DatabaseDataPlaneState };
   local_settings: LocalSettingsSummary;
@@ -1291,20 +1289,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async bootstrap(): Promise<RuntimeBootstrap> {
-    const value = await apiRequest<Omit<RuntimeBootstrap, 'workspace'> & {
-      workspace: { id: string; name: string; path: string; kind: string };
-    }>('/api/app/bootstrap');
-    return {
-      ...value,
-      workspace: {
-        id: value.workspace.id,
-        name: value.workspace.name,
-        path: value.workspace.path,
-        kind: value.workspace.kind === 'transient' || value.workspace.kind === 'quick'
-          ? 'quick'
-          : 'project',
-      },
-    };
+    return apiRequest<RuntimeBootstrap>('/api/app/bootstrap');
   }
 
   async modelCatalog(refresh = false): Promise<ModelCatalogReadModel> {

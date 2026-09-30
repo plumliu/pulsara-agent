@@ -33,7 +33,6 @@ from pulsara_agent.tool_permission import EffectivePermissionPolicy
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.http_server import LocalHttpServer
 from pulsara_agent.web_app.session_controller import LocalSessionController
-from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
 class LocalWebApplicationState(StrEnum):
@@ -67,7 +66,8 @@ class LocalWebApplication:
         self,
         *,
         settings: LocalSettingsStore | None = None,
-        workspace_input: HostWorkspaceInput,
+        memory_domain_id: str = "u_local",
+        trust_workspace_mcp_config: bool = False,
         permission_policy: EffectivePermissionPolicy,
         active_skill_names: frozenset[str] = frozenset(),
         port: int = 0,
@@ -84,7 +84,6 @@ class LocalWebApplication:
             settings=self.settings,
             catalog=self.catalog,
         )
-        self.workspace_input = workspace_input
         self.permission_policy = permission_policy
         self.active_skill_names = active_skill_names
         self.requested_port = port
@@ -92,7 +91,8 @@ class LocalWebApplication:
         self.core = core or KernelHostCore.production(model_runtime=self.model_runtime)
         self.sessions = LocalSessionController(
             core=self.core,
-            workspace_input=workspace_input,
+            memory_domain_id=memory_domain_id,
+            trust_workspace_mcp_config=trust_workspace_mcp_config,
             permission_policy=permission_policy,
             active_skill_names=active_skill_names,
         )

@@ -10,7 +10,6 @@ import pytest
 from pulsara_agent.web_app import directory_picker as module
 from pulsara_agent.web_app.directory_picker import NativeDirectoryPicker
 from pulsara_agent.web_app.session_controller import LocalSessionController
-from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
 @pytest.mark.parametrize("cancelled", [False, True])
@@ -30,10 +29,7 @@ def test_native_selection_returns_original_directory_or_cancel(tmp_path, monkeyp
     assert spawn.call_args.args[-1] == str(selected)
     assert str(selected) not in spawn.call_args.args[2]
     if not cancelled:
-        controller = SimpleNamespace(workspace_input=HostWorkspaceInput(
-            workspace_kind="project", workspace_root=tmp_path,
-            memory_domain_id="test", trust_workspace_mcp_config=False,
-        ))
+        controller = SimpleNamespace(memory_domain_id="test", trust_workspace_mcp_config=False)
         workspace = LocalSessionController._workspace_input_for_create(
             controller, workspace_kind="project", workspace_path=result,
         )

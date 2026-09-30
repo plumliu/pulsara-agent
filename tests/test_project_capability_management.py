@@ -42,7 +42,6 @@ from pulsara_agent.web_app.session_controller import (
     _capability_payload,
     _mcp_transport_payload,
 )
-from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
 async def _create_project_mcp_via_controller(controller, session_id, *, server_id, display_name,
@@ -681,10 +680,8 @@ def test_session_created_during_a_project_change_still_marks_lazy_refresh(
         controller.core = _refresh_core()
         controller.core.open_session = open_session
         controller.core.close_session = AsyncMock()
-        controller.workspace_input = HostWorkspaceInput(
-            workspace_kind="project",
-            workspace_root=workspace,
-        )
+        controller.memory_domain_id = "u_local"
+        controller.trust_workspace_mcp_config = False
         controller.model_role = SimpleNamespace()
         controller.permission_policy = SimpleNamespace()
         controller.active_skill_names = frozenset()
@@ -742,10 +739,8 @@ def test_session_resumed_from_a_string_workspace_path_keeps_raced_refresh(
         controller.core.read_resumable_session = read_resumable_session
         controller.core.resume_session = resume_session
         controller.core.close_session = AsyncMock()
-        controller.workspace_input = HostWorkspaceInput(
-            workspace_kind="project",
-            workspace_root=workspace,
-        )
+        controller.memory_domain_id = "u_local"
+        controller.trust_workspace_mcp_config = False
         controller.model_role = SimpleNamespace()
         controller.permission_policy = SimpleNamespace()
         controller.active_skill_names = frozenset()

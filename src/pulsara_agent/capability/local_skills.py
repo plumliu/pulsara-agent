@@ -1,4 +1,4 @@
-"""Source-neutral Skill parser and the sole four-root loose definition producer."""
+"""Source-neutral Skill parser and the sole loose definition producer."""
 
 from __future__ import annotations
 
@@ -259,9 +259,10 @@ class LooseSkillRootAlias:
 
 @dataclass(frozen=True, slots=True, init=False)
 class PreparedLooseSkillRootPolicy:
-    """The exact, always-four-root loose definition policy."""
+    """Exact user roots, plus project roots when a project was selected."""
 
     roots: tuple[PreparedSkillRootBinding, ...]
+    includes_workspace: bool
     configuration_unavailable_reason: PulsaraHomeUnavailableReason | None
     lexical_aliases: tuple[LooseSkillRootAlias, ...]
     _owner_authority: object = field(repr=False, compare=False)
@@ -270,6 +271,7 @@ class PreparedLooseSkillRootPolicy:
         self,
         *,
         roots: tuple[PreparedSkillRootBinding, ...],
+        includes_workspace: bool,
         configuration_unavailable_reason: PulsaraHomeUnavailableReason | None,
         lexical_aliases: tuple[LooseSkillRootAlias, ...],
         _owner_authority: object,
@@ -278,6 +280,7 @@ class PreparedLooseSkillRootPolicy:
         if _constructor is not _ROOT_POLICY_CONSTRUCTOR:
             raise TypeError("Skill root policies are owner-issued")
         object.__setattr__(self, "roots", roots)
+        object.__setattr__(self, "includes_workspace", includes_workspace)
         object.__setattr__(
             self, "configuration_unavailable_reason", configuration_unavailable_reason
         )
@@ -294,7 +297,15 @@ class PreparedLooseSkillRootPolicy:
             item._owner_authority is not self._owner_authority for item in self.roots
         ):
             raise ValueError("loose Skill root policy contains a foreign binding")
-        missing = set(LOOSE_SKILL_ROOT_ORDER) - set(kinds)
+        required = set(LOOSE_SKILL_ROOT_ORDER)
+        if not self.includes_workspace:
+            required -= {
+                LocalSkillRootKind.WORKSPACE_PULSARA,
+                LocalSkillRootKind.WORKSPACE_AGENTS,
+            }
+        if set(kinds) - required:
+            raise ValueError("loose Skill roots exceed the selected scope")
+        missing = required - set(kinds)
         if bool(missing) != (self.configuration_unavailable_reason is not None):
             raise ValueError("loose Skill root configuration state conflicts")
         if missing and not missing.issubset(
@@ -416,7 +427,7 @@ _UniqueKeySafeLoader.add_constructor(
 
 
 class LooseSkillDefinitionProducer:
-    """The sole four-root policy and complete loose observation owner."""
+    """The sole user/project root policy and complete loose observation owner."""
 
     def __init__(
         self,
@@ -444,8 +455,14 @@ class LooseSkillDefinitionProducer:
         self.maximum_discovery_skill_bytes = maximum_discovery_skill_bytes
         self._owner_authority = object()
 
-    def prepare_root_policy(self, workspace_root: Path) -> PreparedLooseSkillRootPolicy:
-        workspace = prepare_local_source_path(workspace_root)
+    def prepare_root_policy(
+        self, workspace_root: Path | None = None
+    ) -> PreparedLooseSkillRootPolicy:
+        workspace = (
+            prepare_local_source_path(workspace_root)
+            if workspace_root is not None
+            else None
+        )
         user_home_resolution = self.user_home_resolution
         if self.user_agents_skills_root is None and user_home_resolution is None:
             user_home_resolution = resolve_user_home()
@@ -457,6 +474,11 @@ class LooseSkillDefinitionProducer:
         configuration_reason: PulsaraHomeUnavailableReason | None = None
         roots: list[PreparedSkillRootBinding] = []
         for root_kind in LOOSE_SKILL_ROOT_ORDER:
+            if workspace is None and root_kind in {
+                LocalSkillRootKind.WORKSPACE_PULSARA,
+                LocalSkillRootKind.WORKSPACE_AGENTS,
+            }:
+                continue
             if (
                 root_kind is LocalSkillRootKind.USER_PULSARA
                 and self.user_product_skills_root is None
@@ -499,6 +521,7 @@ class LooseSkillDefinitionProducer:
                     )
         return PreparedLooseSkillRootPolicy(
             roots=tuple(roots),
+            includes_workspace=workspace is not None,
             configuration_unavailable_reason=configuration_reason,
             lexical_aliases=tuple(aliases),
             _owner_authority=self._owner_authority,
@@ -684,16 +707,20 @@ class LooseSkillDefinitionProducer:
 
     def _prepare_root_binding(
         self,
-        workspace_root: Path,
+        workspace_root: Path | None,
         root_kind: LocalSkillRootKind,
         *,
         home_resolution: PulsaraHomeResolution | None,
         user_home_resolution: UserHomeResolution | None,
     ) -> PreparedSkillRootBinding:
         if root_kind is LocalSkillRootKind.WORKSPACE_PULSARA:
+            if workspace_root is None:
+                raise ValueError("workspace Skill root requires a selected directory")
             path = workspace_root.joinpath(*WORKSPACE_PRODUCT_SKILL_ROOT_PARTS)
             containment = workspace_root
         elif root_kind is LocalSkillRootKind.WORKSPACE_AGENTS:
+            if workspace_root is None:
+                raise ValueError("workspace Skill root requires a selected directory")
             path = workspace_root.joinpath(*WORKSPACE_AGENTS_SKILL_ROOT_PARTS)
             containment = workspace_root
         elif root_kind is LocalSkillRootKind.USER_PULSARA:

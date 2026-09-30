@@ -919,7 +919,6 @@ def test_web_fork_outcomes_are_closed_and_open_is_post_commit(
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
         from pulsara_agent.web_app.session_controller import LocalSessionController
-        from pulsara_agent.workspace_identity import HostWorkspaceInput
         from pulsara_agent.conversation_kernel._repository.fork import (
             CanonicalForkCreation,
         )
@@ -933,9 +932,6 @@ def test_web_fork_outcomes_are_closed_and_open_is_post_commit(
         )
         controller = LocalSessionController(
             core=core,
-            workspace_input=HostWorkspaceInput(
-                workspace_kind="project", workspace_root=tmp_path
-            ),
             permission_policy=None,
             active_skill_names=frozenset(),
         )
@@ -960,7 +956,6 @@ def test_web_fork_disconnected_waiter_does_not_cancel_creation(tmp_path):
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
         from pulsara_agent.web_app.session_controller import LocalSessionController
-        from pulsara_agent.workspace_identity import HostWorkspaceInput
         from pulsara_agent.conversation_kernel._repository.fork import (
             CanonicalForkCreation,
         )
@@ -981,9 +976,6 @@ def test_web_fork_disconnected_waiter_does_not_cancel_creation(tmp_path):
         )
         controller = LocalSessionController(
             core=core,
-            workspace_input=HostWorkspaceInput(
-                workspace_kind="project", workspace_root=tmp_path
-            ),
             permission_policy=None,
             active_skill_names=frozenset(),
         )

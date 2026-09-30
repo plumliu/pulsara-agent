@@ -472,7 +472,6 @@ async def _run(args, saved, secrets):
                         catalog=catalog,
                         model_runtime=runtime,
                         core=core,
-                        workspace_input=workspace_input,
                         permission_policy=preset_to_policy(
                             PermissionMode.BYPASS_PERMISSIONS
                         ),

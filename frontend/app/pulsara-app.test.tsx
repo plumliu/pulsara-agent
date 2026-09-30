@@ -79,12 +79,6 @@ afterEach(cleanup);
 
 const bootstrap: RuntimeBootstrap = {
   application: { name: 'Pulsara', version: '0.1.0', transport: 'local' },
-  workspace: {
-    id: 'workspace',
-    name: 'pulsara_agent',
-    path: '/tmp/pulsara_agent',
-    kind: 'project',
-  },
   protocol: { major: 3, minor: 0 },
   runtime: { status: 'ready', origin: 'http://localhost', database_state: 'ready' },
   database_state: 'ready',
@@ -120,6 +114,12 @@ const initialSession: SessionSummary = {
   status: 'running',
   updatedAt: '刚刚',
   live: false,
+  workspace: {
+    id: 'workspace',
+    name: 'pulsara_agent',
+    path: '/tmp/pulsara_agent',
+    kind: 'project',
+  },
   modelCallBinding: {
     connection_id: 'model-connection:00000000000000000000000000000000',
     reasoning: { kind: 'effort', value: 'medium' },
@@ -3467,9 +3467,11 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('radio', { name: /指定目录/ }));
     const pathPreview = screen.getByRole('textbox', { name: '目录路径' }) as HTMLInputElement;
     expect(pathPreview.readOnly).toBe(true);
+    expect(pathPreview.value).toBe('');
+    expect((screen.getByRole('button', { name: /^创建会话/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '选择目录' }));
     await waitFor(() => expect(pathPreview.value).toBe('/tmp/project'));
-    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith('/tmp/pulsara_agent', expect.any(AbortSignal));
+    expect(adapter.pickWorkspaceDirectory).toHaveBeenCalledWith('', expect.any(AbortSignal));
     fireEvent.click(screen.getByRole('button', { name: /^创建会话/ }));
     await waitFor(() => expect(adapter.createSession).toHaveBeenCalledWith({ kind: 'project', path: '/tmp/project' }));
   });

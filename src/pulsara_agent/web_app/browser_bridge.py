@@ -464,7 +464,7 @@ class LocalBrowserBridge:
         try:
             if base is None:
                 summary = await self.sessions.core.read_resumable_session(
-                    connection.session_id, memory_domain_id=self.sessions.workspace_input.memory_domain_id,
+                    connection.session_id, memory_domain_id=self.sessions.memory_domain_id,
                 )
                 if summary is None:
                     raise expired()

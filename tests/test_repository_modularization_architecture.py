@@ -21,6 +21,9 @@ from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATI
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# PULSARA_SESSION_TITLE_IMPLEMENTATION_SPEC.zh.md adds one metadata-only
+# repository operation; title tests verify domain isolation and exact row changes.
+_SESSION_TITLE_ADDED_METHODS = {"rename_session"}
 # Fork hard cut: these existing SQL consumers now explicitly route executed
 # owners; public signatures remain unchanged. Behavioral rejection is covered
 # by test_conversation_fork, rather than old implementation AST equality.
@@ -77,6 +80,41 @@ _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES = {
         "tests/test_stage2_tui_cross_language.py::"
         "test_stage2_python_gateway_to_go_tui_fresh_snapshot_and_detach"
     ),
+}
+# PULSARA_GUI_WORKING_DIRECTORY_HARD_CUT_SPEC.zh.md removes the complete
+# Host CLI and its dedicated input module. GUI/kernel control tests remain.
+_HOST_CLI_HARD_CUT_RETIRED_PYTEST_NODES = {
+    "tests/test_repl.py::test_redirected_repl_uses_basic_prompt",
+    "tests/test_repl.py::test_redirected_repl_input_does_not_block_background_event_loop",
+    "tests/test_repl.py::test_interactive_repl_enables_async_history_and_suspend",
+    "tests/test_repl.py::test_interactive_repl_retries_termios_setup_interrupted_by_sigcont",
+    "tests/test_repl.py::test_repl_history_falls_back_when_home_is_read_only",
+}
+# Tool-failure continuation replaces the old no-result contract and covers both
+# normal continuation and caller cancellation. Provider failure diagnostics now
+# cover an absent and an explicit code hint. Require every replacement below.
+_TOOL_FAILURE_CONTINUATION_PYTEST_REPLACEMENTS = {
+    (
+        "tests/test_round5_long_horizon_postgres.py::"
+        f"test_round5_effectful_physical_exception_keeps_attempt_without_result[{case}]"
+    ): {
+        "tests/test_round5_long_horizon_postgres.py::"
+        f"test_effectful_tool_failure_preserves_unknown_result_and_continues[{cancelled}-{case}]"
+        for cancelled in (False, True)
+    }
+    for case in (
+        'TERMINAL_EFFECT-terminal_process-{"action":"write"}',
+        "bounded_write-write_file-{}",
+        "unknown_effect-test_tool-{}",
+    )
+}
+_TOOL_FAILURE_CONTINUATION_PYTEST_REPLACEMENTS[
+    "tests/test_stage2_provider_stream.py::"
+    "test_stage2_provider_failure_is_sanitized_at_the_single_boundary"
+] = {
+    "tests/test_stage2_provider_stream.py::"
+    f"test_stage2_provider_failure_is_sanitized_at_the_single_boundary[{code_hint}]"
+    for code_hint in (None, "401_auth")
 }
 _ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES = {
     "tests/test_round5_long_horizon_execution_envelope.py::test_round5_job_transport_is_bounded_without_changing_foreground",
@@ -1059,7 +1097,8 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
             - _DIRECT_MEMORY_REMOVED_METHODS
             | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
             | _DIRECT_MEMORY_ADDED_METHODS
-            | _MEMORY_EDIT_ADDED_METHODS,
+            | _MEMORY_EDIT_ADDED_METHODS
+            | _SESSION_TITLE_ADDED_METHODS,
             _ROUND7_CHANGED_METHODS
             | _ROUND8_CHANGED_METHODS
             | _ROUND5A2_CHANGED_METHODS
@@ -1221,6 +1260,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_METHODS
         | _DIRECT_MEMORY_ADDED_METHODS
         | _MEMORY_EDIT_ADDED_METHODS
+        | _SESSION_TITLE_ADDED_METHODS
     )
     for name in (
         set(baseline_runtime["methods"])
@@ -1293,6 +1333,7 @@ def test_repository_modularization_current_contract_matches_baseline() -> None:
         | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_METHODS
         | _DIRECT_MEMORY_ADDED_METHODS
         | _MEMORY_EDIT_ADDED_METHODS
+        | _SESSION_TITLE_ADDED_METHODS
         | _DIRECT_MEMORY_REMOVED_METHODS
         | _MEMORY_GOVERNANCE_HARD_CUT_ADDED_TOP_LEVEL_FUNCTIONS
         | _MEMORY_GOVERNANCE_HARD_CUT_REMOVED_TOP_LEVEL_FUNCTIONS
@@ -1355,6 +1396,8 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
     current_nodes = set(module._pytest_node_ids())
     assert baseline_nodes - current_nodes == (
         _FRONTEND_HARD_CUT_RETIRED_PYTEST_NODES
+        | _HOST_CLI_HARD_CUT_RETIRED_PYTEST_NODES
+        | set(_TOOL_FAILURE_CONTINUATION_PYTEST_REPLACEMENTS)
         | _ROUND5B_DURABLE_JOB_SUBTRACTION_RETIRED_PYTEST_NODES
         | _ASYNC_SUBAGENT_COMPLETION_RETIRED_PYTEST_NODES
         | _SUBAGENT_WAIT_REFINEMENT_RETIRED_PYTEST_NODES
@@ -1381,9 +1424,12 @@ def test_repository_modularization_preserves_every_existing_pytest_node() -> Non
             "tests/test_stage2_terminal_host_lifetime.py::test_round5_canonical_close_upgrade_after_decision_fence_is_rejected",
         }
     )
+    for previous, replacements in _TOOL_FAILURE_CONTINUATION_PYTEST_REPLACEMENTS.items():
+        assert previous in baseline_nodes
+        assert replacements <= current_nodes, (previous, replacements - current_nodes)
     assert (
         "tests/test_stage2_architecture.py::"
-        "test_stage2_ordinary_host_and_renderer_neutral_protocol_select_kernel_v3"
+        "test_stage2_gui_host_and_renderer_neutral_protocol_select_kernel_v3"
     ) in current_nodes
 
 

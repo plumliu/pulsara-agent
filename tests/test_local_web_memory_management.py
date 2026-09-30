@@ -58,8 +58,8 @@ async def server_for(tmp_path, *, state="ready"):
     )
     sessions = SimpleNamespace(
         core=core,
-        workspace_input=SimpleNamespace(memory_domain_id="server-owned"),
-        bootstrap_payload=lambda: {"workspace": {"id": "actual-workspace"}},
+        memory_domain_id="server-owned",
+        bootstrap_payload=lambda: {"application": {"name": "Pulsara"}},
     )
     deps = _model_server_dependencies()
     deps["database_state"] = lambda: state

@@ -14,7 +14,6 @@ from pulsara_agent.web_app.session_controller import (
     LocalSessionController,
     _create_quick_workspace_root,
 )
-from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
 def _task_row(
@@ -116,11 +115,7 @@ class _TaskCore:
 def _controller(tmp_path: Path, core: _TaskCore) -> LocalSessionController:
     return LocalSessionController(
         core=cast(KernelHostCore, core),
-        workspace_input=HostWorkspaceInput(
-            workspace_kind="project",
-            workspace_root=tmp_path,
-            memory_domain_id="u_local",
-        ),
+        memory_domain_id="u_local",
         permission_policy=cast(EffectivePermissionPolicy, object()),
         active_skill_names=frozenset(),
     )

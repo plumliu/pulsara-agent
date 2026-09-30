@@ -28,7 +28,6 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlTarget,
     UserControlTargetKind,
 )
-from pulsara_agent.cli import _control_query_unavailable_message
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.terminal_process.monitor import (
     TerminalMonitorCancelOutcome,
@@ -694,16 +693,3 @@ def test_pr03_durable_subagent_cancel_loser_reports_the_actual_terminal_winner()
         assert result.reason == "SUCCEEDED"
 
     asyncio.run(scenario())
-
-
-def test_pr03_cli_reports_exact_query_unavailability_without_reusing_pending_ack() -> (
-    None
-):
-    assert (
-        _control_query_unavailable_message(ControlQueryStatus.RESULT_UNAVAILABLE)
-        == "The original control result is no longer available."
-    )
-    assert (
-        _control_query_unavailable_message(ControlQueryStatus.OWNER_UNAVAILABLE)
-        == "The original Host owner is unavailable."
-    )

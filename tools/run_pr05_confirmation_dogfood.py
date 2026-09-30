@@ -25,7 +25,6 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.web_app.application import LocalWebApplication
-from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 from run_model_switch_handover_dogfood import _ReadOnlySettingsStore, _binding, _create_database, _drop_database
 from run_pr03_user_control_dogfood import _Pr03RecordingRuntime, _rows
@@ -161,7 +160,7 @@ async def run(args, saved, secrets):
         return session
     core.open_session = opened
     app = LocalWebApplication(settings=store, catalog=catalog, model_runtime=runtime, core=core,
-        workspace_input=HostWorkspaceInput(workspace_kind='project', workspace_root=workspace, trust_workspace_mcp_config=False),
+        trust_workspace_mcp_config=False,
         permission_policy=preset_to_policy(PermissionMode.ASK_PERMISSIONS), port=args.port)
     try:
         await app.start()

@@ -428,20 +428,17 @@ reset a real endpoint without explicit operator authorization.
 
 ## Run
 
-The local Web app is the primary configuration and conversation surface:
+The local Web app is the configuration and conversation surface:
 
 ```sh
-uv run pulsara app --workspace /path/to/project
+uv run pulsara app
 ```
 
-After a session has an explicit model connection selected, the headless REPL
-can resume that canonical session without any environment-file path:
+Choose each conversation's working directory in the GUI, or use Quick Start.
+The app does not adopt its launch directory as a workspace.
 
-```sh
-uv run pulsara host repl \
-  --workspace /path/to/project \
-  --continue
-```
+Create, resume, and continue conversations in the GUI. The CLI provides app
+launching, capability administration, and diagnostics.
 
 ## Client boundary
 

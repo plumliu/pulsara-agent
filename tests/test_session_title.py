@@ -82,7 +82,7 @@ def test_controller_rename_uses_current_domain_without_loading_runtime():
     async def run():
         core = SimpleNamespace(rename_session=AsyncMock(return_value="saved"))
         controller = SimpleNamespace(_lock=asyncio.Lock(), _closing=False, core=core,
-                                     workspace_input=SimpleNamespace(memory_domain_id="domain:test"))
+                                     memory_domain_id="domain:test")
         assert await LocalSessionController.rename_session(controller, "session:test", " saved ") == {
             "session_id": "session:test", "title": "saved"}
         core.rename_session.assert_awaited_once_with("session:test", memory_domain_id="domain:test", title=" saved ")

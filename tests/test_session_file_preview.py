@@ -28,7 +28,7 @@ def bridge_for(root):
 
     sessions = SimpleNamespace(
         core=SimpleNamespace(read_resumable_session=summary),
-        workspace_input=SimpleNamespace(memory_domain_id="device"),
+        memory_domain_id="device",
     )
     bridge = LocalBrowserBridge(sessions=sessions, protocol_server=object())
     for name in ("one", "two"):

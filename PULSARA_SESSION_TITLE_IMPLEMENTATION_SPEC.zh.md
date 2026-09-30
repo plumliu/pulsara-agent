@@ -24,6 +24,8 @@ PostgreSQL sessions 新增可空 title；repository 执行仅该列的原子更�
 
 数据库验证改名、归档、归档中改名、恢复、跨域拒绝、删除后不复活，以及除title外行值/消息不变。HTTP验证形状和缺失/跨域错误；前端验证两个入口共享交互、保存错误、中文合成、取消与标题同步；执行相关聚焦回归与前端构建。此功能不调用模型，无需真实provider dogfood。
 
+仓库模块化门控登记 `rename_session` 为本功能新增的唯一 repository method 与数据库操作 owner。其余历史 owner 继续执行原有精确等价检查；不重写 checkpoint baseline。该新增 owner 的产品行为由上述真实 PostgreSQL 标题测试验证。
+
 ## 本轮验证记录
 
 - 后端：`tests/test_session_title.py tests/test_session_archive.py tests/test_local_web_session_summary.py tests/test_local_web_session_order_postgres.py tests/test_stage5_clean_migration.py`，40 passed（5.48秒），既有 aiohttp shutdown_timeout 警告1条。

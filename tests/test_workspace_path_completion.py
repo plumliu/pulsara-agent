@@ -65,7 +65,8 @@ def test_session_root_comes_from_canonical_selected_session(tmp_path):
         (first / 'first.txt').touch()
         (second / 'second.txt').touch()
         controller = object.__new__(LocalSessionController)
-        controller.workspace_input = SimpleNamespace(memory_domain_id='domain', root=first)
+        controller.memory_domain_id = 'domain'
+        controller.trust_workspace_mcp_config = False
         controller.core = SimpleNamespace(read_resumable_session=AsyncMock(side_effect=[
             SimpleNamespace(workspace_root=str(second)), None,
         ]))

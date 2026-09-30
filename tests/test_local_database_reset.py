@@ -26,7 +26,6 @@ from pulsara_agent.web_app.application import (
     DatabaseDataPlaneState,
     LocalWebApplication,
 )
-from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.support.model_config import test_model_runtime as make_runtime
 from tests.test_stage5_clean_migration import (
     _migrated_database,
@@ -137,7 +136,6 @@ def test_reset_http_confirms_target_and_obeys_data_plane_lifetime(
             settings=settings,
             model_runtime=runtime,
             catalog=runtime.catalog,
-            workspace_input=HostWorkspaceInput("project", tmp_path),
             permission_policy=default_permission_policy(),
         )
         await app.start()
@@ -196,7 +194,6 @@ def test_reset_close_failure_preserves_database(tmp_path, monkeypatch):
             settings=runtime.settings,
             model_runtime=runtime,
             catalog=runtime.catalog,
-            workspace_input=HostWorkspaceInput("project", tmp_path),
             permission_policy=default_permission_policy(),
         )
         await app.start()
@@ -239,7 +236,6 @@ def test_cancelled_reset_waits_for_physical_transaction_before_readmission(
             settings=runtime.settings,
             model_runtime=runtime,
             catalog=runtime.catalog,
-            workspace_input=HostWorkspaceInput("project", tmp_path),
             permission_policy=default_permission_policy(),
         )
         await app.start()

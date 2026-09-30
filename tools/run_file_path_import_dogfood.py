@@ -22,7 +22,6 @@ from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.settings import LocalSettingsStore, LocalPostgresConfig
 from pulsara_agent.tool_permission import default_permission_policy
 from pulsara_agent.web_app.application import LocalWebApplication
-from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tools.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
     _create_database,
@@ -121,11 +120,7 @@ async def run(output: Path, model: str):
         runtime = ObservedRuntime(delegate, report)
         app = LocalWebApplication(
             settings=settings,
-            workspace_input=HostWorkspaceInput(
-                workspace_kind="project",
-                workspace_root=root / "workspace",
-                trust_workspace_mcp_config=False,
-            ),
+            trust_workspace_mcp_config=False,
             permission_policy=default_permission_policy(),
             catalog=catalog,
             model_runtime=runtime,

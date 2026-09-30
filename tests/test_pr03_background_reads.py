@@ -224,7 +224,8 @@ class _ReadCore:
 def _read_controller(core: _ReadCore) -> LocalSessionController:
     controller = object.__new__(LocalSessionController)
     controller.core = core
-    controller.workspace_input = SimpleNamespace(memory_domain_id="memory:one")
+    controller.memory_domain_id = "memory:one"
+    controller.trust_workspace_mcp_config = False
     return controller
 
 

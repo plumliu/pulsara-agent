@@ -361,12 +361,14 @@ class LocalSessionController:
         self,
         *,
         core: KernelHostCore,
-        workspace_input: HostWorkspaceInput,
+        memory_domain_id: str = "u_local",
+        trust_workspace_mcp_config: bool = False,
         permission_policy: EffectivePermissionPolicy,
         active_skill_names: frozenset[str],
     ) -> None:
         self.core = core
-        self.workspace_input = workspace_input
+        self.memory_domain_id = memory_domain_id
+        self.trust_workspace_mcp_config = trust_workspace_mcp_config
         self.permission_policy = permission_policy
         self.active_skill_names = active_skill_names
         self._by_session: dict[str, HostSessionHandle] = {}
@@ -385,32 +387,25 @@ class LocalSessionController:
         return await self.list_sessions()
 
     def bootstrap_payload(self) -> dict[str, object]:
-        workspace = resolve_workspace(self.workspace_input)
         return {
             "application": {
                 "name": "Pulsara",
                 "version": "0.1.0",
                 "transport": "localhost-http+terminal-v3",
             },
-            "workspace": {
-                "id": workspace.workspace_key,
-                "name": Path(workspace.workspace_root).name or "workspace",
-                "path": str(workspace.workspace_root),
-                "kind": workspace.workspace_kind,
-            },
             "protocol": {"major": 3, "minor": 0},
         }
 
     async def list_sessions(self) -> list[dict[str, object]]:
         summaries = await self.core.list_resumable_sessions_across_workspaces(
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
             include_archived=False,
         )
         async with self._lock:
             live_ids = frozenset(self._by_session)
             handles = dict(self._by_session)
             busy_ids = frozenset(self._operations)
-        idle_ids = await self.core.idle_session_ids(self.workspace_input.memory_domain_id)
+        idle_ids = await self.core.idle_session_ids(self.memory_domain_id)
         result = []
         for item in summaries:
             payload = self._summary_payload(item, item.session_id in live_ids)
@@ -424,7 +419,7 @@ class LocalSessionController:
     async def search_sessions(self, *, query: str, lifecycle: str = "ALL", cursor: str | None = None, limit: int = 20):
         from pulsara_agent.conversation_kernel.host import _kernel_session_summary
         rows, next_cursor = await self.core.search_sessions(
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
             query=query, lifecycle=lifecycle, cursor=cursor, limit=limit)
         return {"items": [{"session": self._summary_payload(_kernel_session_summary(row), False),
                            "match_kind": row["match_kind"], "snippet": row["snippet"]} for row in rows],
@@ -435,13 +430,13 @@ class LocalSessionController:
             if self._closing:
                 raise SessionControlRejected("SESSION_RENAME_UNAVAILABLE", "服务正在关闭，请稍后重试。")
         saved = await self.core.rename_session(
-            session_id, memory_domain_id=self.workspace_input.memory_domain_id, title=title,
+            session_id, memory_domain_id=self.memory_domain_id, title=title,
         )
         return {"session_id": session_id, "title": saved}
 
     async def list_archived_sessions(self):
         summaries = await self.core.list_resumable_sessions_across_workspaces(
-            memory_domain_id=self.workspace_input.memory_domain_id, include_archived=True,
+            memory_domain_id=self.memory_domain_id, include_archived=True,
         )
         return [self._summary_payload(item, False) for item in summaries if item.lifecycle == 'ARCHIVED']
 
@@ -465,14 +460,14 @@ class LocalSessionController:
         try:
             if not operation.unconfirmed:
                 try:
-                    await self.core.unarchive_session(operation.session_id, self.workspace_input.memory_domain_id)
+                    await self.core.unarchive_session(operation.session_id, self.memory_domain_id)
                     return {'status': 'OPEN', 'session_id': operation.session_id}
                 except KeyError:
                     raise
                 except Exception:
                     operation.unconfirmed = True
             try:
-                status = await self.core.read_session_lifecycle(operation.session_id, self.workspace_input.memory_domain_id)
+                status = await self.core.read_session_lifecycle(operation.session_id, self.memory_domain_id)
             except Exception as exc:
                 raise SessionDeleteRejected('SESSION_ARCHIVE_UNCONFIRMED', '暂时无法确认操作结果，请恢复数据库连接后重试确认。', 503) from exc
             operation.unconfirmed = False
@@ -502,7 +497,7 @@ class LocalSessionController:
             raise ValueError("task batch id is invalid")
         summary = await self.core.read_resumable_session(
             session_id,
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
         )
         if summary is None:
             raise KeyError(session_id)
@@ -578,7 +573,7 @@ class LocalSessionController:
             raise ValueError("task group page size is out of bounds")
         summary = await self.core.read_resumable_session(
             session_id,
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
         )
         if summary is None:
             raise KeyError(session_id)
@@ -652,7 +647,7 @@ class LocalSessionController:
             raise ValueError("task id is required")
         summary = await self.core.read_resumable_session(
             session_id,
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
         )
         if summary is None:
             raise KeyError(session_id)
@@ -689,7 +684,7 @@ class LocalSessionController:
             raise ValueError("task group id is required")
         summary = await self.core.read_resumable_session(
             session_id,
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
         )
         if summary is None:
             raise KeyError(session_id)
@@ -738,7 +733,7 @@ class LocalSessionController:
             raise ValueError("task activity page size is out of bounds")
         summary = await self.core.read_resumable_session(
             session_id,
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
         )
         if summary is None:
             raise KeyError(session_id)
@@ -1048,8 +1043,7 @@ class LocalSessionController:
     ) -> dict[str, object]:
         """Read the user-owned Skill, MCP, and Plugin inventory."""
 
-        workspace_root = resolve_workspace(self.workspace_input).workspace_root
-        skills_task = asyncio.to_thread(_inspect_user_skills, workspace_root)
+        skills_task = asyncio.to_thread(_inspect_user_skills)
         mcp_task = asyncio.to_thread(self.core.mcp_management.load_configs)
         plugins_task = self.core.inspect_user_plugins()
         skills, mcp_configs, plugins = await asyncio.gather(
@@ -1167,9 +1161,8 @@ class LocalSessionController:
         requested = Path(skill_path.strip()).expanduser()
         if not skill_path.strip() or not requested.is_absolute():
             raise ValueError("Skill path must be absolute")
-        workspace_root = resolve_workspace(self.workspace_input).workspace_root
         async with self._capability_mutation_lock:
-            observed = await asyncio.to_thread(_inspect_user_skills, workspace_root)
+            observed = await asyncio.to_thread(_inspect_user_skills)
             requested = requested.resolve(strict=False)
             raw_items = observed.get("items")
             if not isinstance(raw_items, list):
@@ -1366,7 +1359,7 @@ class LocalSessionController:
         workspace_root = (
             handle.session.workspace.workspace_root
             if handle
-            else resolve_workspace(self.workspace_input).workspace_root
+            else require_pulsara_home()
         )
         result = await self.core.mcp_management.test(
             LocalMcpTarget(server_id, workspace_root if handle else None),
@@ -1720,7 +1713,7 @@ class LocalSessionController:
 
     async def complete_workspace_paths(self, session_id: str, prefix: str, cursor: str | None) -> dict[str, object]:
         summary = await self.core.read_resumable_session(
-            session_id, memory_domain_id=self.workspace_input.memory_domain_id,
+            session_id, memory_domain_id=self.memory_domain_id,
         )
         if summary is None:
             raise KeyError(session_id)
@@ -1729,7 +1722,7 @@ class LocalSessionController:
     async def read_session(self, session_id: str) -> dict[str, object] | None:
         summary = await self.core.read_resumable_session(
             session_id,
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
         )
         return (
             None
@@ -1768,7 +1761,7 @@ class LocalSessionController:
             source_session_id=source_session_id,
             anchor_entry_id=anchor_entry_id,
             child_session_id=child_session_id,
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
         )
         if not creation.created:
             return {
@@ -1798,7 +1791,7 @@ class LocalSessionController:
         if no_live_observation is None:
             summary = await self.core.read_resumable_session(
                 session_id,
-                memory_domain_id=self.workspace_input.memory_domain_id,
+                memory_domain_id=self.memory_domain_id,
             )
             if summary is None:
                 raise KeyError(session_id)
@@ -1846,7 +1839,7 @@ class LocalSessionController:
         try:
             summary = await self.core.read_resumable_session(
                 session_id,
-                memory_domain_id=self.workspace_input.memory_domain_id,
+                memory_domain_id=self.memory_domain_id,
             )
             if summary is None:
                 raise KeyError(session_id)
@@ -1863,7 +1856,7 @@ class LocalSessionController:
                 memory_domain_id=summary.memory_domain_id,
                 cleanup_workspace_root_on_close=False,
                 trust_workspace_mcp_config=(
-                    self.workspace_input.trust_workspace_mcp_config
+                    self.trust_workspace_mcp_config
                 ),
             )
             session = await self.core.resume_session(
@@ -1950,7 +1943,7 @@ class LocalSessionController:
                 workspace_kind="transient",
                 workspace_root=root,
                 display_label=f"快速开始 · {now.strftime('%m月%d日 %H:%M')}",
-                memory_domain_id=self.workspace_input.memory_domain_id,
+                memory_domain_id=self.memory_domain_id,
                 cleanup_workspace_root_on_close=False,
                 trust_workspace_mcp_config=False,
             )
@@ -1964,10 +1957,10 @@ class LocalSessionController:
                 workspace_kind="project",
                 workspace_root=candidate,
                 display_label=None,
-                memory_domain_id=self.workspace_input.memory_domain_id,
+                memory_domain_id=self.memory_domain_id,
                 cleanup_workspace_root_on_close=False,
                 trust_workspace_mcp_config=(
-                    self.workspace_input.trust_workspace_mcp_config
+                    self.trust_workspace_mcp_config
                 ),
             )
         else:
@@ -2051,11 +2044,11 @@ class LocalSessionController:
     async def _confirm_session_deletion(self, operation, bridge) -> dict[str, object]:
         try:
             if operation.action == 'archive':
-                lifecycle = await self.core.read_session_lifecycle(operation.session_id, self.workspace_input.memory_domain_id)
+                lifecycle = await self.core.read_session_lifecycle(operation.session_id, self.memory_domain_id)
                 exists = lifecycle != 'ARCHIVED'
             else:
                 exists = await self.core.canonical_session_exists(
-                    operation.session_id, self.workspace_input.memory_domain_id,
+                    operation.session_id, self.memory_domain_id,
                 )
         except Exception as exc:
             operation.unconfirmed = True
@@ -2085,7 +2078,7 @@ class LocalSessionController:
                 await asyncio.gather(*(asyncio.shield(t) for t in pending), return_exceptions=True)
             # Do not touch another domain's runtime even if an ID is guessed.
             exists = await self.core.canonical_session_exists(
-                operation.session_id, self.workspace_input.memory_domain_id,
+                operation.session_id, self.memory_domain_id,
             )
             async with self._lock:
                 handle = self._by_session.get(operation.session_id)
@@ -2094,10 +2087,10 @@ class LocalSessionController:
                 if operation.action == 'archive':
                     raise KeyError(operation.session_id)
                 return {"status": "ABSENT", "session_id": operation.session_id}
-            if handle is not None and handle.workspace_input.memory_domain_id != self.workspace_input.memory_domain_id:
+            if handle is not None and handle.workspace_input.memory_domain_id != self.memory_domain_id:
                 raise RuntimeError("session delete domain mismatch")
             operation.core_operation = await self.core.begin_session_retirement(
-                operation.session_id, self.workspace_input.memory_domain_id,
+                operation.session_id, self.memory_domain_id,
             )
             if operation.action == 'archive':
                 try:
@@ -2275,7 +2268,7 @@ class LocalSessionController:
             raise ValueError("session_id is required")
         summary = await self.core.read_resumable_session(
             session_id,
-            memory_domain_id=self.workspace_input.memory_domain_id,
+            memory_domain_id=self.memory_domain_id,
         )
         if summary is None:
             raise KeyError(session_id)
@@ -2636,10 +2629,10 @@ def _skill_removal_identity(
     }
 
 
-def _inspect_user_skills(workspace_root: Path) -> dict[str, object]:
+def _inspect_user_skills() -> dict[str, object]:
     producer = LooseSkillDefinitionProducer()
     config = load_user_skill_config()
-    policy = producer.prepare_root_policy(workspace_root)
+    policy = producer.prepare_root_policy()
     observed = producer.observe(policy)
     roots = [
         {

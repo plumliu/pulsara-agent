@@ -1,4 +1,4 @@
-"""Pulsara command line for the canonical conversation kernel."""
+"""Pulsara app launcher and local administration commands."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from pathlib import Path
 import signal
 import sys
 from time import monotonic
-from uuid import uuid4
 from pulsara_agent.plugins.contracts import SuccessfulPluginInstallOutcome
 
 from pulsara_agent import __version__
@@ -34,17 +33,13 @@ from pulsara_agent.capability import (
 )
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
-    require_pulsara_home,
     resolve_pulsara_home,
     resolve_user_home,
 )
-from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.conversation_kernel.user_control import ControlQueryStatus
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     DEFAULT_KERNEL_WATCHDOG_POLICY,
 )
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
-from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.model_target import (
     default_reasoning_selection,
@@ -61,7 +56,6 @@ from pulsara_agent.primitives.permission import (
     PermissionMode,
     parse_permission_mode,
 )
-from pulsara_agent.repl import ReplPrompt, build_repl_prompt
 from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.settings import (
     LocalSettings,
@@ -70,7 +64,6 @@ from pulsara_agent.settings import (
 )
 from pulsara_agent.workspace_identity import (
     HostWorkspaceInput,
-    normalize_workspace_kind,
     resolve_workspace,
 )
 from pulsara_agent.hooks.contracts import (
@@ -116,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true")
     commands = parser.add_subparsers(dest="command")
 
-    app = _add_host_common_args(
+    app = _add_app_runtime_args(
         commands.add_parser("app", help="Run the complete local Pulsara Web app.")
     )
     app.add_argument("--port", type=int, default=0)
@@ -131,15 +124,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
-    host = commands.add_parser("host", help="Run the canonical conversation kernel.")
-    host_commands = host.add_subparsers(dest="host_command")
-    run = _add_host_common_args(host_commands.add_parser("run"))
-    run.add_argument("prompt")
-    repl = _add_host_common_args(host_commands.add_parser("repl"))
-    resume = repl.add_mutually_exclusive_group()
-    resume.add_argument("--resume", default=None)
-    resume.add_argument("--continue", dest="continue_session", action="store_true")
-    repl.add_argument("--list-sessions", action="store_true")
     skills = commands.add_parser("skills")
     skill_commands = skills.add_subparsers(dest="skills_command")
     validate = skill_commands.add_parser("validate")
@@ -259,22 +243,15 @@ def _add_database_args(
     return parser
 
 
-def _add_host_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    parser.add_argument("--workspace", default=None)
-    parser.add_argument("--workspace-kind", choices=("project", "transient"))
-    parser.add_argument(
-        "--transient-display-label",
-        default=None,
-        help="Optional label for a transient workspace; project labels come from the root.",
-    )
+def _add_app_runtime_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--memory-domain-id", default=None)
     parser.add_argument("--skill", action="append", default=[])
     parser.add_argument(
         "--trust-workspace-mcp",
         action="store_true",
         help=(
-            "Trust this workspace's .pulsara/mcp.yaml for the current Host "
-            "open. Disabled by default because workspace MCP may launch code "
+            "Trust project .pulsara/mcp.yaml when opening sessions. "
+            "Disabled by default because workspace MCP may launch code "
             "or resolve secret references."
         ),
     )
@@ -298,18 +275,6 @@ def main() -> None:
             return
         except (ValueError, KeyError, RuntimeError, OSError) as exc:
             parser.error(_public_error(exc))
-    if args.command == "host":
-        try:
-            if args.host_command == "run":
-                result = asyncio.run(_kernel_host_run(args))
-                _print_agent_run_result(result)
-                return
-            if args.host_command == "repl":
-                asyncio.run(_kernel_host_repl(args))
-                return
-        except (ValueError, KeyError) as exc:
-            parser.error(_public_error(exc))
-        parser.error("host requires a subcommand")
     if args.command == "skills":
         try:
             output, exit_status = _skills_command(args)
@@ -384,24 +349,6 @@ def main() -> None:
     parser.print_help()
 
 
-async def _kernel_host_run(args) -> object:
-    _settings, catalog, runtime = _runtime_services()
-    await catalog.refresh()
-    core = KernelHostCore.production(model_runtime=runtime)
-    session = None
-    try:
-        session = await core.open_session(
-            _workspace_input_from_args(args),
-            permission_policy=_permission_policy(args),
-            active_skill_names=_active_skill_names_from_args(args),
-        )
-        return await session.run_turn(PromptContent.text(args.prompt))
-    finally:
-        if session is not None:
-            await core.close_session(session.host_session_id)
-        await core.shutdown()
-
-
 async def _local_web_app(args) -> None:
     from pulsara_agent.web_app import (
         LocalWebApplication,
@@ -413,7 +360,8 @@ async def _local_web_app(args) -> None:
         settings=settings,
         catalog=catalog,
         model_runtime=runtime,
-        workspace_input=_workspace_input_from_args(args),
+        memory_domain_id=args.memory_domain_id or "u_local",
+        trust_workspace_mcp_config=args.trust_workspace_mcp,
         permission_policy=_permission_policy(args),
         active_skill_names=_active_skill_names_from_args(args),
         port=args.port,
@@ -423,142 +371,6 @@ async def _local_web_app(args) -> None:
         application,
         open_browser=not args.no_open,
     )
-
-
-async def _open_initial_session(core: KernelHostCore, args):
-    common = {
-        "permission_policy": _permission_policy(args),
-        "active_skill_names": _active_skill_names_from_args(args),
-    }
-    workspace = _workspace_input_from_args(args)
-    if getattr(args, "resume", None):
-        return await core.resume_session(
-            args.resume, workspace_input=workspace, **common
-        )
-    if getattr(args, "continue_session", False):
-        return await core.resume_most_recent_session(workspace, **common)
-    return await core.open_session(workspace, **common)
-
-
-async def _kernel_host_repl(args) -> None:
-    _settings, catalog, runtime = _runtime_services()
-    await catalog.refresh()
-    core = KernelHostCore.production(model_runtime=runtime)
-    repl_prompt: ReplPrompt = build_repl_prompt(
-        history_path=require_pulsara_home() / "repl_history"
-    )
-    try:
-        workspace = _workspace_input_from_args(args)
-        if args.list_sessions:
-            summaries = await core.list_resumable_sessions(workspace_input=workspace)
-            print(json.dumps([item.to_dict() for item in summaries], indent=2))
-            return
-        session = await _open_initial_session(core, args)
-        print("Pulsara kernel REPL · :help · Ctrl-D detach · :close conversation")
-        while True:
-            try:
-                prompt = await repl_prompt.read_line("pulsara> ")
-            except KeyboardInterrupt:
-                print("^C")
-                continue
-            except EOFError:
-                print()
-                return
-            command = prompt.strip()
-            if not command:
-                continue
-            if command in {"exit", "quit", ":q"}:
-                return
-            if command in {":help", ":h", ":?"}:
-                print(":sessions · :resume ID · :continue · :stop · :close")
-                continue
-            if command == ":sessions":
-                summaries = await core.list_resumable_sessions(
-                    workspace_input=workspace
-                )
-                print(json.dumps([item.to_dict() for item in summaries], indent=2))
-                continue
-            if command == ":stop":
-                target_turn_id = session.active_root_turn_id()
-                if target_turn_id is None:
-                    print("No active turn.")
-                    continue
-                command_id = (
-                    f"command:control:{session.control_admission_deadline_ms()}:"
-                    f"{uuid4().hex}"
-                )
-                outcome = await session.request_stop_turn(
-                    command_id=command_id,
-                    expected_session_id=session.session_id,
-                    expected_host_session_id=session.host_session_id,
-                    target_turn_id=target_turn_id,
-                )
-                request = outcome.user_control
-                if request is None:
-                    print(outcome.public_message)
-                    continue
-                from pulsara_agent.conversation_kernel.user_control import (
-                    UserControlRequest,
-                )
-
-                expected = UserControlRequest(
-                    request.operation,
-                    command_id,
-                    request.session_id,
-                    request.host_session_id,
-                    request.target,
-                )
-                while outcome.status == "PENDING":
-                    await asyncio.sleep(0.05)
-                    queried = await session.query_control_command(expected)
-                    if queried.outcome is None:
-                        print(_control_query_unavailable_message(queried.status))
-                        break
-                    outcome = queried.outcome
-                else:
-                    print(outcome.public_message)
-                continue
-            if command == ":close":
-                await core.close_session(
-                    session.host_session_id
-                )
-                print(f"Closed {session.session_id}")
-                return
-            if command.startswith(":resume "):
-                next_session = await core.resume_session(
-                    command.removeprefix(":resume ").strip(),
-                    workspace_input=workspace,
-                    permission_policy=_permission_policy(args),
-                    active_skill_names=_active_skill_names_from_args(args),
-                )
-                await core.close_session(
-                    session.host_session_id
-                )
-                session = next_session
-                continue
-            if command == ":continue":
-                next_session = await core.resume_most_recent_session(
-                    workspace,
-                    permission_policy=_permission_policy(args),
-                    active_skill_names=_active_skill_names_from_args(args),
-                )
-                if next_session.host_session_id != session.host_session_id:
-                    await core.close_session(
-                        session.host_session_id
-                    )
-                    session = next_session
-                continue
-            _print_agent_run_result(await session.run_turn(PromptContent.text(prompt)))
-    finally:
-        await core.shutdown()
-
-
-def _control_query_unavailable_message(status: ControlQueryStatus) -> str:
-    if status is ControlQueryStatus.RESULT_UNAVAILABLE:
-        return "The original control result is no longer available."
-    if status is ControlQueryStatus.OWNER_UNAVAILABLE:
-        return "The original Host owner is unavailable."
-    raise ValueError("a FOUND control query must carry its outcome")
 
 
 class _SkillCliUsageError(ValueError):
@@ -2107,11 +1919,6 @@ def _database_command(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def _print_agent_run_result(result) -> None:
-    if result.final_text:
-        print(result.final_text)
-
-
 def _runtime_services():
     settings = LocalSettingsStore()
     catalog = ModelCatalogOwner(ModelsDevCatalogClient())
@@ -2218,16 +2025,6 @@ async def _config_check() -> dict[str, object]:
         },
         "model_connections": connections,
     }
-
-
-def _workspace_input_from_args(args) -> HostWorkspaceInput:
-    return HostWorkspaceInput(
-        workspace_kind=normalize_workspace_kind(args.workspace_kind or "project"),
-        workspace_root=Path(args.workspace or "."),
-        display_label=args.transient_display_label,
-        memory_domain_id=args.memory_domain_id or "u_local",
-        trust_workspace_mcp_config=bool(getattr(args, "trust_workspace_mcp", False)),
-    )
 
 
 def _active_skill_names_from_args(args) -> frozenset[str]:

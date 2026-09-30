@@ -10,6 +10,21 @@ import type { AgentTask } from './pulsara-types';
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('bootstraps the app without assigning a working directory', async () => {
+  const payload = {
+    application: { name: 'Pulsara', version: '0.1.0', transport: 'localhost-http+terminal-v3' },
+    protocol: { major: 3, minor: 0 },
+    runtime: { status: 'ready', origin: 'http://127.0.0.1:8765', database_state: 'ready' },
+    local_settings: {}, model_configurations: [],
+  };
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const bootstrap = await new LocalHttpRuntimeAdapter().bootstrap();
+  expect(bootstrap).toEqual(payload);
+  expect(bootstrap).not.toHaveProperty('workspace');
+  expect(fetchMock).toHaveBeenCalledWith('/api/app/bootstrap', expect.any(Object));
+});
+
 it('requests a native directory selection and distinguishes cancellation', async () => {
   const fetchMock = vi.fn()
     .mockResolvedValueOnce(new Response(JSON.stringify({ path: '/tmp/项目 ' }), { status: 200 }))

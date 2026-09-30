@@ -67,8 +67,8 @@ const defaultAdapter = new LocalHttpRuntimeAdapter();
 
 const emptyWorkspace: Workspace = {
   id: 'local',
-  name: '本地工作区',
-  path: '正在连接…',
+  name: '尚未选择工作目录',
+  path: '',
   kind: 'project',
 };
 
@@ -1208,12 +1208,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     return () => window.removeEventListener('keydown', handleKey);
   }, [canCreateSession]);
 
-  const workspace = bootstrap?.workspace ?? emptyWorkspace;
   const activeSession = useMemo(
     () => sessionList.find((session) => session.id === activeSessionId) ?? emptySession,
     [activeSessionId, sessionList],
   );
-  const activeWorkspace = activeSession.workspace ?? workspace;
+  const activeWorkspace = activeSession.workspace ?? emptyWorkspace;
   const openingSession = sessionList.find(session => session.id === openingSessionId);
   const isObserver = connection?.role === 'observer';
   const canControl = connection?.role === 'controller';
@@ -2414,7 +2413,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       {activeView === 'workbench' && !databaseBlocked && openingSession && (
         <SessionOpeningView
           session={openingSession}
-          workspace={openingSession.workspace ?? workspace}
+          workspace={openingSession.workspace ?? emptyWorkspace}
           error={runtimeError}
           onRetry={() => openSession(openingSession.id)}
           onOpenSidebar={() => setSidebarOpen(true)}
@@ -2647,7 +2646,6 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       {newSessionOpen && <NewSessionDialog
         open={newSessionOpen}
         canCreateSession={canCreateSession}
-        defaultWorkspacePath={workspace.path === '正在连接…' ? '' : workspace.path}
         onClose={() => setNewSessionOpen(false)}
         onCreate={createSession}
         onPickDirectory={(initialPath, signal) => adapter.pickWorkspaceDirectory(initialPath, signal)}

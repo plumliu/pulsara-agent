@@ -728,7 +728,8 @@ def _runtime_reopen_controller(
     core = _RuntimeReopenCore(str(tmp_path))
     controller = object.__new__(LocalSessionController)
     controller.core = core
-    controller.workspace_input = workspace_input
+    controller.memory_domain_id = workspace_input.memory_domain_id
+    controller.trust_workspace_mcp_config = workspace_input.trust_workspace_mcp_config
     controller.permission_policy = cast(object, None)
     controller.active_skill_names = frozenset()
     controller._by_session = {}

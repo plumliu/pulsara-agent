@@ -144,7 +144,7 @@ class LocalMemoryController:
 
     @property
     def domain(self):
-        return self.sessions.workspace_input.memory_domain_id
+        return self.sessions.memory_domain_id
 
     @staticmethod
     def query(request, allowed):

@@ -345,20 +345,15 @@ endpoint/database 的 operator 授权时，不得重置真实环境。
 
 ## 运行
 
-本地 Web 应用是配置与对话的主要入口：
+本地 Web 应用是配置与对话入口：
 
 ```sh
-uv run pulsara app --workspace /path/to/project
+uv run pulsara app
 ```
 
-会话已经显式选择模型连接后，可用 headless REPL 恢复该 canonical session，
-不再经过环境文件：
+在 GUI 中为会话选择工作目录，或使用“快速开始”。应用启动时不会将当前目录作为工作区。
 
-```sh
-uv run pulsara host repl \
-  --workspace /path/to/project \
-  --continue
-```
+在 GUI 中创建、恢复和继续会话。CLI 提供应用启动、能力管理和诊断命令。
 
 ## Client 边界
 
