@@ -391,24 +391,17 @@ _SUBAGENT_PROFILE_DESCRIPTION = (
     "Omit to use general_worker."
 )
 _SUBAGENT_CONTEXT_DESCRIPTION = (
-    "Optional recent conversation text to include in addition to task. Omit it, or use "
-    "mode=none, when the task is self-contained. Use mode=last_n only when 1-3 recent "
-    "conversation turns are essential. Earlier tool calls and tool results are not "
-    "copied, so put required evidence and locations in task."
+    "Optional context: none (default), recent main-conversation turns (last_n), or "
+    "a finished worker's public history (worker_history). History starts a new task "
+    "with current tools and permissions; it does not restart the old task."
 )
 _SUBAGENT_CONTEXT_MODE_DESCRIPTION = (
-    "none includes no earlier conversation; last_n includes the most recent "
-    "conversation turns selected by turns."
+    "none needs no other fields; last_n requires turns; worker_history requires "
+    "task_id for a started, terminal worker in this conversation with readable public history."
 )
 _SUBAGENT_CONTEXT_TURNS_DESCRIPTION = (
-    "Required only for mode=last_n. Number of recent conversation turns to include, "
-    "from 1 to 3. Do not provide it for mode=none."
-)
-_SUBAGENT_COMPLETION_GUIDE = (
-    "A task finishing does not start a new model reply. If this reply is still in "
-    "progress, the result can be added at the next opportunity. If this reply ends "
-    "first, the completed task stays visible and its result can be added to a later "
-    "user request or an explicit continuation. Do not promise an automatic future reply."
+    "Required only for last_n: 1–3 recent main-conversation turns, excluding tool calls/results. "
+    "Omit for none and worker_history."
 )
 
 
@@ -1179,20 +1172,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "spawn_agent": _descriptor(
         name="spawn_agent",
         description=(
-            "Delegate one independent task to one agent. This is the default choice for "
-            "a single, well-bounded piece of work. The response returns a task_id and its "
-            "current status; creating the task does not wait for it to finish. Continue "
-            "useful, non-overlapping local work after spawning, and do not wait merely to "
-            "fetch a result that the conversation will receive automatically. Copy task_id "
-            "exactly into "
-            "wait_agent, send_agent_message, or stop_agent when synchronization or control "
-            "is genuinely needed. The task may start immediately or wait until capacity is "
-            "available. By default the agent receives the task but no earlier conversation, "
-            "so write a self-contained task and include exact files or sources it should "
-            "use. Request last_n context only when a few recent conversation turns are "
-            "essential. Use create_agent_tasks instead only for a genuine multi-task batch "
-            "or required task dependencies. "
-            + _SUBAGENT_COMPLETION_GUIDE
+            "Delegate one task asynchronously; returns task_id and status, and may queue for capacity. "
+            "Provide a self-contained objective. Omit context for no history; use worker_history + the old "
+            "task_id to follow up on a finished worker. This creates a new task; it does not revive the old one. "
+            "Use create_agent_tasks for batches or success dependencies. Read the cataloged pulsara-subagent "
+            "Skill for context selection, follow-ups and recovery examples."
         ),
         input_schema=object_schema(
             properties={
@@ -1267,24 +1251,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "wait_agent": _descriptor(
         name="wait_agent",
         description=(
-            "Wait only when the current answer must use delegated results and no other "
-            "useful work remains. This tool reports why waiting ended; result content arrives "
-            "in separate conversation messages after this tool call finishes, so do not "
-            "expect result bodies in its return value. With 1..16 exact task_ids, "
-            "settle=first returns when any target finishes and settle=all returns only when "
-            "every target finishes. Finished includes success, failure, cancellation, and "
-            "dependency failure, so predicate_satisfied does not mean that every task "
-            "succeeded. Partial or unrelated results do not finish an all wait. Guidance "
-            "sent to the reply currently in progress interrupts either form and must be "
-            "handled first; a message queued for a later reply does not. Omit task_ids only "
-            "to wait for any delegated result or current-reply guidance. Outcomes are: "
-            "predicate_satisfied when the requested first/all condition is met; "
-            "steer_available when current-reply guidance is ready; completion_available "
-            "when an untargeted delegated result is ready; nothing_pending when an "
-            "untargeted wait has no running task or ready result; and timeout when only this "
-            "wait call reached its limit. Prefer one meaningful wait over repeated short "
-            "polls. A timeout never cancels a task and does not prove the task later failed "
-            "or stopped."
+            "Wait for delegated results needed by the current answer. Results arrive as separate "
+            "conversation messages after this call, not in its return body. With task_ids, settle=first "
+            "waits for any target to finish; all waits for every target. Finished includes failure and cancellation; "
+            "predicate_satisfied does not mean success. Partial/unrelated completions do not satisfy all. "
+            "Current-reply guidance interrupts waiting (steer_available); later-reply queued guidance does not. "
+            "Without task_ids, completion_available means a result is ready and nothing_pending means no "
+            "active task or ready result. timeout ends only this wait, not any task. Prefer a meaningful wait to polling."
         ),
         input_schema=object_schema(
             properties={
@@ -1327,14 +1300,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "stop_agent": _descriptor(
         name="stop_agent",
         description=(
-            "Cancel one delegated task that is queued, waiting for another task, or "
-            "currently running. Use the exact task_id returned by a task tool. If the "
-            "task has already finished, this returns its final state without changing it. "
-            "Cancelling a prerequisite prevents tasks that require its result from running, "
-            "but unrelated tasks continue. Cancellation does not undo files or external side "
-            "effects already produced, does not cancel unrelated background commands, and "
-            "does not authorize restarting or replacing the task. Treat its final result or "
-            "failure like any other delegated outcome."
+            "Cancel one queued, dependency-waiting or running task by exact task_id. "
+            "A finished task returns its final state unchanged. Cancelling a prerequisite blocks its dependents; "
+            "unrelated tasks and background commands continue. Cancellation does not undo side effects."
         ),
         input_schema=object_schema(
             properties={
@@ -1364,15 +1332,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "list_agents": _descriptor(
         name="list_agents",
         description=(
-            "List delegated tasks from this conversation. Use it to recover task_ids or "
-            "review task names, objectives, status, dependencies, pending messages, and "
-            "short result summaries. It does not show an agent's full working conversation. "
-            "Use wait_agent instead when the current answer is blocked on known tasks. Do "
-            "not repeatedly call list_agents to poll for completion. A listed status is a "
-            "snapshot and may change after the call. "
-            "Omit cursor for the first page. If next_cursor is returned, copy it exactly "
-            "into cursor and keep max_items and include_dependencies unchanged; if a cursor "
-            "is later rejected, restart from the first page."
+            "List this conversation's tasks to recover exact IDs or inspect status, objectives, "
+            "dependencies, pending messages and result summaries; excludes full worker transcripts. "
+            "Use wait_agent for synchronization, not repeated list polling. Status is a snapshot. "
+            "Page with next_cursor and unchanged max_items/include_dependencies; restart paging if a cursor is rejected."
         ),
         input_schema=object_schema(
             properties={
@@ -1410,22 +1373,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "create_agent_tasks": _descriptor(
         name="create_agent_tasks",
         description=(
-            "Create a small batch of delegated tasks, each run by one agent when ready. "
-            "The call schedules the batch and returns task identities and initial statuses; "
-            "it does not wait for the tasks. "
-            "Use this higher-level tool when several tasks should be created together or "
-            "when one task genuinely needs another task's completed result. Prefer "
-            "independent tasks with no depends_on entries so they may run in parallel. Add "
-            "a dependency only when the later task cannot do correct work without the "
-            "earlier result; do not build coordinator, review, or synthesis chains by "
-            "default when the main conversation can combine the results directly. A task "
-            "with unmet dependencies waits, and if a prerequisite does not complete "
-            "successfully, the dependent task does not run. When a prerequisite succeeds, "
-            "its self-contained summary is provided to the dependent task. Use spawn_agent "
-            "for one ordinary independent task. Continue non-overlapping local work after "
-            "dispatch; use wait_agent only when the current answer cannot be completed "
-            "without the selected results. "
-            + _SUBAGENT_COMPLETION_GUIDE
+            "Schedule a batch asynchronously; returns task IDs and initial statuses. "
+            "Use spawn_agent for one task. Independent items can run in parallel. depends_on waits for "
+            "prerequisite success and supplies its result; any unsuccessful prerequisite blocks the dependent. "
+            "Use material_task_ids for finished results/failures, or worker_history for a finished worker's "
+            "public history, without a success dependency. See pulsara-subagent for workflow examples."
         ),
         input_schema=object_schema(
             properties={
@@ -1547,14 +1499,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "send_agent_message": _descriptor(
         name="send_agent_message",
         description=(
-            "Send additional information or a correction to a delegated task that is "
-            "currently running. Use the exact task_id and send only information relevant "
-            "to the existing task; create a new task for separate work. A status of queued "
-            "means the message was accepted for later delivery and does not prove that the "
-            "agent has read it or acted on it. The agent receives it when it next has a "
-            "chance to continue. Do not resend the same message merely because it remains "
-            "queued. This tool cannot message a task that has not started or has already "
-            "finished, and it never restarts a finished task."
+            "Send relevant guidance to an ACTIVE worker using its exact task_id. "
+            "Queued means accepted for later delivery, not read or acted on; do not resend merely because it is queued. "
+            "Cannot message queued or finished tasks. For a finished worker's follow-up, use spawn_agent with "
+            "context.mode=worker_history and context.task_id set to its old ID; this creates a new task."
         ),
         input_schema=object_schema(
             properties={
@@ -1583,15 +1531,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "report_agent_result": _descriptor(
         name="report_agent_result",
         description=(
-            "Finish your delegated task by submitting its structured result. Call this "
-            "only after the work is complete, and make it the only tool call in this "
-            "response; do not combine it with file, terminal, or other tool calls. summary "
-            "must stand on its own because the assigning conversation or a dependent task "
-            "may receive it without your working conversation or tool outputs. State the "
-            "answer, key evidence and constraints, and actionable file or artifact locations. "
-            "Use output_preview for optional supporting detail and diagnostics only for "
-            "useful structured findings. If more work is needed, continue working instead "
-            "of calling this tool."
+            "Finish your worker task with a self-contained summary of the outcome, evidence, "
+            "constraints and relevant file/artifact locations. Call only when done, as the sole tool call in "
+            "this response. data is optional structured output; output_preview supplies supporting detail "
+            "and diagnostics supplies useful findings. Continue working if the task is unfinished."
         ),
         input_schema=object_schema(
             properties={

@@ -15,6 +15,7 @@ EXPECTED_BUNDLED_SKILL_NAMES = (
     "pulsara-sheets",
     "pulsara-skill-creator",
     "pulsara-skill-installer",
+    "pulsara-subagent",
 )
 if len(EXPECTED_BUNDLED_SKILL_NAMES) != len(set(EXPECTED_BUNDLED_SKILL_NAMES)):
     raise RuntimeError("bundled Skill inventory contains duplicate official names")

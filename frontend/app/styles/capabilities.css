@@ -69,10 +69,13 @@
 .capability-list-detail--skill { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; }
 .capability-list-detail--skill > .capability-detail-actions { flex: 0 0 auto; margin: 0; }
 .capability-detail-stats { display: flex; flex-wrap: wrap; gap: 7px; }
+.capability-plugin-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.capability-plugin-summary > .capability-detail-actions { margin: 0 0 0 auto; }
+/* Bound the expanded viewport, keeping every discovered tool scrollable. */
+.capability-list-item--mcp .capability-list-detail { max-height: min(440px, 55dvh); overflow-y: auto; scrollbar-gutter: stable; }
 .capability-detail-stats span { display: inline-flex; align-items: center; gap: 4px; min-height: 26px; padding: 0 8px; border-radius: 6px; background: var(--paper-deep); color: var(--muted); font-size: var(--type-label); }
 .capability-list-detail > p { overflow-wrap: anywhere; margin: 10px 0 0; color: var(--muted); font-size: var(--type-control); line-height: 1.7; }
 .capability-list-detail--skill > p { flex: 1; min-width: 0; margin: 0; font-size: var(--type-small); line-height: 1.45; }
-.capability-success { display: flex; align-items: center; gap: 6px; margin-top: 10px; color: var(--green); font-size: var(--type-small); }
 .capability-detail-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .capability-detail-actions > span { min-width: 0; margin-right: auto; overflow-wrap: anywhere; font-size: var(--type-small); color: var(--muted); }
 .capability-detail-actions > button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; flex: 0 0 auto; white-space: nowrap; font-size: var(--type-small); }

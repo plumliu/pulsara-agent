@@ -3,7 +3,6 @@
 import {
   BookOpenText,
   Box,
-  Check,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -21,6 +20,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { McpEditor, mcpAuthLabels } from './mcp-editor';
+import type { MarkdownNotify } from './markdown-body';
 import { SkillImporter } from './skill-importer';
 import { McpImporter } from './mcp-importer';
 import { PluginConnectionEditor } from './plugin-connection-editor';
@@ -48,6 +48,7 @@ type CapabilityTab = 'plugins' | 'mcp' | 'skills';
 type AddKind = 'plugin' | 'mcp' | 'skill' | 'mcp-import';
 
 interface CapabilityViewProps {
+  onNotify: MarkdownNotify;
   snapshot?: UserCapabilitySnapshot;
   loading: boolean;
   error?: string;
@@ -119,6 +120,7 @@ function CapabilityDrawer({ open, children }: { open: boolean; children: React.R
 
 
 export function CapabilityView({
+  onNotify,
   snapshot,
   loading,
   error,
@@ -229,7 +231,13 @@ export function CapabilityView({
                   <Toggle checked={plugin.enabled} busy={busyKey === `plugin:${plugin.id}`} label={`${plugin.enabled ? '关闭' : '开启'} ${plugin.name}`} onChange={() => void togglePlugin(plugin)} />
                 </div>
                 <CapabilityDrawer open={open}>
-                  <div className="capability-list-detail"><div className="capability-detail-stats"><span><strong>{plugin.skillCount}</strong> 技能</span><span><strong>{plugin.mcpCount}</strong> MCP 服务</span>{plugin.author && <span>作者 {plugin.author}</span>}</div>{plugin.enabled && <div className="capability-success"><Check size={13} /> 已启用；会话将在安全时机采用</div>}{(plugin.mcpConnections ?? []).map((connection) => <div className="capability-detail-actions" key={connection.serverId}><span>{connection.serverId}{!plugin.enabled && ' · 插件已关闭'}</span><button className="secondary-ghost" onClick={() => setEditingPluginConnection({plugin, connection})}><PlugZap size={13} />配置连接</button></div>)}<div className="capability-detail-actions">{removeCandidate === plugin.id ? <><span className="capability-remove-warning">确定从 Pulsara 中移除？</span><button className="secondary-ghost" onClick={() => setRemoveCandidate(undefined)}>取消</button><button className="danger-ghost" disabled={busyKey === `remove:${plugin.id}`} onClick={() => void removePlugin(plugin)}><Trash2 size={13} />确认移除</button></> : <button className="danger-ghost" onClick={() => setRemoveCandidate(plugin.id)}><Trash2 size={13} />移除插件</button>}</div></div>
+                  <div className="capability-list-detail">
+                    <div className="capability-plugin-summary">
+                      <div className="capability-detail-stats"><span><strong>{plugin.skillCount}</strong> 技能</span><span><strong>{plugin.mcpCount}</strong> MCP 服务</span>{plugin.author && <span>作者 {plugin.author}</span>}</div>
+                      <div className="capability-detail-actions">{removeCandidate === plugin.id ? <><span className="capability-remove-warning">确定从 Pulsara 中移除？</span><button className="secondary-ghost" onClick={() => setRemoveCandidate(undefined)}>取消</button><button className="danger-ghost" disabled={busyKey === `remove:${plugin.id}`} onClick={() => void removePlugin(plugin)}><Trash2 size={13} />确认移除</button></> : <button className="danger-ghost" onClick={() => setRemoveCandidate(plugin.id)}><Trash2 size={13} />移除插件</button>}</div>
+                    </div>
+                    {(plugin.mcpConnections ?? []).map((connection) => <div className="capability-detail-actions" key={connection.serverId}><span>{connection.serverId}{!plugin.enabled && ' · 插件已关闭'}</span><button className="secondary-ghost" onClick={() => setEditingPluginConnection({plugin, connection})}><PlugZap size={13} />配置连接</button></div>)}
+                  </div>
                 </CapabilityDrawer>
               </article>;
             }) : <EmptyState>{normalizedQuery ? '没有匹配的插件。' : '还没有安装用户插件。'}</EmptyState>
@@ -260,7 +268,7 @@ export function CapabilityView({
                   <Toggle checked={server.enabled} busy={busyKey === `mcp:${server.id}`} label={`${server.enabled ? '关闭' : '开启'} ${server.name}`} onChange={() => void toggleMcp(server)} />
                 </div>
                 <CapabilityDrawer open={open}>
-                  <div className="capability-list-detail"><div className="capability-detail-stats"><span><strong>{server.toolCount}</strong> 工具</span><span><strong>{server.resourceCount}</strong> 资源</span><span><Workflow size={12} /> {server.availableToSubagents ? '主任务与子任务' : '仅主任务'}</span><span>{server.transport.kind === 'stdio' ? '本地命令' : 'HTTP'}</span></div>{server.enabled && (server.toolCount > 0 || server.resourceCount > 0) && <div className="capability-success"><Check size={13} /> Pulsara 会按需使用已发现的能力</div>}{server.instructions && <p>{server.instructions}</p>}{server.tools.length > 0 && <div className="capability-tool-grid">{server.tools.map((tool) => <div key={`${server.id}:${tool.remoteName}`}><code>{tool.name}</code><span>{tool.description || '没有说明'}</span></div>)}</div>}</div>
+                  <div className="capability-list-detail"><div className="capability-detail-stats"><span><strong>{server.toolCount}</strong> 工具</span><span><strong>{server.resourceCount}</strong> 资源</span><span><Workflow size={12} /> {server.availableToSubagents ? '主任务与子任务' : '仅主任务'}</span><span>{server.transport.kind === 'stdio' ? '本地命令' : 'HTTP'}</span></div>{server.instructions && <p>{server.instructions}</p>}{server.tools.length > 0 && <div className="capability-tool-grid">{server.tools.map((tool) => <div key={`${server.id}:${tool.remoteName}`}><code>{tool.name}</code><span>{tool.description || '没有说明'}</span></div>)}</div>}</div>
                   <div className="capability-detail-actions capability-drawer-actions">
                   <button className="secondary-ghost" onClick={() => setEditingMcp(server)}>编辑连接与凭据</button>
                   {(server.config.auth as { type?: string } | undefined)?.type === 'oauth' && <>
@@ -338,9 +346,9 @@ export function CapabilityView({
       </div>}
       {editingPluginConnection && <PluginConnectionEditor plugin={editingPluginConnection.plugin} connection={editingPluginConnection.connection} onClose={() => setEditingPluginConnection(undefined)} onSave={(input) => onEditPluginConnection(editingPluginConnection.plugin, editingPluginConnection.connection, input)} onAuthorization={(action) => onPluginMcpAuthorization(editingPluginConnection.plugin, editingPluginConnection.connection, action)} />}
       {addKind === 'skill' && <SkillImporter onClose={() => setAddKind(undefined)} onInstall={onInstallSkill} onPreview={onPreviewSkills} />}
-      {addKind === 'mcp' && <McpEditor onClose={() => setAddKind(undefined)} onSave={onCreateMcp} onTest={onTestMcp} />}
+      {addKind === 'mcp' && <McpEditor onClose={() => setAddKind(undefined)} onSave={onCreateMcp} onTest={onTestMcp} onNotify={onNotify} />}
       {addKind === 'mcp-import' && <McpImporter onClose={() => setAddKind(undefined)} onPreview={onPreviewMcpImport} onImport={onImportMcp} />}
-      {editingMcp && <McpEditor server={editingMcp} onClose={() => setEditingMcp(undefined)} onSave={(input) => onEditMcp(editingMcp, input)} onTest={onTestMcp} />}
+      {editingMcp && <McpEditor server={editingMcp} onClose={() => setEditingMcp(undefined)} onSave={(input) => onEditMcp(editingMcp, input)} onTest={onTestMcp} onNotify={onNotify} />}
     </section>
   );
 }

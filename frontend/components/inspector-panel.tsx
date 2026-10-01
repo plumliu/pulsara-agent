@@ -213,6 +213,7 @@ function CapabilitySwitch({
 }
 
 function ProjectCapabilityDialog({
+  onNotify,
   initialKind,
   returnFocusTo,
   onClose,
@@ -222,6 +223,7 @@ function ProjectCapabilityDialog({
   credentialScopeKey,
   mcpForms,
 }: {
+  onNotify: MarkdownNotify;
   mcpForms: ProjectMcpForms;
   initialKind: ProjectCapabilityKind;
   returnFocusTo?: HTMLElement | null;
@@ -243,12 +245,13 @@ function ProjectCapabilityDialog({
     };
   }, [returnFocusTo]);
 
-  if (initialKind === 'mcp') return createPortal(<McpEditor credentialScopeKey={credentialScopeKey} onClose={onClose} onTest={mcpForms.test} onSave={async (input) => { await onCreateMcp(input); return true; }} />, document.body);
+  if (initialKind === 'mcp') return createPortal(<McpEditor credentialScopeKey={credentialScopeKey} onClose={onClose} onTest={mcpForms.test} onNotify={onNotify} onSave={async (input) => { await onCreateMcp(input); return true; }} />, document.body);
   return createPortal(<SkillImporter scopeLabel="应用到这个目录的所有会话" onPreview={onPreviewSkills} onInstall={async (input) => {await onInstallSkill(input); return true;}} onClose={onClose} />, document.body);
 
 }
 
 function ProjectCapabilityPanel({
+  onNotify,
   kind,
   setKind,
   mcpForms,
@@ -269,6 +272,7 @@ function ProjectCapabilityPanel({
   onOpenUserCapabilities,
   onOpenHomeSettings,
 }: {
+  onNotify: MarkdownNotify;
   mcpForms: ProjectMcpForms;
   kind: ProjectCapabilityKind;
   setKind: (kind: ProjectCapabilityKind) => void;
@@ -437,8 +441,8 @@ function ProjectCapabilityPanel({
         </section>
       )}
       {busy && <div className="project-capability-busy"><LoaderCircle size={12} /> {busy}</div>}
-      {dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
-      {editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
+      {dialogKind && snapshot?.credentialScopeKey && <ProjectCapabilityDialog onNotify={onNotify} mcpForms={mcpForms} initialKind={dialogKind} credentialScopeKey={snapshot.credentialScopeKey} returnFocusTo={dialogOpener} onClose={() => setDialogKind(undefined)} onPreviewSkills={onPreviewSkills} onInstallSkill={onInstallSkill} onCreateMcp={onCreateMcp} />}
+      {editingMcp && snapshot?.credentialScopeKey && createPortal(<McpEditor credentialScopeKey={snapshot.credentialScopeKey} server={{...editingMcp, enabled: editingMcp.configuredEnabled, config: editingMcp.config!, currentIdentity: editingMcp.configIdentity!, transport: editingMcp.transport!} satisfies UserMcpServerCapability} onClose={() => setEditingMcp(undefined)} onTest={mcpForms.test} onNotify={onNotify} onAuthorization={(action) => mcpForms.authorize(editingMcp, action)} onSave={async (input) => { await onEditMcp(editingMcp, input); return true; }} />, document.body)}
       {importingMcp && createPortal(<McpImporter onPreview={mcpForms.preview} onImport={mcpForms.import} onClose={() => setImportingMcp(false)} />, document.body)}
     </div>
   );
@@ -552,6 +556,7 @@ export function InspectorPanel({
           />
         ) : (
           <ProjectCapabilityPanel
+            onNotify={onNotify}
             key={session.id}
             kind={capabilityKind}
             setKind={setCapabilityKind}

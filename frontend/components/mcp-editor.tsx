@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { ChevronDown, LoaderCircle, Plus, Save, Trash2, X, PlugZap } from 'lucide-react';
 import type { McpEditInput, McpCredentialOwner, McpConnectionTestResult, UserMcpServerCapability, PluginMcpConnection } from '../lib/pulsara-types';
+import type { MarkdownNotify } from './markdown-body';
 
 export const mcpAuthLabels: Record<string, string> = {none: '无需认证', bearer: 'Bearer Token', static_headers: '秘密 Header', oauth: '浏览器登录'};
 
@@ -18,18 +19,22 @@ function pairs(text: string): Record<string, string> {
   return value as Record<string, string>;
 }
 
-export function McpEditor({ server, onClose, onSave, onTest, onAuthorization, onRestoreDefaults, credentialOwner, credentialScopeKey, packageDefinition, connectionInputs = [] }: {
+type ConnectionTestProps = {
+  onTest: (input: McpEditInput) => Promise<McpConnectionTestResult>;
+  onNotify: MarkdownNotify;
+} | { onTest?: never; onNotify?: never };
+
+export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthorization, onRestoreDefaults, credentialOwner, credentialScopeKey, packageDefinition, connectionInputs = [] }: {
   server?: UserMcpServerCapability;
   onClose: () => void;
   onSave: (input: McpEditInput) => Promise<boolean>;
-  onTest?: (input: McpEditInput) => Promise<McpConnectionTestResult>;
   onAuthorization?: (action: 'login' | 'status' | 'cancel' | 'logout') => Promise<void>;
   onRestoreDefaults?: () => Promise<boolean>;
   credentialOwner?: McpCredentialOwner;
   credentialScopeKey?: string;
   packageDefinition?: Record<string, unknown>;
   connectionInputs?: PluginMcpConnection['connectionInputs'];
-}) {
+} & ConnectionTestProps) {
   const [inputValues, setInputValues] = useState<Record<string, string>>({});
   const [clearInputs, setClearInputs] = useState<Record<string, boolean>>({});
   const original = server?.config ?? {};
@@ -77,7 +82,6 @@ export function McpEditor({ server, onClose, onSave, onTest, onAuthorization, on
   const [retainConfirmed, setRetainConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [testResult, setTestResult] = useState('');
   useEffect(() => {
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !busy) onClose(); };
     window.addEventListener('keydown', close);
@@ -144,14 +148,17 @@ export function McpEditor({ server, onClose, onSave, onTest, onAuthorization, on
       if (perToolEffect !== undefined) extra.effect_policy = {...effect, tool_effect_overrides: pairs(perToolEffect)};
       const input: McpEditInput = { serverId: id.trim(), retainCredentialsConfirmed: retainConfirmed, config: { ...original, ...extra, display_name: name.trim() || id.trim(), enabled, transport, auth: authentication, public_headers: kind === 'stdio' ? {} : pairs(headers), scope_policy: subagents ? 'ROOT_AND_SUBAGENTS' : 'ROOT_ONLY' }, secretChanges: changes };
       if (testing && onTest) {
-        setTestResult('');
         const result = await onTest(input);
-        setTestResult(result.status === 'ready'
-          ? `连接正常：${result.tools} 个工具、${result.resources} 项资源、${result.resource_templates} 个资源模板、${result.prompts} 个提示词。未保存或启用。`
-          : ({ credential_required: '请填写连接凭据。', authorization_required: '请先保存配置并登录授权。', timeout: '连接或目录读取超时；仍可保存后再试。', schema_bound_exceeded: '已连接服务，但工具定义超出资源限制，无法采用完整工具目录；不是登录授权失败。仍可保存配置。', failed: '连接或目录读取失败，请检查地址、认证和协议；仍可保存。' })[result.status]);
+        if (result.status === 'ready') {
+          onNotify('连接正常', `${result.tools} 个工具、${result.resources} 项资源、${result.resource_templates} 个资源模板、${result.prompts} 个提示词。测试不会保存或启用连接。`, 'success');
+        } else {
+          onNotify('连接测试未完成', ({ credential_required: '请填写连接凭据。', authorization_required: '请先保存配置并登录授权。', timeout: '连接或目录读取超时；仍可保存后再试。', schema_bound_exceeded: '已连接服务，但工具定义超出资源限制，无法采用完整工具目录；不是登录授权失败。仍可保存配置。', failed: '连接或目录读取失败，请检查地址、认证和协议；仍可保存。' })[result.status], 'warning');
+        }
       } else if (await onSave(input)) onClose();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : '配置无法保存，请检查填写内容。');
+      const detail = failure instanceof Error ? failure.message : '请检查填写内容后重试。';
+      if (testing && onTest) onNotify('连接测试未完成', detail, 'warning');
+      else setError(detail);
     } finally { setBusy(false); }
   };
 
@@ -238,7 +245,6 @@ export function McpEditor({ server, onClose, onSave, onTest, onAuthorization, on
         <label className="capability-check capability-field--wide"><input type="checkbox" checked={subagents} onChange={(event) => setSubagents(event.target.checked)} />也向子任务提供</label></>}
         {destinationChanged && retainsCredential && <label className="capability-check capability-field--wide"><input type="checkbox" checked={retainConfirmed} onChange={(event) => setRetainConfirmed(event.target.checked)} />我确认将保留的凭据用于新的连接目标。</label>}
         {error && <p role="alert" className="capability-field--wide">{error}</p>}
-        {testResult && <p role="status" className="capability-field--wide">{testResult}</p>}
         {previousAuth.type === 'oauth' && onAuthorization && <div className="capability-field--wide"><small>以下操作使用已保存的连接，不使用当前未保存的修改。</small><div className="capability-detail-actions">
           {(['login', 'status', 'cancel', 'logout'] as const).map((action) => <button className="secondary-action" disabled={busy} key={action} onClick={() => void (async () => {
             setBusy(true); try { await onAuthorization(action); } finally { setBusy(false); }

@@ -355,6 +355,7 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         "pulsara-sheets",
         "pulsara-skill-creator",
         "pulsara-skill-installer",
+        "pulsara-subagent",
     )
     with BundledSkillDistributionBindingOwner() as owner:
         result = BundledSkillDefinitionProducer(owner).observe()

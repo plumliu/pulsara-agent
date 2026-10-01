@@ -34,10 +34,11 @@ describe('MCP connection editor', () => {
   });
 
   it('distinguishes an oversized tool definition from failed authorization', async () => {
-    render(<McpEditor server={server} onSave={vi.fn()} onClose={vi.fn()} onTest={vi.fn(async () => ({status: 'schema_bound_exceeded' as const, tools: 0, resources: 0, resource_templates: 0, prompts: 0}))} />);
+    const notify = vi.fn();
+    render(<McpEditor server={server} onSave={vi.fn()} onClose={vi.fn()} onNotify={notify} onTest={vi.fn(async () => ({status: 'schema_bound_exceeded' as const, tools: 0, resources: 0, resource_templates: 0, prompts: 0}))} />);
     fireEvent.click(screen.getByRole('button', {name: '测试连接'}));
-    await waitFor(() => expect(screen.getByText(/工具定义超出资源限制/)).toBeTruthy());
-    expect(screen.getByText(/不是登录授权失败/)).toBeTruthy();
+    await waitFor(() => expect(notify).toHaveBeenCalledWith('连接测试未完成', expect.stringMatching(/工具定义超出资源限制.*不是登录授权失败/), 'warning'));
+    expect(screen.queryByText(/工具定义超出资源限制/)).toBeNull();
     expect((screen.getByRole('button', {name: '保存连接'}) as HTMLButtonElement).disabled).toBe(false);
   });
   it('selects an OAuth client secret environment reference without reading the environment', async () => {

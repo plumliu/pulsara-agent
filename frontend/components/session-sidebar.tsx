@@ -156,6 +156,7 @@ export function SessionSidebar({
   onTakeControl,
 }: SessionSidebarProps) {
   const sidebarRef = useRef<HTMLElement>(null);
+  const [scrollbarNearby, setScrollbarNearby] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
   const [creatingGroup, setCreatingGroup] = useState<string | null>(null);
   const [pickingDirectory, setPickingDirectory] = useState(false);
@@ -283,7 +284,13 @@ export function SessionSidebar({
         </button>
 
         <section className="session-list" aria-label="会话目录">
-          <div className="session-list__scroll">
+          <div className="session-list__scroll" data-scrollbar-visible={scrollbarNearby || undefined}
+            onPointerMove={event => {
+              if (event.pointerType === 'touch') return;
+              const edge = event.currentTarget.getBoundingClientRect().right;
+              setScrollbarNearby(event.clientX >= edge - 24);
+            }}
+            onPointerLeave={() => setScrollbarNearby(false)}>
             <section className="session-section" aria-label="从目录中打开">
               <div className="session-group-heading">
               <button
@@ -374,14 +381,13 @@ export function SessionSidebar({
           <div className="connection-line">
             <span className={`runtime-dot runtime-dot--${runtimeStatus}`} />
             <span>{runtimeStatus === 'online' && connectionRole === 'observer' ? '已连接 · 旁观中' : connectionLabels[runtimeStatus]}</span>
-            <code>本机</code>
           </div>
-          <div className={`connection-detail${connectionRole === 'observer' ? ' is-observer' : ''}`}>
-            <span>{connectionRole === 'observer' ? '此会话正在另一个窗口中操作' : '数据保存在这台设备上'}</span>
+          {connectionRole === 'observer' && <div className="connection-detail is-observer">
+            <span>此会话正在另一个窗口中操作</span>
             {runtimeStatus === 'online' && connectionRole === 'observer' && (
               <button type="button" onClick={onTakeControl}><Eye size={11} /> 在此窗口继续</button>
             )}
-          </div>
+          </div>}
         </div>
       </aside>
     </>

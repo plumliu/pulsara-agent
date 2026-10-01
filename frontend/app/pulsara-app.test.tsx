@@ -1027,7 +1027,8 @@ describe('PulsaraApp', () => {
     expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
     expect(await screen.findByText('Personal Tools')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '查看 Personal Tools' }));
-    expect(await screen.findByText('已启用；会话将在安全时机采用')).toBeTruthy();
+    expect(screen.queryByText('已启用；会话将在安全时机采用')).toBeNull();
+    expect(screen.getByRole('switch', { name: '关闭 Personal Tools' }).getAttribute('aria-checked')).toBe('true');
     expect(screen.queryByText('已用于当前打开的会话')).toBeNull();
     expect(screen.queryByText('/Users/test/.pulsara/plugins/personal-tools')).toBeNull();
     fireEvent.click(screen.getByRole('tab', { name: /技能/ }));

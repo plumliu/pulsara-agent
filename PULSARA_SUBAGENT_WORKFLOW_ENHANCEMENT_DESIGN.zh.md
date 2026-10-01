@@ -261,6 +261,12 @@ P4 不承诺“保留完整历史而没有 token 成本”；优先让模型按�
 - 已终止 worker 的 canonical 历史在同一会话重载后仍可作为新任务来源，前提是材料通过现有读取验证。
 - 会话 fork 目前复制有效 ROOT 历史，不承诺复制 worker 任务图。首版不把父会话 task ID 伪装成子会话可引用来源；子会话可使用真正导入的 ROOT 结果材料，worker 历史选择只接受子会话自己的可读任务。后续若要复制任务图，需要独立 fork 产品合同。
 
+### 7.5 模型使用说明的分层
+
+内置 `pulsara-subagent` Skill 通过既有 bundled inventory、Skill catalog 和 `read_file` 路径提供按需指导。正文集中解释独立任务、ACTIVE 消息、终态 worker-history 后续任务、终态材料引用和成功依赖的选择，并提供普通审阅、连续追问和失败恢复的短例子。简单独立委派无需强制先读取 Skill；复杂上下文／连续追问／依赖／恢复可按目录说明读取。不新增 Skill 加载、执行或权限机制。
+
+工具描述保留调用边界和参数合同：`worker_history` 接受当前会话已启动且公开历史可读的终态 worker，只给新任务传入历史；`send_agent_message` 仅用于 ACTIVE worker，并直接指向终态追问的创建路径。等待返回语义、分页、取消不回滚副作用和结果提交的 sole-call 规则仍在各工具说明中，不能把正确调用依赖于模型是否读过 Skill。系统提示只保留委派后继续独立工作、需要结果时等待、完成不自动开启新回复及按需读取 Skill 的常驻原则，删除重复的完整编排教程。Runtime 生命周期、schema 形状、资源边界与权限均不变；说明更新不构成旧 epoch 的 SYSTEM/tools 重建边界。
+
 ## 8. Prompt 与模型认知负担
 
 工具表保持清晰分工：单任务用 spawn，真实依赖批次用 create，运行中补充用 send，需要同步才 wait。后续任务仍通过创建接口，不增加 resume/restart/followup 三组近义工具。
