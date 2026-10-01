@@ -21,7 +21,7 @@ function modelConfiguration(index: number): ModelConfigurationSummary {
 function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelConfigurationDetail, catalog: ModelCatalogReadModel = { status: 'ready', routes: [] }) {
   const target = { runtime_dsn: 'postgresql://runtime@localhost:5432/pulsara', admin_dsn: 'postgresql://admin@localhost:5432/pulsara' };
   let settings: LocalSettingsReadModel = {
-    local_settings: { postgres: target, dashscope_credentials: { embedding_configured: false, rerank_configured: false } },
+    local_settings: { pulsara_home: '/custom/pulsara-home', postgres: target, dashscope_credentials: { embedding_configured: false, rerank_configured: false } },
     database_state: 'database_reset_required', model_configurations: configurations,
   };
   const reset = vi.fn(async () => {
@@ -246,4 +246,25 @@ it('keeps a failed reset visible without automatically retrying', async () => {
   expect(await screen.findByRole('alert')).toHaveProperty('textContent', '目标已变更，请重新确认。');
   expect(reset).toHaveBeenCalledOnce();
   expect(screen.getByRole('dialog')).toBeTruthy();
+});
+
+
+it('shows the effective Pulsara Home in a disabled display beneath the connection in Local Service', async () => {
+  setup();
+  fireEvent.click(screen.getByRole('button', { name: '本地服务' }));
+  const home = screen.getByRole('region', { name: 'Pulsara 用户目录' });
+  const path = within(home).getByRole('textbox', { name: 'Pulsara 用户目录' });
+  await waitFor(() => expect(path).toHaveProperty('value', '/custom/pulsara-home'));
+  expect(path).toHaveProperty('disabled', true);
+  path.focus();
+  expect(document.activeElement).not.toBe(path);
+  expect(within(home).queryByText('当前路径，只读')).toBeNull();
+  expect(within(home).getByText('用户级技能、MCP、插件和模型连接保存在这里。')).toBeTruthy();
+  expect(within(home).queryByRole('button')).toBeNull();
+  expect(home.classList.contains('is-highlighted')).toBe(false);
+  const serviceCard = home.parentElement!;
+  expect(within(serviceCard).getByRole('heading', { name: '本地服务' })).toBeTruthy();
+  expect(within(serviceCard).getByText('页面连接').closest('.setting-row')?.nextElementSibling).toBe(home);
+  fireEvent.click(screen.getByRole('button', { name: '通用' }));
+  expect(screen.queryByRole('region', { name: 'Pulsara 用户目录' })).toBeNull();
 });

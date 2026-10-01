@@ -194,10 +194,16 @@
 
 .project-capability-overview > p { margin: -2px 0 12px; }
 .project-capability-overview > p, .session-search-recent { color: var(--muted); font-size: var(--type-caption); line-height: 1.45; }
-.project-capability-pending { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 11px; padding: 9px; border: 1px solid color-mix(in srgb,var(--violet) 22%,var(--line)); border-radius: 9px; background: var(--violet-soft); color: var(--violet); }
-.project-capability-pending strong, .project-capability-pending small { display: block; }
-.project-capability-pending strong { color: var(--ink-soft); font-size: var(--type-caption); }
-.project-capability-pending small { margin-top: 2px; color: var(--muted); font-size: var(--type-micro); line-height: 1.4; }
+.project-capability-overview .section-label .project-capability-info { display: grid; place-items: center; flex: 0 0 24px; width: 24px; height: 24px; margin-left: auto; padding: 0; border-radius: 6px; color: var(--faint); }
+.project-capability-overview .section-label .project-capability-info:hover, .project-capability-overview .section-label .project-capability-info:focus-visible { background: var(--paper-deep); color: var(--muted); }
+/* System-style material keeps the details legible in either theme. */
+.project-capability-tooltip { position: fixed; z-index: 1100; width: 280px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); overflow: auto; padding: 14px 16px; border: 1px solid rgba(35,36,40,.1); border-radius: 12px; background: rgba(250,248,245,.96); backdrop-filter: blur(20px) saturate(1.3); -webkit-backdrop-filter: blur(20px) saturate(1.3); box-shadow: 0 8px 28px rgba(25,26,30,.12), 0 2px 6px rgba(25,26,30,.05), inset 0 1px 0 rgba(255,255,255,.65); color: var(--ink-soft); font: 13px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif; }
+.project-capability-tooltip strong { color: var(--ink); font-weight: 600; }
+.project-capability-tooltip p { margin: 6px 0 0; color: color-mix(in srgb, var(--ink-soft) 78%, transparent); }
+.project-capability-tooltip ol { margin: 10px 0 0; padding: 0; list-style: none; }
+.project-capability-tooltip li { padding: 2px 0; }
+:root[data-theme='dark'] .project-capability-tooltip { border-color: rgba(255,255,255,.12); background: rgba(35,37,42,.94); box-shadow: 0 8px 28px rgba(0,0,0,.28), 0 2px 6px rgba(0,0,0,.12), inset 0 1px 0 rgba(255,255,255,.05); }
+.project-capability-overview .section-label > small { margin-left: auto; }
 .project-capability-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .project-capability-tabs { display: flex; flex: 0 0 auto; gap: 3px; padding: 3px; border-radius: 9px; background: var(--paper-deep); }
 .project-capability-tabs button { min-height: 27px; padding: 0 9px; border-radius: 6px; color: var(--muted); font-size: var(--type-caption); }
@@ -286,3 +292,6 @@
 .project-capability-dialog footer button.is-primary:disabled svg { animation: spin .9s linear infinite; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.project-capability-tooltip a { color: var(--blue); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--blue) 40%, transparent); text-underline-offset: 3px; }
+.project-capability-tooltip a:hover { text-decoration-color: currentColor; }

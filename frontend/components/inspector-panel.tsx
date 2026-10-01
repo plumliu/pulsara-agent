@@ -7,18 +7,18 @@ import {
   ChevronDown,
   ExternalLink,
   FolderCog,
+  Info,
   ListChecks,
   LoaderCircle,
   PanelRightClose,
   Plus,
   RefreshCw,
   Server,
-  Sparkles,
   TerminalSquare,
   Trash2,
   Wrench,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { McpEditor } from './mcp-editor';
 import { McpImporter } from './mcp-importer';
@@ -44,6 +44,7 @@ import type { MarkdownNotify } from './markdown-body';
 import { TaskWorkspace } from './task-workspace';
 import { BackgroundTerminalPanel } from './background-terminal-panel';
 import { AnimatedDisclosure } from './animated-disclosure';
+import { usePromptHover } from '../lib/prompt-hover';
 import type {
   BackgroundProcessLog,
   BackgroundProcessPage,
@@ -100,6 +101,7 @@ interface InspectorPanelProps {
   onRemoveProjectMcp: (server: McpServerCapability) => Promise<void>;
   onReconnectProjectMcp: (server: McpServerCapability) => Promise<void>;
   onOpenUserCapabilities: () => void;
+  onOpenHomeSettings: () => void;
   onNotify: MarkdownNotify;
   onClose: () => void;
 }
@@ -160,6 +162,28 @@ function skillIssueSummary(issue: SkillCatalogIssue): string {
   const last = segments.at(-1);
   const name = last?.toLowerCase() === 'skill.md' ? segments.at(-2) : last;
   return name ? `${name} 没有通过检查` : issue.title;
+}
+
+function SkillPrecedenceInfo({ onOpenHomeSettings }: { onOpenHomeSettings: () => void }) {
+  const { trigger, details, position, show, hide, keep, dismiss } = usePromptHover<HTMLButtonElement, HTMLDivElement>(280);
+  const tooltipId = useId();
+  return <>
+    <button ref={trigger} type="button" className="project-capability-info" aria-label="技能覆盖规则"
+      aria-describedby={position ? tooltipId : undefined}
+      onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide} onClick={show}>
+      <Info size={13} aria-hidden="true" />
+    </button>
+    {position && createPortal(<div ref={details} id={tooltipId} className="project-capability-tooltip" role="tooltip"
+      style={{ left: position.left, top: position.top, translate: position.above ? '0 -100%' : undefined }}
+      onMouseEnter={keep} onMouseLeave={hide} onFocus={keep} onBlur={hide}>
+      <strong>同名技能</strong>
+      <p>优先使用靠前的版本，其余版本会保留。</p>
+      <ol>
+        <li>当前目录下的 .pulsara/skills</li><li>当前目录下的 .agents/skills</li><li><a href="#pulsara-home" onClick={(event) => { event.preventDefault(); dismiss(); onOpenHomeSettings(); }}>用户级 Pulsara</a> 目录下的 skills</li><li>家目录下的 .agents/skills</li>
+        <li>当前目录的插件提供的技能</li><li>用户级插件提供的技能</li><li>Pulsara 自带的技能</li>
+      </ol>
+    </div>, document.body)}
+  </>;
 }
 
 function CapabilitySwitch({
@@ -243,6 +267,7 @@ function ProjectCapabilityPanel({
   onRemoveMcp,
   onReconnectMcp,
   onOpenUserCapabilities,
+  onOpenHomeSettings,
 }: {
   mcpForms: ProjectMcpForms;
   kind: ProjectCapabilityKind;
@@ -261,6 +286,7 @@ function ProjectCapabilityPanel({
   onRemoveMcp: (server: McpServerCapability) => Promise<void>;
   onReconnectMcp: (server: McpServerCapability) => Promise<void>;
   onOpenUserCapabilities: () => void;
+  onOpenHomeSettings: () => void;
   onRemoveSkill: (skill: SkillCapability) => Promise<void>;
 }) {
   const [expandedMcp, setExpandedMcp] = useState<string>();
@@ -279,7 +305,7 @@ function ProjectCapabilityPanel({
   const rows = kind === 'skills' ? projectSkills.length + inheritedSkills.length : projectMcp.length + inheritedMcp.length;
   const capabilityAttention = kind === 'skills'
     ? [
-      ...(snapshot?.skills.issues.map(skillIssueSummary) ?? []),
+      ...(snapshot?.skills.issues.filter((issue) => issue.kind !== 'shadowed').map(skillIssueSummary) ?? []),
       ...(snapshot?.skills.details.length ? ['部分技能目录暂时无法完整读取'] : []),
     ]
     : [
@@ -344,9 +370,8 @@ function ProjectCapabilityPanel({
   return (
     <div className="project-capability-panel">
       <section className="inspector-section project-capability-overview">
-        <div className="section-label"><span>{snapshot?.workspaceKind === 'quick' ? '工作目录能力' : '项目能力'}</span>{loading && <small><LoaderCircle size={10} /> 正在同步</small>}</div>
+        <div className="section-label"><span>{snapshot?.workspaceKind === 'quick' ? '工作目录能力' : '项目能力'}</span>{kind === 'skills' && <SkillPrecedenceInfo onOpenHomeSettings={onOpenHomeSettings} />}{loading && <small><LoaderCircle size={10} /> 正在同步</small>}</div>
         <p>这里的修改会应用到同一目录的所有会话。</p>
-        {snapshot?.adoption.pending && <div className="project-capability-pending"><Sparkles size={12} /><span><strong>更改已保存</strong><small>会话将在下一次模型请求前的安全时机载入；新连接就绪后可用。</small></span></div>}
         {snapshot?.adoption.attention && !snapshot.adoption.pending && (
           <div className="task-inventory-notice task-inventory-notice--error">
             <AlertTriangle size={15} />
@@ -464,6 +489,7 @@ export function InspectorPanel({
   onRemoveProjectMcp,
   onReconnectProjectMcp,
   onOpenUserCapabilities,
+  onOpenHomeSettings,
   onNotify,
   onClose,
 }: InspectorPanelProps) {
@@ -545,6 +571,7 @@ export function InspectorPanel({
             onRemoveMcp={onRemoveProjectMcp}
             onReconnectMcp={onReconnectProjectMcp}
             onOpenUserCapabilities={onOpenUserCapabilities}
+            onOpenHomeSettings={onOpenHomeSettings}
           />
         )}
       </div>

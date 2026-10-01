@@ -196,6 +196,7 @@ export interface ModelCatalogReadModel {
 
 export interface LocalSettingsSummary {
   state?: 'ready' | 'unavailable';
+  pulsara_home?: string;
   postgres: { runtime_dsn: string; admin_dsn: string | null } | null;
   dashscope_credentials: {
     embedding_configured: boolean;

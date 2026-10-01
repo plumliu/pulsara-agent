@@ -60,6 +60,7 @@ from pulsara_agent.capability.mcp_management import (
     McpSecretMutation,
 )
 from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalIdentity
+from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.web_app.browser_bridge import (
     BridgeDetachFailed,
     BridgeDetachFull,
@@ -1295,6 +1296,7 @@ class LocalHttpServer:
         return {
             "local_settings": {
                 "state": settings_state,
+                "pulsara_home": str(require_pulsara_home()),
                 "postgres": (
                     None
                     if settings.postgres is None

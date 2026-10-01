@@ -182,6 +182,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   const [promptDraftStore] = useState(() => new PromptDraftStore());
   const [activeView, setActiveView] = useState<AppView>('workbench');
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>();
+  const [settingsHighlightHome, setSettingsHighlightHome] = useState(false);
   const [bootstrap, setBootstrap] = useState<RuntimeBootstrap>();
   const [sessionList, setSessionList] = useState<SessionSummary[]>([]);
   const [sessionRevision, setSessionRevision] = useState(0);
@@ -1234,8 +1235,11 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
   }, [mergedProjection, projection.subagentRuns]);
   const renderedMessages = mergedProjection.messages;
 
-  const navigate = (view: AppView, settingsSection?: SettingsSection) => {
-    if (view === 'settings') setSettingsInitialSection(settingsSection);
+  const navigate = (view: AppView, settingsSection?: SettingsSection, highlightHome = false) => {
+    if (view === 'settings') {
+      setSettingsInitialSection(settingsSection);
+      setSettingsHighlightHome(highlightHome);
+    }
     setActiveView(view);
     setSidebarOpen(false);
   };
@@ -2574,6 +2578,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           onRemoveProjectMcp={removeProjectMcp}
           onReconnectProjectMcp={reconnectProjectMcp}
           onOpenUserCapabilities={() => setActiveView('capabilities')}
+          onOpenHomeSettings={() => navigate('settings', 'service', true)}
           onNotify={notify}
           onClose={() => setInspectorOpen(false)}
         />
@@ -2619,6 +2624,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       {activeView === 'settings' && (
         <SettingsView
           initialSection={settingsInitialSection}
+          highlightHome={settingsHighlightHome}
           sessionRevision={sessionRevision}
           onSessionsChanged={async () => { setSessionList(await adapter.listSessions()); }}
           onDeleteSession={session => { setDeleteTarget(session); setDeleteError(undefined); }}

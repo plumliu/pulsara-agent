@@ -82,7 +82,7 @@ const bootstrap: RuntimeBootstrap = {
   protocol: { major: 3, minor: 0 },
   runtime: { status: 'ready', origin: 'http://localhost', database_state: 'ready' },
   database_state: 'ready',
-  local_settings: {
+  local_settings: { pulsara_home: '/Users/test/custom-pulsara-home',
     state: 'ready',
     postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },
     dashscope_credentials: { embedding_configured: false, rerank_configured: false },
@@ -1115,7 +1115,8 @@ describe('PulsaraApp', () => {
       'pulsara:project-review',
       false,
     ));
-    expect(await within(inspector).findByText('更改已保存')).toBeTruthy();
+    await waitFor(() => expect(projectSwitch.getAttribute('aria-checked')).toBe('false'));
+    expect(within(inspector).queryByText('更改已保存')).toBeNull();
     expect(within(inspector).queryByRole('switch', { name: /pdf/ })).toBeNull();
 
     fireEvent.click(within(inspector).getByRole('tab', { name: /MCP/ }));
@@ -1124,7 +1125,7 @@ describe('PulsaraApp', () => {
     expect(within(inspector).queryByRole('switch', { name: /本地文档/ })).toBeNull();
   });
 
-  it('summarizes Skill conflicts without exposing internal absolute paths', async () => {
+  it('keeps ordinary Skill overrides quiet and explains precedence on the info icon', async () => {
     const adapter = new FakeAdapter();
     const hiddenPath = '/Users/test/source/src/pulsara_agent/bundled_skills/pdf/SKILL.md';
     const hiddenWinner = '/Users/test/.pulsara/skills/pdf/SKILL.md';
@@ -1146,11 +1147,40 @@ describe('PulsaraApp', () => {
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
 
-    expect(await within(inspector).findByText(/pdf 使用了优先级更高的版本/)).toBeTruthy();
+    await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalled());
+    expect(within(inspector).queryByText(/pdf 使用了优先级更高的版本/)).toBeNull();
+    const rules = within(inspector).getByRole('button', { name: '技能覆盖规则' });
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    fireEvent.mouseEnter(rules);
+    const tooltip = screen.getByRole('tooltip');
+    expect(tooltip.parentElement).toBe(document.body);
+    expect(rules.getAttribute('aria-describedby')).toBe(tooltip.id);
+    expect(within(tooltip).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      '当前目录下的 .pulsara/skills', '当前目录下的 .agents/skills', '用户级 Pulsara 目录下的 skills', '家目录下的 .agents/skills', '当前目录的插件提供的技能', '用户级插件提供的技能', 'Pulsara 自带的技能',
+    ]);
+    expect(within(tooltip).getByText('优先使用靠前的版本，其余版本会保留。')).toBeTruthy();
+    fireEvent.mouseLeave(rules);
+    await waitFor(() => expect(screen.queryByRole('tooltip')).toBeNull());
+    fireEvent.focus(rules);
+    expect(screen.getByRole('tooltip')).toBeTruthy();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('tooltip')).toBeNull();
     expect(within(inspector).getByText(/部分技能目录暂时无法完整读取/)).toBeTruthy();
     expect(within(inspector).queryByText(hiddenPath, { exact: false })).toBeNull();
     expect(within(inspector).queryByText(hiddenWinner, { exact: false })).toBeNull();
     expect(within(inspector).queryByText(/internal producer unavailable/)).toBeNull();
+    fireEvent.mouseEnter(rules);
+    fireEvent.click(within(screen.getByRole('tooltip')).getByRole('link', { name: '用户级 Pulsara' }));
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    const homeSetting = screen.getByRole('region', { name: 'Pulsara 用户目录' });
+    expect(homeSetting.classList.contains('is-highlighted')).toBe(true);
+    expect(document.activeElement).toBe(homeSetting);
+    expect(within(homeSetting).queryByText('当前路径，只读')).toBeNull();
+    const homePath = within(homeSetting).getByRole('textbox', { name: 'Pulsara 用户目录' });
+    expect(homePath).toHaveProperty('value', '/Users/test/custom-pulsara-home');
+    expect(homePath).toHaveProperty('disabled', true);
+    fireEvent.animationEnd(homeSetting);
+    await waitFor(() => expect(homeSetting.classList.contains('is-highlighted')).toBe(false), { timeout: 3000 });
   });
 
   it('keeps disabled or shadowed skills out of the composer suggestions', async () => {
@@ -1566,7 +1596,7 @@ describe('PulsaraApp', () => {
     expect(adapter.inspectCapabilities.mock.calls.filter(([sessionId]) => sessionId === 'session-1')).toHaveLength(1);
   });
 
-  it('clears the pending capability notice after the next turn settles', async () => {
+  it('refreshes capability adoption after the next turn without a pending banner', async () => {
     const adapter = new FakeAdapter();
     adapter.inspectCapabilities
       .mockResolvedValueOnce({
@@ -1581,7 +1611,8 @@ describe('PulsaraApp', () => {
     render(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('当前会话详情');
     fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    expect(await within(inspector).findByText('更改已保存')).toBeTruthy();
+    await within(inspector).findByRole('button', { name: /继承的能力/ });
+    expect(within(inspector).queryByText('更改已保存')).toBeNull();
 
     await act(async () => {
       adapter.lastConnection?.emit({

@@ -158,3 +158,17 @@
 .archived-session-actions button { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: var(--type-label); }
 .archived-sessions-empty { padding: 24px; color: var(--muted); font-size: var(--type-small); text-align: center; }
 @media (max-width: 700px) { .archived-sessions > ul > li { align-items: flex-start; flex-direction: column; gap: 12px; } }
+
+.settings-home { scroll-margin: 24px; }
+.settings-home:focus { outline: none; }
+.settings-home-heading { display: flex; align-items: center; gap: 9px; }
+.settings-home-heading .setting-row__copy { min-width: 0; }
+.settings-home input:disabled { opacity: 1; background: var(--paper-deep); color: var(--faint); border-color: var(--line); user-select: none; -webkit-user-select: none; pointer-events: none; }
+.settings-home.is-highlighted { animation: home-setting-highlight 1.1s ease-in-out 2; }
+@keyframes home-setting-highlight {
+  0%, 100% { background-color: transparent; }
+  45% { background-color: color-mix(in srgb, var(--blue) 8%, var(--paper-raised)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-home.is-highlighted { animation: none; }
+}

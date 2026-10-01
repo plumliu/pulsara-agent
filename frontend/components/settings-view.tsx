@@ -1,7 +1,7 @@
 'use client';
 
 import {
-  Archive, Bot, Check, ChevronLeft, ChevronRight, CircleAlert, Database, HardDrive, KeyRound,
+  Archive, Bot, Check, ChevronLeft, ChevronRight, CircleAlert, Database, HardDrive, House, KeyRound,
   LoaderCircle, Moon, Palette, Pencil, Plus, RefreshCw,
   SlidersHorizontal, Sun, Trash2, X,
 } from 'lucide-react';
@@ -25,6 +25,7 @@ type CustomReasoningKind = CustomReasoningProfile;
 
 interface SettingsViewProps {
   initialSection?: SettingsSection;
+  highlightHome?: boolean;
   sessionRevision: number;
   onSessionsChanged: () => Promise<void>;
   onDeleteSession: (session: SessionSummary) => void;
@@ -229,9 +230,24 @@ function ModelFormContainer({ editing, busy, onClose, children }: {
   return editing ? <dialog ref={dialog} className="model-edit-dialog" aria-label="修改模型配置" onClose={onClose} onCancel={(event) => { if (busy) event.preventDefault(); else onClose(); }}>{content}</dialog> : content;
 }
 
-export function SettingsView({ initialSection, theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession }: SettingsViewProps) {
+export function SettingsView({ initialSection, highlightHome, theme, bootstrap, runtimeStatus, adapter, onThemeChange, onConfigurationChanged, onNotify, sessionRevision, onSessionsChanged, onDeleteSession }: SettingsViewProps) {
   const { showBuiltinToolResults, onChange: onToolResultDisplayChange } = useContext(ToolResultDisplayContext);
   const [section, setSection] = useState<SettingsSection>(initialSection ?? (bootstrap?.database_state === 'ready' ? 'general' : 'service'));
+  const homeSetting = useRef<HTMLElement>(null);
+  const homeLocated = useRef(false);
+  const [homeHighlighted, setHomeHighlighted] = useState(Boolean(highlightHome));
+  useEffect(() => {
+    if (!highlightHome) return;
+    // Also clear the highlight when reduced motion disables the CSS animation.
+    const timer = setTimeout(() => setHomeHighlighted(false), 2200);
+    return () => clearTimeout(timer);
+  }, [highlightHome]);
+  useEffect(() => {
+    if (!highlightHome || section !== 'service' || homeLocated.current) return;
+    homeLocated.current = true;
+    homeSetting.current?.scrollIntoView?.({ block: 'center' });
+    homeSetting.current?.focus({ preventScroll: true });
+  }, [highlightHome, section]);
   const [settings, setSettings] = useState<LocalSettingsReadModel | undefined>(bootstrap);
   const [catalog, setCatalog] = useState<ModelCatalogReadModel>();
   const [loading, setLoading] = useState(true);
@@ -640,7 +656,15 @@ export function SettingsView({ initialSection, theme, bootstrap, runtimeStatus, 
             <div className="database-state-row"><span className={`database-state database-state--${databaseState}`}><i />{databaseStateCopy}</span><small>浏览器设置壳：{statusLabels[runtimeStatus]}</small></div>
             <div className="database-form"><label><span>Runtime DSN</span><input value={runtimeDsn} onChange={(event) => setRuntimeDsn(event.target.value)} placeholder="postgresql://pulsara:…@localhost:5432/pulsara" /></label><label><span>Admin DSN（可选）</span><input value={adminDsn} onChange={(event) => setAdminDsn(event.target.value)} placeholder="只用于显式初始化、升级或重置" /></label><p>初始化/升级将使用上方已保存的 Admin DSN 管理同一数据库，并按 Runtime DSN 验证运行角色。请先核对目标数据库与角色。</p>{databaseMessage && <div className="database-message">{databaseMessage}</div>}<div className="form-actions"><button className="primary-action" disabled={Boolean(databaseBusy) || !runtimeDsn.trim()} onClick={() => void saveDatabase()}>{databaseBusy === 'save' ? <LoaderCircle size={13} /> : <Check size={13} />}保存连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres} onClick={() => void databaseAction('check')}>{databaseBusy === 'check' ? <LoaderCircle size={13} /> : <RefreshCw size={13} />}检查连接</button><button disabled={Boolean(databaseBusy) || !settings?.local_settings.postgres?.admin_dsn || databaseState === 'database_reset_required'} onClick={() => void databaseAction('migrate')}>{databaseBusy === 'migrate' ? <LoaderCircle size={13} /> : <Database size={13} />}初始化 / 升级</button><button className="subtle-danger" disabled={Boolean(databaseBusy) || runtimeStatus !== 'online' || !settings?.local_settings.postgres?.admin_dsn || databaseState === 'database_resetting'} onClick={() => { setResetError(undefined); setResetTarget(settings!.local_settings.postgres!); }}><Trash2 size={13} />重置数据…</button></div></div>
           </section>
-          <section className="settings-group"><header><HardDrive size={16} /><div><h2>本地服务</h2><p>Pulsara 的设置与任务都由这台设备上的进程管理。</p></div></header><SettingRow icon={HardDrive} title="页面连接" detail="浏览器与本地设置服务"><span className={`connection-value connection-value--${runtimeStatus}`} role="status"><i aria-hidden="true" />{statusLabels[runtimeStatus]}</span></SettingRow></section>
+          <section className="settings-group"><header><HardDrive size={16} /><div><h2>本地服务</h2><p>Pulsara 的设置与任务都由这台设备上的进程管理。</p></div></header><SettingRow icon={HardDrive} title="页面连接" detail="浏览器与本地设置服务"><span className={`connection-value connection-value--${runtimeStatus}`} role="status"><i aria-hidden="true" />{statusLabels[runtimeStatus]}</span></SettingRow>
+            <section ref={homeSetting} id="pulsara-home" tabIndex={-1} aria-labelledby="pulsara-home-title"
+              className={`database-form settings-home${homeHighlighted ? ' is-highlighted' : ''}`} onAnimationEnd={() => setHomeHighlighted(false)}>
+              <div className="settings-home-heading"><span className="setting-row__icon"><House size={15} aria-hidden="true" /></span>
+                <div className="setting-row__copy"><strong id="pulsara-home-title">Pulsara 用户目录</strong><small>用户级技能、MCP、插件和模型连接保存在这里。</small></div>
+              </div>
+              <input aria-label="Pulsara 用户目录" disabled value={settings?.local_settings.pulsara_home ?? ''} placeholder={loading ? '正在读取…' : '暂时无法读取目录'} />
+            </section>
+          </section>
         </>}
       </div>
     </div>

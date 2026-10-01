@@ -162,6 +162,7 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
     onToggleProjectMcp: vi.fn(async () => undefined),
     onRemoveProjectMcp: vi.fn(async () => undefined),
     onReconnectProjectMcp: vi.fn(async () => undefined),
+    onOpenHomeSettings: vi.fn(),
     onOpenUserCapabilities: vi.fn(),
     onNotify: vi.fn(),
     onClose: vi.fn(),

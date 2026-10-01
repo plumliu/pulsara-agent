@@ -1515,3 +1515,44 @@ def test_workspace_path_candidates_http_contract_and_security(tmp_path):
         finally:
             await server.aclose()
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("custom_home", [False, True])
+def test_settings_expose_effective_home_readonly_independently_of_cwd(tmp_path, monkeypatch, custom_home):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "os-home"))
+    home = tmp_path / "custom-home" if custom_home else tmp_path / "os-home" / ".pulsara"
+    if custom_home:
+        monkeypatch.setenv("PULSARA_HOME", str(home))
+    else:
+        monkeypatch.delenv("PULSARA_HOME", raising=False)
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    monkeypatch.chdir(launch)
+    home.mkdir(parents=True)
+    marker = home / "keep.txt"
+    marker.write_text("unchanged")
+
+    async def exercise():
+        static = tmp_path / "static"
+        static.mkdir()
+        (static / "index.html").write_text("Pulsara")
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, _Sessions()),
+            bridge=cast(LocalBrowserBridge, _Bridge()),
+            static_root=static, requested_port=0,
+            is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                for path in ("/api/app/bootstrap", "/api/local-settings"):
+                    async with client.get(server.origin + path) as response:
+                        assert response.status == 200
+                        assert (await response.json())["local_settings"]["pulsara_home"] == str(home)
+        finally:
+            await server.aclose()
+
+    asyncio.run(exercise())
+    assert marker.read_text() == "unchanged"
+    assert sorted(item.name for item in home.iterdir()) == ["keep.txt"]
