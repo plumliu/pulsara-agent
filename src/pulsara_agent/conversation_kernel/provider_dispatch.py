@@ -5104,7 +5104,7 @@ class ProviderDispatchCoordinator:
                 measurement=measurement,
             ).take_for(candidate)
         try:
-            floors = ()
+            catalog_floors, tool_floors = (), ()
             while (
                 measurement.quote.final_wire_estimated_input_tokens
                 > measurement.quote.effective_input_budget_tokens
@@ -5119,10 +5119,13 @@ class ProviderDispatchCoordinator:
                     or candidate.sources is None
                 ):
                     break
-                next_floors = self._compiler.next_catalog_render_floors(
-                    sources=candidate.sources,
+                next_floors = await self._io.run(
+                    self._compiler.next_wire_render_floors,
+                    deadline_monotonic=deadline,
+                    request=candidate.compile_request,
                     compiled=candidate.append_result.compiled_input,
-                    floors=floors,
+                    catalog_floors=catalog_floors,
+                    tool_floors=tool_floors,
                 )
                 if next_floors is None:
                     break
@@ -5136,7 +5139,8 @@ class ProviderDispatchCoordinator:
                         request,
                         planning=candidate.planning,
                         deadline_monotonic=deadline,
-                        catalog_render_floors=next_floors,
+                        catalog_render_floors=next_floors[0],
+                        tool_render_floors=next_floors[1],
                         wire_selection=candidate.append_result.compiled_input,
                     )
                     cold = None
@@ -5148,7 +5152,8 @@ class ProviderDispatchCoordinator:
                         request,
                         planning=candidate.planning,
                         deadline_monotonic=deadline,
-                        catalog_render_floors=next_floors,
+                        catalog_render_floors=next_floors[0],
+                        tool_render_floors=next_floors[1],
                         wire_selection=candidate.append_result.compiled_input,
                     )
                     cold = replace(candidate.cold_semantic, compiled_result=append)
@@ -5158,7 +5163,7 @@ class ProviderDispatchCoordinator:
                     append_result=append,
                     cold_semantic=cold,
                 )
-                floors = next_floors
+                catalog_floors, tool_floors = next_floors
                 measurement = await self._freeze_candidate_wire_measurement(
                     candidate, deadline=deadline
                 )

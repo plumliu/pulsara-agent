@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import json
 from typing import Mapping
 
@@ -23,6 +24,7 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceCandidate,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
+    ProviderToolResultContextMetadata,
     FrozenRetainedHistoricalRequest,
     provider_input_item_text,
     StructuredModelInputLimits,
@@ -33,13 +35,26 @@ from pulsara_agent.model_input.continuity import (
     SourceObservationPresence,
     encode_runtime_observation,
 )
-from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition
+from pulsara_agent.ports.artifact import (
+    ToolOutputArtifactDisposition,
+    ToolOutputArtifactUnavailabilityReason,
+    ToolResultDisplayKind,
+)
+from pulsara_agent.ports.tool_execution import (
+    ToolOutputSourceCoverage,
+    ToolOutputSourceCoverageReason,
+)
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+    MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS,
+    ToolObservationOrigin,
+    freeze_tool_observation_timing_fact,
 )
 from pulsara_agent.primitives.tool_result_projection import (
     ToolResultLogicalMessageKind,
+    ToolResultDeliveryRequirement,
+    MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES,
     decode_provider_tool_result_observation,
     provider_neutral_message_logical_bytes,
     project_tool_result_storage_body,
@@ -396,6 +411,133 @@ def source_variant_message(
         presence=SourceObservationPresence.VALUE,
         contract_version=candidate.source_contract_version,
         body=text,
+    )
+
+
+def ordinary_tool_result_can_degrade(item: FrozenProviderInputItem) -> bool:
+    """Eligibility for final-wire feedback, separate from historical Plan semantics."""
+    return (
+        item.item_kind
+        in {
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        }
+        and item.tool_result_context is not None
+        and item.tool_result_context.timing.observation_origin
+        is not ToolObservationOrigin.PLAN_CONTROL
+        and item.tool_result_delivery.requirement
+        is ToolResultDeliveryRequirement.BEST_AVAILABLE
+        and not any(isinstance(part, LLMImagePart) for part in item.content)
+    )
+
+
+def ordinary_tool_result_minimum_upper(tool_call_id: str) -> LLMMessage:
+    """Bound an ordinary omitted late carrier with the existing renderers.
+
+    This admission witness is neither sent nor stored. Metadata has closed ASCII
+    enums and a native artifact:tool-result:<64 hex> ID. Timing witnesses cover
+    all legal origin/duration combinations. Provenance is already JSON bounded:
+    one all-backslash ID fills that bound and maximizes the next JSON escaping.
+    The runner adds a closure, bounding normal delivery as well as closure+late.
+    Canonical/epoch physical admission continues to use its independent FULL upper.
+    """
+    maximum = MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS
+    timings = tuple(
+        freeze_tool_observation_timing_fact(
+            session_id="minimum-upper",
+            turn_id="minimum-upper",
+            observed_at=datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc),
+            observation_duration_microseconds=duration,
+            tool_reported_duration_microseconds=reported,
+            observation_origin=origin,
+        )
+        for origin in ToolObservationOrigin
+        if origin is not ToolObservationOrigin.PLAN_CONTROL
+        for duration in (
+            (None,) if origin is ToolObservationOrigin.POLICY else (None, maximum)
+        )
+        for reported in (
+            (None,) if origin is ToolObservationOrigin.POLICY else (None, maximum)
+        )
+    )
+    # JSON array and string delimiters take four bytes; each backslash takes two.
+    provenance = ("\\" * ((MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES - 4) // 2),)
+    metadata = ProviderToolResultContextMetadata(
+        result_id="minimum-upper",
+        result_state="CANCELLED_BEFORE_DISPATCH",
+        display_kind=max(ToolResultDisplayKind, key=lambda value: len(value.value)),
+        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
+        artifact_id=None,
+        source_coverage=ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
+        source_coverage_reason=max(
+            ToolOutputSourceCoverageReason, key=lambda value: len(value.value)
+        ),
+        artifact_unavailability_reason=None,
+        model_visible_memory_fact_ids=provenance,
+        timing=timings[0],
+    )
+    item = FrozenProviderInputItem(
+        FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        "minimum-upper",
+        1,
+        "minimum-upper",
+        (LLMTextPart(""),),
+        tool_call_id=tool_call_id,
+        tool_request_entry_id="minimum-upper",
+        tool_result_context=metadata,
+        tool_result_body_text="",
+    )
+    artifacts = tuple(
+        replace(
+            item,
+            tool_result_context=replace(
+                metadata,
+                artifact_disposition=disposition,
+                artifact_id=("artifact:tool-result:" + "0" * 64)
+                if disposition
+                in {
+                    ToolOutputArtifactDisposition.AVAILABLE,
+                    ToolOutputArtifactDisposition.INCOMPLETE,
+                }
+                else None,
+                artifact_unavailability_reason=max(
+                    ToolOutputArtifactUnavailabilityReason,
+                    key=lambda value: len(value.value),
+                )
+                if disposition is ToolOutputArtifactDisposition.UNAVAILABLE
+                else None,
+            ),
+        )
+        for disposition in ToolOutputArtifactDisposition
+    )
+    # Each body is rendered twice as text in the outer carrier/provider JSON;
+    # compare escaped lengths, including quoted-versus-null metadata members.
+    item = max(
+        artifacts,
+        key=lambda candidate: len(
+            canonical_json_bytes(
+                canonical_json_bytes(_omitted_tool_result_body(candidate)).decode(
+                    "utf-8"
+                )
+            )
+        ),
+    )
+    body = _omitted_tool_result_body(item)
+    messages = tuple(
+        _tool_result_message(
+            replace(
+                item,
+                tool_result_context=replace(item.tool_result_context, timing=timing),
+            ),
+            body,
+        )
+        for timing in timings
+    )
+    return max(
+        messages,
+        key=lambda message: len(
+            canonical_json_bytes(text_part_values(message.content)[0])
+        ),
     )
 
 

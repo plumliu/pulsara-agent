@@ -3858,9 +3858,9 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # Compiler v15 adds final-wire catalog selection. Its contract boundary
+        # Compiler v16 adds final-wire ordinary-result selection. Its contract boundary
         # changes the semantic root; this unchanged input keeps its decision.
-        "sha256:14f58bd7a7d0068e6908efa530175783f5be5f036e50b617902e634575563c7e"
+        "sha256:d2454adc9d78ff7c26748f9f5a4d81a15fa919a58d24c2704301c19e0b5527d1"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

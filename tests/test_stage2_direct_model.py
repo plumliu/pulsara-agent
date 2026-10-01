@@ -451,6 +451,7 @@ def _prepared_execution(
     port: DirectKernelModelPort,
     *,
     maximum_input_tokens: int = 4_096,
+    tool_names: tuple[str, ...] = ("read_file",),
     scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     scope_subagent_task_id: str | None = None,
     canonical_items: tuple[FrozenProviderInputItem, ...] = (),
@@ -461,7 +462,7 @@ def _prepared_execution(
     sequence = max(
         (item.source_entry_sequence or 0 for item in canonical_items), default=0
     )
-    tool_port = StructuredToolPort(object(), tool_names=("read_file",))
+    tool_port = StructuredToolPort(object(), tool_names=tool_names)
     binding = test_model_binding(port._model_runtime)  # noqa: SLF001
     surface = prepare_test_direct_tool_surface(
         tool_port,

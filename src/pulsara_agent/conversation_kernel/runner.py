@@ -91,7 +91,10 @@ from pulsara_agent.llm.input import (
     LLMToolCall,
     MessageRole,
 )
-from pulsara_agent.model_input.lowering import image_reference_digest_part
+from pulsara_agent.model_input.lowering import (
+    image_reference_digest_part,
+    ordinary_tool_result_minimum_upper,
+)
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
@@ -300,6 +303,8 @@ from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
 from pulsara_agent.hooks.matcher import event_matcher_subject
 from pulsara_agent.primitives.tool_result_projection import (
     ToolResultLogicalMessageKind,
+    ToolResultDeliveryRequirement,
+    classify_tool_result_delivery,
     conservative_tool_result_logical_message,
     provider_neutral_message_logical_bytes,
 )
@@ -3255,7 +3260,31 @@ class ConversationKernelRunner:
             canonical_followup += quote[0]
             logical_followup += quote[1]
             followup_items += quote[2]
-            suffix_messages.extend(quote[3])
+            # Physical canonical/epoch maxima above remain independent of the
+            # smallest legal provider display. Predict possible successful FULL
+            # delivery with the same classifier used by the canonical reader.
+            arguments = thaw_json(call.arguments)
+            possible_image = False
+            if call.tool_name == "visualization_render":
+                try:
+                    _, possible_image = parse_visualization_source(arguments)
+                except ValueError:
+                    pass
+            delivery = classify_tool_result_delivery(
+                tool_name=call.tool_name,
+                result_state="SUCCESS",
+                public_arguments=arguments,
+                has_image_attachment=possible_image,
+            )
+            suffix_messages.extend(
+                quote[3]
+                if plan_batch
+                or delivery.requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
+                else (
+                    _tool_result_closure_message(call.tool_call_id),
+                    ordinary_tool_result_minimum_upper(call.tool_call_id),
+                )
+            )
 
         image_calls: list[tuple[int, CompletedToolCallBlock, str]] = []
         for call_ordinal, call in enumerate(calls):
@@ -3284,7 +3313,8 @@ class ConversationKernelRunner:
             )
             reference_upper = (
                 image_source.value
-                if image_source.kind in {
+                if image_source.kind
+                in {
                     ViewImageSourceKind.IMAGE_REF,
                     VisualizationSourceKind.VISUALIZATION_REF,
                 }
@@ -3424,7 +3454,9 @@ class ConversationKernelRunner:
         # cannot decide whether this mutation is allowed for a model's token
         # window. The ordinary next-dispatch planner admits the actual catalog
         # and invokes existing compaction when needed, without rebasing prefixes.
-        suffix_messages.extend(message for message in source_messages if message not in catalog_messages)
+        suffix_messages.extend(
+            message for message in source_messages if message not in catalog_messages
+        )
         wire = (
             quote_provider_followup_wire_resources(
                 request=request,

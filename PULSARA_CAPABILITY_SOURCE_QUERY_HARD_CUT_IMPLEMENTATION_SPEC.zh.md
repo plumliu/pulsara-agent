@@ -481,3 +481,21 @@ P2：ordinary preview 允许原始纯文本，reader 会将其再次放入 late 
 2026-10-01 收口：GPT-6 Astra / xhigh critic 交叉复审通过，无剩余阻塞。复审补齐冷 assembly 与 candidate 的完整 request/planning/result/call/read 校验，以及 floor 选择或重编异常时尚未消费的 wire measurement 恰好释放一次；没有新增 authority、持久状态或恢复机制。聚焦回归 189 项通过；全仓库非 PostgreSQL／非 retrieval_live 回归 2205 项通过（404 项依标记未选择）；PostgreSQL Host/runner/图片核心集成 147 项通过。上述运行包含重叠测试，不累加为总数。修改文件 Ruff 与 diff whitespace 检查通过。
 
 随后使用保存的 OpenRouter GPT-6 Luna / xhigh 配置，通过生产 KernelHostCore/ModelRuntime owners、只读设置注入、临时 Pulsara home 和已验证的本机 disposable PostgreSQL database 跑窄范围真实 provider dogfood。两轮、六次实际模型调用完成：manage_capability 安装 USER loose Skill 后继续读取文件与图片；后续 list_capabilities 确认新 Skill。全部实际 wire quote 在模型预算内，实际 HTTP 返回 200；临时 home/database 已清理，生产配置与数据库未改。首次临时脚本未解析 macOS 符号链接目录且使用相对读取路径，产生 STAGING_UNAVAILABLE/FILE_NOT_FOUND；修正测试路径后通过，保留首轮失败记录，没有放宽生产路径校验。这次真实运行验证正常能力变更与图片续接；100k 清单超预算降级、两类 wire API 的逐字前缀、迟到控制字符极限及异常清理由受控真实 compiler/adapter/preview 回归证明，不将窄 dogfood 描述为这些极限分支的真实 provider 实测。
+
+### 13.3 普通工具结果的最低反馈预留与最终展示选择
+
+本节取代第 13.2 节中普通结果仍按最大 FULL wire 预留的保留项。canonical bytes/items、epoch logical bytes 继续使用原最大结算上界，包括 late 原始文本 6x；只有 ordinary BEST_AVAILABLE 的执行前 wire/token 预留改为既有 OMITTED_BODY 的合法上界。物理最大值与模型展示下界必须分开计算。最小表示仍无法容纳时，保持 effects/assistant settlement 前的 OutputResourceInterruption，不新增当场 compaction/retry owner。
+
+lowering 唯一拥有结果变体与最低正文 renderer，复用既有 metadata/outer envelope；runner 不复制字段或发明新的模型结果格式。上界保留闭合状态、coverage、artifact 可用性及原生固定格式 ID、全部合法 timing、既有 canonical JSON 8 KiB/50 条 memory provenance 边界。必须覆盖正常结果与 closure+late 分支，不能承诺 COMPACT/REF_ONLY 一定存在或存在完整 artifact。上界仅用于本地规划，不发送或持久化。
+
+执行前使用既有 classify_tool_result_delivery 的成功分支及实际 public arguments；可能有图片的调用沿既有图片解析/绑定 owner 判断。成功的目录页、MCP schema、artifact read/export 与图片保留最大 FULL 预留，本节不优化它们的收费。SKILL_ACTIVATION 当前没有实际分类消费，不根据 read_file 路径另加完整交付规则。Plan batch 保留专门预留；实际 timing origin 为 PLAN_CONTROL 的结果不进入新增 wire 降级。其既有省略正文误投影为 REJECTED/error 的问题不记作本节已修复。
+
+实际结果先尝试最丰富的合法展示；最终 wire 超预算时，compiler 在第 13.2 节同一反馈入口按既有 tool/source degradation key 推进普通结果与 Skill/MCP 清单的实际可用变体。不得假设每一级 wire 单调减少；有限变体自然终止并沿既有 deadline，不新增重试次数 cap。变体扫描通过既有 KernelSessionIO worker 执行，复用 compiler deadline 在逐项扫描和 lowering 前后检查；异常时未消费的 measurement 恰好释放一次。原 request/canonical/source/target/planning 完整值保持，其他已经降级的选择不升级。same epoch 只选择未安装 suffix；cold/adopted successor 可重选合法历史展示。已有 SYSTEM/tools/messages、实际 assistant/native replay、FULL_REQUIRED 和图片不削减。
+
+图片混合批次的 base suffix/base quote 同步使用普通结果最低上界；释放的 wire/token 空间可分给图片，图片增量仍实际计量，canonical/epoch 最大保护不变。dry/post、prospective、Hook 与普通后续继续采用同一实际 wire winner。模型不新增预算参数或手动降级操作。
+
+合同保证规范结算与冻结基础上的最低反馈可表示，实际 provider 输入始终经过最终 gate；不保证未来追加 mandatory 输入必定容纳、compaction 必定恢复或任意结果完整内联，不因后续模型调用失败重做副作用。验收覆盖两 API、正常/late、极限 provenance/timing、缺失 COMPACT/REF、FULL/Plan 排除、混合多图片、native replay、逐字同 epoch 前缀，以及最低仍不 fit 时未执行工具。代码测试后由同一 Resource reservation critic 交叉审核。
+
+2026-10-01 收口：本节已完成代码 hard cut，compiler 合同升级至 v16-tool-result-final-wire，原 catalog-only 反馈入口已删除。Resource reservation critic（GPT-6 Astra / xhigh）完成代码交叉复审，无剩余阻塞；复审发现的新变体扫描 deadline／事件循环接缝已按既有 worker 和 deadline owner 修订，未增加调度或持久机制。最终全仓库非 PostgreSQL／非 retrieval_live 回归 2242 项通过（406 项依标记未选择）；PostgreSQL Host/runner/图片核心集成 147 项及新增完整 runner gate 回归 2 项通过。critic 独立聚焦回归 82 项通过，包含新增两项 PostgreSQL 测试，与上述集合有重叠，不累加为总数。修改文件 Ruff 与 diff whitespace 检查通过。
+
+新增 gate 回归使用 scripted 模型和真实 PostgreSQL runner：64k 窗口接受三次普通工具并完成后续（旧最大 FULL 后缀自身约 119k），32k 窗口因最低反馈不足在 assistant settlement／effects 前拒绝，执行尝试与 assistant／工具结果记录均为零。两 API 的多图片与大 native replay 使用真实 quote owner／adapter 受控验证 same-base 增量和完整 replay 字节收费；正常／late 上界、来源极值、FULL／Plan 排除和同 epoch 字节连续性均有受控回归。本节未将这些极限分支描述为真实 provider dogfood；第 13.2 节真实运行记录仍只证明其当时的窄范围流程。

@@ -221,6 +221,8 @@ def _prepare_case(
     user_text="Continue.",
     extra_sources=(),
     initial_catalog=None,
+    tool_items=(),
+    tool_names=None,
 ):
     compiler = StructuredModelInputCompiler()
     owner = new_test_provider_input_continuity_owner()
@@ -228,7 +230,7 @@ def _prepare_case(
         _snapshot(_user(user_text)),
         _sources(*(() if initial_catalog is None else (initial_catalog,))),
         budget=budget,
-        tool_names=("manage_capability", "view_image") if mixed else (),
+        tool_names=tool_names if tool_names is not None else (("manage_capability", "view_image") if mixed else ()),
         route_wire_profile=RouteWireProfile(wire_api=api),
     )
     model, prepared = _PREPARED_MODEL_CALLS[initial.compile_binding.binding_fingerprint]
@@ -244,6 +246,7 @@ def _prepare_case(
     if mixed:
         results, image = _mixed_results()
         items += results
+    items += tool_items
     snapshot = _snapshot(
         *items,
         canonical_expanded_bytes=sum(
@@ -653,7 +656,7 @@ def test_catalog_selection_failure_consumes_real_measurement_exactly_once(
 
     monkeypatch.setattr(coordinator._model, "freeze_wire_measurement", capture)
     method = (
-        "next_catalog_render_floors"
+        "next_wire_render_floors"
         if failure_site == "floor-selection"
         else "compile_new_epoch"
         if cold

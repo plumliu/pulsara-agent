@@ -76,6 +76,7 @@ from pulsara_agent.model_input.lowering import (
     LoweredCanonicalItem,
     image_reference_part,
     lower_canonical_item,
+    ordinary_tool_result_can_degrade,
     source_variant_message,
 )
 from pulsara_agent.primitives.context import (
@@ -100,9 +101,7 @@ from pulsara_agent.model_input.visualization_source import (
 )
 
 
-COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v15-catalog-final-wire"
-)
+COMPILER_CONTRACT_VERSION = "pulsara.structured-model-input-compiler.prefix-continuity.v16-tool-result-final-wire"
 
 
 class _SacrificeRank(IntEnum):
@@ -718,6 +717,29 @@ class StructuredModelInputCompiler:
         return state
 
     @staticmethod
+    def _apply_tool_render_selection(states, wire_selection, floors):
+        choices = (
+            {}
+            if wire_selection is None
+            else {
+                item.source_entry_fingerprint: item.selected_mode
+                for item in wire_selection.tool_result_decisions
+            }
+        )
+        lower_bounds = dict(floors)
+        for state in states:
+            identity = compiled_tool_result_source_fingerprint(state.item)
+            modes = tuple(item.mode for item in state.lowered.tool_result_variants)
+            previous = choices.get(identity)
+            if previous is not None:
+                state.selected = modes.index(previous)
+            floor = lower_bounds.get(identity)
+            if floor is not None:
+                if not ordinary_tool_result_can_degrade(state.item):
+                    raise ValueError("wire tool render floor is not an ordinary result")
+                state.selected = max(state.selected, modes.index(floor))
+
+    @staticmethod
     def _validate_wire_selection(request, selection):
         if selection is not None and (
             selection.canonical_input_identity != request.canonical_input.identity
@@ -730,16 +752,27 @@ class StructuredModelInputCompiler:
                 ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
             )
 
-    def next_catalog_render_floors(self, *, sources, compiled, floors=()):
-        """Advance one existing catalog variant without altering frozen source facts.
+    def next_wire_render_floors(
+        self,
+        *,
+        request,
+        compiled,
+        catalog_floors=(),
+        tool_floors=(),
+        deadline_monotonic: float | None = None,
+    ):
+        """Advance one legal routing/result variant on the frozen compile basis.
 
         Final wire measurement owns fit; the compiler owns legal render order.
-        Only not-yet-installed catalog emissions may advance. Finite owner
-        variants terminate selection; no retry or lifetime cap is introduced.
+        Append decisions cover only uninstalled delta; a cold epoch may reselect
+        its history. Finite variants terminate without a retry/lifetime cap.
         """
+        deadline = _CompileDeadline(deadline_monotonic)
+        deadline.check()
         decisions = {item.source_kind: item for item in compiled.source_decisions}
         eligible = []
-        for candidate in sources.candidates:
+        for candidate in request.sources.candidates:
+            deadline.check()
             if candidate.source_kind not in {
                 ContextSourceKind.SKILL_CATALOG,
                 ContextSourceKind.MCP_CATALOG,
@@ -756,14 +789,58 @@ class StructuredModelInputCompiler:
                         self._source_degradation_key(candidate),
                         candidate.source_kind,
                         modes[index + 1],
+                        "catalog",
                     )
                 )
+        decisions_by_result = {
+            item.source_entry_fingerprint: item
+            for item in compiled.tool_result_decisions
+        }
+        artifact_read_available = any(
+            tool.name == "artifact_read"
+            for tool in request.compile_binding.tool_surface.tool_specs
+        )
+        for item in request.canonical_input.items:
+            deadline.check()
+            if not ordinary_tool_result_can_degrade(item):
+                continue
+            identity = compiled_tool_result_source_fingerprint(item)
+            decision = decisions_by_result.get(identity)
+            # Append decisions describe only the not-yet-installed delta.
+            if decision is None:
+                continue
+            lowered = lower_canonical_item(
+                item,
+                artifact_read_available=artifact_read_available,
+                limits=self._limits,
+            )
+            deadline.check()
+            state = _ToolState(
+                lowered,
+                current_turn=item.source_turn_id
+                == request.canonical_input.identity.turn_id,
+            )
+            modes = tuple(variant.mode for variant in lowered.tool_result_variants)
+            state.selected = modes.index(decision.selected_mode)
+            if self._tool_can_advance(state):
+                eligible.append(
+                    (
+                        self._tool_degradation_key(state),
+                        identity,
+                        modes[state.selected + 1],
+                        "tool",
+                    )
+                )
+        deadline.check()
         if not eligible:
             return None
-        _, kind, mode = min(eligible)
-        next_floors = dict(floors)
-        next_floors[kind] = mode
-        return tuple(sorted(next_floors.items(), key=lambda item: item[0].value))
+        _, identity, mode, category = min(eligible)
+        catalogs, tools = dict(catalog_floors), dict(tool_floors)
+        (catalogs if category == "catalog" else tools)[identity] = mode
+        return (
+            tuple(sorted(catalogs.items(), key=lambda item: item[0].value)),
+            tuple(sorted(tools.items())),
+        )
 
     def compile(
         self,
@@ -773,6 +850,7 @@ class StructuredModelInputCompiler:
         catalog_render_floors: tuple[
             tuple[ContextSourceKind, ContextRenderMode], ...
         ] = (),
+        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
     ) -> FrozenCompiledModelInput:
         result = self._compile(
@@ -780,6 +858,7 @@ class StructuredModelInputCompiler:
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
             catalog_render_floors=catalog_render_floors,
+            tool_render_floors=tool_render_floors,
             wire_selection=wire_selection,
         )
         assert isinstance(result, FrozenCompiledModelInput)
@@ -810,6 +889,7 @@ class StructuredModelInputCompiler:
         catalog_render_floors: tuple[
             tuple[ContextSourceKind, ContextRenderMode], ...
         ] = (),
+        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
     ) -> FrozenCompiledModelInput | FrozenModelInputSemanticProjection:
         self._validate_wire_selection(request, wire_selection)
@@ -858,19 +938,9 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
-        if wire_selection is not None:
-            choices = {
-                item.source_entry_fingerprint: item.selected_mode
-                for item in wire_selection.tool_result_decisions
-            }
-            for state in tool_states:
-                selected = choices.get(
-                    compiled_tool_result_source_fingerprint(state.item)
-                )
-                if selected is not None:
-                    state.selected = tuple(
-                        item.mode for item in state.lowered.tool_result_variants
-                    ).index(selected)
+        self._apply_tool_render_selection(
+            tool_states, wire_selection, tool_render_floors
+        )
         self._validate_tool_delivery_variants(tool_states)
         self._validate_physical_bounds(
             request,
@@ -1166,6 +1236,7 @@ class StructuredModelInputCompiler:
         catalog_render_floors: tuple[
             tuple[ContextSourceKind, ContextRenderMode], ...
         ] = (),
+        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
     ) -> FrozenProviderInputAppendCompileResult:
         """Compile one causally appended input without relowering old messages."""
@@ -1176,6 +1247,7 @@ class StructuredModelInputCompiler:
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
             catalog_render_floors=catalog_render_floors,
+            tool_render_floors=tool_render_floors,
             wire_selection=wire_selection,
             new_epoch=False,
         )
@@ -1191,6 +1263,7 @@ class StructuredModelInputCompiler:
         catalog_render_floors: tuple[
             tuple[ContextSourceKind, ContextRenderMode], ...
         ] = (),
+        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
     ) -> FrozenProviderInputAppendCompileResult:
         """Fully reproject canonical truth for one authorized epoch boundary."""
@@ -1201,6 +1274,7 @@ class StructuredModelInputCompiler:
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
             catalog_render_floors=catalog_render_floors,
+            tool_render_floors=tool_render_floors,
             wire_selection=wire_selection,
             new_epoch=True,
         )
@@ -1256,6 +1330,7 @@ class StructuredModelInputCompiler:
         catalog_render_floors: tuple[
             tuple[ContextSourceKind, ContextRenderMode], ...
         ] = (),
+        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
     ) -> (
         FrozenProviderInputAppendCompileResult
@@ -1338,6 +1413,7 @@ class StructuredModelInputCompiler:
                 deadline=deadline,
                 semantic_projection=semantic_projection,
                 catalog_render_floors=catalog_render_floors,
+                tool_render_floors=tool_render_floors,
                 wire_selection=wire_selection,
             )
 
@@ -1350,6 +1426,7 @@ class StructuredModelInputCompiler:
                 request,
                 deadline_monotonic=deadline.value,
                 catalog_render_floors=catalog_render_floors,
+                tool_render_floors=tool_render_floors,
                 wire_selection=wire_selection,
             )
         )
@@ -1716,6 +1793,7 @@ class StructuredModelInputCompiler:
         catalog_render_floors: tuple[
             tuple[ContextSourceKind, ContextRenderMode], ...
         ] = (),
+        tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
     ) -> (
         FrozenProviderInputAppendCompileResult
@@ -1761,19 +1839,9 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
-        if wire_selection is not None:
-            choices = {
-                item.source_entry_fingerprint: item.selected_mode
-                for item in wire_selection.tool_result_decisions
-            }
-            for state in tool_states:
-                selected = choices.get(
-                    compiled_tool_result_source_fingerprint(state.item)
-                )
-                if selected is not None:
-                    state.selected = tuple(
-                        item.mode for item in state.lowered.tool_result_variants
-                    ).index(selected)
+        self._apply_tool_render_selection(
+            tool_states, wire_selection, tool_render_floors
+        )
         self._validate_tool_delivery_variants(tool_states)
 
         emissions: list[_AppendSourceEmission] = []
