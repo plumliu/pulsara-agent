@@ -196,7 +196,10 @@ interface McpTraceDetail {
 function parseJsonObject(value?: string): JsonObject | undefined {
   if (!value) return undefined;
   try {
-    const parsed = JSON.parse(value) as unknown;
+    // Complete inline results may also carry the canonical artifact reread hint.
+    // That hint is presentation text, outside the structured result body.
+    const artifactHint = value.indexOf('\n\n[TOOL OUTPUT ARTIFACT:');
+    const parsed = JSON.parse(artifactHint < 0 ? value : value.slice(0, artifactHint)) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? parsed as JsonObject
       : undefined;
@@ -265,11 +268,12 @@ function collectMessageTraces(messages: Message[]): ToolTrace[] {
 function buildMcpToolRefIndex(messages: Message[]): ReadonlyMap<string, McpToolIdentity> {
   const result = new Map<string, McpToolIdentity>();
   for (const trace of collectMessageTraces(messages)) {
-    if (trace.toolName !== 'inspect_new_mcp_tool') continue;
+    if (trace.toolName !== 'inspect_capability') continue;
     const descriptor = parseJsonObject(trace.resultText);
     const toolRef = stringValue(descriptor?.tool_ref);
-    const serverId = stringValue(descriptor?.server_id);
-    const remoteToolName = stringValue(descriptor?.remote_tool_name);
+    const target = objectField(descriptor, 'target');
+    const serverId = stringValue(target?.server_id);
+    const remoteToolName = stringValue(target?.tool_name);
     if (!toolRef || !serverId || !remoteToolName) continue;
     result.set(toolRef, {
       serverId,
@@ -303,53 +307,31 @@ function mcpTraceDetail(
   toolRefs: ReadonlyMap<string, McpToolIdentity>,
 ): McpTraceDetail | undefined {
   const name = trace.toolName;
-  if (!name || !['list_mcp_servers', 'inspect_new_mcp_tool', 'use_new_mcp_tool'].includes(name)) {
+  if (!name || !['list_capabilities', 'inspect_capability', 'use_new_mcp_tool'].includes(name)) {
     return undefined;
   }
   const args = parseJsonObject(trace.argumentsJson);
   const result = parseJsonObject(trace.resultText);
-  if (name === 'list_mcp_servers') {
-    const requestedServer = stringValue(args?.server_id);
-    const server = objectField(result, 'server');
-    const servers = objectArrayField(result, 'servers');
-    const tools = objectArrayField(result, 'tools');
-    if (server || requestedServer) {
-      const serverId = stringValue(server?.server_id) || requestedServer;
-      const rows: McpDetailRow[] = [{ label: 'MCP 服务', value: serverId }];
-      if (server) rows.push({ label: '连接状态', value: mcpStatusLabel(server.public_status) });
-      return {
-        subtitle: `${serverId} · ${tools.length} 个工具`,
-        rows,
-        items: tools.map((tool) => ({
-          name: stringValue(tool.remote_tool_name) || stringValue(tool.provider_tool_name) || '未命名工具',
-        })),
-        suppressGenericSuccess: true,
-      };
-    }
-    const total = numberValue(result?.total_server_count) || servers.length;
+  if (name === 'list_capabilities') {
+    if (!Array.isArray(result?.items) || typeof result?.total_count !== 'number') return undefined;
+    const items = objectArrayField(result, 'items');
+    const total = numberValue(result?.total_count);
     return {
-      subtitle: `发现 ${total} 个 MCP 服务`,
-      rows: total > servers.length
-        ? [{ label: '当前页', value: `${servers.length} / ${total}` }]
-        : [],
-      items: servers.map((item) => ({
-        name: stringValue(item.server_id) || '未命名服务',
-        detail: `${mcpStatusLabel(item.public_status)} · ${numberValue(item.tool_count)} 个工具`,
-      })),
+      subtitle: `观察到 ${total} 项能力${result?.completeness === 'PARTIAL' ? ' · 观察不完整' : ''}`,
+      rows: total > items.length ? [{ label: '当前页', value: `${items.length} / ${total}` }] : [],
+      items: items.map((item) => ({ name: stringValue(item.name) || '未命名能力', detail: stringValue(item.status) })),
       suppressGenericSuccess: true,
     };
   }
-  if (name === 'inspect_new_mcp_tool') {
-    const serverId = stringValue(result?.server_id) || stringValue(args?.server_id) || '未知服务';
-    const remoteToolName = stringValue(result?.remote_tool_name) || stringValue(args?.tool_name) || '未知工具';
+  if (name === 'inspect_capability') {
+    const target = objectField(result, 'target') ?? objectField(args, 'target');
+    if (!stringValue(target?.kind).startsWith('MCP_')) return undefined;
+    const serverId = stringValue(target?.server_id) || stringValue(target?.runtime_server_id);
+    const toolName = stringValue(target?.tool_name) || stringValue(target?.name);
     return {
-      subtitle: `${serverId} · ${remoteToolName}`,
-      rows: [
-      { label: 'MCP 服务', value: serverId },
-      { label: '检查的工具', value: remoteToolName },
-      ],
-      items: [],
-      suppressGenericSuccess: true,
+      subtitle: [serverId, toolName].filter(Boolean).join(' · ') || 'MCP 详情',
+      rows: [{ label: 'MCP 服务', value: serverId }, ...(toolName ? [{ label: '所选能力', value: toolName }] : [])],
+      items: [], suppressGenericSuccess: true,
     };
   }
   const toolRef = stringValue(args?.tool_ref);

@@ -4539,8 +4539,8 @@ function reasoningKind(value: string): ReasoningBlock['kind'] {
 function toolDisplayName(name: string): string {
   const normalized = name.toLowerCase();
   if (normalized === 'reload_capabilities') return '刷新能力';
-  if (normalized === 'list_mcp_servers') return '浏览 MCP 服务';
-  if (normalized === 'inspect_new_mcp_tool') return '检查 MCP 工具';
+  if (normalized === 'list_capabilities') return '查看能力';
+  if (normalized === 'inspect_capability') return '查看能力详情';
   if (normalized === 'use_new_mcp_tool') return '调用 MCP 工具';
   if (normalized.includes('report_agent_result')) return '提交子任务结果';
   if (normalized.includes('create_agent_tasks') || normalized.includes('spawn_agent')) return '创建子任务';
@@ -4570,15 +4570,12 @@ function toolArgumentSummary(name: string, content: string): string {
     const value = JSON.parse(content) as Record<string, unknown>;
     const normalized = name.toLowerCase();
     if (normalized === 'reload_capabilities') return '重新载入 Skill、MCP 与 Hook';
-    if (normalized === 'list_mcp_servers') {
-      return typeof value.server_id === 'string' && value.server_id
-        ? `查看 ${value.server_id} 的工具`
-        : '读取当前 MCP 服务列表';
+    if (normalized === 'list_capabilities') {
+      return typeof value.kind === 'string' ? `查看 ${value.kind} 能力` : '读取能力及来源';
     }
-    if (normalized === 'inspect_new_mcp_tool') {
-      const server = typeof value.server_id === 'string' ? value.server_id : '';
-      const tool = typeof value.tool_name === 'string' ? value.tool_name : '';
-      return [server, tool].filter(Boolean).join(' · ') || '检查一个 MCP 工具';
+    if (normalized === 'inspect_capability') {
+      const target = value.target && typeof value.target === 'object' ? value.target as Record<string, unknown> : {};
+      return [target.plugin_id, target.runtime_server_id ?? target.server_id, target.tool_name ?? target.name].filter((item) => typeof item === 'string').join(' · ') || '查看所选能力的详情';
     }
     if (normalized === 'use_new_mcp_tool') return '调用已经检查的 MCP 工具';
     if (normalized.includes('report_agent_result')) return '提交最终结果';

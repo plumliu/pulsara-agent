@@ -273,7 +273,7 @@ def _parse_handler(
         diagnostics.append(_diag("HOOK_CONFIG_INVALID_HANDLER", label, event_type))
         return None
     handler_type = value.get("type")
-    if handler_type in {"prompt", "agent"}:
+    if handler_type in {"prompt", "agent", "http", "mcp_tool"}:
         diagnostics.append(
             _diag(
                 "HOOK_CONFIG_KNOWN_UNSUPPORTED_HANDLER",

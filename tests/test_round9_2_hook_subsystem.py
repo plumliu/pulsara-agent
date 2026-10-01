@@ -2233,7 +2233,8 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
 @pytest.mark.parametrize('scope', [HookVisibilityScope.USER, HookVisibilityScope.WORKSPACE])
 @pytest.mark.parametrize('plugin', [False, True])
 @pytest.mark.parametrize('enabled', [False, True])
-def test_joint_v2_invalidates_old_trust_without_changing_enabled_or_time(tmp_path, monkeypatch, scope, plugin, enabled):
+@pytest.mark.parametrize('previous_contract', ['pulsara.hook-definition-trust.v1', 'pulsara.hook-definition-trust.v2'])
+def test_v3_invalidates_old_trust_without_changing_enabled_or_time(tmp_path, monkeypatch, scope, plugin, enabled, previous_contract):
     from dataclasses import replace
     from pulsara_agent.hooks import trust
     from pulsara_agent.hooks.contracts import PluginHookSourceIdentity, PluginHookTrustSubject
@@ -2248,7 +2249,7 @@ def test_joint_v2_invalidates_old_trust_without_changing_enabled_or_time(tmp_pat
     definition = replace(_definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, 'printf test', matcher='Read|Grep|Glob'), provenance=provenance)
     store = trust.HookTrustStore(tmp_path)
     with monkeypatch.context() as old:
-        old.setattr(trust, 'TRUST_DIGEST_CONTRACT', 'pulsara.hook-definition-trust.v1')
+        old.setattr(trust, 'TRUST_DIGEST_CONTRACT', previous_contract)
         digest = trust.normalized_definition_digest(provenance, (definition,))
     store.trust(provenance.trust_subject, expected_digest=digest)
     store.set_enabled(provenance.trust_subject, enabled=enabled)
@@ -2288,3 +2289,37 @@ def test_hook_review_uses_production_matcher_native_remote_and_is_advisory(tmp_p
     assert value['definitions'][0]['matched_operations'] == ['读取文件', '搜索内容', '查找文件', 'mcp__real__lookup']
     assert value['tool_inventory_complete'] is False
     assert normalized_definition_digest(snapshot.provenance, snapshot.definitions) == before
+
+
+def test_plugin_hook_directory_aliases_execute_without_reinterpreting_path(tmp_path):
+    from pulsara_agent.hooks.contracts import (
+        PluginHookSourceIdentity, PluginHookTrustSubject, plugin_hook_environment,
+    )
+    # A shell-looking directory name is data, not an extra command to execute.
+    package = tmp_path / 'package $(touch INJECTED) `touch INJECTED`'
+    package.mkdir()
+    script = package / 'probe.py'
+    script.write_text('import os,json\nprint(json.dumps({k:os.environ[k] for k in ["PLUGIN_ROOT","CLAUDE_PLUGIN_ROOT","PLUGIN_DATA","CLAUDE_PLUGIN_DATA"]}))\n')
+    data = tmp_path / 'data with spaces'
+    data.mkdir()
+    provenance = FrozenHookSourceProvenance(
+        PluginHookSourceIdentity(HookVisibilityScope.USER, 'example', 'pkg_' + '1' * 32,
+            'dev.pulsara/hooks/hooks.json', package / 'hooks.json'),
+        PluginHookTrustSubject(HookVisibilityScope.USER, 'example'), None, 'example',
+        declaration_environment=plugin_hook_environment(package, data),
+    )
+    command = shlex.quote(sys.executable) + ' "${CLAUDE_PLUGIN_ROOT}/probe.py"'
+    definition = replace(_definition(tmp_path, HookEventType.SESSION_START_EVENT, command), provenance=provenance)
+    async def run():
+        executor = HookCommandExecutor(credential_boundary=ProcessCredentialBoundary())
+        try:
+            result = await executor.execute(HookExecutionRequest(
+                definition, {}, _scope(), 1, 0, tmp_path, tmp_path, monotonic() + 10,
+            ))
+            assert result.failure_code is None and result.exit_code == 0, result
+            assert json.loads(result.stdout) == dict(plugin_hook_environment(package, data))
+            assert definition.command == command
+            assert not (tmp_path / 'INJECTED').exists()
+        finally:
+            await executor.aclose()
+    asyncio.run(run())

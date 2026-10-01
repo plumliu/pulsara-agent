@@ -16,6 +16,7 @@ from pulsara_agent.hooks.contracts import (
     HookVisibilityScope,
     PluginHookSourceIdentity,
     PluginHookTrustSubject,
+    plugin_hook_environment,
 )
 from pulsara_agent.hooks.trust import HookTrustStore, normalized_definition_digest
 from pulsara_agent.plugins.contracts import (
@@ -143,10 +144,7 @@ def _snapshot(
         subject,
         None,
         f"PLUGIN {visibility.value} {instance.identity.plugin_id}",
-        (
-            ("PLUGIN_DATA", str(instance.data_root)),
-            ("PLUGIN_ROOT", str(instance.package_root)),
-        ),
+        plugin_hook_environment(instance.package_root, instance.data_root),
         anchor,
     )
     diagnostic = HookDiagnostic(

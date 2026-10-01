@@ -1983,11 +1983,13 @@ class CompactionCoordinator:
         deadline: float,
         reusable_observation: HandleFreeProviderWireObservation | None = None,
     ) -> PreparedWireMeasurementDecision:
-        return await self._provider_dispatch.measure_prepared_wire_candidate(
+        decision = await self._provider_dispatch.measure_prepared_wire_candidate(
             self._provider_dispatch.wire_candidate_for_dispatch(dispatch),
             deadline=deadline,
             reusable_observation=reusable_observation,
         )
+        dispatch.select_wire_candidate(decision.candidate)
+        return decision
 
     def wire_decision_crosses_automatic_threshold(
         self,
@@ -3084,6 +3086,10 @@ class CompactionCoordinator:
                             deadline=successor_deadline,
                         )
                     )
+                    dry_wire_candidate = dry_wire_decision.candidate
+                    prepared_candidate = replace(
+                        prepared_candidate, wire_candidate=dry_wire_candidate
+                    )
                     if model_switch_candidate is None:
                         validate_compaction_wire_transition(
                             source_view=source_view,
@@ -3128,6 +3134,10 @@ class CompactionCoordinator:
                         pending_wire_decision = await self._provider_dispatch.measure_prepared_wire_candidate(
                             pending_prepared_candidate.wire_candidate,
                             deadline=successor_deadline,
+                        )
+                        pending_prepared_candidate = replace(
+                            pending_prepared_candidate,
+                            wire_candidate=pending_wire_decision.candidate,
                         )
                         if pending_wire_decision.wire_input_plan is None:
                             raise StructuredModelInputCompileError(
@@ -3792,6 +3802,10 @@ class CompactionCoordinator:
                             post_base_candidate.wire_candidate,
                             deadline=base_deadline,
                         )
+                        post_base_candidate = replace(
+                            post_base_candidate,
+                            wire_candidate=post_base_decision.candidate,
+                        )
                         if model_switch_candidate is None:
                             validate_compaction_wire_transition(
                                 source_view=source_view,
@@ -3850,6 +3864,10 @@ class CompactionCoordinator:
                             selected_post_decision = await self._provider_dispatch.measure_prepared_wire_candidate(
                                 selected_post_candidate.wire_candidate,
                                 deadline=base_deadline,
+                            )
+                            selected_post_candidate = replace(
+                                selected_post_candidate,
+                                wire_candidate=selected_post_decision.candidate,
                             )
                             if selected_post_decision.wire_input_plan is None:
                                 raise StructuredModelInputCompileError(
@@ -3957,6 +3975,7 @@ class CompactionCoordinator:
                                 hook_sibling.candidate,
                                 deadline=hook_deadline,
                             )
+                            hook_sibling.candidate = hook_decision.candidate
                             if (
                                 model_switch_candidate is None
                                 and pending_active_candidate is None

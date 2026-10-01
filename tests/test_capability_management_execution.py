@@ -68,10 +68,9 @@ def test_form_validation_does_not_write_and_executes_user_candidate(tmp_path):
         accepted = AcceptedCapabilityFormSubmission(values)
         call.accept(accepted)
         outcome = await call.execute()
-        assert (
-            outcome["current"]["config"]["transport"]["endpoint"]
-            == "https://user.example.org/mcp"
-        )
+        assert outcome["current"]["config_path"] == str(service.mcp.user_config_path)
+        assert "config" not in outcome["current"]
+        assert service.mcp.inspect(LocalMcpTarget("docs")).transport.endpoint == "https://user.example.org/mcp"
         with pytest.raises(RuntimeError):
             accepted.take()
         await service.mcp.aclose()

@@ -19,7 +19,7 @@ sole native validator/publisher. Do not ask a model to rewrite supported formats
    importer owns exact conversion and native admission; use its result and
    diagnostics rather than auditing every script or reimplementing its checks.
    Empty declarations mean empty; never union neighboring host manifests.
-   Unsupported active components block the whole import; do not drop them.
+   Unsupported host components are reported and not activated. Supported components must pass native validation; installation does not promise the original host behavior.
 3. Use `manage_capability` INSTALL_PLUGIN with source_path and source_format
    (`native`, `claude`, `codex`, `cursor`). Use replace only for an
    explicitly requested replacement. The native parser and held-source
@@ -56,6 +56,10 @@ For a selected Claude distribution:
 Use the actual format (`native`, `claude`, `codex`, `cursor`). After a successful
 install or replacement, reuse the returned `identity.plugin_id` and `scope` for
 subsequent management; do not derive the target from the source directory name.
+The successful result also gives `current.package_root`, the exact installed package.
+For details pass `target={kind:"PLUGIN",scope:<returned scope>,plugin_id:<returned id>}`
+to `inspect_capability`. For its capabilities copy that target to `list_capabilities.parent`.
+Plugin is a source, not a list kind; complete package inventory stays in the GUI.
 Installed means disabled, not enabled or trusted.
 
 ```json
@@ -83,8 +87,10 @@ Do not add `source_path`, a digest or a user-acceptance flag to Hook calls.
 Trust presents the full current definitions in the GUI even under full access.
 Hook enablement does not grant trust; Plugin enablement remains separate.
 
-Use `INSPECT_HOOK_SOURCES` to observe sources, `SET_HOOK_SOURCE_ENABLED` with
-`enabled` to switch one, and `REVOKE_HOOK_TRUST` to revoke trust. Inspection is
+Use `list_capabilities` with `kind:"HOOK_SOURCE"` and copy the exact target into
+`inspect_capability` to read current definitions and authorization. Use
+`SET_HOOK_SOURCE_ENABLED` with `enabled` to switch one, and `REVOKE_HOOK_TRUST`
+to revoke trust. Inspection is
 allowed in READ_ONLY. Read `references/hook-source-management.md` for local
 source authoring or exact mutation examples; it is enough for ordinary Hook work.
 
@@ -103,9 +109,9 @@ Read `references/conversion-contract.md` when import diagnostics need explanatio
 `references/pulsara-hook-extension.md` for detailed Hook conversion or control
 semantics. These are troubleshooting references, not mandatory pre-install reads.
 
-Never guess credentials, endpoints, dependencies or compatibility. Do not create
-a smaller Plugin by dropping active components; a separately requested authoring
-task is different from importing an existing package. Ordinary permissions apply.
+Never guess credentials, endpoints, dependencies or compatibility. Use the official
+importer for supported components and report its diagnostics. Do not manually rewrite
+the package or claim unsupported host behavior is preserved. Ordinary permissions apply.
 
 Use terminal/file tools to prepare sources, then the typed management tool to
 install, configure and authorize them. Do not use terminal Hook trust/`--yes` to

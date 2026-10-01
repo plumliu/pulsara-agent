@@ -25,6 +25,7 @@ from pulsara_agent.hooks.contracts import (
     HookSourceKind,
     HookVisibilityScope,
     PluginHookSourceIdentity,
+    plugin_hook_environment,
 )
 from pulsara_agent.hooks.trust import HookTrustStore
 from pulsara_agent.mcp_config import (
@@ -85,6 +86,115 @@ class PluginInspectionService:
         self._home_resolution = pulsara_home_resolution
         self._home = pulsara_home_resolution.path
 
+    def _observe_instance(self, state, *, deadline_monotonic, cancellation, scrub_set,
+                          current_anchors, hook_anchors, materialize_enabled):
+        identity = PluginInstanceIdentity(
+            state.scope, state.plugin_id, state.workspace_state_key
+        )
+        layout = self._store.layout(identity)
+        package_root = (
+            layout.plugin_package_parent / state.current_package_install_id
+        )
+        package_in_use = self._store.package_in_use(
+            layout, state.current_package_install_id
+        )
+        current_anchor = self._store.acquire_package_anchor(
+            layout,
+            state.current_package_install_id,
+            deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
+        )
+        current_anchors.append(current_anchor)
+        hook_anchor = current_anchor.duplicate()
+        hook_anchors.append(hook_anchor)
+        observation = self._observer.observe(
+            package_root,
+            deadline_monotonic=deadline_monotonic,
+            cancellation=cancellation,
+            scrub_set=scrub_set,
+            hook_package_install_id=state.current_package_install_id,
+            hook_visibility=(
+                HookVisibilityScope.USER
+                if state.scope is PluginScopeKind.USER
+                else HookVisibilityScope.WORKSPACE
+            ),
+            hook_workspace_state_key=state.workspace_state_key,
+            hook_lifetime_anchor=hook_anchor,
+            hook_declaration_environment=plugin_hook_environment(package_root, layout.data_root),
+            scan_active_api_key=False,
+            enforce_managed_admission=False,
+        )
+        try:
+            if observation.summary.manifest.name != state.plugin_id:
+                raise ValueError("Plugin inspection manifest/state identity conflicts")
+            item = PluginInstanceInspection(
+                    identity=identity,
+                    package_install_id=state.current_package_install_id,
+                    enabled=state.enabled,
+                    package_root=package_root,
+                    data_root=layout.data_root,
+                    summary=observation.summary,
+                    diagnostics=observation.diagnostics,
+                    package_in_use=package_in_use,
+                    mcp_connection_overlays=state.mcp_connection_overlays,
+                    hook_config=_detached_hook_config(observation.hook_config),
+                )
+            enabled = None
+            if state.enabled and materialize_enabled:
+                enabled = freeze_enabled_plugin_instance(
+                        identity=identity,
+                        state=state,
+                        package_root=package_root,
+                        data_root=layout.data_root,
+                        observation=observation,
+                        current_anchor=current_anchor,
+                    )
+            return item, enabled
+        finally:
+            observation.close()
+
+    def inspect_exact(self, *, identity, deadline_monotonic, cancellation, scrub_set):
+        """Observe one identity without scanning unrelated states or composing winners."""
+        current_anchors = []
+        hook_anchors = []
+        try:
+            _check_abort(deadline_monotonic, cancellation)
+            layout = self._store.layout(identity)
+            state = self._store.read_state(layout)
+            if state is None:
+                return PluginInspectionOutcome(PluginInspectionDisposition.COMPLETE, (), (), ())
+            item, _ = self._observe_instance(
+                state, deadline_monotonic=deadline_monotonic,
+                cancellation=cancellation, scrub_set=scrub_set,
+                current_anchors=current_anchors, hook_anchors=hook_anchors,
+                materialize_enabled=False,
+            )
+            _check_abort(deadline_monotonic, cancellation)
+            if self._store.read_state(layout) != state:
+                raise PluginPackageRaced("Plugin state changed during exact observation")
+            return PluginInspectionOutcome(
+                PluginInspectionDisposition.COMPLETE, (item,), (), (),
+                physical_lifetime_anchors=tuple(current_anchors),
+                skill_composition_disposition=PluginInspectionComponentDisposition.UNAVAILABLE,
+                mcp_composition_disposition=PluginInspectionComponentDisposition.UNAVAILABLE,
+                hook_composition_disposition=PluginInspectionComponentDisposition.UNAVAILABLE,
+            )
+        except (PluginPackageCancelled, PluginPackageTimedOut):
+            for anchor in current_anchors:
+                anchor.close()
+            raise
+        except (MemoryError, OSError, RuntimeError, ValueError,
+                PluginPackageUnavailable, PluginPackageRaced) as exc:
+            for anchor in current_anchors:
+                anchor.close()
+            return PluginInspectionOutcome(
+                PluginInspectionDisposition.UNAVAILABLE, (), (),
+                (PluginDiagnostic(PluginDiagnosticCode.VIEW_UNAVAILABLE, str(exc)),),
+            )
+        finally:
+            for anchor in hook_anchors:
+                anchor.close()
+
     def inspect(
         self,
         *,
@@ -106,75 +216,15 @@ class PluginInspectionService:
             enabled_instances = []
             for state in state_aggregate.states:
                 _check_abort(deadline_monotonic, cancellation)
-                identity = PluginInstanceIdentity(
-                    state.scope, state.plugin_id, state.workspace_state_key
+                item, enabled = self._observe_instance(
+                    state, deadline_monotonic=deadline_monotonic,
+                    cancellation=cancellation, scrub_set=scrub_set,
+                    current_anchors=current_anchors, hook_anchors=hook_anchors,
+                    materialize_enabled=True,
                 )
-                layout = self._store.layout(identity)
-                package_root = (
-                    layout.plugin_package_parent / state.current_package_install_id
-                )
-                package_in_use = self._store.package_in_use(
-                    layout, state.current_package_install_id
-                )
-                current_anchor = self._store.acquire_package_anchor(
-                    layout,
-                    state.current_package_install_id,
-                    deadline_monotonic=deadline_monotonic,
-                    cancellation=cancellation,
-                )
-                current_anchors.append(current_anchor)
-                hook_anchor = current_anchor.duplicate()
-                hook_anchors.append(hook_anchor)
-                observation = self._observer.observe(
-                    package_root,
-                    deadline_monotonic=deadline_monotonic,
-                    cancellation=cancellation,
-                    scrub_set=scrub_set,
-                    hook_package_install_id=state.current_package_install_id,
-                    hook_visibility=(
-                        HookVisibilityScope.USER
-                        if state.scope is PluginScopeKind.USER
-                        else HookVisibilityScope.WORKSPACE
-                    ),
-                    hook_workspace_state_key=state.workspace_state_key,
-                    hook_lifetime_anchor=hook_anchor,
-                    hook_declaration_environment=(
-                        ("PLUGIN_DATA", str(layout.data_root)),
-                        ("PLUGIN_ROOT", str(package_root)),
-                    ),
-                    scan_active_api_key=False,
-                    enforce_managed_admission=False,
-                )
-                try:
-                    if observation.summary.manifest.name != state.plugin_id:
-                        raise ValueError("Plugin inspection manifest/state identity conflicts")
-                    inspections.append(
-                        PluginInstanceInspection(
-                            identity=identity,
-                            package_install_id=state.current_package_install_id,
-                            enabled=state.enabled,
-                            package_root=package_root,
-                            data_root=layout.data_root,
-                            summary=observation.summary,
-                            diagnostics=observation.diagnostics,
-                            package_in_use=package_in_use,
-                            mcp_connection_overlays=state.mcp_connection_overlays,
-                            hook_config=_detached_hook_config(observation.hook_config),
-                        )
-                    )
-                    if state.enabled:
-                        enabled_instances.append(
-                            freeze_enabled_plugin_instance(
-                                identity=identity,
-                                state=state,
-                                package_root=package_root,
-                                data_root=layout.data_root,
-                                observation=observation,
-                                current_anchor=current_anchor,
-                            )
-                        )
-                finally:
-                    observation.close()
+                inspections.append(item)
+                if enabled is not None:
+                    enabled_instances.append(enabled)
 
             state_aggregate.revalidate()
             ordered_enabled = tuple(

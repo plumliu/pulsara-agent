@@ -372,6 +372,9 @@ class PreparedProviderWireCandidate:
         dataclass_field(repr=False)
     )
     native_projection_set: FrozenNativeToolProjectionSet = dataclass_field(repr=False)
+    compile_request: StructuredModelInputCompileRequest | None = dataclass_field(
+        default=None, repr=False
+    )
     tool_choice: str | None = None
     planning: FrozenProviderInputAppendPlanningInput | None = dataclass_field(
         default=None, repr=False
@@ -399,6 +402,18 @@ class PreparedProviderWireCandidate:
             or self.native_projection_set != self.prepared_call.native_projection_set
         ):
             raise ValueError("provider wire candidate does not exact-join")
+        if self.compile_request is not None and (
+            self.compile_request.canonical_facts != self.canonical_read.compile_snapshot
+            or self.compile_request.canonical_input
+            != self.canonical_read.compile_snapshot.canonical_input
+            or self.compile_request.compile_binding
+            is not self.prepared_call.compile_binding
+            or self.compile_request.sources != self.sources
+            or self.compile_request.context_id != self.semantic_input.context_id
+            or self.compile_request.sources.collection_fingerprint
+            != self.semantic_input.source_collection_fingerprint
+        ):
+            raise ValueError("wire candidate changed its frozen compilation basis")
         dispatch_values = (
             self.planning,
             self.append_result,
@@ -415,6 +430,15 @@ class PreparedProviderWireCandidate:
             and self.append_result.compiled_input != self.semantic_input
         ):
             raise ValueError("provider wire candidate changed its compiled input")
+        cold = self.cold_semantic
+        if cold is not None and (
+            cold.compile_request != self.compile_request
+            or cold.planning != self.planning
+            or cold.compiled_result != self.append_result
+            or cold.prepared_call is not self.prepared_call
+            or cold.seed.dispatch_read != self.canonical_read
+        ):
+            raise ValueError("wire candidate changed its frozen cold assembly")
 
     @property
     def call(self) -> ResolvedModelCall:
@@ -803,6 +827,9 @@ class PreparedProviderDispatch:
     sources: CollectedContextSources
     append_result: FrozenProviderInputAppendCompileResult
     memory_context: FrozenModelCallMemoryContext
+    compile_request: StructuredModelInputCompileRequest | None = dataclass_field(
+        default=None, repr=False
+    )
     direct_switch_admission: FrozenDirectSwitchAdmission | None = dataclass_field(
         default=None, repr=False
     )
@@ -854,6 +881,40 @@ class PreparedProviderDispatch:
             )
         ):
             raise ValueError("prepared provider dispatch does not exact-join")
+
+    def select_wire_candidate(self, candidate: PreparedProviderWireCandidate) -> None:
+        """Adopt a measured render winner while retaining the same cut authority."""
+        if _provider_wire_candidate_matches_dispatch(candidate, self):
+            return
+        if (
+            candidate.canonical_read != self.canonical_read
+            or candidate.prepared_call is not self.prepared_call
+            or candidate.native_projection_set
+            != self.prepared_call.native_projection_set
+            or candidate.planning != self.planning
+            or candidate.sources != self.sources
+            or candidate.compile_request != self.compile_request
+            or candidate.tool_exposure_plan != self.tool_exposure_plan
+            or candidate.memory_context != self.memory_context
+            or candidate.append_result is None
+            or self.direct_switch_admission is not None
+            or (candidate.cold_semantic is None) != (self.cold_semantic is None)
+            or (
+                self.cold_semantic is not None
+                and replace(self.cold_semantic, compiled_result=candidate.append_result)
+                != candidate.cold_semantic
+            )
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+        with self._authority_lock:
+            if self._install_started or self._execution_authority is None:
+                raise ConversationKernelConflict(
+                    "wire selection followed dispatch installation"
+                )
+            self.append_result = candidate.append_result
+            self.cold_semantic = candidate.cold_semantic
 
     @property
     def cut(self) -> PreparedProviderInputCut:
@@ -2100,6 +2161,7 @@ class ProviderDispatchCoordinator:
                 wire = await self.measure_prepared_wire_candidate(
                     PreparedProviderWireCandidate(
                         canonical_read=result.canonical_read,
+                        compile_request=result.compile_request,
                         semantic_input=result.append_result.compiled_input,
                         prepared_call=result.prepared_call,
                         native_projection_set=(
@@ -2114,6 +2176,7 @@ class ProviderDispatchCoordinator:
                     ),
                     deadline=deadline,
                 )
+                result.select_wire_candidate(wire.candidate)
                 if wire.wire_input_plan is None:
                     kind = (
                         ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
@@ -2308,14 +2371,15 @@ class ProviderDispatchCoordinator:
                     candidate=measured_candidate,
                     decision=decision,
                 )
-            canonical_observation, capability_observation = (
-                await self._owner_dispatch_observations(
-                    handle=handle,
-                    expected_read=actual_read,
-                    capability_dispatch_cut=prepared.capability_dispatch_cut,
-                    borrow=borrow,
-                    deadline=deadline,
-                )
+            (
+                canonical_observation,
+                capability_observation,
+            ) = await self._owner_dispatch_observations(
+                handle=handle,
+                expected_read=actual_read,
+                capability_dispatch_cut=prepared.capability_dispatch_cut,
+                borrow=borrow,
+                deadline=deadline,
             )
             dispatch = PreparedProviderDispatch(
                 _execution_authority=ProviderDispatchExecutionAuthority(
@@ -2334,6 +2398,7 @@ class ProviderDispatchCoordinator:
                 capability_dispatch_cut=prepared.capability_dispatch_cut,
                 tool_exposure_plan=prepared.tool_exposure_plan,
                 sources=prepared.sources,
+                compile_request=decision.candidate.compile_request,
                 append_result=prepared.append_result,
                 memory_context=prepared.memory_context,
                 direct_switch_admission=direct_switch_admission,
@@ -2480,9 +2545,7 @@ class ProviderDispatchCoordinator:
         if isinstance(
             cold_seed_override,
             (AdoptedCompactionContinuationSeed, CompactionDryProjectionSeed),
-        ) and not (
-            _compaction_candidate_family
-        ):
+        ) and not (_compaction_candidate_family):
             raise ValueError(
                 "compaction continuation must use its frozen candidate family"
             )
@@ -2974,18 +3037,19 @@ class ProviderDispatchCoordinator:
                     raise StructuredModelInputCompileError(
                         ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                     ) from exc
-                canonical_observation, capability_observation = (
-                    await self._owner_dispatch_observations(
-                        handle=handle,
-                        expected_read=(
-                            expected_source_read
-                            if _compaction_dry_projection
-                            else base_read
-                        ),
-                        capability_dispatch_cut=capability_dispatch_cut,
-                        borrow=borrow,
-                        deadline=deadline,
-                    )
+                (
+                    canonical_observation,
+                    capability_observation,
+                ) = await self._owner_dispatch_observations(
+                    handle=handle,
+                    expected_read=(
+                        expected_source_read
+                        if _compaction_dry_projection
+                        else base_read
+                    ),
+                    capability_dispatch_cut=capability_dispatch_cut,
+                    borrow=borrow,
+                    deadline=deadline,
                 )
                 resource_authority = (
                     CompactionDryResourceAuthority(
@@ -3479,6 +3543,7 @@ class ProviderDispatchCoordinator:
                         final_append = trial_cold_semantic.compiled_result
                     trial_candidate = PreparedProviderWireCandidate(
                         canonical_read=prospective_read,
+                        compile_request=replace(final_request, sources=final_sources),
                         semantic_input=final_append.compiled_input,
                         prepared_call=prepared_call,
                         native_projection_set=(prepared_call.native_projection_set),
@@ -3498,9 +3563,10 @@ class ProviderDispatchCoordinator:
                         continue
                     selected_plan = trial_plan
                     selected_facts = prospective
-                    selected_sources = final_sources
-                    selected_append = final_append
-                    selected_cold_semantic = trial_cold_semantic
+                    selected_sources = trial_wire.candidate.sources
+                    selected_append = trial_wire.candidate.append_result
+                    selected_compile_request = trial_wire.candidate.compile_request
+                    selected_cold_semantic = trial_wire.candidate.cold_semantic
                     selected_memory_context = final_memory
                     selected_dispatch_read = prospective_read
                     break
@@ -3590,14 +3656,15 @@ class ProviderDispatchCoordinator:
                         selected_plan.quote.resulting_epoch_logical_bytes
                     ),
                 )
-                canonical_observation, capability_observation = (
-                    await self._owner_dispatch_observations(
-                        handle=handle,
-                        expected_read=actual_read,
-                        capability_dispatch_cut=capability_dispatch_cut,
-                        borrow=borrow,
-                        deadline=deadline,
-                    )
+                (
+                    canonical_observation,
+                    capability_observation,
+                ) = await self._owner_dispatch_observations(
+                    handle=handle,
+                    expected_read=actual_read,
+                    capability_dispatch_cut=capability_dispatch_cut,
+                    borrow=borrow,
+                    deadline=deadline,
                 )
                 return PreparedProviderDispatch(
                     _execution_authority=ProviderDispatchExecutionAuthority(
@@ -3616,6 +3683,7 @@ class ProviderDispatchCoordinator:
                     capability_dispatch_cut=capability_dispatch_cut,
                     tool_exposure_plan=tool_exposure_plan,
                     sources=selected_sources,
+                    compile_request=selected_compile_request,
                     append_result=selected_append,
                     memory_context=selected_memory_context,
                     accepted_steers=batch,
@@ -3990,20 +4058,21 @@ class ProviderDispatchCoordinator:
                     compile_request,
                     sources=final_sources,
                 )
-                append, final_sources = (
-                    await self._memory_support.compile_with_fallback(
-                        request=final_request,
-                        planning=planning,
-                        new_epoch=cold_seed is not None,
-                        canonical_facts=base_facts,
-                        sources=final_sources,
-                        preference_source=preference_source,
-                        recall_reservation=None,
-                        preference_reservation=preference_reservation,
-                        scope=scope,
-                        memory_use_policy=memory_use_policy,
-                        deadline=deadline,
-                    )
+                (
+                    append,
+                    final_sources,
+                ) = await self._memory_support.compile_with_fallback(
+                    request=final_request,
+                    planning=planning,
+                    new_epoch=cold_seed is not None,
+                    canonical_facts=base_facts,
+                    sources=final_sources,
+                    preference_source=preference_source,
+                    recall_reservation=None,
+                    preference_reservation=preference_reservation,
+                    scope=scope,
+                    memory_use_policy=memory_use_policy,
+                    deadline=deadline,
                 )
                 if cold_seed is not None:
                     final_request = replace(
@@ -4032,6 +4101,7 @@ class ProviderDispatchCoordinator:
             if completion_candidates:
                 completion_wire_candidate = PreparedProviderWireCandidate(
                     canonical_read=base_read,
+                    compile_request=replace(compile_request, sources=final_sources),
                     semantic_input=append.compiled_input,
                     prepared_call=prepared_call,
                     native_projection_set=prepared_call.native_projection_set,
@@ -4046,6 +4116,8 @@ class ProviderDispatchCoordinator:
                     completion_wire_candidate,
                     deadline=deadline,
                 )
+                append = completion_wire.candidate.append_result
+                cold_semantic = completion_wire.candidate.cold_semantic
                 if completion_wire.wire_input_plan is None:
                     kind = (
                         ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
@@ -4065,18 +4137,17 @@ class ProviderDispatchCoordinator:
                 )
                 base_read = actual_completion_read
                 base_facts = actual_completion_read.compile_snapshot
-            canonical_observation, capability_observation = (
-                await self._owner_dispatch_observations(
-                    handle=handle,
-                    expected_read=(
-                        expected_source_read
-                        if _noninstallable_preparation
-                        else base_read
-                    ),
-                    capability_dispatch_cut=capability_dispatch_cut,
-                    borrow=borrow,
-                    deadline=deadline,
-                )
+            (
+                canonical_observation,
+                capability_observation,
+            ) = await self._owner_dispatch_observations(
+                handle=handle,
+                expected_read=(
+                    expected_source_read if _noninstallable_preparation else base_read
+                ),
+                capability_dispatch_cut=capability_dispatch_cut,
+                borrow=borrow,
+                deadline=deadline,
             )
             return PreparedProviderDispatch(
                 _execution_authority=ProviderDispatchExecutionAuthority(
@@ -4096,6 +4167,7 @@ class ProviderDispatchCoordinator:
                 capability_dispatch_cut=capability_dispatch_cut,
                 tool_exposure_plan=tool_exposure_plan,
                 sources=final_sources,
+                compile_request=replace(compile_request, sources=final_sources),
                 append_result=append,
                 memory_context=memory_snapshot,
                 compaction_headroom_preflight=headroom_preflight,
@@ -4223,9 +4295,7 @@ class ProviderDispatchCoordinator:
             != family.prepared_call.epoch_call_target.target_bundle
         )
         cold_seed = (
-            _compaction_seed_with_dispatch_read(
-                family.compaction_seed, canonical_read
-            )
+            _compaction_seed_with_dispatch_read(family.compaction_seed, canonical_read)
             if context_base_changed and family.compaction_seed is not None
             else CanonicalColdContinuationSeed(canonical_read)
             if predecessor_view is None or model_switch_requested
@@ -4333,6 +4403,7 @@ class ProviderDispatchCoordinator:
         )
         wire_candidate = PreparedProviderWireCandidate(
             canonical_read=canonical_read,
+            compile_request=replace(compile_request, sources=final_sources),
             semantic_input=append.compiled_input,
             prepared_call=family.prepared_call,
             native_projection_set=family.prepared_call.native_projection_set,
@@ -4347,6 +4418,8 @@ class ProviderDispatchCoordinator:
             wire_candidate,
             deadline=deadline,
         )
+        append = wire_decision.candidate.append_result
+        cold_semantic = wire_decision.candidate.cold_semantic
         if wire_decision.wire_input_plan is None:
             kind = (
                 ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
@@ -4572,6 +4645,7 @@ class ProviderDispatchCoordinator:
         )
         wire_candidate = PreparedProviderWireCandidate(
             canonical_read=canonical_read,
+            compile_request=compile_request,
             semantic_input=append.compiled_input,
             prepared_call=family.prepared_call,
             native_projection_set=family.prepared_call.native_projection_set,
@@ -4626,6 +4700,7 @@ class ProviderDispatchCoordinator:
                 capability_dispatch_cut=family.capability_dispatch_cut,
                 tool_exposure_plan=family.tool_exposure_plan,
                 sources=candidate.sources,
+                compile_request=candidate.compile_request,
                 append_result=candidate.append_result,
                 memory_context=candidate.memory_context,
                 cold_semantic=candidate.cold_semantic,
@@ -4798,6 +4873,7 @@ class ProviderDispatchCoordinator:
                 return None
             candidate = PreparedProviderWireCandidate(
                 canonical_read=canonical_read,
+                compile_request=compile_request,
                 semantic_input=hook_append.compiled_input,
                 prepared_call=base.prepared_call,
                 native_projection_set=base.prepared_call.native_projection_set,
@@ -4819,6 +4895,7 @@ class ProviderDispatchCoordinator:
     ) -> PreparedProviderWireCandidate:
         return PreparedProviderWireCandidate(
             canonical_read=dispatch.canonical_read,
+            compile_request=dispatch.compile_request,
             semantic_input=dispatch.append_result.compiled_input,
             prepared_call=dispatch.prepared_call,
             native_projection_set=dispatch.prepared_call.native_projection_set,
@@ -4873,6 +4950,7 @@ class ProviderDispatchCoordinator:
                 capability_dispatch_cut=base.capability_dispatch_cut,
                 tool_exposure_plan=selected.tool_exposure_plan,
                 sources=selected.sources,
+                compile_request=selected.compile_request,
                 append_result=selected.append_result,
                 memory_context=selected.memory_context,
                 compaction_headroom_preflight=base.compaction_headroom_preflight,
@@ -5026,26 +5104,86 @@ class ProviderDispatchCoordinator:
                 measurement=measurement,
             ).take_for(candidate)
         try:
+            floors = ()
+            while (
+                measurement.quote.final_wire_estimated_input_tokens
+                > measurement.quote.effective_input_budget_tokens
+                or measurement.quote.final_wire_utf8_bytes
+                > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
+            ):
+                if (
+                    not isinstance(candidate, PreparedProviderWireCandidate)
+                    or candidate.compile_request is None
+                    or candidate.planning is None
+                    or candidate.append_result is None
+                    or candidate.sources is None
+                ):
+                    break
+                next_floors = self._compiler.next_catalog_render_floors(
+                    sources=candidate.sources,
+                    compiled=candidate.append_result.compiled_input,
+                    floors=floors,
+                )
+                if next_floors is None:
+                    break
+                consumed, measurement = measurement, None
+                consumed.discard_materialization_to_quote()
+                _require_dispatch_planning_deadline(deadline)
+                request = candidate.compile_request
+                if candidate.cold_semantic is None:
+                    append = await self._io.run(
+                        self._compiler.compile_installed_append,
+                        request,
+                        planning=candidate.planning,
+                        deadline_monotonic=deadline,
+                        catalog_render_floors=next_floors,
+                        wire_selection=candidate.append_result.compiled_input,
+                    )
+                    cold = None
+                else:
+                    # The seed has already been exact-joined by the cold assembler.
+                    # Recompile its frozen basis without another read or authority.
+                    append = await self._io.run(
+                        self._compiler.compile_new_epoch,
+                        request,
+                        planning=candidate.planning,
+                        deadline_monotonic=deadline,
+                        catalog_render_floors=next_floors,
+                        wire_selection=candidate.append_result.compiled_input,
+                    )
+                    cold = replace(candidate.cold_semantic, compiled_result=append)
+                candidate = replace(
+                    candidate,
+                    semantic_input=append.compiled_input,
+                    append_result=append,
+                    cold_semantic=cold,
+                )
+                floors = next_floors
+                measurement = await self._freeze_candidate_wire_measurement(
+                    candidate, deadline=deadline
+                )
             _require_dispatch_planning_deadline(deadline)
-        except BaseException:
-            measurement.discard_materialization_to_quote()
-            raise
-        quote = measurement.quote
-        if (
-            quote.final_wire_estimated_input_tokens
-            <= quote.effective_input_budget_tokens
-            and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
-            and _provider_candidate_meets_input_resource_headroom(candidate)
-        ):
-            plan = measurement.prepare_executable_plan(
-                semantic_input=candidate.semantic_input
+            quote = measurement.quote
+            admitted = (
+                quote.final_wire_estimated_input_tokens
+                <= quote.effective_input_budget_tokens
+                and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
+                and _provider_candidate_meets_input_resource_headroom(candidate)
             )
-        else:
-            quote = measurement.discard_materialization_to_quote()
-            plan = None
-        decision = PreparedWireMeasurementDecision(candidate, quote, plan)
-        _require_dispatch_planning_deadline(deadline)
-        return decision
+            consumed, measurement = measurement, None
+            if admitted:
+                plan = consumed.prepare_executable_plan(
+                    semantic_input=candidate.semantic_input
+                )
+            else:
+                quote = consumed.discard_materialization_to_quote()
+                plan = None
+            decision = PreparedWireMeasurementDecision(candidate, quote, plan)
+            _require_dispatch_planning_deadline(deadline)
+            return decision
+        finally:
+            if measurement is not None:
+                measurement.discard_materialization_to_quote()
 
     @staticmethod
     def freeze_direct_switch_admission(
@@ -6188,6 +6326,7 @@ def _provider_wire_candidate_matches_dispatch(
         and candidate.append_result == dispatch.append_result
         and candidate.cold_semantic == dispatch.cold_semantic
         and candidate.sources == dispatch.sources
+        and candidate.compile_request == dispatch.compile_request
         and candidate.tool_exposure_plan == dispatch.tool_exposure_plan
         and candidate.memory_context == dispatch.memory_context
     )

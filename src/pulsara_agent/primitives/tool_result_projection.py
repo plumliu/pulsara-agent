@@ -76,9 +76,9 @@ class FrozenToolResultDeliveryRequirement:
             raise TypeError("tool result full-delivery reason is invalid")
         if self.classifier_contract != TOOL_RESULT_FULL_DELIVERY_CLASSIFIER_CONTRACT:
             raise ValueError("tool result delivery classifier contract drifted")
-        if (
-            self.requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
-        ) != (self.reason is not None):
+        if (self.requirement is ToolResultDeliveryRequirement.FULL_REQUIRED) != (
+            self.reason is not None
+        ):
             raise ValueError("tool result delivery requirement union is invalid")
 
 
@@ -102,11 +102,12 @@ def classify_tool_result_delivery(
     tool_name: str,
     result_state: str,
     has_image_attachment: bool = False,
+    public_arguments: Mapping[str, object] | None = None,
 ) -> FrozenToolResultDeliveryRequirement:
     """Rebuild the closed requirement from exact tool identity and result state.
 
-    MCP directory pages and inspection schemas are meaningful only when their
-    exact closed payload reaches the model in FULL.
+    Capability list pages and callable MCP schemas need their exact closed
+    payload in FULL. Ordinary capability details use the existing artifact path.
     """
 
     if result_state != "SUCCESS":
@@ -117,16 +118,15 @@ def classify_tool_result_delivery(
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.IMAGE_ATTACHMENT
         )
-    if tool_name in {
-        "list_mcp_prompts",
-        "list_mcp_resource_templates",
-        "list_mcp_resources",
-        "list_mcp_servers",
-    }:
+    if tool_name == "list_capabilities":
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE
         )
-    if tool_name == "inspect_new_mcp_tool":
+    if (
+        tool_name == "inspect_capability"
+        and isinstance((public_arguments or {}).get("target"), Mapping)
+        and public_arguments["target"].get("kind") == "MCP_TOOL"
+    ):
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
         )

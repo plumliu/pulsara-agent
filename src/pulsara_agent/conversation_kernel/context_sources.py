@@ -2310,17 +2310,16 @@ def _render_mcp_catalog(
 
 
 _NEW_MCP_TOOL_USAGE = (
-    "Tools under new_tool_names use two steps: first call inspect_new_mcp_tool "
-    "with server_id and the complete listed name; then read its input_schema and "
-    "call use_new_mcp_tool with the returned tool_ref and matching arguments. "
-    "Inspection does not run the remote tool. Copy names and references exactly; "
-    "never guess a schema. If an MCP tool already appears as its own callable tool, "
-    "call it directly. MCP resources and prompts use their dedicated tools. Use "
-    "list_mcp_servers(server_id=..., cursor=...) to read omitted tool rows; for a "
-    "row whose route is NEW_MCP_META_ONLY, pass provider_tool_name unchanged to "
-    "inspect_new_mcp_tool. For example, inspect provider_tool_name "
-    "mcp__late__bulk_00 from server_id late with that exact name."
+    "Tools under new_tool_names can be inspected with inspect_capability using "
+    "target={kind:MCP_TOOL,server_id:<exact server>,tool_name:<complete listed name>}. "
+    "Read input_schema; invocation.mode=META supplies tool_ref for use_new_mcp_tool. "
+    "DIRECT uses the installed native tool, UNAVAILABLE supplies a reason. "
+    "Inspection never executes or grants permission. For omitted names use "
+    "list_capabilities with kind=MCP_TOOL and parent={kind:MCP_SERVER,runtime_server_id:<exact server>}; "
+    "copy target and follow next_offset. For example the complete name is mcp__late__bulk_00. "
+    "Resources and prompts are inspected locally, then fetched with their existing read/get tools."
 )
+
 
 
 def _bounded_mcp_catalog_provider_body(

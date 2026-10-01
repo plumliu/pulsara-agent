@@ -141,11 +141,9 @@ class CapabilityManagementPreparation:
                 Action.INSTALL_LOOSE_SKILL,
                 Action.SET_LOOSE_SKILL_ENABLED,
                 Action.REMOVE_LOOSE_SKILL,
-                Action.INSPECT_LOOSE_SKILLS,
                 Action.TRUST_HOOK_SOURCE,
                 Action.REVOKE_HOOK_TRUST,
                 Action.SET_HOOK_SOURCE_ENABLED,
-                Action.INSPECT_HOOK_SOURCES,
                 Action.INSTALL_PLUGIN,
                 Action.SET_PLUGIN_ENABLED,
                 Action.REMOVE_PLUGIN,
@@ -157,14 +155,12 @@ class CapabilityManagementPreparation:
             Action.INSTALL_LOOSE_SKILL,
             Action.SET_LOOSE_SKILL_ENABLED,
             Action.REMOVE_LOOSE_SKILL,
-            Action.INSPECT_LOOSE_SKILLS,
         }:
             return await self._skill(intent, fields, root)
         if intent.action in {
             Action.TRUST_HOOK_SOURCE,
             Action.REVOKE_HOOK_TRUST,
             Action.SET_HOOK_SOURCE_ENABLED,
-            Action.INSPECT_HOOK_SOURCES,
         }:
             return await self._hook(intent, fields, root)
         if intent.action in {
@@ -356,16 +352,9 @@ class CapabilityManagementPreparation:
 
     async def _skill(self, intent, fields, root):
         scope = LocalSkillInstallScope(intent.scope.value.lower())
-        effects = (
-            ResolvedCapabilityEffectProjection()
-            if intent.action is Action.INSPECT_LOOSE_SKILLS
-            else (
-                ResolvedCapabilityEffectProjection(
-                    workspace_write=root is not None,
-                    outside_workspace_write=root is None,
-                    destructive=intent.action is Action.REMOVE_LOOSE_SKILL,
-                )
-            )
+        effects = ResolvedCapabilityEffectProjection(
+            workspace_write=root is not None, outside_workspace_write=root is None,
+            destructive=intent.action is Action.REMOVE_LOOSE_SKILL,
         )
         target = validation = removal = None
         if intent.action is Action.INSTALL_LOOSE_SKILL:
@@ -514,14 +503,6 @@ class CapabilityManagementPreparation:
         )
 
     async def _hook(self, intent, fields, root):
-        if intent.action is Action.INSPECT_HOOK_SOURCES:
-            return PreparedCapabilityManagementInvocation(
-                intent,
-                ResolvedCapabilityEffectProjection(),
-                (),
-                freeze_json(intent.to_dict()),
-                freeze_json({}),
-            )
         snapshots, _ = await self.inspect_hook_sources(
             root=root,
             source_kind=fields["source_kind"],
@@ -551,7 +532,7 @@ class CapabilityManagementPreparation:
             hook=snapshot,
         )
 
-    def inspect_plugin_skill_definitions(self, root) -> FrozenPluginSkillDefinitions:
+    def inspect_plugin_skill_definitions(self, root, *, cancellation=None, deadline_monotonic=None) -> FrozenPluginSkillDefinitions:
         # Same native package view and producer used by Host activation and CLI.
         from pulsara_agent.plugins.view import EnabledPluginViewOwner
         from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
@@ -564,8 +545,8 @@ class CapabilityManagementPreparation:
             store=store, credential_boundary=self.plugins._credential_boundary
         ).observe(
             workspace_root=root,
-            deadline_monotonic=self.deadline(),
-            cancellation=NeverCancelPluginOperation(),
+            deadline_monotonic=deadline_monotonic if deadline_monotonic is not None else self.deadline(),
+            cancellation=cancellation if cancellation is not None else NeverCancelPluginOperation(),
         )
         try:
             return PluginSkillDefinitionProducer().observe(view)
@@ -649,6 +630,7 @@ class CapabilityManagementPreparation:
         observed = await asyncio.to_thread(
             self.plugins.inspect_local_plugins,
             InspectLocalPluginsRequest(self.deadline(), workspace_root=root),
+            identity=identity,
         )
         if not isinstance(observed, PluginInspectionOutcome):
             raise ValueError("Plugin inventory is unavailable")

@@ -81,12 +81,8 @@ except ImportError:  # pragma: no cover - unsupported platform
 
 MAXIMUM_PLUGIN_STATE_BYTES = 1024 * 1024
 _PACKAGE_ID = re.compile(r"pkg_[0-9a-f]{32}")
-_PLUGIN_ID = re.compile(
-    r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"
-)
-_STAGE = re.compile(
-    r"\.pulsara-stage-(pkg_[0-9a-f]{32})-([0-9a-f]{32})"
-)
+_PLUGIN_ID = re.compile(r"(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?")
+_STAGE = re.compile(r"\.pulsara-stage-(pkg_[0-9a-f]{32})-([0-9a-f]{32})")
 _STATE_TEMP = re.compile(
     r"\.pulsara-state-((?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)-([0-9a-f]{32})\.tmp"
 )
@@ -339,6 +335,43 @@ class ManagedPluginStore:
     def layout(self, identity: PluginInstanceIdentity) -> PluginStoreLayout:
         return PluginStoreLayout(self._home, identity)
 
+    def current_package_identity_for_path(
+        self, path: Path, *, workspace_root: Path | None
+    ) -> PluginInstanceIdentity | None:
+        """Locate a current package by the store's own layout, without inventory I/O.
+
+        A path is only a selector. Exact state and held package observation still
+        decide whether it belongs to a current admitted component.
+        """
+        if not path.is_absolute() or ".." in path.parts:
+            raise ValueError("package observation requires an exact absolute path")
+        scopes = [(PluginScopeKind.USER, None)]
+        if workspace_root is not None:
+            scopes.append((PluginScopeKind.WORKSPACE, workspace_root))
+        for scope, root in scopes:
+            placeholder = self.identity(
+                scope=scope, plugin_id="path-selector", workspace_root=root
+            )
+            base = self.layout(placeholder).plugin_package_parent.parent
+            try:
+                relative = path.relative_to(base)
+            except ValueError:
+                continue
+            if len(relative.parts) < 3:
+                return None
+            identity = self.identity(
+                scope=scope, plugin_id=relative.parts[0], workspace_root=root
+            )
+            layout = self.layout(identity)
+            state = self.read_state(layout)
+            if state is None or state.current_package_install_id != relative.parts[1]:
+                return None
+            path.relative_to(
+                layout.plugin_package_parent / state.current_package_install_id
+            )
+            return identity
+        return None
+
     def install_locked(
         self,
         observation: HeldPluginPackageObservation,
@@ -384,7 +417,10 @@ class ManagedPluginStore:
 
             retained = []
             diagnostics = []
-            servers = {server.local_server_id: server for server in observation.summary.mcp.mcp_servers}
+            servers = {
+                server.local_server_id: server
+                for server in observation.summary.mcp.mcp_servers
+            }
             for overlay in current.mcp_connection_overlays if current else ():
                 server = servers.get(overlay.local_server_id)
                 try:
@@ -399,11 +435,13 @@ class ManagedPluginStore:
                         secret_resolver=secret_resolver,
                     )
                 except ValueError:
-                    diagnostics.append(PluginDiagnostic(
-                        PluginDiagnosticCode.MCP_SERVER_INVALID,
-                        "连接配置不再适用于新插件，请重新配置。",
-                        component=f"{identity.plugin_id}:{overlay.local_server_id}",
-                    ))
+                    diagnostics.append(
+                        PluginDiagnostic(
+                            PluginDiagnosticCode.MCP_SERVER_INVALID,
+                            "连接配置不再适用于新插件，请重新配置。",
+                            component=f"{identity.plugin_id}:{overlay.local_server_id}",
+                        )
+                    )
                 else:
                     retained.append(overlay)
             state = replace(state, mcp_connection_overlays=tuple(retained))
@@ -424,8 +462,15 @@ class ManagedPluginStore:
                 )
                 if isinstance(result, StoreInstallResult):
                     result = replace(result, connection_diagnostics=tuple(diagnostics))
-                elif isinstance(result, StoreCleanupFailure) and isinstance(result.prior, StoreInstallResult):
-                    result = replace(result, prior=replace(result.prior, connection_diagnostics=tuple(diagnostics)))
+                elif isinstance(result, StoreCleanupFailure) and isinstance(
+                    result.prior, StoreInstallResult
+                ):
+                    result = replace(
+                        result,
+                        prior=replace(
+                            result.prior, connection_diagnostics=tuple(diagnostics)
+                        ),
+                    )
                 return result
         except PluginPackageCancelled:
             raise
@@ -456,9 +501,7 @@ class ManagedPluginStore:
                 _diagnostic(PluginDiagnosticCode.STAGING_UNAVAILABLE)
             )
         package_root = layout.plugin_package_parent / state.current_package_install_id
-        stage_name = (
-            f".pulsara-stage-{state.current_package_install_id}-{uuid4().hex}"
-        )
+        stage_name = f".pulsara-stage-{state.current_package_install_id}-{uuid4().hex}"
         stage_path = layout.plugin_package_parent / stage_name
         stage_fd: int | None = None
         stage_identity: tuple[int, int] | None = None
@@ -668,8 +711,7 @@ class ManagedPluginStore:
             prior = StoreOperationTimedOut()
         except PluginPackageInvalid as exc:
             if any(
-                diagnostic.code
-                is PluginDiagnosticCode.SOURCE_CONTAINS_ACTIVE_API_KEY
+                diagnostic.code is PluginDiagnosticCode.SOURCE_CONTAINS_ACTIVE_API_KEY
                 for diagnostic in exc.diagnostics
             ):
                 prior = StoreSourceInvalid(exc.diagnostics)
@@ -794,7 +836,8 @@ class ManagedPluginStore:
         """Hold the existing instance lock across connection and private settlement."""
         layout = self.layout(identity)
         with self._exclusive_lock(
-            layout.instance_lock_path, deadline_monotonic=deadline_monotonic,
+            layout.instance_lock_path,
+            deadline_monotonic=deadline_monotonic,
             cancellation=cancellation,
         ):
             yield layout, self.read_state(layout)
@@ -827,9 +870,14 @@ class ManagedPluginStore:
                 previous = self.read_state(layout)
                 if previous is None:
                     return StoreEnablementResult(None, None)
-                if previous.current_package_install_id != expected_package_install_id or (
-                    prepared_current is not None and (
-                        identity != prepared_current.identity or previous != prepared_current.current
+                if (
+                    previous.current_package_install_id != expected_package_install_id
+                    or (
+                        prepared_current is not None
+                        and (
+                            identity != prepared_current.identity
+                            or previous != prepared_current.current
+                        )
                     )
                 ):
                     return StoreEnablementResult(
@@ -838,15 +886,31 @@ class ManagedPluginStore:
                         stale_observed_install_id=previous.current_package_install_id,
                     )
                 from .mcp_connection import connection_review as capture_review
-                summary = self.read_package_summary(
-                    layout, previous.current_package_install_id,
-                    deadline_monotonic=deadline_monotonic, cancellation=cancellation,
-                    scrub_set=ProcessCredentialScrubSet(),
-                ) if enabled else None
-                if enabled and capture_review(previous.mcp_connection_overlays, settings.read().mcp_secret,
-                    servers=summary.mcp.mcp_servers, identity=identity) != connection_review:
+
+                summary = (
+                    self.read_package_summary(
+                        layout,
+                        previous.current_package_install_id,
+                        deadline_monotonic=deadline_monotonic,
+                        cancellation=cancellation,
+                        scrub_set=ProcessCredentialScrubSet(),
+                    )
+                    if enabled
+                    else None
+                )
+                if (
+                    enabled
+                    and capture_review(
+                        previous.mcp_connection_overlays,
+                        settings.read().mcp_secret,
+                        servers=summary.mcp.mcp_servers,
+                        identity=identity,
+                    )
+                    != connection_review
+                ):
                     return StoreEnablementResult(
-                        None, previous,
+                        None,
+                        previous,
                         stale_observed_install_id=previous.current_package_install_id,
                     )
                 if previous.enabled == enabled:
@@ -860,17 +924,15 @@ class ManagedPluginStore:
                     previous.mcp_connection_overlays,
                 )
                 _check_abort(deadline_monotonic, cancellation)
-                _write_state_atomic(layout, updated, replacing=True, publisher=self._publisher)
+                _write_state_atomic(
+                    layout, updated, replacing=True, publisher=self._publisher
+                )
                 try:
                     confirmed = self.read_state(layout)
                 except (OSError, ValueError):
-                    return StoreEnablementResult(
-                        updated, previous, ack_unknown=True
-                    )
+                    return StoreEnablementResult(updated, previous, ack_unknown=True)
                 if confirmed != updated:
-                    return StoreEnablementResult(
-                        updated, previous, ack_unknown=True
-                    )
+                    return StoreEnablementResult(updated, previous, ack_unknown=True)
                 return StoreEnablementResult(updated, previous)
         except (PluginPackageCancelled, PluginPackageTimedOut):
             raise
@@ -901,7 +963,9 @@ class ManagedPluginStore:
             try:
                 os.unlink(layout.state_path.name, dir_fd=parent)
                 try:
-                    os.stat(layout.state_path.name, dir_fd=parent, follow_symlinks=False)
+                    os.stat(
+                        layout.state_path.name, dir_fd=parent, follow_symlinks=False
+                    )
                 except FileNotFoundError:
                     return StoreRemovalResult(previous, True)
                 except OSError:
@@ -951,7 +1015,9 @@ class ManagedPluginStore:
             )
             try:
                 if observed.summary.manifest.name != layout.identity.plugin_id:
-                    raise ValueError("managed package manifest/state identity conflicts")
+                    raise ValueError(
+                        "managed package manifest/state identity conflicts"
+                    )
                 return observed.summary
             finally:
                 observed.close()
@@ -993,7 +1059,9 @@ class ManagedPluginStore:
         except BaseException:
             os.close(descriptor)
             raise
-        return PhysicalLifetimeAnchor(descriptor, layout.package_lock_path(package_install_id))
+        return PhysicalLifetimeAnchor(
+            descriptor, layout.package_lock_path(package_install_id)
+        )
 
     def package_in_use(
         self, layout: PluginStoreLayout, package_install_id: str
@@ -1021,7 +1089,10 @@ class ManagedPluginStore:
         targets = [(PluginScopeKind.USER, None)]
         if workspace_root is not None:
             targets.append(
-                (PluginScopeKind.WORKSPACE, workspace_context_key(workspace_root.as_posix()))
+                (
+                    PluginScopeKind.WORKSPACE,
+                    workspace_context_key(workspace_root.as_posix()),
+                )
             )
         states: list[PluginInstanceState] = []
         observations: list[_StateRootObservation] = []
@@ -1063,7 +1134,9 @@ class ManagedPluginStore:
                 )
             )
         ordered = tuple(sorted(states, key=_state_sort_key))
-        if len({(item.scope, item.workspace_state_key, item.plugin_id) for item in ordered}) != len(ordered):
+        if len(
+            {(item.scope, item.workspace_state_key, item.plugin_id) for item in ordered}
+        ) != len(ordered):
             raise ValueError("Plugin state identities are not unique")
         return ordered, tuple(observations)
 
@@ -1076,13 +1149,21 @@ class ManagedPluginStore:
         cancellation: PluginCancellationPort,
     ) -> tuple[PluginVersionInspection, ...]:
         referenced = {
-            (item.scope, item.workspace_state_key, item.plugin_id, item.current_package_install_id)
+            (
+                item.scope,
+                item.workspace_state_key,
+                item.plugin_id,
+                item.current_package_install_id,
+            )
             for item in states
         }
         targets = [(PluginScopeKind.USER, None)]
         if workspace_root is not None:
             targets.append(
-                (PluginScopeKind.WORKSPACE, workspace_context_key(workspace_root.as_posix()))
+                (
+                    PluginScopeKind.WORKSPACE,
+                    workspace_context_key(workspace_root.as_posix()),
+                )
             )
         result: list[PluginVersionInspection] = []
         for scope, workspace_key in targets:
@@ -1095,10 +1176,14 @@ class ManagedPluginStore:
             try:
                 for plugin_id in sorted(os.listdir(scope_fd)):
                     _check_abort(deadline_monotonic, cancellation)
-                    metadata = os.stat(plugin_id, dir_fd=scope_fd, follow_symlinks=False)
+                    metadata = os.stat(
+                        plugin_id, dir_fd=scope_fd, follow_symlinks=False
+                    )
                     if not stat.S_ISDIR(metadata.st_mode) or plugin_id.startswith("."):
                         continue
-                    plugin_fd = os.open(plugin_id, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=scope_fd)
+                    plugin_fd = os.open(
+                        plugin_id, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=scope_fd
+                    )
                     try:
                         for name in sorted(os.listdir(plugin_fd)):
                             if not _PACKAGE_ID.fullmatch(name):
@@ -1107,7 +1192,9 @@ class ManagedPluginStore:
                                 name, dir_fd=plugin_fd, follow_symlinks=False
                             )
                             if not stat.S_ISDIR(version_meta.st_mode):
-                                raise ValueError("managed Plugin version is not a directory")
+                                raise ValueError(
+                                    "managed Plugin version is not a directory"
+                                )
                             item_identity = PluginInstanceIdentity(
                                 scope, plugin_id, workspace_key
                             )
@@ -1117,7 +1204,8 @@ class ManagedPluginStore:
                                     item_identity,
                                     name,
                                     layout.plugin_package_parent / name,
-                                    (scope, workspace_key, plugin_id, name) in referenced,
+                                    (scope, workspace_key, plugin_id, name)
+                                    in referenced,
                                     self.package_in_use(layout, name),
                                 )
                             )
@@ -1128,7 +1216,10 @@ class ManagedPluginStore:
         return tuple(
             sorted(
                 result,
-                key=lambda item: (*_identity_sort_key(item.identity), item.package_install_id),
+                key=lambda item: (
+                    *_identity_sort_key(item.identity),
+                    item.package_install_id,
+                ),
             )
         )
 
@@ -1167,7 +1258,12 @@ class ManagedPluginStore:
             )
             _revalidate_state_observations(observations)
             referenced = {
-                (item.scope, item.workspace_state_key, item.plugin_id, item.current_package_install_id)
+                (
+                    item.scope,
+                    item.workspace_state_key,
+                    item.plugin_id,
+                    item.current_package_install_id,
+                )
                 for item in states
             }
             candidates = (
@@ -1185,12 +1281,16 @@ class ManagedPluginStore:
             candidates = tuple(sorted(candidates, key=lambda item: str(item[0].path)))
             for candidate, identity, package_id in candidates:
                 _check_abort(deadline_monotonic, cancellation)
-                if candidate.kind is PluginGcRefKind.VERSION and (
-                    identity.scope,
-                    identity.workspace_state_key,
-                    identity.plugin_id,
-                    package_id,
-                ) in referenced:
+                if (
+                    candidate.kind is PluginGcRefKind.VERSION
+                    and (
+                        identity.scope,
+                        identity.workspace_state_key,
+                        identity.plugin_id,
+                        package_id,
+                    )
+                    in referenced
+                ):
                     continue
                 current = candidate
                 layout = self.layout(identity)
@@ -1252,9 +1352,7 @@ class ManagedPluginStore:
                     os.close(descriptor)
             return PluginGcOutcome(
                 PluginGcDisposition.COMPLETE,
-                PluginGcProgress(
-                    tuple(removed), tuple(in_use), None, None, False
-                ),
+                PluginGcProgress(tuple(removed), tuple(in_use), None, None, False),
             )
         except PluginPackageCancelled:
             return PluginGcOutcome(
@@ -1301,7 +1399,10 @@ class ManagedPluginStore:
         targets = [(PluginScopeKind.USER, None)]
         if workspace_root is not None:
             targets.append(
-                (PluginScopeKind.WORKSPACE, workspace_context_key(workspace_root.as_posix()))
+                (
+                    PluginScopeKind.WORKSPACE,
+                    workspace_context_key(workspace_root.as_posix()),
+                )
             )
         result: list[tuple[PluginGcRef, PluginInstanceIdentity, str]] = []
         for scope, workspace_key in targets:
@@ -1314,7 +1415,9 @@ class ManagedPluginStore:
             try:
                 for plugin_id in sorted(os.listdir(scope_fd)):
                     _check_abort(deadline_monotonic, cancellation)
-                    metadata = os.stat(plugin_id, dir_fd=scope_fd, follow_symlinks=False)
+                    metadata = os.stat(
+                        plugin_id, dir_fd=scope_fd, follow_symlinks=False
+                    )
                     if plugin_id.startswith("."):
                         continue
                     if not stat.S_ISDIR(metadata.st_mode) or not _PLUGIN_ID.fullmatch(
@@ -1341,7 +1444,8 @@ class ManagedPluginStore:
                                 (
                                     PluginGcRef(
                                         kind,
-                                        self.layout(identity).plugin_package_parent / name,
+                                        self.layout(identity).plugin_package_parent
+                                        / name,
                                         package_id,
                                     ),
                                     identity,
@@ -1352,9 +1456,7 @@ class ManagedPluginStore:
                         os.close(plugin_fd)
             finally:
                 os.close(scope_fd)
-        return tuple(
-            sorted(result, key=lambda item: str(item[0].path))
-        )
+        return tuple(sorted(result, key=lambda item: str(item[0].path)))
 
     def _gc_state_temp_candidates(
         self,
@@ -1449,14 +1551,10 @@ def _open_or_create_absolute_directory(path: Path) -> int:
     try:
         for component in path.parts[1:]:
             try:
-                next_fd = os.open(
-                    component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current
-                )
+                next_fd = os.open(component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current)
             except FileNotFoundError:
                 os.mkdir(component, 0o700, dir_fd=current)
-                next_fd = os.open(
-                    component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current
-                )
+                next_fd = os.open(component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current)
                 os.fchmod(next_fd, 0o700)
             os.close(current)
             current = next_fd
@@ -1505,9 +1603,7 @@ def _copy_observation_to_stage(
             if entry.kind is PackageEntryKind.DIRECTORY:
                 try:
                     os.mkdir(name, 0o700, dir_fd=parent)
-                    child = os.open(
-                        name, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=parent
-                    )
+                    child = os.open(name, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=parent)
                     try:
                         os.fchmod(child, 0o700)
                     finally:
@@ -1525,9 +1621,7 @@ def _copy_observation_to_stage(
                     raise _StageUnavailable from exc
                 try:
                     try:
-                        os.fchmod(
-                            destination, 0o700 if entry.executable else 0o600
-                        )
+                        os.fchmod(destination, 0o700 if entry.executable else 0o600)
                     except OSError as exc:
                         raise _StageUnavailable from exc
                     while True:
@@ -1567,8 +1661,12 @@ def _verify_paired_bytes(
     deadline_monotonic: float,
     cancellation: PluginCancellationPort,
 ) -> None:
-    source_shape = tuple((item.relative_path, item.kind, item.executable) for item in source.entries)
-    stage_shape = tuple((item.relative_path, item.kind, item.executable) for item in stage.entries)
+    source_shape = tuple(
+        (item.relative_path, item.kind, item.executable) for item in source.entries
+    )
+    stage_shape = tuple(
+        (item.relative_path, item.kind, item.executable) for item in stage.entries
+    )
     if source_shape != stage_shape:
         raise OSError("staged Plugin shape changed")
     by_path = {item.relative_path: item for item in stage.entries}
@@ -1630,9 +1728,7 @@ def _normalize_stage_modes(
         parent, name = _open_relative_parent(stage_fd, entry.relative_path)
         try:
             if entry.kind is PackageEntryKind.DIRECTORY:
-                descriptor = os.open(
-                    name, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=parent
-                )
+                descriptor = os.open(name, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=parent)
                 try:
                     os.fchmod(descriptor, 0o500)
                 finally:
@@ -1675,9 +1771,7 @@ def _open_relative_parent(root_fd: int, relative: PurePosixPath) -> tuple[int, s
     current = os.dup(root_fd)
     try:
         for component in relative.parts[:-1]:
-            next_fd = os.open(
-                component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current
-            )
+            next_fd = os.open(component, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=current)
             os.close(current)
             current = next_fd
         return current, relative.parts[-1]
@@ -1700,10 +1794,7 @@ def _summary_semantic(summary: PluginValidationSummary) -> object:
     return (
         summary.manifest,
         summary.skills.disposition,
-        tuple(
-            (skill.name, skill.description)
-            for skill in summary.skills.skills
-        ),
+        tuple((skill.name, skill.description) for skill in summary.skills.skills),
         summary.mcp.disposition,
         summary.mcp.mcp_servers,
         summary.hooks.disposition,
@@ -1719,10 +1810,7 @@ def _ensure_data_root(path: Path) -> None:
             raise OSError("Plugin data root is not a directory")
         os.fchmod(descriptor, 0o700)
         confirmed = os.fstat(descriptor)
-        if (
-            confirmed.st_uid != os.geteuid()
-            or stat.S_IMODE(confirmed.st_mode) != 0o700
-        ):
+        if confirmed.st_uid != os.geteuid() or stat.S_IMODE(confirmed.st_mode) != 0o700:
             raise OSError("Plugin data root is not private and writable")
     finally:
         os.close(descriptor)
@@ -1737,7 +1825,9 @@ def _state_payload(state: PluginInstanceState) -> bytes:
             "workspace_state_key": state.workspace_state_key,
             "current_package_install_id": state.current_package_install_id,
             "enabled": state.enabled,
-            "mcp_connection_overlays": [overlay_to_dict(item) for item in state.mcp_connection_overlays],
+            "mcp_connection_overlays": [
+                overlay_to_dict(item) for item in state.mcp_connection_overlays
+            ],
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -1796,9 +1886,7 @@ def _read_state_at_with_evidence(
     parent: int, layout: PluginStoreLayout
 ) -> tuple[PluginInstanceState | None, tuple[int, int, int, int, int]]:
     try:
-        before = os.stat(
-            layout.state_path.name, dir_fd=parent, follow_symlinks=False
-        )
+        before = os.stat(layout.state_path.name, dir_fd=parent, follow_symlinks=False)
     except FileNotFoundError:
         return None, (0, 0, 0, 0, 0)
     if not stat.S_ISREG(before.st_mode):
@@ -1821,9 +1909,7 @@ def _read_state_at_with_evidence(
             raise OSError("Plugin state changed during read")
     finally:
         os.close(descriptor)
-    path_after = os.stat(
-        layout.state_path.name, dir_fd=parent, follow_symlinks=False
-    )
+    path_after = os.stat(layout.state_path.name, dir_fd=parent, follow_symlinks=False)
     if _file_identity(path_after) != expected:
         raise OSError("Plugin state pathname raced")
     raw = b"".join(chunks)
@@ -1890,7 +1976,7 @@ def _visible_state_names(descriptor: int) -> tuple[str, ...]:
 
 
 def _revalidate_state_observations(
-    observations: tuple[_StateRootObservation, ...]
+    observations: tuple[_StateRootObservation, ...],
 ) -> None:
     for observation in observations:
         if observation.root_identity is None:
@@ -1905,9 +1991,11 @@ def _revalidate_state_observations(
         try:
             root = os.fstat(rebound)
             if (
-                (root.st_dev, root.st_ino) != observation.root_identity
-                or _visible_state_names(rebound) != observation.names
-            ):
+                root.st_dev,
+                root.st_ino,
+            ) != observation.root_identity or _visible_state_names(
+                rebound
+            ) != observation.names:
                 raise OSError("Plugin state aggregate raced")
             for name, expected in observation.files:
                 current = os.stat(name, dir_fd=rebound, follow_symlinks=False)
@@ -1929,10 +2017,14 @@ def _cleanup_owned_tree(
         return None
     except (MemoryError, OSError, ValueError):
         return PluginCleanupLocationStatus.UNKNOWN
-    if not stat.S_ISDIR(metadata.st_mode) or (
-        metadata.st_dev,
-        metadata.st_ino,
-    ) != expected_identity:
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or (
+            metadata.st_dev,
+            metadata.st_ino,
+        )
+        != expected_identity
+    ):
         return PluginCleanupLocationStatus.UNKNOWN
     try:
         root = os.open(name, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=parent_fd)
@@ -1951,7 +2043,11 @@ def _cleanup_owned_tree(
                 descriptor, prefix = stack.pop()
                 try:
                     for child_name in sorted(os.listdir(descriptor)):
-                        relative = prefix / child_name if prefix.parts else PurePosixPath(child_name)
+                        relative = (
+                            prefix / child_name
+                            if prefix.parts
+                            else PurePosixPath(child_name)
+                        )
                         child_meta = os.stat(
                             child_name,
                             dir_fd=descriptor,

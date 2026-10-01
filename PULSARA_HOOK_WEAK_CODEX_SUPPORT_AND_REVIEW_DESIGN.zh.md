@@ -1,6 +1,6 @@
 # Pulsara Hook 有限 Codex 支持与用户审阅设计
 
-日期：2026-09-30。状态：用户已授权与上游搜索规格联合实施；代码复审通过，无剩余阻塞。原生输入、别名、v2 信任契约与审阅 UI 已实现，真实 GUI dogfood 已通过，完成本次激活验收；结果见第 11 节。
+日期：2026-09-30；2026-10-01 更新。状态：原生输入、匹配别名、完整审阅、v3 信任契约及四种 Plugin Hook 目录变量已实现；外部格式导入支持部分并报告未支持功能。相关非真实会话检查 240 项及 Ponytail 生产 GUI dogfood 已通过。原联合实施与复审见第 11 节，本轮验证见文末。
 
 本文拥有本次联合 Hook hard cut 的合同，取代旧的混合工具名输入与“完整脚本等价转换”承诺。能力管理入口、安装作用域、权限与采用仍遵循 [应用与能力管理边界设计](PULSARA_APP_AND_CAPABILITY_MANAGEMENT_BOUNDARY_DESIGN.zh.md)。
 
@@ -14,7 +14,7 @@ Pulsara 提供一个小而明确的命令 Hook 系统。对外准确表述为：
 
 这里的“弱支持 Codex”不是“完整复刻 Codex，仅少一个功能”。明确不支持 PreTool 参数改写，也不复制其完整工具、会话记录、环境和结果替换机制。PostTool 保留追加上下文的能力，原工具结果完整保留。这个取舍使 Hook 负责观察、提示和有限阻止，使工具 owner 继续负责实际调用与结果结算。
 
-不建设 Claude Code Hook 运行兼容层，不为其他 harness 添加专用输入、工具参数翻译、私有状态文件或控制协议。已有插件格式导入中的 Skills、MCP 与普通资源不因本设计被删除；Hook 部分统一落到同一个 Pulsara 契约。
+不建设 Claude Code Hook 运行兼容层，不为其他 harness 添加专用输入、工具参数翻译、私有状态文件或控制协议。2026-10-01 用户授权补齐有限目录变量适配：Plugin command Hook 同时提供 PLUGIN_ROOT／CLAUDE_PLUGIN_ROOT 和 PLUGIN_DATA／CLAUDE_PLUGIN_DATA，各对值相同；执行 shell 展开这四个 braced 引用（POSIX 使用环境展开；Windows 转为 cmd 环境引用），避免把目录字节重新解释成 shell 代码；保留原始声明与脚本字节。MCP 不因此取得 Claude 环境别名。已有插件格式导入中的 Skills、MCP 与普通资源不因本设计被删除；Hook 部分统一落到同一个 Pulsara 契约。
 
 Plugin 作者可以完全忽略 stdin，也可以只读自己需要的字段。普通安装流程不要求模型逐个阅读脚本、证明跨宿主等价或替作者改写程序。
 
@@ -24,7 +24,7 @@ Plugin 作者可以完全忽略 stdin，也可以只读自己需要的字段。�
 
 | 层次 | Pulsara 承诺 | 不据此承诺的行为 |
 | --- | --- | --- |
-| 配置导入与事件 | 接受本文明确支持的配置形状、事件及 command handler，拒绝可确定的不支持项 | 不复刻供应商完整生命周期、运行环境或全部 handler |
+| 配置导入与事件 | 导入支持的组件，明确报告不激活的宿主组件、事件和 handler；无效的支持项仍拒绝 | 不复刻供应商完整生命周期、运行环境或全部 handler |
 | 工具匹配 | 原生名、通配规则及闭合别名按生产 matcher 决定是否触发 | 不替换脚本内部的工具名判断，不从命令文本推断语义 |
 | 脚本输入 | 传递真实原生 tool_name、tool_input 和公开 tool_response | 不翻译成供应商工具名、参数或结果结构，不补造 transcript/宿主私有状态 |
 | 输出控制 | 只解析第 5 节明确支持的上下文、阻止、许可及停止控制 | 不支持任意供应商控制扩展，也不保证脚本输出自然符合本合同 |
@@ -156,13 +156,17 @@ PreTool 不支持 updatedInput，也不新增 allow/ask 自动许可；自动允
 
 继续复用一个选定格式 importer、一个 native validator、一个 Hook parser 与一个 executor。Codex 发行声明显式关闭 hooks 时，不激活邻近 Claude/Cursor Hook 文件；不将不同发行版的 Hook union 到同一个候选包。
 
-安装器检查可确定的结构与声明：选定来源、事件、matcher、handler、配置字段、命令与资源位置，以及已声明且可确定的不支持项。明显不支持的活动 Hook 配置应拒绝所选发行版的转换，报告具体缺口，不自动删掉 Hook 来宣布整包成功。
+安装器检查可确定的结构与声明：选定来源、事件、matcher、handler、配置字段、命令与资源位置。导入成功表示支持部分形成原生候选，不表示完整源宿主行为等价。已声明而不支持的宿主组件、未知顶层扩展、Hook 事件以及 prompt／agent／http／mcp_tool handler 不激活，必须在既有预览 notices 和安装 diagnostics 中说明；不新增兼容报告、持久登记或模型决策参数。保留普通资源，但不把这些声明注册为原生能力。
 
-通过检查表示“配置已转换为 Pulsara 契约”，不表示“脚本行为已经验证”，也不表示“完整供应商 harness 等价”。普通安装不执行脚本，不递归追踪依赖，不做通用静态程序分析；不要求模型提供语义兼容证明。这修订了现有 conversion-contract 对任意 Hook 输入/输出完全等价的过强承诺，但不放宽来源安全、Skill/MCP 声明完整性或未知活动组件的处理规则。
+仅按选定发行版的声明和已知默认约定选择组件，不从其他发行版 manifest union。未引用的目录是资源，不因目录存在就认定为活动宿主组件；Claude 默认 commands／agents／outputStyles 只按其 Markdown 约定观察，其他发行版不从这些邻近目录推断活动组件。已支持 Skill／MCP／command Hook 自身的无效结构、正则或字段，及任何来源安全、凭据、race、取消和资源边界仍沿原生 owner 拒绝；不能将无效支持项归类为不支持而掩盖失败。已知不支持的 Hook 项保留原声明并由唯一原生 parser 跳过，诊断区分未支持与无效。
+
+通过检查表示“支持的配置已转换为 Pulsara 契约”，不表示“脚本行为已经验证”，也不表示“完整供应商 harness 等价”。普通安装不执行脚本，不递归追踪依赖，不做通用静态程序分析；不要求模型提供语义兼容证明。已支持的声明完整保留，未支持部分明确报告，不放宽来源安全。
 
 在现有安装预览中直接说明：
 
-> 已转换 Hook 配置与匹配规则。脚本收到 Pulsara 原生工具名与参数；不保证外部脚本无需适配即可运行，脚本行为尚未验证。
+> 已导入支持的组件，未支持的功能见提示。Hook 提供插件目录兼容变量，但工具名与参数仍为 Pulsara 原生契约；脚本行为尚未验证。
+
+目录别名由 Plugin 的唯一冻结 provenance producer 提供，检查、审阅、执行及失败快照使用相同环境；local Hook 不注入 Plugin 变量。固定四变量的执行展开不改写作者脚本，不处理任意供应商变量。新增环境与展开语义要求 trust contract hard cut 到 v3：旧信任不迁移，保留 enabled，用户重新审阅后才执行。已有 provider prefix 不因环境变化重建。Ponytail dogfood 在非真实测试通过后新建生产配置 GUI 会话，由模型下载并 USER 安装、启用／信任按真实审阅表单完成，验证主／子会话上下文和模式切换；不得据配置解析成功宣称端到端通过。
 
 这是一个面向当前配置的说明，不新增独立兼容报告、持久验证状态或“完全兼容”标签。Native 校验、Plugin 启用、Hook 信任、实际运行各自报告自己的事实。
 
@@ -192,7 +196,7 @@ Bundled installer 的常规指令只需告诉模型：选择发行版、调用�
 
 联合 hard cut 修改公开 tool_name、删除混合字段，增加 Read/Grep/Glob 别名并替换搜索入口，属于已审阅行为的变更。实施时统一使旧 Hook trust 失效，保留原启用设置，待用户重新审阅后执行；不把旧接受自动升级为新接受。Plugin enable 与 Hook trust 仍是不同边界。
 
-复用搜索规格确定的同一次 `TRUST_DIGEST_CONTRACT` 更新：从 `pulsara.hook-definition-trust.v1` 切到 `pulsara.hook-definition-trust.v2`，覆盖最终搜索工具、全部新别名及原生 Hook 输入契约。联合实施不先对 Grep/Glob 重新授信，再让用户因真实 tool_name 切换重复审阅；v2 首次发布就表示这组完整语义。不增加新 trust store、逐工具 digest、别名注册表或数据库字段；该固定标识属于既有跨重启语义确认边界，不是普通代码文件 SHA。
+历史联合实施复用搜索规格确定的同一次 `TRUST_DIGEST_CONTRACT` 更新：从 `pulsara.hook-definition-trust.v1` 切到 `pulsara.hook-definition-trust.v2`，覆盖最终搜索工具、全部新别名及原生 Hook 输入契约。联合实施不先对 Grep/Glob 重新授信，再让用户因真实 tool_name 切换重复审阅；v2 首次发布就表示这组完整语义。不增加新 trust store、逐工具 digest、别名注册表或数据库字段；该固定标识属于既有跨重启语义确认边界，不是普通代码文件 SHA。
 
 激活前停止旧 runtime，新冷会话仅使用最终 descriptor、matcher、输入与 v2 digest。原 trust 文件、trusted_at、enabled 与 Plugin 包状态不作迁移或批量改写。任何 USER/WORKSPACE、local/Plugin 来源，包括稍后才加载的旧项目来源，只计算 v2 当前 digest：enabled 的旧已信任来源成为 MODIFIED，不能执行；disabled 来源保持 DISABLED，开启也不能恢复旧信任。完整 GUI 审阅与 exact-definition revalidation 后写入 v2；信任操作不顺带开启来源或 Plugin。不枚举旧项目、不批量 revoke、不接受 v1 fallback，重置 PostgreSQL 也不代表 trust 文件已清空。
 
@@ -257,3 +261,13 @@ ripgrep 拥有搜索与文件发现，wcmatch 拥有纯 glob 匹配，现有 Ter
 
 
 真实 dogfood 发现并修复一处 P2 前端提示问题：后端 capability 表单正常关闭发送 `SUBMITTED`，adapter 曾仅将 `RESOLVED` 视为正常，因此误报未知结束原因。现在 `SUBMITTED` 静默收尾，`CANCELLED` 显示普通取消，未知原因继续提示；不把提交当成配置已应用，也没有新增协议、缓存或事件。三个回归通过，runtime-adapter 共 80 项通过，最终前端全量 587 项与 TypeScript/构建通过，同一 critic 对窄修订复审无阻塞。重新加载前端后，在会话 `2736bf6e` 对同一份已信任定义再次提交 GUI 审阅，实际只显示正常提交且配置已应用，错误提示未再出现；未撤销信任、修改定义或再次切换 v2。
+
+### 2026-10-01 本轮适配验证
+
+目录别名、旧 v1/v2 信任失效、受支持组件严格校验及未支持组件报告已完成代码落地。相关非真实会话测试 127 项通过，Ruff 通过。固定上游 Ponytail 4.10.0（e3ba2aa6f1e6f0bc4d69eb09c9f0d0a93af56156）的 Claude/Codex 两个发行版均可导入，分别得到 6 个 Skill、3 个 Hook；这是导入阶段验证，后续生产 GUI 运行结果见下文。
+
+本轮最终相关非真实会话检查合并运行 240 项通过，修改文件 Ruff 和 diff whitespace 检查通过。生产 GUI 新建会话 16a2d26a（test1、GPT-6 Luna/xhigh）中，模型自主从官方仓库克隆 Ponytail，并用 INSTALL_PLUGIN／USER／codex 发布到 ~/.pulsara/plugins/packages/user/ponytail/pkg_68d5501344d6447f919ba494ed986829；4 个 Hook 脚本字节与下载源相同。启用前两次中断暴露目录资源预估问题，修订见来源查询规范第 13.1 节；重启并继续后进入真实启用审阅，列出 6 Skill、3 Hook；用户已完成启用和信任审阅，工具核实 enabled 与 TRUSTED，未重复安装。
+
+生产 GUI 运行验证已完成：新冷会话 4f80aa1c（test1、GPT-6 Luna/xhigh）及真实子任务 hook-receipt-check 均在不读取 Skill／规则文件、不手动执行脚本的情况下报告 Ponytail full 规则。runtime 同时观察 SessionStart／SubagentStart 的 PONYTAIL:FULL。随后普通用户输入 /ponytail ultra 触发 UserPromptSubmit 的 PONYTAIL:ULTRA，主会话实际收到“PONYTAIL MODE CHANGED — level: ultra”，新子任务 hook-dogfood-ultra 报告 ultra 规则；Plugin data 的 .ponytail-active 为 ultra。/ponytail off 实际产生“PONYTAIL MODE OFF”，新子任务 hook-dogfood-off 明确报告未收到 Ponytail 规则。最后 /ponytail full 实际收到恢复通知，状态文件恢复 full，插件保持启用与 TRUSTED。三条声明均验证了真实执行和模型可见结果，修复后未再出现本轮资源中断；保存的生产设置未改写。
+
+验证边界：Ponytail 的 Codex 分支在模式切换时只注入通知，后续子任务读取当前模式并注入相应规则；这不宣称已将主会话旧规则删除或替换。状态文件由上游脚本写到同一 USER Plugin data 目录，不能宣称存在逐会话状态隔离。未执行 /ponytail default，不改其用户默认配置。上述为当前包的实测结果，不扩大到任意供应商 Hook 输入或宿主行为。

@@ -65,9 +65,9 @@ scalars 64 KiB, and matchers 1 KiB. These are per-carrier parser bounds, not a
 Plugin lifetime or total-Hook cap. Do not split one behavior across files to evade
 them: one Plugin has exactly one Hook config source.
 
-`prompt`, `agent`, `http`, `mcp_tool`, or any other handler type has no target.
-Unknown behavior-bearing fields are not inert merely because the parser can
-diagnose or skip them. If they are required, conversion is not exact.
+Known unsupported `prompt`, `agent`, `http`, and `mcp_tool` handlers and unsupported events
+are reported and not activated. Unknown handler types or fields on supported command
+handlers remain invalid. Import does not promise whole-harness behavior.
 
 ## Events and Matchers
 
@@ -193,6 +193,8 @@ Plugin Hook commands receive these public declaration values:
 ```text
 PLUGIN_ROOT=<exact immutable managed package root>
 PLUGIN_DATA=<exact persistent Plugin data root>
+CLAUDE_PLUGIN_ROOT=<same package root as PLUGIN_ROOT>
+CLAUDE_PLUGIN_DATA=<same data root as PLUGIN_DATA>
 ```
 
 Pulsara does not interpolate either placeholder into the reviewed command.
@@ -254,9 +256,9 @@ mapping or proof artifact to override failed admission. A renamed event is valid
 only when the owner timing and control effect are the same, not merely because
 the names sound similar.
 
-Refuse whole-Plugin conversion when any required Hook depends on an unsupported
-event or handler, matcher dialect, transcript path, automatic dependency setup,
-different tool schema, argument/result mutation, output suppression, implicit
-fail-closed behavior, more than one continuation, durable/background completion,
-or stronger context authority. Leaving such a Hook file in the candidate as an
-inert resource does not preserve the Plugin.
+Unsupported events and handler types are reported and not activated by the importer.
+Supported command Hooks must have valid native configuration. Scripts still receive
+Pulsara inputs and output/control limits; an imported script depending on another
+host's schemas, transcript, permissions or execution authority may fail at runtime.
+Report that limitation without claiming whole-harness equivalence. Directory aliases
+are finite environment adaptation, not automatic dependency setup or input translation.

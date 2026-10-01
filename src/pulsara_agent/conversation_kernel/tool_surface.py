@@ -26,11 +26,6 @@ from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 _MCP_STANDARD_TOOL_NAMES = frozenset(
     {
         "get_mcp_prompt",
-        "inspect_new_mcp_tool",
-        "list_mcp_prompts",
-        "list_mcp_resource_templates",
-        "list_mcp_resources",
-        "list_mcp_servers",
         "read_mcp_resource",
         "use_new_mcp_tool",
     }

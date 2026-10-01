@@ -15,8 +15,8 @@ Do not use a checkout, private script, raw YAML editing or a second installer.
    A vendor CLI is not necessarily an MCP server. Streamable HTTP and explicit
    legacy SSE are supported by the official SDK; never guess transport by name.
 2. Reuse USER or WORKSPACE from the user's intent; ask only if it is ambiguous.
-   Inspect `list_mcp_servers`
-   before adding a duplicate. Do not silently broaden workspace trust or network access.
+   Use `list_capabilities` with `kind:"MCP_SERVER"` before adding a duplicate.
+   Copy a target into `inspect_capability` for its location and connection details. Do not silently broaden workspace trust or network access.
 3. Call `manage_capability` with ADD_LOCAL_MCP, UPDATE_LOCAL_MCP or REMOVE_LOCAL_MCP,
    exact server_id and scope. Public config uses the native structured schema,
    not a serialized blob. Omit unknown connection details so the shared user
@@ -30,10 +30,12 @@ Do not use a checkout, private script, raw YAML editing or a second installer.
    tries to load managed changes before the next model request; do not
    routinely call `reload_capabilities` a second time. Use explicit reload for
    out-of-band CLI/file changes or a reported partial adoption only.
-6. Use `list_mcp_servers` for the exact configured identity. When a tool is
-   NEW_MCP_META_ONLY, call `inspect_new_mcp_tool` and then `use_new_mcp_tool`
-   with the returned reference. Never guess names or schemas; newly discovered tools
-   use this route without replacing the current tool list.
+6. List the current server's tools with `list_capabilities`, `kind:"MCP_TOOL"`
+   and its copied MCP_SERVER parent. Copy a tool target into `inspect_capability`.
+   Read the complete `input_schema`: DIRECT uses the named native tool, META uses
+   the returned `tool_ref` with `use_new_mcp_tool`, UNAVAILABLE explains the obstacle.
+   Resources and prompts use their respective query kinds; inspect metadata before
+   `read_mcp_resource` or `get_mcp_prompt`. Never guess names or schemas.
 7. If requested, perform one safe representative call. Saving, authorizing,
    discovering a catalog and executing a tool are distinct outcomes; report
    exactly what passed and what remains unavailable.
@@ -48,7 +50,10 @@ Every call includes `action` and explicit uppercase `scope`. Minimal calls are:
 
 This opens the shared editor for missing connection settings. For updates use
 `UPDATE_LOCAL_MCP` with the same `server_id`; omit `config` to edit current truth.
-For removal use `REMOVE_LOCAL_MCP`. OAuth authorization and clearing local grants
+Successful add/update/remove results give the actual `current.config_path`,
+not a full configuration echo. Details provide a connection summary, not a complete
+UPDATE template; omit config to use the prefilled editor. For removal use
+`REMOVE_LOCAL_MCP`. OAuth authorization and clearing local grants
 use `AUTHORIZE_MCP` and `CLEAR_MCP_AUTHORIZATION` with `server_id`; include the
 exact `plugin_id` only for a Plugin connection. Optional expected guards may be
 omitted for fresh native inspection; never guess them. Hook trust and Plugin

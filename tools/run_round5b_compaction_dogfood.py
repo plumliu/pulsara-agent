@@ -1467,7 +1467,7 @@ async def _run_overbound(
                 item.provider_name.startswith("mcp__")
                 for item in successor.direct_native_projection_set.tool_versions
             ),
-            "inspect_calls": trajectory.count("inspect_new_mcp_tool"),
+            "inspect_calls": trajectory.count("inspect_capability"),
             "meta_use_calls": trajectory.count("use_new_mcp_tool"),
             "canonical_tool_trajectory": trajectory,
             "final_nonempty": bool(final.final_text.strip()),

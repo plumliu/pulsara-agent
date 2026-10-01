@@ -101,7 +101,7 @@ from pulsara_agent.model_input.visualization_source import (
 
 
 COMPILER_CONTRACT_VERSION = (
-    "pulsara.structured-model-input-compiler.prefix-continuity.v14-tool-guidance"
+    "pulsara.structured-model-input-compiler.prefix-continuity.v15-catalog-final-wire"
 )
 
 
@@ -688,16 +688,99 @@ class StructuredModelInputCompiler:
     ) -> None:
         self._limits = limits
 
+    @staticmethod
+    def _catalog_source_state(candidate, floors, wire_selection):
+        state = _SourceState(candidate)
+        if wire_selection is not None:
+            decision = next(
+                (
+                    item
+                    for item in wire_selection.source_decisions
+                    if item.source_kind is candidate.source_kind
+                ),
+                None,
+            )
+            if decision is not None:
+                state.omitted = not decision.included
+                if decision.included:
+                    state.selected = tuple(item.mode for item in candidate.variants).index(
+                        decision.selected_mode
+                    )
+        floor = dict(floors).get(candidate.source_kind)
+        if floor is not None:
+            if candidate.source_kind not in {
+                ContextSourceKind.SKILL_CATALOG,
+                ContextSourceKind.MCP_CATALOG,
+            }:
+                raise ValueError("wire render floor is not a routing catalog")
+            index = tuple(item.mode for item in candidate.variants).index(floor)
+            state.selected = max(state.selected, index)
+        return state
+
+    @staticmethod
+    def _validate_wire_selection(request, selection):
+        if selection is not None and (
+            selection.canonical_input_identity != request.canonical_input.identity
+            or selection.compile_binding_fingerprint
+            != request.compile_binding.binding_fingerprint
+            or selection.source_collection_fingerprint
+            != request.sources.collection_fingerprint
+        ):
+            raise StructuredModelInputCompileError(
+                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+            )
+
+    def next_catalog_render_floors(self, *, sources, compiled, floors=()):
+        """Advance one existing catalog variant without altering frozen source facts.
+
+        Final wire measurement owns fit; the compiler owns legal render order.
+        Only not-yet-installed catalog emissions may advance. Finite owner
+        variants terminate selection; no retry or lifetime cap is introduced.
+        """
+        decisions = {item.source_kind: item for item in compiled.source_decisions}
+        eligible = []
+        for candidate in sources.candidates:
+            if candidate.source_kind not in {
+                ContextSourceKind.SKILL_CATALOG,
+                ContextSourceKind.MCP_CATALOG,
+            }:
+                continue
+            decision = decisions.get(candidate.source_kind)
+            if decision is None or not decision.included:
+                continue
+            modes = tuple(item.mode for item in candidate.variants)
+            index = modes.index(decision.selected_mode)
+            if index + 1 < len(modes):
+                eligible.append(
+                    (
+                        self._source_degradation_key(candidate),
+                        candidate.source_kind,
+                        modes[index + 1],
+                    )
+                )
+        if not eligible:
+            return None
+        _, kind, mode = min(eligible)
+        next_floors = dict(floors)
+        next_floors[kind] = mode
+        return tuple(sorted(next_floors.items(), key=lambda item: item[0].value))
+
     def compile(
         self,
         request: StructuredModelInputCompileRequest,
         *,
         deadline_monotonic: float | None = None,
+        catalog_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode], ...
+        ] = (),
+        wire_selection: FrozenCompiledModelInput | None = None,
     ) -> FrozenCompiledModelInput:
         result = self._compile(
             request,
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
+            catalog_render_floors=catalog_render_floors,
+            wire_selection=wire_selection,
         )
         assert isinstance(result, FrozenCompiledModelInput)
         return result
@@ -724,7 +807,12 @@ class StructuredModelInputCompiler:
         *,
         deadline_monotonic: float | None,
         semantic_projection: bool,
+        catalog_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode], ...
+        ] = (),
+        wire_selection: FrozenCompiledModelInput | None = None,
     ) -> FrozenCompiledModelInput | FrozenModelInputSemanticProjection:
+        self._validate_wire_selection(request, wire_selection)
         deadline = _CompileDeadline(deadline_monotonic)
         deadline.check()
         self._validate_canonical_input_bound(request)
@@ -751,7 +839,10 @@ class StructuredModelInputCompiler:
             )
         lowered = tuple(lowered_items)
         deadline.check()
-        source_states = [_SourceState(item) for item in request.sources.candidates]
+        source_states = [
+            self._catalog_source_state(item, catalog_render_floors, wire_selection)
+            for item in request.sources.candidates
+        ]
         tool_states = [
             _ToolState(
                 item,
@@ -767,6 +858,19 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
+        if wire_selection is not None:
+            choices = {
+                item.source_entry_fingerprint: item.selected_mode
+                for item in wire_selection.tool_result_decisions
+            }
+            for state in tool_states:
+                selected = choices.get(
+                    compiled_tool_result_source_fingerprint(state.item)
+                )
+                if selected is not None:
+                    state.selected = tuple(
+                        item.mode for item in state.lowered.tool_result_variants
+                    ).index(selected)
         self._validate_tool_delivery_variants(tool_states)
         self._validate_physical_bounds(
             request,
@@ -1059,6 +1163,10 @@ class StructuredModelInputCompiler:
         *,
         planning: FrozenProviderInputAppendPlanningInput,
         deadline_monotonic: float | None = None,
+        catalog_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode], ...
+        ] = (),
+        wire_selection: FrozenCompiledModelInput | None = None,
     ) -> FrozenProviderInputAppendCompileResult:
         """Compile one causally appended input without relowering old messages."""
 
@@ -1067,6 +1175,8 @@ class StructuredModelInputCompiler:
             planning=planning,
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
+            catalog_render_floors=catalog_render_floors,
+            wire_selection=wire_selection,
             new_epoch=False,
         )
         assert isinstance(result, FrozenProviderInputAppendCompileResult)
@@ -1078,6 +1188,10 @@ class StructuredModelInputCompiler:
         *,
         planning: FrozenProviderInputAppendPlanningInput,
         deadline_monotonic: float | None = None,
+        catalog_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode], ...
+        ] = (),
+        wire_selection: FrozenCompiledModelInput | None = None,
     ) -> FrozenProviderInputAppendCompileResult:
         """Fully reproject canonical truth for one authorized epoch boundary."""
 
@@ -1086,6 +1200,8 @@ class StructuredModelInputCompiler:
             planning=planning,
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
+            catalog_render_floors=catalog_render_floors,
+            wire_selection=wire_selection,
             new_epoch=True,
         )
         assert isinstance(result, FrozenProviderInputAppendCompileResult)
@@ -1137,10 +1253,15 @@ class StructuredModelInputCompiler:
         deadline_monotonic: float | None,
         semantic_projection: bool,
         new_epoch: bool,
+        catalog_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode], ...
+        ] = (),
+        wire_selection: FrozenCompiledModelInput | None = None,
     ) -> (
         FrozenProviderInputAppendCompileResult
         | FrozenProviderInputAppendSemanticProjection
     ):
+        self._validate_wire_selection(request, wire_selection)
         deadline = _CompileDeadline(deadline_monotonic)
         deadline.check()
         self._validate_canonical_input_bound(request)
@@ -1216,6 +1337,8 @@ class StructuredModelInputCompiler:
                 frontier=frontier,
                 deadline=deadline,
                 semantic_projection=semantic_projection,
+                catalog_render_floors=catalog_render_floors,
+                wire_selection=wire_selection,
             )
 
         # New epochs fully project effective canonical truth. Boundary
@@ -1223,7 +1346,12 @@ class StructuredModelInputCompiler:
         fresh = (
             self.project(request, deadline_monotonic=deadline.value)
             if semantic_projection
-            else self.compile(request, deadline_monotonic=deadline.value)
+            else self.compile(
+                request,
+                deadline_monotonic=deadline.value,
+                catalog_render_floors=catalog_render_floors,
+                wire_selection=wire_selection,
+            )
         )
         deadline.check()
         all_materialized, _ = self._materialize_approved_plan(request)
@@ -1264,10 +1392,7 @@ class StructuredModelInputCompiler:
         )
         delta_messages = tuple(item.message for item in expanded_delta)
 
-        previous_heads = {
-            item.source_kind: item
-            for item in ()
-        }
+        previous_heads = {item.source_kind: item for item in ()}
         source_decisions = {item.source_kind: item for item in fresh.source_decisions}
         observation_messages: list[tuple[int, str, LLMMessage]] = []
         resulting_heads = dict(previous_heads)
@@ -1588,6 +1713,10 @@ class StructuredModelInputCompiler:
         frontier: ProcessLocalCanonicalFrontier,
         deadline: _CompileDeadline,
         semantic_projection: bool,
+        catalog_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode], ...
+        ] = (),
+        wire_selection: FrozenCompiledModelInput | None = None,
     ) -> (
         FrozenProviderInputAppendCompileResult
         | FrozenProviderInputAppendSemanticProjection
@@ -1632,6 +1761,19 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
+        if wire_selection is not None:
+            choices = {
+                item.source_entry_fingerprint: item.selected_mode
+                for item in wire_selection.tool_result_decisions
+            }
+            for state in tool_states:
+                selected = choices.get(
+                    compiled_tool_result_source_fingerprint(state.item)
+                )
+                if selected is not None:
+                    state.selected = tuple(
+                        item.mode for item in state.lowered.tool_result_variants
+                    ).index(selected)
         self._validate_tool_delivery_variants(tool_states)
 
         emissions: list[_AppendSourceEmission] = []
@@ -1640,7 +1782,9 @@ class StructuredModelInputCompiler:
             if candidate.source_kind is ContextSourceKind.BASE_SYSTEM:
                 continue
             previous = previous_heads.get(candidate.source_kind)
-            state = _SourceState(candidate)
+            state = self._catalog_source_state(
+                candidate, catalog_render_floors, wire_selection
+            )
             semantic = _source_occurrence_fingerprint(
                 candidate.domain_semantic_fingerprint,
                 lifecycle=candidate.lifecycle,

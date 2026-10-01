@@ -10,6 +10,7 @@ from pulsara_agent.mcp_config import (
     NoAuth,
     StdioTransportConfig,
     _parse_server,
+    _parse_server_declaration,
 )
 from pulsara_agent.mcp_credentials import (
     McpCredentialOwner,
@@ -160,7 +161,7 @@ class PluginMcpConnectionOverlay:
             raise ValueError("Plugin reserved environment cannot be overridden")
         # One native validator owns connection/auth syntax. The stand-in command
         # is never executable and does not grant a package/process authority.
-        _parse_server(self.local_server_id, self.validation_entry())
+        _parse_server_declaration(self.local_server_id, self.validation_entry())
 
     def validation_entry(self) -> dict:
         from pulsara_agent.capability.mcp_management import auth_to_entry
@@ -288,7 +289,9 @@ def resolve_connection_overlay(server, overlay, *, owner):
             if item.private
         }
         refs = managed_bindings(
-            _parse_server(server.local_server_id, overlay.validation_entry())
+            _parse_server_declaration(
+                server.local_server_id, overlay.validation_entry()
+            )
         )
         if any(
             binding.name.startswith("input:")

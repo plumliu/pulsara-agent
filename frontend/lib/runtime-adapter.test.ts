@@ -1270,7 +1270,7 @@ describe('exact prompt projection', () => {
   });
 
   it('projects successful orchestration results and exposes child execution', async () => {
-    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(value) });
+    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))) });
     const toolRequest = (
       sequence: number,
       entryId: string,
@@ -1514,12 +1514,12 @@ describe('exact prompt projection', () => {
   });
 
   it('keeps exact MCP meta-tool arguments and results for structured UI projection', async () => {
-    const argumentsJson = JSON.stringify({ server_id: 'firecrawl' });
+    const argumentsJson = JSON.stringify({ kind: 'MCP_TOOL', parent: { kind: 'MCP_SERVER', runtime_server_id: 'firecrawl' } });
     const resultText = JSON.stringify({
-      total_server_count: 1,
-      servers: [{ server_id: 'firecrawl', public_status: 'READY', tool_count: 3 }],
+      total_count: 1, completeness: 'COMPLETE',
+      items: [{ kind: 'MCP_SERVER', name: 'firecrawl', target: { kind: 'MCP_SERVER', runtime_server_id: 'firecrawl' }, source: null, status: '连接已就绪。' }],
     });
-    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(value) });
+    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))) });
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', connection_generation: 1,
       session_id: 'session-1', role: 'controller',
@@ -1532,7 +1532,7 @@ describe('exact prompt projection', () => {
             entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
             blocks: [{
               block_id: 'block-mcp-list', block_kind: 'TOOL_CALL',
-              tool_call_id: 'call-mcp-list', tool_name: 'list_mcp_servers',
+              tool_call_id: 'call-mcp-list', tool_name: 'list_capabilities',
               tool_arguments_preview: btoa(argumentsJson),
             }],
           }, {
@@ -1553,8 +1553,8 @@ describe('exact prompt projection', () => {
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
     expect(connection.current().messages[0]?.traces?.[0]).toMatchObject({
-      toolName: 'list_mcp_servers',
-      title: '浏览 MCP 服务',
+      toolName: 'list_capabilities',
+      title: '查看能力',
       argumentsJson,
       resultText,
       status: 'completed',

@@ -18,6 +18,7 @@ from pulsara_agent.hooks.contracts import (
     HookDiagnostic,
     HookDispatchScopeRef,
     HookEventType,
+    HookSourceKind,
     JsonValue,
 )
 from pulsara_agent.model_input.contracts import (
@@ -176,6 +177,21 @@ class HookCommandExecutor:
                 scrub.observe(guard.value)
             command = definition.selected_command(windows=sys.platform == "win32")
             overlay = dict(definition.provenance.declaration_environment)
+            if (
+                definition.provenance.identity.kind is HookSourceKind.PLUGIN
+                and sys.platform == "win32"
+            ):
+                # POSIX expands braced env references itself, without reparsing
+                # directory bytes as shell code. cmd needs its native env syntax.
+                # Keep the authored definition immutable on both platforms.
+                for name in (
+                    "PLUGIN_ROOT",
+                    "CLAUDE_PLUGIN_ROOT",
+                    "PLUGIN_DATA",
+                    "CLAUDE_PLUGIN_DATA",
+                ):
+                    if name in overlay:
+                        command = command.replace("${" + name + "}", "%" + name + "%")
             overlay["PULSARA_HOOK_SOURCE_DIR"] = str(
                 definition.provenance.identity.canonical_path.parent
             )

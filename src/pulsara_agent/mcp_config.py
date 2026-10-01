@@ -321,6 +321,64 @@ class McpEffectPolicyConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class McpServerDeclaration:
+    """Validated saved definition, without credential resolution or runtime IDs."""
+
+    server_id: str
+    display_name: str
+    enabled: bool
+    required: bool
+    transport: McpTransportConfig
+    auth: McpAuthConfig
+    exposure_policy: McpExposurePolicy
+    scope_policy: McpScopePolicy
+    effect_policy: McpEffectPolicyConfig
+    supports_parallel_tool_calls: bool
+    stateless_http_max_in_flight: int
+    catalog_refresh_interval_ms: int | None
+    default_tool_timeout_ms: int
+    per_tool_timeout_ms: tuple[tuple[str, int], ...]
+    runtime_source: McpRuntimeSourceIdentity = field(
+        default_factory=LocalConfiguredMcpRuntimeSource
+    )
+    public_headers: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_mcp_configuration(self)
+
+
+def _validate_mcp_configuration(config) -> None:
+    if not config.server_id or not config.display_name:
+        raise ValueError("MCP server identity is incomplete")
+    if not 1 <= config.stateless_http_max_in_flight <= 16:
+        raise ValueError("MCP stateless concurrency is out of range")
+    if not 1_000 <= config.default_tool_timeout_ms <= 600_000:
+        raise ValueError("MCP default tool timeout is out of range")
+    if config.catalog_refresh_interval_ms is not None and not (
+        30_000 <= config.catalog_refresh_interval_ms <= 86_400_000
+    ):
+        raise ValueError("MCP refresh interval is out of range")
+    if len(config.per_tool_timeout_ms) > MAXIMUM_MCP_TOOL_OVERRIDES:
+        raise ValueError("too many MCP per-tool timeout overrides")
+    names = tuple(name for name, _ in config.per_tool_timeout_ms)
+    _validate_names(names, "MCP timeout override tools")
+    if any(not 1_000 <= value <= 600_000 for _, value in config.per_tool_timeout_ms):
+        raise ValueError("MCP per-tool timeout is out of range")
+    if not isinstance(
+        config.runtime_source,
+        (LocalConfiguredMcpRuntimeSource, ManagedPackageMcpRuntimeSource),
+    ):
+        raise TypeError("MCP runtime source identity union is open")
+    _validate_public_headers(config.public_headers)
+    if isinstance(config.transport, StdioTransportConfig) and config.public_headers:
+        raise ValueError("stdio MCP cannot send HTTP headers")
+    if isinstance(config.transport, StdioTransportConfig) and not isinstance(
+        config.auth, NoAuth
+    ):
+        raise ValueError("stdio MCP uses secret env, not HTTP authentication")
+
+
+@dataclass(frozen=True, slots=True)
 class McpServerConfig:
     server_id: str
     display_name: str
@@ -354,34 +412,7 @@ class McpServerConfig:
     ) = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not self.server_id or not self.display_name:
-            raise ValueError("MCP server identity is incomplete")
-        if not 1 <= self.stateless_http_max_in_flight <= 16:
-            raise ValueError("MCP stateless concurrency is out of range")
-        if not 1_000 <= self.default_tool_timeout_ms <= 600_000:
-            raise ValueError("MCP default tool timeout is out of range")
-        if self.catalog_refresh_interval_ms is not None and not (
-            30_000 <= self.catalog_refresh_interval_ms <= 86_400_000
-        ):
-            raise ValueError("MCP refresh interval is out of range")
-        if len(self.per_tool_timeout_ms) > MAXIMUM_MCP_TOOL_OVERRIDES:
-            raise ValueError("too many MCP per-tool timeout overrides")
-        names = tuple(name for name, _ in self.per_tool_timeout_ms)
-        _validate_names(names, "MCP timeout override tools")
-        if any(not 1_000 <= value <= 600_000 for _, value in self.per_tool_timeout_ms):
-            raise ValueError("MCP per-tool timeout is out of range")
-        if not isinstance(
-            self.runtime_source,
-            (LocalConfiguredMcpRuntimeSource, ManagedPackageMcpRuntimeSource),
-        ):
-            raise TypeError("MCP runtime source identity union is open")
-        _validate_public_headers(self.public_headers)
-        if isinstance(self.transport, StdioTransportConfig) and self.public_headers:
-            raise ValueError("stdio MCP cannot send HTTP headers")
-        if isinstance(self.transport, StdioTransportConfig) and not isinstance(
-            self.auth, NoAuth
-        ):
-            raise ValueError("stdio MCP uses secret env, not HTTP authentication")
+        _validate_mcp_configuration(self)
         semantic, runtime, resolved = _derive_config_fingerprints(
             server_id=self.server_id,
             display_name=self.display_name,
@@ -670,6 +701,36 @@ def _parse_server(
     runtime_source: McpRuntimeSourceIdentity | None = None,
     secret_resolver: McpSecretResolver | None = None,
 ) -> McpServerConfig:
+    declaration = _parse_server_declaration(
+        server_id, raw, runtime_source=runtime_source
+    )
+    return freeze_mcp_server_config(
+        server_id=declaration.server_id,
+        display_name=declaration.display_name,
+        enabled=declaration.enabled,
+        required=declaration.required,
+        transport=declaration.transport,
+        auth=declaration.auth,
+        exposure_policy=declaration.exposure_policy,
+        scope_policy=declaration.scope_policy,
+        effect_policy=declaration.effect_policy,
+        supports_parallel_tool_calls=declaration.supports_parallel_tool_calls,
+        stateless_http_max_in_flight=declaration.stateless_http_max_in_flight,
+        catalog_refresh_interval_ms=declaration.catalog_refresh_interval_ms,
+        default_tool_timeout_ms=declaration.default_tool_timeout_ms,
+        per_tool_timeout_ms=declaration.per_tool_timeout_ms,
+        runtime_source=declaration.runtime_source,
+        public_headers=declaration.public_headers,
+        secret_resolver=secret_resolver,
+    )
+
+
+def _parse_server_declaration(
+    server_id: str,
+    raw: Mapping[str, Any],
+    *,
+    runtime_source: McpRuntimeSourceIdentity | None = None,
+) -> McpServerDeclaration:
     server_id = server_id.strip()
     if not server_id or len(server_id.encode("utf-8")) > 128:
         raise ValueError("MCP server id is invalid")
@@ -851,7 +912,7 @@ def _parse_server(
         "MCP tool timeout",
     )
     per_tool_timeout = tuple(sorted(per_timeout.items()))
-    return freeze_mcp_server_config(
+    return McpServerDeclaration(
         server_id=server_id,
         display_name=display_name,
         enabled=enabled,
@@ -874,7 +935,6 @@ def _parse_server(
                 ).items()
             )
         ),
-        secret_resolver=secret_resolver,
     )
 
 

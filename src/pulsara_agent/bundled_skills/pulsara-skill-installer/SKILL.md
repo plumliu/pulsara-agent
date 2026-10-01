@@ -18,9 +18,11 @@ installation target and its frozen Pulsara home.
    absolute `source_path`. Optional `name` and `description` use the native
    candidate normalization; source files and references/scripts/assets remain
    intact. Never specify a destination workspace or propagate home environment.
-3. Verify with `INSPECT_LOOSE_SKILLS` using the same scope, optionally filtering
-   by the installed absolute `skill_path` (the copy's `SKILL.md`). Inspect
-   disabled, shadowed, invalid, unavailable and operation eligibility separately.
+3. Reuse `identity.skill_path` from the installation result. Pass
+   `{"target":{"kind":"SKILL","skill_path":"<returned path>"}}` to
+   `inspect_capability` to check selection, issues and management eligibility.
+   To discover copies use `list_capabilities` with `kind:"SKILL"` and optional scope;
+   copy its target unchanged. List rows are summaries; locations are in details.
 4. Use `SET_LOOSE_SKILL_ENABLED` with the exact `skill_path` and boolean `enabled`
    when requested. Use `REMOVE_LOOSE_SKILL` only for an authorized exact copy;
    discoverable workspace `.agents` copies are not deletion targets.
@@ -30,7 +32,7 @@ installation target and its frozen Pulsara home.
 
 ## Minimal calls
 
-Pass these objects to `manage_capability`; substitute the observed absolute
+Pass the installation object to `manage_capability`; substitute the observed absolute
 paths and reuse the user's scope. `source_path` is a directory; `skill_path` is
 the installed copy's `SKILL.md`, not its directory.
 
@@ -39,12 +41,15 @@ the installed copy's `SKILL.md`, not its directory.
 ```
 
 ```json
-{"action":"INSPECT_LOOSE_SKILLS","scope":"WORKSPACE","skill_path":"/absolute/project/.pulsara/skills/example-skill/SKILL.md"}
+{"target":{"kind":"SKILL","skill_path":"/absolute/project/.pulsara/skills/example-skill/SKILL.md"}}
 ```
+
+The second object is for `inspect_capability`. Installation returns `current.skill_root`
+and `current.skill_path`; the directory and SKILL.md are distinct.
 
 For enable/disable use `SET_LOOSE_SKILL_ENABLED` with the same `skill_path` and
 `enabled:true` or `false`. For removal use `REMOVE_LOOSE_SKILL` with `skill_path`.
-`INSPECT_LOOSE_SKILLS` is allowed in READ_ONLY; mutations follow current
+`list_capabilities` and `inspect_capability` are allowed in READ_ONLY; mutations follow current
 permissions. The installed path comes from the result; do not reconstruct it
 from a terminal cwd or guessed home.
 

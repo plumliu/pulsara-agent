@@ -112,14 +112,14 @@ def test_native_inspection_is_read_only_in_every_permission_mode(tmp_path, mode)
         assert effects.read_only
         result = await DefaultToolDispatchAuthorizationPolicy().decide(
             ToolDispatchAuthorizationRequest(
-                "manage_capability",
+                "list_capabilities",
                 "call:read",
-                {"action": "INSPECT_LOOSE_SKILLS", "scope": "USER"},
+                {},
                 "turn:read",
                 "entry:read",
                 permission,
                 tmp_path,
-                effects,
+                None,
             )
         )
         assert result.kind.value == "ALLOW"

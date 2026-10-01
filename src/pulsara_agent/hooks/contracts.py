@@ -205,6 +205,18 @@ class FrozenHookSourceProvenance:
     )
 
 
+def plugin_hook_environment(
+    package_root: Path, data_root: Path
+) -> tuple[tuple[str, str], ...]:
+    """The finite directory aliases shared by Plugin review and execution."""
+    return (
+        ("CLAUDE_PLUGIN_DATA", str(data_root)),
+        ("CLAUDE_PLUGIN_ROOT", str(package_root)),
+        ("PLUGIN_DATA", str(data_root)),
+        ("PLUGIN_ROOT", str(package_root)),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenHookMatcherFact:
     pattern: str

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import fields, replace
 import ast
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +17,6 @@ from pulsara_agent.capability.contracts import (
     FrozenMcpCapabilityProjectionInput,
     FrozenMcpRouteProjection,
     FrozenNativeToolWireEligibilityQuote,
-    FrozenNativeToolProjectionSet,
     FrozenSkillProjectionInput,
     InstalledCapabilityEpochPredecessor,
     McpInspectEffectKind,
@@ -31,7 +29,6 @@ from pulsara_agent.capability.contracts import (
     freeze_capability_source_snapshot,
     freeze_mcp_inspectability_fact,
     freeze_tool_capability_fact,
-    native_tool_projection_set_fingerprint,
     tool_capability_version_ref,
 )
 from pulsara_agent.capability.local_skills import (
@@ -63,7 +60,8 @@ from pulsara_agent.conversation_kernel.mcp.contracts import (
     McpServerCatalogEntry,
     build_catalog_snapshot,
 )
-from pulsara_agent.conversation_kernel.mcp.directory import McpDirectoryPageFactory
+from pulsara_agent.conversation_kernel.mcp.directory import runtime_rows
+from pulsara_agent.capability.source_query import render_page, parse_query, CapabilityQueryError
 from pulsara_agent.conversation_kernel.mcp.meta import (
     McpToolRefCapacityExceeded,
     ProcessLocalNewMcpToolRefOwner,
@@ -829,7 +827,7 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
     )
 
 
-def test_round9_mcp_directory_cursor_is_scope_and_catalog_bound() -> None:
+def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
     entries = tuple(
         McpServerCatalogEntry(
             server_id=f"server-{index}",
@@ -855,21 +853,6 @@ def test_round9_mcp_directory_cursor_is_scope_and_catalog_bound() -> None:
         for index in range(3)
     )
     catalog = build_catalog_snapshot(owner_epoch=1, catalog_revision=1, entries=entries)
-    contract = context_fingerprint("test:round9-wire-contract:v1", "chat")
-    direct = FrozenNativeToolProjectionSet(
-        conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        native_function_tool_wire_contract_fingerprint=contract,
-        tool_versions=(),
-        projections=(),
-        projection_set_fingerprint=native_tool_projection_set_fingerprint(
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-            native_function_tool_wire_contract_fingerprint=contract,
-            tool_versions=(),
-            projections=(),
-        ),
-    )
     routes = FrozenMcpRouteProjection(
         routes=(),
         joined_catalog_semantic_fingerprint=catalog.semantic_fingerprint,
@@ -878,64 +861,26 @@ def test_round9_mcp_directory_cursor_is_scope_and_catalog_bound() -> None:
             {"routes": (), "catalog": catalog.semantic_fingerprint},
         ),
     )
-    factory = McpDirectoryPageFactory()
-    first = factory.render(
-        arguments={"limit": 1},
-        scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        catalog=catalog,
-        candidates={},
-        routes=routes,
-        direct_projection_set=direct,
-    )
-    assert first.state == "SUCCESS"
-    payload = json.loads(first.content)
-    assert len(payload["servers"]) == 1
-    assert payload["next_cursor"]
-    second = factory.render(
-        arguments={"limit": 1, "cursor": payload["next_cursor"]},
-        scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        catalog=catalog,
-        candidates={},
-        routes=routes,
-        direct_projection_set=direct,
-    )
-    assert json.loads(second.content)["servers"][0]["server_id"] == "server-1"
-    child = factory.render(
-        arguments={"limit": 1, "cursor": payload["next_cursor"]},
-        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id="task:child",
-        catalog=catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK),
-        candidates={},
-        routes=routes,
-        direct_projection_set=direct,
-    )
-    assert child.state == "APPLICATION_ERROR"
-    assert b"STALE_CURSOR" in child.content
-
-    drifted_routes = replace(
-        routes,
-        joined_catalog_semantic_fingerprint="sha256:foreign-catalog",
-        projection_fingerprint=context_fingerprint(
-            "mcp-route-projection:v1",
-            {"routes": (), "catalog": "sha256:foreign-catalog"},
-        ),
-    )
-    stale_cut = factory.render(
-        arguments={"limit": 1},
-        scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        catalog=catalog,
-        candidates={},
-        routes=drifted_routes,
-        direct_projection_set=direct,
-    )
-    assert stale_cut.state == "APPLICATION_ERROR"
-    assert b"MCP_CATALOG_STALE" in stale_cut.content
+    runtime = SimpleNamespace(catalog_for_scope=lambda scope: catalog.for_scope(scope), candidates={})
+    plan = SimpleNamespace(mcp_catalog_route_projection=routes)
+    rows, _, diagnostics = runtime_rows(runtime, plan, ModelInputScopeKind.ROOT)
+    assert diagnostics == []
+    first = render_page(rows, {"limit": 1})
+    assert len(first["items"]) == 1 and first["next_offset"] == 1
+    second = render_page(rows, {"limit": 1, "offset": first["next_offset"]})
+    assert second["items"][0]["target"]["runtime_server_id"] == "server-1"
+    assert render_page(rows, {"offset": 99})["next_offset"] is None
+    with pytest.raises(CapabilityQueryError):
+        parse_query({"cursor": "old-shape"})
+    child_plan = SimpleNamespace(mcp_catalog_route_projection=replace(routes, joined_catalog_semantic_fingerprint=catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK).semantic_fingerprint, projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK).semantic_fingerprint})))
+    child_rows, _, diagnostics = runtime_rows(runtime, child_plan, ModelInputScopeKind.SUBAGENT_TASK)
+    assert diagnostics == [] and len(child_rows) == 3
+    drifted_routes = replace(routes, joined_catalog_semantic_fingerprint="sha256:foreign-catalog", projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": "sha256:foreign-catalog"}))
+    stale_rows, _, diagnostics = runtime_rows(runtime, SimpleNamespace(mcp_catalog_route_projection=drifted_routes), ModelInputScopeKind.ROOT)
+    assert stale_rows == [] and diagnostics[0]["code"] == "MCP_CATALOG_STALE"
 
 
-def test_round9_mcp_item_directory_cursor_is_list_and_query_bound() -> None:
+def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
     server_catalog_fingerprint = context_fingerprint(
         "test:round9-item-server-catalog:v1",
         "server",
@@ -1028,47 +973,23 @@ def test_round9_mcp_item_directory_cursor_is_list_and_query_bound() -> None:
             discovery_snapshot=snapshot,
         )
     }
-    factory = McpDirectoryPageFactory()
-    first = factory.render_items(
-        tool_name="list_mcp_resources",
-        arguments={"server_id": "server", "limit": 1},
-        scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        catalog=catalog,
-        candidates=candidates,
-    )
-    assert first.state == "SUCCESS"
-    first_payload = json.loads(first.content)
-    assert first_payload["page_kind"] == "RESOURCE_PAGE"
-    assert first_payload["items"][0]["uri"] == "fixture://resource/0"
-    cursor = first_payload["next_cursor"]
-    assert isinstance(cursor, str)
-
-    second = factory.render_items(
-        tool_name="list_mcp_resources",
-        arguments={"server_id": "server", "limit": 1, "cursor": cursor},
-        scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        catalog=catalog,
-        candidates=candidates,
-    )
-    assert json.loads(second.content)["items"][0]["uri"] == ("fixture://resource/1")
-
-    for tool_name, arguments in (
-        ("list_mcp_prompts", {"server_id": "server", "limit": 1}),
-        ("list_mcp_resources", {"server_id": "server", "limit": 2}),
-        ("list_mcp_resources", {"limit": 1}),
-    ):
-        stale = factory.render_items(
-            tool_name=tool_name,
-            arguments={**arguments, "cursor": cursor},
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-            catalog=catalog,
-            candidates=candidates,
-        )
-        assert stale.state == "APPLICATION_ERROR"
-        assert b"STALE_CURSOR" in stale.content
+    runtime = SimpleNamespace(catalog_for_scope=lambda scope: catalog.for_scope(scope), candidates=candidates)
+    plan = SimpleNamespace(mcp_catalog_route_projection=SimpleNamespace(
+        joined_catalog_semantic_fingerprint=catalog.semantic_fingerprint, routes=()))
+    rows, details, diagnostics = runtime_rows(runtime, plan, ModelInputScopeKind.ROOT)
+    assert diagnostics == []
+    resources = [item for item in rows if item["kind"] == "MCP_RESOURCE"]
+    first = render_page(resources, {"limit": 1})
+    assert first["items"][0]["target"]["uri"] == "fixture://resource/0"
+    assert first["next_offset"] == 1
+    second = render_page(resources, {"limit": 1, "offset": first["next_offset"]})
+    assert second["items"][0]["target"]["uri"] == "fixture://resource/1"
+    assert details[("MCP_RESOURCE", "server", "fixture://resource/0")]["uri"] == "fixture://resource/0"
+    prompts = [item for item in rows if item["kind"] == "MCP_PROMPT"]
+    assert prompts and prompts[0]["target"]["name"] == snapshot.prompts[0].name
+    assert render_page(resources, {"offset": 99})["items"] == []
+    with pytest.raises(CapabilityQueryError):
+        parse_query({"kind": "MCP_RESOURCE", "cursor": "old-shape"})
 
 
 def test_round9_projection_wire_bytes_are_derived_not_caller_supplied() -> None:

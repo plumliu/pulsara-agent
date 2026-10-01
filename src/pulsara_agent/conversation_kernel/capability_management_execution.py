@@ -19,6 +19,7 @@ from pulsara_agent.capability.local_skill_publisher import (
     LocalSkillInstallDisposition,
 )
 from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalDisposition
+from pulsara_agent.capability.inspection_presentation import diagnostic_payload
 from pulsara_agent.hooks.trust import normalized_definition_digest
 from pulsara_agent.plugins.contracts import (
     InspectLocalPluginsRequest,
@@ -355,14 +356,12 @@ class CapabilityManagementCall:
             Action.INSTALL_LOOSE_SKILL,
             Action.SET_LOOSE_SKILL_ENABLED,
             Action.REMOVE_LOOSE_SKILL,
-            Action.INSPECT_LOOSE_SKILLS,
         }:
             return await self._skill(prepared, fields, root)
         if action in {
             Action.TRUST_HOOK_SOURCE,
             Action.REVOKE_HOOK_TRUST,
             Action.SET_HOOK_SOURCE_ENABLED,
-            Action.INSPECT_HOOK_SOURCES,
         }:
             return await self._hook(prepared, fields, root, values)
         if prepared.local_mutation is not None:
@@ -387,9 +386,7 @@ class CapabilityManagementCall:
                 prepared,
                 "APPLIED",
                 {
-                    "config": config_to_entry(outcome.config)
-                    if outcome.config is not None
-                    else None,
+                    "config_path": str(service.mcp.path(mutation.target)),
                     "cleanup_attention": outcome.cleanup_attention,
                 },
             )
@@ -499,30 +496,14 @@ class CapabilityManagementCall:
         )
         if isinstance(outcome, SuccessfulPluginInstallOutcome):
             result["identity"]["plugin_id"] = outcome.identity.plugin_id
+            result["current"]["package_root"] = str(outcome.package_root)
+            result["diagnostics"] = [diagnostic_payload(item) for item in outcome.diagnostics]
         return result
 
     async def _skill(self, prepared, fields, root):
         service = self.service
         scope = LocalSkillInstallScope(prepared.intent.scope.value.lower())
         action = prepared.intent.action
-        if action is Action.INSPECT_LOOSE_SKILLS:
-            # Read current native sources; do not replay a prepared inventory.
-            inventory, _, _ = await asyncio.to_thread(
-                service.skills.inspect_loose_skills,
-                scope=scope,
-                workspace_root=root,
-                plugin_definitions=await asyncio.to_thread(
-                    service.inspect_plugin_skill_definitions, root
-                ),
-            )
-            if "skill_path" in fields:
-                for name in ("items", "issues"):
-                    inventory[name] = [
-                        item
-                        for item in inventory[name]
-                        if item["path"] == fields["skill_path"]
-                    ]
-            return self._result(prepared, "OBSERVED", inventory)
         candidate = await service.prepare(prepared.intent.to_dict())
         self._same_target(candidate)
         if action is Action.INSTALL_LOOSE_SKILL:
@@ -550,14 +531,12 @@ class CapabilityManagementCall:
                 if outcome.disposition is LocalSkillInstallDisposition.CANCELLED
                 else "REJECTED"
             )
-            return self._result(
-                prepared,
-                status,
+            result = self._result(
+                prepared, status,
                 {
                     "operation_status": outcome.disposition.value,
-                    "path": str(outcome.destination_path)
-                    if outcome.destination_path is not None
-                    else None,
+                    "skill_root": str(outcome.destination_path) if applied and outcome.destination_path is not None else None,
+                    "skill_path": str(outcome.destination_path / "SKILL.md") if applied and outcome.destination_path is not None else None,
                     "cleanup_attention": outcome.disposition
                     is LocalSkillInstallDisposition.CLEANUP_UNAVAILABLE,
                     "prior_operation_status": outcome.prior_disposition.value
@@ -571,6 +550,9 @@ class CapabilityManagementCall:
                     else None,
                 },
             )
+            if applied and outcome.destination_path is not None:
+                result["identity"]["skill_path"] = str(outcome.destination_path / "SKILL.md")
+            return result
         if action is Action.SET_LOOSE_SKILL_ENABLED:
             await _settled_call(
                 service.skills.set_loose_skill_enabled,
@@ -655,55 +637,6 @@ class CapabilityManagementCall:
     async def _hook(self, prepared, fields, root, values):
         service = self.service
         action = prepared.intent.action
-        if action is Action.INSPECT_HOOK_SOURCES:
-            snapshots, observation = await service.inspect_hook_sources(
-                root=root,
-                source_kind=fields.get("source_kind"),
-                plugin_id=fields.get("plugin_id"),
-                allow_unavailable=True,
-            )
-            composition_complete = observation["hook_composition_status"] == "COMPLETE"
-            sources = []
-            for snapshot, plugin in snapshots:
-                public = await service.public_hook_snapshot(snapshot)
-                public.update(
-                    {
-                        "source_kind": "PLUGIN" if plugin is not None else "LOCAL",
-                        "plugin_enabled": plugin.enabled
-                        if plugin is not None
-                        else None,
-                        "effective": (
-                            plugin.effective_hook if composition_complete else None
-                        )
-                        if plugin is not None
-                        else snapshot.runnable,
-                        "shadowed": (
-                            bool(plugin.enabled and not plugin.effective_hook)
-                            if composition_complete
-                            else None
-                        )
-                        if plugin is not None
-                        else False,
-                    }
-                )
-                sources.append(public)
-            return self._result(
-                prepared,
-                "OBSERVED",
-                {
-                    "status": "UNAVAILABLE"
-                    if observation["plugin_inventory_status"] == "UNAVAILABLE"
-                    or observation["hook_composition_status"] == "UNAVAILABLE"
-                    or any(
-                        item["source_disposition"] == "UNAVAILABLE"
-                        or item["trust_disposition"] == "UNAVAILABLE"
-                        for item in sources
-                    )
-                    else "COMPLETE",
-                    **observation,
-                    "sources": sources,
-                },
-            )
         snapshot = prepared.hook
         subject = snapshot.provenance.trust_subject
         store = service.hooks.trust_store

@@ -624,10 +624,13 @@ class SuccessfulPluginInstallOutcome:
     package_install_id: str
     summary: PluginValidationSummary
     diagnostics: tuple[object, ...]
+    package_root: Path = field(kw_only=True)
     cleanup_attention: bool = False
     enabled: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        if not self.package_root.is_absolute():
+            raise ValueError("installed Plugin package root must be absolute")
         if self.disposition not in {
             PluginInstallDisposition.INSTALLED,
             PluginInstallDisposition.REPLACED,

@@ -282,7 +282,7 @@ def _tool_settlement_summary(
         "inspect_attempts": sum(
             bool(row["attempt_accepted"])
             for row in rows
-            if row["tool_name"] == "inspect_new_mcp_tool"
+            if row["tool_name"] == "inspect_capability"
         ),
         "meta_use_attempts": sum(
             bool(row["attempt_accepted"])
@@ -316,17 +316,16 @@ def _arguments_contract_ok(
     tool_name = row["tool_name"]
     if tool_name == expected_direct_tool_name:
         return set(arguments) == {"text"} and isinstance(arguments["text"], str)
-    if tool_name == "inspect_new_mcp_tool":
+    if tool_name == "inspect_capability":
         if expected_meta_server_id is None or expected_meta_tool_name is None:
             return False
         provider_name = mangle_mcp_tool_names(
             expected_meta_server_id, (expected_meta_tool_name,)
         )[expected_meta_tool_name]
         return (
-            arguments.get("server_id") == expected_meta_server_id
-            and arguments.get("tool_name")
-            in {expected_meta_tool_name, provider_name}
-            and set(arguments) == {"server_id", "tool_name"}
+            set(arguments) == {"target"}
+            and arguments["target"] == {"kind": "MCP_TOOL", "server_id": expected_meta_server_id,
+                                        "tool_name": provider_name}
         )
     if tool_name == "use_new_mcp_tool":
         return (
@@ -388,7 +387,7 @@ async def _run_scenario(
         )
         expected_tool_names = (
             "mcp__direct__direct_echo",
-            "inspect_new_mcp_tool",
+            "inspect_capability",
             "use_new_mcp_tool",
         )
         expected_direct_tool_name = "mcp__direct__direct_echo"
@@ -415,7 +414,7 @@ async def _run_scenario(
         )
         expected_tool_names = (
             "mcp__mixed__direct_echo",
-            "inspect_new_mcp_tool",
+            "inspect_capability",
             "use_new_mcp_tool",
         )
         expected_direct_tool_name = "mcp__mixed__direct_echo"

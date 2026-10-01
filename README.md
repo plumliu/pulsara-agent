@@ -333,7 +333,7 @@ MCP, and aggregate-Skill snapshots. Exact target-aware native preflight occurs
 before the parent dispatch cut; Tool planning and Skill projection consume
 sibling views from that same cut. A cold MCP cohort is either wholly admitted
 within both canonical and actual-wire bounds or kept meta-only. Late-ready and
-native-wire-incompatible tools use bounded `inspect_new_mcp_tool` then
+native-wire-incompatible tools use `inspect_capability` with an exact MCP_TOOL target, then
 `use_new_mcp_tool`; a policy/route-bound ref becomes callable only after the
 inspection result is installed FULL. Same-epoch SYSTEM and tools remain
 byte-stable, and catalog/route changes append messages only. No capability

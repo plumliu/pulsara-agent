@@ -795,7 +795,7 @@ def test_round9_discovery_retains_canonical_valid_wire_incompatible_mcp_tool(
 @pytest.mark.postgres
 @pytest.mark.parametrize(
     "inspect_tool_name",
-    ("intersecting_unions", "mcp__fixture__intersecting_unions"),
+    ("mcp__fixture__intersecting_unions",),
 )
 def test_round9_meta_inspect_full_install_then_single_physical_use(
     stage2_migrated_postgres_database,
@@ -838,11 +838,8 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
             if request.model_call_index == 1:
                 events = _generic_tool_stream(
                     block_id="call:inspect",
-                    tool_name="inspect_new_mcp_tool",
-                    arguments={
-                        "server_id": "fixture",
-                        "tool_name": inspect_tool_name,
-                    },
+                    tool_name="inspect_capability",
+                    arguments={"target": {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": inspect_tool_name}},
                 )
             elif request.model_call_index == 2:
                 result = next(
@@ -2075,16 +2072,11 @@ def test_round9_mcp_catalog_variants_are_bounded_closed_degradations() -> None:
 
 
 def test_round9_meta_tool_descriptors_define_inspect_then_use_few_shot() -> None:
-    inspect = builtin_tool_catalog_entry("inspect_new_mcp_tool").descriptor
+    inspect = builtin_tool_catalog_entry("inspect_capability").descriptor
     use = builtin_tool_catalog_entry("use_new_mcp_tool").descriptor
-
-    assert "mcp__late__bulk_00" in inspect.description
-    assert "route=NEW_MCP_META_ONLY" in inspect.description
-    assert "provider_tool_name" in inspect.description
-    assert "listed under new_tool_names by list_mcp_servers" not in inspect.description
-    assert '{"server_id":"late","tool_name":"mcp__late__bulk_00"}' in (
-        inspect.description
-    )
+    assert "complete input_schema" in inspect.description
+    assert "DIRECT" in inspect.description and "META" in inspect.description
+    assert "target" in inspect.description
     assert "input_schema" in use.description
     assert (
         '{"tool_ref":"mcpref_RETURNED_VALUE","arguments":{"text":"round9"}}'
@@ -2379,11 +2371,8 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
             if dynamic and request.model_call_index == 1:
                 events = _generic_tool_stream(
                     block_id="call:inspect",
-                    tool_name="inspect_new_mcp_tool",
-                    arguments={
-                        "server_id": "fixture",
-                        "tool_name": "intersecting_unions",
-                    },
+                    tool_name="inspect_capability",
+                    arguments={"target": {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": "mcp__fixture__intersecting_unions"}},
                 )
             elif request.model_call_index == (2 if dynamic else 1):
                 name, arguments = "mcp__fixture__fake_echo", {"text": "observe"}
@@ -2907,6 +2896,31 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         try:
+            from types import SimpleNamespace
+            from pulsara_agent.primitives.context import thaw_json
+            target = {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": dynamic.name}
+            inspected = await port._query_capabilities_result(
+                tool_name="inspect_capability", arguments={"target": target},
+                invocation_context=SimpleNamespace(surface_borrow=borrow),
+            )
+            assert inspected.state == "SUCCESS"
+            detail = json.loads(inspected.content)
+            assert detail["target"] == target
+            assert detail["input_schema"] == thaw_json(dynamic.parameters)
+            assert detail["description"] == dynamic.description
+            assert detail["invocation"] == {"mode": "DIRECT", "tool_name": dynamic.name}
+            assert "tool_ref" not in detail
+            rejected = await port._query_capabilities_result(
+                tool_name="inspect_capability", arguments={"target": {**target, "tool_name": "fixture_echo"}},
+                invocation_context=SimpleNamespace(surface_borrow=borrow),
+            )
+            assert rejected.state == "APPLICATION_ERROR"
+            assert b"MCP_TOOL_NOT_FOUND" in rejected.content
+            old_input = await port._query_capabilities_result(
+                tool_name="inspect_capability", arguments={"server_id": "fixture", "tool_name": dynamic.name},
+                invocation_context=SimpleNamespace(surface_borrow=borrow),
+            )
+            assert old_input.state == "APPLICATION_ERROR" and b"INVALID_ARGUMENTS" in old_input.content
             authorization = await port.authorize(
                 tool_name=dynamic.name,
                 arguments={"text": "surface"},

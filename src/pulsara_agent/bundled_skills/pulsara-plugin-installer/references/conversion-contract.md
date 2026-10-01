@@ -48,32 +48,20 @@ The official importer/native validator owns these checks. Use its supported
 conversion and diagnostics; this list explains admission rather than requiring
 the model to build a second validator or audit every script. The importer checks supported declarations, not arbitrary script semantics:
 
-1. Every active source component has one exact supported destination.
-2. Selected Skill resources are copied unchanged.
-3. MCP commands, arguments, working directories, URLs, headers, and environment
-   declarations remain exact apart from a standard package-root placeholder
-   representation with the same resolved value.
-4. Every declared Hook configuration has a supported event, matcher and command handler. Scripts receive Pulsara native names and parameters; conversion does not validate behavior or vendor harness equivalence. Ordinary installation never executes scripts, follows their dependencies recursively, or requires model-run semantic proof. See `pulsara-hook-extension.md` for input/output limits.
-5. Required host tools, Apps, permissions, dependency installation, PATH changes,
-   background services, and UI behavior are either natively represented or absent.
-6. License and compatibility statements remain truthful.
-7. The sole Pulsara production validator returns `VALID` for the complete candidate.
+1. Install supported selected-format Skills, MCP connections and command Hooks.
+2. Copy scripts and Skill resources unchanged; do not execute them during import.
+3. Preserve supported MCP declarations and credential boundaries. Invalid supported
+   configuration still blocks installation; unsupported settings are not guessed.
+4. Report unsupported host components and Hook events/handler types in preview
+   notices and installation diagnostics. They are not registered or executed.
+5. Unreferenced directories are resources; do not infer another host's components.
+6. Preserve licensing and truthful compatibility statements.
+7. Validate the native candidate through the existing production owner.
 
-Known presentation metadata may be omitted from the active standard manifest
-when it never affects source behavior. Do not promote it to a Pulsara capability.
-Unknown behavior-bearing fields block conversion rather than being silently
-discarded. The importer owns the supported field set, not a model's judgment.
+Installation means the supported subset was installed, not that the original
+harness behavior is preserved. Unknown source-host extensions are reported and
+not activated. Invalid supported components, unsafe paths, source races and actual
+credential literals still block installation. The model cannot override them.
 
-## Honest Stop
-
-Stop as soon as preserving the whole Plugin would require guessing, substituting,
-executing source code, dropping an active component, or changing user-visible
-behavior. Report:
-
-- the detected source format;
-- the exact blocking files and components;
-- what Pulsara representation is missing;
-- why omission or substitution would change the Plugin's intent;
-- that the original source was unchanged and no Plugin was installed.
-
-Do not create a reduced fork unless the user separately asks for Plugin authoring.
+For compatibility questions, explain the exact unsupported host dependency.
+Do not manually construct a reduced fork or repair a failed supported declaration.

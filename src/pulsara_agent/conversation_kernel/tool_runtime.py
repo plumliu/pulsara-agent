@@ -18,7 +18,10 @@ from jsonschema import ValidationError, validators
 from .capability_management import CapabilityManagementPreparation
 from .capability_management_execution import CapabilityManagementCall
 from pulsara_agent.capability.mcp_management import McpManagementConflict
-from pulsara_agent.capability.management_form import PendingCapabilityForm, AcceptedCapabilityFormSubmission
+from pulsara_agent.capability.management_form import (
+    PendingCapabilityForm,
+    AcceptedCapabilityFormSubmission,
+)
 
 from pulsara_agent.capability.builtin_catalog import (
     BuiltinToolCatalogEntry,
@@ -256,7 +259,13 @@ from .mcp.supervisor import (
     McpSnapshotStale,
 )
 from .mcp.contracts import McpDiscoveryCatalogInspection
-from .mcp.directory import McpDirectoryPageFactory
+from .capability_query import CapabilitySourceQuery
+from pulsara_agent.capability.source_query import (
+    parse_query,
+    CapabilityQueryError,
+    fits_result,
+    query_error,
+)
 from .mcp.meta import (
     McpToolRefCapacityExceeded,
     NewMcpToolRef,
@@ -418,9 +427,15 @@ class KernelToolInteractionResolution(Protocol):
 
 
 class KernelToolInteractionPort(Protocol):
-    async def request_capability_form(self, *, turn_id: str, assistant_entry_id: str,
-        tool_call_id: str, permission_snapshot: FrozenRunPermissionSnapshot,
-        form: PendingCapabilityForm) -> KernelToolInteractionResolution: ...
+    async def request_capability_form(
+        self,
+        *,
+        turn_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
+        permission_snapshot: FrozenRunPermissionSnapshot,
+        form: PendingCapabilityForm,
+    ) -> KernelToolInteractionResolution: ...
 
     async def request_tool_confirmation(
         self,
@@ -663,7 +678,8 @@ class DirectKernelToolPort:
         live_bus: LiveAgentEventBus,
         artifact_read_port: ToolArtifactReadPort | None = None,
         image_reference_read_port: CanonicalImageReferenceReadPort | None = None,
-        visualization_reference_read_port: PostgresCanonicalVisualizationReadPort | None = None,
+        visualization_reference_read_port: PostgresCanonicalVisualizationReadPort
+        | None = None,
         terminal_monitor_wake_scheduler: Callable[[], None] | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
@@ -743,13 +759,10 @@ class DirectKernelToolPort:
             _DirectCapabilityControlTool("reload_hooks"),
             _DirectCapabilityControlTool("reload_capabilities"),
             _DirectCapabilityControlTool("manage_capability"),
-            _DirectMcpCatalogTool("list_mcp_servers"),
-            _DirectMcpCatalogTool("inspect_new_mcp_tool"),
+            _DirectMcpCatalogTool("list_capabilities"),
+            _DirectMcpCatalogTool("inspect_capability"),
             _DirectMcpCatalogTool("use_new_mcp_tool"),
-            _DirectMcpCatalogTool("list_mcp_resources"),
-            _DirectMcpCatalogTool("list_mcp_resource_templates"),
             _DirectMcpCatalogTool("read_mcp_resource"),
-            _DirectMcpCatalogTool("list_mcp_prompts"),
             _DirectMcpCatalogTool("get_mcp_prompt"),
         )
         if artifact_read_port is not None:
@@ -777,9 +790,9 @@ class DirectKernelToolPort:
         self._closed = False
         self._builtin_composition_state = BuiltinCompositionState.PREPARING
         self._builtin_composition_seal: object | None = None
-        self._sealed_builtin_bindings: tuple[
-            ProductionBuiltinExecutorBinding, ...
-        ] | None = None
+        self._sealed_builtin_bindings: (
+            tuple[ProductionBuiltinExecutorBinding, ...] | None
+        ) = None
         self._physically_closed = False
         self._terminal_physically_closed = False
         self._close_async_lock = asyncio.Lock()
@@ -795,9 +808,7 @@ class DirectKernelToolPort:
         self._visualization_subscriptions: dict[
             str, dict[tuple[str, str], VisualizationSubscription]
         ] = {}
-        self._mcp_ref_settlements: dict[
-            str, ProcessLocalEffectSettlementToken
-        ] = {}
+        self._mcp_ref_settlements: dict[str, ProcessLocalEffectSettlementToken] = {}
         self._todo_owner = TodoRunStateOwner(
             session_id=session_id,
             owner_epoch=host_owner_id,
@@ -823,7 +834,6 @@ class DirectKernelToolPort:
             tuple[int, str], _PreparedMcpMetaInvocation
         ] = {}
         self._mcp_meta_refs = ProcessLocalNewMcpToolRefOwner()
-        self._mcp_directory = McpDirectoryPageFactory()
         self._installed_epoch_by_borrow: dict[str, _InstalledBorrowEpoch] = {}
 
     def visualization_subscriptions(
@@ -880,7 +890,9 @@ class DirectKernelToolPort:
                 raise RuntimeError("Capability reload port is already bound")
             self._capability_reload = port
 
-    def bind_capability_management(self, service: CapabilityManagementPreparation) -> None:
+    def bind_capability_management(
+        self, service: CapabilityManagementPreparation
+    ) -> None:
         with self._surface_lock:
             self._require_builtin_composition_preparing_locked()
             if self._capability_management is not None:
@@ -1074,9 +1086,11 @@ class DirectKernelToolPort:
         with self._surface_lock:
             if self._sealed_builtin_bindings is None:
                 raise RuntimeError("builtin composition is not sealed")
-            subjects = tuple(tool_matcher_subject(binding.tool_name)
+            subjects = tuple(
+                tool_matcher_subject(binding.tool_name)
                 for binding in self._sealed_builtin_bindings
-                if binding.tool_name != "report_agent_result")
+                if binding.tool_name != "report_agent_result"
+            )
             supervisor = self._mcp_supervisor
         if supervisor is None:
             return subjects, False
@@ -1264,7 +1278,9 @@ class DirectKernelToolPort:
                 f"mcp-direct:{binding.unavailable_reason_code}",
                 "MCP tool generation is unavailable",
             )
-        entry = builtin_tool_catalog_entry(tool_name) if tool_name in self._tools else None
+        entry = (
+            builtin_tool_catalog_entry(tool_name) if tool_name in self._tools else None
+        )
         if entry is not None:
             schema = _json_schema_value(entry.descriptor.input_schema)
             try:
@@ -1377,8 +1393,7 @@ class DirectKernelToolPort:
                 owner_host_session_id=self._host_owner_id
             )
             if (
-                item.origin.conversation_scope_kind
-                == conversation_scope_kind.value
+                item.origin.conversation_scope_kind == conversation_scope_kind.value
                 and item.origin.scope_subagent_task_id == scope_subagent_task_id
             )
         )
@@ -1409,9 +1424,10 @@ class DirectKernelToolPort:
             conversation_scope_kind is ModelInputScopeKind.ROOT
             and self._subagent is not None
         ):
-            subagent_facts, subagent_totals = (
-                await self._subagent.freeze_compaction_handoff()
-            )
+            (
+                subagent_facts,
+                subagent_totals,
+            ) = await self._subagent.freeze_compaction_handoff()
         return freeze_compaction_runtime_handoff(
             terminal_processes=process_facts,
             terminal_monitors=monitor_facts,
@@ -1437,8 +1453,7 @@ class DirectKernelToolPort:
             or plan.direct_projection_set.scope_subagent_task_id != task_id
             or plan.dispatch_view.parent_dispatch_cut.conversation_scope_kind
             is not scope
-            or plan.dispatch_view.parent_dispatch_cut.scope_subagent_task_id
-            != task_id
+            or plan.dispatch_view.parent_dispatch_cut.scope_subagent_task_id != task_id
         ):
             raise ValueError("planned tool surface scope is invalid")
         with self._surface_lock:
@@ -1457,14 +1472,9 @@ class DirectKernelToolPort:
             mcp_binding_by_name = (
                 {}
                 if current_mcp is None
-                else {
-                    item.tool_name: item
-                    for item in current_mcp.execution_bindings
-                }
+                else {item.tool_name: item for item in current_mcp.execution_bindings}
             )
-            mcp_executor_by_name = (
-                {} if current_mcp is None else current_mcp.executors
-            )
+            mcp_executor_by_name = {} if current_mcp is None else current_mcp.executors
             version_by_name = {
                 item.provider_name: item
                 for item in plan.direct_projection_set.tool_versions
@@ -1516,9 +1526,7 @@ class DirectKernelToolPort:
                 )
                 leaves.append(
                     PreparedUnavailableDirectMcpGate(
-                        capability_identity_fingerprint=(
-                            version.identity_fingerprint
-                        ),
+                        capability_identity_fingerprint=(version.identity_fingerprint),
                         tool_semantic_fingerprint=spec.descriptor_fingerprint,
                         provider_tool_name=spec.name,
                         unavailable_reason_code=reason,
@@ -1659,8 +1667,7 @@ class DirectKernelToolPort:
         if (
             permit.scope.session_id != self._session_id
             or permit.scope.scope_kind is not access.conversation_scope_kind
-            or permit.scope.scope_subagent_task_id
-            != access.scope_subagent_task_id
+            or permit.scope.scope_subagent_task_id != access.scope_subagent_task_id
         ):
             raise RuntimeError("provider-input install scope does not join tool borrow")
         self.validate_tool_surface_borrow(surface_borrow, surface_borrow.prepared)
@@ -1800,7 +1807,7 @@ class DirectKernelToolPort:
                     "This MCP tool was available when the current context began, "
                     "but its server connection is currently unavailable. The native "
                     "tool definition remains frozen to preserve context continuity. "
-                    "Do not route it through use_new_mcp_tool. Check list_mcp_servers "
+                    "Do not route it through use_new_mcp_tool. Check list_capabilities "
                     "or wait for a same-schema reconnect."
                 ),
             )
@@ -1965,18 +1972,34 @@ class DirectKernelToolPort:
         if tool_name == "manage_capability":
             access = surface_borrow.prepared.access
             if access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
-                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "capability:root-only", "Capability management is available only in ROOT")
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    "capability:root-only",
+                    "Capability management is available only in ROOT",
+                )
             if self._capability_management is None:
-                return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                    "capability:unavailable", "Capability management is unavailable")
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                    "capability:unavailable",
+                    "Capability management is unavailable",
+                )
             try:
                 prepared = await self._capability_management.prepare(arguments)
             except ValueError as exc:
-                return KernelToolAuthorization(KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    "capability:invalid-target", str(exc))
-            capability_call = CapabilityManagementCall(self._capability_management, prepared)
-            capability_call.subject = (self._session_id, turn_id, assistant_entry_id, tool_call_id)
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                    "capability:invalid-target",
+                    str(exc),
+                )
+            capability_call = CapabilityManagementCall(
+                self._capability_management, prepared
+            )
+            capability_call.subject = (
+                self._session_id,
+                turn_id,
+                assistant_entry_id,
+                tool_call_id,
+            )
         decision = await self._authorization_policy.decide(
             ToolDispatchAuthorizationRequest(
                 tool_name=tool_name,
@@ -1986,23 +2009,37 @@ class DirectKernelToolPort:
                 assistant_entry_id=assistant_entry_id,
                 permission_snapshot=permission_snapshot,
                 workspace_root=self._workspace_root,
-                capability_effects=capability_call.prepared.effects if capability_call else None,
+                capability_effects=capability_call.prepared.effects
+                if capability_call
+                else None,
             )
         )
         if capability_call is not None:
-            readonly_form = (decision.kind is ToolDispatchDecisionKind.DENY
-                             and permission_snapshot.effective_mode is PermissionMode.READ_ONLY)
+            readonly_form = (
+                decision.kind is ToolDispatchDecisionKind.DENY
+                and permission_snapshot.effective_mode is PermissionMode.READ_ONLY
+            )
             if decision.kind is ToolDispatchDecisionKind.DENY and not readonly_form:
                 capability_call.discard()
-                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    decision.reference, decision.public_message)
-            form = readonly_form or bool(capability_call.prepared.user_inputs) or (
-                decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION)
+                return KernelToolAuthorization(
+                    KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    decision.reference,
+                    decision.public_message,
+                )
+            form = (
+                readonly_form
+                or bool(capability_call.prepared.user_inputs)
+                or (decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION)
+            )
             return KernelToolAuthorization(
-                KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED if form else KernelToolAuthorizationKind.ALLOW,
-                decision.reference, decision.public_message,
+                KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED
+                if form
+                else KernelToolAuthorizationKind.ALLOW,
+                decision.reference,
+                decision.public_message,
                 capability_call=capability_call,
-                capability_permission_required=decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION,
+                capability_permission_required=decision.kind
+                is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION,
             )
         if decision.kind is ToolDispatchDecisionKind.REQUIRE_CONFIRMATION:
             return KernelToolAuthorization(
@@ -2092,8 +2129,7 @@ class DirectKernelToolPort:
             item
             for item in plan.mcp_catalog_route_projection.routes
             if item.route_fingerprint == ref.tool_route_fingerprint
-            and item.version.identity_fingerprint
-            == ref.capability_identity_fingerprint
+            and item.version.identity_fingerprint == ref.capability_identity_fingerprint
             and item.version.semantic_fingerprint == ref.tool_semantic_fingerprint
         )
         if len(matches) != 1:
@@ -2402,9 +2438,7 @@ class DirectKernelToolPort:
     def resolve_hook_permission(
         self, *, prepared_request: PreparedPermissionRequest, allow: bool
     ) -> KernelToolAuthorization:
-        key, admission, permit = self._validate_permission_request(
-            prepared_request
-        )
+        key, admission, permit = self._validate_permission_request(prepared_request)
         if not allow:
             if key is not None and admission is not None:
                 self._mcp_confirmation_admissions.pop(key, None)
@@ -2442,33 +2476,58 @@ class DirectKernelToolPort:
         )
 
     async def request_capability_form(
-        self, *, authorization, turn_id, assistant_entry_id, tool_call_id, permission_snapshot,
+        self,
+        *,
+        authorization,
+        turn_id,
+        assistant_entry_id,
+        tool_call_id,
+        permission_snapshot,
     ):
         call = authorization.capability_call
-        if call is None or authorization.kind is not KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED:
+        if (
+            call is None
+            or authorization.kind
+            is not KernelToolAuthorizationKind.CAPABILITY_FORM_REQUIRED
+        ):
             raise RuntimeError("capability form has no prepared call")
         if self._interaction is None:
             call.discard()
-            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "interaction:no-controller", "Capability configuration requires a controller")
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "interaction:no-controller",
+                "Capability configuration requires a controller",
+            )
         try:
             resolution = await self._interaction.request_capability_form(
-                turn_id=turn_id, assistant_entry_id=assistant_entry_id, tool_call_id=tool_call_id,
-                permission_snapshot=permission_snapshot, form=call.form(authorization.public_message),
+                turn_id=turn_id,
+                assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+                permission_snapshot=permission_snapshot,
+                form=call.form(authorization.public_message),
             )
         except BaseException:
             call.discard()
             raise
-        if resolution.decision == "SUBMIT" and resolution.capability_submission is not None:
+        if (
+            resolution.decision == "SUBMIT"
+            and resolution.capability_submission is not None
+        ):
             call.accept(resolution.capability_submission)
-            return KernelToolAuthorization(KernelToolAuthorizationKind.ALLOW,
-                resolution.reference, resolution.public_message,
-                capability_call=call, capability_user_submission=True)
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.ALLOW,
+                resolution.reference,
+                resolution.public_message,
+                capability_call=call,
+                capability_user_submission=True,
+            )
         call.discard()
         return KernelToolAuthorization(
-            KernelToolAuthorizationKind.TOOL_UNAVAILABLE if "no-controller" in resolution.reference
+            KernelToolAuthorizationKind.TOOL_UNAVAILABLE
+            if "no-controller" in resolution.reference
             else KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH,
-            resolution.reference, resolution.public_message,
+            resolution.reference,
+            resolution.public_message,
         )
 
     async def request_confirmation(
@@ -2580,85 +2639,100 @@ class DirectKernelToolPort:
                 resolution.public_message,
                 accepted_result_entry_id=resolution.result_entry_id,
                 accepted_result_id=resolution.result_id,
-                accepted_result_entry_sequence=(
-                    resolution.result_entry_sequence
-                ),
+                accepted_result_entry_sequence=(resolution.result_entry_sequence),
                 accepted_result_observed_at=resolution.result_observed_at,
                 accepted_result_public_body=resolution.result_public_body,
             )
         raise RuntimeError("interaction resolution vocabulary is invalid")
 
-    def _list_mcp_servers_result(
-        self,
-        *,
-        arguments: Mapping[str, object],
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> KernelToolResult:
-        generation = surface_borrow.prepared.access.surface_generation
-        runtime = self._mcp_runtime_by_surface_generation.get(generation)
-        plan = surface_borrow.prepared.capability_exposure_plan
-        if runtime is None or plan is None:
-            return _local_mcp_application_error("MCP_CATALOG_UNAVAILABLE")
-        scope_kind = surface_borrow.prepared.access.conversation_scope_kind
-        catalog = runtime.catalog_for_scope(scope_kind)
-        if (
-            catalog.semantic_fingerprint
-            != plan.mcp_catalog_route_projection.joined_catalog_semantic_fingerprint
-        ):
-            return _local_mcp_application_error("MCP_CATALOG_STALE")
-        page = self._mcp_directory.render(
-            arguments=arguments,
-            scope_kind=scope_kind,
-            scope_subagent_task_id=(
-                surface_borrow.prepared.access.scope_subagent_task_id
-            ),
-            catalog=catalog,
-            candidates=runtime.candidates,
-            routes=plan.mcp_catalog_route_projection,
-            direct_projection_set=plan.direct_projection_set,
-        )
-        return KernelToolResult(
-            state=page.state,
-            content=page.content,
-            effect_class="read_only",
-        )
+    async def _query_capabilities_result(
+        self, *, tool_name, arguments, invocation_context
+    ):
+        borrow = invocation_context.surface_borrow
+        scope = borrow.prepared.access.conversation_scope_kind
+        try:
+            values = parse_query(
+                arguments,
+                inspect=tool_name == "inspect_capability",
+                subagent=scope is ModelInputScopeKind.SUBAGENT_TASK,
+            )
+            if (
+                tool_name == "inspect_capability"
+                and values["target"]["kind"] == "MCP_TOOL"
+            ):
+                return self._inspect_mcp_tool_result(
+                    target=values["target"], invocation_context=invocation_context
+                )
+            runtime = self._mcp_runtime_by_surface_generation.get(
+                borrow.prepared.access.surface_generation
+            )
+            result = await CapabilitySourceQuery(
+                self._capability_management,
+                runtime=runtime,
+                plan=borrow.prepared.capability_exposure_plan,
+                scope=scope,
+            ).execute(values, inspect=tool_name == "inspect_capability")
+            content = canonical_json_bytes(result)
+            # Only MCP_TOOL schema inspection is FULL-required. Ordinary details
+            # use the existing OUTPUT artifact and provider result projection.
+            candidate = (
+                None
+                if tool_name == "list_capabilities"
+                else ToolOutputArtifactCandidate(
+                    role="OUTPUT",
+                    text=content.decode("utf-8"),
+                    source_coverage=ToolOutputSourceCoverage.COMPLETE,
+                    original_utf8_bytes=len(content),
+                    source_format_hint=ToolOutputSourceFormatHint.TEXT,
+                )
+            )
+            return KernelToolResult(
+                state="SUCCESS",
+                content=content,
+                output_artifact_candidate=candidate,
+                effect_class="read_only",
+            )
+        except CapabilityQueryError as exc:
+            return KernelToolResult(
+                state="APPLICATION_ERROR",
+                content=canonical_json_bytes(
+                    {
+                        **query_error(exc.code, str(exc)),
+                        **(
+                            {"diagnostics": list(exc.diagnostics)}
+                            if exc.diagnostics
+                            else {}
+                        ),
+                    }
+                ),
+                effect_class="read_only",
+            )
+        except (OSError, ValueError) as exc:
+            # Query output passes the same concrete credential-value scrub owner;
+            # no internal DTO or complete config is serialized on failures.
+            result = query_error("SOURCE_OBSERVATION_UNAVAILABLE", str(exc))
+            if self._capability_management is not None:
+                from pulsara_agent.plugins.contracts import InspectLocalPluginsRequest
 
-    def _list_mcp_items_result(
-        self,
-        *,
-        tool_name: str,
-        arguments: Mapping[str, object],
-        surface_borrow: ProcessLocalToolSurfaceBorrow,
-    ) -> KernelToolResult:
-        generation = surface_borrow.prepared.access.surface_generation
-        runtime = self._mcp_runtime_by_surface_generation.get(generation)
-        if runtime is None:
-            return _local_mcp_application_error("MCP_CATALOG_UNAVAILABLE")
-        scope_kind = surface_borrow.prepared.access.conversation_scope_kind
-        page = self._mcp_directory.render_items(
-            tool_name=tool_name,
-            arguments=arguments,
-            scope_kind=scope_kind,
-            scope_subagent_task_id=(
-                surface_borrow.prepared.access.scope_subagent_task_id
-            ),
-            catalog=runtime.catalog_for_scope(scope_kind),
-            candidates=runtime.candidates,
-        )
-        return KernelToolResult(
-            state=page.state,
-            content=page.content,
-            effect_class="read_only",
-        )
+                scrub = await asyncio.to_thread(
+                    self._capability_management.plugins._capture_scrub_set,
+                    InspectLocalPluginsRequest(self._capability_management.deadline()),
+                )
+                result = scrub.scrub_json(result)
+            return KernelToolResult(
+                state="APPLICATION_ERROR",
+                content=canonical_json_bytes(result),
+                effect_class="read_only",
+            )
 
-    def _inspect_new_mcp_tool_result(
+    def _inspect_mcp_tool_result(
         self,
         *,
-        arguments: Mapping[str, object],
+        target: Mapping[str, object],
         invocation_context: KernelToolInvocationContext,
     ) -> KernelToolResult:
-        server_id = arguments.get("server_id")
-        remote_name = arguments.get("tool_name")
+        server_id = target.get("server_id")
+        remote_name = target.get("tool_name")
         if not isinstance(server_id, str) or not isinstance(remote_name, str):
             return _local_mcp_application_error("INVALID_ARGUMENTS")
         borrow = invocation_context.surface_borrow
@@ -2669,25 +2743,79 @@ class DirectKernelToolPort:
             item
             for item in plan.mcp_catalog_route_projection.routes
             if item.target.server_id == server_id
-            and remote_name
-            in {
-                item.target.remote_tool_name,
-                item.version.provider_name,
-            }
+            and remote_name == item.version.provider_name
         )
         if len(matches) != 1:
             return _local_mcp_application_error("MCP_TOOL_NOT_FOUND")
         route = matches[0]
         if route.route is ToolCapabilityRouteKind.DIRECT:
-            return _local_mcp_application_error("MCP_TOOL_IS_NATIVE_DIRECT")
+            direct_binding = borrow.execution_binding(route.version.provider_name)
+            if isinstance(direct_binding, PreparedUnavailableDirectMcpGate):
+                return KernelToolResult(
+                    state="SUCCESS",
+                    effect_class="read_only",
+                    content=canonical_json_bytes(
+                        {
+                            "target": dict(target),
+                            "invocation": {"mode": "UNAVAILABLE"},
+                            "diagnostics": [
+                                {
+                                    "code": direct_binding.unavailable_reason_code,
+                                    "message": "The frozen direct tool cannot currently be dispatched.",
+                                }
+                            ],
+                        }
+                    ),
+                )
+            spec = next(
+                (
+                    item
+                    for item in borrow.prepared.model_surface.tool_specs
+                    if item.name == route.version.provider_name
+                ),
+                None,
+            )
+            if spec is None:
+                return _local_mcp_application_error("MCP_TOOL_BINDING_STALE")
+            body = {
+                "target": dict(target),
+                "description": spec.description,
+                "input_schema": thaw_json(spec.parameters),
+                "invocation": {"mode": "DIRECT", "tool_name": spec.name},
+            }
+            if not fits_result(body):
+                return _local_mcp_application_error("MCP_DESCRIPTOR_OVERBOUND")
+            return KernelToolResult(
+                state="SUCCESS",
+                content=canonical_json_bytes(body),
+                effect_class="read_only",
+            )
         if route.route is ToolCapabilityRouteKind.UNAVAILABLE:
-            return _local_mcp_application_error(route.public_reason_code.value)
+            return KernelToolResult(
+                state="SUCCESS",
+                effect_class="read_only",
+                content=canonical_json_bytes(
+                    {
+                        "target": dict(target),
+                        "invocation": {"mode": "UNAVAILABLE"},
+                        "diagnostics": [
+                            {
+                                "code": route.public_reason_code.value,
+                                "message": "The current route does not allow this tool to be called.",
+                            }
+                        ],
+                    }
+                ),
+            )
         generation = borrow.prepared.access.surface_generation
         runtime = self._mcp_runtime_by_surface_generation.get(generation)
         if runtime is None:
             return _local_mcp_application_error("MCP_RUNTIME_UNAVAILABLE")
         executor = runtime.executors.get(route.version.provider_name)
-        if executor is None or _mcp_executor_capability_version(executor) != route.version:
+        if (
+            executor is None
+            or _mcp_executor_capability_version(executor) != route.version
+        ):
             return _local_mcp_application_error("MCP_TOOL_BINDING_STALE")
         values = _mcp_inspection_values(executor)
         quote = conservative_mcp_inspection_logical_utf8_bytes(values)
@@ -2699,9 +2827,7 @@ class DirectKernelToolPort:
                 conversation_scope_kind=epoch.conversation_scope_kind,
                 scope_subagent_task_id=epoch.scope_subagent_task_id,
                 continuity_epoch_nonce=epoch.epoch_nonce,
-                capability_identity_fingerprint=(
-                    route.version.identity_fingerprint
-                ),
+                capability_identity_fingerprint=(route.version.identity_fingerprint),
                 tool_semantic_fingerprint=route.version.semantic_fingerprint,
                 mcp_execution_policy_fingerprint=(
                     execution_policy_fingerprint(executor.policy)
@@ -2776,22 +2902,37 @@ class DirectKernelToolPort:
         observation_origin = tool_observation_origin_for_binding(binding)
         if tool_name == "manage_capability":
             call = invocation_context.capability_call
-            if (call is None or call.service is not self._capability_management
-                or call.subject != (self._session_id, turn_id, assistant_entry_id, tool_call_id)
-                or invocation_context.conversation_scope_kind != "ROOT"):
+            if (
+                call is None
+                or call.service is not self._capability_management
+                or call.subject
+                != (self._session_id, turn_id, assistant_entry_id, tool_call_id)
+                or invocation_context.conversation_scope_kind != "ROOT"
+            ):
                 raise RuntimeError("capability execution lost its exact prepared owner")
             try:
                 values = await call.execute()
             except McpManagementConflict as exc:
-                values = {"status": "CONFLICT", "message": str(exc), "adoption": "NOT_APPLICABLE"}
+                values = {
+                    "status": "CONFLICT",
+                    "message": str(exc),
+                    "adoption": "NOT_APPLICABLE",
+                }
             except ValueError:
                 # Private form values may be present in a native validator's
                 # exception. Do not put that exception into tool/Hook context.
-                values = {"status": "REJECTED", "message": "Capability operation could not be applied; review its current configuration.", "adoption": "NOT_APPLICABLE"}
+                values = {
+                    "status": "REJECTED",
+                    "message": "Capability operation could not be applied; review its current configuration.",
+                    "adoption": "NOT_APPLICABLE",
+                }
             if values["status"] == "APPLIED":
                 try:
-                    values["adoption"] = await self._capability_reload.adopt_capability_management_change(
-                        workspace_root=call._root())
+                    values[
+                        "adoption"
+                    ] = await self._capability_reload.adopt_capability_management_change(
+                        workspace_root=call._root()
+                    )
                 except asyncio.CancelledError:
                     # Source is already settled. Preserve that fact; a later
                     # safe point may retry adoption, never replay the mutation.
@@ -2799,10 +2940,18 @@ class DirectKernelToolPort:
                 except Exception:
                     values["adoption"] = "PARTIAL"
             return KernelToolResult(
-                state="SUCCESS" if values["status"] in {"APPLIED", "OBSERVED"} else "APPLICATION_ERROR",
-                content=json.dumps(values, ensure_ascii=False, separators=(",", ":")).encode(),
-                effect_class="read_only" if call.prepared.effects.read_only else "unknown_effect",
-                physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
+                state="SUCCESS"
+                if values["status"] in {"APPLIED", "OBSERVED"}
+                else "APPLICATION_ERROR",
+                content=json.dumps(
+                    values, ensure_ascii=False, separators=(",", ":")
+                ).encode(),
+                effect_class="read_only"
+                if call.prepared.effects.read_only
+                else "unknown_effect",
+                physical_observation=_freeze_physical_observation(
+                    invocation_started, observation_origin
+                ),
             )
         if tool_name == "reload_hooks":
             if self._capability_reload is None:
@@ -2839,7 +2988,9 @@ class DirectKernelToolPort:
             )
             safe_values = HookSecretScrubSet.capture().scrub_json(dict(values))
             if not isinstance(safe_values, dict):
-                raise RuntimeError("Capability reload result lost its JSON object shape")
+                raise RuntimeError(
+                    "Capability reload result lost its JSON object shape"
+                )
             content = json.dumps(
                 safe_values,
                 ensure_ascii=False,
@@ -2854,34 +3005,10 @@ class DirectKernelToolPort:
                     invocation_started, observation_origin
                 ),
             )
-        if tool_name == "list_mcp_servers":
+        if tool_name in {"list_capabilities", "inspect_capability"}:
             return replace(
-                self._list_mcp_servers_result(
-                    arguments=arguments,
-                    surface_borrow=invocation_context.surface_borrow,
-                ),
-                physical_observation=_freeze_physical_observation(
-                    invocation_started, observation_origin
-                ),
-            )
-        if tool_name in {
-            "list_mcp_prompts",
-            "list_mcp_resource_templates",
-            "list_mcp_resources",
-        }:
-            return replace(
-                self._list_mcp_items_result(
+                await self._query_capabilities_result(
                     tool_name=tool_name,
-                    arguments=arguments,
-                    surface_borrow=invocation_context.surface_borrow,
-                ),
-                physical_observation=_freeze_physical_observation(
-                    invocation_started, observation_origin
-                ),
-            )
-        if tool_name == "inspect_new_mcp_tool":
-            return replace(
-                self._inspect_new_mcp_tool_result(
                     arguments=arguments,
                     invocation_context=invocation_context,
                 ),
@@ -2902,7 +3029,9 @@ class DirectKernelToolPort:
                 raise RuntimeError("MCP meta invocation admission is incomplete")
             token = arguments.get("tool_ref")
             inner = arguments.get("arguments")
-            frozen_inner = freeze_json(dict(inner)) if isinstance(inner, Mapping) else None
+            frozen_inner = (
+                freeze_json(dict(inner)) if isinstance(inner, Mapping) else None
+            )
             try:
                 epoch = self._installed_epoch_for_borrow(
                     invocation_context.surface_borrow
@@ -2925,7 +3054,9 @@ class DirectKernelToolPort:
                     or resolved_executor != prepared_meta.executor
                     or frozen_inner != prepared_meta.arguments
                 ):
-                    raise RuntimeError("MCP meta invocation changed after authorization")
+                    raise RuntimeError(
+                        "MCP meta invocation changed after authorization"
+                    )
             except BaseException:
                 if permit.state.value == "ADMITTED":
                     permit.release()
@@ -3205,7 +3336,9 @@ class DirectKernelToolPort:
                             or increment.wire_bytes > allowance.wire_bytes
                             or increment.input_tokens > allowance.input_tokens
                         ):
-                            raise VisualizationScreenshotError("IMAGE_RESOURCE_EXCEEDED")
+                            raise VisualizationScreenshotError(
+                                "IMAGE_RESOURCE_EXCEEDED"
+                            )
                         preview = candidate_content
                     except asyncio.CancelledError:
                         raise
@@ -3238,8 +3371,10 @@ class DirectKernelToolPort:
                     + "."
                 )
             return KernelToolResult(
-                state="SUCCESS", content=(preview or message.encode("utf-8")),
-                process_local_settlement=token, effect_class="read_only",
+                state="SUCCESS",
+                content=(preview or message.encode("utf-8")),
+                process_local_settlement=token,
+                effect_class="read_only",
                 physical_observation=_freeze_physical_observation(
                     invocation_started, observation_origin
                 ),
@@ -3381,7 +3516,9 @@ class DirectKernelToolPort:
                 )
             if source.kind is ViewImageSourceKind.PATH:
                 if not isinstance(candidate, LocalImageReadCandidate):
-                    raise TypeError("view_image path read returned an invalid candidate")
+                    raise TypeError(
+                        "view_image path read returned an invalid candidate"
+                    )
                 assert self._image_validator is not None
                 try:
                     image = await self._image_validator.freeze_local_image(
@@ -3734,7 +3871,9 @@ class DirectKernelToolPort:
                 retained = self._visualization_settlements.get(token.token_id)
                 if retained is not token:
                     if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
-                        raise RuntimeError("committed visualization settlement is absent")
+                        raise RuntimeError(
+                            "committed visualization settlement is absent"
+                        )
                     return ProcessLocalEffectSettlementResult(
                         ProcessLocalEffectSettlementOutcome.DISCARDED
                     )
@@ -4388,9 +4527,7 @@ def _kernel_result_from_mcp_known(
         ),
         caller_cancelled_while_running=caller_cancelled,
         effect_class=(
-            "read_only"
-            if effect_kind is McpEffectKind.READ_ONLY
-            else "unknown_effect"
+            "read_only" if effect_kind is McpEffectKind.READ_ONLY else "unknown_effect"
         ),
         physical_observation=physical_observation,
     )

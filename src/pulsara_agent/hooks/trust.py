@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - Windows branch
     fcntl = None  # type: ignore[assignment]
 
 
-TRUST_DIGEST_CONTRACT = "pulsara.hook-definition-trust.v2"
+TRUST_DIGEST_CONTRACT = "pulsara.hook-definition-trust.v3"
 MAXIMUM_HOOK_TRUST_STATE_BYTES = 64 * 1024
 _READ_FLAGS = (
     os.O_RDONLY

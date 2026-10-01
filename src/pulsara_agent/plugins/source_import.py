@@ -11,6 +11,17 @@ import os
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
+from pulsara_agent.hooks.config_parser import parse_hook_config
+from pulsara_agent.hooks.contracts import (
+    FrozenHookSourceProvenance,
+    HookDiagnostic,
+    HookDiagnosticSeverity,
+    HookSourceKind,
+    HookVisibilityScope,
+    LocalFileHookSourceIdentity,
+    LocalFileHookTrustSubject,
+)
+from .contracts import PluginDiagnostic, PluginDiagnosticCode
 from pulsara_agent.capability.mcp_import import (
     _jsonc,
     read_mcp_import,
@@ -39,6 +50,13 @@ SOURCE_MANIFESTS = {
     "codex": ".codex-plugin/plugin.json",
     "cursor": ".cursor-plugin/plugin.json",
 }
+
+
+def _unsupported_hook_diagnostic(item):
+    return isinstance(item, HookDiagnostic) and (
+        item.severity is HookDiagnosticSeverity.INFO
+        or item.code in {"HOOK_CONFIG_UNKNOWN_EVENT", "HOOK_CONFIG_UNKNOWN_ROOT_FIELD"}
+    )
 
 
 def preview_plugin_imports(
@@ -163,10 +181,11 @@ def observe_plugin_import(observer, request, *, scrub_set):
             cancellation=request.cancellation,
             scrub_set=scrub_set,
         )
-        # External whole-bundle equivalence does not inherit native partial
-        # component diagnostics as permission to silently drop active components.
-        if observed.diagnostics:
-            raise PluginImportError("转换后的组件未通过原生校验，不能安装为完整插件。")
+        # Unsupported host behavior is reported, never activated. Invalid
+        # supported components and source safety still fail native admission.
+        if any(not _unsupported_hook_diagnostic(item) for item in observed.diagnostics):
+            raise PluginImportError("支持的组件未通过原生校验，不能安装。")
+        observed.diagnostics = (*observed.diagnostics, *source.unsupported_components())
         observed.source_import = source
         return observed
     except BaseException:
@@ -253,57 +272,6 @@ class PluginSourceImport:
 
     def component_plan(self):
         manifest = self.manifest
-        display = {
-            "$schema",
-            "name",
-            "version",
-            "description",
-            "author",
-            "homepage",
-            "repository",
-            "license",
-            "keywords",
-            "displayName",
-            "logo",
-            "category",
-            "tags",
-            "interface",
-        }
-        active = {
-            "skills",
-            "mcpServers",
-            "hooks",
-            "variables",
-            "commands",
-            "agents",
-            "rules",
-            "apps",
-            "channels",
-            "outputStyles",
-            "lspServers",
-            "minClientVersions",
-        }
-        unknown = set(manifest) - display - active
-        if unknown:
-            raise PluginImportError(
-                "未映射的 manifest 字段：" + ", ".join(sorted(unknown))
-            )
-        for name in active - {
-            "skills",
-            "mcpServers",
-            "hooks",
-            "variables",
-            "minClientVersions",
-        }:
-            default_path = PurePosixPath(name)
-            if (
-                manifest.get(name)
-                or name not in manifest
-                and default_path in self.by_path
-            ):
-                raise PluginImportError(
-                    f"{name} 依赖宿主行为，不能宣称整包等价；可另行导入独立 MCP 或技能。"
-                )
         # Version requirements describe the source host; they are displayed, not
         # reinterpreted as a Pulsara runtime version or an executable dependency.
         default_mcp = ".mcp.json" if PurePosixPath(".mcp.json") in self.by_path else {}
@@ -331,10 +299,9 @@ class PluginSourceImport:
         hooks = self.selected("hooks", default_hooks)
         if hooks == [] or hooks == {}:
             hooks = {"hooks": {}}
-        if not isinstance(hooks, dict) or set(hooks) != {"hooks"}:
-            raise PluginImportError(
-                "Hooks 需要可等价的 hooks 对象；不能忽略未知执行字段。"
-            )
+        if not isinstance(hooks, dict) or "hooks" not in hooks:
+            raise PluginImportError("Hooks 需要包含 hooks 的对象。")
+        self.parse_import_hooks(hooks)
         skills_value = manifest.get(
             "skills", "skills" if PurePosixPath("skills") in self.by_path else []
         )
@@ -361,6 +328,82 @@ class PluginSourceImport:
             raise PluginImportError("所选技能名称重复，请选择一个发行目录。")
         return drafts, hooks, tuple(skills)
 
+    def unsupported_components(self):
+        """Only selected-format declarations/conventions, never sibling hosts."""
+        known = {
+            "commands",
+            "agents",
+            "rules",
+            "apps",
+            "channels",
+            "outputStyles",
+            "lspServers",
+        }
+        metadata = {
+            "$schema",
+            "name",
+            "version",
+            "description",
+            "author",
+            "homepage",
+            "repository",
+            "license",
+            "keywords",
+            "displayName",
+            "logo",
+            "category",
+            "tags",
+            "interface",
+        }
+        supported = {"skills", "mcpServers", "hooks", "variables", "minClientVersions"}
+        names = {name for name in known if self.manifest.get(name)}
+        # Claude's implicit host components are Markdown; Ponytail's Gemini
+        # commands/*.toml is an inert resource in a Claude/Codex distribution.
+        if self.format == "claude":
+            for name in {"commands", "agents", "outputStyles"}:
+                if name not in self.manifest and any(
+                    path.suffix == ".md" and path.is_relative_to(PurePosixPath(name))
+                    for path in self.by_path
+                ):
+                    names.add(name)
+        unknown = set(self.manifest) - metadata - supported - known
+        return tuple(
+            PluginDiagnostic(
+                PluginDiagnosticCode.MANIFEST_UNKNOWN_FIELD_IGNORED
+                if name in unknown
+                else PluginDiagnosticCode.EXTENSIONS_FIELD_IGNORED,
+                f"未支持宿主功能 {name}：不会注册或执行；仅导入支持的组件。",
+                SOURCE_MANIFESTS[self.format],
+                name,
+            )
+            for name in sorted(names | unknown)
+        )
+
+    def parse_import_hooks(self, hooks):
+        # Reuse the production parser for preview and validation; this temporary
+        # provenance describes the held declaration, never grants execution.
+        provenance = FrozenHookSourceProvenance(
+            LocalFileHookSourceIdentity(
+                HookSourceKind.USER_FILE,
+                self.source / SOURCE_MANIFESTS[self.format],
+                HookVisibilityScope.USER,
+            ),
+            LocalFileHookTrustSubject(HookSourceKind.USER_FILE),
+            None,
+            "Plugin import",
+        )
+        parsed = parse_hook_config(json.dumps(hooks).encode(), provenance=provenance)
+        if any(not _unsupported_hook_diagnostic(item) for item in parsed.diagnostics):
+            raise PluginImportError(
+                "Hook 支持项配置无效："
+                + "; ".join(
+                    item.message
+                    for item in parsed.diagnostics
+                    if not _unsupported_hook_diagnostic(item)
+                )
+            )
+        return parsed
+
     def preview(self):
         if (
             not isinstance(self.manifest.get("name"), str)
@@ -386,9 +429,25 @@ class PluginSourceImport:
             "name": self.manifest.get("name"),
             "source_format": self.format,
             "skills": [path.name for path in skills],
-            "hooks": list(hooks["hooks"]),
+            "hooks": list(
+                dict.fromkeys(
+                    item.event_type.external_name
+                    for item in self.parse_import_hooks(hooks).definitions
+                )
+            ),
             "mcp": mcp,
-            "notices": ["仅转换所选发行版；资源和脚本不执行，安装后保持关闭。"] + (["已转换 Hook 配置与匹配规则。脚本收到 Pulsara 原生工具名与参数；不保证外部脚本无需适配即可运行，脚本行为尚未验证。"] if hooks["hooks"] else []),
+            "notices": [
+                "仅导入所选发行版支持的组件；资源和脚本不执行，安装后保持关闭。"
+            ]
+            + [item.message for item in self.unsupported_components()]
+            + [item.message for item in self.parse_import_hooks(hooks).diagnostics]
+            + (
+                [
+                    "Hook 提供插件目录兼容变量；工具名与参数仍为 Pulsara 原生契约，脚本行为尚未验证。"
+                ]
+                if hooks["hooks"]
+                else []
+            ),
         }
 
     def convert(self, *, classifications=(), public_values=()):

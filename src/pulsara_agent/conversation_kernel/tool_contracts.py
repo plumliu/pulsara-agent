@@ -65,7 +65,7 @@ from pulsara_agent.ports.artifact import (
     ToolResultDisplayKind,
 )
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.primitives.context import FrozenJsonObjectFact
+from pulsara_agent.primitives.context import FrozenJsonObjectFact, thaw_json
 from pulsara_agent.primitives.tool_result_projection import (
     FrozenToolResultDeliveryRequirement,
     classify_tool_result_delivery,
@@ -111,9 +111,13 @@ class KernelToolResult:
             ):
                 raise ValueError("typed image content is invalid for this Tool result")
         else:
-            raise TypeError("kernel Tool result content must be bytes or frozen content")
+            raise TypeError(
+                "kernel Tool result content must be bytes or frozen content"
+            )
         if self.artifact_inline_result and self.output_artifact_candidate is not None:
-            raise ValueError("artifact inline results cannot recursively own an artifact")
+            raise ValueError(
+                "artifact inline results cannot recursively own an artifact"
+            )
 
 
 class KernelToolPhysicalInvocationError(RuntimeError):
@@ -156,7 +160,9 @@ class KernelToolInvocationContext:
     input_modalities: tuple[str, ...] | None = None
     image_resource_allowance: "FrozenImageToolResourceAllowance | None" = None
     permission_confirmation_granted: bool = False
-    capability_call: CapabilityManagementCall | None = field(default=None, repr=False, compare=False)
+    capability_call: CapabilityManagementCall | None = field(
+        default=None, repr=False, compare=False
+    )
     subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
         field(default=None, repr=False)
     )
@@ -239,9 +245,7 @@ class FrozenImageToolResourceAllowance:
     logical_bytes: int
     wire_bytes: int
     input_tokens: int
-    quote_owner: "ImageToolResourceQuotePort" = field(
-        repr=False, compare=False
-    )
+    quote_owner: "ImageToolResourceQuotePort" = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (
@@ -268,12 +272,15 @@ class FrozenImageToolResourceIncrement:
     input_tokens: int
 
     def __post_init__(self) -> None:
-        if min(
-            self.canonical_bytes,
-            self.logical_bytes,
-            self.wire_bytes,
-            self.input_tokens,
-        ) < 0:
+        if (
+            min(
+                self.canonical_bytes,
+                self.logical_bytes,
+                self.wire_bytes,
+                self.input_tokens,
+            )
+            < 0
+        ):
             raise ValueError("image Tool resource increment is invalid")
 
 
@@ -325,7 +332,9 @@ class KernelToolAuthorization:
     kind: KernelToolAuthorizationKind
     reference: str
     public_message: str = ""
-    capability_call: CapabilityManagementCall | None = field(default=None, repr=False, compare=False, kw_only=True)
+    capability_call: CapabilityManagementCall | None = field(
+        default=None, repr=False, compare=False, kw_only=True
+    )
     capability_permission_required: bool = field(default=False, kw_only=True)
     capability_user_submission: bool = field(default=False, kw_only=True)
     accepted_attempt_id: str | None = None
@@ -501,7 +510,9 @@ class AcceptedCanonicalToolResultSettlement:
                 frozen_tool_result_public_text(self.canonical_content)
                 != self.public_projection.canonical_body
             ):
-                raise ValueError("ToolResult public projection drifted from canonical content")
+                raise ValueError(
+                    "ToolResult public projection drifted from canonical content"
+                )
 
 
 def build_accepted_canonical_tool_result_settlement(
@@ -579,6 +590,7 @@ def build_accepted_canonical_tool_result_settlement(
             metadata=metadata,
             delivery=classify_tool_result_delivery(
                 tool_name=tool_name,
+                public_arguments=thaw_json(public_arguments),
                 result_state=result_state,
                 has_image_attachment=(
                     canonical_content is not None
@@ -698,8 +710,12 @@ class ToolInvocationPort(Protocol):
     ) -> KernelToolAuthorization: ...
 
     async def request_capability_form(
-        self, *, authorization: KernelToolAuthorization, turn_id: str,
-        assistant_entry_id: str, tool_call_id: str,
+        self,
+        *,
+        authorization: KernelToolAuthorization,
+        turn_id: str,
+        assistant_entry_id: str,
+        tool_call_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
     ) -> KernelToolAuthorization: ...
 

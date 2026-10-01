@@ -34,6 +34,22 @@ async def invoke(service, **arguments):
     ).execute()
 
 
+async def query_sources(service, **arguments):
+    from pulsara_agent.conversation_kernel.capability_query import CapabilitySourceQuery
+    from pulsara_agent.capability.source_query import parse_query
+    from pulsara_agent.model_input.contracts import ModelInputScopeKind
+    inspect = "target" in arguments
+    return await CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT).execute(
+        parse_query(arguments, inspect=inspect), inspect=inspect)
+
+
+async def inspect_hook(service, *, scope, source_kind, plugin_id=None):
+    target = {"kind": "HOOK_SOURCE", "scope": scope, "source_kind": source_kind}
+    if plugin_id is not None:
+        target["plugin_id"] = plugin_id
+    return await query_sources(service, target=target)
+
+
 @pytest.mark.parametrize("scope", ["USER", "WORKSPACE"])
 def test_skill_lifecycle_keeps_source_and_uses_frozen_target(
     tmp_path, monkeypatch, scope
@@ -55,17 +71,15 @@ def test_skill_lifecycle_keeps_source_and_uses_frozen_target(
             else service.workspace_root / ".pulsara"
         )
         skill = target_root / "skills" / "boundary-example" / "SKILL.md"
-        assert Path(result["current"]["path"]) == skill.parent
+        assert Path(result["current"]["skill_root"]) == skill.parent
         assert (skill.parent / "reference.txt").read_text() == "preserved resource"
         assert (source / "SKILL.md").read_bytes() == original
         assert not (tmp_path / "foreign-home").exists()
         assert (await invoke(service, **args))["status"] == "CONFLICT"
-        inspected = await invoke(service, action="INSPECT_LOOSE_SKILLS", scope=scope)
-        assert (
-            inspected["status"] == "OBSERVED"
-            and inspected["adoption"] == "NOT_APPLICABLE"
-        )
-        assert inspected["current"]["items"][0]["path"] == str(skill)
+        inspected = await query_sources(service, kind="SKILL", scope=scope, source_kind="LOCAL")
+        assert inspected["completeness"] == "COMPLETE"
+        assert inspected["items"][0]["target"]["skill_path"] == str(skill)
+        assert result["identity"]["skill_path"] == str(skill)
         enabled = await invoke(
             service,
             action="SET_LOOSE_SKILL_ENABLED",
@@ -74,10 +88,8 @@ def test_skill_lifecycle_keeps_source_and_uses_frozen_target(
             enabled=False,
         )
         assert enabled["status"] == "APPLIED"
-        inspected = await invoke(
-            service, action="INSPECT_LOOSE_SKILLS", scope=scope, skill_path=str(skill)
-        )
-        assert not inspected["current"]["items"][0]["enabled"]
+        inspected = await query_sources(service, target={"kind":"SKILL", "skill_path":str(skill)})
+        assert inspected["enabled"] is False and inspected["selected"] is False
         removed = await invoke(
             service, action="REMOVE_LOOSE_SKILL", scope=scope, skill_path=str(skill)
         )
@@ -106,7 +118,7 @@ def test_install_metadata_override_uses_native_candidate_and_preserves_source(tm
         assert "description:" not in (source / "SKILL.md").read_text()
         assert (
             "name: imported"
-            in (Path(result["current"]["path"]) / "SKILL.md").read_text()
+            in (Path(result["current"]["skill_root"]) / "SKILL.md").read_text()
         )
         await service.mcp.aclose()
 
@@ -130,20 +142,20 @@ def test_inventory_preserves_shadowed_invalid_and_distinct_removal_eligibility(
         invalid = service.workspace_root / ".pulsara" / "skills" / "invalid"
         invalid.mkdir()
         (invalid / "SKILL.md").write_text("invalid")
-        observed = await invoke(
-            service, action="INSPECT_LOOSE_SKILLS", scope="WORKSPACE"
-        )
-        items = observed["current"]["items"]
-        assert len(items) == 2 and {item["shadowed"] for item in items} == {False, True}
-        agent = next(item for item in items if ".agents" in item["path"])
+        observed = await query_sources(service, kind="SKILL", scope="WORKSPACE", source_kind="LOCAL")
+        items = [await query_sources(service, target=row["target"]) for row in observed["items"] if row["name"] == "same-name"]
+        assert len(items) == 2 and {item["selected"] for item in items} == {False, True}
+        agent = next(item for item in items if ".agents" in item["skill_path"])
         assert agent["enable_eligible"] and not agent["remove_eligible"]
-        assert observed["current"]["issues"][0]["path"] == str(invalid / "SKILL.md")
+        invalid_item = next(row for row in observed["items"] if row["name"] == "invalid")
+        assert invalid_item["target"]["skill_path"] == str(invalid / "SKILL.md")
+        assert observed["completeness"] == "PARTIAL"
         assert (
             await invoke(
                 service,
                 action="SET_LOOSE_SKILL_ENABLED",
                 scope="WORKSPACE",
-                skill_path=agent["path"],
+                skill_path=agent["skill_path"],
                 enabled=False,
             )
         )["status"] == "APPLIED"
@@ -152,7 +164,7 @@ def test_inventory_preserves_shadowed_invalid_and_distinct_removal_eligibility(
                 dict(
                     action="REMOVE_LOOSE_SKILL",
                     scope="WORKSPACE",
-                    skill_path=agent["path"],
+                    skill_path=agent["skill_path"],
                 )
             )
         assert (
@@ -292,13 +304,8 @@ def test_user_hook_inspection_does_not_read_project_and_never_enables_plugin(
             return original(**kwargs)
 
         monkeypatch.setattr(service.hooks, "_read_source", user_only)
-        result = await invoke(
-            service, action="INSPECT_HOOK_SOURCES", scope="USER", source_kind="LOCAL"
-        )
-        assert (
-            result["current"]["status"] == "COMPLETE"
-            and len(result["current"]["sources"]) == 1
-        )
+        result = await query_sources(service, kind="HOOK_SOURCE", scope="USER", source_kind="LOCAL")
+        assert result["completeness"] == "COMPLETE" and len(result["items"]) == 1
         plugin = await service._plugin(None, "example")
         assert not plugin.enabled
         await service.mcp.aclose()
@@ -310,9 +317,7 @@ def test_user_hook_inspection_does_not_read_project_and_never_enables_plugin(
     "action",
     [
         "INSTALL_LOOSE_SKILL",
-        "INSPECT_LOOSE_SKILLS",
         "TRUST_HOOK_SOURCE",
-        "INSPECT_HOOK_SOURCES",
     ],
 )
 def test_transient_workspace_rejects_project_capability_scope(tmp_path, action):
@@ -359,19 +364,19 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
     async def run():
         service = preparation(tmp_path)
         await install_plugin(service, tmp_path, hooks=hook_document())
-        observed = await invoke(
+        observed = await inspect_hook(
             service,
-            action="INSPECT_HOOK_SOURCES",
             scope="USER",
             source_kind="PLUGIN",
             plugin_id="example",
         )
-        source = observed["current"]["sources"][0]
+        source = observed
         assert (
-            source["source_disposition"] == "COMPLETE" and not source["plugin_enabled"]
+            source["authorization"] == "UNTRUSTED" and source["selected"] is False
         )
-        assert source["definitions"][0]["additionalContextLimit"] == 300
-        assert source["declaration_environment"]["PLUGIN_ROOT"]
+        assert source["definitions"][0]["event"] == "PreToolUse"
+        assert source["definitions"][0]["command"]
+        assert "declaration_environment" not in source and "definition_digest" not in source
         call = CapabilityManagementCall(
             service,
             await service.prepare(
@@ -392,15 +397,14 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
         assert (await call.execute())["status"] == "APPLIED"
         plugin = await service._plugin(None, "example")
         assert not plugin.enabled
-        observed = await invoke(
+        observed = await inspect_hook(
             service,
-            action="INSPECT_HOOK_SOURCES",
             scope="USER",
             source_kind="PLUGIN",
             plugin_id="example",
         )
-        source = observed["current"]["sources"][0]
-        assert source["trust_disposition"] == "TRUSTED" and not source["effective"]
+        source = observed
+        assert source["authorization"] == "TRUSTED" and source["selected"] is False
         enable = CapabilityManagementCall(
             service,
             await service.prepare(
@@ -419,14 +423,14 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
             )
         )
         assert (await enable.execute())["status"] == "APPLIED"
-        observed = await invoke(
+        observed = await inspect_hook(
             service,
-            action="INSPECT_HOOK_SOURCES",
             scope="USER",
             source_kind="PLUGIN",
             plugin_id="example",
         )
-        assert observed["current"]["sources"][0]["effective"]
+        assert observed["authorization"] == "TRUSTED" and observed["selected"] is None
+        assert (await service._plugin(None, "example")).enabled
         await service.mcp.aclose()
 
     asyncio.run(run())
@@ -669,22 +673,12 @@ def test_unavailable_native_hook_composition_remains_unknown_in_query(
             raise OSError("composition unavailable fixture")
 
         monkeypatch.setattr(inspection, "compose_hook_definition_view", unavailable)
-        result = await invoke(
-            service,
-            action="INSPECT_HOOK_SOURCES",
-            scope="USER",
-            source_kind="PLUGIN",
-            plugin_id="example",
-        )
-        observed = result["current"]
-        assert observed["plugin_inventory_status"] == "COMPLETE"
-        assert (
-            observed["hook_composition_status"] == observed["status"] == "UNAVAILABLE"
-        )
-        source = observed["sources"][0]
-        assert source["source_disposition"] == "COMPLETE" and source["plugin_enabled"]
-        assert source["effective"] is None and source["shadowed"] is None
-        assert observed["diagnostics"]
+        result = await query_sources(service, kind="HOOK_SOURCE", source_kind="PLUGIN")
+        assert result["completeness"] == "PARTIAL"
+        assert result["items"] and "来源已禁用" not in result["items"][0]["status"]
+        source = await inspect_hook(service, scope="USER", source_kind="PLUGIN", plugin_id="example")
+        assert source["definitions"] and source["selected"] is None
+        assert result["diagnostics"]
         await service.mcp.aclose()
 
     asyncio.run(run())

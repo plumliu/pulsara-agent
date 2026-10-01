@@ -167,7 +167,10 @@ def test_round7_1_variant_validator_accepts_ordered_subsets_without_full() -> No
         limits=StructuredModelInputLimits(),
     )
     by_mode = {variant.mode: variant for variant in lowered.tool_result_variants}
-    for mode in (ToolResultProviderRenderMode.COMPACT, ToolResultProviderRenderMode.REF_ONLY):
+    for mode in (
+        ToolResultProviderRenderMode.COMPACT,
+        ToolResultProviderRenderMode.REF_ONLY,
+    ):
         text = by_mode[mode].message.content[0].text
         assert "offset_chars=0" in text
         assert "next_offset_chars as offset_chars" in text
@@ -290,7 +293,9 @@ def test_round7_1_compatible_append_keeps_installed_prefix_and_actual_mode() -> 
     assert after.messages[: len(installed.messages)] == installed.messages
 
 
-def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result() -> None:
+def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result() -> (
+    None
+):
     calls = tuple(
         ProviderToolCall(f"call:{index}", "test_tool", freeze_json({}))
         for index in range(1, 4)
@@ -349,17 +354,20 @@ def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result(
     assert tool_result_ids == tuple(call.tool_call_id for call in calls)
 
 
-@pytest.mark.parametrize("reason", [
-    ToolResultFullDeliveryReason.ARTIFACT_PAGE,
-    ToolResultFullDeliveryReason.ARTIFACT_EXPORT_LOCATION,
-])
-def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(reason) -> None:
+@pytest.mark.parametrize(
+    "reason",
+    [
+        ToolResultFullDeliveryReason.ARTIFACT_PAGE,
+        ToolResultFullDeliveryReason.ARTIFACT_EXPORT_LOCATION,
+    ],
+)
+def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(
+    reason,
+) -> None:
     oversized, _body = _body_with_exact_logical_bytes(40_001, seed="中")
     oversized = replace(
         oversized,
-        tool_result_delivery=full_required_tool_result_delivery(
-            reason
-        ),
+        tool_result_delivery=full_required_tool_result_delivery(reason),
     )
     with pytest.raises(StructuredModelInputCompileError) as missing:
         StructuredModelInputCompiler().compile(
@@ -375,9 +383,7 @@ def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(re
     inlineable, _body = _body_with_exact_logical_bytes(20_000, seed="a")
     inlineable = replace(
         inlineable,
-        tool_result_delivery=full_required_tool_result_delivery(
-            reason
-        ),
+        tool_result_delivery=full_required_tool_result_delivery(reason),
     )
     with pytest.raises(StructuredModelInputCompileError) as aggregate:
         StructuredModelInputCompiler().compile(
@@ -396,24 +402,48 @@ def test_round7_1_full_delivery_classifier_is_request_and_result_derived() -> No
     assert classify_tool_result_delivery(
         tool_name="artifact_read", result_state="SUCCESS"
     ) == full_required_tool_result_delivery(ToolResultFullDeliveryReason.ARTIFACT_PAGE)
-    assert classify_tool_result_delivery(
-        tool_name="artifact_read", result_state="ERROR"
-    ) == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    assert classify_tool_result_delivery(
-        tool_name="third_party_tool", result_state="SUCCESS"
-    ) == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    for tool_name in (
-        "list_mcp_prompts",
-        "list_mcp_resource_templates",
-        "list_mcp_resources",
-        "list_mcp_servers",
-    ):
+    assert (
+        classify_tool_result_delivery(tool_name="artifact_read", result_state="ERROR")
+        == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    )
+    assert (
+        classify_tool_result_delivery(
+            tool_name="third_party_tool", result_state="SUCCESS"
+        )
+        == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    )
+    for tool_name in ("list_capabilities",):
         assert classify_tool_result_delivery(
             tool_name=tool_name,
             result_state="SUCCESS",
         ) == full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE
         )
+
+    assert classify_tool_result_delivery(
+        tool_name="inspect_capability",
+        result_state="SUCCESS",
+        public_arguments={
+            "target": {"kind": "MCP_TOOL", "server_id": "s", "tool_name": "t"}
+        },
+    ) == full_required_tool_result_delivery(
+        ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
+    )
+
+    assert (
+        classify_tool_result_delivery(
+            tool_name="inspect_capability",
+            result_state="SUCCESS",
+            public_arguments={
+                "target": {
+                    "kind": "HOOK_SOURCE",
+                    "scope": "USER",
+                    "source_kind": "LOCAL",
+                }
+            },
+        )
+        == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    )
 
     for reason in ToolResultFullDeliveryReason:
         requirement = full_required_tool_result_delivery(reason)
@@ -433,12 +463,8 @@ def test_round7_1_logical_quote_is_not_chat_or_responses_wire_bytes() -> None:
         timing=metadata.timing,
         model_visible_memory_ids=(),
     )
-    chat = canonical_json_bytes(
-        chat_semantic_wire_group(rendered.message)
-    )
-    responses = canonical_json_bytes(
-        responses_semantic_wire_group(rendered.message)
-    )
+    chat = canonical_json_bytes(chat_semantic_wire_group(rendered.message))
+    responses = canonical_json_bytes(responses_semantic_wire_group(rendered.message))
     assert rendered.logical_utf8_bytes == 39_999
     assert len(chat) > rendered.logical_utf8_bytes
     assert len(responses) > rendered.logical_utf8_bytes
@@ -485,8 +511,7 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
                 )
                 if any(
                     isinstance(target, ast.Name)
-                    and target.id
-                    == "MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES"
+                    and target.id == "MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES"
                     for target in targets
                 ):
                     definitions.append((path, node.lineno))
@@ -517,7 +542,6 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
         assert all(forbidden not in module for module in imported_modules)
 
     migration = (
-        production
-        / "storage/migrations/sql/0000_conversation_kernel_baseline.sql"
+        production / "storage/migrations/sql/0000_conversation_kernel_baseline.sql"
     ).read_text(encoding="utf-8")
     assert "tool_result_delivery" not in migration

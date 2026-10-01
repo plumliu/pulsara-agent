@@ -20,6 +20,8 @@ from pulsara_agent.mcp_config import (
     WorkspaceRelativeMcpCwd,
     _load_raw,
     _parse_server,
+    _parse_server_declaration,
+    McpServerDeclaration,
     _write_mcp_raw,
     mcp_server_workspace_approval_identity,
     workspace_mcp_config_path,
@@ -402,6 +404,25 @@ class LocalMcpManagementService:
             self.parse(LocalMcpTarget(server_id, workspace_root), entry)
             for server_id, entry in sorted(raw.items())
         )
+
+    def inspect_declarations(
+        self, workspace_root: Path | None = None
+    ) -> tuple[McpServerDeclaration, ...]:
+        """Read the sole config parser without loading settings or resolving secrets."""
+        raw = _load_raw(self.path(LocalMcpTarget("inventory", workspace_root)))
+        declarations = []
+        for server_id, entry in sorted(raw.items()):
+            target = LocalMcpTarget(server_id, workspace_root)
+            declaration = _parse_server_declaration(
+                server_id, entry, runtime_source=target.source
+            )
+            if any(
+                binding.owner != target.owner
+                for binding in managed_bindings(declaration)
+            ):
+                raise ValueError("MCP credential reference crosses its owner")
+            declarations.append(declaration)
+        return tuple(declarations)
 
     async def prepare_mutation(
         self,

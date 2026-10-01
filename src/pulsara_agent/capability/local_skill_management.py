@@ -331,12 +331,34 @@ class LocalSkillManagementService:
             if owns_binding:
                 owner.close()
 
+    def inspect_definition_sources(self, *, workspace_root, plugin_definitions=None,
+                                   deadline_monotonic=None, cancellation=None):
+        """Read declarations through the existing producers and sole resolver."""
+        user_home = self._user_home_resolution or resolve_user_home()
+        producer = self._loose_producer or LooseSkillDefinitionProducer(
+            pulsara_home_resolution=self._home_resolution(user_home_resolution=user_home),
+            user_home_resolution=user_home,
+        )
+        loose = producer.observe(producer.prepare_root_policy(workspace_root),
+                                 deadline_monotonic=deadline_monotonic, cancellation=cancellation)
+        owner = self._bundled_binding_owner or BundledSkillDistributionBindingOwner()
+        try:
+            bundled = BundledSkillDefinitionProducer(owner).observe(
+                deadline_monotonic=deadline_monotonic, cancellation=cancellation)
+            effective = (self._catalog_resolver.resolve(loose, plugin_definitions, bundled)
+                         if plugin_definitions is not None else None)
+            return loose, bundled, effective
+        finally:
+            if self._bundled_binding_owner is None:
+                owner.close()
+
     def inspect_loose_skills(
         self,
         *,
         scope: LocalSkillInstallScope,
         workspace_root: Path | None = None,
         plugin_definitions: FrozenPluginSkillDefinitions | None = None,
+        deadline_monotonic=None, cancellation=None,
     ):
         if (scope is LocalSkillInstallScope.WORKSPACE) != (workspace_root is not None):
             raise ValueError("Skill inspection workspace conflicts with scope")
@@ -346,7 +368,7 @@ class LocalSkillManagementService:
             pulsara_home_resolution=home, user_home_resolution=user_home
         )
         policy = producer.prepare_root_policy(workspace_root)
-        observed = producer.observe(policy)
+        observed = producer.observe(policy, deadline_monotonic=deadline_monotonic, cancellation=cancellation)
         allowed = (
             {LocalSkillRootKind.USER_PULSARA, LocalSkillRootKind.USER_AGENTS}
             if workspace_root is None
@@ -397,9 +419,9 @@ class LocalSkillManagementService:
                 item.message for item in observed.unavailable_cause.diagnostics
             )
         effective = (
-            self.inspect_effective_skill_catalog(
-                InspectEffectiveSkillCatalogRequest(workspace_root, plugin_definitions)
-            )
+            self.inspect_definition_sources(workspace_root=workspace_root,
+                plugin_definitions=plugin_definitions, deadline_monotonic=deadline_monotonic,
+                cancellation=cancellation)[2]
             if plugin_definitions is not None
             else None
         )

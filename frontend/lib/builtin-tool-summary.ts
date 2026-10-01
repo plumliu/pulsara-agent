@@ -31,6 +31,8 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   memory_explain: ['查看记忆来源', '正在查看记忆的来源与审核记录', '已读取记忆的来源与审核记录'],
   remember: ['提交记忆', '正在提交记忆', '已提交记忆'],
   mark_memory_relation: ['标记记忆关系', '正在标记记忆关系', '已处理记忆关系'],
+  list_capabilities: ['查看能力', '正在查看能力及来源', '已读取能力清单'],
+  inspect_capability: ['查看能力详情', '正在读取所选能力详情', '已读取能力详情'],
   manage_capability: ['管理扩展能力', '正在处理连接或插件配置', '已处理配置请求'],
   reload_capabilities: ['刷新扩展能力', '正在刷新技能、连接与自动操作', '已刷新技能、连接与自动操作'],
   reload_hooks: ['刷新自动操作', '正在刷新自动操作配置', '已刷新自动操作配置'],

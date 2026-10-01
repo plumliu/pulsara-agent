@@ -462,6 +462,7 @@ FrozenColdConversationSeed = (
 
 @dataclass(frozen=True, slots=True)
 class PreparedColdEpochSemanticAssembly:
+    compile_request: StructuredModelInputCompileRequest = field(repr=False)
     seed: FrozenColdConversationSeed = field(repr=False)
     planning: FrozenProviderInputAppendPlanningInput = field(repr=False)
     compiled_result: FrozenProviderInputAppendCompileResult = field(repr=False)
@@ -555,6 +556,7 @@ class KernelColdEpochInputAssembler:
         )
         self._require_deadline(deadline_monotonic)
         return PreparedColdEpochSemanticAssembly(
+            compile_request=compile_request,
             seed=seed,
             planning=planning,
             compiled_result=compiled_result,

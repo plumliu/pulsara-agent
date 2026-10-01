@@ -1108,6 +1108,24 @@ def test_post_response_charge_includes_assistant_arguments_and_result_uppers() -
     }
 
 
+@pytest.mark.parametrize("replace_existing", [None, False, True])
+def test_disabled_plugin_install_reserves_only_catalogs_it_can_change(
+    replace_existing: bool | None,
+) -> None:
+    from pulsara_agent.conversation_kernel.runner import _capability_catalog_source_kinds
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+
+    arguments = {"action": "INSTALL_PLUGIN", "scope": "WORKSPACE", "source_path": "/test/source"}
+    if replace_existing is not None:
+        arguments["replace"] = replace_existing
+    call = CompletedToolCallBlock("block:install", "call:install", "manage_capability", freeze_json(arguments))
+    expected = (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG) if replace_existing else ()
+    assert _capability_catalog_source_kinds(call) == expected
+    for action in ("SET_PLUGIN_ENABLED", "REMOVE_PLUGIN"):
+        changed = replace(call, arguments=freeze_json({"action": action, "scope": "WORKSPACE", "plugin_id": "test"}))
+        assert _capability_catalog_source_kinds(changed) == (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG)
+
+
 def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes() -> None:
     from tests.test_round3_structured_model_input_compiler import _tool_result
 
@@ -1354,3 +1372,58 @@ def test_post_response_gate_reports_each_closed_resource_boundary(
         )
 
     assert raised.value.reason == reason
+
+
+@pytest.mark.parametrize('wire_api', ['chat', 'responses'])
+@pytest.mark.parametrize('source_kind', ['SKILL_CATALOG', 'MCP_CATALOG'])
+@pytest.mark.parametrize('text', ['\\' * 500, '"' * 500, '\x01' * 500, '汉字🙂' * 100, '\n\t\r' * 100], ids=['slashes','quotes','controls','unicode','whitespace'])
+def test_serialized_catalog_quote_bounds_real_owner_json_escaping(wire_api, source_kind, text):
+    from pulsara_agent.conversation_kernel.runner import _runtime_source_message_upper
+    from pulsara_agent.model_input.continuity import encode_runtime_observation
+    from pulsara_agent.model_input.contracts import ContextSourceKind, ContextTrustClass
+    from pulsara_agent.model_input.continuity import SourceObservationLifecycle, SourceObservationPresence
+    source_kind = ContextSourceKind(source_kind)
+    body = canonical_json_bytes({'skills' if source_kind is ContextSourceKind.SKILL_CATALOG else 'servers': [{'description': text}]}).decode()
+    assert all(ord(char) >= 32 for char in body)
+    actual = encode_runtime_observation(source_kind=source_kind, trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION, lifecycle=SourceObservationLifecycle.SNAPSHOT, presence=SourceObservationPresence.VALUE, contract_version='post-response-resource-upper', body=body)
+    upper = _runtime_source_message_upper(source_kind=source_kind, trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION, lifecycle=SourceObservationLifecycle.SNAPSHOT, maximum_body_utf8_bytes=len(body.encode()), serialized_json_body=True)
+    raw_upper = _runtime_source_message_upper(source_kind=source_kind, trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION, lifecycle=SourceObservationLifecycle.SNAPSHOT, maximum_body_utf8_bytes=len(body.encode()))
+    group = chat_semantic_wire_group if wire_api == 'chat' else responses_semantic_wire_group
+    actual_wire, upper_wire, raw_wire = (group(message)[0] for message in (actual, upper, raw_upper))
+    estimator = PulsaraHeuristicTokenEstimatorV2()
+    assert len(canonical_json_bytes(actual_wire)) <= len(canonical_json_bytes(upper_wire)) < len(canonical_json_bytes(raw_wire))
+    assert estimator.estimate_wire_json_component(actual_wire) <= estimator.estimate_wire_json_component(upper_wire) < estimator.estimate_wire_json_component(raw_wire)
+
+
+def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(monkeypatch):
+    from types import SimpleNamespace
+    from pulsara_agent.conversation_kernel import runner as module
+    from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV2
+    estimator = PulsaraHeuristicTokenEstimatorV2()
+    wire_plan = SimpleNamespace(quote=SimpleNamespace(effective_input_budget_tokens=200_000))
+    identity = SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)
+    canonical = SimpleNamespace(identity=identity, canonical_expanded_bytes=0, items=())
+    runner = object.__new__(ConversationKernelRunner)
+    runner._continuity = SimpleNamespace(current_view=lambda scope: SimpleNamespace(epoch_nonce='epoch', epoch_revision=1, wire_input_plan=wire_plan, logical_bytes=0))
+    runner._context_source_collector = SimpleNamespace(freeze_post_response_call_source_upper=lambda: (LLMMessage.user('clock'),))
+    runner._hook_output_source_upper = lambda **kwargs: None
+    runner._subagent_runtime = None
+    seen = []
+    def quote_wire(**kwargs):
+        messages = kwargs['bounded_suffix_messages']
+        seen.extend(messages)
+        items = tuple(chat_semantic_wire_group(message)[0] for message in messages)
+        return ProviderFollowupWireResourceQuote(sum(len(canonical_json_bytes(item)) for item in items), sum(estimator.estimate_wire_json_component(item) for item in items), len(items))
+    monkeypatch.setattr(module, 'quote_provider_followup_wire_resources', quote_wire)
+    completed = CompletedAssistantMessage('draft:test', (CompletedToolCallBlock('block:test', 'call:test', 'manage_capability', freeze_json({'action':'SET_PLUGIN_ENABLED','scope':'USER','plugin_id':'ponytail','enabled':True})),), '')
+    quote = runner._quote_post_response_resources(
+        request=SimpleNamespace(wire_input_plan=wire_plan, compiled_input=SimpleNamespace(canonical_input_identity=identity)),
+        permit=SimpleNamespace(scope=None, epoch_nonce='epoch', epoch_revision=1),
+        collected=SimpleNamespace(completed=completed, provider_replay=None),
+        canonical_facts=SimpleNamespace(canonical_input=canonical, plan_workflow_fact=None),
+        root_completion_followup_items=0,
+    )
+    assert quote.bounded_followup_logical_bytes > 800_000
+    assert quote.followup_wire.final_wire_estimated_input_tokens < 200_000
+    assert not any('post-response-resource-upper' in join_text_content(message.content) for message in seen)
+    runner._require_post_response_resources(quote, effective_input_budget_tokens=200_000)

@@ -1,18 +1,18 @@
 # Pulsara 能力来源与统一查询 hard cut 实施规范
 
-状态：2026-10-01 来源查询合同已由同一 GPT-6.1 Sol / xhigh critic 复审通过，待实施；用户随后授权将第 11.2 节四项问题纳入本轮。四项运行修订已按第 12 节实现并由同一 critic 交叉审核通过，广回归已通过；统一来源查询入口仍待实施。
+状态：2026-10-01 统一来源查询、模型字段减法与旧入口删除已完整落地；非真实会话检查、同一 GPT-6.1 Sol / xhigh critic 代码复审及真实 GUI dogfood 已通过。真实会话暴露的首次禁用 Plugin 安装过度预留与清单摘要误报问题已修复、测试并交叉审核，无本轮阻塞项。既有独立资源预估待修事项及验收范围见第 13 节。第 12 节四项运行修订已在前一轮实现和审核。
 
 本文以根目录 [AGENTS.md](AGENTS.md) 为约束，衔接 [应用与能力管理边界](PULSARA_APP_AND_CAPABILITY_MANAGEMENT_BOUNDARY_DESIGN.zh.md)、[搜索拆分](PULSARA_SEARCH_TOOL_SPLIT_IMPLEMENTATION_SPEC.zh.md) 和 [Hook 输入与审阅](PULSARA_HOOK_WEAK_CODEX_SUPPORT_AND_REVIEW_DESIGN.zh.md)。本文获准实施后，只在来源查询、公开位置与对应模型入口的主题内取代旧合同；不会重做安装布局、执行 owner 或 Hook v2。
 
 ## 1. 产品目标与范围
 
-模型可以用一个列表入口回答“这个会话有哪些能力，它们来自哪里、实际放在哪里、现在是什么状态”，再通过一个详情入口查看确切目标。Plugin 是能力的分发与管理来源，不作为能力列表条目。模型无需从 cwd、目录名字或 manifest 拼出安装位置，也无需记住不同能力的多套清单工具。
+模型先用一个列表入口回答“有哪些能力、来自哪里、是否存在使用障碍”，需要位置、调用参数或具体问题时，再通过一个详情入口查看确切目标。Plugin 是能力的分发与管理来源，不作为能力列表条目。模型无需从 cwd、目录名字或 manifest 拼出安装位置，也无需记住不同能力的多套清单工具。降低模型认知负担是字段选择的前提：能由 owner 内部判断的事实，不要求模型理解其判断机制。
 
 完整 Plugin 清单、空包盘点与无法产生能力的损坏包排障由 GUI 负责；模型查询入口不提供全量 Plugin 枚举，也不提供等效的全量来源摘要。模型仍可使用安装结果、能力来源或用户提供的确切 scope + plugin_id 查看和管理该 Plugin，不要求它先枚举所有安装包。
 
 本轮一起完成用户认可的两部分：
 
-1. Skill、独立 MCP 与 Plugin 的安装／配置结果公开 owner 实际解析的位置；能力列表中的来源及确切目标详情沿用相同字段。
+1. Skill、独立 MCP 与 Plugin 的安装／配置结果返回本次操作的实际落点；确切目标详情按相同字段含义返回位置。能力列表只返回选择目标所需的来源和状态，不逐行展开安装布局或完整配置。
 2. 新增 `list_capabilities`、`inspect_capability`，统一来源观察及 MCP 查询分支，删除被替代的模型查询入口。
 
 `manage_capability` 保留变更与 HITL；远端调用保留独立入口。统一查询不连接服务器、不执行 Plugin／Hook、不渲染远端 prompt、不读取远端 resource 正文，不以“发现”授予执行许可。内部 `CapabilityKind` 仍只有 TOOL／SKILL；本规范中的 MCP server、Hook source 等是查询记录种类，不是新增运行时 leaf。PLUGIN 仅作为来源类型和确切来源详情 target，不能作为 list 的 kind。
@@ -31,12 +31,16 @@
 - `inspect_new_mcp_tool` 公开 schema 并沿既有 owner 准备临时 tool_ref；ref 的发布仍在工具结果提交后结算。`use_new_mcp_tool` 负责远端执行。
 - `manage_capability` 中 `INSPECT_LOOSE_SKILLS`、`INSPECT_HOOK_SOURCES` 是已有只读观察动作；安装、启停、授权和信任仍由各自原生服务执行。
 
-依赖／owner 分工：SDK 拥有 MCP 协议与 transport；现有 source producers、resolver、Plugin store/inspection、Hook provider/trust、MCP supervisor、frozen surface 和 ref owner 拥有各自事实与执行资格。新增适配只负责从它们读取公开事实、组合来源关系、按查询过滤、分页和渲染。没有第二套 inventory、正则、目录扫描器、解析器或权限系统。
+依赖／owner 分工：SDK 拥有 MCP 协议与 transport；现有 source producers、resolver、Plugin store/inspection、Hook provider/trust、MCP supervisor、frozen surface 和 ref owner 拥有各自事实与执行资格。新增适配只负责从它们读取公开事实、组合来源关系、按查询过滤、分页和渲染。没有第二套 inventory、正则、目录扫描器、解析器或权限系统。本文出现的 owner、provenance、lease、generation 等是实施约束，不能因其出现在规范里就变成模型 schema 或必读 Skill 术语。
 
 确切 Plugin 查询存在一个需要补齐的原生 extension point：当前 PluginInspectionService.inspect 先观察全量 state aggregate，再遍历包；任一包观察失败可以使整体 instances 为空。全量观察后筛选无法实现确切目标隔离，因此在同一 inspection/store owner 内增加确切 identity 观察分支，复用 layout、read_state、当前 package anchor、PluginSourceObserver、状态一致性与凭据检查。先选择目标再观察，不调用全量 aggregate 后过滤；GUI 全量观察路径保持原职责。这是既有 owner 的最小扩展，不建立第二套 package parser、store、resolver 或查询注册表。
 
 第 12 节四项修订后，freeze_enabled_plugin_instance 和 EnabledPluginViewOwner.observe 只投影声明；PluginInspectionService 与管理／CLI 观察不创建 data_root。Host 使用显式 observe_for_runtime 在本地 stdio／Hook 运行物化前准备目录。default list、确切 inspect 与 Plugin parent 必须复用纯观察，不因数据目录缺失抹掉声明。effective／采用只引用可精确关联的既有 frozen/live 事实，否则 UNKNOWN；不另外实现 resolver。GUI 保留完整清单与诊断。
 
+
+模型查询还需要两处原生窄入口，避免为了详情复用运行物化：独立 MCP 的唯一配置 parser 先生成经过相同校验、但不解析秘密或计算运行配置身份的声明，运行 owner 再由该声明冻结实际配置；查询仅通过 typed provenance 关联 runtime，当前磁盘配置采用情况无法证明时为未知。Plugin MCP 的同一纯连接组合应用声明、当前实例 overlay 与作者输入默认值，查询取非秘密连接目标摘要，运行 owner 才继续物化秘密和执行身份。不能为判断采用重新读取秘密存储或以 fresh resolved identity 证明采用；实际秘密值过滤仍沿既有 ProcessCredentialBoundary。
+
+Skill target 只有 skill_path。ManagedPluginStore 的原生布局 owner 可以把当前 home 的 USER／当前 GUI WORKSPACE 包内路径定位到确切实例，并核对当前 state 的 install ID，再复用 inspect_exact；查询 adapter 不拆目录名字，也不全量解析其他包的 states。这个入口只定位当前安装副本，不新增 registry 或旧版本查询合同。健康 Plugin 返回的 Skill target 必须能往返，不受无关损坏包阻断；选择事实仍单独为 UNKNOWN。确切 Hook source 的存在、空定义与拒绝诊断也不能取决于它是否有资格形成默认列表行。
 
 ## 3. 真实位置与作用域
 
@@ -48,17 +52,17 @@ loose Skill 的四个发现根保持原优先级：工作目录 `.pulsara/skills
 
 独立 MCP 使用有效 home 的 mcp.yaml 或会话工作目录的 `.pulsara/mcp.yaml`。Plugin 的 MCP 声明仍在 package 的 mcp.json；实例 overlay 与私密凭据继续属于既有 owner，不能误报为项目的 mcp.yaml。Plugin 的 WORKSPACE scope 不表示 package 位于项目目录。
 
-### 3.2 公开路径合同
+### 3.2 公开路径合同：操作结果与按需详情
 
 | 对象／结果 | 字段 | 精确含义 |
 | --- | --- | --- |
-| Skill 安装、列表、详情 | `skill_root`、`skill_path` | 安装／来源目录与其中 SKILL.md 的绝对路径；不再用一个 path 同时代表两者 |
-| 独立 MCP 增删改、列表、详情 | `config_path` | 本次实际读写的配置文件绝对路径；删除后仍表示被修改的位置，不表示该 server 仍存在 |
-| Plugin 安装成功、能力行的 Plugin 来源、确切 Plugin 详情 | `package_root` | 此次安装版本或当前观察版本的托管包绝对路径 |
-| Plugin MCP 子项 | `config_path` | package 中实际 mcp.json 声明位置；不混为独立 mcp.yaml 或实例 state／overlay JSON |
-| Hook source 列表／详情 | `config_path` | 原生来源的 hooks.json 绝对路径，不是脚本程序路径 |
+| Skill 安装、详情 | `skill_root`、`skill_path` | 安装／来源目录与其中 SKILL.md 的绝对路径；不再用一个 path 同时代表两者。列表只在 target 中携带定位所必需的 skill_path |
+| 独立 MCP 增删改、详情 | `config_path` | 本次实际读写或观察的配置文件绝对路径；删除后仍表示被修改的位置，不表示该 server 仍存在 |
+| Plugin 安装成功、确切 Plugin 详情 | `package_root` | 此次安装版本或当前观察版本的托管包绝对路径；能力列表的 Plugin 来源只携带其 target |
+| Plugin MCP server 详情 | `config_path` | package 中实际 mcp.json 声明位置；不混为独立 mcp.yaml 或实例 state／overlay JSON。包位置通过 source.target 查询，不在每个子项重复 package_root |
+| Hook source 详情 | `config_path` | 原生来源的 hooks.json 绝对路径，不是脚本程序路径 |
 
-Plugin 的 MCP 子项公开 package_root 与声明 config_path。data_root 和实例 state／overlay 文件位置继续由原生 owners 使用，不作为常规模型查询字段；不新增 include_internal 或另一个内部详情工具。检查确切 MCP／Hook 时，其实际执行配置中与当前问题有关的 cwd／参数／非秘密环境仍沿原 owner 如实公开，不能将必要配置整体删掉或把路径当秘密。路径可见不授予直接改写 managed state 或读取秘密的资格，变更仍走原生管理 owner。远端工具／resource／prompt 本身没有本地安装目录，位置关联到来源 server，不能把远端 URI 当成 filesystem path。
+路径返回遵循任务需要，不遵循内部 DTO 的层级：安装结果给本次落点，列表给可复制目标，详情给该目标的定义位置。远端 MCP tool／resource／prompt 只关联来源 server，不重复 server 的配置路径或 Plugin 包路径。data_root 和实例 state／overlay 文件位置继续由原生 owners 使用，不作为常规模型查询字段；不新增 include_internal 或另一个内部详情工具。检查确切 MCP／Hook 时，与具体失败有关的 cwd／参数／非秘密环境仍沿原 owner 如实说明；不因隐藏高级配置而丢掉故障事实，也不把完整配置当作默认详情。路径可见不授予直接改写 managed state 或读取秘密的资格，变更仍走原生管理 owner。远端 URI 不是 filesystem path。
 
 位置均由负责该操作的既有 owner 输出；使用 SuccessfulPluginInstallOutcome 的真实 identity/package_install_id 和唯一 PluginStoreLayout，不在结果 formatter 重拼第二套路径规则。成功位置来自本次已结算的操作，不能事后随手重读“最新版本”冒充本次结果；失败、冲突、未知结果不声称成功安装，也不输出猜测的 package_root。
 
@@ -74,13 +78,13 @@ Plugin 的 MCP 子项公开 package_root 与声明 config_path。data_root 和�
 
 - kind：SKILL、HOOK_SOURCE、MCP_SERVER、MCP_TOOL、MCP_RESOURCE、MCP_RESOURCE_TEMPLATE、MCP_PROMPT。PLUGIN 明确拒绝，不作为旧形状 alias。
 - scope：USER／WORKSPACE。省略表示观察当前 Host 可管理／可见的来源，不增加 AUTO 或新的持久作用域；bundled 来源没有 USER/WORKSPACE 安装 scope。
-- source_kind：LOCAL／PLUGIN／BUNDLED。省略不过滤；LOCAL Skill 行另保留原 root_kind，区分四个发现根。
+- source_kind：LOCAL／PLUGIN／BUNDLED。省略不过滤；四个 loose Skill 发现根由内部 root_kind 与 resolver 识别，模型详情通过实际 skill_path 区分，不再公开第二套 root_kind 枚举。
 - parent：只接受确切 PLUGIN 来源 target 或 MCP_SERVER target。PLUGIN 形状是按该来源筛选其 Skill／MCP server／Hook source；MCP_SERVER 形状用于列当前 runtime 的直接子项。Plugin target 可从能力行 source.target、安装结果中的 identity 或用户提供的确切身份取得，不需要 Plugin 列表行。不得填写任意目录、通配 plugin_id、省略身份或要求搜索包名。
 - limit：默认 50，1–200，沿已有 MCP directory 页条目边界；offset：默认 0，非负整数，bool 不作整数。
 
 ROOT 无 kind／parent 时直接返回跨 local／Plugin／bundled 来源的 Skill、MCP server、Hook source，并补充无法关联到当前安装副本的可见 runtime MCP server。Plugin 提供的能力与独立能力并列，每条保留 source，不要求模型先展开包。选择 kind 后可以跨来源列该类型；source_kind=PLUGIN 仍只返回能力，不返回包记录。指定 Plugin parent 只列该确切包当前声明的 Skill、MCP server、Hook source；指定 MCP server parent 只列当前已观察的 tools/resources/templates/prompts。kind 与 parent 不相容时返回参数错误。
 
-默认清单包含实际观察到的已禁用、被覆盖、不完整或不可用的能力记录，不把 effective winner catalog 当成完整能力声明清单。没有连接的 MCP 可以显示配置，但不能造出远端工具目录。普通 built-in tool 不作为安装来源记录逐项列出；实际直接调用工具表仍由已冻结 provider surface 提供。
+默认清单包含实际观察到的已禁用、被覆盖、不完整或不可用的能力记录，不把 effective winner catalog 当成完整能力声明清单。没有连接的 MCP 可以显示已配置的 server 记录，但不能造出远端工具目录。普通 built-in tool 不作为安装来源记录逐项列出；实际直接调用工具表仍由已冻结 provider surface 提供。
 
 Plugin 提供的能力沿 PluginInspectionService 的实例 summary／原生组件观察读取，disabled 实例也能列出已声明的组件；effective_skill_names／effective_mcp_server_ids／effective_hook 只说明选择或采用状态，不用来决定“包里有什么”。组件损坏或无法观察时保留能力查询的 completeness；查询确切来源时返回该来源诊断，不能用空 effective 集合断言包内没有组件。
 
@@ -105,13 +109,15 @@ Plugin 提供的能力沿 PluginInspectionService 的实例 summary／原生组�
 | MCP_RESOURCE_TEMPLATE | 当前 catalog 的 server_id、uri_template |
 | MCP_PROMPT | 当前 catalog 的 server_id、name |
 
-输出返回该目标的最新可核实详情及相同来源／位置字段。Plugin 成功详情的业务字段闭合为 target、version、description、package_root、enabled、components、diagnostics，具体语义按第 4.4 节；不内嵌所有组件／schema，也不返回其他包、候选包名或全局 Plugin 数量。确切目标不存在／损坏时返回该目标的公开原因，不建议或枚举替代包。Skill 详情返回 metadata、root/path、选择状态与管理资格；正文沿普通 read_file 渐进读取，不新增 load_skill。Hook 详情返回来源状态和现有完整定义审阅信息，不自动信任或执行。
+输出返回该目标的最新可核实详情及第 3.2 节适用的位置字段。Plugin 成功详情的业务字段闭合为 target、version、description、package_root、enabled、components、diagnostics，具体语义按第 4.4 节；不内嵌所有组件／schema，也不返回其他包、候选包名或全局 Plugin 数量。确切目标不存在／损坏时返回该目标的公开原因，不建议或枚举替代包。Skill 详情返回必要作者 metadata、skill_root／skill_path、选择状态与管理资格；正文沿普通 read_file 渐进读取，不新增 load_skill。Hook 详情返回触发条件、实际执行内容、针对当前观察定义的授权状态及影响执行的具体问题；旧版 trusted_at 或 enabled 不能证明当前定义已授权。不直接序列化完整内部审阅 DTO，不自动信任或执行。
 
 确切 Plugin inspect 与 Plugin parent 来源筛选均走第 2 节的原生确切观察分支：健康包 A 的声明、路径与本地状态不因无关坏包 B 不可读而失败，也不能把全量观察的失败归因到 A。目标缺失、损坏、取消、race 等结果来自该目标的真实观察。Plugin 成功详情不计算整包 adoption／effective。parent 返回的各能力行或对应能力详情如依赖全局 composition，而该观察不可用，选择／effective 状态单独返回 UNKNOWN 与相应完整性；保留目标已观察的声明，不自造 winner 或另写 resolver。MCP runtime 采用继续按既有 provenance 判断。查询使用本次确切 state／package 观察及原有 lifetime/revalidation，不新增 state digest 或持久快照。
 
-MCP server 详情返回非秘密配置、声明／实例来源、当前连接观察和目录状态。安装 server 与 runtime server 只能由既有规范化配置／provenance 精确关联：复用 LocalConfiguredMcpRuntimeSource 的 USER／WORKSPACE 来源，以及 ManagedPackageMcpRuntimeSource 的 scope key、package owner、package_install_id；不能从名称拆出 Plugin 身份或由目录猜测。HOST_OVERRIDE 或仍被当前 epoch 持有、但不属于当前安装副本的旧 Plugin 版本用 runtime target 展示，不伪造配置路径。
+ROOT 的安装配置 MCP server 详情返回连接目标摘要、来源、适用的 config_path、当前安装启用选择、所关联的连接／目录事实及具体诊断；不返回 config_to_entry 的完整配置。连接目标摘要只含 transport 类型及 HTTP endpoint 或 stdio command／args／cwd；环境值、headers、认证配置与高级策略不默认展开。ROOT 的 runtime target 只有在既有 owner 提供该 candidate 精确冻结的配置时才给对应摘要，不能取最新同名安装配置冒充；没有可核实摘要时省略并说明原因，不新增配置快照或证明机制。SUBAGENT runtime 详情仅展示现有 scoped catalog metadata、目录／调用资格与公开失败，不返回 config_path、进程启动参数、连接 endpoint、安装 enabled 或安装来源 target；不通过 slot.client.config 扩大配置观察面。
 
-关联同一来源不等于当前磁盘配置已被 runtime 采用。分别报告来源归属与采用状态；只能用既有 owner 的版本／配置身份判断采用，无法核实就 UNKNOWN。查询不得重物化秘密、启动连接或新增 digest 来证明关联。ROOT 通过安装 target 可以取得所关联的 runtime target，后续目录查询仍受当前 caller 的 runtime scope 限制；SUBAGENT 不由 runtime target 反查安装管理清单。
+安装 server 与 runtime server 只能由既有规范化配置／provenance 精确关联：复用 LocalConfiguredMcpRuntimeSource 的 USER／WORKSPACE 来源，以及 ManagedPackageMcpRuntimeSource 的 scope key、package owner、package_install_id；不能从名称拆出 Plugin 身份或由目录猜测。HOST_OVERRIDE 或仍被当前 epoch 持有、但不属于当前安装副本的旧 Plugin 版本用 runtime target 展示，不伪造配置路径。上述关联键和配置身份只在内部使用，不进入模型来源对象。
+
+关联同一来源不等于当前磁盘配置已被 runtime 采用。来源对象只回答“来自哪里”；详情在需要区分已保存配置与当前会话事实时说明采用情况，无法核实就明确说明未知。只能用既有 owner 的版本／配置身份判断，不能向模型展示比对链或要求其判定。查询不得重物化秘密、启动连接或新增 digest 来证明关联。ROOT 通过安装 target 可以取得所关联的 runtime target，后续目录查询仍受当前 caller 的 runtime scope 限制；SUBAGENT 不由 runtime target 反查安装管理清单。
 
 配置形状的 MCP parent 只列精确关联的当前 runtime 子项。未关联或目录尚未发现时，返回明确原因与相应 completeness；即使 items 为空，也不能声称远端没有工具／resources／templates／prompts。
 
@@ -147,6 +153,19 @@ ROOT 第一次观察只需调用 `list_capabilities`：
 
 查看详情时只把目标行的完整 target 放进 `inspect_capability.target`。MCP_TOOL 返回 DIRECT 时使用原生工具；返回 META 时复制 tool_ref 给 use_new_mcp_tool；UNAVAILABLE 时根据公开原因处理。后续页复制 next_offset，并保持原筛选参数。模型不需要选择目录布局、生成 ID、了解 cursor 签名或手工拼接调用工具名。
 
+#### 4.3.1 管理工具的模型说明合同
+
+`manage_capability` 的共同 description、实际 action 分支与参数 description 共同构成首屏可用说明；模型无需先读取多个安装 Skill 或逐个试调用，才能判断操作归属。总描述只讲统一选路、作用域、权限／表单、秘密与结果；15 个现有动作各自在实际 provider schema 的 `oneOf.properties.action.description` 中说明用途与限制，不在总描述重复整张动作表。安装 Skill 保留来源获取与作者流程，不替代核心工具边界。
+
+- 独立 Skill 的安装、启停、删除与独立 MCP 的增删改，不能管理 Plugin 内声明；bundled Skill 只读。Skill 安装不覆盖已有副本，用户要求替换时先准备新来源，再按 inspect 的操作资格删除确切旧副本并安装。启停资格与删除资格不同，不能把可发现当成可删除。
+- Plugin 按整包安装／替换、启停、删除；安装和替换后禁用。已有 Plugin MCP 使用 `CONFIGURE_PLUGIN_MCP_CONNECTION`，身份为 scope、plugin_id 与包内 server_id，不能改包的 command／args／cwd／transport kind。Hook 信任与来源启停分别控制，既不修改 Hook 定义，也不代替 Plugin 启用。
+- USER／WORKSPACE 绑定当前 Host home／GUI 工作目录，terminal cwd 不改变目标。source_path 是绝对来源目录；skill_path 是确切安装副本的绝对 SKILL.md 路径。管理使用安装身份，不把 runtime server ID、工具名、ref 或整个 query target 当成管理参数。
+- 省略 config／overlay 会打开相应预填连接编辑器；必需 action、scope、身份和路径仍须填写。完整候选也可能因权限、凭据或必要审阅进入用户表单。config／overlay 对象是完整替换，不是 patch；overlay:null 清除实例覆盖并恢复包／输入默认值，不删除组件；expected_overlay:null 只断言当前无覆盖。高级对象未知时直接使用编辑器，不要求模型读取私密配置或仓库实现来构造参数。
+- 工具在各权限模式均可见，所需确认由 runtime 收集；READ_ONLY 的修改交由用户表单明确提交，不要求切换模式。Plugin 启用与 Hook 信任始终审阅当前内容；模型不能提交接受标记或秘密。删除／替换须有用户请求，不能通过 terminal 或直接编辑受管理文件绕过原生 owners。
+- 变更结果与 adoption 分开报告，APPLIED 不说明是否出现表单；不重放已完成变更，不例行二次 reload。配置保存、来源启用、OAuth 授权、Hook 信任、会话采用与实际调用成功不能互相替代。
+
+本节只完善现有说明，不新增 action、参数、权限或执行路径，也不重建运行中 epoch 的 provider prefix；新说明随新的合法 provider 输入根采用。
+
 ### 4.4 规范／SDK 对照与模型字段减法
 
 2026-10-01 实际核对：本仓库 pyproject／uv.lock 与根目录 .venv 均使用 MCP Python SDK 2.1.0；[SDK 官方说明](https://github.com/modelcontextprotocol/python-sdk) 的 v2 是 SDK 发布线，[MCP 官方最新规范](https://modelcontextprotocol.io/specification/2026-07-28) 使用日期标识协议版本，两者不是同一个版本号。这里只审计字段语义，不扩大为协议升级。
@@ -171,8 +190,13 @@ ROOT 第一次观察只需调用 `list_capabilities`：
 | components.*.observation | 原生组件 disposition，COMPLETE 仍可附单项无效诊断 | 不直接复制这个枚举字段。用 count 与相关 diagnostics 保留结果语义，不教模型第二套观察状态机 |
 | diagnostics | 原生目标／组件错误的 code、message、必要 component/path | 保留具体可操作问题。没有问题为空；不得省略无效单项诊断以暗示全部组件有效 |
 | next_actions、额外 management identity | 可从已有 target 和固定入口推导 | 不新增输出字段；统一工具说明解释 target 可复制到 inspect.target／list.parent，管理使用其 scope + plugin_id |
-| 能力行 source 与 source.target | 原生来源归属及对应查询目标 | 保留，Plugin 只作为该能力来源；不追加包索引。安装副本精确关联仍由内部 typed values 拥有，不新加公共 digest／generation |
-| Skill 两路径、MCP／Hook config_path | 实际来源定义的路径 | 保留原第 3 节合同；查询不授予编辑、连接、信任或执行资格 |
+| 能力行 source 与 source.target | 原生来源归属及对应查询目标 | source 只保留 kind、适用的 scope 与 Plugin 来源 target；scope 已在该行 target 或来源 target 内时不重复。Plugin 包路径／enabled 去确切来源详情查看；不追加包索引。安装副本精确关联仍由内部 typed values 拥有，不新加公共 digest／generation |
+| root_kind、package_install_id、workspace_state_key、package_owner_key、store_scope_key | 原生发现、存储分区与版本关联事实 | 仅内部使用；模型复制已有 target，不理解或拼接这些身份 |
+| Skill 两路径、MCP／Hook config_path | 实际来源定义的路径 | 仅按第 3.2 节用于操作结果及适用详情；列表不重复展开路径。query target 必需的 skill_path 仍保留 |
+| MCP 完整 config、scope_policy、exposure_policy、effect_policy | 原生配置、Host 可见范围、筛选与授权策略 | 不直接输出；模型看已裁剪的能力及既有调用资格。某策略确实造成失败时，诊断说明该限制，不教模型自行重算权限或手改完整配置 |
+| stateless_http_asserted、supports_parallel_tool_calls、并发容量、刷新间隔、各类 timeout、network_policy | Host 接入与调度设置 | 常规 list／inspect／管理成功结果不携带；诊断只公开造成当前问题的相关设置与事实，默认变更由预填 GUI 完成 |
+| auth、secret_env、secret references、public_headers、完整 env | 原生认证与进程配置 | 不默认展开。诊断需要时保留具体缺失项名称／相关非秘密事实，实际凭据值始终过滤；不把秘密存储身份或整套 header/env 当作模型必须理解的配置 |
+| Hook digest、trust binding、matcher 编译结果、supported_tool_names／unsupported_tool_names、origin DTO | 信任核对、匹配实现与内部审阅材料 | 不直接输出。详情保留原始触发条件、命令／参数／cwd、授权事实与具体不匹配原因；需要说明工具名兼容时给本定义的简短结论，不给整张内部工具映射表 |
 | MCP server／tool 身份、schema、invocation.mode、tool_ref | scoped runtime、已安装 descriptor 与既有 ref owner | 保留调用所必需字段；target 仅定位，tool_ref 才按既有精确绑定进入 META 调用。完整 schema 不截断，DIRECT 不发 ref |
 | limit／offset、total_count／next_offset／completeness | 本次分页观察与结果预算 | 保留现有第 5 节页合同；模型只需按 next_offset 翻页，PARTIAL 不作不存在断言，不需要了解签名、版本锁或内部 cut |
 
@@ -200,13 +224,48 @@ COMPLETE 的 count=0 但有单项无效诊断，只表示没有解析所得项�
 
 组件不可解析时，相应 count 为 null，诊断保留该组件的具体问题；不能填 0。作者版本缺失时 version 为 null，仅表示未声明版本，不增加 UNKNOWN 状态或猜测安装版本。
 
+### 4.5 列表、详情、诊断与变更结果的展示边界
+
+模型接口使用显式字段投影，不把 dataclass、config_to_entry、PluginInstanceInspection 或 GUI review 对象整体转为 JSON。内部字段有生产消费点，只能证明它对 owner 有用，不能证明它应该对模型公开。
+
+| 结果层级 | 模型需要的信息 | 不默认展开的信息 |
+| --- | --- | --- |
+| list 能力行 | kind、name、简短 description（存在时）、target、source、status | 目录布局、作者完整 metadata、schema、完整配置、组件数量、连接／授权状态机及身份比对过程 |
+| Skill 详情 | 来源、作者名称／描述等必要 metadata、两路径、选择／管理事实及诊断 | resolver 候选次序、root_kind、content revision、编辑 authority |
+| MCP server 详情 | ROOT 安装 target 的连接目标摘要与定义位置、启用及连接／目录事实、必要 runtime target 和诊断；runtime target 按第 4.2 节精确配置及 caller 范围裁剪 | 完整原生 config、策略组合、SDK 协商记录、lease／generation、指纹及凭据引用对象；SUBAGENT 不获取 Host 配置摘要或安装来源 target |
+| MCP tool 详情 | 完整 callable schema、实际调用名称、DIRECT／META／UNAVAILABLE 与 META 所需 tool_ref | descriptor 身份、ref 绑定／容量／签名、执行策略 DTO。schema 不因减负裁剪 |
+| MCP resource／template／prompt 详情 | 已发现的名称／描述及 URI／参数等实际使用 metadata | 来源 server 的重复配置、resource 正文、渲染后的 prompt |
+| Hook 详情 | 当前定义的触发条件、执行命令／参数／cwd、针对该定义的用户授权事实、影响执行的限制 | Hook 内部身份、信任校验材料、编译缓存与全量兼容工具清单；旧信任记录不冒充当前授权 |
+| 确切 Plugin 详情 | 第 4.4 节闭合字段 | 包内全部定义、内部组件观察枚举、整包运行状态 |
+| 安装／配置／启停结果 | 已有本次动作结果、后续定位所必需的 identity、适用的实际落点及待处理问题 | 完整配置回显、存储身份和内部状态快照；成功不宣称当前会话已经采用 |
+
+list 的 status 是从原生事实生成的简短说明，供模型阅读，不是新的状态机、permit 或管理输入。正常情况也必须明确是“当前已选择”“已配置，尚未连接”“已禁用”还是“当前采用情况未知”等已核实事实，不能写模糊的“可用”掩盖目录或执行资格。存在多个障碍时保留各个影响下一步的事实，例如“来源已禁用；该 Hook 尚未获授权”，但不逐行复制所有 owner 枚举或列出常态内部阶段。详情保留与该类型有关的分别核实事实；不能为了减少字段将启用、已连接、已信任、已采用合并成一个 available。状态文案只渲染事实，不建立第二套 resolver／权限判断。
+
+diagnostics 保留原 code、具体 message、必要 component/path；相关高级配置只在其解释当前问题确有必要时附在诊断中，复用当前 owner 的错误上下文，不新增配置诊断注册表。例如启动失败需要给出实际 command／cwd，缺失凭据需要指出待填写项，Host 禁止远端访问需要说明具体限制；都不顺带回显其余配置。减少默认字段不是扩大凭据过滤，也不能把真实失败改成泛化的“不可用”。即使环境中可通过 terminal 读取非秘密原生配置，也不要求模型为了完成常规操作先学习整份配置。
+
+UPDATE_LOCAL_MCP 的 config 仍是完整替换。精简详情不能拿来当完整配置模板；通常省略 config，由 owner 打开已预填当前完整配置的 GUI。只有任务确实要求直接提交完整配置时才沿已有原生合同处理，不暗加 patch／merge 或通过 inspect 输出高级字段全集。MCP 管理成功结果当前回显的完整 config 在本轮一并删除，保留操作身份、config_path 与实际 cleanup_attention；内部 mutation outcome、确认表单与配置保存不裁剪。
+
+例如一个独立 MCP 的列表行只需如下内容（仅模拟业务行，不展示分页 envelope）：
+
+```json
+{
+  "kind": "MCP_SERVER",
+  "name": "project-docs",
+  "target": {"kind": "MCP_SERVER", "scope": "WORKSPACE", "source_kind": "LOCAL", "server_id": "project-docs"},
+  "source": {"kind": "LOCAL"},
+  "status": "已配置，尚未连接；远端目录尚未发现。"
+}
+```
+
+询问“配置在哪里”时，复制 target 调用 inspect，获得 config_path；询问“有哪些工具”时，只有已关联且目录已发现的 runtime 才能返回真实子项。列表不先给一份完整 transport／auth／policy 供模型自行分析。
+
 ## 5. 来源、状态、分页与可见失败
 
-每个简短列表行至少有 kind、名称／简要说明、target、source、位置和可核实状态。source 保留原 root_kind 或 Plugin 来源 target；Plugin 来源包含可复制的 source.target、package_root 与启用状态，scope／plugin_id 由 source.target 携带，不重复另一套 identity。bundled 不冒充用户安装。source 只描述该行的来源，不附带同目录其他包或全量来源索引。后续用法由统一工具说明教授，不逐行增加 next_actions。内部 ordinal、digest、nonce、guard 与凭据不作为常规清单正文。
+每个简短列表行仅按第 4.5 节返回 kind、name、可选 description、target、source、status。source.kind 为 LOCAL／PLUGIN／BUNDLED；LOCAL 必要时携带 USER／WORKSPACE scope，但该行 target 已含 scope 时不重复；PLUGIN 用 source.target 携带确切 scope／plugin_id，BUNDLED 无安装 scope。子项沿已核实且当前调用者可观察的来源投影；来源无法核实时 source 为 null，并在 status 说明未知，不增加 UNKNOWN 来源枚举或伪造 LOCAL／Plugin 身份。SUBAGENT 不反查安装来源，既有 scoped catalog 无来源事实时 source 为 null，只说明此调用者范围内未提供来源信息，不能据此断言 Host 来源异常。来源本身不包含 package_root、root_kind 或一套重复状态，实际位置与来源启用选择由确切详情获得。bundled 不冒充用户安装。source 只描述该行的来源，不附带同目录其他包或全量来源索引。后续用法由统一工具说明教授，不逐行增加 next_actions。内部 ordinal、digest、nonce、guard 与凭据不作为常规清单正文。
 
 状态不能合并成单个 available：
 
-- 安装／声明观察、enabled、Skill selection/shadowed/invalid、Hook trust 分别展示实际值；disabled Plugin 的组件仍可观察，但不能声称已激活。
+- 安装／声明观察、enabled、Skill selection/shadowed/invalid、Hook trust 在内部及相关详情中分别核实；列表 status 仅说明当前选择和实际障碍，不输出各套内部枚举。disabled Plugin 的组件仍可观察，但不能声称已激活。
 - MCP 配置保存、连接、目录发现、当前调用路由、来源采用彼此独立。配置已变但旧 epoch descriptor 仍在时分别说明磁盘事实与实际已安装调用面。
 - 来源不完整、解析失败、权限不足、远端目录尚未发现都不能变成“没有任何项”。响应保留按 owner／能力观察范围定位的 completeness 与诊断。某来源不可用时可以分页展示其他已观察能力，但整体标 PARTIAL，不能作全量不存在断言。无确切 Plugin 筛选时，诊断说明能力观察不足，不附带失败 Plugin 的逐项身份／路径名单或包数；确切 Plugin 查询则公开该目标的具体失败详情。安装／管理结果仍报告本次目标的实际结果，GUI 仍保留完整包诊断。
 
@@ -253,7 +312,7 @@ Hook 的 stdin、闭合别名、输出控制和 v2 trust 未改变，不切换�
 ## 8. 实施清单
 
 1. capability/builtin_catalog 与管理 intent：新查询闭合 schema，删除五个旧查询 descriptor 与两个管理 inspect 动作，保留各执行工具。
-2. capability_management_execution／原生 services：Skill 两路径字段、MCP config_path、Plugin 成功版本 package_root；列表/详情使用相同公开位置，按第 4.4 节构造最小模型投影，不导出内部／GUI DTO 的全部字段，保持 mutation／adoption 分开。
+2. capability_management_execution／原生 services：Skill 两路径字段、MCP config_path、Plugin 成功版本 package_root；按第 3.2／4.4／4.5 节分层构造显式最小投影，列表只给定位所必需的 target，详情按需给位置，MCP 管理成功结果删除完整 config 回显。不得导出内部／GUI DTO 的全部字段，保持 mutation／adoption 分开，原生存储／确认表单不裁剪。
 3. tool_runtime／Host：两个 descriptor 在 both caller scopes 可见，本地查询不依赖 MCP port；ROOT 原生来源观察与 SUBAGENT scoped runtime 查询分别接线到既有 owners，再复用过滤／渲染。PluginInspectionService/store 补确切 identity 观察分支，确切 Plugin inspect／parent 不先扫描全量包再过滤；default list／exact inspect／parent 声明观察不调用带数据目录准备副作用的 materializer。保持取消、source race、scope、collision 与完整性。
 4. mcp/directory、MCP projection/meta ref：复用候选及结果预算，移除被删除 list 的旧 cursor 公开路径；统一 inspect 的 DIRECT／META／UNAVAILABLE 分支，不复制协议或 ref state machine。
 5. bundled instructions、frontend 工具摘要、GUI 共用观察与活跃文档：模型清单直接列能力、Plugin 只作来源，不添加全量包枚举入口；GUI 保留完整 Plugin 清单与诊断。统一字段含义与最少使用步骤，不把查询成功当成启用、信任、连接或实际使用成功。
@@ -267,9 +326,9 @@ Hook 的 stdin、闭合别名、输出控制和 v2 trust 未改变，不切换�
 
 - 位置：默认／自定义 PULSARA_HOME、USER／WORKSPACE、四个 loose roots、Plugin 工作区中央存储、source 与安装副本分离、terminal cd/workdir 不改变目标；成功、替换、冲突、删除、取消／未知结果不串版本或伪造路径。
 - 来源：bundled／local／Plugin，disabled、shadowed、invalid、不完整／不可管理项；Plugin 包内子项不伪装成 loose，不因观察启用／信任或启动进程；跨 scope 同名项按确切来源区分。
-- 查询：ROOT 默认跨来源能力、SUBAGENT 默认 scoped runtime、无 MCP port 的本地查询、kind 跨来源、确切 Plugin 来源筛选与 MCP parent、过滤组合、闭合 target、未知字段／错误类型、空页与真实下一页；ROOT_ONLY 保留原因，不可观察不作不存在结论，行字节预算截断必须继续前进。
+- 查询：ROOT 默认跨来源能力、SUBAGENT 默认 scoped runtime、无 MCP port 的本地查询、kind 跨来源、确切 Plugin 来源筛选与 MCP parent、过滤组合、闭合 target、未知字段／错误类型、空页与真实下一页；ROOT_ONLY 保留原因，不可观察不作不存在结论，行字节预算截断必须继续前进。SUBAGENT server 详情不反查 slot 配置／安装来源，不泄漏路径、endpoint、启动参数与安装启用选择；ROOT runtime 摘要不能用最新同名配置替代当前 candidate 的配置。
 - Plugin 边界：list kind=PLUGIN 明确拒绝；默认页和 source_kind=PLUGIN 都仅返回能力；空包无能力行，空 Hook source 不作包清单替身，坏包无伪行，total_count 只统计能力。全量来源摘要、包名单／包数、模糊包名查询、错误中的替代包列表均不存在；确切来源 target 可来自能力、安装或用户身份而不依赖“已见 ID”状态。健康 A 与无关坏 B 并存时，确切 inspect／parent 仍观察 A，B 的全局失败不归到 A；全局选择不可知时声明保留而 effective 单独 UNKNOWN，缺失／损坏／取消／race 的确切目标结果和 anchor 清理正确。GUI 完整 inventory、确切 Plugin 诊断与管理能力保持。
-- 字段减法：Plugin 成功详情只包含第 4.4 节闭合业务字段，无 data_root／instance_config_path／package_in_use／总 valid／aggregate adoption／重复 identity／next_actions。MISSING 为 0，COMPLETE 计解析所得项且保留无效单项诊断，INVALID／UNAVAILABLE 为 null；所有子项无效时 COMPLETE count=0、诊断非空，不误报没有声明。缺失版本为 null。MCP server 的作者 metadata 不冒充 Plugin manifest，配置路径／包路径／stdio cwd 不混淆，原 MCP／Hook 运行数据目录及 GUI 字段仍有效。
+- 字段减法：list 不展开安装路径／schema／配置／root_kind／内部状态枚举；Skill target 必需的 skill_path 保留。位置只按第 3.2 节输出，Plugin 子项通过 source.target 查包位置。MCP 详情和管理成功结果均无完整 config，诊断只带相关设置，完整替换默认仍走预填 GUI。Hook 详情无内部信任／编译／全量别名 DTO，原触发条件及执行内容保留。Plugin 成功详情只包含第 4.4 节闭合业务字段，无 data_root／instance_config_path／package_in_use／总 valid／aggregate adoption／重复 identity／next_actions。MISSING 为 0，COMPLETE 计解析所得项且保留无效单项诊断，INVALID／UNAVAILABLE 为 null；所有子项无效时 COMPLETE count=0、诊断非空，不误报没有声明。缺失版本为 null。MCP server 的作者 metadata 不冒充 Plugin manifest，配置路径／包路径／stdio cwd 不混淆，原 MCP／Hook 运行数据目录及 GUI 字段仍有效。混合状态与未知采用必须如实说明，不用“可用”或空清单遮蔽；DIRECT／META 的完整 schema 与调用资格保持。
 - 只读观察：已启用且 data_root 缺失／不可准备的本地 MCP、HTTP-only 与 Hook Plugin，default list／exact inspect／Plugin parent 均不创建目录、不调用运行 preparation、不将有效声明改成 unavailable；运行采用无法精确关联时单独 UNKNOWN。实际启用／运行准备按第 12.3 节；查询取消／失败的 anchor 清理保持。
 - MCP：tools/resources/templates/prompts 无 transport list 请求；配置与 runtime 来源精确关联，无法关联时公开未知；DIRECT 只描述已安装定义，META 才发 ref，UNAVAILABLE 不发 ref；collision、ROOT/subagent scope、stale ref、ref 提交/取消 settlement、大 schema 可见失败全部保留。
 - 权限：新查询是只读，可在 READ_ONLY 下进行获准观察；schema/ref 公布不执行，read/get/use 仍走原 owner 和权限；管理只保留变更动作与原 HITL。
@@ -278,6 +337,8 @@ Hook 的 stdin、闭合别名、输出控制和 v2 trust 未改变，不切换�
 - 真实 GUI：生产保存配置只读，桌面 test1 下隔离项目，GPT-6 Luna / xhigh；自然语言询问能力及其来源／位置，直接看到 disabled Plugin 声明的能力，安装一个 loose Skill／小测试 Plugin 后直接使用返回身份与位置筛选／查询／管理；确切空包仍可查看和管理，完整包盘点留在 GUI。查询 MCP schema 再做一项已授权代表调用；观察模型不用旧工具、猜路径、传播 home 或误把 list 当远端调用。实际需用户确认的表单仍走 GUI，只报告实际完成的验证。
 
 ## 10. 审阅记录
+
+2026-10-01 模型负担追加审阅：收紧此前“所有视图沿用位置字段”和“非秘密配置”两处过宽承诺。列表仅承担发现与选择，位置进入操作结果／确切详情；内部发现根枚举、存储关联键、高级 MCP 策略及 Hook 审阅 DTO 不直接进入模型结果。新增第 4.5 节规定显式投影、按问题提供诊断上下文与管理结果减法，保留完整调用 schema、实际失败和原生 GUI 完整配置。同一 critic 认可字段减法，指出 server 摘要不能扩大 SUBAGENT 原 scoped catalog 范围；已明确 ROOT 安装／精确 runtime 配置与 SUBAGENT 目录观察的区别，并将 Hook 授权限定到当前定义。critic 认为以上收口后可冻结。本次仅修订文档，不实施统一查询或其他生产代码；文稿待用户审阅。
 
 2026-10-01：主 agent 根据当前生产 owner 形成初稿，覆盖两条用户批注。同一 GPT-6.1 Sol / xhigh critic 核对现有 scope、Plugin summary/state layout、MCP source identity 与查询/ref owners 后复审通过，无阻塞项。讨论后的修订包括 ROOT／SUBAGENT 范围、本地查询无 MCP port 依赖、disabled 组件观察、runtime 来源与采用分开、未关联 MCP 子项的完整性，以及 owner 整体不可用时的公开失败。主 agent 完成修订并冻结，待用户审阅。
 
@@ -361,3 +422,62 @@ set_enabled 只提交 enabled 状态与既有连接 review；不创建 data_root
 
 
 2026-10-01 第 12 节实施验收：四项运行修订完成；同一 GPT-6.1 Sol / xhigh critic 实现交叉审核通过，无剩余阻塞。审核发现的 CLI parser flag 未同步和双 server safe-point dirty lease mint 问题均修复，新增 owner 回归 38 项通过。全仓库非 PostgreSQL／非 retrieval_live 测试 2079 项通过（404 项依标记未选择），包含架构约束检查；前端 587 项通过，生产静态包重建与针对变更的 Ruff 检查通过。广回归中旧 Host 测试替身入口已同步为 observe_for_runtime，未改断言；前端一次提示补全时序失败在单独及全量复测均通过，未修改该组件。未修改生产配置或数据库，未运行真实模型会话。统一来源查询工具尚未实施，不将这次通过记录当作第 9 节完整激活证据。
+
+
+## 13. 本轮代码验收与真实会话进度
+
+2026-10-01 的实现保留原生 GUI／安装／执行 owners；新增两个模型查询工具，删除被替代的五个 MCP 查询入口及两个只读管理 action。位置字段、来源、目标及模型详情按第 3–6 节投影，内置 capability Skills 和前端工具摘要同步更新。没有新增持久状态、事件、关系、任务、身份注册表或 provider prefix 重建边界。
+
+代码复审已修复并验证：健康 Plugin Skill target 与无关坏包隔离；Plugin MCP 摘要应用当前 overlay 和输入默认值；查询不为来源采用重新物化凭据；确切无效 Hook 保留真实诊断；普通大型详情沿既有 OUTPUT artifact 分页；精确查询区分原生来源失败、runtime 未安装／目录未发现、完整观察中的目标缺失，并保留 caller scope 隐藏边界。MCP_TOOL schema 仍 FULL-required，DIRECT／META／UNAVAILABLE 与既有 ref 结算不变。
+
+非真实会话验收：广泛非 PostgreSQL／非 retrieval_live 测试 2117 项通过；随后补充的来源查询／应用边界 75 项通过；相关 PostgreSQL 测试 29 项通过，另有大型 Hook 详情的真实 PostgreSQL artifact 分页往返 1 项通过。前端 35 个文件、583 项测试通过，TypeScript 类型检查与本地静态资源构建通过；修改文件 Ruff、编译、协议生成检查和 diff whitespace 检查通过。测试计数按各次运行记录，不累加重叠用例。
+
+同一 GPT-6.1 Sol / xhigh critic 独立复审通过：查询／结果投影 68 项及最终失败／范围边界 8 项独立验证通过，确认无剩余阻塞并准许进入真实 GUI dogfood。
+
+真实会话准备使用 saved LocalSettingsStore 配置的只读注入，临时 Pulsara home 与已验证的本机 disposable PostgreSQL database。原用户 MCP 文件还包含上一轮删除的 proved_stateless；保留原文件，通过隔离 home 避免把旧配置兼容路径加回来。测试源位于 Desktop/test1/capability_source_query_20261001，demo Plugin 原生校验所得 1 Skill／1 MCP／1 Hook，空 Plugin 为 0／0／0，均无解析诊断。用户通过 GUI 选择该测试目录后，使用保存的 OpenRouter GPT-6 Luna / xhigh 连接完成真实验收；没有注入伪造模型回复或工具结果。
+
+
+真实 GUI 首轮在安装前被 FOLLOWUP_INPUT_TOKENS 中断。既有 runner 把首次 INSTALL_PLUGIN 也按可能改变 Skill/MCP 目录收费，但 native store 首次发布 disabled，enabled-view owner 在观察组件前跳过该实例，因此该分支不可能改变两个运行目录。本轮只删除 `INSTALL_PLUGIN` 且 `replace != true` 的目录变化预留；替换、启停、删除、reload 及 MCP 变化预留保持。没有扩大模型预算、削弱资源边界或重建 provider prefix。重启同一隔离测试环境后，从普通 GUI 继续实际任务。资源测试文件 61 项通过，critic 独立相关分支 8 项通过。
+
+前端同时修复两个可见误报：完整 JSON 清单携带原生 artifact reread footer 时，显示层先分离标准 footer 再解析正文；缺少有效 items/total_count 的等待或失败结果不再冒充“0 项能力”。实际默认页 29 项能正确显示。前端应用文件回归 143 项通过，TypeScript 检查、本地静态资源构建、修改文件 Ruff/编译及 diff 检查通过。critic 核对 footer 精确协议与首次安装分支，无阻塞。
+
+实际完成的三轮结果：
+
+- 安装与来源：内置管理成功安装 WORKSPACE loose Skill 与 demo/empty 两个禁用 Plugin。demo 确切详情为 1 Skill／1 MCP server／1 Hook definition，empty 为 0／0／0；按 demo 返回身份分页 offset 0→1→2，next_offset 最后为 null，三个返回 target 均能确切检查实际定义位置。禁用／未信任障碍如实返回。独立 Skill 沿返回 skill_path 读取已安装正文，实际回复 SOURCE_QUERY_SKILL_OK。
+- MCP：内置 ADD_LOCAL_MCP 写入项目 `.pulsara/mcp.yaml`，返回实际 config_path。目录发现前返回 PARTIAL 与 MCP_CATALOG_NOT_DISCOVERED，随后普通查询所得完整清单为一个工具；inspect 返回完整输入/输出 schema、META 与已提交 tool_ref。一次 use_new_mcp_tool 实际返回 SOURCE_QUERY_ECHO:roundtrip，isError=false。服务端只读 hints 没有授予权限，未配置 Host override 时仍为 EXTERNAL_EFFECT；本次代表调用在完全访问下完成。没有出现 HITL 表单，因此不声称实测了确认表单分支。
+- 只读：GUI 选择只读后，canonical turn 的 requested/effective permission 均为 read-only，轮次 COMPLETED。实际仅执行 list_capabilities/inspect_capability，两个 Plugin 仍禁用，Hook 为 UNTRUSTED/selected=false，空 Plugin 计数仍为零，MCP 完整 schema 与 META 查询成功，没有执行或修改。
+
+真实 trace 没有旧五个查询入口、terminal CLI 安装或直接改写 managed state；Plugin 数据目录在安装和查询完成后仍不存在。安装及 MCP 变更的原生采用结果报告 same_epoch_prefix=UNCHANGED；逐字 prefix 连续性由相关静态／PostgreSQL 回归验证，本次 GUI trace 不冒充原始 provider wire 逐字比对。模型曾从已知 server_id 构造 runtime parent；后续确切工具 target 与 tool_ref 来自真实查询结果。本轮验证的是可工作流程，不把单次模型行为当作“永不猜目标”的保证。
+
+两个既有资源预估问题单独记录，不混入本轮查询 hard cut：loose Skill 会在后续 dispatch 重新观察，但其变化尚未纳入后响应目录变化预留；已 JSON 串行化的目录仍使用通用控制字符最大展开上界，预留偏粗。进一步修改需要按各自 owner 格式证明和独立资源合同收口，不随手缩小 Hook 上界或扩大模型预算。这两项没有阻塞上述实际验收，也不记作已经修复。
+
+
+收尾：已停止隔离 runtime，并核实临时 home 与本机 dogfood database 均已删除；项目内测试源与 loose Skill 保留。全局 `uv tool` editable 环境原先缺少上一轮搜索拆分新增的 wcmatch，已使用仓库 uv.lock 导出的约束离线同步依赖。随后从 Desktop/test1（非源码 cwd）通过全局 pulsara app 正常启动普通生产 listener，bootstrap/model settings 和 sessions API 正常；数据库 status 为 up_to_date。普通 GUI 的能力读取及已有会话恢复仍被用户级 mcp.yaml 的旧 proved_stateless 键阻断，原生声明 parser 确认报错 MCP HTTP transport contains unknown fields: proved_stateless。没有改写该生产文件、重置生产数据库或增加旧字段兼容；这个配置阻塞与本轮隔离功能验收通过分开报告。
+
+
+2026-10-01 后续配置收尾：用户明确授权移除旧键后，仅删除有效 Pulsara home 的 mcp.yaml 中一处 proved_stateless:false，校验其余 YAML 值完全保留。原生声明解析通过，普通 GUI 能力 API 返回 200，刷新后已有生产会话正常恢复。未重置生产数据库、未修改 local-settings.yaml，前述生产配置阻塞已解除。
+
+### 13.1 Ponytail 生产 dogfood 暴露的清单预留修订（2026-10-01）
+
+首次安装保持 disabled 并成功；启用调用被 FOLLOWUP_INPUT_TOKENS 拦截。目录来源预留使用原始控制字符 6x 展开，但 Skill render_catalog_prompt 与 MCP _bounded_mcp_catalog_provider_body 均先通过 canonical_json_bytes 生成紧凑 JSON，随后才按既有 UTF-8 上限检查。合法 JSON 正文没有字面控制字符，剩余字符在 observation JSON 内至多 2x；因此目录预留使用相同字节上限的全反斜线正文表示编码上界。后续 provider adapter 的二次转义和 token estimator 仍实际计费，不缩小目录上限、不扩大模型预算，也不改写 provider prefix。原始 Hook context 保留控制字符上界，不受此修订影响。回归测试覆盖 JSON 反斜线、引号、控制字符转义、Unicode 和两类 wire adapter，并保留目录变化分支及 canonical/epoch/wire/token 边界测试。此项收口只解决已序列化目录的上界问题；loose Skill 变化的预留归属仍是独立待修项。
+
+进一步实际重试确认：仅修正转义仍会把“所有清单都达到最大容量”的假设当成当前模型的输入，导致正常启用仍中断。目录变化预留继续计入 epoch 物理字节上界，但该尚未发生的最大目录不进入后响应 wire/token 预拒绝；下一 safe point 由原有 source collector 冻结实际目录，原有 dispatch planner 按真实 wire/模型预算接纳，必要时沿既有 compaction 边界压缩。工具结果、Hook、图片、规范行与 epoch 字节边界保持；不允许超预算 provider dispatch，也不承诺任意能力修改后无需压缩即可立即调用模型。没有新 owner、事件、字段、durability 或 prefix 重建例外。
+
+验证状态：资源测试 82 项通过；与本轮 Hook／Plugin／能力查询和架构检查合并运行 240 项通过，Ruff 与 diff whitespace 检查通过。真实生产 GUI 重试完成 Ponytail 的 USER 安装、启用和 TRUSTED 审阅，随后独立冷会话 4f80aa1c 验证 SessionStart／SubagentStart 规则注入，以及 UserPromptSubmit 的 full→ultra→off→full 模式切换。主会话与真实子任务均完成，无再次资源中断；具体输入与运行边界见 Hook 规范文末。
+
+
+### 13.2 实际清单最终 wire 选择与迟到结算上界（2026-10-01）
+
+本节收口资源审阅中的 P1、P2，取代第 13.1 节对“现有 compaction 即可处理实际清单超预算”的不完整推断。最大 Skill/MCP 清单不重新进入模型窗口的后响应预拒绝；JSON 清单 2x 编码上界继续有效。普通工具结果按最大 FULL wire 预留的行为保持，留待后续单独商议。
+
+P1：compiler 继续唯一拥有合法来源变体、降级顺序、不可丢内容与 append-only 编译；provider_dispatch 继续唯一拥有实际 Chat/Responses wire 计量与接纳。在同一个已经冻结的 canonical/source/target/planning cut 上，最终 wire 不 fit 时仅推进尚未安装的 Skill/MCP 清单合法变体，并按既有 compiler 重编、重新实际计量。清单 source 真值、原 request 与其他已选来源/工具结果展示不被重抓或升级；选择下界是一次本地规划的参数，不是新 DTO fingerprint、来源语义或 durable 状态。有限变体自然终止并沿现有局部 deadline，不能添加总尝试数或生命周期 cap。
+
+普通工具后续、冷输入、prospective 输入与 compaction 的 dry/post successor 采用同一最终 wire winner；保留原 exact-join、一次性 Hook reservation 和 cut/borrow authority。summary、repair 或仅有 semantic projection 的候选没有完整编译 basis，不能通过此路径改写已经冻结的 summary 输入。只有冷 epoch 或已采用 compaction 允许重建输入根；同 epoch 的 SYSTEM/tools/旧 messages 保持原字节，仅编译新 suffix。Skill 清单无法完整展示时使用现有 UNAVAILABLE_MINIMAL 明确观察，不能冒充空清单或不存在；MCP 沿 FULL/COMPACT/REF_ONLY。最小合法输入仍超预算时保留 typed failure；历史压缩不保证能够修复来源自身超预算。
+
+P2：ordinary preview 允许原始纯文本，reader 会将其再次放入 late outcome JSON；该 canonical 预留按原始控制字符 6x 构造上界。已序列化目录的 2x 证明不能套用到 plain-text preview。保持原有 canonical bytes/items、epoch、wire 与图片额度边界，真实 preview→closure/late→canonical 计量及临界 gate 必须覆盖；typed 图片沿既有 frozen prompt owner 增量计费，不复制图存储协议。
+
+验收包含两类 wire API、同 epoch 前缀、最小历史冷 successor、MCP 合法变体、能力变更与图片混合后续、最小仍 overbound 的明确失败，以及真实 late preview 和 typed 图片结算上界。测试通过不代替实际最终 wire winner 的 owner/消费者一致性检查。
+
+2026-10-01 收口：GPT-6 Astra / xhigh critic 交叉复审通过，无剩余阻塞。复审补齐冷 assembly 与 candidate 的完整 request/planning/result/call/read 校验，以及 floor 选择或重编异常时尚未消费的 wire measurement 恰好释放一次；没有新增 authority、持久状态或恢复机制。聚焦回归 189 项通过；全仓库非 PostgreSQL／非 retrieval_live 回归 2205 项通过（404 项依标记未选择）；PostgreSQL Host/runner/图片核心集成 147 项通过。上述运行包含重叠测试，不累加为总数。修改文件 Ruff 与 diff whitespace 检查通过。
+
+随后使用保存的 OpenRouter GPT-6 Luna / xhigh 配置，通过生产 KernelHostCore/ModelRuntime owners、只读设置注入、临时 Pulsara home 和已验证的本机 disposable PostgreSQL database 跑窄范围真实 provider dogfood。两轮、六次实际模型调用完成：manage_capability 安装 USER loose Skill 后继续读取文件与图片；后续 list_capabilities 确认新 Skill。全部实际 wire quote 在模型预算内，实际 HTTP 返回 200；临时 home/database 已清理，生产配置与数据库未改。首次临时脚本未解析 macOS 符号链接目录且使用相对读取路径，产生 STAGING_UNAVAILABLE/FILE_NOT_FOUND；修正测试路径后通过，保留首轮失败记录，没有放宽生产路径校验。这次真实运行验证正常能力变更与图片续接；100k 清单超预算降级、两类 wire API 的逐字前缀、迟到控制字符极限及异常清理由受控真实 compiler/adapter/preview 回归证明，不将窄 dogfood 描述为这些极限分支的真实 provider 实测。

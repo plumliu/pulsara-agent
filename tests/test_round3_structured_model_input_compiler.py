@@ -3858,9 +3858,9 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # The two additional absent source leaves change the source collection
-        # and the compiled semantic root without changing the budget decision.
-        "sha256:5baa37974f8fa1337324c4721c004d2c0461b381541d8c8636a8075c2e82ca84"
+        # Compiler v15 adds final-wire catalog selection. Its contract boundary
+        # changes the semantic root; this unchanged input keeps its decision.
+        "sha256:14f58bd7a7d0068e6908efa530175783f5be5f036e50b617902e634575563c7e"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

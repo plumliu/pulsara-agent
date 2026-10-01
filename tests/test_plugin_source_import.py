@@ -227,10 +227,12 @@ def test_private_template_is_missing_input_not_copied_secret(tmp_path):
         observe(source, import_public_values=(("TOKEN", "must-not-store"),))
 
 
-def test_unknown_active_component_and_private_literal_reject_whole_bundle(tmp_path):
+def test_unsupported_component_reported_but_private_literal_still_rejected(tmp_path):
     source = fixture(tmp_path, {"apps": {"service": "app-123"}, "mcpServers": {}})
-    with pytest.raises(PluginImportError, match="apps"):
-        observe(source)
+    with observe(source) as observed:
+        assert any(item.component == "apps" for item in observed.diagnostics)
+        assert observed.summary.mcp.mcp_servers == ()
+    assert any("apps" in notice for notice in discover(source)[0]["preview"]["notices"])
     (source / ".codex-plugin/plugin.json").write_text(
         json.dumps(
             {
@@ -332,3 +334,72 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
         await service.mcp.aclose()
 
     asyncio.run(run())
+
+
+def test_partial_import_keeps_resources_and_reports_unsupported_hooks(tmp_path):
+    hooks = {
+        "hooks": {
+            "SessionStart": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "echo supported"},
+                        {"type": "http", "url": "https://example.org/hook"},
+                    ]
+                }
+            ],
+            "ExternalHostEvent": [
+                {"hooks": [{"type": "command", "command": "echo inert"}]}
+            ],
+        }
+    }
+    source = fixture(tmp_path, {"apps": {"app": "host-only"}, "hooks": hooks})
+    (source / "commands").mkdir()
+    (source / "commands/foreign.toml").write_text('prompt = "Gemini only"')
+    preview = discover(source)[0]["preview"]
+    assert preview["hooks"] == ["SessionStart"]
+    assert any("apps" in value for value in preview["notices"])
+    with observe(source) as observed:
+        assert len(observed.summary.hooks.hook_definitions) == 1
+        codes = {item.code for item in observed.diagnostics}
+        assert "HOOK_CONFIG_UNKNOWN_EVENT" in codes
+        assert "HOOK_CONFIG_KNOWN_UNSUPPORTED_HANDLER" in codes
+        assert (
+            observed.source_path / "commands/foreign.toml"
+        ).read_text() == 'prompt = "Gemini only"'
+        assert (
+            json.loads(
+                (observed.source_path / "dev.pulsara/hooks/hooks.json").read_text()
+            )
+            == hooks
+        )
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        {"type": "command", "command": 42},
+        {"type": "command", "command": "echo yes", "unrecognizedExecutionFlag": True},
+    ],
+)
+def test_invalid_supported_hook_still_blocks_partial_import(tmp_path, handler):
+    source = fixture(
+        tmp_path,
+        {
+            "apps": {"app": "host-only"},
+            "hooks": {"hooks": {"SessionStart": [{"hooks": [handler]}]}},
+        },
+    )
+    with pytest.raises(PluginImportError, match="Hook"):
+        observe(source)
+
+
+def test_unreferenced_gemini_commands_are_resources_in_claude_import(tmp_path):
+    source = fixture(tmp_path, {}, "claude")
+    (source / "commands").mkdir()
+    (source / "commands/mode.toml").write_text('prompt = "mode"')
+    with observe(source, "claude") as observed:
+        assert not any(item.component == "commands" for item in observed.diagnostics)
+        assert (observed.source_path / "commands/mode.toml").is_file()
+    (source / "commands/host-command.md").write_text("Claude command")
+    with observe(source, "claude") as observed:
+        assert any(item.component == "commands" for item in observed.diagnostics)

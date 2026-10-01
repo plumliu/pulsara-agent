@@ -531,7 +531,10 @@ def _ordinary_result_followup_upper(
     logical = provider_neutral_message_logical_bytes(closure) + (
         provider_neutral_message_logical_bytes(late)
     )
-    result_body = "\\" * CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
+    # Plain-text previews retain raw C0 characters. The reader wraps a late
+    # preview in canonical JSON, where each such byte can expand to six bytes;
+    # unlike the provider logical envelope, the preview is not already JSON.
+    result_body = "\x01" * CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
     late_storage = canonical_json_bytes(
         {
             "schema_version": "late_tool_outcome_observation.v1",
@@ -697,6 +700,7 @@ def _runtime_source_message_upper(
     trust_class: ContextTrustClass,
     lifecycle: SourceObservationLifecycle,
     maximum_body_utf8_bytes: int,
+    serialized_json_body: bool = False,
 ) -> LLMMessage:
     """Build the escaping maximum for one existing bounded source body."""
 
@@ -712,7 +716,11 @@ def _runtime_source_message_upper(
         lifecycle=lifecycle,
         presence=SourceObservationPresence.VALUE,
         contract_version="post-response-resource-upper",
-        body="\x01" * maximum_body_utf8_bytes,
+        # Catalog owners return compact canonical JSON. Its body has no literal
+        # control chars: those were already escaped before the byte bound. Every
+        # remaining character expands at most 2x in the observation JSON; the
+        # all-backslash body owns that upper. Raw Hook context still needs 6x.
+        body=("\\" if serialized_json_body else "\x01") * maximum_body_utf8_bytes,
     )
 
 
@@ -725,9 +733,15 @@ def _capability_catalog_source_kinds(
         return (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG)
     if call.tool_name != "manage_capability":
         return ()
-    action = thaw_json(call.arguments).get("action")
+    arguments = thaw_json(call.arguments)
+    action = arguments.get("action")
     if action in _MCP_ONLY_CAPABILITY_ACTIONS:
         return (ContextSourceKind.MCP_CATALOG,)
+    if action == "INSTALL_PLUGIN" and arguments.get("replace") is not True:
+        # First installs publish disabled instances. The enabled-view owner
+        # skips them before observing components, so neither routing catalog
+        # can change. Replacement can disable an existing active instance.
+        return ()
     if action in {"INSTALL_PLUGIN", "SET_PLUGIN_ENABLED", "REMOVE_PLUGIN"}:
         return (ContextSourceKind.SKILL_CATALOG, ContextSourceKind.MCP_CATALOG)
     # The closed capability intent parser rejects unknown actions before any
@@ -1495,6 +1509,7 @@ class ConversationKernelRunner:
                 hook_sibling = None
                 session_start_context = None
                 return prepared
+            hook_sibling.candidate = decision.candidate
             selected = self._provider_dispatch.bind_selected_prospective_root_dispatch(
                 base=prepared,
                 sibling=hook_sibling,
@@ -3343,6 +3358,7 @@ class ConversationKernelRunner:
                     trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
                     lifecycle=SourceObservationLifecycle.SNAPSHOT,
                     maximum_body_utf8_bytes=MAX_SKILL_CATALOG_UTF8_BYTES,
+                    serialized_json_body=True,
                 )
             )
         if ContextSourceKind.MCP_CATALOG in changed_catalogs:
@@ -3352,8 +3368,10 @@ class ConversationKernelRunner:
                     trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
                     lifecycle=SourceObservationLifecycle.SNAPSHOT,
                     maximum_body_utf8_bytes=MAXIMUM_MCP_CATALOG_FULL_BYTES,
+                    serialized_json_body=True,
                 )
             )
+        catalog_messages = tuple(source_messages)
         if fresh_enter_plan:
             source_messages.extend(
                 self._context_source_collector.freeze_fresh_entered_plan_source_upper(
@@ -3401,7 +3419,12 @@ class ConversationKernelRunner:
             provider_neutral_message_logical_bytes(message)
             for message in source_messages
         )
-        suffix_messages.extend(source_messages)
+        # Dynamic catalog observations are frozen only at the next safe point.
+        # Their maximum serialized bytes remain in epoch physical admission, but
+        # cannot decide whether this mutation is allowed for a model's token
+        # window. The ordinary next-dispatch planner admits the actual catalog
+        # and invokes existing compaction when needed, without rebasing prefixes.
+        suffix_messages.extend(message for message in source_messages if message not in catalog_messages)
         wire = (
             quote_provider_followup_wire_resources(
                 request=request,

@@ -280,6 +280,8 @@ def test_round9_3_one_view_feeds_skill_mcp_and_hook_native_owners(
         assert dict(plugin.provenance.declaration_environment) == {
             "PLUGIN_DATA": str(view.user_instances[0].data_root),
             "PLUGIN_ROOT": str(view.user_instances[0].package_root),
+            "CLAUDE_PLUGIN_DATA": str(view.user_instances[0].data_root),
+            "CLAUDE_PLUGIN_ROOT": str(view.user_instances[0].package_root),
         }
         local_provider.trust_store.trust(
             plugin.provenance.trust_subject,

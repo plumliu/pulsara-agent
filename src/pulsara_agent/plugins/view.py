@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pulsara_agent.hooks.config_parser import ParsedHookConfig
-from pulsara_agent.hooks.contracts import HookVisibilityScope
+from pulsara_agent.hooks.contracts import HookVisibilityScope, plugin_hook_environment
 from pulsara_agent.plugins.contracts import (
     EnabledPluginViewDisposition,
     PluginComponentObservationDisposition,
@@ -228,10 +228,7 @@ class EnabledPluginViewOwner:
                     ),
                     hook_workspace_state_key=state.workspace_state_key,
                     hook_lifetime_anchor=hook_anchor,
-                    hook_declaration_environment=(
-                        ("PLUGIN_DATA", str(data_root)),
-                        ("PLUGIN_ROOT", str(package_root)),
-                    ),
+                    hook_declaration_environment=plugin_hook_environment(package_root, data_root),
                     scan_active_api_key=False,
                     enforce_managed_admission=False,
                 )

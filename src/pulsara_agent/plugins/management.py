@@ -112,8 +112,16 @@ class PluginManagementService:
         self._credential_boundary = credential_boundary
         self._home_resolution = pulsara_home_resolution
 
-    async def authorize_plugin_mcp(self, *, identity, local_server_id, expected_package_install_id,
-                                   deadline_monotonic, connections, action="login"):
+    async def authorize_plugin_mcp(
+        self,
+        *,
+        identity,
+        local_server_id,
+        expected_package_install_id,
+        deadline_monotonic,
+        connections,
+        action="login",
+    ):
         """Login uses a saved disabled or enabled instance, never a browser draft."""
         import asyncio
         from .contracts import NeverCancelPluginOperation
@@ -126,26 +134,45 @@ class PluginManagementService:
                 raise ValueError("Plugin store is unavailable")
             layout = store.layout(identity)
             state = await asyncio.to_thread(store.read_state, layout)
-            if state is None or state.current_package_install_id != expected_package_install_id:
+            if (
+                state is None
+                or state.current_package_install_id != expected_package_install_id
+            ):
                 raise McpManagementConflict("Plugin changed; refresh before logging in")
             cancellation = NeverCancelPluginOperation()
-            scrub = await asyncio.to_thread(self._credential_boundary.capture_scrub_set,
-                                           deadline_monotonic=deadline_monotonic,
-                                           cancellation=cancellation)
-            summary = await asyncio.to_thread(
-                store.read_package_summary, layout, state.current_package_install_id,
-                deadline_monotonic=deadline_monotonic, cancellation=cancellation, scrub_set=scrub,
+            scrub = await asyncio.to_thread(
+                self._credential_boundary.capture_scrub_set,
+                deadline_monotonic=deadline_monotonic,
+                cancellation=cancellation,
             )
-            server = next((server for server in summary.mcp.mcp_servers
-                           if server.local_server_id == local_server_id), None)
+            summary = await asyncio.to_thread(
+                store.read_package_summary,
+                layout,
+                state.current_package_install_id,
+                deadline_monotonic=deadline_monotonic,
+                cancellation=cancellation,
+                scrub_set=scrub,
+            )
+            server = next(
+                (
+                    server
+                    for server in summary.mcp.mcp_servers
+                    if server.local_server_id == local_server_id
+                ),
+                None,
+            )
             if server is None:
                 raise ValueError("Plugin MCP component is unavailable")
             config = materialize_plugin_mcp_definition(
-                identity=identity, state=state, server=server,
-                package_root=layout.plugin_package_parent / state.current_package_install_id,
+                identity=identity,
+                state=state,
+                server=server,
+                package_root=layout.plugin_package_parent
+                / state.current_package_install_id,
                 data_root=layout.data_root,
                 secret_resolver=connections.settings.read().mcp_secret,
             )
+
             def current_target():
                 return config if store.read_state(layout) == state else None
 
@@ -154,9 +181,13 @@ class PluginManagementService:
                 return connections.oauth._begin(owner, current_target)
             if action == "status":
                 return connections.oauth.login_state(owner, config)
+
         def require_current():
             if current_target() is None:
-                raise McpManagementConflict("Plugin changed; refresh before authorization changes")
+                raise McpManagementConflict(
+                    "Plugin changed; refresh before authorization changes"
+                )
+
         if action == "logout":
             await connections.oauth.logout(owner, require_current=require_current)
         elif action == "cancel":
@@ -170,9 +201,7 @@ class PluginManagementService:
 
         return await replace_plugin_connection(self, connections, request)
 
-    def validate_local_plugin_source(
-        self, request: ValidateLocalPluginSourceRequest
-    ):
+    def validate_local_plugin_source(self, request: ValidateLocalPluginSourceRequest):
         try:
             scrub_set = self._capture_scrub_set(request)
         except ProcessCredentialBoundaryCancelled:
@@ -186,6 +215,7 @@ class PluginManagementService:
         observer = PluginSourceObserver(self._credential_boundary)
         try:
             from .source_import import observe_plugin_import
+
             observation = observe_plugin_import(observer, request, scrub_set=scrub_set)
         except PluginPackageInvalid as exc:
             return InvalidPluginValidationOutcome(
@@ -226,10 +256,14 @@ class PluginManagementService:
         finally:
             observation.close()
 
-    async def install_local_plugin(self, request: InstallLocalPluginRequest, *, connections):
+    async def install_local_plugin(
+        self, request: InstallLocalPluginRequest, *, connections
+    ):
         import asyncio
 
-        worker = asyncio.create_task(self._install_local_plugin(request, connections=connections))
+        worker = asyncio.create_task(
+            self._install_local_plugin(request, connections=connections)
+        )
         while not worker.done():
             try:
                 await asyncio.shield(worker)
@@ -239,7 +273,9 @@ class PluginManagementService:
                 break
         return worker.result()
 
-    async def _install_local_plugin(self, request: InstallLocalPluginRequest, *, connections):
+    async def _install_local_plugin(
+        self, request: InstallLocalPluginRequest, *, connections
+    ):
         import asyncio
         from .connection_management import install_plugin_package
 
@@ -275,7 +311,10 @@ class PluginManagementService:
         observer = PluginSourceObserver(self._credential_boundary)
         try:
             from .source_import import observe_plugin_import
-            observation = await asyncio.to_thread(observe_plugin_import, observer, request, scrub_set=scrub_set)
+
+            observation = await asyncio.to_thread(
+                observe_plugin_import, observer, request, scrub_set=scrub_set
+            )
         except PluginPackageInvalid as exc:
             return FailedPluginInstallOutcome(
                 PluginInstallDisposition.INVALID,
@@ -306,9 +345,7 @@ class PluginManagementService:
             return FailedPluginInstallOutcome(
                 PluginInstallDisposition.UNAVAILABLE,
                 safe_source_path,
-                diagnostics=(
-                    _diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE),
-                ),
+                diagnostics=(_diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE),),
             )
         try:
             identity = store.identity(
@@ -318,7 +355,11 @@ class PluginManagementService:
             )
             try:
                 result = await install_plugin_package(
-                    store, connections, observation, request, scrub_set,
+                    store,
+                    connections,
+                    observation,
+                    request,
+                    scrub_set,
                 )
             except McpManagementConflict:
                 raise
@@ -327,10 +368,13 @@ class PluginManagementService:
             except PluginPackageTimedOut:
                 result = StoreOperationTimedOut()
             except (MemoryError, OSError, ValueError):
-                result = StoreMutationFailure(_diagnostic(PluginDiagnosticCode.STATE_UNAVAILABLE))
+                result = StoreMutationFailure(
+                    _diagnostic(PluginDiagnosticCode.STATE_UNAVAILABLE)
+                )
             return _install_outcome(
                 result,
                 source_path=safe_source_path,
+                package_parent=store.layout(identity).plugin_package_parent,
                 identity=_safe_identity(identity, scrub_set),
                 diagnostics=_safe_diagnostics(observation.diagnostics, scrub_set),
                 scrub_set=scrub_set,
@@ -383,7 +427,10 @@ class PluginManagementService:
                 )
             )
         try:
-            from pulsara_agent.settings import LocalSettingsStore, LOCAL_SETTINGS_FILE_NAME
+            from pulsara_agent.settings import (
+                LocalSettingsStore,
+                LOCAL_SETTINGS_FILE_NAME,
+            )
 
             result = store.set_enabled(
                 identity,
@@ -435,9 +482,7 @@ class PluginManagementService:
                     PluginEnablementDisposition.NOT_FOUND,
                     identity,
                     request.enabled,
-                    diagnostics=(
-                        _diagnostic(PluginDiagnosticCode.PACKAGE_NOT_FOUND),
-                    ),
+                    diagnostics=(_diagnostic(PluginDiagnosticCode.PACKAGE_NOT_FOUND),),
                 )
             )
         if result.ack_unknown:
@@ -474,7 +519,9 @@ class PluginManagementService:
             )
         )
 
-    async def remove_local_plugin(self, request: RemoveLocalPluginRequest, *, connections=None):
+    async def remove_local_plugin(
+        self, request: RemoveLocalPluginRequest, *, connections=None
+    ):
         identity = _request_identity(
             request.scope, request.plugin_id, request.workspace_root
         )
@@ -518,33 +565,42 @@ class PluginManagementService:
             )
         try:
             from .connection_management import remove_plugin_state
-            from pulsara_agent.capability.mcp_management import LocalMcpManagementService
-            from pulsara_agent.settings import LocalSettingsStore, LOCAL_SETTINGS_FILE_NAME
+            from pulsara_agent.capability.mcp_management import (
+                LocalMcpManagementService,
+            )
+            from pulsara_agent.settings import (
+                LocalSettingsStore,
+                LOCAL_SETTINGS_FILE_NAME,
+            )
 
             owns_connections = connections is None
-            connections = connections or LocalMcpManagementService(LocalSettingsStore(store.home / LOCAL_SETTINGS_FILE_NAME), user_config_path=store.home / "mcp.yaml")
+            connections = connections or LocalMcpManagementService(
+                LocalSettingsStore(store.home / LOCAL_SETTINGS_FILE_NAME),
+                user_config_path=store.home / "mcp.yaml",
+            )
             try:
-                result = await remove_plugin_state(store, connections, identity, request)
+                result = await remove_plugin_state(
+                    store, connections, identity, request
+                )
             finally:
                 if owns_connections:
                     await connections.aclose()
         except PluginPackageCancelled:
             return settle(
-                FailedPluginRemovalOutcome(
-                    PluginRemovalDisposition.CANCELLED, identity
-                )
+                FailedPluginRemovalOutcome(PluginRemovalDisposition.CANCELLED, identity)
             )
         except PluginPackageTimedOut:
             return settle(
-                FailedPluginRemovalOutcome(
-                    PluginRemovalDisposition.TIMED_OUT, identity
-                )
+                FailedPluginRemovalOutcome(PluginRemovalDisposition.TIMED_OUT, identity)
             )
         if result.stale:
-            return settle(FailedPluginRemovalOutcome(
-                PluginRemovalDisposition.STALE, identity,
-                diagnostics=(_diagnostic(PluginDiagnosticCode.STATE_RACED),),
-            ))
+            return settle(
+                FailedPluginRemovalOutcome(
+                    PluginRemovalDisposition.STALE,
+                    identity,
+                    diagnostics=(_diagnostic(PluginDiagnosticCode.STATE_RACED),),
+                )
+            )
         if result.diagnostic is not None:
             return settle(
                 FailedPluginRemovalOutcome(
@@ -558,9 +614,7 @@ class PluginManagementService:
                 FailedPluginRemovalOutcome(
                     PluginRemovalDisposition.NOT_FOUND,
                     identity,
-                    diagnostics=(
-                        _diagnostic(PluginDiagnosticCode.PACKAGE_NOT_FOUND),
-                    ),
+                    diagnostics=(_diagnostic(PluginDiagnosticCode.PACKAGE_NOT_FOUND),),
                 )
             )
         if result.ack_unknown:
@@ -575,7 +629,9 @@ class PluginManagementService:
         if result.removed:
             return settle(
                 RemovedPluginOutcome(
-                    identity, result.previous.current_package_install_id, result.cleanup_attention
+                    identity,
+                    result.previous.current_package_install_id,
+                    result.cleanup_attention,
                 )
             )
         return settle(
@@ -587,7 +643,11 @@ class PluginManagementService:
             )
         )
 
-    def inspect_local_plugins(self, request: InspectLocalPluginsRequest):
+    def inspect_local_plugins(
+        self, request: InspectLocalPluginsRequest, *, identity=None, package_path=None
+    ):
+        if identity is not None and package_path is not None:
+            raise ValueError("exact Plugin selectors are mutually exclusive")
         try:
             scrub_set = self._capture_scrub_set(request)
         except ProcessCredentialBoundaryCancelled:
@@ -616,16 +676,54 @@ class PluginManagementService:
             credential_boundary=self._credential_boundary,
         )
         try:
-            outcome = PluginInspectionService(
+            if package_path is not None:
+                try:
+                    identity = store.current_package_identity_for_path(
+                        package_path, workspace_root=request.workspace_root
+                    )
+                except (OSError, ValueError) as exc:
+                    return PluginInspectionOutcome(
+                        PluginInspectionDisposition.UNAVAILABLE,
+                        (),
+                        (),
+                        (
+                            PluginDiagnostic(
+                                PluginDiagnosticCode.VIEW_UNAVAILABLE,
+                                scrub_set.scrub_text(str(exc)),
+                            ),
+                        ),
+                    )
+                if identity is None:
+                    return PluginInspectionOutcome(
+                        PluginInspectionDisposition.COMPLETE, (), (), ()
+                    )
+            inspection = PluginInspectionService(
                 store=store,
                 credential_boundary=self._credential_boundary,
                 pulsara_home_resolution=resolution,
-            ).inspect(
-                workspace_root=request.workspace_root,
+            )
+            arguments = dict(
                 deadline_monotonic=request.deadline_monotonic,
                 cancellation=request.cancellation,
                 scrub_set=scrub_set,
             )
+            if identity is None:
+                outcome = inspection.inspect(
+                    workspace_root=request.workspace_root, **arguments
+                )
+            else:
+                expected = _request_identity(
+                    identity.scope,
+                    identity.plugin_id,
+                    request.workspace_root
+                    if identity.scope is PluginScopeKind.WORKSPACE
+                    else None,
+                )
+                if expected != identity:
+                    raise ValueError(
+                        "exact Plugin identity does not join observation scope"
+                    )
+                outcome = inspection.inspect_exact(identity=identity, **arguments)
             return _safe_inspection_outcome(outcome, scrub_set)
         except PluginPackageCancelled:
             return PluginInspectionAbort(PluginInspectionAbortReason.CANCELLED)
@@ -662,9 +760,9 @@ class PluginManagementService:
             )
         return _safe_gc_outcome(
             store.gc(
-            workspace_root=request.workspace_root,
-            deadline_monotonic=request.deadline_monotonic,
-            cancellation=request.cancellation,
+                workspace_root=request.workspace_root,
+                deadline_monotonic=request.deadline_monotonic,
+                cancellation=request.cancellation,
             ),
             scrub_set,
         )
@@ -702,6 +800,7 @@ def _install_outcome(
     value: StoreInstallOutcome,
     *,
     source_path: Path,
+    package_parent: Path,
     identity: PluginInstanceIdentity,
     diagnostics: tuple[object, ...],
     scrub_set: ProcessCredentialScrubSet,
@@ -714,19 +813,18 @@ def _install_outcome(
                 else PluginInstallDisposition.INSTALLED
             ),
             identity,
-            _safe_package_install_id(
-                value.state.current_package_install_id, scrub_set
-            ),
+            _safe_package_install_id(value.state.current_package_install_id, scrub_set),
             _safe_summary(value.summary, scrub_set),
             diagnostics + _safe_diagnostics(value.connection_diagnostics, scrub_set),
+            package_root=_safe_path(
+                package_parent / value.state.current_package_install_id, scrub_set
+            ),
             cleanup_attention=value.cleanup_attention,
         )
     if isinstance(value, StoreAlreadyPresent):
         return AlreadyPresentPluginInstallOutcome(
             identity,
-            _safe_package_install_id(
-                value.state.current_package_install_id, scrub_set
-            ),
+            _safe_package_install_id(value.state.current_package_install_id, scrub_set),
             value.state.enabled,
             _safe_summary(value.summary, scrub_set),
         )
@@ -771,6 +869,7 @@ def _install_outcome(
         prior = _install_outcome(
             value.prior,
             source_path=source_path,
+            package_parent=package_parent,
             identity=identity,
             diagnostics=diagnostics,
             scrub_set=scrub_set,
@@ -854,9 +953,7 @@ def _safe_summary(
         _safe_optional_text(manifest.repository, scrub_set),
         _safe_optional_text(manifest.license, scrub_set),
         tuple(sorted(_safe_text(item, scrub_set) for item in manifest.keywords)),
-        tuple(
-            sorted(_safe_text(item, scrub_set) for item in manifest.extension_names)
-        ),
+        tuple(sorted(_safe_text(item, scrub_set) for item in manifest.extension_names)),
     )
 
     skills = tuple(
@@ -974,10 +1071,7 @@ def _safe_inspection_outcome(
             package_in_use=item.package_in_use,
             effective_skill_names=tuple(
                 sorted(
-                    {
-                        _safe_text(name, scrub_set)
-                        for name in item.effective_skill_names
-                    }
+                    {_safe_text(name, scrub_set) for name in item.effective_skill_names}
                 )
             ),
             effective_mcp_server_ids=tuple(
@@ -990,9 +1084,7 @@ def _safe_inspection_outcome(
             ),
             effective_hook=item.effective_hook,
             effective_hook_definition_count=item.effective_hook_definition_count,
-            effective_hook_trust_disposition=(
-                item.effective_hook_trust_disposition
-            ),
+            effective_hook_trust_disposition=(item.effective_hook_trust_disposition),
         )
         for item in value.instances
     )
@@ -1160,14 +1252,10 @@ def _safe_diagnostics(
                 )
             )
         elif isinstance(diagnostic, ResolutionUnavailableCause):
-            safe_diagnostic = _safe_diagnostics(
-                (diagnostic.diagnostic,), scrub_set
-            )[0]
+            safe_diagnostic = _safe_diagnostics((diagnostic.diagnostic,), scrub_set)[0]
             if not isinstance(safe_diagnostic, SkillDiagnostic):
                 raise TypeError("Skill resolution diagnostic union is open")
-            safe.append(
-                ResolutionUnavailableCause(diagnostic.reason, safe_diagnostic)
-            )
+            safe.append(ResolutionUnavailableCause(diagnostic.reason, safe_diagnostic))
         elif isinstance(diagnostic, InvalidSkillCandidateIssue):
             if _skill_issue_identity_contains_secret(diagnostic, scrub_set):
                 safe.append(_withheld_skill_inspection_diagnostic())
@@ -1222,9 +1310,7 @@ def _skill_issue_identity_contains_secret(
     elif isinstance(issue, ConflictingSkillCandidateIssue):
         values.append(issue.name)
         for candidate in issue.candidates:
-            values.extend(
-                (str(candidate.path), skill_origin_label(candidate.origin))
-            )
+            values.extend((str(candidate.path), skill_origin_label(candidate.origin)))
     else:
         raise TypeError("Skill issue union is open")
     return any(scrub_set.contains(value) for value in values)
@@ -1260,9 +1346,7 @@ def _withheld_identity(scope: PluginScopeKind) -> PluginInstanceIdentity:
     )
 
 
-def _safe_package_install_id(
-    value: str, scrub_set: ProcessCredentialScrubSet
-) -> str:
+def _safe_package_install_id(value: str, scrub_set: ProcessCredentialScrubSet) -> str:
     if scrub_set.contains(value):
         return "pkg_00000000000000000000000000000000"
     return value
@@ -1289,9 +1373,7 @@ def _withheld_source_path() -> Path:
 
 
 def _diagnostic(code: PluginDiagnosticCode) -> PluginDiagnostic:
-    return PluginDiagnostic(
-        code, code.value.removeprefix("plugin_").replace("_", " ")
-    )
+    return PluginDiagnostic(code, code.value.removeprefix("plugin_").replace("_", " "))
 
 
 __all__ = ["EventPluginCancellationPort", "PluginManagementService"]

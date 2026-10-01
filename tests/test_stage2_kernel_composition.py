@@ -333,6 +333,9 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
 ) -> None:
     import pulsara_agent.conversation_kernel.host as kernel_host
 
+    # This lifecycle fixture owns no plugin inventory or Hook trust store.
+    # Keep installed user plugins outside its fake Host composition.
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara-home"))
     start_mcp_entered = asyncio.Event()
     release_start_mcp = asyncio.Event()
     constructed_sessions: list[object] = []

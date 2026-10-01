@@ -116,9 +116,12 @@ def normalize_plugin_mcp_configs(
             )
             try:
                 config = bind_plugin_authorization(
-                    config, instance.identity, instance.state,
+                    config,
+                    instance.identity,
+                    instance.state,
                     local_server_id=server.local_server_id,
-                    current_state=current_state, oauth_manager=oauth_manager,
+                    current_state=current_state,
+                    oauth_manager=oauth_manager,
                 )
             except BaseException:
                 _close_anchor(config.physical_lifetime_anchor)
@@ -190,7 +193,9 @@ def framed_plugin_mcp_server_id(plugin_id: str, local_server_id: str) -> str:
     return value
 
 
-def bind_plugin_authorization(config, identity, state, *, local_server_id, current_state, oauth_manager):
+def bind_plugin_authorization(
+    config, identity, state, *, local_server_id, current_state, oauth_manager
+):
     if not isinstance(config.auth, OAuthAuthorization):
         return config
     if oauth_manager is None or current_state is None:
@@ -280,23 +285,11 @@ def _normalize_server(
         raise
 
 
-def materialize_plugin_mcp_definition(
-    *,
-    identity,
-    state,
-    server,
-    package_root,
-    data_root,
-    anchor=None,
-    secret_resolver=None,
-) -> McpServerConfig:
-    """Shared exact composition for installed inspection and live materialization.
+def plugin_declaration_transport(server, *, package_root, data_root):
+    """Native path expansion shared by read-only detail and live materialization.
 
-    A definition inspected without a physical anchor does not own a package
-    lifetime and must never be handed to the live supervisor.
+    Does not resolve credentials, prepare data directories or freeze config IDs.
     """
-    plugin_id = identity.plugin_id
-    server_id = framed_plugin_mcp_server_id(plugin_id, server.local_server_id)
     if isinstance(server, PluginMcpStdioSummary):
         command = server.command
         if command.startswith("./"):
@@ -332,6 +325,54 @@ def materialize_plugin_mcp_definition(
             allow_http_localhost=server.endpoint.lower().startswith("http://"),
             network_policy=McpHttpNetworkPolicy.PUBLIC_ONLY,
         )
+    return transport
+
+
+def plugin_configured_connection(
+    server, *, identity, overlays, package_root, data_root
+):
+    """Pure connection composition; never resolves values or prepares execution."""
+    transport = plugin_declaration_transport(
+        server, package_root=package_root, data_root=data_root
+    )
+    transport, public_headers, auth = apply_connection_overlay(
+        transport,
+        server.public_headers
+        if isinstance(server, (PluginMcpHttpSummary, PluginMcpSseSummary))
+        else (),
+        resolve_connection_overlay(
+            server,
+            next(
+                (
+                    item
+                    for item in overlays
+                    if item.local_server_id == server.local_server_id
+                ),
+                None,
+            ),
+            owner=plugin_connection_owner(identity, server.local_server_id),
+        ),
+    )
+    return transport, public_headers, auth
+
+
+def materialize_plugin_mcp_definition(
+    *,
+    identity,
+    state,
+    server,
+    package_root,
+    data_root,
+    anchor=None,
+    secret_resolver=None,
+) -> McpServerConfig:
+    """Shared exact composition for installed inspection and live materialization.
+
+    A definition inspected without a physical anchor does not own a package
+    lifetime and must never be handed to the live supervisor.
+    """
+    plugin_id = identity.plugin_id
+    server_id = framed_plugin_mcp_server_id(plugin_id, server.local_server_id)
     source = ManagedPackageMcpRuntimeSource(
         store_scope_key=(
             "user"
@@ -341,19 +382,12 @@ def materialize_plugin_mcp_definition(
         package_owner_key=plugin_id,
         package_install_id=state.current_package_install_id,
     )
-    transport, public_headers, auth = apply_connection_overlay(
-        transport,
-        server.public_headers
-        if isinstance(server, (PluginMcpHttpSummary, PluginMcpSseSummary))
-        else (),
-        resolve_connection_overlay(server, next(
-            (
-                item
-                for item in state.mcp_connection_overlays
-                if item.local_server_id == server.local_server_id
-            ),
-            None,
-        ), owner=plugin_connection_owner(identity, server.local_server_id)),
+    transport, public_headers, auth = plugin_configured_connection(
+        server,
+        identity=identity,
+        overlays=state.mcp_connection_overlays,
+        package_root=package_root,
+        data_root=data_root,
     )
     owner = plugin_connection_owner(identity, server.local_server_id)
 

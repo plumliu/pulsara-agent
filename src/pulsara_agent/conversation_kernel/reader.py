@@ -751,7 +751,10 @@ class CanonicalProviderInputReader:
                 }
             if binding is None:
                 raise ConversationKernelConflict("provider binding is absent")
-            if binding["current_context_binding_revision_id"] != cut.context_binding_revision_id:
+            if (
+                binding["current_context_binding_revision_id"]
+                != cut.context_binding_revision_id
+            ):
                 raise ConversationKernelConflict("provider binding revision is stale")
             if cut.provider_input_through_sequence > int(
                 binding["latest_entry_sequence"]
@@ -1289,10 +1292,12 @@ class CanonicalProviderInputReader:
                 references = visualizations_by_entry.get(entry_id, ())
                 if references:
                     metadata_text = canonical_json_bytes(
-                        {"pulsara_visualizations": [
-                            {"visualization_ref": reference}
-                            for reference in references
-                        ]}
+                        {
+                            "pulsara_visualizations": [
+                                {"visualization_ref": reference}
+                                for reference in references
+                            ]
+                        }
                     ).decode("utf-8")
                     encoded_size = len(metadata_text.encode("utf-8"))
                     remaining_bytes.consume(encoded_size)
@@ -1384,6 +1389,7 @@ class CanonicalProviderInputReader:
                                 tool_result_body_text=result_body_text,
                                 tool_result_delivery=classify_tool_result_delivery(
                                     tool_name=call.tool_name,
+                                    public_arguments=thaw_json(call.arguments),
                                     result_state=str(result["result_state"]),
                                     has_image_attachment=any(
                                         isinstance(part, LLMImagePart)
@@ -1525,6 +1531,7 @@ class CanonicalProviderInputReader:
                                     tool_result_delivery=(
                                         classify_tool_result_delivery(
                                             tool_name=call.tool_name,
+                                            public_arguments=thaw_json(call.arguments),
                                             result_state=str(result["result_state"]),
                                             has_image_attachment=bool(result_images),
                                         )

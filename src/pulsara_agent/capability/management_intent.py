@@ -23,11 +23,9 @@ class CapabilityManagementAction(StrEnum):
     INSTALL_LOOSE_SKILL = "INSTALL_LOOSE_SKILL"
     SET_LOOSE_SKILL_ENABLED = "SET_LOOSE_SKILL_ENABLED"
     REMOVE_LOOSE_SKILL = "REMOVE_LOOSE_SKILL"
-    INSPECT_LOOSE_SKILLS = "INSPECT_LOOSE_SKILLS"
     TRUST_HOOK_SOURCE = "TRUST_HOOK_SOURCE"
     REVOKE_HOOK_TRUST = "REVOKE_HOOK_TRUST"
     SET_HOOK_SOURCE_ENABLED = "SET_HOOK_SOURCE_ENABLED"
-    INSPECT_HOOK_SOURCES = "INSPECT_HOOK_SOURCES"
     ADD_LOCAL_MCP = "ADD_LOCAL_MCP"
     UPDATE_LOCAL_MCP = "UPDATE_LOCAL_MCP"
     REMOVE_LOCAL_MCP = "REMOVE_LOCAL_MCP"
@@ -70,17 +68,14 @@ _FIELDS = {
         set(),
     ),
     CapabilityManagementAction.REMOVE_LOOSE_SKILL: ({"skill_path"}, set()),
-    CapabilityManagementAction.INSPECT_LOOSE_SKILLS: (set(), {"skill_path"}),
+
     CapabilityManagementAction.TRUST_HOOK_SOURCE: ({"source_kind"}, {"plugin_id"}),
     CapabilityManagementAction.REVOKE_HOOK_TRUST: ({"source_kind"}, {"plugin_id"}),
     CapabilityManagementAction.SET_HOOK_SOURCE_ENABLED: (
         {"source_kind", "enabled"},
         {"plugin_id"},
     ),
-    CapabilityManagementAction.INSPECT_HOOK_SOURCES: (
-        set(),
-        {"source_kind", "plugin_id"},
-    ),
+
     CapabilityManagementAction.ADD_LOCAL_MCP: ({"server_id"}, {"config"}),
     CapabilityManagementAction.UPDATE_LOCAL_MCP: (
         {"server_id"},
@@ -114,6 +109,80 @@ _FIELDS = {
 }
 
 
+# Keep operation guidance on the actual action property sent to the provider;
+# callers need not load an installer Skill to choose the correct owner.
+_ACTION_DESCRIPTIONS = {
+    CapabilityManagementAction.INSTALL_LOOSE_SKILL: (
+        "Install one loose Skill from a local directory into the selected scope. "
+        "Does not overwrite or install a Plugin. For user-requested replacement, "
+        "prepare the replacement source first; inspect/remove the eligible exact old copy, then install."
+    ),
+    CapabilityManagementAction.SET_LOOSE_SKILL_ENABLED: (
+        "Enable or disable one observed loose Skill copy by its exact SKILL.md path; "
+        "inspect its management eligibility first. Does not control Plugin or bundled Skills."
+    ),
+    CapabilityManagementAction.REMOVE_LOOSE_SKILL: (
+        "Remove one authorized loose Skill directory by its exact SKILL.md path. "
+        "Inspect removal eligibility first: discovery alone does not imply removability. "
+        "Does not remove a Plugin component or a bundled Skill."
+    ),
+    CapabilityManagementAction.TRUST_HOOK_SOURCE: (
+        "Request user review and trust of the full current Hook definitions for one LOCAL "
+        "or PLUGIN source. Does not enable the source or its Plugin; the model cannot accept review."
+    ),
+    CapabilityManagementAction.REVOKE_HOOK_TRUST: (
+        "Revoke trust for one LOCAL or PLUGIN Hook source without deleting its definitions."
+    ),
+    CapabilityManagementAction.SET_HOOK_SOURCE_ENABLED: (
+        "Enable or disable one LOCAL or PLUGIN Hook source. Does not grant trust or enable "
+        "its Plugin. Hook actions do not add, edit or delete definitions."
+    ),
+    CapabilityManagementAction.ADD_LOCAL_MCP: (
+        "Add an independent MCP connection with a new server_id. Omit config to open the "
+        "connection editor. Does not add a server to a Plugin."
+    ),
+    CapabilityManagementAction.UPDATE_LOCAL_MCP: (
+        "Edit an existing independent MCP connection. Omit config for the prefilled editor; "
+        "a supplied config replaces the entire entry, not selected fields. Enable/disable "
+        "this connection through that editor or a complete config's enabled field."
+    ),
+    CapabilityManagementAction.REMOVE_LOCAL_MCP: (
+        "Remove one authorized independent MCP entry and its dedicated local credentials "
+        "and authorization. Keeps the configuration file and other entries; does not "
+        "delete a Plugin's MCP declaration or uninstall the server program."
+    ),
+    CapabilityManagementAction.INSTALL_PLUGIN: (
+        "Install a whole local Plugin distribution; use source_format for official import. "
+        "replace:true replaces an existing instance only when the user requested replacement. "
+        "Both installation and replacement publish a disabled instance; enable separately."
+    ),
+    CapabilityManagementAction.SET_PLUGIN_ENABLED: (
+        "Enable or disable the whole exact Plugin instance. Enabling always requires user "
+        "review of current components and credential destinations. Does not grant Hook trust."
+    ),
+    CapabilityManagementAction.REMOVE_PLUGIN: (
+        "Remove the authorized exact Plugin instance and its dedicated credentials as a whole. "
+        "Preserves Plugin data and the original source; existing consumers may finish using "
+        "the old package. Does not delete individual component declarations."
+    ),
+    CapabilityManagementAction.CONFIGURE_PLUGIN_MCP_CONNECTION: (
+        "Configure one existing Plugin MCP connection using plugin_id plus its local server_id. "
+        "Omit overlay for the prefilled editor. overlay:null clears instance overrides, not "
+        "the component, restoring package/input defaults. Cannot change package command, "
+        "args, cwd or transport kind."
+    ),
+    CapabilityManagementAction.AUTHORIZE_MCP: (
+        "Start user-interactive OAuth for an already configured OAuth connection. Include "
+        "plugin_id for a Plugin component; omit it for an independent MCP. Does not configure "
+        "authentication, enable the source or grant Hook trust."
+    ),
+    CapabilityManagementAction.CLEAR_MCP_AUTHORIZATION: (
+        "Clear the connection's local OAuth grants without removing its configuration or "
+        "revoking remote tokens. Include plugin_id only for a Plugin component."
+    ),
+}
+
+
 def capability_management_input_schema() -> dict[str, object]:
     """Closed action union; nested candidates use the sole native parser."""
     properties = {
@@ -124,46 +193,95 @@ def capability_management_input_schema() -> dict[str, object]:
         "scope": {
             "type": "string",
             "enum": [item.value for item in CapabilityManagementScope],
+            "description": (
+                "USER: Host's home; WORKSPACE: GUI directory. Copy existing target scope; "
+                "terminal cwd never selects it."
+            ),
         },
-        **{
-            name: {"type": "string", "minLength": 1}
-            for name in (
-                "server_id",
-                "plugin_id",
-                "source_path",
-                "skill_path",
-                "name",
-                "description",
-                "expected_identity",
-                "expected_package_install_id",
-            )
+        "server_id": {
+            "type": "string", "minLength": 1,
+            "description": (
+                "New ID for ADD; otherwise exact independent configuration or Plugin-local ID "
+                "from the installation target. Not runtime_server_id, tool name or ref."
+            ),
         },
-        "source_kind": {"type": "string", "enum": ["LOCAL", "PLUGIN"]},
-        "enabled": {"type": "boolean"},
-        "replace": {"type": "boolean"},
+        "plugin_id": {
+            "type": "string", "minLength": 1,
+            "description": (
+                "Exact Plugin ID from source target, install result or user; never derive from paths/runtime IDs."
+            ),
+        },
+        "source_path": {
+            "type": "string", "minLength": 1,
+            "description": (
+                "Absolute local source directory: Skill containing SKILL.md or Plugin distribution "
+                "root. Download separately; not an installation destination."
+            ),
+        },
+        "skill_path": {
+            "type": "string", "minLength": 1,
+            "description": "Exact absolute installed SKILL.md path copied from list/inspect, not its directory or author source.",
+        },
+        "name": {
+            "type": "string", "minLength": 1,
+            "description": "Optional loose Skill metadata normalization; omit to retain the source's parsed name.",
+        },
+        "description": {
+            "type": "string", "minLength": 1,
+            "description": "Optional loose Skill metadata normalization; omit to retain its source description.",
+        },
+        "expected_identity": {
+            "type": "string", "minLength": 1,
+            "description": "Independent MCP change guard. Normally omit for fresh inspection; never invent.",
+        },
+        "expected_package_install_id": {
+            "type": "string", "minLength": 1,
+            "description": "Plugin change guard. Normally omit; never infer from manifest version.",
+        },
+        "source_kind": {
+            "type": "string", "enum": ["LOCAL", "PLUGIN"],
+            "description": "Hook owner only: LOCAL uses scope; PLUGIN also requires plugin_id. Copy the source target.",
+        },
+        "enabled": {
+            "type": "boolean",
+            "description": "Selected Skill/Plugin/Hook enablement; not trust, OAuth authorization or proof of adoption.",
+        },
+        "replace": {
+            "type": "boolean",
+            "description": "Plugin only: default false; true for user-requested replacement of that instance.",
+        },
         "source_format": {
             "type": "string",
             "enum": ["native", "claude", "codex", "cursor"],
+            "description": "Plugin distribution format; default native. Official import installs supported components and reports unsupported host features; do not rewrite manifests or claim full host compatibility.",
         },
         "config": {
             "type": "object",
             "description": (
-                "Complete native public MCP entry, not a patch. HTTP example: "
+                "Prefer omission for the connection editor (UPDATE is prefilled). A supplied "
+                "object replaces the complete native entry, not a patch. HTTP example: "
                 '{"display_name":"Docs","enabled":true,"transport":{"type":"streamable_http",'
                 '"endpoint":"https://example.org/mcp"},"auth":{"type":"none"}}. '
-                "For an explicitly approved loopback HTTP endpoint put allow_http_localhost:true inside transport. "
+                "Explicitly approved loopback HTTP requires allow_http_localhost:true inside transport. "
                 'stdio transport uses type:"stdio", command, args (array), cwd (workspace-relative), env (public only). '
-                "UPDATE replaces the whole entry: preserve existing settings; if you do not have the complete "
-                "configuration, omit config to open the user editor prefilled from current truth. "
-                "Never read private settings or repository source to construct this object. "
-                "For credentials omit config and let the user select authentication and enter secrets in the editor."
+                "Preserve existing settings. Use the editor for credentials or unknown configuration; "
+                "do not read private settings/repository implementation to build this object."
             ),
         },
         "overlay": {
             "type": ["object", "null"],
-            "description": "Finite Plugin MCP connection overlay; null clears it. Executable fields cannot be overridden.",
+            "description": (
+                "Prefer omission to open the Plugin connection editor. null clears overrides. "
+                "A supplied object must be the complete native overlay, not a patch or local "
+                "MCP config; do not guess its fields or copy the inspect summary as a template. "
+                "Only endpoint, public headers/environment and authentication can be configured; "
+                "executable fields and transport kind belong to the package. Secrets stay in the editor."
+            ),
         },
-        "expected_overlay": {"type": ["object", "null"]},
+        "expected_overlay": {
+            "type": ["object", "null"],
+            "description": "Prior overlay guard; normally omit. null asserts no existing override, not a request to clear it.",
+        },
     }
     return {
         "type": "object",
@@ -175,7 +293,10 @@ def capability_management_input_schema() -> dict[str, object]:
                         name: properties[name]
                         for name in sorted(required | optional | {"scope"})
                     },
-                    "action": {"type": "string", "const": action.value},
+                    "action": {
+                        "type": "string", "const": action.value,
+                        "description": _ACTION_DESCRIPTIONS[action],
+                    },
                 },
                 "required": sorted(required | {"action", "scope"}),
                 "additionalProperties": False,
@@ -227,7 +348,7 @@ def parse_capability_management_intent(
         kind = fields.get("source_kind")
         if "plugin_id" in fields and kind != "PLUGIN":
             raise ValueError("Plugin Hook identity requires source_kind PLUGIN")
-        if action is not CapabilityManagementAction.INSPECT_HOOK_SOURCES and (
+        if (
             (kind == "PLUGIN") != ("plugin_id" in fields)
         ):
             raise ValueError("select the exact Plugin Hook identity")

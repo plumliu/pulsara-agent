@@ -14,7 +14,8 @@ def test_default_system_prompt_is_pulsara_native_and_capability_honest() -> None
     )
     assert "Memory is advisory, may be stale or incomplete" in DEFAULT_SYSTEM_PROMPT
     assert "announced in the MCP catalog under new_tool_names" in DEFAULT_SYSTEM_PROMPT
-    assert "route is NEW_MCP_META_ONLY" in DEFAULT_SYSTEM_PROMPT
+    assert "invocation.mode is META" in DEFAULT_SYSTEM_PROMPT
+    assert "Copy the returned target into inspect_capability" in DEFAULT_SYSTEM_PROMPT
     assert "new_tool_names in list_mcp_servers" not in DEFAULT_SYSTEM_PROMPT
 
     for foreign_product_contract in (

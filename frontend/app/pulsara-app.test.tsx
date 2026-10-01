@@ -2011,6 +2011,23 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('button', { name: '查看完整输出' })).toBeTruthy();
   });
 
+  it.each([undefined, 'invalid JSON', '{"error":"SOURCE_OBSERVATION_UNAVAILABLE"}'])(
+    'does not report an unavailable capability page as empty: %s', async (resultText) => {
+      const adapter = new FakeAdapter();
+      adapter.connectionValue = {
+        ...projection(''), messages: [{
+          id: 'assistant-query', role: 'assistant', time: '18:11', body: '', status: 'completed',
+          traces: [{ id: 'query', kind: 'mcp', toolName: 'list_capabilities', title: '查看能力',
+            subtitle: '查看能力', status: resultText === undefined ? 'running' : 'failed',
+            argumentsJson: '{}', resultText, meta: '' }],
+        }], isRunning: false, activeTurnId: undefined,
+      };
+      render(<PulsaraApp adapter={adapter} />);
+      fireEvent.click(await screen.findByRole('button', { name: '展开中间过程' }));
+      expect(screen.queryByText('观察到 0 项能力')).toBeNull();
+    },
+  );
+
   it('explains MCP meta-tool routing and identifies exact Skill documents', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
@@ -2027,21 +2044,21 @@ describe('PulsaraApp', () => {
           argumentsJson: JSON.stringify({ path: '/opt/pulsara/bundled_skills/pdf/SKILL.md' }),
           resultText: JSON.stringify({ path: '/opt/pulsara/bundled_skills/pdf/SKILL.md', total_lines: 42 }),
         }, {
-          id: 'trace-list', kind: 'mcp', toolName: 'list_mcp_servers', title: '浏览 MCP 服务',
+          id: 'trace-list', kind: 'mcp', toolName: 'list_capabilities', title: '查看能力',
           subtitle: '已完成', status: 'completed', meta: '操作完成', argumentsJson: '{}',
           resultText: JSON.stringify({
-            page_kind: 'SERVER_PAGE', total_server_count: 2,
-            servers: [{ server_id: 'firecrawl', public_status: 'READY', tool_count: 3 }, {
-              server_id: 'local-docs', public_status: 'CONNECTING', tool_count: 1,
+            total_count: 2, completeness: 'COMPLETE',
+            items: [{ kind: 'MCP_SERVER', name: 'firecrawl', status: '连接已就绪。' }, {
+              kind: 'MCP_SERVER', name: 'local-docs', status: '正在连接。',
             }],
-          }),
+          }) + '\n\n[TOOL OUTPUT ARTIFACT: full retained output is available as artifact_id=artifact:test.]',
         }, {
-          id: 'trace-inspect', kind: 'mcp', toolName: 'inspect_new_mcp_tool', title: '检查 MCP 工具',
+          id: 'trace-inspect', kind: 'mcp', toolName: 'inspect_capability', title: '查看能力详情',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
-          argumentsJson: JSON.stringify({ server_id: 'firecrawl', tool_name: 'firecrawl_search' }),
+          argumentsJson: JSON.stringify({ target: { kind: 'MCP_TOOL', server_id: 'firecrawl', tool_name: 'mcp__firecrawl__firecrawl_search' } }),
           resultText: JSON.stringify({
-            server_id: 'firecrawl', remote_tool_name: 'firecrawl_search',
-            provider_tool_name: 'mcp__firecrawl__firecrawl_search', effect_kind: 'READ_ONLY',
+            target: { kind: 'MCP_TOOL', server_id: 'firecrawl', tool_name: 'mcp__firecrawl__firecrawl_search' },
+            invocation: { mode: 'META' }, effect_kind: 'READ_ONLY',
             description: '搜索公开网页。', tool_ref: 'mcpref_firecrawl_search',
             input_schema: { type: 'object', properties: { query: { type: 'string' } } },
           }),
@@ -2065,23 +2082,23 @@ describe('PulsaraApp', () => {
     expect(await screen.findByText('使用 pdf 技能')).toBeTruthy();
     expect(screen.queryByText('reload_plugins')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: /list_mcp_servers/ }));
+    fireEvent.click(screen.getByRole('button', { name: /list_capabilities/ }));
+    expect(screen.getByText('观察到 2 项能力')).toBeTruthy();
     const listDetails = container.querySelectorAll('.mcp-trace-details')[0] as HTMLElement;
     expect(within(listDetails).getByText('firecrawl')).toBeTruthy();
     expect(within(listDetails).getByText('local-docs')).toBeTruthy();
-    expect(within(listDetails).getByText('已就绪 · 3 个工具')).toBeTruthy();
+    expect(within(listDetails).getByText('连接已就绪。')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /inspect_new_mcp_tool/ }));
+    fireEvent.click(screen.getByRole('button', { name: /inspect_capability/ }));
     const inspectDetails = container.querySelectorAll('.mcp-trace-details')[1] as HTMLElement;
-    expect(within(inspectDetails).getByText('检查的工具')).toBeTruthy();
-    expect(within(inspectDetails).getByText('firecrawl_search')).toBeTruthy();
-    expect(within(inspectDetails).queryByText('mcp__firecrawl__firecrawl_search')).toBeNull();
+    expect(within(inspectDetails).getByText('所选能力')).toBeTruthy();
+    expect(within(inspectDetails).getByText('mcp__firecrawl__firecrawl_search')).toBeTruthy();
     expect(within(inspectDetails).queryByText('query')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /use_new_mcp_tool/ }));
     const useDetails = container.querySelectorAll('.mcp-trace-details')[2] as HTMLElement;
     expect(within(useDetails).getByText('调用的工具')).toBeTruthy();
-    expect(within(useDetails).getByText('firecrawl_search')).toBeTruthy();
+    expect(within(useDetails).getByText('mcp__firecrawl__firecrawl_search')).toBeTruthy();
     expect(within(useDetails).queryByText(/"query": "Pulsara"/)).toBeNull();
   });
 

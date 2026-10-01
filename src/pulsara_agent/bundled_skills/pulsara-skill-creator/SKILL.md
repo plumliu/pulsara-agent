@@ -9,7 +9,10 @@ Use this skill to create or improve a portable Agent Skills bundle for Pulsara.
 
 ## Workflow
 
-1. Use the concrete workflow already supplied; ask only for missing information
+1. When improving an installed Skill, use `list_capabilities` with `kind:"SKILL"`
+   and copy its target into `inspect_capability` to locate the exact copy. Read the
+   returned SKILL.md with `read_file`; do not guess directories from terminal cwd.
+   Use the concrete workflow already supplied; ask only for missing information
    that changes the Skill's design.
 2. Create a source directory named with lowercase letters, digits, and hyphens.
    Authoring a source is separate from installation; do not write into a managed

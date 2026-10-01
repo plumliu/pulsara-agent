@@ -100,7 +100,7 @@ Plugin 的 immutable package、安装实例和 persistent data 沿用原生命�
 | Loose Skill 安装、启停、删除 | 同一个 manage_capability：`INSTALL_LOOSE_SKILL`、`SET_LOOSE_SKILL_ENABLED`、`REMOVE_LOOSE_SKILL` | 复用 LocalSkillManagementService、已有 Skill enable 配置与精确删除 owner。仅管理现有可管理来源；bundled 只读，Plugin 子项不可作为 loose 删除目标。 |
 | Hook 文件创作/编辑 | terminal/文件工具 | 修改声明不授予 trust；请求既有刷新后在安全时点采用，不宣称任意文件写入会自动通知 Host。 |
 | Hook 信任、撤销信任、启停 | 同一个 manage_capability：`TRUST_HOOK_SOURCE`、`REVOKE_HOOK_TRUST`、`SET_HOOK_SOURCE_ENABLED` | 按现有 source 级语义选择 local 或 exact Plugin source，复用 HookTrustStore 的当前定义重验证及执行 owner。 |
-| 观察 Loose Skill 与 Hook 管理目标 | 同一个 manage_capability：`INSPECT_LOOSE_SKILLS`、`INSPECT_HOOK_SOURCES` | 补齐必要的模型只读接线，复用已有公开目录/来源观察与配置 owner；不建立第二套 inventory registry。 |
+| 观察能力及确切来源 | `list_capabilities` → `inspect_capability`；`manage_capability` 仅做变更 | 依 [统一来源查询规范](PULSARA_CAPABILITY_SOURCE_QUERY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) 复用原生 owners；Plugin 仅作来源，位置进入确切详情／操作结果，不公开完整配置或第二套包 inventory。 |
 | 查询 MCP 状态与验证使用 | 现有 list/inspect、GUI 与管理结果的公开观察 | 保存、连接、发现和实际调用分别验证；管理结果不能代替一次真实使用。 |
 
 所有新增动作仍必填 `scope`。`INSTALL_LOOSE_SKILL` 携带绝对 `source_path`，可携带现有安装 owner 支持的 `name` / `description` 候选修正；原始 source 不变。Skill 启停/删除携带公开观察所得的确切绝对 `skill_path`（安装副本的 `SKILL.md`），启停另带 boolean `enabled`。路径只选中现有副本，native owner 必须按 scope 验证其来源与操作资格，不能用它指定任意删除/写入目标；启停和删除的可管理根分别保持现有合同，不把“可发现”扩大为“可删除”。删除 observation 由 preparation 取得并直接传给现有删除 owner，不要求模型复制内部 identity 或新增 receipt。

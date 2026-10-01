@@ -105,8 +105,12 @@ describe('builtin tool summaries', () => {
     expect(summary?.subtitle).toBe('已执行命令');
   });
 
-  it.each(['mcp__server__read_file', 'list_mcp_servers', 'inspect_new_mcp_tool', 'use_new_mcp_tool',
-    'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource', 'list_mcp_prompts', 'get_mcp_prompt'])('leaves %s to the external tool presentation', (name) => {
+  it('summarizes the unified queries without exposing internal configuration', () => {
+    expect(builtinToolSummary(trace('list_capabilities', { items: [] }))?.title).toBe('查看能力');
+    expect(builtinToolSummary(trace('inspect_capability', { target: { kind: 'PLUGIN' } }))?.title).toBe('查看能力详情');
+  });
+
+  it.each(['mcp__server__read_file', 'use_new_mcp_tool', 'read_mcp_resource', 'get_mcp_prompt'])('leaves %s to the external tool presentation', (name) => {
     expect(builtinToolSummary(trace(name, { content: 'external' }))).toBeUndefined();
   });
 });

@@ -80,16 +80,14 @@ def render_inspected_new_mcp_tool_provider_result(
         raise ValueError("MCP tool reference is invalid")
     return canonical_json_bytes(
         {
-            "access_mode": "NEW_MCP_META_ONLY",
+            "target": {"kind": "MCP_TOOL", "server_id": values.server_id, "tool_name": values.provider_tool_name},
+            "invocation": {"mode": "META"},
             "description": values.description,
             "effect_kind": values.effect_kind,
             "input_schema": values.input_schema,
             "invocation_notice": MCP_INSPECT_INVOCATION_NOTICE,
             "output_schema": values.output_schema,
             "permission_notice": MCP_INSPECT_PERMISSION_NOTICE,
-            "provider_tool_name": values.provider_tool_name,
-            "remote_tool_name": values.remote_tool_name,
-            "server_id": values.server_id,
             "tool_ref": tool_ref,
         }
     ).decode("utf-8")
