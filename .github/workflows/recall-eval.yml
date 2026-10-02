@@ -24,6 +24,9 @@ on:
 jobs:
   recall-eval:
     runs-on: ubuntu-latest
+    # This gate tests Python source, not the macOS-only application wheel.
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -46,9 +49,9 @@ jobs:
       - name: Install Python
         run: uv python install 3.12
       - name: Sync dev dependencies
-        run: uv sync --dev
+        run: uv sync --locked --dev --no-install-project
       - name: Ruff
-        run: uv run ruff check
+        run: uv run --no-sync ruff check
       - name: Initialize PostgreSQL runtime role
         run: docker exec -i "${{ job.services.postgres.id }}" bash -s < docker/postgres-init/001-runtime-role.sh
       - name: Advisory memory contract gate
@@ -56,7 +59,7 @@ jobs:
           PULSARA_POSTGRES_ADMIN_DSN: "postgresql://pulsara_admin:pulsara_admin@127.0.0.1:5432/pulsara"
           PULSARA_POSTGRES_DSN: "postgresql://pulsara_runtime:pulsara_runtime@127.0.0.1:5432/pulsara"
         run: >-
-          uv run pytest -q
+          uv run --no-sync python -m pytest -q
           tests/test_direct_advisory_memory.py
           tests/test_direct_memory_preference_refresh.py
           tests/test_direct_memory_prompt_contract.py
