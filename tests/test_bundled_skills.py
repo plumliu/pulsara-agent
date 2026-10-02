@@ -424,6 +424,12 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
     )
     assert mcp_skill_read.status is ToolResultState.SUCCESS
     assert json.loads(mcp_skill_read.output)["path"] == str(mcp_installer.path)
+    mcp_reference = mcp_installer.base_dir / "references" / "connection-configuration.md"
+    mcp_reference_read = ReadFileTool(tmp_path).execute(
+        ToolCall("call:mcp-config-reference", "read_file", {"path": str(mcp_reference)})
+    )
+    assert mcp_reference_read.status is ToolResultState.SUCCESS
+    assert json.loads(mcp_reference_read.output)["path"] == str(mcp_reference)
 
     analysis = next(item for item in result.candidates if item.name == "pulsara-data-analysis")
     assert analysis.source is SkillSource.BUNDLED

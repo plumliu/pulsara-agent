@@ -65,3 +65,19 @@ credential literals still block installation. The model cannot override them.
 
 For compatibility questions, explain the exact unsupported host dependency.
 Do not manually construct a reduced fork or repair a failed supported declaration.
+
+## User-only import and advanced administration
+
+The capability page's model-free wizard selects a source directory and detects
+its sole distribution. If multiple manifests exist, compare previews and select
+one; never union them. The user classifies fields and fills ordinary parameters
+before installation. Use this path for parameterized sources needing user input;
+credential values never enter the native candidate or INSTALL_PLUGIN arguments.
+
+The installed `pulsara plugins` CLI offers `validate`, `add`, `list`, `doctor`,
+`enable`, `disable`, `remove` and `gc`. Check actual help; foreign import uses the
+typed tool/UI unless the CLI explicitly supports that format. This is an
+explicitly out-of-band path, not a way to bypass review in a conversation.
+Adopt external changes through GUI refresh or an allowed `reload_capabilities`
+call; CLI does not update live sessions automatically. Do not substitute a
+checkout, private installer, raw package copy or managed-state edits.

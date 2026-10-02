@@ -113,72 +113,53 @@ _FIELDS = {
 # callers need not load an installer Skill to choose the correct owner.
 _ACTION_DESCRIPTIONS = {
     CapabilityManagementAction.INSTALL_LOOSE_SKILL: (
-        "Install one loose Skill from a local directory into the selected scope. "
-        "Does not overwrite or install a Plugin. For user-requested replacement, "
-        "prepare the replacement source first; inspect/remove the eligible exact old copy, then install."
+        "Install an independent Skill; existing destinations are not overwritten."
     ),
     CapabilityManagementAction.SET_LOOSE_SKILL_ENABLED: (
-        "Enable or disable one observed loose Skill copy by its exact SKILL.md path; "
-        "inspect its management eligibility first. Does not control Plugin or bundled Skills."
+        "Toggle an inspected, eligible independent Skill copy; Plugin and bundled Skills are excluded."
     ),
     CapabilityManagementAction.REMOVE_LOOSE_SKILL: (
-        "Remove one authorized loose Skill directory by its exact SKILL.md path. "
-        "Inspect removal eligibility first: discovery alone does not imply removability. "
-        "Does not remove a Plugin component or a bundled Skill."
+        "Remove an independent Skill directory after inspecting removal eligibility; "
+        "discovery alone does not imply removability. Plugin and bundled Skills are excluded."
     ),
     CapabilityManagementAction.TRUST_HOOK_SOURCE: (
-        "Request user review and trust of the full current Hook definitions for one LOCAL "
-        "or PLUGIN source. Does not enable the source or its Plugin; the model cannot accept review."
+        "Request user review and trust of the full current Hook source; does not enable it or its Plugin."
     ),
     CapabilityManagementAction.REVOKE_HOOK_TRUST: (
-        "Revoke trust for one LOCAL or PLUGIN Hook source without deleting its definitions."
+        "Revoke Hook source trust while keeping its definitions."
     ),
     CapabilityManagementAction.SET_HOOK_SOURCE_ENABLED: (
-        "Enable or disable one LOCAL or PLUGIN Hook source. Does not grant trust or enable "
-        "its Plugin. Hook actions do not add, edit or delete definitions."
+        "Toggle a Hook source; does not grant trust, enable its Plugin or edit definitions."
     ),
     CapabilityManagementAction.ADD_LOCAL_MCP: (
-        "Add an independent MCP connection with a new server_id. Omit config to open the "
-        "connection editor. Does not add a server to a Plugin."
+        "Add an independent MCP connection with a new server_id; not a Plugin declaration."
     ),
     CapabilityManagementAction.UPDATE_LOCAL_MCP: (
-        "Edit an existing independent MCP connection. Omit config for the prefilled editor; "
-        "a supplied config replaces the entire entry, not selected fields. Enable/disable "
-        "this connection through that editor or a complete config's enabled field."
+        "Edit an existing independent MCP connection, including its enabled setting."
     ),
     CapabilityManagementAction.REMOVE_LOCAL_MCP: (
-        "Remove one authorized independent MCP entry and its dedicated local credentials "
-        "and authorization. Keeps the configuration file and other entries; does not "
-        "delete a Plugin's MCP declaration or uninstall the server program."
+        "Remove an independent MCP entry and dedicated local credentials/grants; "
+        "keeps other entries and the server program. Plugin declarations are excluded."
     ),
     CapabilityManagementAction.INSTALL_PLUGIN: (
-        "Install a whole local Plugin distribution; use source_format for official import. "
-        "replace:true replaces an existing instance only when the user requested replacement. "
-        "Both installation and replacement publish a disabled instance; enable separately."
+        "Install or replace a whole Plugin as disabled; enable separately with SET_PLUGIN_ENABLED."
     ),
     CapabilityManagementAction.SET_PLUGIN_ENABLED: (
-        "Enable or disable the whole exact Plugin instance. Enabling always requires user "
-        "review of current components and credential destinations. Does not grant Hook trust."
+        "Toggle the whole Plugin; enabling requires user component/credential-destination review. "
+        "Hook trust remains separate."
     ),
     CapabilityManagementAction.REMOVE_PLUGIN: (
-        "Remove the authorized exact Plugin instance and its dedicated credentials as a whole. "
-        "Preserves Plugin data and the original source; existing consumers may finish using "
-        "the old package. Does not delete individual component declarations."
+        "Remove the whole Plugin and dedicated credentials; preserve Plugin data and the original source."
     ),
     CapabilityManagementAction.CONFIGURE_PLUGIN_MCP_CONNECTION: (
-        "Configure one existing Plugin MCP connection using plugin_id plus its local server_id. "
-        "Omit overlay for the prefilled editor. overlay:null clears instance overrides, not "
-        "the component, restoring package/input defaults. Cannot change package command, "
-        "args, cwd or transport kind."
+        "Configure an existing Plugin MCP connection; execution fields remain package-owned."
     ),
     CapabilityManagementAction.AUTHORIZE_MCP: (
-        "Start user-interactive OAuth for an already configured OAuth connection. Include "
-        "plugin_id for a Plugin component; omit it for an independent MCP. Does not configure "
-        "authentication, enable the source or grant Hook trust."
+        "Start interactive authorization for an already configured OAuth connection; "
+        "does not configure authentication or enable the source."
     ),
     CapabilityManagementAction.CLEAR_MCP_AUTHORIZATION: (
-        "Clear the connection's local OAuth grants without removing its configuration or "
-        "revoking remote tokens. Include plugin_id only for a Plugin component."
+        "Clear local OAuth grants; keep the connection configuration and remote tokens."
     ),
 }
 
@@ -186,16 +167,12 @@ _ACTION_DESCRIPTIONS = {
 def capability_management_input_schema() -> dict[str, object]:
     """Closed action union; nested candidates use the sole native parser."""
     properties = {
-        "action": {
-            "type": "string",
-            "enum": [item.value for item in CapabilityManagementAction],
-        },
         "scope": {
             "type": "string",
             "enum": [item.value for item in CapabilityManagementScope],
             "description": (
-                "USER: Host's home; WORKSPACE: GUI directory. Copy existing target scope; "
-                "terminal cwd never selects it."
+                "USER: Host's home; WORKSPACE: GUI project directory, never terminal cwd. "
+                "Copy existing target scope; use the user's selected scope for installation."
             ),
         },
         "server_id": {
@@ -208,7 +185,8 @@ def capability_management_input_schema() -> dict[str, object]:
         "plugin_id": {
             "type": "string", "minLength": 1,
             "description": (
-                "Exact Plugin ID from source target, install result or user; never derive from paths/runtime IDs."
+                "Exact Plugin ID from source target, install result or user, never paths/runtime IDs. "
+                "For OAuth actions, include for a Plugin connection; omit for an independent MCP."
             ),
         },
         "source_path": {
@@ -232,19 +210,19 @@ def capability_management_input_schema() -> dict[str, object]:
         },
         "expected_identity": {
             "type": "string", "minLength": 1,
-            "description": "Independent MCP change guard. Normally omit for fresh inspection; never invent.",
+            "description": "Independent MCP guard; normally omit, never guess. OAuth actions allow it only without plugin_id.",
         },
         "expected_package_install_id": {
             "type": "string", "minLength": 1,
-            "description": "Plugin change guard. Normally omit; never infer from manifest version.",
+            "description": "Plugin guard; normally omit, never infer from manifest version. OAuth actions allow it only with plugin_id.",
         },
         "source_kind": {
             "type": "string", "enum": ["LOCAL", "PLUGIN"],
-            "description": "Hook owner only: LOCAL uses scope; PLUGIN also requires plugin_id. Copy the source target.",
+            "description": "Hook owner: PLUGIN requires plugin_id; LOCAL forbids it. Copy from the source target.",
         },
         "enabled": {
             "type": "boolean",
-            "description": "Selected Skill/Plugin/Hook enablement; not trust, OAuth authorization or proof of adoption.",
+            "description": "Whether to enable the selected Skill, Plugin or Hook source.",
         },
         "replace": {
             "type": "boolean",
@@ -253,29 +231,26 @@ def capability_management_input_schema() -> dict[str, object]:
         "source_format": {
             "type": "string",
             "enum": ["native", "claude", "codex", "cursor"],
-            "description": "Plugin distribution format; default native. Official import installs supported components and reports unsupported host features; do not rewrite manifests or claim full host compatibility.",
+            "description": "Plugin distribution format for the official importer; default native.",
         },
         "config": {
             "type": "object",
             "description": (
-                "Prefer omission for the connection editor (UPDATE is prefilled). A supplied "
-                "object replaces the complete native entry, not a patch. HTTP example: "
-                '{"display_name":"Docs","enabled":true,"transport":{"type":"streamable_http",'
-                '"endpoint":"https://example.org/mcp"},"auth":{"type":"none"}}. '
-                "Explicitly approved loopback HTTP requires allow_http_localhost:true inside transport. "
-                'stdio transport uses type:"stdio", command, args (array), cwd (workspace-relative), env (public only). '
-                "Preserve existing settings. Use the editor for credentials or unknown configuration; "
-                "do not read private settings/repository implementation to build this object."
+                "Omit for the connection editor (UPDATE is prefilled). An object replaces the "
+                "complete native entry, not a patch; preserve existing settings. Public shapes "
+                "are in the MCP installer reference. Use the editor for credentials or unknown "
+                "settings; do not read private settings or implementation to construct config."
             ),
         },
         "overlay": {
             "type": ["object", "null"],
             "description": (
-                "Prefer omission to open the Plugin connection editor. null clears overrides. "
-                "A supplied object must be the complete native overlay, not a patch or local "
-                "MCP config; do not guess its fields or copy the inspect summary as a template. "
-                "Only endpoint, public headers/environment and authentication can be configured; "
-                "executable fields and transport kind belong to the package. Secrets stay in the editor."
+                "Omit for the prefilled Plugin connection editor; null clears instance overrides, "
+                "restoring package/input defaults. An object replaces the complete native overlay, "
+                "not a patch or local MCP config. Only endpoint, public headers/environment and "
+                "authentication are configurable; command, args, cwd and transport kind stay "
+                "package-owned. Use the editor for unknown fields or credentials; the inspect "
+                "summary is not an overlay template."
             ),
         },
         "expected_overlay": {
@@ -295,7 +270,13 @@ def capability_management_input_schema() -> dict[str, object]:
                     },
                     "action": {
                         "type": "string", "const": action.value,
-                        "description": _ACTION_DESCRIPTIONS[action],
+                        # Root-union lowering merges both required and allowed fields.
+                        # Keep the exact per-action signature beside its wire enum.
+                        "description": (
+                            f"Required: {', '.join(sorted(required)) or 'none'}. "
+                            f"Optional: {', '.join(sorted(optional)) or 'none'}. "
+                            + _ACTION_DESCRIPTIONS[action]
+                        ),
                     },
                 },
                 "required": sorted(required | {"action", "scope"}),

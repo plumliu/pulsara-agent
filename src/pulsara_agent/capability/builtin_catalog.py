@@ -433,26 +433,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_capability": _descriptor(
         name="manage_capability",
         description=(
-            "Manage capability changes requested by the user; select the action described in the schema. "
-            "Use list_capabilities/inspect_capability for queries and exact targets; a query target is "
-            "not a management argument: copy its scope and the action's required IDs or skill_path. "
-            "Loose Skill and local MCP actions apply to independent sources only. Plugin Skills/MCP "
-            "declarations belong to the whole package: install/replace, enable/disable or remove the Plugin. "
-            "Configure an existing Plugin MCP connection with CONFIGURE_PLUGIN_MCP_CONNECTION; "
-            "Hook actions separately control source trust/enablement. Bundled Skills are read-only. "
-            "Do not delete or replace an existing source without the user's request, or bypass these owners "
-            "with terminal commands or direct managed-file edits. USER uses the Host's home; WORKSPACE "
-            "uses the GUI directory, independent of terminal cwd. Use the requested scope for installation. "
-            "Prefer omitting config/overlay for user connection editors; supplied objects must be complete. "
-            "Required action, scope, IDs and paths must still be supplied. "
-            "Never request/include secret values or tokens; the user enters them privately in the editor. "
-            "Optional expected guards can normally be omitted; never guess them. Main agent only, "
-            "available in every permission mode. The runtime handles required confirmation, missing "
-            "connection inputs, Plugin enable review and full Hook trust review. READ_ONLY changes "
-            "require user form submission rather than direct model execution; do not request a mode change. "
-            "Wait for the completed result. Report mutation status and adoption separately; APPLIED "
-            "does not indicate whether a form appeared. Verify RELOADED with list/inspect; call "
-            "reload_capabilities only for out-of-band changes or reported partial adoption."
+            "Manage user-requested capability changes. Every call requires action and scope; "
+            "use only fields listed for the selected action. Query with list_capabilities/inspect_capability; "
+            "copy scope and exact IDs or skill_path, not the query target object. "
+            "Do not remove or replace an existing source unless authorized by the user's request, "
+            "or bypass installation, configuration or authorization owners with terminal commands "
+            "or managed-state edits. Main agent only, available in every permission mode. "
+            "The runtime collects confirmation, connection inputs and reviews; READ_ONLY changes "
+            "require user form submission, not a mode change. Never request or pass secret values; "
+            "users enter them privately in the editor. Wait for completion; report mutation and "
+            "adoption separately. Do not replay a settled change or routinely reload."
         ),
         input_schema=capability_management_input_schema(),
         is_read_only=False,

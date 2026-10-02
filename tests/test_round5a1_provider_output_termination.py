@@ -208,6 +208,39 @@ def test_openai_function_tool_declares_object_root_without_mutating_schema() -> 
     assert "oneOf" not in chat["parameters"]
 
 
+def test_capability_management_wire_keeps_each_actions_required_and_allowed_fields() -> None:
+    descriptor = next(
+        item.descriptor for item in builtin_tool_catalog()
+        if item.descriptor.name == "manage_capability"
+    )
+    canonical = thaw_tool_json_object(descriptor.input_schema)
+    tool = ToolSpec(descriptor.name, descriptor.description, canonical)
+    chat = chat_tool_wire_items((tool,))[0]["function"]
+    responses = responses_tool_wire_items((tool,))[0]
+    assert chat == {key: responses[key] for key in chat}
+    assert "use only fields listed for the selected action" in chat["description"]
+
+    wire = chat["parameters"]
+    assert set(wire["required"]) == {"action", "scope"}
+    actions = {
+        item["enum"][0]: item
+        for item in wire["properties"]["action"]["anyOf"]
+    }
+    # The portable provider root accepts the union of all properties. Its action
+    # guidance must retain the stricter field choices enforced by the local union.
+    for branch in canonical["oneOf"]:
+        action = branch["properties"]["action"]["const"]
+        required_text, optional_and_behavior = actions[action]["description"].split(". Optional: ", 1)
+        optional_text, behavior = optional_and_behavior.split(". ", 1)
+        required = set(required_text.removeprefix("Required: ").split(", "))
+        optional = set() if optional_text == "none" else set(optional_text.split(", "))
+        assert required == set(branch["required"]) - {"action", "scope"}
+        assert required | optional == set(branch["properties"]) - {"action", "scope"}
+        assert behavior
+    assert len(actions) == len(canonical["oneOf"])
+    assert thaw_tool_json_object(descriptor.input_schema) == canonical
+
+
 def test_openai_function_tool_rejects_non_object_argument_root() -> None:
     tool = ToolSpec("invalid", "Invalid function arguments.", {"type": "string"})
     with pytest.raises(ValueError, match="object root"):

@@ -29,3 +29,14 @@ live sessions at their existing safe points; inspect adoption separately from
 the completed filesystem mutation. Current provider roots remain unchanged.
 
 Pulsara package Skills are read-only defaults loaded directly from the installed package. They are not copied into these roots and have no sync, status, reset, manifest, backup, or opt-out state. A loose same-name Skill shadows the package definition until the user removes that loose directory.
+
+## User import and advanced administration
+
+The capability page offers directory import and management without a model.
+Installing one loose directory does not execute neighboring host plugins.
+
+Standalone `pulsara skills` commands are an explicitly out-of-band administration
+path; inspect their actual help. They do not supply live-Host review/adoption.
+Ordinary conversation management uses `manage_capability`, not CLI, raw copies
+or private state edits. User filesystem edits remain supported; adopt external
+changes through the GUI refresh or an allowed `reload_capabilities` call.
