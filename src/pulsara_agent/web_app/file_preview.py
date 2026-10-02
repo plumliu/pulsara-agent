@@ -435,7 +435,7 @@ def open_preview(connection_id: str, path: Path) -> Preview:
             )
         except OSError as exc:
             if exc.errno == errno.ELOOP:
-                item.notice = "符号链接暂不支持内容预览，可在 Finder 中定位。"
+                item.notice = "符号链接暂不支持内容预览，可打开所在文件夹。"
                 return item
             raise
         item.info = os.fstat(item.fd)
@@ -458,7 +458,7 @@ def open_preview(connection_id: str, path: Path) -> Preview:
             return Preview(
                 connection_id,
                 path,
-                notice="路径包含符号链接，暂不支持内容预览，可在 Finder 中定位。",
+                notice="路径包含符号链接，暂不支持内容预览，可打开所在文件夹。",
             )
         raise file_error(exc) from exc
     except BaseException:

@@ -10,9 +10,9 @@ import json
 import logging
 from pathlib import Path
 import shlex
-import sys
 from typing import Literal, Mapping
 from uuid import uuid4
+from .native_desktop import open_desktop_path
 from pulsara_agent.conversation_kernel.session_deletion import (
     KernelSessionRetirement, SessionDeleteRejected,
 )
@@ -1619,12 +1619,7 @@ class LocalSessionController:
         else:
             raise ValueError("unknown capability root")
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if sys.platform != "darwin":
-            raise RuntimeError("directory reveal is unavailable")
-        process = await asyncio.create_subprocess_exec("open", str(path))
-        status = await process.wait()
-        if status != 0:
-            raise RuntimeError("directory reveal failed")
+        await open_desktop_path(path)
         return {"opened": True, "path": str(path)}
 
     async def _reload_live_capabilities(self) -> tuple[int, int]:

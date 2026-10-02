@@ -11,6 +11,7 @@ from aiohttp import web
 from aiohttp.helpers import content_disposition_header
 
 from .file_preview import FilePreviewError, PAGE_BYTES
+from .native_desktop import NativeDesktopUnavailable, open_desktop_path
 
 HEADERS = {
     "Cache-Control": "no-store",
@@ -130,16 +131,10 @@ class FilePreviewHttp:
         action = body.get("action")
         # action_path re-opens without following symlinks before path handoff to OS.
         path = item.action_path(action)
-        args = (
-            ["open", "-R", str(path)]
-            if action == "reveal" and item.kind != "directory"
-            else ["open", str(path)]
-        )
-        process = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-        )
-        if await process.wait() != 0:
-            raise FilePreviewError("FILE_UNREADABLE", "系统暂时无法打开这个位置。", 409)
+        try:
+            await open_desktop_path(path, reveal_file=action == "reveal" and item.kind != "directory")
+        except NativeDesktopUnavailable as exc:
+            raise FilePreviewError("FILE_UNREADABLE", str(exc), 409) from exc
         return web.json_response({"opened": True}, headers=HEADERS)
 
     async def content(self, request):

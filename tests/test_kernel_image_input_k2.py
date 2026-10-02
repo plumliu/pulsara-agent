@@ -335,21 +335,32 @@ def test_host_worker_stops_after_reply_before_exit(monkeypatch, stop) -> None:
     validator = HostPromptImageValidator()
 
     async def run() -> None:
+        setup_timeout = 10
         joining = asyncio.Event()
         original_reap = validator._reap_active  # noqa: SLF001
 
         async def observe_reap(process, connection, *, terminate, **kwargs):
             if not terminate:
+                # Start the deadline case at its actual boundary: a reply is
+                # available while the real worker still owns its process.
+                # Cold spawn latency under parallel CI is not the behavior
+                # this test is measuring.
+                assert process.is_alive()
+                if stop == "deadline":
+                    monkeypatch.setattr(
+                        "pulsara_agent.conversation_kernel.image_validation.monotonic",
+                        lambda: kwargs["deadline_monotonic"] + 1,
+                    )
                 joining.set()
             return await original_reap(process, connection, terminate=terminate, **kwargs)
 
         monkeypatch.setattr(validator, "_reap_active", observe_reap)
         task = asyncio.create_task(validator.freeze(
             PromptContent((PromptImagePart(_encoded_image("PNG"), "image/png"),)),
-            deadline_monotonic=monotonic() + (3 if stop == "deadline" else 10),
+            deadline_monotonic=monotonic() + setup_timeout,
         ))
         try:
-            await asyncio.wait_for(joining.wait(), timeout=4)
+            await asyncio.wait_for(joining.wait(), timeout=setup_timeout)
             if stop == "cancel":
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):

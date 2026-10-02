@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import platform
+import os
 import subprocess
 import stat
 import sys
@@ -61,6 +62,47 @@ def _classify_source_inventory(repository_root: Path):
     return contract.classify_bundled_skill_inventory(entries)
 
 
+# Plain Linux tags deliberately make no unvalidated manylinux/glibc promise.
+# Ubuntu CI validates each native target; binutils owns ELF interpretation.
+_WHEEL_TARGETS = {
+    ("Darwin", "arm64"): "macosx_11_0_arm64",
+    ("Linux", "x86_64"): "linux_x86_64",
+    ("Linux", "aarch64"): "linux_aarch64",
+}
+
+
+def _validate_executable_platform(executable: Path, target: tuple[str, str]) -> None:
+    if target[0] == "Darwin":
+        architectures = subprocess.check_output(
+            ["/usr/bin/lipo", "-archs", str(executable)], timeout=60,
+        ).strip()
+        if architectures != b"arm64":
+            raise ValueError("prepared rg does not match the arm64 wheel target")
+        metadata = subprocess.check_output(
+            ["/usr/bin/otool", "-l", str(executable)], timeout=60,
+        )
+        if b"minos 11.0\n" not in metadata:
+            raise ValueError("prepared rg minimum OS does not match the 11.0 wheel target")
+        return
+    metadata = subprocess.check_output(
+        ["readelf", "--file-header", "--program-headers", "--dynamic", str(executable)],
+        env={**os.environ, "LC_ALL": "C"}, timeout=60,
+    ).decode("utf-8")
+    fields = {
+        key.strip(): value.strip()
+        for line in metadata.splitlines()
+        if ":" in line
+        for key, value in [line.split(":", 1)]
+    }
+    expected_machine = {
+        "x86_64": "Advanced Micro Devices X86-64", "aarch64": "AArch64",
+    }[target[1]]
+    if fields.get("Class") != "ELF64" or fields.get("Machine") != expected_machine:
+        raise ValueError("prepared rg does not match the Linux wheel architecture")
+    if "INTERP" in metadata or "(NEEDED)" in metadata:
+        raise ValueError("prepared Linux rg must not require a system loader or shared libraries")
+
+
 class CustomBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
@@ -68,19 +110,13 @@ class CustomBuildHook(BuildHookInterface):
         del version
         root = Path(self.root)
         executable = root / "src/pulsara_agent/_vendor/ripgrep/rg"
-        # Supported publication target: tested official Mach-O minos 11.0 arm64.
-        # Other upstream assets are preparable, but cannot be published unverified.
-        if (platform.system(), platform.machine()) != ("Darwin", "arm64"):
+        target = (platform.system(), platform.machine())
+        if target not in _WHEEL_TARGETS:
             raise RuntimeError(
-                "No validated Pulsara ripgrep wheel target for this platform"
+                f"No validated Pulsara ripgrep wheel target for this platform: {target}"
             )
         try:
-            architectures = subprocess.check_output(["/usr/bin/lipo", "-archs", str(executable)], timeout=60).strip()
-            if architectures != b"arm64":
-                raise ValueError("prepared rg does not match the arm64 wheel target")
-            metadata = subprocess.check_output(["/usr/bin/otool", "-l", str(executable)], timeout=60)
-            if b"minos 11.0\n" not in metadata:
-                raise ValueError("prepared rg minimum OS does not match the 11.0 wheel target")
+            _validate_executable_platform(executable, target)
             result = subprocess.run(
                 [str(executable), "--version"],
                 capture_output=True,
@@ -94,11 +130,11 @@ class CustomBuildHook(BuildHookInterface):
                     raise ValueError(f"missing ripgrep license: {name}")
         except (OSError, ValueError, IndexError, subprocess.SubprocessError) as exc:
             raise RuntimeError(
-                "Run .venv/bin/python tools/prepare_ripgrep.py explicitly before offline build/install"
+                "Run .venv/bin/python tools/prepare_ripgrep.py explicitly before offline build/install; Linux builds also require binutils (readelf)"
             ) from exc
         if self.target_name == "wheel":
             build_data["pure_python"] = False
-            build_data["tag"] = "py3-none-macosx_11_0_arm64"
+            build_data["tag"] = f"py3-none-{_WHEEL_TARGETS[target]}"
             build_data["force_include"][str(executable.parent)] = (
                 "pulsara_agent/_vendor/ripgrep"
             )

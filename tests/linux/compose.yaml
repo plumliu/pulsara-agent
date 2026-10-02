@@ -1,0 +1,27 @@
+services:
+  database:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: pulsara_admin
+      POSTGRES_PASSWORD: pulsara_admin
+      POSTGRES_DB: pulsara
+    volumes:
+      - ../../docker/postgres-init/001-runtime-role.sh:/docker-entrypoint-initdb.d/001-runtime-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulsara_admin -d pulsara"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  tests:
+    build:
+      context: ../..
+      dockerfile: tests/linux/Dockerfile
+    # Docker owns PID-1 orphan reaping. Preserve Pulsara's complete group-join
+    # contract rather than ignoring zombies or installing a custom reaper.
+    init: true
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      PULSARA_POSTGRES_ADMIN_DSN: postgresql://pulsara_admin:pulsara_admin@database:5432/pulsara
+      PULSARA_POSTGRES_DSN: postgresql://pulsara_runtime:pulsara_runtime@database:5432/pulsara

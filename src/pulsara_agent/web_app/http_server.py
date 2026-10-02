@@ -71,6 +71,7 @@ from pulsara_agent.web_app.browser_bridge import (
 from pulsara_agent.web_app.protocol_client import ProtocolBridgeError
 from pulsara_agent.web_app.file_import import LocalImport, receive_file, receive_directory
 from pulsara_agent.web_app.directory_picker import NativeDirectoryPicker
+from pulsara_agent.web_app.native_desktop import NativeDesktopUnavailable
 from pulsara_agent.web_app.file_preview import FilePreviewError
 from pulsara_agent.web_app.file_preview_http import FilePreviewHttp
 from pulsara_agent.web_app.visualization_preview import VisualizationPreviews
@@ -1494,9 +1495,11 @@ class LocalHttpServer:
         )
 
     async def _open_capability_root(self, request: web.Request) -> web.Response:
-        return web.json_response(
-            await self.sessions.open_capability_root(request.match_info["root"])
-        )
+        try:
+            result = await self.sessions.open_capability_root(request.match_info["root"])
+        except NativeDesktopUnavailable as exc:
+            raise HttpPublicError("DIRECTORY_OPEN_UNAVAILABLE", str(exc), status=503) from exc
+        return web.json_response(result)
 
     async def _preview_skill_import(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)
@@ -2023,8 +2026,10 @@ class LocalHttpServer:
             path = await self._directory_picker.choose(initial_path)
         except NotImplementedError as exc:
             raise HttpPublicError(
-                "DIRECTORY_PICKER_UNSUPPORTED", "原生目录选择目前支持 macOS。", status=501,
+                "DIRECTORY_PICKER_UNSUPPORTED", "原生目录选择目前支持 macOS 和 Linux 桌面。", status=501,
             ) from exc
+        except NativeDesktopUnavailable as exc:
+            raise HttpPublicError("DIRECTORY_PICKER_UNAVAILABLE", str(exc), status=503) from exc
         except (OSError, ValueError) as exc:
             raise HttpPublicError(
                 "DIRECTORY_PICKER_UNAVAILABLE", "无法打开目录选择窗口或读取所选目录，请重试。", status=503,

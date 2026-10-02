@@ -114,7 +114,7 @@ function FilePreviewDialog({ view, api, onClose, onNotify, onRetry, open }: {
             title={source ? '显示预览' : '查看源码'} aria-label={source ? '显示预览' : '查看源码'} aria-pressed={source}
             onClick={() => setSourceToken(source ? null : file.read_token)}><Code2 size={16} /></button>}
           <button title="复制路径" aria-label="复制路径" onClick={() => { void navigator.clipboard.writeText(file.path).then(() => onNotify('路径已复制', undefined, 'success'), () => onNotify('无法复制路径', undefined, 'warning')); }}><Copy size={16} /></button>
-          <button title="在 Finder 中显示" aria-label="在 Finder 中显示" onClick={() => void action('reveal')}><FolderOpen size={16} /></button>
+          <button title="打开所在文件夹" aria-label="打开所在文件夹" onClick={() => void action('reveal')}><FolderOpen size={16} /></button>
           {file.can_open && <button title="使用系统应用打开" aria-label="使用系统应用打开" onClick={() => void action('open')}><ExternalLink size={16} /></button>}
           {file.content_url && <a aria-label="下载原文件" title="下载原文件" href={`${file.content_url}?download=1`} download={file.name} referrerPolicy="no-referrer"><Download size={16} /></a>}
         </>}
@@ -155,7 +155,7 @@ function FileBody({ file, api, source, onNotify, onRetry }: FileBodyProps) {
     </div>
   </div>;
   if (file.kind === 'pdf' && file.content_url) return <object className="file-preview-pdf" data={file.content_url} type="application/pdf" aria-label={file.name}><p>浏览器无法预览此 PDF，请下载或使用系统应用打开。</p></object>;
-  if (!reading) return <div className="file-preview-status"><FolderOpen size={28} /><strong>{file.name}</strong><p>{file.kind === 'directory' ? '可在 Finder 中打开此文件夹。' : file.can_open ? '可下载原文件或使用系统应用打开。' : '可下载原文件或在 Finder 中定位。'}</p>{file.size !== null && <small>{file.size.toLocaleString()} 字节</small>}</div>;
+  if (!reading) return <div className="file-preview-status"><FolderOpen size={28} /><strong>{file.name}</strong><p>{file.kind === 'directory' ? '可使用系统文件管理器打开此文件夹。' : file.can_open ? '可下载原文件或使用系统应用打开。' : '可下载原文件或打开所在文件夹。'}</p>{file.size !== null && <small>{file.size.toLocaleString()} 字节</small>}</div>;
   return <FileReader key={mode} file={file} api={api} source={source} mode={mode} onNotify={onNotify} onRetry={onRetry} />;
 }
 

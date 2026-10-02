@@ -24,7 +24,7 @@ on:
 jobs:
   recall-eval:
     runs-on: ubuntu-latest
-    # This gate tests Python source, not the macOS-only application wheel.
+    # This gate tests Python source, not the platform application wheel.
     env:
       PYTHONPATH: ${{ github.workspace }}/src
     services:

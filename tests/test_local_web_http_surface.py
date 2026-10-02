@@ -17,6 +17,7 @@ from pulsara_agent.web_app import http_server as http_server_module
 from pulsara_agent.web_app import session_controller as session_controller_module
 from pulsara_agent.web_app.browser_bridge import LocalBrowserBridge
 from pulsara_agent.web_app.http_server import LocalHttpServer
+from pulsara_agent.web_app.native_desktop import NativeDesktopUnavailable
 from pulsara_agent.web_app.session_controller import LocalSessionController
 from pulsara_agent.llm.model_catalog import ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
@@ -38,7 +39,7 @@ def test_native_workspace_picker_http_security_selection_cancel_and_failure(tmp_
             is_ready=lambda: True, is_draining=lambda: False,
             **_model_server_dependencies(),
         )
-        choose = AsyncMock(side_effect=["/tmp/原目录 ", None, OSError("unavailable"), NotImplementedError()])
+        choose = AsyncMock(side_effect=["/tmp/原目录 ", None, OSError("unavailable"), NotImplementedError(), NativeDesktopUnavailable("缺少桌面组件，请安装 zenity 后重试。")])
         monkeypatch.setattr(server._directory_picker, "choose", choose)
         await server.start()
         try:
@@ -64,6 +65,17 @@ def test_native_workspace_picker_http_security_selection_cancel_and_failure(tmp_
                     async with client.post(url, json={}) as response:
                         assert response.status == status
                         assert (await response.json())["error"]["code"] == code
+                async with client.post(url, json={}) as response:
+                    assert response.status == 503
+                    assert (await response.json())["error"]["message"] == "缺少桌面组件，请安装 zenity 后重试。"
+                monkeypatch.setattr(server.sessions, "open_capability_root", AsyncMock(
+                    side_effect=NativeDesktopUnavailable("缺少桌面组件，请安装 xdg-utils 后重试。"),
+                ), raising=False)
+                async with client.post(f"{server.origin}/api/capabilities/roots/pulsara/open", json={}) as response:
+                    assert response.status == 503
+                    error = (await response.json())["error"]
+                    assert error["code"] == "DIRECTORY_OPEN_UNAVAILABLE"
+                    assert error["message"] == "缺少桌面组件，请安装 xdg-utils 后重试。"
         finally:
             await server.aclose()
 
