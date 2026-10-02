@@ -72,6 +72,9 @@ function composerIsDisabled(composer: HTMLElement): boolean {
 }
 
 beforeEach(() => {
+  // Each test starts with its own browser selection; remounts within a test
+  // still exercise the production preference persistence.
+  window.localStorage.removeItem('pulsara-active-session');
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} });
 });
 
@@ -839,6 +842,23 @@ class FakeAdapter implements RuntimeAdapter {
 }
 
 describe('PulsaraApp', () => {
+  it('restores the selected session after remounting in the same browser', async () => {
+    const adapter = new FakeAdapter();
+    adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });
+    const view = render(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    fireEvent.click(screen.getByRole('button', { name: /历史会话.*可恢复/ }));
+    await screen.findByRole('heading', { name: '历史会话' });
+    expect(window.localStorage.getItem('pulsara-active-session')).toBe('session-2');
+    view.unmount();
+
+    render(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '历史会话' });
+    expect(adapter.connectCalls.map(call => call.sessionId)).toEqual([
+      'session-1', 'session-2', 'session-2',
+    ]);
+  });
+
   it('shows a selected session loading page immediately, including while closing the old connection', async () => {
     const adapter = new FakeAdapter();
     adapter.sessions.push({ ...initialSession, id: 'session-2', title: '历史会话' });

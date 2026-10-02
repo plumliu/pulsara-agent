@@ -118,9 +118,11 @@ export function ToastStack({ toasts, onDismiss }: { toasts: ToastMessage[]; onDi
 
   useLayoutEffect(() => {
     const stack = stackRef.current;
-    if (!stack || !hasToasts || typeof stack.showPopover !== 'function') return;
+    // A modal can detach during this commit before its MutationObserver updates
+    // the portal target. The next modal snapshot rehomes the notification.
+    if (!stack?.isConnected || !hasToasts || typeof stack.showPopover !== 'function') return;
     stack.showPopover();
-    return () => { if (stack.matches(':popover-open')) stack.hidePopover(); };
+    return () => { if (stack.isConnected && stack.matches(':popover-open')) stack.hidePopover(); };
   }, [modal, hasToasts]);
 
   const content = (

@@ -678,7 +678,7 @@ function TaskGraphDialog({
               </section>}
               {selected.result?.diagnostics?.length ? <section className="task-node-detail__result">
                 <h4>任务诊断</h4>
-                {selected.result.diagnostics?.length ? <ul>{selected.result.diagnostics.map((diagnostic, index) => <li key={`${selected.result?.id}:diagnostic:${index}`}><span>{typeof diagnostic.message === 'string' ? diagnostic.message : JSON.stringify(diagnostic.message)}</span></li>)}</ul> : null}
+                <ul>{selected.result.diagnostics.map((diagnostic, index) => <li key={`${selected.result?.id}:diagnostic:${index}`}><span>{typeof diagnostic.message === 'string' ? diagnostic.message : JSON.stringify(diagnostic)}</span></li>)}</ul>
               </section> : null}
               {processRead?.taskId === selected.id && processRead.nextCursor && <section><button type="button" onClick={() => void loadMoreProcesses()}>继续检查关联后台命令</button></section>}
 

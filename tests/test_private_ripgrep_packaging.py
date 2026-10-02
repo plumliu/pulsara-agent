@@ -21,6 +21,11 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         shutil.copy2(ROOT / name, source / name)
     shutil.copytree(ROOT / 'tools', source / 'tools', ignore=shutil.ignore_patterns('__pycache__'))
     shutil.copytree(ROOT / 'src', source / 'src', ignore=shutil.ignore_patterns('_vendor', '__pycache__'))
+    frontend = source / 'frontend'
+    dependency = frontend / 'node_modules' / 'fixture-package'
+    dependency.mkdir(parents=True)
+    (dependency / 'index.js').write_text('installed dependency must not ship')
+    (frontend / 'package.json').write_text('{"name":"source-fixture"}')
     # Each real backend entry point fails offline before explicit preparation.
     for expression in ["build_wheel('dist')", "build_editable('dist')", "build_sdist('dist')"]:
         command = [sys.executable, '-c', f"from hatchling.build import *; {expression}"]
@@ -53,8 +58,11 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         assert archive.read('pulsara_agent/_vendor/ripgrep/LICENSE-PCRE2')
         assert archive.read('pulsara_agent/web_app/static/index.html')
     with tarfile.open(next((source / 'dist').glob('*.tar.gz'))) as archive:
-        assert not any('_vendor/ripgrep' in member.name for member in archive)
-        assert any(member.name.endswith('tools/prepare_ripgrep.py') for member in archive)
+        names = archive.getnames()
+        assert not any('_vendor/ripgrep' in name for name in names)
+        assert not any('frontend/node_modules' in name for name in names)
+        assert any(name.endswith('frontend/package.json') for name in names)
+        assert any(name.endswith('tools/prepare_ripgrep.py') for name in names)
 
 
 def test_prepare_checksum_failure_writes_no_resources(tmp_path, monkeypatch):

@@ -131,6 +131,12 @@ class _TerminalMonitorDogfoodModel:
                 {"action": "register", "process_id": process_id},
             )
         elif call_index == 3:
+            monitor_result = next(
+                item for item in reversed(request.compiled_input.messages)
+                if item.role is MessageRole.TOOL_RESULT and item.content
+            )
+            observation = decode_tool_result_observation(text_part_values(monitor_result.content)[0])
+            assert json.loads(str(observation["body"]))["status"] == "REGISTERED"
             payloads = _text("text:round2-waiting", "MONITOR_REGISTERED_WAITING")
         else:
             terminal_items = tuple(
@@ -159,10 +165,15 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
 ) -> None:
     import pulsara_agent.conversation_kernel.host as kernel_host
 
+    release_path = tmp_path / "release-monitor-completion"
+    # Registration requires a running process. Coordinate completion with the
+    # accepted registration instead of racing model/DB work against a sleep.
     script = (
         "import time; "
+        "from pathlib import Path; "
         "print('R2_INITIAL_SENTINEL', flush=True); "
-        "time.sleep(1.0); "
+        f"release = Path({str(release_path)!r});\n"
+        "while not release.exists(): time.sleep(0.01)\n"
         "print('R2_COMPLETION_SENTINEL', flush=True)"
     )
     command = f"{shlex.quote(sys.executable)} -u -c {shlex.quote(script)}"
@@ -186,46 +197,50 @@ def test_round2_host_yield_monitor_completion_and_autonomous_continuation(
                 workspace_root=tmp_path,
             )
         )
-        await session.update_model_call_binding(test_model_binding(model_runtime))
-        first = await session.run_turn(PromptContent.text("run and monitor the process"))
-        assert first.final_text == "MONITOR_REGISTERED_WAITING"
-        await asyncio.wait_for(model.autonomous_seen.wait(), timeout=8)
+        try:
+            await session.update_model_call_binding(test_model_binding(model_runtime))
+            first = await session.run_turn(PromptContent.text("run and monitor the process"))
+            assert first.final_text == "MONITOR_REGISTERED_WAITING"
+            release_path.touch()
+            await asyncio.wait_for(model.autonomous_seen.wait(), timeout=8)
 
-        deadline = monotonic() + 5
-        while True:
-            rows = await asyncio.to_thread(
-                session.repository.rehydrate_session,
+            deadline = monotonic() + 5
+            while True:
+                rows = await asyncio.to_thread(
+                    session.repository.rehydrate_session,
+                    session_id=session.session_id,
+                    deadline_monotonic=monotonic() + 5,
+                )
+                if any(
+                    row.get("entry_kind") == "ASSISTANT_MESSAGE"
+                    and row.get("block_inline_content") == b"AUTONOMOUS_COMPLETION_SEEN"
+                    for row in rows
+                ):
+                    break
+                assert monotonic() < deadline
+                await asyncio.sleep(0.05)
+            kinds = [str(row["entry_kind"]) for row in rows]
+            assert kinds.count("TERMINAL_OBSERVATION") == 1
+            observation_index = kinds.index("TERMINAL_OBSERVATION")
+            assert kinds[observation_index + 1] == "ASSISTANT_MESSAGE"
+            events = await asyncio.to_thread(
+                session.repository.events_after,
                 session_id=session.session_id,
+                after_sequence=0,
+                limit=64,
                 deadline_monotonic=monotonic() + 5,
             )
-            if any(
-                row.get("entry_kind") == "ASSISTANT_MESSAGE"
-                and row.get("block_inline_content") == b"AUTONOMOUS_COMPLETION_SEEN"
-                for row in rows
-            ):
-                break
-            assert monotonic() < deadline
-            await asyncio.sleep(0.05)
-        kinds = [str(row["entry_kind"]) for row in rows]
-        assert kinds.count("TERMINAL_OBSERVATION") == 1
-        observation_index = kinds.index("TERMINAL_OBSERVATION")
-        assert kinds[observation_index + 1] == "ASSISTANT_MESSAGE"
-        events = await asyncio.to_thread(
-            session.repository.events_after,
-            session_id=session.session_id,
-            after_sequence=0,
-            limit=64,
-            deadline_monotonic=monotonic() + 5,
-        )
-        assert (
-            sum(
-                event["event_type"] == "TerminalObservationAccepted" for event in events
+            assert (
+                sum(
+                    event["event_type"] == "TerminalObservationAccepted" for event in events
+                )
+                == 1
             )
-            == 1
-        )
-        await core.close_session(
-            session.host_session_id,
-        )
-        await core.shutdown()
+        finally:
+            release_path.touch()
+            await core.close_session(
+                session.host_session_id,
+            )
+            await core.shutdown()
 
     asyncio.run(scenario())

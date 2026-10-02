@@ -3195,6 +3195,11 @@ def test_worker_controls_beyond_128_remain_queryable_and_cancellable(stage2_migr
         await _set_capacity(manager, 144)
         try:
             for call, context in zip(calls, contexts, strict=True):
+                # This direct-manager fixture has no Host renewal loop. Keep
+                # its existing physical lease alive across the 144 workers,
+                # just as the production Host does, without a lifetime cap.
+                await io.run(repository.renew_host_writer, lease.guard,
+                    lease_seconds=30, deadline_monotonic=monotonic()+30)
                 response = await manager.invoke(tool_name=call[0], arguments=call[3], invocation_context=context)
                 assert response.state == 'SUCCESS'
             assert len(attempts) == 144

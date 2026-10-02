@@ -34,7 +34,8 @@ packages = ["src/pulsara_agent"]
 exclude = ["src/pulsara_agent/_vendor/ripgrep"]
 
 [tool.hatch.build.targets.sdist]
-exclude = ["src/pulsara_agent/_vendor/ripgrep"]
+# Hatch reads the root VCS ignores, not frontend/.gitignore.
+exclude = ["src/pulsara_agent/_vendor/ripgrep", "frontend/node_modules"]
 
 [tool.hatch.build.hooks.custom]
 path = "tools/hatch_build.py"

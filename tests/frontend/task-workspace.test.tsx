@@ -35,6 +35,20 @@ const task = (overrides: Partial<AgentTask> = {}): AgentTask => ({
 });
 
 describe('TaskWorkspace PR03 hard cut', () => {
+  it('shows structured task diagnostics even when they have no message field', () => {
+    const diagnostic = { check: 'read_file', result: 'SUCCESS', evidence: 'total_lines=2' };
+    render(<TaskWorkspace tasks={[task({ status: 'completed', result: {
+      id: 'result', summary: '验证完成', diagnostics: [diagnostic, { message: '只读约束已满足' }],
+    } })]} loading={false} canControl={false} onRetry={vi.fn()} onCancel={vi.fn()}
+      onNotify={vi.fn()} activities={new Map()} loadActivities={vi.fn(async () => ({ activities: [] }))}
+      loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))} />);
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
+    const detail = screen.getByRole('complementary', { name: '精确任务 详情' });
+    expect(within(detail).getByRole('heading', { name: '任务诊断' })).toBeTruthy();
+    expect(within(detail).getByText(JSON.stringify(diagnostic))).toBeTruthy();
+    expect(within(detail).getByText('只读约束已满足')).toBeTruthy();
+  });
+
   it('keeps internal task metadata out of the detail and puts cancellation in its header', () => {
     const cancel = vi.fn(async () => undefined);
     const internalTask = task({ context: { mode: 'worker-history', historyTaskId: 'internal-history-id' },

@@ -420,33 +420,36 @@ class TerminalOutputOwner:
             return self._inflight_reads
 
     def append_raw(self, raw: bytes) -> bytes:
-        try:
-            public = self._sanitizer.feed(raw)
-        except Exception:
-            with self._lock:
+        with self._lock:
+            try:
+                # Decoder/token carry and retained bytes form one stream cut.
+                # Concurrent feeds must not race on the incremental state.
+                public = self._sanitizer.feed(raw)
+            except Exception:
                 self._unavailable = True
                 self._revision += 1
                 self._condition.notify_all()
-            return b""
-        self._append_public(public)
+                return b""
+            start, end = self._append_public_locked(public)
+        self._notify_append(public, start, end)
         return public
 
     def finalize(self, *, status: str, exit_code: int | None) -> bytes:
-        try:
-            public = self._sanitizer.finalize()
-        except Exception:
-            public = b""
-            with self._lock:
-                self._unavailable = True
-        self._append_public(public)
         with self._lock:
+            try:
+                public = self._sanitizer.finalize()
+            except Exception:
+                public = b""
+                self._unavailable = True
+            start, end = self._append_public_locked(public)
             if not self._finalized:
                 self._finalized = True
                 self._status = status
                 self._exit_code = exit_code
                 self._revision += 1
                 self._condition.notify_all()
-        self._notify_subscribers(b"", self._through, self._through)
+        self._notify_append(public, start, end)
+        self._notify_subscribers(b"", end, end)
         return public
 
     def update_lifecycle(self, *, status: str, exit_code: int | None) -> None:
@@ -458,20 +461,23 @@ class TerminalOutputOwner:
             self._revision += 1
             self._condition.notify_all()
 
-    def _append_public(self, public: bytes) -> None:
+    def _append_public_locked(self, public: bytes) -> tuple[int, int]:
+        start = self._through
         if not public:
-            return
+            return start, start
         # The sanitizer only returns valid UTF-8.  Assert that invariant before
         # it can become retained authority.
         public.decode("utf-8")
-        with self._lock:
-            start = self._through
-            self._retained.extend(public)
-            self._through += len(public)
-            self._evict_to_bound_locked(self.maximum_bytes)
-            self._revision += 1
-            end = self._through
-            self._condition.notify_all()
+        self._retained.extend(public)
+        self._through += len(public)
+        self._evict_to_bound_locked(self.maximum_bytes)
+        self._revision += 1
+        self._condition.notify_all()
+        return start, self._through
+
+    def _notify_append(self, public: bytes, start: int, end: int) -> None:
+        if not public:
+            return
         callback = self._retained_bytes_changed
         if callback is not None:
             callback(self)
