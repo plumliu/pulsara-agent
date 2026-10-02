@@ -15,14 +15,14 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   terminal_process: ['管理命令', '正在处理命令进程', '已查看命令状态'],
   terminal_monitor: ['关注命令进展', '正在设置进展通知', '已处理通知设置'],
   todo: ['更新工作清单', '正在更新工作清单', '已更新工作清单'],
-  spawn_agent: ['创建子任务', '正在创建子任务', '已创建子任务'],
-  create_agent_tasks: ['创建子任务', '正在创建子任务', '已创建子任务'],
+  spawn_agent: ['创建任务', '正在创建任务', '已创建任务'],
+  create_agent_tasks: ['创建任务', '正在创建任务', '已创建任务'],
   list_agent_models: ['查看可用模型', '正在读取已保存的模型配置', '已读取可用模型'],
-  list_agents: ['查看子任务', '正在查看子任务状态', '已读取子任务状态'],
-  wait_agent: ['等待子任务', '正在等待子任务进展', '已等待子任务'],
-  stop_agent: ['停止子任务', '正在请求停止子任务', '已请求停止子任务'],
-  send_agent_message: ['联系子任务', '正在发送补充信息', '已发送补充信息'],
-  report_agent_result: ['提交子任务结果', '正在提交子任务结果', '已提交子任务结果'],
+  list_agents: ['查看任务', '正在查看任务状态', '已读取任务状态'],
+  wait_agent: ['等待任务', '正在等待任务进展', '已等待任务'],
+  stop_agent: ['停止任务', '正在请求停止任务', '已请求停止任务'],
+  send_agent_message: ['联系任务', '正在发送补充信息', '已发送补充信息'],
+  report_agent_result: ['提交任务结果', '正在提交任务结果', '已提交任务结果'],
   enter_plan: ['开始规划', '正在进入规划模式', '已进入规划模式'],
   ask_plan_question: ['确认方案细节', '等待你的选择', '已记录你的选择'],
   exit_plan: ['提交方案', '正在提交方案', '方案已提交，等待你的确认'],
@@ -126,7 +126,7 @@ function failure(trace: ToolTrace, result: Record<string, unknown>): string {
     if (result.status === 'CONFLICT') return '配置已变化，本次变更未应用';
     if (result.status === 'REJECTED') return '配置变更未被接受';
   }
-  if (trace.toolName === 'report_agent_result' && result.status === 'not_accepted') return '子任务结果未被接收';
+  if (trace.toolName === 'report_agent_result' && result.status === 'not_accepted') return '任务结果未被接收';
   return errors[text(result.error)] ?? states[trace.resultState ?? ''] ?? '操作失败';
 }
 
@@ -227,12 +227,12 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
       }
       case 'spawn_agent':
       case 'stop_agent':
-        detail = taskStates[status] ? `子任务${taskStates[status]}` : detail;
+        detail = taskStates[status] ? `任务${taskStates[status]}` : detail;
         break;
       case 'create_agent_tasks':
       case 'list_agents': {
         const total = count(result.tasks);
-        if (total !== undefined) detail = name === 'create_agent_tasks' ? `已创建 ${total} 个子任务` : `本次列出 ${total} 个子任务`;
+        if (total !== undefined) detail = name === 'create_agent_tasks' ? `已创建 ${total} 个任务` : `本次列出 ${total} 个任务`;
         if (result.has_more === true) detail += '，还有后续任务';
         break;
       }
@@ -242,15 +242,15 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
         break;
       }
       case 'wait_agent':
-        detail = ({ timeout: '已等待子任务', steer_available: '已收到你的补充',
-          nothing_pending: '没有待处理的子任务', predicate_satisfied: '已有子任务结束' } as Record<string, string>)[text(result.outcome)] ?? detail;
+        detail = ({ timeout: '已等待任务', steer_available: '已收到你的补充',
+          nothing_pending: '没有待处理的任务', predicate_satisfied: '已有任务结束' } as Record<string, string>)[text(result.outcome)] ?? detail;
         break;
       case 'send_agent_message':
         if (status === 'queued') detail = '已发送补充信息';
         break;
       case 'report_agent_result':
-        if (status === 'accepted') detail = '子任务结果已接收';
-        if (status === 'not_accepted') detail = '子任务结果未被接收';
+        if (status === 'accepted') detail = '任务结果已接收';
+        if (status === 'not_accepted') detail = '任务结果未被接收';
         break;
       case 'memory_search':
         if (Array.isArray(result.memories)) detail = `本次找到 ${result.memories.length} 条相关记忆`;

@@ -36,6 +36,7 @@
 .live-badge--waiting { color: var(--violet); background: var(--violet-soft); }
 .topbar-actions { display: flex; align-items: center; gap: 6px; }
 .topbar .ghost-button { min-height: 31px; padding: 0 9px; font-size: var(--type-label); }
+.topbar .context-compact-button > svg { flex: none; }
 .topbar .ghost-button.is-compacting svg { animation: spin .9s linear infinite; }
 .session-actions__busy { animation: spin .9s linear infinite; }
 .queue-badge { padding: 4px 7px; border-radius: 9px; background: var(--violet-soft); color: var(--violet); font-family: var(--mono); font-size: var(--type-caption); }

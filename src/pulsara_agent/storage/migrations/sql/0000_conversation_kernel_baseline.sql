@@ -133,7 +133,6 @@ CREATE TABLE pulsara_v3.subagent_tasks (
     parent_context_body text,
     dependency_context_body text,
     terminal_material_body text,
-    worker_history_body text,
     material_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
     objective text NOT NULL,
     status text NOT NULL CHECK (status IN (
@@ -153,7 +152,7 @@ CREATE TABLE pulsara_v3.subagent_tasks (
     FOREIGN KEY (session_id, history_source_task_id)
         REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK (octet_length(objective) BETWEEN 1 AND 65536),
-    CHECK (task_key IS NULL OR task_key ~ '^[a-z][a-z0-9_-]{0,63}$'),
+    CHECK (task_key IS NULL OR task_key ~ '^[A-Za-z][A-Za-z0-9_-]{0,63}$'),
     CHECK (label IS NULL OR octet_length(label) BETWEEN 1 AND 256),
     CHECK (display_role IS NULL OR octet_length(display_role) BETWEEN 1 AND 256),
     CHECK (jsonb_typeof(model_call_binding) = 'object'
@@ -329,6 +328,10 @@ CREATE TABLE pulsara_v3.turn_context_binding_revisions (
         REFERENCES pulsara_v3.context_snapshots (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((base_kind = 'FULL_HISTORY') = (context_snapshot_id IS NULL))
 );
+ALTER TABLE pulsara_v3.subagent_tasks ADD CONSTRAINT subagent_history_revision_fk
+    FOREIGN KEY (session_id, history_context_binding_revision_id)
+    REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id)
+    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_current_context_revision_fk
     FOREIGN KEY (session_id, current_context_binding_revision_id)
     REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
@@ -1962,8 +1965,7 @@ BEGIN
             OLD.history_context_binding_revision_id IS DISTINCT FROM NEW.history_context_binding_revision_id OR
             OLD.parent_context_body IS DISTINCT FROM NEW.parent_context_body OR
             ((OLD.dependency_context_body IS DISTINCT FROM NEW.dependency_context_body OR
-              OLD.terminal_material_body IS DISTINCT FROM NEW.terminal_material_body OR
-              OLD.worker_history_body IS DISTINCT FROM NEW.worker_history_body)
+              OLD.terminal_material_body IS DISTINCT FROM NEW.terminal_material_body)
              AND NOT (OLD.status = 'PENDING_START' AND NEW.status = 'ACTIVE')) OR
             OLD.objective IS DISTINCT FROM NEW.objective OR
             OLD.execution_writer_generation IS DISTINCT FROM

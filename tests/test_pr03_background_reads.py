@@ -217,8 +217,9 @@ class _ReadCore:
                 },),
                 (),
                 True,
+                None,
             )
-        return tuple(selected), (), (), False
+        return tuple(selected), (), (), False, None
 
 
 def _read_controller(core: _ReadCore) -> LocalSessionController:

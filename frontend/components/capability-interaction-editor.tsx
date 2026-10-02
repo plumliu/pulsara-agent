@@ -8,7 +8,7 @@ import type { RuntimeInteractionResolution } from '../lib/runtime-adapter';
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const hookTrust: Record<string, string> = {TRUSTED: '已信任', UNTRUSTED: '尚未信任', MODIFIED: '定义或契约已变化，需重新审阅', DISABLED: '已关闭', UNAVAILABLE: '当前不可用'};
-const hookEvents: Record<string, string> = {SessionStart: '对话开始时', SessionEnd: '对话结束时', UserPromptSubmit: '发送消息时', PreToolUse: '工具调用前', PermissionRequest: '请求工具权限时', PostToolUse: '工具调用完成后', PreCompact: '压缩上下文前', PostCompact: '压缩上下文后', SubagentStart: '子任务开始时', SubagentStop: '子任务结束时', Stop: '模型准备结束时'};
+const hookEvents: Record<string, string> = {SessionStart: '对话开始时', SessionEnd: '对话结束时', UserPromptSubmit: '发送消息时', PreToolUse: '工具调用前', PermissionRequest: '请求工具权限时', PostToolUse: '工具调用完成后', PreCompact: '压缩上下文前', PostCompact: '压缩上下文后', SubagentStart: '任务开始时', SubagentStop: '任务结束时', Stop: '模型准备结束时'};
 const actions: Record<string, string> = {
   INSTALL_LOOSE_SKILL: '安装技能', SET_LOOSE_SKILL_ENABLED: '更改技能开关', REMOVE_LOOSE_SKILL: '删除技能',
   TRUST_HOOK_SOURCE: '信任 Hook 来源', REVOKE_HOOK_TRUST: '撤销 Hook 信任', SET_HOOK_SOURCE_ENABLED: '更改 Hook 来源开关',

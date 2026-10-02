@@ -311,6 +311,11 @@ class CanonicalProviderInputReader:
         cut: PreparedProviderInputCut,
         *,
         deadline_monotonic: float,
+        _connection=None,
+        _single_scope: bool = False,
+        _historical_scope: bool = False,
+        _effective_source_floor: int = 0,
+        _include_snapshot: bool = True,
     ) -> FrozenCompactionHeadroomPreflight:
         """Quote reducible input from metadata before hydrating canonical bodies."""
 
@@ -318,12 +323,56 @@ class CanonicalProviderInputReader:
             freeze_compaction_headroom_preflight,
         )
 
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
+        from contextlib import nullcontext
+
+        manager = (
+            self._provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR,
+                row_factory=dict_row,
+                deadline_monotonic=deadline_monotonic,
+                isolation_level=IsolationLevel.REPEATABLE_READ,
+            )
+            if _connection is None
+            else nullcontext(_connection)
+        )
+        with manager as connection:
+            if not _single_scope:
+                from pulsara_agent.conversation_kernel.subagents.history import (
+                    worker_history_segments,
+                )
+
+                segments = worker_history_segments(
+                    connection,
+                    cut,
+                    deadline_monotonic=deadline_monotonic,
+                    maximum_items=self._maximum_items,
+                )
+                if segments is not None:
+                    quotes = [
+                        self.read_compaction_headroom_preflight(
+                            segment,
+                            deadline_monotonic=deadline_monotonic,
+                            _connection=connection,
+                            _single_scope=True,
+                            _historical_scope=_historical_scope or segment != cut,
+                            _effective_source_floor=segments.source_floor,
+                            _include_snapshot=segment == segments.snapshot_segment,
+                        )
+                        for segment in segments.segments
+                    ]
+                    return freeze_compaction_headroom_preflight(
+                        session_id=cut.session_id,
+                        turn_id=cut.turn_id,
+                        context_binding_revision_id=cut.context_binding_revision_id,
+                        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                        scope_subagent_task_id=quotes[-1].scope_subagent_task_id,
+                        effective_materialization_lineage_floor=segments.source_floor,
+                        provider_input_through_sequence=cut.provider_input_through_sequence,
+                        selected_item_count=sum(q.selected_item_count for q in quotes),
+                        selected_canonical_expanded_bytes=sum(
+                            q.selected_canonical_expanded_bytes for q in quotes
+                        ),
+                    )
             binding = connection.execute(
                 """
                 SELECT t.conversation_scope_kind, t.scope_subagent_task_id,
@@ -333,13 +382,14 @@ class CanonicalProviderInputReader:
                 JOIN pulsara_v3.turn_context_binding_revisions AS r
                   ON r.session_id = t.session_id
                  AND r.turn_id = t.id
-                 AND r.id = t.current_context_binding_revision_id
                 WHERE t.session_id = %s AND t.id = %s AND r.id = %s
+                  AND (%s OR r.id=t.current_context_binding_revision_id)
                 """,
                 (
                     cut.session_id,
                     cut.turn_id,
                     cut.context_binding_revision_id,
+                    _historical_scope,
                 ),
             ).fetchone()
             if binding is None:
@@ -351,6 +401,7 @@ class CanonicalProviderInputReader:
                 if str(binding["base_kind"]) == "FULL_HISTORY"
                 else int(binding["source_through_sequence"])
             )
+            floor = max(floor, _effective_source_floor)
             if floor > cut.provider_input_through_sequence:
                 raise ConversationKernelConflict(
                     "compaction headroom floor exceeds its prepared cut"
@@ -461,11 +512,19 @@ class CanonicalProviderInputReader:
                     self._maximum_items + 1,
                     cut.session_id,
                     cut.session_id,
-                    binding["context_snapshot_id"],
+                    binding["context_snapshot_id"] if _include_snapshot else None,
                 ),
             ).fetchone()
             if quote is None:
                 raise ConversationKernelConflict("compaction headroom quote is absent")
+            from pulsara_agent.conversation_kernel.subagents.history import (
+                worker_initial_material_items,
+            )
+
+            materials = worker_initial_material_items(connection, cut=cut, floor=floor)
+            material_bytes = sum(
+                len(item.content[0].text.encode("utf-8")) for item in materials
+            )
             tool_calls = int(quote["tool_calls"])
             return freeze_compaction_headroom_preflight(
                 session_id=cut.session_id,
@@ -480,7 +539,8 @@ class CanonicalProviderInputReader:
                 # A request contributes one assistant item and at most one
                 # result/closure plus one cut-visible late correction per call.
                 selected_item_count=(
-                    int(quote["base_item_count"])
+                    len(materials)
+                    + int(quote["base_item_count"])
                     + max(
                         int(quote["total_entries"]),
                         int(quote["total_blocks"]),
@@ -488,7 +548,8 @@ class CanonicalProviderInputReader:
                     )
                 ),
                 selected_canonical_expanded_bytes=(
-                    int(quote["base_expanded_bytes"])
+                    material_bytes
+                    + int(quote["base_expanded_bytes"])
                     + int(quote["entry_bytes"])
                     + int(quote["image_bytes"])
                     + int(quote["block_bytes"])
@@ -556,8 +617,8 @@ class CanonicalProviderInputReader:
                 scope_kind=identity.conversation_scope_kind,
                 scope_subagent_task_id=identity.scope_subagent_task_id,
             )
-            base_kind = str(row["base_kind"])
-            if base_kind == "FULL_HISTORY":
+            effective = dispatch.compile_snapshot.context_binding_fact
+            if effective.base_kind is ContextBindingBaseKind.FULL_HISTORY:
                 lineage = CompactionSourceLineageBase(
                     kind=CompactionLineageBaseKind.FULL_HISTORY_GENESIS,
                     scope=scope,
@@ -567,14 +628,22 @@ class CanonicalProviderInputReader:
                         row["source_through_sequence"]
                     ),
                     effective_materialization_lineage_floor=0,
+                    persisted_context_snapshot_id=row["context_snapshot_id"],
                 )
-            elif (
-                base_kind == "SNAPSHOT"
-                and row["context_snapshot_id"] is not None
-                and row["source_digest"] is not None
-                and int(row["snapshot_source_cut"])
-                == int(row["source_through_sequence"])
-            ):
+            else:
+                effective_snapshot = connection.execute(
+                    "SELECT source_digest, source_through_sequence FROM pulsara_v3.context_snapshots "
+                    "WHERE session_id=%s AND id=%s",
+                    (cut.session_id, effective.context_snapshot_id),
+                ).fetchone()
+                if (
+                    effective_snapshot is None
+                    or effective_snapshot["source_through_sequence"]
+                    != effective.source_through_sequence
+                ):
+                    raise ConversationKernelConflict(
+                        "effective snapshot lineage is absent"
+                    )
                 lineage = CompactionSourceLineageBase(
                     kind=CompactionLineageBaseKind.CURRENT_SNAPSHOT,
                     scope=scope,
@@ -583,15 +652,10 @@ class CanonicalProviderInputReader:
                     persisted_revision_genesis_marker=int(
                         row["source_through_sequence"]
                     ),
-                    effective_materialization_lineage_floor=int(
-                        row["source_through_sequence"]
-                    ),
-                    snapshot_id=str(row["context_snapshot_id"]),
-                    prior_source_digest=str(row["source_digest"]),
-                )
-            else:
-                raise ConversationKernelConflict(
-                    "compaction binding lineage is corrupt"
+                    effective_materialization_lineage_floor=effective.source_through_sequence,
+                    snapshot_id=effective.context_snapshot_id,
+                    prior_source_digest=effective_snapshot["source_digest"],
+                    persisted_context_snapshot_id=row["context_snapshot_id"],
                 )
             canonical_range = freeze_compaction_canonical_range(
                 scope=scope,
@@ -641,6 +705,11 @@ class CanonicalProviderInputReader:
         deadline_monotonic: float,
         _connection: object | None = None,
         _prospective_root_candidate: PreparedRootProviderInputCandidate | None = None,
+        _single_scope: bool = False,
+        _historical_scope: bool = False,
+        _canonical_byte_budget: int | None = None,
+        _effective_source_floor: int = 0,
+        _include_snapshot: bool = True,
     ) -> FrozenCanonicalProviderDispatchRead:
         from contextlib import nullcontext
 
@@ -655,6 +724,23 @@ class CanonicalProviderInputReader:
             else nullcontext(_connection)
         )
         with manager as connection:
+            if not _single_scope and _prospective_root_candidate is None:
+                from pulsara_agent.conversation_kernel.subagents.history import (
+                    worker_history_segments,
+                    read_effective_worker_dispatch,
+                )
+
+                segments = worker_history_segments(
+                    connection,
+                    cut,
+                    deadline_monotonic=deadline_monotonic,
+                    maximum_items=self._maximum_items,
+                )
+                if segments is not None:
+                    return read_effective_worker_dispatch(
+                        self, connection, cut, segments, deadline_monotonic,
+                        historical_scope=_historical_scope,
+                    )
             if _prospective_root_candidate is None:
                 binding = connection.execute(
                     """
@@ -752,7 +838,8 @@ class CanonicalProviderInputReader:
             if binding is None:
                 raise ConversationKernelConflict("provider binding is absent")
             if (
-                binding["current_context_binding_revision_id"]
+                not _historical_scope
+                and binding["current_context_binding_revision_id"]
                 != cut.context_binding_revision_id
             ):
                 raise ConversationKernelConflict("provider binding revision is stale")
@@ -848,6 +935,9 @@ class CanonicalProviderInputReader:
                 ),
             )
 
+            source_floor = max(source_floor, _effective_source_floor)
+            if not _include_snapshot:
+                snapshot = None
             stored_through_sequence = (
                 cut.provider_input_through_sequence
                 if _prospective_root_candidate is None
@@ -979,7 +1069,11 @@ class CanonicalProviderInputReader:
                 tuple(str(row["id"]) for row in block_metadata),
             )
             blocks_by_entry = self._join_block_payloads(block_metadata, block_payloads)
-            remaining_bytes = _RemainingReadBudget(self._maximum_canonical_bytes)
+            remaining_bytes = _RemainingReadBudget(
+                self._maximum_canonical_bytes
+                if _canonical_byte_budget is None
+                else _canonical_byte_budget
+            )
             if snapshot is not None:
                 snapshot = dict(snapshot)
                 snapshot["inline_content"] = self._load_snapshot_payload(
@@ -1007,6 +1101,18 @@ class CanonicalProviderInputReader:
                     )
                 )
                 canonical_bytes += expanded_bytes
+            from pulsara_agent.conversation_kernel.subagents.history import (
+                worker_initial_material_items,
+            )
+
+            initial_materials = worker_initial_material_items(
+                connection, cut=cut, floor=source_floor
+            )
+            for material in initial_materials:
+                amount = len(material.content[0].text.encode("utf-8"))
+                remaining_bytes.consume(amount)
+                canonical_bytes += amount
+            items.extend(initial_materials)
             next_assistant_cut = _next_assistant_cuts(entries)
             closures: list[ProviderToolResultClosure] = []
             late: list[LateToolOutcomeObservation] = []
@@ -1575,7 +1681,11 @@ class CanonicalProviderInputReader:
                 items.insert(insert_at, late_item)
             if len(items) > self._maximum_items:
                 raise ConversationKernelConflict("provider input item bound exceeded")
-            if canonical_bytes > self._maximum_canonical_bytes:
+            if canonical_bytes > (
+                self._maximum_canonical_bytes
+                if _canonical_byte_budget is None
+                else _canonical_byte_budget
+            ):
                 raise ConversationKernelConflict("provider input byte bound exceeded")
             pure_scope = ModelInputScopeKind(scope_kind)
             identity_fingerprint = canonical_model_input_identity_fingerprint(

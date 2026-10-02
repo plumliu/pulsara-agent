@@ -901,7 +901,7 @@ describe('exact prompt projection', () => {
             current_todos: [{
               todo_run_id: 'todo-child', scope_kind: 'SUBAGENT_TASK',
               scope_subagent_task_id: 'task-1', disposition: 'ACTIVE',
-              ordered_items: [{ ordinal: 0, text: '子任务步骤', status: 'in_progress' }],
+              ordered_items: [{ ordinal: 0, text: '任务步骤', status: 'in_progress' }],
             }, {
               todo_run_id: 'todo-root', scope_kind: 'ROOT', disposition: 'ACTIVE',
               ordered_items: [

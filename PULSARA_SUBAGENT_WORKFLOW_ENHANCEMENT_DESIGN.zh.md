@@ -54,6 +54,8 @@ Pulsara 沿用 ROOT 主 Agent 编排、worker 执行的单层结构。主 Agent 
 
 首版唯一执行单元仍是 task。它拥有目标、模型绑定、上下文选择、启动依赖及最终结果。batch 继续表示一次接纳的任务集合，不成为独立执行器；一个逻辑工作过程允许跨多个 batch。
 
+`spawn_agent.task_name` 和批量 `task_key` 允许大小写字母、数字、下划线和连字符，以字母开头，保留既有 64 字符边界。大小写原样保存；同批依赖引用精确匹配，`A` 与 `a` 是两个不同的 key。任务身份仍由系统生成的 `task_id` 承担。前端称为“任务”，任务对话的委派者称为“主 Agent”。
+
 ROOT 通过现有创建工具追加任务。worker 结果提供证据和建议，不能自行改图、提升权限或创建后代。图上没有自然语言自行获得执行权的边。
 
 分清三种关系：
@@ -220,11 +222,13 @@ TODO owner 不再自行定义另一份物理容量；它只接纳当前 manager 
 
 ## 7. P4：历史材料、结构化结果与后续任务
 
+本节的 worker_history 构建合同已由 [canonical 上下文分支设计](PULSARA_WORKER_HISTORY_CANONICAL_BRANCH_DESIGN.zh.md) 替代。
+
 ### 7.1 三条窄路径
 
 - **结果引用**：给新任务携带已完成任务的摘要、可选结构化 data 与产物引用。
 - **失败材料**：给新任务携带已经 FAILED/CANCELLED/INTERRUPTED/BLOCKED_DEPENDENCY_FAILED 的公开诊断，保留原状态和不确定副作用说明。
-- **worker 历史上下文**：给新任务带入一个已终止 worker 的有效上下文材料，用于连续审阅、研究追问、修订。
+- **worker 历史上下文**：给新任务带入一个已终止 worker 的有效对话历史，用于连续审阅、研究追问、修订。
 
 前两者通过任务创建的可选材料引用参数选择；同一来源已通过成功依赖注入时去重。第三者作为 context 的一种显式选择，与 NONE/LAST_N 互斥，避免模型组合多套历史来源。新任务可继续有独立成功依赖。
 
@@ -236,7 +240,7 @@ TODO owner 不再自行定义另一份物理容量；它只接纳当前 manager 
 
 当前 worker 的初始 parent LAST_N 材料来自 `_start_materials`，终态后会清理；canonical 初始消息只保存 objective，任务行的 LAST_N 数字不能还原当时选中的具体材料。因此 P4 必须为**新接纳的任务**保存可回看的公开上下文来源：parent 选中内容在接纳事务冻结，成功依赖材料在 start 事务冻结，后续 inter-agent 消息沿现有 canonical entry 保存。使用现有 task/blob owner 的不可变内容或可精确重建的 canonical refs/cut，并纳入 blob 可达性；不能把进程内 cache 当作跨重载保证。
 
-worker-history 包承诺的内容是目标、实际带入的公开 parent/dependency/材料来源，以及有效 cut 内已提交的公共对话；不包含旧 SYSTEM/tools、私有 reasoning、权限授予或未提交流。采用摘要覆盖的部分以摘要呈现，不重复递归展开全部祖先材料。此前没有保存来源的开发数据不能被宣称拥有完整历史包；hard cut 更新 clean-v0 和样例数据，缺失必需材料时明确不可用，不添加旧数据猜测恢复或静默降级路径。
+worker-history 分支继承的内容是目标、实际带入的公开 parent/dependency/材料来源，以及有效 cut 内已提交的公共对话；不包含旧 SYSTEM/tools、私有 reasoning、权限授予或未提交流。采用摘要覆盖的部分以摘要呈现，不重复递归展开全部祖先材料。此前没有保存来源的开发数据不能被宣称拥有完整有效历史；hard cut 更新 clean-v0 和样例数据，缺失必需材料时明确不可用，不添加旧数据猜测恢复或静默降级路径。
 
 新 task ID、child turn、模型绑定、权限、Hook/TODO/terminal 生命周期均独立。旧任务状态及结果不改变，下游已引用结果不失效。源 worker 曾做过什么不授权目标重新执行；目标执行任何副作用仍走本任务现有工具和权限。
 
@@ -244,9 +248,9 @@ worker-history 包承诺的内容是目标、实际带入的公开 parent/depend
 
 ### 7.3 上下文构建与前缀合同
 
-历史通过现有 prompt compiler/context-source 接缝进入**新任务**的首个 cold epoch。旧 worker 的 SYSTEM、tools、权限说明和 provider 原生内部状态不作为新任务权威复制。
+历史通过唯一 canonical effective reader 进入新任务的首个 cold epoch，并由普通公共消息／工具 lowering 呈现，随后追加新目标。初始 LAST_N、成功依赖及终态材料使用真实 initial entry 锚点，按 parent／dependency／terminal 顺序在 objective 前出现一次；已覆盖材料不重新注入。旧 worker 的 SYSTEM、tools、权限说明和执行状态不作为新任务权威复制。
 
-历史材料以有来源标记的协作数据呈现，保留可见角色、工具请求/结果对应和必要产物位置。没有对应结果的请求只能呈现为历史未完成/结果未知，不能伪造为新任务待执行的 tool call。跨模型时不搬运旧供应商私有 reasoning/replay；复用现有公共历史解码与兼容性校验。
+有效历史由每段不可变来源 task／cut／revision 与当前任务后缀组成；来源 snapshot 内的 active request 转为历史保留请求，目标唯一当前请求是自己的 objective。历史工具调用不重新执行，缺失结果使用既有可见未知 closure。来源 cut 后的迟到结果不改变已接纳分支；跨模型复用既有 replay 兼容性和公开投影。
 
 源任务经过 compaction 时，读取该任务 scope 的有效“已采用摘要 + 保留材料 + 后续 canonical 历史”；不能把摘要标成完整原文。目标上下文超过实际 provider 输入预算时，由既有编译/compaction 路径处理；若该路径尚不能处理 imported worker source，P4 必须补这个窄接缝或返回明确的输入资源错误，不默默截掉历史。
 

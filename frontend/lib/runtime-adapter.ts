@@ -644,6 +644,8 @@ export interface AgentTaskActivityRecord {
   turnStatus?: string;
   entrySequence: number;
   entryKind: string;
+  inherited?: boolean;
+  sourceTaskLabel?: string;
   acceptedAt: string;
   objective: string;
   body?: string;
@@ -651,11 +653,12 @@ export interface AgentTaskActivityRecord {
   contentKind: 'INLINE' | 'CANONICAL_BLOB';
   contentDigest: string;
   contentSize: number;
-  blocks: Array<{ blockId: string; ordinal: number; kind: string; toolCallId?: string; toolName?: string; attemptId?: string }>;
+  blocks: Array<{ blockId: string; ordinal: number; kind: string; text?: string; toolCallId?: string; toolName?: string; attemptId?: string }>;
   toolResults: Array<{ attemptId?: string; assistantEntryId: string; toolCallId: string; resultEntryId: string; resultState: string }>;
 }
 
 export interface AgentTaskActivityPage {
+  inheritedContext?: { sourceLabel: string; materials: Array<{ label: string; body: string }> };
   activities: AgentTaskActivityRecord[];
   nextCursor?: string;
 }
@@ -728,7 +731,7 @@ export function projectAgentTaskConversation(
         role: 'assistant',
         assistantKind: record.entryKind === 'ASSISTANT_MESSAGE' ? 'terminal' : 'tool-request',
         time: formatTime(record.acceptedAt),
-        body: projected?.body ?? taskAssistantBody(record.entryKind, body),
+        body: projected?.body ?? (record.blocks.filter(block => block.kind === 'TEXT').sort((a, b) => a.ordinal - b.ordinal).map(block => block.text ?? '').join('\n\n') || taskAssistantBody(record.entryKind, body)),
         reasoning: projected?.reasoning?.map((block) => ({ ...block })),
         traces: traces.length ? traces : undefined,
         status: projected?.status === 'running' ? 'running' : 'completed',
@@ -1542,12 +1545,15 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         turn_status?: string;
         entry_sequence: string | number;
         entry_kind: string;
+        inherited?: boolean;
+        source_task_label?: string;
         accepted_at: string;
         objective: string;
         content: { kind: 'INLINE' | 'CANONICAL_BLOB'; inline_content?: string; digest: string; size: string | number; media_type?: string; codec?: string };
-        blocks?: Array<{ block_id: string; ordinal: string | number; kind: string; tool_call_id?: string | null; tool_name?: string | null; attempt_id?: string | null }>;
+        blocks?: Array<{ block_id: string; ordinal: string | number; kind: string; text?: string | null; tool_call_id?: string | null; tool_name?: string | null; attempt_id?: string | null }>;
         tool_results?: Array<{ attempt_id?: string | null; assistant_entry_id: string; tool_call_id: string; result_entry_id: string; result_state: string }>;
       }>;
+      inherited_context?: { source_label: string; materials: Array<{ label: string; body: string }> } | null;
       next_cursor?: string | null;
     }>(`/api/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/activities?${query.toString()}`);
     return {
@@ -1564,6 +1570,8 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         turnStatus: activity.turn_status,
         entrySequence: numeric(activity.entry_sequence),
         entryKind: activity.entry_kind,
+        inherited: activity.inherited,
+        sourceTaskLabel: activity.source_task_label,
         acceptedAt: activity.accepted_at,
         objective: activity.objective,
         body: promptContent
@@ -1579,6 +1587,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
           blockId: block.block_id,
           ordinal: numeric(block.ordinal),
           kind: block.kind,
+          text: block.text ?? undefined,
           toolCallId: block.tool_call_id || undefined,
           toolName: block.tool_name || undefined,
           attemptId: block.attempt_id || undefined,
@@ -1592,6 +1601,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
         })),
         };
       }),
+      inheritedContext: payload.inherited_context ? { sourceLabel: payload.inherited_context.source_label, materials: payload.inherited_context.materials } : undefined,
       nextCursor: payload.next_cursor || undefined,
     };
   }
@@ -3504,7 +3514,7 @@ class LocalRuntimeConnection implements RuntimeConnection {
       if (result.taskId) {
         let run = subagentRuns.find((candidate) => candidate.id === result.taskId);
         if (!run) {
-          run = {id: result.taskId, label: '', role: '子任务', objective: '', status: 'unknown', color: 'blue', activities: []};
+          run = {id: result.taskId, label: '', role: '任务', objective: '', status: 'unknown', color: 'blue', activities: []};
           subagentRuns.push(run);
         }
         run.activities.push({
@@ -4148,8 +4158,8 @@ function projectSubagentRuns(
     const index = task ? Math.max(0, tasks.indexOf(task)) : fallbackIndex++;
     const run: SubagentRun = {
       id: taskId,
-      label: task?.label || `子任务 ${index + 1}`,
-      role: task?.role || '子任务',
+      label: task?.label || `任务 ${index + 1}`,
+      role: task?.role || '任务',
       objective: task?.objective || '',
       // Task rows are loaded on demand; absence says nothing about liveness.
       status: task?.status || 'unknown',
@@ -4543,14 +4553,14 @@ function toolDisplayName(name: string): string {
   if (normalized === 'list_capabilities') return '查看能力';
   if (normalized === 'inspect_capability') return '查看能力详情';
   if (normalized === 'use_new_mcp_tool') return '调用 MCP 工具';
-  if (normalized.includes('report_agent_result')) return '提交子任务结果';
-  if (normalized.includes('create_agent_tasks') || normalized.includes('spawn_agent')) return '创建子任务';
-  if (normalized.includes('wait_agent')) return '等待子任务';
-  if (normalized.includes('send_agent_message')) return '发送子任务消息';
-  if (normalized.includes('stop_agent')) return '停止子任务';
+  if (normalized.includes('report_agent_result')) return '提交任务结果';
+  if (normalized.includes('create_agent_tasks') || normalized.includes('spawn_agent')) return '创建任务';
+  if (normalized.includes('wait_agent')) return '等待任务';
+  if (normalized.includes('send_agent_message')) return '发送任务消息';
+  if (normalized.includes('stop_agent')) return '停止任务';
   if (normalized === 'list_agent_models') return '查看可用模型';
   if (normalized === 'visualization_render') return '渲染可视化';
-  if (normalized.includes('list_agents')) return '查看子任务';
+  if (normalized.includes('list_agents')) return '查看任务';
   if (normalized === 'todo') return '更新 TODO';
   if (normalized.includes('ask_plan_question')) return '提出规划问题';
   if (normalized.includes('exit_plan')) return '提交规划方案';
@@ -4581,15 +4591,15 @@ function toolArgumentSummary(name: string, content: string): string {
     if (normalized === 'use_new_mcp_tool') return '调用已经检查的 MCP 工具';
     if (normalized.includes('report_agent_result')) return '提交最终结果';
     if (normalized.includes('create_agent_tasks')) {
-      return `创建 ${Array.isArray(value.tasks) ? value.tasks.length : 0} 个子任务`;
+      return `创建 ${Array.isArray(value.tasks) ? value.tasks.length : 0} 个任务`;
     }
-    if (normalized.includes('spawn_agent')) return String(value.label ?? value.task ?? '创建一个子任务');
-    if (normalized.includes('wait_agent')) return '等待指定子任务出现新进展';
-    if (normalized.includes('send_agent_message')) return '向子任务发送补充信息';
-    if (normalized.includes('stop_agent')) return '停止指定子任务';
+    if (normalized.includes('spawn_agent')) return String(value.label ?? value.task ?? '创建一个任务');
+    if (normalized.includes('wait_agent')) return '等待指定任务出现新进展';
+    if (normalized.includes('send_agent_message')) return '向任务发送补充信息';
+    if (normalized.includes('stop_agent')) return '停止指定任务';
     if (normalized === 'list_agent_models') return '正在读取已保存的模型配置';
     if (normalized === 'visualization_render') return value.review === true ? '正在生成可视化预览' : '正在准备可视化';
-    if (normalized.includes('list_agents')) return '读取当前子任务状态';
+    if (normalized.includes('list_agents')) return '读取当前任务状态';
     if (normalized === 'todo') return '更新当前工作清单';
     if (name.toLowerCase().includes('ask_plan_question')) return String(value.question ?? '等待你的选择');
     if (name.toLowerCase().includes('exit_plan')) return String(value.summary ?? '等待你确认方案');
@@ -4724,7 +4734,7 @@ function projectTaskInventoryRecord(task: ProtocolTaskInventoryRecord): AgentTas
   } : undefined;
   return {
     id: task.id,
-    label: task.label || task.task_key || '子任务',
+    label: task.label || task.task_key || '任务',
     role: task.display_role || profileLabel(task.profile),
     profile: task.profile,
     objective: task.objective ?? '',
@@ -4771,7 +4781,7 @@ function profileLabel(profile?: string): string {
     verification_worker: '验证',
     synthesizer: '整合',
   };
-  return labels[profile ?? ''] ?? '子任务';
+  return labels[profile ?? ''] ?? '任务';
 }
 
 function taskColor(taskId: string): AgentTask['color'] {

@@ -6256,6 +6256,7 @@ def _dispatch_anchor(
             item
             for item in delta
             if item.source_entry_id == snapshot.identity.initial_entry_id
+            and item.item_kind is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
         )
     else:
         candidates = ()

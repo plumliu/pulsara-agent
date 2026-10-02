@@ -27,24 +27,13 @@ from pulsara_agent.conversation_kernel.context_sources import (
     build_subagent_context_source,
 )
 from pulsara_agent.conversation_kernel.subagents.contracts import (
-    FrozenDependencyResultContext,
-    FrozenSubagentParentContextCallSubject,
-    FrozenSubagentParentContextSelection,
-    SubagentContextMode,
     SubagentProfileKind,
-    build_parent_context_selection,
-    dependency_result_context_identity_digest,
-    parent_context_call_subject_identity_digest,
-    parent_context_selection_identity_digest,
-    parent_context_source_identity_digest,
 )
 from pulsara_agent.llm.provider_replay import ProviderReplayTargetCompatibilityFact
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
-    ContextSourceAbsentFact,
-    ContextSourceCandidate,
     ContextSourceKind,
     FrozenCompiledModelInput,
     FrozenProviderInputItem,
@@ -254,9 +243,22 @@ def _issue_adopted_compaction_continuation_seed(
 _SUBAGENT_SEED_AUTHORITY = object()
 
 
+def subagent_initial_material_absences():
+    # Initial public material now belongs to canonical items. Keep the existing
+    # context-source slots explicitly absent so it is never injected twice.
+    return tuple(
+        build_subagent_context_source(kind=kind, text=None, domain_identity=None)
+        for kind in (
+            ContextSourceKind.PARENT_CONTEXT,
+            ContextSourceKind.DEPENDENCY_RESULTS,
+            ContextSourceKind.TERMINAL_MATERIAL,
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SubagentInitialSeed:
-    """Exact sealed first-open carrier for one fixed worker leaf."""
+    """First-open task identity; all inherited/public material is canonical."""
 
     dispatch_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
     task_id: str
@@ -264,190 +266,55 @@ class SubagentInitialSeed:
     profile_kind: SubagentProfileKind
     objective: str = field(repr=False)
     objective_item: FrozenProviderInputItem = field(repr=False)
-    parent_call_subject: FrozenSubagentParentContextCallSubject = field(repr=False)
-    parent_context_selection: FrozenSubagentParentContextSelection = field(repr=False)
-    parent_context_source: ContextSourceCandidate | ContextSourceAbsentFact = field(
-        repr=False
-    )
-    dependency_context: FrozenDependencyResultContext | None = field(repr=False)
-    dependency_results_source: ContextSourceCandidate | ContextSourceAbsentFact = field(
-        repr=False
-    )
-    terminal_material_body: str | None = field(repr=False)
-    worker_history_body: str | None = field(repr=False)
-    terminal_material_source: ContextSourceCandidate | ContextSourceAbsentFact = field(repr=False)
-    worker_history_source: ContextSourceCandidate | ContextSourceAbsentFact = field(repr=False)
     _authority: object = field(repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        identity = self.dispatch_read.compile_snapshot.canonical_input.identity
+    def __post_init__(self):
         canonical = self.dispatch_read.compile_snapshot.canonical_input
-        objective_items = tuple(
+        identity = canonical.identity
+        matches = tuple(
             item
             for item in canonical.items
-            if item.item_kind is FrozenProviderInputItemKind.USER
+            if item.source_entry_id == identity.initial_entry_id
+            and item.item_kind is FrozenProviderInputItemKind.USER
             and item.input_origin is CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
-        )
-        expected_selection = build_parent_context_selection(
-            self.parent_call_subject,
-            mode=self.parent_context_selection.mode,
-            last_n_turns=self.parent_context_selection.last_n_turns,
-            history_task_id=self.parent_context_selection.history_task_id,
-        )
-        expected_parent_source = build_subagent_context_source(
-            kind=ContextSourceKind.PARENT_CONTEXT,
-            text=expected_selection.rendered_body,
-            domain_identity={
-                "subject": parent_context_call_subject_identity_digest(
-                    self.parent_call_subject
-                ),
-                "selection": parent_context_selection_identity_digest(
-                    self.parent_call_subject, expected_selection
-                ),
-                "source": parent_context_source_identity_digest(
-                    self.parent_call_subject, expected_selection
-                ),
-            },
-        )
-        expected_dependency_source = build_subagent_context_source(
-            kind=ContextSourceKind.DEPENDENCY_RESULTS,
-            text=(
-                None
-                if self.dependency_context is None
-                else self.dependency_context.rendered_body
-            ),
-            domain_identity=(
-                None
-                if self.dependency_context is None
-                else dependency_result_context_identity_digest(self.dependency_context)
-            ),
-        )
-        expected_material_source = build_subagent_context_source(
-            kind=ContextSourceKind.TERMINAL_MATERIAL,
-            text=self.terminal_material_body,
-            domain_identity=(None if self.terminal_material_body is None else {"task_id": self.task_id, "body": self.terminal_material_body}),
-        )
-        expected_history_source = build_subagent_context_source(
-            kind=ContextSourceKind.WORKER_HISTORY,
-            text=self.worker_history_body,
-            domain_identity=(None if self.worker_history_body is None else {"task_id": self.task_id, "source_task_id": self.parent_context_selection.history_task_id, "body": self.worker_history_body}),
-        )
-        parent_present = isinstance(self.parent_context_source, ContextSourceCandidate)
-        dependency_present = isinstance(
-            self.dependency_results_source, ContextSourceCandidate
         )
         if (
             self._authority is not _SUBAGENT_SEED_AUTHORITY
             or identity.conversation_scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
             or identity.scope_subagent_task_id != self.task_id
             or not self.parent_turn_id
-            or self.parent_call_subject.caller_turn_id != self.parent_turn_id
             or not isinstance(self.profile_kind, SubagentProfileKind)
-            or len(objective_items) != 1
-            or objective_items[0] != self.objective_item
+            or matches != (self.objective_item,)
             or provider_input_item_text(self.objective_item) != self.objective
             or self.objective_item.source_turn_id != identity.turn_id
-            or self.parent_call_subject.session_id != identity.session_id
-            or self.parent_context_selection != expected_selection
-            or self.parent_context_source != expected_parent_source
-            or self.dependency_results_source != expected_dependency_source
-            or self.terminal_material_source != expected_material_source
-            or self.worker_history_source != expected_history_source
-            or (
-                self.parent_context_selection.mode is SubagentContextMode.NONE
-                and parent_present
-            )
-            or bool(self.parent_context_selection.selected_units) != parent_present
-            or self.parent_context_source.source_kind
-            is not ContextSourceKind.PARENT_CONTEXT
-            or (self.dependency_context is None) == dependency_present
-            or self.dependency_results_source.source_kind
-            is not ContextSourceKind.DEPENDENCY_RESULTS
-            or (
-                self.dependency_context is not None
-                and self.dependency_context.target_task_id != self.task_id
-            )
         ):
-            raise ValueError("subagent initial seed is invalid")
+            raise ValueError("subagent canonical initial seed is invalid")
 
     @property
-    def source_replacements(
-        self,
-    ) -> tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...]:
-        return self.parent_context_source, self.dependency_results_source, self.terminal_material_source, self.worker_history_source
+    def source_replacements(self):
+        return subagent_initial_material_absences()
 
 
 def build_subagent_initial_seed(
-    *,
-    dispatch_read: FrozenCanonicalProviderDispatchRead,
-    task_id: str,
-    parent_turn_id: str,
-    profile_kind: SubagentProfileKind,
-    objective: str,
-    parent_call_subject: FrozenSubagentParentContextCallSubject,
-    parent_context_selection: FrozenSubagentParentContextSelection,
-    dependency_context: FrozenDependencyResultContext | None,
-    terminal_material_body: str | None = None,
-    worker_history_body: str | None = None,
-) -> SubagentInitialSeed:
+    *, dispatch_read, task_id, parent_turn_id, profile_kind, objective
+):
     canonical = dispatch_read.compile_snapshot.canonical_input
-    objective_items = tuple(
+    matches = tuple(
         item
         for item in canonical.items
-        if item.item_kind is FrozenProviderInputItemKind.USER
+        if item.source_entry_id == canonical.identity.initial_entry_id
+        and item.item_kind is FrozenProviderInputItemKind.USER
         and item.input_origin is CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
     )
-    if len(objective_items) != 1:
-        raise ValueError("child canonical cut lacks one exact objective item")
-    objective_item = objective_items[0]
-    parent_source = build_subagent_context_source(
-        kind=ContextSourceKind.PARENT_CONTEXT,
-        text=parent_context_selection.rendered_body,
-        domain_identity={
-            "subject": parent_context_call_subject_identity_digest(parent_call_subject),
-            "selection": parent_context_selection_identity_digest(
-                parent_call_subject, parent_context_selection
-            ),
-            "source": parent_context_source_identity_digest(
-                parent_call_subject, parent_context_selection
-            ),
-        },
-    )
-    dependency_source = build_subagent_context_source(
-        kind=ContextSourceKind.DEPENDENCY_RESULTS,
-        text=(None if dependency_context is None else dependency_context.rendered_body),
-        domain_identity=(
-            None
-            if dependency_context is None
-            else dependency_result_context_identity_digest(dependency_context)
-        ),
-    )
-    material_source = build_subagent_context_source(
-        kind=ContextSourceKind.TERMINAL_MATERIAL,
-        text=terminal_material_body,
-        domain_identity=(None if terminal_material_body is None else {"task_id": task_id, "body": terminal_material_body}),
-    )
-    history_source = build_subagent_context_source(
-        kind=ContextSourceKind.WORKER_HISTORY,
-        text=worker_history_body,
-        domain_identity=(None if worker_history_body is None else {"task_id": task_id, "source_task_id": parent_context_selection.history_task_id, "body": worker_history_body}),
-    )
+    if len(matches) != 1:
+        raise ValueError("child canonical cut lacks one exact current objective")
     return SubagentInitialSeed(
         dispatch_read,
         task_id,
         parent_turn_id,
         profile_kind,
         objective,
-        objective_item,
-        parent_call_subject,
-        parent_context_selection,
-        parent_source,
-        dependency_context,
-        dependency_source,
-        terminal_material_body,
-        worker_history_body,
-        material_source,
-        history_source,
+        matches[0],
         _SUBAGENT_SEED_AUTHORITY,
     )
 
@@ -662,7 +529,6 @@ class KernelColdEpochInputAssembler:
                     ContextSourceKind.PARENT_CONTEXT,
                     ContextSourceKind.DEPENDENCY_RESULTS,
                     ContextSourceKind.TERMINAL_MATERIAL,
-                    ContextSourceKind.WORKER_HISTORY,
                 }
             }
             expected = {item.source_kind: item for item in seed.source_replacements}

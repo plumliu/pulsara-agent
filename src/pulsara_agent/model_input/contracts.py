@@ -120,7 +120,6 @@ class ContextSourceKind(StrEnum):
     PARENT_CONTEXT = "PARENT_CONTEXT"
     DEPENDENCY_RESULTS = "DEPENDENCY_RESULTS"
     TERMINAL_MATERIAL = "TERMINAL_MATERIAL"
-    WORKER_HISTORY = "WORKER_HISTORY"
 
 
 class ContextChannel(StrEnum):
@@ -750,6 +749,7 @@ class FrozenProviderInputItemKind(StrEnum):
     LATE_TOOL_OUTCOME = "LATE_TOOL_OUTCOME"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
     INTER_AGENT_MESSAGE = "INTER_AGENT_MESSAGE"
+    INITIAL_CONTEXT_MATERIAL = "INITIAL_CONTEXT_MATERIAL"
 
 
 class CompactionContinuationMode(StrEnum):
@@ -872,10 +872,13 @@ def validate_compaction_request_shape(
             CanonicalInputOriginKind.INTER_AGENT_MESSAGE
         },
         FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {None},
+        FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL: {None},
     }
     allowed = origins.get(item_kind)
     if allowed is None or input_origin not in allowed:
         raise ValueError("compaction request kind/origin union is invalid")
+    if active and item_kind is FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL:
+        raise ValueError("initial context material cannot be an active request")
     if active and input_origin in {
         CanonicalInputOriginKind.HUMAN_STEER,
         CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,

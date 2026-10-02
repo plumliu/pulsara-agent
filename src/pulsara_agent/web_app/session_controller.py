@@ -741,6 +741,7 @@ class LocalSessionController:
             blocks,
             results,
             has_more,
+            inherited_context,
         ) = await self.core.read_subagent_task_activity_page(
             session_id=session_id,
             task_id=task_id,
@@ -754,6 +755,9 @@ class LocalSessionController:
                     "block_id": str(block["id"]),
                     "ordinal": int(block["block_ordinal"]),
                     "kind": str(block["block_kind"]),
+                    "text": bytes(block["public_content"]).decode("utf-8")
+                    if str(block["block_kind"]) == "TEXT" and block.get("public_content") is not None
+                    else None,
                     "tool_call_id": block.get("tool_call_id"),
                     "tool_name": block.get("tool_name"),
                     "attempt_id": block.get("attempt_id"),
@@ -776,9 +780,9 @@ class LocalSessionController:
             )
         activities = []
         for entry in entries:
-            inline = entry.get("inline_content")
+            inline = entry.get("public_content", entry.get("inline_content"))
             content = {
-                "kind": "INLINE" if inline is not None else "CANONICAL_BLOB",
+                "kind": "CANONICAL_BLOB" if entry.get("blob_id") is not None or inline is None else "INLINE",
                 "digest": str(entry["content_digest"]),
                 "size": int(entry["content_size"]),
                 "media_type": str(entry["content_media_type"]),
@@ -798,6 +802,8 @@ class LocalSessionController:
                     "entry_kind": str(entry["entry_kind"]),
                     "accepted_at": entry["accepted_at"].isoformat(),
                     "objective": str(entry["task_objective"]),
+                    "inherited": bool(entry.get("inherited", False)),
+                    "source_task_label": entry.get("source_task_label"),
                     "content": content,
                     "blocks": blocks_by_entry.get(entry_id, []),
                     "tool_results": results_by_entry.get(entry_id, []),
@@ -815,6 +821,7 @@ class LocalSessionController:
             "task_id": task_id,
             "activities": activities,
             "next_cursor": next_cursor,
+            "inherited_context": inherited_context,
         }
 
     async def inspect_session_capabilities(self, session_id: str) -> dict[str, object]:

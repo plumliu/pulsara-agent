@@ -62,9 +62,6 @@ from pulsara_agent.conversation_kernel.repository import (
     TurnAdmissionConfirmationKind,
 )
 from pulsara_agent.model_input.contracts import (
-    ContextSourceAbsentFact,
-    ContextSourceCandidate,
-    ContextSourceKind,
     ModelInputScopeKind,
 )
 from pulsara_agent.conversation_kernel.runner import (
@@ -82,9 +79,6 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
 from pulsara_agent.conversation_kernel.cold_epoch import (
     SubagentInitialSeed,
     build_subagent_initial_seed,
-)
-from pulsara_agent.conversation_kernel.context_sources import (
-    build_subagent_context_source,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenRootSubagentTaskBoardHandoffFact,
@@ -131,10 +125,6 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_subagent_task_terminal_settlement,
     build_subagent_task_start,
     build_subagent_result_public_fact,
-    dependency_result_context_identity_digest,
-    parent_context_call_subject_identity_digest,
-    parent_context_selection_identity_digest,
-    parent_context_source_identity_digest,
 )
 from pulsara_agent.conversation_kernel.subagents.launch import (
     SubagentLaunchPreparationPort,
@@ -218,7 +208,6 @@ class _TaskStartMaterial:
     dependency_task_ids: tuple[str, ...]
     dependency_context: FrozenDependencyResultContext | None = None
     terminal_material_body: str | None = None
-    worker_history_body: str | None = None
 
 
 @dataclass(slots=True)
@@ -661,11 +650,6 @@ class KernelSubagentManager:
             parent_turn_id=material.parent_turn_id,
             profile_kind=material.profile,
             objective=material.objective,
-            parent_call_subject=material.parent_call_subject,
-            parent_context_selection=material.context,
-            dependency_context=material.dependency_context,
-            terminal_material_body=material.terminal_material_body,
-            worker_history_body=material.worker_history_body,
         )
 
     def profile_kind(self, *, task_id: str) -> SubagentProfileKind:
@@ -674,56 +658,14 @@ class KernelSubagentManager:
             raise RuntimeError("subagent start material is not installed")
         return material.profile
 
-    def initial_context_sources(
-        self, *, task_id: str
-    ) -> tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...]:
-        """Return the exact immutable source leaves installed for one child."""
-
-        material = self._start_materials.get(task_id)
-        if material is None:
+    def initial_context_sources(self, *, task_id: str):
+        if task_id not in self._start_materials:
             raise RuntimeError("subagent start material is not installed")
-        return (
-            build_subagent_context_source(
-                kind=ContextSourceKind.PARENT_CONTEXT,
-                text=material.context.rendered_body,
-                domain_identity={
-                    "subject": parent_context_call_subject_identity_digest(
-                        material.parent_call_subject
-                    ),
-                    "selection": parent_context_selection_identity_digest(
-                        material.parent_call_subject, material.context
-                    ),
-                    "source": parent_context_source_identity_digest(
-                        material.parent_call_subject, material.context
-                    ),
-                },
-            ),
-            build_subagent_context_source(
-                kind=ContextSourceKind.DEPENDENCY_RESULTS,
-                text=(
-                    None
-                    if material.dependency_context is None
-                    else material.dependency_context.rendered_body
-                ),
-                domain_identity=(
-                    None
-                    if material.dependency_context is None
-                    else dependency_result_context_identity_digest(
-                        material.dependency_context
-                    )
-                ),
-            ),
-            build_subagent_context_source(
-                kind=ContextSourceKind.TERMINAL_MATERIAL,
-                text=material.terminal_material_body,
-                domain_identity=(None if material.terminal_material_body is None else {"task_id": task_id, "body": material.terminal_material_body}),
-            ),
-            build_subagent_context_source(
-                kind=ContextSourceKind.WORKER_HISTORY,
-                text=material.worker_history_body,
-                domain_identity=(None if material.worker_history_body is None else {"task_id": task_id, "source_task_id": material.context.history_task_id, "body": material.worker_history_body}),
-            ),
+        from pulsara_agent.conversation_kernel.cold_epoch import (
+            subagent_initial_material_absences,
         )
+
+        return subagent_initial_material_absences()
 
     async def invoke(
         self,
@@ -914,7 +856,7 @@ class KernelSubagentManager:
                 task_key = raw.get("task_key")
                 if task_key is not None and (
                     not isinstance(task_key, str)
-                    or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", task_key) is None
+                    or re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", task_key) is None
                 ):
                     raise ValueError("task_key is invalid")
                 if task_key is not None and task_key in key_to_id:
@@ -1316,8 +1258,14 @@ class KernelSubagentManager:
                 # scheduler to fill the slot, so a canonical terminal child no
                 # longer blocks the next accepted task merely because its
                 # coroutine has not returned from final settlement yet.
-                occupied = {task_id for task_id, item in self._tasks.items() if item.status == "ACTIVE"}
-                available = self._capacity_target - len(occupied | self._launch_permits.keys())
+                occupied = {
+                    task_id
+                    for task_id, item in self._tasks.items()
+                    if item.status == "ACTIVE"
+                }
+                available = self._capacity_target - len(
+                    occupied | self._launch_permits.keys()
+                )
                 if available <= 0:
                     return
             rows = await self._io.run(
@@ -1332,8 +1280,15 @@ class KernelSubagentManager:
             for row in rows:
                 task_id = str(row["id"])
                 async with self._lock:
-                    occupied = {task_id for task_id, item in self._tasks.items() if item.status == "ACTIVE"}
-                    if len(occupied | self._launch_permits.keys()) >= self._capacity_target:
+                    occupied = {
+                        task_id
+                        for task_id, item in self._tasks.items()
+                        if item.status == "ACTIVE"
+                    }
+                    if (
+                        len(occupied | self._launch_permits.keys())
+                        >= self._capacity_target
+                    ):
                         break
                     material = self._start_materials.get(task_id)
                     if material is None or task_id in self._launch_permits:
@@ -1366,7 +1321,7 @@ class KernelSubagentManager:
                         target_task_id=task_id,
                         rows=dependencies,
                     )
-                    terminal_body, history_body = await self._io.run(
+                    terminal_body = await self._io.run(
                         self._repository.read_subagent_start_sources,
                         session_id=self._guard.session_id,
                         task_id=task_id,
@@ -1376,7 +1331,6 @@ class KernelSubagentManager:
                         material,
                         dependency_context=dependency_context,
                         terminal_material_body=terminal_body,
-                        worker_history_body=history_body,
                     )
                     async with self._lock:
                         if self._launch_permits.get(task_id) is not permit:
@@ -1396,7 +1350,6 @@ class KernelSubagentManager:
                         parent_context=material.context,
                         dependency_context=dependency_context,
                         terminal_material_body=terminal_body,
-                        worker_history_body=history_body,
                         occurred_at=datetime.now(timezone.utc),
                         actor_id=self._host_owner_id,
                     )
@@ -3557,7 +3510,7 @@ def _validate_task_definition(value: object) -> None:
     task_key = value.get("task_key")
     if task_key is not None and (
         not isinstance(task_key, str)
-        or re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", task_key) is None
+        or re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", task_key) is None
     ):
         raise ValueError("task_key is invalid")
     for field in ("label", "display_role"):

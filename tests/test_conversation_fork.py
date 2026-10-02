@@ -233,7 +233,10 @@ def compact(
         (turn_id,),
     )[0]
     canonical_initial = tuple(
-        item for item in canonical.items if item.source_entry_id == initial["id"]
+        item
+        for item in canonical.items
+        if item.source_entry_id == initial["id"]
+        and item.item_kind is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
     )
     active_content = None
     if initial["entry_sequence"] <= boundary:
@@ -255,7 +258,9 @@ def compact(
             if initial["entry_sequence"] <= boundary
             else CompactionActiveRequestLocation.CANONICAL_SUFFIX,
             item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+            input_origin=CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
+            if initial["conversation_scope_kind"] == "SUBAGENT_TASK"
+            else CanonicalInputOriginKind.HUMAN_MESSAGE,
             content=active_content,
         )
     )
@@ -286,8 +291,10 @@ def compact(
             predecessor=ExpectedCompactionPredecessorRevision(
                 binding_revision_id=lineage.binding_revision_id,
                 revision_ordinal=lineage.binding_revision_ordinal,
-                base_kind="SNAPSHOT" if lineage.snapshot_id else "FULL_HISTORY",
-                context_snapshot_id=lineage.snapshot_id,
+                base_kind="SNAPSHOT"
+                if lineage.persisted_context_snapshot_id
+                else "FULL_HISTORY",
+                context_snapshot_id=lineage.persisted_context_snapshot_id,
                 source_through_sequence=lineage.persisted_revision_genesis_marker,
             ),
             snapshot_id=identity("snapshot"),

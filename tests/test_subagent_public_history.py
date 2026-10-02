@@ -1,193 +1,173 @@
-"""Worker history is public material at a frozen source cut, never executable state."""
+"""Worker history preserves fixed canonical references, not JSON history packages."""
 
-from __future__ import annotations
-
-from hashlib import sha256
-import json
+from time import monotonic
 
 import pytest
 
-from pulsara_agent.conversation_kernel.compaction.prompt import build_compaction_snapshot_carrier, freeze_compaction_summary_output
-from pulsara_agent.conversation_kernel.compaction.contracts import CONTEXT_SNAPSHOT_CODEC, CONTEXT_SNAPSHOT_MEDIA_TYPE
 from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
-from pulsara_agent.conversation_kernel.subagents.history import read_terminal_worker_public_history
-from pulsara_agent.model_input.contracts import CompactionContinuationMode
-
-_SNAPSHOT = build_compaction_snapshot_carrier(
-    summary=freeze_compaction_summary_output("COMPACTED_PUBLIC_SUMMARY", maximum_utf8_bytes=1024),
-    recent_human_requests=(), continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
-    active_request=None,
-).body
+from pulsara_agent.conversation_kernel.subagents.history import (
+    validate_worker_history_source,
+    worker_history_segments,
+    worker_initial_material_items,
+)
+from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 
 
-def _content(body: bytes) -> dict[str, object]:
-    return {
-        "body": body,
-        "content_size": len(body),
-        "content_digest": "sha256:" + sha256(body).hexdigest(),
-        "content_codec": "utf-8",
-    }
-
-
-class _Result:
-    def __init__(self, value: object) -> None:
+class Result:
+    def __init__(self, value):
         self.value = value
 
     def fetchone(self):
         return self.value
 
-    def fetchall(self):
-        return self.value
+
+class Source:
+    def __init__(self, status="COMPLETED", frontier=True, found=True):
+        self.status, self.frontier, self.found = status, frontier, found
+
+    def execute(self, query, args):
+        if "task.status" in query:
+            assert args == ("revision:A", "session:one", "task:A")
+            return Result(
+                dict(
+                    status=self.status,
+                    turn_id="turn:A",
+                    entry_sequence=4,
+                    source_through_sequence=6,
+                )
+                if self.found
+                else None
+            )
+        assert args == ("session:one", "task:A", 8)
+        return Result({"present": 1} if self.frontier else None)
 
 
-class _FrozenRows:
-    def __init__(
-        self, *, snapshot_body: bytes | None = _SNAPSHOT,
-        status: str = "COMPLETED", has_image: bool = False,
-    ) -> None:
-        self.snapshot_body = snapshot_body
-        self.status = status
-        self.has_image = has_image
-        self.queries: list[tuple[str, tuple[object, ...]]] = []
-
-    def execute(self, query: str, args: tuple[object, ...]):
-        self.queries.append((query, args))
-        if "FROM pulsara_v3.subagent_tasks AS t" in query:
-            return _Result({
-                "objective": "review the input", "parent_context_body": "ROOT_PUBLIC",
-                "dependency_context_body": "DIRECT_DEPENDENCY",
-                "terminal_material_body": "PRIOR_RESULT", "worker_history_body": '{"pulsara_worker_history":{"frames":[{"objective":"ANCESTOR_PUBLIC"}]}}', "status": self.status,
-                "base_kind": "SNAPSHOT", "source_through_sequence": 8,
-                "context_snapshot_id": "snapshot:source",
-            })
-        if "FROM pulsara_v3.context_snapshots AS s" in query:
-            return _Result({**_content(self.snapshot_body or b""),
-                "inline_content": self.snapshot_body, "blob_id": None,
-                "content_codec": CONTEXT_SNAPSHOT_CODEC, "content_media_type": CONTEXT_SNAPSHOT_MEDIA_TYPE,
-                "workspace_id": "workspace:one", "session_id": "session:one",
-            })
-        if "FROM pulsara_v3.canonical_image_refs AS r" in query:
-            return _Result([])
-        if "FROM pulsara_v3.canonical_image_refs AS image" in query:
-            return _Result({"present": 1} if self.has_image else None)
-        if "FROM pulsara_v3.transcript_entries AS e" in query:
-            return _Result([
-                {
-                    "id": "entry:assistant", "entry_sequence": 9,
-                    "entry_kind": "ASSISTANT_MESSAGE", "tool_call_id": None,
-                    "result_state": None, **_content(b""),
-                },
-                {
-                    "id": "entry:tool-result", "entry_sequence": 10,
-                    "entry_kind": "TOOL_RESULT", "tool_call_id": "call:settled",
-                    "result_state": "SUCCESS", **_content(b"public tool result"),
-                },
-            ])
-        if "FROM pulsara_v3.assistant_message_blocks AS b" in query:
-            return _Result([
-                {
-                    "assistant_entry_id": "entry:assistant", "block_kind": "TOOL_CALL",
-                    "tool_call_id": "call:unsettled", "tool_name": "terminal",
-                    "tool_arguments": {"command": "do not replay"},
-                },
-                {
-                    "assistant_entry_id": "entry:assistant", "block_kind": "TOOL_CALL",
-                    "tool_call_id": "call:settled", "tool_name": "terminal",
-                    "tool_arguments": {"command": "already done"},
-                },
-            ])
-        raise AssertionError(f"unexpected public-history query: {query}")
-
-
-def test_worker_history_uses_frozen_adopted_snapshot_and_marks_unsettled_tool() -> None:
-    rows = _FrozenRows()
-    body = read_terminal_worker_public_history(
-        rows, session_id="session:one", source_task_id="task:old",
-        through_sequence=10, binding_revision_id="revision:frozen",
-    )
-    package = json.loads(body)["pulsara_worker_history"]
-    assert len(package["frames"]) == 1
-    history = package["frames"][0]
-    assert history["source_task_id"] == "task:old"
-    assert history["initial_public_sources"] is None  # already covered by adopted compaction
-    assert "handoff_instruction" not in body
-    assert "AWAIT_NEXT_USER" not in body
-    assert history["adopted_summary"] == "COMPACTED_PUBLIC_SUMMARY"
-    assert history["adopted_summary_through_sequence"] == 8
-    assert [entry["sequence"] for entry in history["committed_public_entries"]] == [9, 10]
-    blocks = history["committed_public_entries"][0]["blocks"]
-    assert blocks[0]["historical_result"] == "UNKNOWN_OR_UNFINISHED"
-    assert "historical_result" not in blocks[1]
-    assert package["content_semantics"] == "ADVISORY_HISTORY_NOT_EXECUTABLE"
-    assert rows.queries[0][1] == ("revision:frozen", "session:one", "task:old")
-    assert rows.queries[4][1][:4] == ("session:one", "task:old", 8, 10)
-
-
-def test_worker_history_rejects_corrupted_adopted_summary() -> None:
-    rows = _FrozenRows()
-    rows.snapshot_body = b"corrupted"
-    original_execute = rows.execute
-
-    def execute(query: str, args: tuple[object, ...]):
-        result = original_execute(query, args)
-        if "FROM pulsara_v3.context_snapshots AS s" in query:
-            result.value["content_digest"] = "sha256:" + "0" * 64
-        return result
-
-    rows.execute = execute  # type: ignore[method-assign]
-    with pytest.raises(ConversationKernelConflict, match="corrupt"):
-        read_terminal_worker_public_history(
-            rows, session_id="session:one", source_task_id="task:old",
-            through_sequence=10, binding_revision_id="revision:frozen",
+@pytest.mark.parametrize("status", ["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"])
+def test_started_terminal_source_has_exact_cut_and_revision(status):
+    assert (
+        validate_worker_history_source(
+            Source(status),
+            session_id="session:one",
+            source_task_id="task:A",
+            through_sequence=8,
+            binding_revision_id="revision:A",
         )
+        == "turn:A"
+    )
 
 
 @pytest.mark.parametrize(
-    ("rows", "message"),
-    (
-        (_FrozenRows(status="ACTIVE"), "not terminal"),
-        (_FrozenRows(snapshot_body=None), "storage union"),
-        (_FrozenRows(has_image=True), "unsupported multimodal"),
-    ),
+    "source,cut",
+    [
+        (Source(status="ACTIVE"), 8),
+        (Source(found=False), 8),
+        (Source(frontier=False), 8),
+        (Source(), 5),
+    ],
 )
-def test_worker_history_rejects_unavailable_public_source(
-    rows: _FrozenRows, message: str,
-) -> None:
-    with pytest.raises(ConversationKernelConflict, match=message):
-        read_terminal_worker_public_history(
-            rows, session_id="session:one", source_task_id="task:old",
-            through_sequence=10, binding_revision_id="revision:frozen",
+def test_invalid_source_never_becomes_summary_fallback(source, cut):
+    with pytest.raises(ConversationKernelConflict):
+        validate_worker_history_source(
+            source,
+            session_id="session:one",
+            source_task_id="task:A",
+            through_sequence=cut,
+            binding_revision_id="revision:A",
         )
 
 
-def test_uncompacted_worker_keeps_its_actual_imported_ancestor_history():
-    rows = _FrozenRows()
-    original = rows.execute
-    def execute(query, args):
-        result = original(query, args)
-        if "FROM pulsara_v3.subagent_tasks AS t" in query:
-            result.value.update(base_kind="EMPTY", source_through_sequence=0, context_snapshot_id=None)
-        return result
-    rows.execute = execute
-    body = read_terminal_worker_public_history(rows, session_id="session:one", source_task_id="task:old", through_sequence=10, binding_revision_id="revision:frozen")
-    assert json.loads(body)["pulsara_worker_history"]["frames"][0]["objective"] == "ANCESTOR_PUBLIC"
+class Chain:
+    def __init__(self, snapshot_at=None):
+        self.snapshot_at = snapshot_at
+        self.visited = []
+
+    def execute(self, query, args):
+        if "SELECT turn.scope_subagent_task_id" in query:
+            revision, session, turn = args
+            n = int(turn.split(":")[1])
+            assert session == "session:one" and revision == f"revision:{n}"
+            self.visited.append(n)
+            return Result(
+                dict(
+                    scope_subagent_task_id=f"task:{n}",
+                    base_kind="SNAPSHOT" if n == self.snapshot_at else "FULL_HISTORY",
+                    source_through_sequence=n * 2,
+                    history_source_task_id=f"task:{n - 1}" if n else None,
+                    history_cut_sequence=n * 2,
+                    history_context_binding_revision_id=f"revision:{n - 1}"
+                    if n
+                    else None,
+                )
+            )
+        if "task.status" in query:
+            n = int(args[2].split(":")[1])
+            return Result(
+                dict(
+                    status="COMPLETED",
+                    turn_id=f"turn:{n}",
+                    entry_sequence=n * 2 + 1,
+                    source_through_sequence=n * 2,
+                )
+            )
+        return Result({"present": 1})
 
 
-def test_worker_history_thousand_generations_stay_flat_and_ordered():
-    rows = _FrozenRows()
-    execute = rows.execute
-    previous = None
-    def read(query, args):
-        result = execute(query, args)
-        if "FROM pulsara_v3.subagent_tasks AS t" in query:
-            result.value.update(base_kind="EMPTY", source_through_sequence=0,
-                context_snapshot_id=None, worker_history_body=previous)
-        return result
-    rows.execute = read
-    for generation in range(1000):
-        previous = read_terminal_worker_public_history(rows, session_id="session:one",
-            source_task_id=f"task:{generation}", through_sequence=10, binding_revision_id="revision:frozen")
-        rows.queries.clear()
-    package = json.loads(previous)["pulsara_worker_history"]
-    assert [f["source_task_id"] for f in package["frames"]] == [f"task:{i}" for i in range(1000)]
-    assert previous.count('"committed_public_entries"') == 1000
+def test_thousand_generation_ancestry_is_iterative_and_ordered():
+    connection = Chain()
+    cut = PreparedProviderInputCut("session:one", "turn:999", "revision:999", 2000)
+    segments = worker_history_segments(
+        connection, cut, deadline_monotonic=monotonic() + 10, maximum_items=2000
+    )
+    assert [s.turn_id for s in segments.segments] == [f"turn:{n}" for n in range(1000)]
+    assert connection.visited == list(reversed(range(1000)))
+    assert segments.segments[0].provider_input_through_sequence == 2
+
+
+def test_snapshot_stops_expanding_covered_ancestors():
+    connection = Chain(snapshot_at=997)
+    cut = PreparedProviderInputCut("session:one", "turn:999", "revision:999", 2000)
+    segments = worker_history_segments(
+        connection, cut, deadline_monotonic=monotonic() + 10, maximum_items=100
+    )
+    assert [s.turn_id for s in segments.segments] == ["turn:997", "turn:998", "turn:999"]
+    assert connection.visited == [999, 998, 997]
+
+
+def test_existing_physical_item_budget_limits_one_read_without_truncation():
+    with pytest.raises(ConversationKernelConflict, match="item budget"):
+        worker_history_segments(
+            Chain(),
+            PreparedProviderInputCut("session:one", "turn:999", "revision:999", 2000),
+            deadline_monotonic=monotonic() + 10,
+            maximum_items=100,
+        )
+
+
+def test_initial_materials_are_ordered_anchored_and_covered_once():
+    class Materials:
+        def execute(self, query, args):
+            return Result(
+                dict(
+                    initial_entry_id="entry:initial",
+                    entry_sequence=9,
+                    parent_context_body="parent",
+                    dependency_context_body="dependency",
+                    terminal_material_body="terminal",
+                )
+            )
+
+    cut = PreparedProviderInputCut("session:one", "turn:worker", "revision:worker", 10)
+    items = worker_initial_material_items(Materials(), cut=cut, floor=0)
+    assert len(items) == 3
+    assert all(
+        i.source_entry_id == "entry:initial" and i.source_entry_sequence == 9
+        for i in items
+    )
+    texts = [i.content[0].text for i in items]
+    assert (
+        "PARENT_CONTEXT" in texts[0]
+        and "DEPENDENCY_RESULTS" in texts[1]
+        and "TERMINAL_MATERIAL" in texts[2]
+    )
+    assert all("UNTRUSTED_COLLABORATION_DATA" in t for t in texts)
+    assert worker_initial_material_items(Materials(), cut=cut, floor=9) == ()

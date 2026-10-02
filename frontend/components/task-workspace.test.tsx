@@ -21,7 +21,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); cleanup(); });
 
 const task = (overrides: Partial<AgentTask> = {}): AgentTask => ({
   id: 'task-a',
-  label: '精确子任务',
+  label: '精确任务',
   role: '验证者',
   objective: '检查 exact owner。',
   status: 'running',
@@ -44,8 +44,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       onNotify: vi.fn(), activities: new Map(), loadActivities: vi.fn(async () => ({ activities: [] })),
       loadBackgroundProcesses: vi.fn(async () => ({ processes: [] })) };
     const view = render(<TaskWorkspace {...props} />);
-    fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
-    const detail = screen.getByRole('complementary', { name: '精确子任务 详情' });
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
+    const detail = screen.getByRole('complementary', { name: '精确任务 详情' });
     expect(detail.textContent).not.toMatch(/历史来源|终态材料来源|结构化结果|internal-history-id|internal-material-id|raw-json-value/);
     expect(within(detail).getByText('可读任务结果')).toBeTruthy();
     const button = within(detail).getByRole('button', { name: '取消任务' });
@@ -56,15 +56,39 @@ describe('TaskWorkspace PR03 hard cut', () => {
     expect(within(detail).queryByRole('button', { name: '取消任务' })).toBeNull();
   });
 
+  it('shows named inherited conversation separately from the current task', async () => {
+    const record = { turnId: 'turn-a', entrySequence: 1, entryKind: 'USER_MESSAGE', acceptedAt: '2026-10-02T10:00:00Z',
+      objective: '原任务目标', body: '原任务目标', contentKind: 'INLINE' as const, contentDigest: 'sha256:source', contentSize: 18, blocks: [], toolResults: [] };
+    render(<TaskWorkspace tasks={[task({ context: { mode: 'worker-history', historyTaskId: 'private-source-id' } })]}
+      loading={false} canControl={false} onRetry={vi.fn()} onCancel={vi.fn()} onNotify={vi.fn()} activities={new Map()}
+      loadActivities={vi.fn(async () => ({ inheritedContext: { sourceLabel: '初次审阅', materials: [{ label: '已压缩的上下文', body: '保留的历史摘要' }] },
+        activities: [{ ...record, entryId: 'source', inherited: true, sourceTaskLabel: '初次审阅' },
+          { ...record, entryId: 'source-answer', entrySequence: 2, entryKind: 'ASSISTANT_MESSAGE', turnStatus: 'COMPLETED',
+            inherited: true, sourceTaskLabel: '初次审阅', body: '{"blocks":[],"draft_identity":"internal"}',
+            blocks: [{ blockId: 'text', ordinal: 0, kind: 'TEXT', text: '祖先任务的最终回复' }] },
+          { ...record, turnId: 'turn-b', entrySequence: 4, entryId: 'current', inherited: false, body: '检查 exact owner。' }] }))}
+      loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))} />);
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
+    const title = await screen.findByText('上下文继承自：初次审阅');
+    const inherited = title.closest('details')!;
+    expect(within(inherited).getByText('原任务目标')).toBeTruthy();
+    expect(within(inherited).getByText('祖先任务的最终回复')).toBeTruthy();
+    expect(within(inherited).getByText('保留的历史摘要')).toBeTruthy();
+    expect(within(inherited).queryByText('检查 exact owner。')).toBeNull();
+    const detail = screen.getByRole('complementary', { name: '精确任务 详情' });
+    expect(within(detail).getAllByText('检查 exact owner。')).toHaveLength(1);
+    expect(detail.textContent).not.toContain('private-source-id');
+  });
+
   it('shows model name and reasoning without connection IDs or raw JSON', () => {
     render(<TaskWorkspace tasks={[task({modelConnectionId:'model-connection:private-id', modelId:'openai/gpt-6-luna', reasoning:{kind:'effort',value:'high'}})]}
       modelConfigurations={[{id:'model-connection:private-id', model_id:'openai/gpt-6-luna', display_name:'GPT-6 Luna'} as import('../lib/runtime-adapter').ModelConfigurationSummary]}
       loading={false} canControl={false} onRetry={vi.fn()} onCancel={vi.fn()} onNotify={vi.fn()}
       activities={new Map()} loadActivities={vi.fn(async()=>({activities:[]}))} loadBackgroundProcesses={vi.fn(async()=>({processes:[]}))}/>);
-    fireEvent.click(screen.getByRole('button',{name:/精确子任务/}));
-    const detail = screen.getByRole('complementary',{name:'精确子任务 详情'});
+    fireEvent.click(screen.getByRole('button',{name:/精确任务/}));
+    const detail = screen.getByRole('complementary',{name:'精确任务 详情'});
     expect(within(detail).getByText('GPT-6 Luna')).toBeTruthy();
-    expect(within(detail).getByText('推理 high')).toBeTruthy();
+    expect(within(detail).getByText('high')).toBeTruthy();
     expect(detail.textContent).not.toContain('model-connection:');
     expect(detail.textContent).not.toContain('"kind"');
   });
@@ -75,7 +99,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
       readCapacity={readCapacity} activities={new Map()}
       loadActivities={vi.fn(async () => ({ activities: [] }))} loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))} />);
     expect(await screen.findByText('2 运行')).toBeTruthy();
-    expect(screen.getByText('子任务并发数')).toBeTruthy();
+    expect(screen.getByText('任务并发数')).toBeTruthy();
     expect(screen.queryByRole('spinbutton')).toBeNull();
     expect(screen.queryByRole('button', { name: '应用并发上限' })).toBeNull();
     expect(screen.queryByText('上限 4')).toBeNull();
@@ -92,7 +116,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     render(<TaskWorkspace tasks={tasks} loading={false} canControl={false} onRetry={vi.fn()} onCancel={vi.fn()}
       onNotify={vi.fn()} activities={new Map()} loadActivities={vi.fn(async()=>({activities:[]}))}
       loadBackgroundProcesses={vi.fn(async()=>({processes:[]}))}/>);
-    fireEvent.click(screen.getByRole('button',{name:/子任务组/}));
+    fireEvent.click(screen.getByRole('button',{name:/任务组/}));
     const node = screen.getByRole('button',{name:'node-1验证者进行中'});
     expect(node.style.left).toBe('328px');
     act(()=>{width=390; resize();});
@@ -120,7 +144,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadActivities={vi.fn(async () => ({ activities: [] }))}
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
     />);
-    fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByLabelText('其他任务组依赖来源：先前审阅')).toBeTruthy();
     expect(dialog.querySelectorAll('.task-graph-edges > path.is-external')).toHaveLength(1);
@@ -133,7 +157,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     render(<TaskWorkspace tasks={[task({ dependencyIds: ['prior'], dependencies: [{ id: 'prior', label: '先前审阅', status: 'completed' }] })]}
       loadTask={loadTask} loading={false} canControl={false} onRetry={vi.fn()} onCancel={vi.fn()} onNotify={vi.fn()}
       activities={new Map()} loadActivities={loadActivities} loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))} />);
-    fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
     expect(loadTask).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: '其他任务组依赖来源：先前审阅' }));
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', '读取暂时失败');
@@ -142,7 +166,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     const detail = await screen.findByRole('complementary', { name: '先前审阅 详情' });
     expect(within(detail).getByText('核对发布事实')).toBeTruthy();
     expect(within(detail).getByText('GPT-6 Luna')).toBeTruthy();
-    expect(within(detail).getByText('推理 high')).toBeTruthy();
+    expect(within(detail).getByText('high')).toBeTruthy();
     expect(loadTask).toHaveBeenLastCalledWith('prior');
     expect(loadActivities).toHaveBeenCalledWith('prior');
     expect(screen.getByRole('dialog').querySelectorAll('.task-node')).toHaveLength(2);
@@ -155,14 +179,14 @@ describe('TaskWorkspace PR03 hard cut', () => {
     render(<TaskWorkspace tasks={[task({ dependencyIds: ['prior'], dependencies: [{ id: 'prior', label: '先前审阅', status: 'completed' }] })]}
       loadTask={loadTask} loading={false} canControl={false} onRetry={vi.fn()} onCancel={vi.fn()} onNotify={vi.fn()}
       activities={new Map()} loadActivities={loadActivities} loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))} />);
-    fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
     const dialog = screen.getByRole('dialog');
     fireEvent.click(screen.getByRole('button', { name: '其他任务组依赖来源：先前审阅' }));
     expect(screen.getByRole('status').textContent).toContain('正在读取任务');
-    fireEvent.click(within(dialog).getByRole('button', { name: /精确子任务/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: /精确任务/ }));
     await act(async () => { resolve(task({ id: 'prior', label: '先前审阅' })); });
     expect(screen.queryByRole('complementary', { name: '先前审阅 详情' })).toBeNull();
-    expect(screen.getByRole('complementary', { name: '精确子任务 详情' })).toBeTruthy();
+    expect(screen.getByRole('complementary', { name: '精确任务 详情' })).toBeTruthy();
     expect(loadActivities).not.toHaveBeenCalledWith('prior');
   });
 
@@ -174,7 +198,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
     const props = { tasks: [local], loadTask, loading: false, canControl: false, onRetry: vi.fn(), onCancel: vi.fn(), onNotify: vi.fn(),
       activities: new Map(), loadActivities: vi.fn(async () => ({ activities: [] })), loadBackgroundProcesses: vi.fn(async () => ({ processes: [] })) };
     const view = render(<TaskWorkspace {...props} />);
-    fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
     fireEvent.click(screen.getByRole('button', { name: '其他任务组依赖来源：先前审阅' }));
     view.rerender(<TaskWorkspace {...props} tasks={[{ ...local }]} />);
     expect(loadTask).toHaveBeenCalledTimes(1);
@@ -205,8 +229,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
     />);
 
-    fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
-    const detail = screen.getByLabelText('精确子任务 详情');
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
+    const detail = screen.getByLabelText('精确任务 详情');
     expect(within(detail).queryByText('结果尚未加入主对话。')).toBeNull();
     expect(within(detail).queryByRole('button', { name: '用这份结果继续' })).toBeNull();
     expect(within(detail).queryByText(/启动主助手继续处理/)).toBeNull();
@@ -262,13 +286,13 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
     />);
 
-    fireEvent.click(screen.getByRole('button', { name: /精确子任务/ }));
-    const detail = screen.getByLabelText('精确子任务 详情');
+    fireEvent.click(screen.getByRole('button', { name: /精确任务/ }));
+    const detail = screen.getByLabelText('精确任务 详情');
     await waitFor(() => expect(loadActivities).toHaveBeenCalled());
     expect(detail.querySelectorAll('.task-conversation .user-turn')).toHaveLength(1);
     expect(detail.querySelectorAll('.task-conversation .assistant-turn')).toHaveLength(1);
-    expect(within(detail).getByText('主任务')).toBeTruthy();
-    expect(within(detail).getAllByText('精确子任务')).toHaveLength(2);
+    expect(within(detail).getByText('主 Agent')).toBeTruthy();
+    expect(within(detail).getAllByText('精确任务')).toHaveLength(2);
     expect(within(detail).queryByText(/draft_identity/)).toBeNull();
     expect(within(detail).queryByText(/ASSISTANT_TOOL_REQUEST/)).toBeNull();
     const tool = within(detail).getByRole('button', { name: '展开工具详情：terminal' });
@@ -297,10 +321,10 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
     />);
 
-    const opener = screen.getByRole('button', { name: /精确子任务/ });
+    const opener = screen.getByRole('button', { name: /精确任务/ });
     fireEvent.click(opener);
-    expect(screen.getByRole('dialog', { name: '精确子任务' })).toBeTruthy();
-    expect(screen.getByLabelText('精确子任务 详情')).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: '精确任务' })).toBeTruthy();
+    expect(screen.getByLabelText('精确任务 详情')).toBeTruthy();
     expect(screen.queryByRole('textbox')).toBeNull();
     await waitFor(() => expect(loadActivities).toHaveBeenCalledWith('task-a'));
     fireEvent.keyDown(window, { key: 'Escape' });
@@ -320,7 +344,7 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
     />);
     expect(screen.getByText(/TASK_BATCH_DATA_INCOMPLETE：task-a/)).toBeTruthy();
-    expect(screen.queryByText('子任务组')).toBeNull();
+    expect(screen.queryByText('任务组')).toBeNull();
   });
 
   it('lays out a dependency DAG in distinct horizontal levels', () => {
@@ -359,8 +383,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
     />);
 
-    fireEvent.click(screen.getByRole('button', { name: /子任务组/ }));
-    const dialog = screen.getByRole('dialog', { name: /子任务组/ });
+    fireEvent.click(screen.getByRole('button', { name: /任务组/ }));
+    const dialog = screen.getByRole('dialog', { name: /任务组/ });
     const left = (label: string) => Number.parseFloat(
       (within(dialog).getByRole('button', { name: new RegExp(label) }) as HTMLElement).style.left,
     );
@@ -414,8 +438,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       loadBackgroundProcesses={vi.fn(async () => ({ processes: [] }))}
     />);
 
-    fireEvent.click(screen.getByRole('button', { name: /子任务组/ }));
-    const dialog = screen.getByRole('dialog', { name: /子任务组/ });
+    fireEvent.click(screen.getByRole('button', { name: /任务组/ }));
+    const dialog = screen.getByRole('dialog', { name: /任务组/ });
     expect(dialog.querySelectorAll('.task-graph-edges > path')).toHaveLength(1);
     fireEvent.click(within(dialog).getByRole('button', { name: /后续节点/ }));
     await waitFor(() => expect(loadActivities).toHaveBeenCalledWith('task-b'));
@@ -461,8 +485,8 @@ describe('TaskWorkspace PR03 hard cut', () => {
       }] }))}
     />);
 
-    fireEvent.click(screen.getByRole('button', { name: /子任务组/ }));
-    const dialog = screen.getByRole('dialog', { name: /子任务组/ });
+    fireEvent.click(screen.getByRole('button', { name: /任务组/ }));
+    const dialog = screen.getByRole('dialog', { name: /任务组/ });
     fireEvent.click(within(dialog).getByRole('button', { name: /被取消节点/ }));
     await waitFor(() => expect(within(dialog).getByRole('button', { name: '取消任务' })).toBeTruthy());
     expect(within(dialog).queryByText(/下游任务：真实下游/)).toBeNull();

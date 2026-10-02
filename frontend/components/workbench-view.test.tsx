@@ -600,7 +600,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     const stop = vi.fn();
     const view = render(<WorkbenchView {...props({ onStop: stop })} />);
     const button = screen.getByRole('button', { name: '停止本轮运行' });
-    expect(button.getAttribute('title')).toContain('子任务、排队输入和后台命令不会自动取消');
+    expect(button.getAttribute('title')).toContain('任务、排队输入和后台命令不会自动取消');
     fireEvent.click(button);
     expect(stop).toHaveBeenCalledTimes(1);
 

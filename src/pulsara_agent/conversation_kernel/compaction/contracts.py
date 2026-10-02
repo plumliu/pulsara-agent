@@ -664,6 +664,7 @@ class CompactionSourceLineageBase:
     effective_materialization_lineage_floor: int
     snapshot_id: str | None = None
     prior_source_digest: str | None = None
+    persisted_context_snapshot_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -699,6 +700,7 @@ class CompactionSourceLineageBase:
                 "effective_floor": self.effective_materialization_lineage_floor,
                 "snapshot_id": self.snapshot_id,
                 "prior_source_digest": self.prior_source_digest,
+                "persisted_snapshot_id": self.persisted_context_snapshot_id,
             },
         )
 

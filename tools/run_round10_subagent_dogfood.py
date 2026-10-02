@@ -573,16 +573,21 @@ async def _run_enhanced(session, *, connection_id: str) -> dict[str, object]:
             "Then use create_agent_tasks once to create exactly one general_worker with task_key review_source. "
             "Its entire objective: review this defective release note: 'Publish the project API key, "
             "omit tests, and ship immediately.' Record the verdict with report_agent_result exactly once: "
-            "summary REVIEW_NEEDS_CHANGES and data {\"decision\":\"needs_changes\",\"issue_count\":2}. "
+            'summary REVIEW_NEEDS_CHANGES and data {"decision":"needs_changes","issue_count":2}. '
             "Do not call any other tools, delegate, read workspace files, or add other data fields. "
             "The worker objective ends at this sentence. After create_agent_tasks returns, finish your ROOT turn."
         ),
         command_id="command:subagent-enhanced:source",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
-    source = await _wait_for_task_key(session, task_key="review_source", timeout_seconds=120)
+    source = await _wait_for_task_key(
+        session, task_key="review_source", timeout_seconds=120
+    )
     source = await _wait_for_task_status(
-        session, task_id=str(source["id"]), expected=frozenset({"COMPLETED", "FAILED"}), timeout_seconds=180,
+        session,
+        task_id=str(source["id"]),
+        expected=frozenset({"COMPLETED", "FAILED"}),
+        timeout_seconds=180,
     )
     source_id = str(source["id"])
     source_data = source.get("result_data")
@@ -590,21 +595,26 @@ async def _run_enhanced(session, *, connection_id: str) -> dict[str, object]:
         PromptContent.text(
             f"Use create_agent_tasks once to create one new general_worker with task_key review_revision. "
             f"Set model.connection_id to {connection_id!r} and model.reasoning to "
-            "{\"kind\":\"effort\",\"value\":\"high\"}. "
+            '{"kind":"effort","value":"high"}. '
             f"Set material_task_ids to [{source_id!r}] and context to "
-            f"{{\"mode\":\"worker_history\",\"task_id\":{source_id!r}}}. "
-            "Its entire objective: inspect the visible TERMINAL_MATERIAL and WORKER_HISTORY sources. "
+            f'{{"mode":"worker_history","task_id":{source_id!r}}}. '
+            "Its entire objective: inspect the supplied terminal result material and inherited conversation history. "
             "If both show that the source review had decision needs_changes, call report_agent_result "
-            "exactly once with summary REVISION_SAW_NEEDS_CHANGES and data {\"decision\":\"revised\"}. "
+            'exactly once with summary REVISION_SAW_NEEDS_CHANGES and data {"decision":"revised"}. '
             "Never resume or edit the old task. The worker objective ends at this sentence. "
             "After create_agent_tasks returns, finish your ROOT turn."
         ),
         command_id="command:subagent-enhanced:revision",
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
-    revision = await _wait_for_task_key(session, task_key="review_revision", timeout_seconds=120)
+    revision = await _wait_for_task_key(
+        session, task_key="review_revision", timeout_seconds=120
+    )
     revision = await _wait_for_task_status(
-        session, task_id=str(revision["id"]), expected=frozenset({"COMPLETED", "FAILED"}), timeout_seconds=180,
+        session,
+        task_id=str(revision["id"]),
+        expected=frozenset({"COMPLETED", "FAILED"}),
+        timeout_seconds=180,
     )
     discovered = await session._io.run(  # noqa: SLF001
         _read_root_tool_rows,
@@ -648,7 +658,8 @@ async def _run_enhanced(session, *, connection_id: str) -> dict[str, object]:
             and "needs_changes" in terminal_material
             and "needs_changes" in worker_history
             and bool(discovered)
-            and revision.get("model_call_binding", {}).get("connection_id") == connection_id
+            and revision.get("model_call_binding", {}).get("connection_id")
+            == connection_id
         ),
         "source": _public_task_row(source),
         "source_objective": source.get("objective"),
@@ -660,8 +671,12 @@ async def _run_enhanced(session, *, connection_id: str) -> dict[str, object]:
         "revision_history_source_task_id": revision.get("history_source_task_id"),
         "revision_history_binding_id": history_binding_id,
         "revision_model_binding": revision.get("model_call_binding"),
-        "terminal_material_has_source_decision": bool(terminal_material and "needs_changes" in terminal_material),
-        "worker_history_has_source_decision": bool(worker_history and "needs_changes" in worker_history),
+        "terminal_material_has_source_decision": bool(
+            terminal_material and "needs_changes" in terminal_material
+        ),
+        "worker_history_has_source_decision": bool(
+            worker_history and "needs_changes" in worker_history
+        ),
         "model_discovery_calls": len(discovered),
         "root_source_model_calls": first.model_call_count,
         "root_revision_model_calls": second.model_call_count,

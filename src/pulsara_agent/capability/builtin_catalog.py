@@ -392,7 +392,7 @@ _SUBAGENT_PROFILE_DESCRIPTION = (
 )
 _SUBAGENT_CONTEXT_DESCRIPTION = (
     "Optional context: none (default), recent main-conversation turns (last_n), or "
-    "a finished worker's public history (worker_history). History starts a new task "
+    "a finished worker's conversation history (worker_history). This creates an independent branch "
     "with current tools and permissions; it does not restart the old task."
 )
 _SUBAGENT_CONTEXT_MODE_DESCRIPTION = (
@@ -1188,10 +1188,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                 },
                 "task_name": {
                     "type": "string",
-                    "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                    "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
                     "description": (
-                        "Optional short name shown in task status. Start with a lowercase "
-                        "letter, then use lowercase letters, digits, underscores, or hyphens. "
+                        "Optional short name shown in task status. Start with a "
+                        "letter, then use letters, digits, underscores, or hyphens. Case is preserved. "
                         "It labels the task but does not change how it runs."
                     ),
                 },
@@ -1394,12 +1394,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                         "properties": {
                             "task_key": {
                                 "type": "string",
-                                "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+                                "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
                                 "description": (
                                     "Optional unique key for this request. Start with a "
-                                    "lowercase letter, then use lowercase letters, digits, "
-                                    "underscores, or hyphens. Other tasks in the same request "
-                                    "may use it in depends_on."
+                                    "letter, then use letters, digits, underscores, or hyphens. "
+                                    "Other tasks in the same request may use it in depends_on; "
+                                    "references must match the exact case."
                                 ),
                             },
                             "label": {

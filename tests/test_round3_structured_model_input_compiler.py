@@ -587,16 +587,6 @@ _SOURCE_FACTS = {
         (ContextRenderMode.FULL,),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
-    ContextSourceKind.WORKER_HISTORY: (
-        "pulsara.subagent-worker-history.v1",
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.MUST_KEEP,
-        45,
-        5,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
         "pulsara.tool-observation-freshness.v1",
         ContextChannel.RUNTIME_OBSERVATION,
@@ -747,9 +737,7 @@ def _sources(
             ContextSourceAbsenceKind.NOT_APPLICABLE
         ),
         ContextSourceKind.MEMORY_RECALL: ContextSourceAbsenceKind.NOT_APPLICABLE,
-        ContextSourceKind.MEMORY_WRITE_HINT: (
-            ContextSourceAbsenceKind.NOT_APPLICABLE
-        ),
+        ContextSourceKind.MEMORY_WRITE_HINT: (ContextSourceAbsenceKind.NOT_APPLICABLE),
         ContextSourceKind.HOOK_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
             ContextSourceAbsenceKind.NOT_APPLICABLE
@@ -760,7 +748,6 @@ def _sources(
         ContextSourceKind.PARENT_CONTEXT: ContextSourceAbsenceKind.NOT_APPLICABLE,
         ContextSourceKind.DEPENDENCY_RESULTS: (ContextSourceAbsenceKind.NOT_APPLICABLE),
         ContextSourceKind.TERMINAL_MATERIAL: ContextSourceAbsenceKind.NOT_APPLICABLE,
-        ContextSourceKind.WORKER_HISTORY: ContextSourceAbsenceKind.NOT_APPLICABLE,
     }
     for kind, absence_kind in default_absences.items():
         if kind not in candidate_kinds and kind not in absent_by_kind:
@@ -3852,15 +3839,15 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
     )
     compiled = StructuredModelInputCompiler().compile(request)
     assert compiled.source_collection_fingerprint == (
-        "sha256:0dd8bbade8b48666081e71747c04d7e283aeaeca66ba97633b44ce16e56b821d"
+        "sha256:7817597999d8607618dc44d98dc5526c5569c07c1ddac9f581fb2a22ec347b74"
     )
     assert compiled.budget_report.decision_digest == (
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # Compiler v16 adds final-wire ordinary-result selection. Its contract boundary
-        # changes the semantic root; this unchanged input keeps its decision.
-        "sha256:d2454adc9d78ff7c26748f9f5a4d81a15fa919a58d24c2704301c19e0b5527d1"
+        # Compiler v17 removes the worker-history source slot and adds native branch
+        # items. This unchanged input keeps its budget decision.
+        "sha256:109aee3c1f3170d0b224ede42887f0db819a3ecc053668e278f63cfb76965aaf"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

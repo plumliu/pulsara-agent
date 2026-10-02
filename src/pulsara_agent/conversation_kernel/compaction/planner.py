@@ -524,9 +524,7 @@ def freeze_destination_dialogue_projection_plan(
             result_entry_id=item.source_entry_id,
             result_entry_sequence=item.source_entry_sequence,
             outcome_ordinal=outcome_ordinal,
-            result_content=(
-                item.content if isinstance(item.content, tuple) else None
-            ),
+            result_content=(item.content if isinstance(item.content, tuple) else None),
         )
     for closure in canonical_read.safe_head_range.closures:
         key = (closure.assistant_entry_id, closure.tool_call_id)
@@ -548,7 +546,12 @@ def freeze_destination_dialogue_projection_plan(
     turn_order: list[str] = []
     for item in canonical_read.safe_head_range.ordered_items:
         if (
-            (active_entry_id is not None and item.source_entry_id == active_entry_id)
+            (
+                active_entry_id is not None
+                and item.source_entry_id == active_entry_id
+                and item.item_kind
+                is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
+            )
             or item.item_kind
             in {
                 FrozenProviderInputItemKind.TOOL_RESULT,
@@ -569,6 +572,7 @@ def freeze_destination_dialogue_projection_plan(
         FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
         FrozenProviderInputItemKind.PLAN_CONTINUATION,
         FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
+        FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL,
     }
     request_ordinal = 0
     for turn_id in turn_order:
@@ -1645,7 +1649,10 @@ def freeze_compaction_continuation(
         raise ValueError("compaction continuation boundary is out of range")
     active_entry_id = canonical.identity.initial_entry_id
     matches = tuple(
-        item for item in canonical.items if item.source_entry_id == active_entry_id
+        item
+        for item in canonical.items
+        if item.source_entry_id == active_entry_id
+        and item.item_kind is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
     )
     if len(matches) > 1:
         raise CompactionPlanningError("active request attribution is duplicated")

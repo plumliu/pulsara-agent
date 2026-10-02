@@ -74,6 +74,7 @@ from pulsara_agent.primitives.run_permission import (
 )
 from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
+    CanonicalInputOriginKind,
     ModelInputScopeKind,
     provider_input_item_text,
 )
@@ -210,20 +211,20 @@ def test_round10_subagent_guidance_is_complete_and_product_facing() -> None:
         "\n\nCommunication:", 1
     )[0]
 
-    assert "does not start a new model reply" in descriptions["spawn_agent"]
-    assert "later user request or an explicit continuation" in descriptions["spawn_agent"]
-    assert "does not wait for the tasks" in descriptions["create_agent_tasks"]
-    assert "separate conversation messages after this tool call finishes" in descriptions[
-        "wait_agent"
-    ]
-    assert "does not mean that every task succeeded" in descriptions["wait_agent"]
-    assert "Do not repeatedly call list_agents to poll" in descriptions["list_agents"]
-    assert "does not undo files or external side effects" in descriptions["stop_agent"]
-    assert "does not prove that the agent has read it" in descriptions[
-        "send_agent_message"
-    ]
-    assert "Do not promise that you will return automatically" in delegated_prompt
-    assert "wait once before giving the final answer" in delegated_prompt
+    skill = Path(
+        "src/pulsara_agent/bundled_skills/pulsara-subagent/SKILL.md"
+    ).read_text()
+    assert "pulsara-subagent Skill" in descriptions["spawn_agent"]
+    assert "separate conversation messages" in descriptions["wait_agent"]
+    assert "predicate_satisfied does not mean success" in descriptions["wait_agent"]
+    assert "not repeated list polling" in descriptions["list_agents"]
+    assert "does not undo side effects" in descriptions["stop_agent"]
+    assert "not read or acted on" in descriptions["send_agent_message"]
+    assert "does not start another model reply" in delegated_prompt
+    assert "wait after independent work is complete" in delegated_prompt
+    assert "do not promise an automatic" in delegated_prompt
+    assert "Finished tasks stay finished" in skill
+    assert "worker_history" in skill and "material_task_ids" in skill
 
     for internal_term in (
         "ROOT",
@@ -1005,7 +1006,7 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         permission_snapshot_id=_id("permission"),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text('delegate exact seed'),
+        content=FrozenPromptContent.text("delegate exact seed"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -1017,18 +1018,31 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         objective=objective,
     )
     launch_port = CanonicalSubagentLaunchPreparationPort(
-            inherit_parent_target=fixture_parent_target,
-        repository=repository, guard=lease.guard, io_owner=KernelSessionIO(),
-        model_runtime=test_model_runtime(model_id="test-pro", wire_api="openai_chat_completions"),
+        inherit_parent_target=fixture_parent_target,
+        repository=repository,
+        guard=lease.guard,
+        io_owner=KernelSessionIO(),
+        model_runtime=test_model_runtime(
+            model_id="test-pro", wire_api="openai_chat_completions"
+        ),
         deadline_factory=KernelExecutionDeadlineFactory(),
     )
     prepared_launch = asyncio.run(launch_port.prepare_launch(task_id.launch.task_start))
-    assert prepared_launch.accepted_model_target_fact == task_id.launch.accepted_model_target_fact
+    assert (
+        prepared_launch.accepted_model_target_fact
+        == task_id.launch.accepted_model_target_fact
+    )
     original_resolve = launch_port._model_runtime.resolve_target  # noqa: SLF001
+
     def drift_resolve(_runtime, *args, **kwargs):
         target = original_resolve(*args, **kwargs)
-        return replace(target, fact=target.fact.model_copy(update={"model_id": "drifted-model"}))
-    monkeypatch.setattr(type(launch_port._model_runtime), "resolve_target", drift_resolve)  # noqa: SLF001
+        return replace(
+            target, fact=target.fact.model_copy(update={"model_id": "drifted-model"})
+        )
+
+    monkeypatch.setattr(
+        type(launch_port._model_runtime), "resolve_target", drift_resolve
+    )  # noqa: SLF001
     with pytest.raises(ValueError, match="target changed"):
         asyncio.run(launch_port.prepare_launch(task_id.launch.task_start))
     child_turn = stable_subagent_turn_id(session_id=session_id, task_id=task_id)
@@ -1054,41 +1068,25 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
         cut,
         deadline_monotonic=monotonic() + 30,
     )
-    subject = build_parent_context_call_subject(
-        session_id=session_id,
-        caller_turn_id=parent_turn_id,
-        provider_input_cut_fingerprint="sha256:seed-cut",
-        continuity_epoch_nonce="epoch:parent",
-        continuity_epoch_revision=3,
-        compiled_semantic_input_fingerprint="sha256:parent-semantic",
-        compiled_message_placements_fingerprint="sha256:parent-placements",
-        ordered_eligible_units=(),
-    )
-    selection = build_parent_context_selection(
-        subject,
-        mode=SubagentContextMode.NONE,
-        last_n_turns=None,
-    )
     seed = build_subagent_initial_seed(
         dispatch_read=dispatch_read,
         task_id=task_id,
         parent_turn_id=parent_turn_id,
         profile_kind=SubagentProfileKind.GENERAL_WORKER,
         objective=objective,
-        parent_call_subject=subject,
-        parent_context_selection=selection,
-        dependency_context=None,
     )
     assert seed.task_id == task_id
-    assert seed.parent_context_selection.mode is SubagentContextMode.NONE
-    assert seed.dependency_context is None
+    assert (
+        seed.objective_item.source_entry_id
+        == dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
+    )
     assert all(
         source.__class__.__name__ == "ContextSourceAbsentFact"
         for source in seed.source_replacements
     )
-    with pytest.raises(ValueError, match="subagent initial seed is invalid"):
+    with pytest.raises(ValueError, match="subagent canonical initial seed is invalid"):
         replace(seed, task_id="task:foreign")
-    with pytest.raises(ValueError, match="subagent initial seed is invalid"):
+    with pytest.raises(ValueError, match="subagent canonical initial seed is invalid"):
         replace(seed, objective="different objective")
 
 
@@ -1569,17 +1567,30 @@ class _CompletingChildRunner:
         task_id = launch.task_start.task_id
         objective = launch.task_start.objective
         self._started.append(objective)
-        self._source_bodies[objective] = tuple(
-            variant.text
-            for source in self._manager.initial_context_sources(task_id=task_id)
-            if hasattr(source, "variants")
-            for variant in source.variants[:1]
-        )
         turn_id = launch.child_turn_id
         cut = self._repository.prepare_provider_input_cut(
             self._lease.guard,
             turn_id=turn_id,
             deadline_monotonic=monotonic() + 30,
+        )
+        from pulsara_agent.model_input.lowering import (
+            compaction_snapshot_provider_content,
+        )
+
+        frozen = CanonicalProviderInputReader(
+            self._repository._provider
+        ).read_frozen_compile_snapshot(cut, deadline_monotonic=monotonic() + 30)
+        self._source_bodies[objective] = tuple(
+            part.text
+            for item in frozen.canonical_input.items
+            if item.source_entry_id != frozen.canonical_input.identity.initial_entry_id
+            or item.item_kind is FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
+            for part in (
+                compaction_snapshot_provider_content(item.content)
+                if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+                else item.content
+            )
+            if hasattr(part, "text")
         )
         final_entry_id = _id("entry")
         summary = f"result for {objective}"
@@ -2269,19 +2280,19 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
         arguments = {
             "tasks": [
                 {
-                    "task_key": "a",
+                    "task_key": "A",
                     "task": "alpha-only",
                     "depends_on": [],
                 },
                 {
-                    "task_key": "b",
+                    "task_key": "a",
                     "task": "bravo-only",
-                    "depends_on": ["a"],
+                    "depends_on": ["A"],
                 },
                 {
-                    "task_key": "c",
+                    "task_key": "C",
                     "task": "charlie-only",
-                    "depends_on": ["b"],
+                    "depends_on": ["a"],
                 },
             ]
         }
@@ -2366,6 +2377,9 @@ def test_round10_dependency_chain_routes_only_direct_result_and_retires_physical
             deadline_monotonic=monotonic() + 30,
         )
         assert len(rows) == 3
+        assert {row["objective"]: row["task_key"] for row in rows} == {
+            "alpha-only": "A", "bravo-only": "a", "charlie-only": "C",
+        }
         assert all(row["status"] == "COMPLETED" for row in rows)
         await manager.aclose(deadline_monotonic=monotonic() + 2)
         from tests.test_conversation_fork import assert_session_aggregate_deleted
@@ -2884,79 +2898,179 @@ def test_scheduler_waiter_cancellation_joins_shared_launch_before_propagating() 
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize('compact_middle', [False, True, 'image'])
+@pytest.mark.parametrize("compact_middle", [False, True, "image"])
 def test_worker_history_three_generations_survive_reload_and_gc(
-    stage2_migrated_postgres_database, compact_middle,
+    stage2_migrated_postgres_database,
+    compact_middle,
 ) -> None:
-    from pulsara_agent.conversation_kernel.subagents.history import read_terminal_worker_public_history
-    from psycopg.rows import dict_row
     from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
     from tests.test_conversation_fork import compact, rows as read_rows
+
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
 
     async def exercise():
-        session_id, workspace_id = _id('session'), _id('workspace')
-        attempts = [_id('attempt') for _ in range(3)]
-        task_ids = [_round10_id('subagent-task', attempt, '0') for attempt in attempts]
+        session_id, workspace_id = _id("session"), _id("workspace")
+        attempts = [_id("attempt") for _ in range(3)]
+        task_ids = [_round10_id("subagent-task", attempt, "0") for attempt in attempts]
         arguments = [
-            {'task': 'ancestor-alpha'},
-            {'task': 'middle-bravo', 'context': {'mode': 'worker_history', 'task_id': task_ids[0]}},
-            {'task': 'latest-charlie', 'context': {'mode': 'worker_history', 'task_id': task_ids[1]}},
+            {"task": "ancestor-alpha"},
+            {
+                "task": "middle-bravo",
+                "context": {"mode": "worker_history", "task_id": task_ids[0]},
+            },
+            {
+                "task": "latest-charlie",
+                "context": {"mode": "worker_history", "task_id": task_ids[1]},
+            },
         ]
-        lease, contexts = _prepare_root_tool_batch(repository, session_id=session_id, workspace_id=workspace_id,
-            calls=tuple(('spawn_agent', _id('call'), attempt, args) for attempt,args in zip(attempts,arguments,strict=True)))
-        manager = KernelSubagentManager(**_manager_launch_kwargs(repository, lease.guard),
-            repository=repository, guard=lease.guard, host_owner_id=_id('host'), io_owner=KernelSessionIO(),
-            live_bus=LiveAgentEventBus(), todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch=_id('todo')))
+        lease, contexts = _prepare_root_tool_batch(
+            repository,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            calls=tuple(
+                ("spawn_agent", _id("call"), attempt, args)
+                for attempt, args in zip(attempts, arguments, strict=True)
+            ),
+        )
+        manager = KernelSubagentManager(
+            **_manager_launch_kwargs(repository, lease.guard),
+            repository=repository,
+            guard=lease.guard,
+            host_owner_id=_id("host"),
+            io_owner=KernelSessionIO(),
+            live_bus=LiveAgentEventBus(),
+            todo_owner=TodoRunStateOwner(
+                session_id=session_id, owner_epoch=_id("todo")
+            ),
+        )
         sources, started = {}, []
-        manager.bind_runner_factory(lambda _scope: _CompletingChildRunner(
-            repository=repository, lease=lease, manager=manager, started=started, source_bodies=sources))
+        manager.bind_runner_factory(
+            lambda _scope: _CompletingChildRunner(
+                repository=repository,
+                lease=lease,
+                manager=manager,
+                started=started,
+                source_bodies=sources,
+            )
+        )
         await manager.open_root_completion_delivery(contexts[0].turn_id)
         for index, (args, ctx) in enumerate(zip(arguments, contexts, strict=True)):
-            created = await manager.invoke(tool_name='spawn_agent', arguments=args, invocation_context=ctx)
-            assert created.state == 'SUCCESS', created.content
-            assert json.loads(created.content)['task_id'] == task_ids[index]
-            waited = await manager.invoke(tool_name='wait_agent', arguments={'task_ids':[task_ids[index]], 'settle':'all', 'timeout_seconds':10}, invocation_context=ctx)
-            assert json.loads(waited.content)['pending_task_ids'] == []
+            created = await manager.invoke(
+                tool_name="spawn_agent", arguments=args, invocation_context=ctx
+            )
+            assert created.state == "SUCCESS", created.content
+            assert json.loads(created.content)["task_id"] == task_ids[index]
+            waited = await manager.invoke(
+                tool_name="wait_agent",
+                arguments={
+                    "task_ids": [task_ids[index]],
+                    "settle": "all",
+                    "timeout_seconds": 10,
+                },
+                invocation_context=ctx,
+            )
+            assert json.loads(waited.content)["pending_task_ids"] == []
             if index == 1 and compact_middle:
-                turn = read_rows(repository, 'SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND scope_subagent_task_id=%s', (session_id,task_ids[index]))[0]
-                boundary = read_rows(repository, 'SELECT max(entry_sequence) AS n FROM pulsara_v3.transcript_entries WHERE session_id=%s AND scope_subagent_task_id=%s', (session_id,task_ids[index]))[0]['n']
+                turn = read_rows(
+                    repository,
+                    "SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND scope_subagent_task_id=%s",
+                    (session_id, task_ids[index]),
+                )[0]
+                boundary = read_rows(
+                    repository,
+                    "SELECT max(entry_sequence) AS n FROM pulsara_v3.transcript_entries WHERE session_id=%s AND scope_subagent_task_id=%s",
+                    (session_id, task_ids[index]),
+                )[0]["n"]
                 retained = ()
-                if compact_middle == 'image':
+                if compact_middle == "image":
                     from io import BytesIO
                     from PIL import Image
                     from pulsara_agent.llm.input import LLMImagePart, LLMTextPart
-                    from pulsara_agent.model_input.contracts import FrozenRetainedHistoricalRequest, FrozenProviderInputItemKind, CanonicalInputOriginKind
+                    from pulsara_agent.model_input.contracts import (
+                        FrozenRetainedHistoricalRequest,
+                    )
+
                     image_bytes = BytesIO()
-                    Image.new('RGB', (4,4), (12,34,56)).save(image_bytes, 'PNG')
-                    retained = (FrozenRetainedHistoricalRequest(FrozenProviderInputItemKind.USER, CanonicalInputOriginKind.HUMAN_MESSAGE, FrozenPromptContent((LLMTextPart('retained illustration'), LLMImagePart('image/png', image_bytes.getvalue(), 4,4)))),)
-                compact(repository, lease.guard, turn['id'], boundary, summary='ancestor-alpha and middle-bravo public findings', idle=True, retained_historical_requests=retained)
-        if compact_middle == 'image':
-            task = repository.query_subagent_task(session_id=session_id, task_id=task_ids[2], deadline_monotonic=monotonic()+30)
-            assert task['status'] == 'FAILED'
-            assert 'unsupported multimodal' in task['terminal_public_detail']
-            assert 'latest-charlie' not in sources
-            await manager.aclose(deadline_monotonic=monotonic()+5)
-            return
-        assert any('ancestor-alpha' in text for text in sources['latest-charlie'])
-        assert any('middle-bravo' in text for text in sources['latest-charlie'])
-        await manager.aclose(deadline_monotonic=monotonic()+5)
+                    Image.new("RGB", (4, 4), (12, 34, 56)).save(image_bytes, "PNG")
+                    retained = (
+                        FrozenRetainedHistoricalRequest(
+                            FrozenProviderInputItemKind.USER,
+                            CanonicalInputOriginKind.HUMAN_MESSAGE,
+                            FrozenPromptContent(
+                                (
+                                    LLMTextPart("retained illustration"),
+                                    LLMImagePart(
+                                        "image/png", image_bytes.getvalue(), 4, 4
+                                    ),
+                                )
+                            ),
+                        ),
+                    )
+                compact(
+                    repository,
+                    lease.guard,
+                    turn["id"],
+                    boundary,
+                    summary="ancestor-alpha and middle-bravo public findings",
+                    idle=True,
+                    retained_historical_requests=retained,
+                )
+        assert any("ancestor-alpha" in text for text in sources["latest-charlie"])
+        assert any("middle-bravo" in text for text in sources["latest-charlie"])
+        await manager.aclose(deadline_monotonic=monotonic() + 5)
         # Reload only canonical owners, then run the real orphan collector.
         reloaded = ConversationKernelRepository(provider)
-        PostgresCanonicalBlobStore(provider).delete_orphans(grace_seconds=1, deadline_monotonic=monotonic()+30)
-        turn = read_rows(reloaded, 'SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND scope_subagent_task_id=%s', (session_id,task_ids[2]))[0]
-        boundary = read_rows(reloaded, 'SELECT max(entry_sequence) AS n FROM pulsara_v3.transcript_entries WHERE session_id=%s AND scope_subagent_task_id=%s', (session_id,task_ids[2]))[0]['n']
-        with provider.connection(lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row, deadline_monotonic=monotonic()+30) as conn:
-            history = json.loads(read_terminal_worker_public_history(conn, session_id=session_id, source_task_id=task_ids[2], through_sequence=boundary, binding_revision_id=turn['current_context_binding_revision_id']))['pulsara_worker_history']
-        parent = history['frames'][-2]
+        PostgresCanonicalBlobStore(provider).delete_orphans(
+            grace_seconds=1, deadline_monotonic=monotonic() + 30
+        )
+        turn = read_rows(
+            reloaded,
+            "SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND scope_subagent_task_id=%s",
+            (session_id, task_ids[2]),
+        )[0]
+        boundary = read_rows(
+            reloaded,
+            "SELECT max(entry_sequence) AS n FROM pulsara_v3.transcript_entries WHERE session_id=%s AND scope_subagent_task_id=%s",
+            (session_id, task_ids[2]),
+        )[0]["n"]
+        cut = reloaded.prepare_compaction_input_cut(
+            lease.guard,
+            turn_id=turn["id"],
+            allow_terminal=True,
+            deadline_monotonic=monotonic() + 30,
+        )
+        frozen = CanonicalProviderInputReader(provider).read_frozen_compaction_cut(
+            cut, deadline_monotonic=monotonic() + 30
+        )
+        canonical = frozen.dispatch_read.compile_snapshot.canonical_input
+        objectives = [
+            provider_input_item_text(i)
+            for i in canonical.items
+            if i.item_kind is FrozenProviderInputItemKind.USER
+            and i.input_origin is CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
+        ]
+        assert objectives == (
+            ["latest-charlie"]
+            if compact_middle
+            else ["ancestor-alpha", "middle-bravo", "latest-charlie"]
+        )
+        assert sum(
+            i.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+            for i in canonical.items
+        ) == bool(compact_middle)
         if compact_middle:
-            assert parent['initial_public_sources'] is None
-            assert parent['adopted_summary'] == 'ancestor-alpha and middle-bravo public findings'
-        else:
-            assert history['frames'][0]['objective'] == 'ancestor-alpha'
-            assert len(history['frames']) == 3
-        assert parent['objective'] == 'middle-bravo'
+            assert (
+                frozen.snapshot_carrier.earlier_context_summary
+                == "ancestor-alpha and middle-bravo public findings"
+            )
+        if compact_middle == "image":
+            from pulsara_agent.conversation_kernel.compaction.prompt import (
+                compaction_snapshot_image_parts,
+            )
+
+            assert len(compaction_snapshot_image_parts(frozen.snapshot_carrier)) == 1
+
     asyncio.run(exercise())
 
 
@@ -3092,7 +3206,7 @@ def test_worker_controls_beyond_128_remain_queryable_and_cancellable(stage2_migr
             assert len(snapshot.control.tool_attempts) == 128
             visible = {item.scope_subagent_task_id for item in snapshot.control.active_turns}
             task_id = next(task for task in attempts if task not in visible)
-            entries, blocks, results, has_more = repository.list_subagent_task_activities(
+            entries, blocks, results, has_more, inherited_context = repository.list_subagent_task_activities(
                 session_id=session_id, task_id=task_id, maximum_items=50, after_entry_sequence=0, deadline_monotonic=monotonic()+30)
             assert not has_more and not results
             assert {row['turn_id'] for row in entries} == {attempts[task_id][0]}

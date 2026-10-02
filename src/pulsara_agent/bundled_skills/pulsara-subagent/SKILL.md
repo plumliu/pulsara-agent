@@ -22,6 +22,9 @@ current scope; this guide does not grant permissions.
 Finished tasks stay finished. A history-based follow-up gets a new task ID;
 describe it to the user as continuing from the previous worker's history.
 Do not conclude that further work is impossible merely because the old task ended.
+Two new tasks can branch from the same source independently; to build on one
+branch later, use that branch's returned task ID. Branches share the working
+directory, so conversation isolation does not isolate file changes.
 
 ## Supply just enough context
 
@@ -33,8 +36,9 @@ Choose the smallest context that supports the work:
   not copy their tool calls/results; put required evidence in the task.
 - **`worker_history`**: use the exact `task_id` of a finished worker in this
   conversation. It must have started and have readable public history. Do not
-  supply `turns`. History includes public work and tool results; compacted parts
-  may be summaries. It does not copy private reasoning, old tools, permissions
+  supply `turns`. The new branch continues the source
+  conversation, including public messages and tool calls/results; compacted
+  parts may be summaries. Historical calls are records, not work to repeat. It does not copy private reasoning, old tools, permissions
   or running processes. The new worker uses its current environment.
 
 `material_task_ids` accepts finished tasks, including failures and tasks that
@@ -69,7 +73,7 @@ Recover from a failed task, using `spawn_agent`:
 {"task":"Inspect the supplied failure diagnosis and identify an in-scope fix. Check whether earlier operations had effects before repeating them.","material_task_ids":["<failed task_id>"]}
 ```
 
-Within one `create_agent_tasks` call, dependencies use another item's `task_key`.
+Within one `create_agent_tasks` call, dependencies use another item's `task_key`. Names and keys preserve case; copy dependency keys exactly (`A` and `a` are different).
 For a prerequisite from an earlier call, use `"task:" + its exact task_id`.
 Task labels are not IDs. Recover lost IDs with `list_agents`.
 

@@ -2994,10 +2994,10 @@ class CompactionCoordinator:
                             revision_ordinal=lineage.binding_revision_ordinal,
                             base_kind=(
                                 "FULL_HISTORY"
-                                if lineage.snapshot_id is None
+                                if lineage.persisted_context_snapshot_id is None
                                 else "SNAPSHOT"
                             ),
-                            context_snapshot_id=lineage.snapshot_id,
+                            context_snapshot_id=lineage.persisted_context_snapshot_id,
                             source_through_sequence=(
                                 lineage.persisted_revision_genesis_marker
                             ),

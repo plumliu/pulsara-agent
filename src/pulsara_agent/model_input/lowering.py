@@ -239,7 +239,10 @@ def lower_canonical_item(
             item,
             LLMMessage.user(_project_plan_continuation(text)),
         )
-    if kind is FrozenProviderInputItemKind.INTER_AGENT_MESSAGE:
+    if kind in {
+        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
+        FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL,
+    }:
         return LoweredCanonicalItem(item, LLMMessage.user(text))
     if kind is FrozenProviderInputItemKind.ASSISTANT:
         return LoweredCanonicalItem(item, LLMMessage.assistant(text))
@@ -284,13 +287,20 @@ def lower_retained_request_content(request) -> tuple[LLMContentPart, ...]:
         return (
             LLMTextPart(
                 canonical_json_bytes(
-                    {"pulsara_terminal_observation": _project_terminal_observation(text)}
+                    {
+                        "pulsara_terminal_observation": _project_terminal_observation(
+                            text
+                        )
+                    }
                 ).decode("utf-8")
             ),
         )
     if request.item_kind is FrozenProviderInputItemKind.PLAN_CONTINUATION:
         return (LLMTextPart(_project_plan_continuation(text)),)
-    if request.item_kind is FrozenProviderInputItemKind.INTER_AGENT_MESSAGE:
+    if request.item_kind in {
+        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
+        FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL,
+    }:
         return (LLMTextPart(text),)
     raise ValueError("retained request kind cannot be lowered")
 

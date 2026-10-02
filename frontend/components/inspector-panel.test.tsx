@@ -184,7 +184,7 @@ describe('InspectorPanel PR03 production navigation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '任务' }));
     expect(screen.getByText('创建或选择会话后查看任务')).toBeTruthy();
-    expect(screen.queryByText('这个会话还没有子任务')).toBeNull();
+    expect(screen.queryByText('这个会话还没有任务')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: '后台终端' }));
     expect(screen.getByText('创建或选择会话后查看后台终端')).toBeTruthy();
@@ -212,7 +212,7 @@ describe('InspectorPanel PR03 production navigation', () => {
     expect(screen.getByText('正在读取项目能力')).toBeTruthy();
 
     fireEvent.click(within(navigation).getByRole('button', { name: '任务' }));
-    expect(screen.getByText('这个会话还没有子任务')).toBeTruthy();
+    expect(screen.getByText('这个会话还没有任务')).toBeTruthy();
 
     fireEvent.click(within(navigation).getByRole('button', { name: '后台终端' }));
     await waitFor(() => expect(loadBackground).toHaveBeenCalledWith(undefined));

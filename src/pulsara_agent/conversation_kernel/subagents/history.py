@@ -1,184 +1,392 @@
-"""Read one terminal worker's public effective scope as advisory material.
+"""Effective worker ancestry, using the canonical reader for every segment.
 
-The ROOT Fork anchor remains ROOT-only. This reader shares canonical row and
-blob content verification but never imports executable provider state.
+No history body, imported rows, or execution state is created. A segment's own
+cut controls tool closure/late-result visibility; the child cut never widens it.
 """
 
 from __future__ import annotations
 
-from hashlib import sha256
-import json
-from typing import Mapping
+from dataclasses import dataclass, fields, replace
+from time import monotonic
 
-from psycopg import Connection
-
-from pulsara_agent.model_input.contracts import (
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
+from pulsara_agent.conversation_kernel.repository_errors import (
+    ConversationKernelConflict,
 )
-from pulsara_agent.primitives.context import canonical_json_bytes
-from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
-from pulsara_agent.conversation_kernel.prompt_storage import hydrate_canonical_snapshot_owner
-from pulsara_agent.conversation_kernel.compaction.prompt import compaction_snapshot_image_parts
-from pulsara_agent.model_input.lowering import compaction_snapshot_sections, lower_retained_request_content
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
+    CanonicalModelInputSnapshot,
+    CompactionActiveRequestLocation,
+    CompactionContinuationMode,
+    ContextBindingBaseKind,
+    FrozenCanonicalCompileSnapshot,
+    FrozenProviderInputItem,
+    FrozenProviderInputItemKind,
+    FrozenRetainedHistoricalRequest,
+    PreparedProviderInputCut,
+    canonical_compile_snapshot_fingerprint,
+    canonical_model_input_snapshot_fingerprint,
+    context_binding_compile_fact_fingerprint,
+)
+from pulsara_agent.model_input.provider_replay import (
+    FrozenCanonicalProviderDispatchRead,
+    freeze_provider_replay_manifest_cut,
+)
+from pulsara_agent.conversation_kernel.compaction.contracts import (
+    FrozenCompactionSummary,
+    provider_input_item_canonical_expanded_bytes,
+)
+from pulsara_agent.llm.input import LLMTextPart
+from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 
 
-def _public_utf8(row: Mapping[str, object], *, field: str) -> str:
-    body = row.get("body")
-    if body is None or row.get("content_codec") != "utf-8":
-        raise ConversationKernelConflict(f"worker history {field} is unreadable")
-    raw = bytes(body)
-    if (
-        len(raw) != int(row["content_size"])
-        or "sha256:" + sha256(raw).hexdigest() != row["content_digest"]
-    ):
-        raise ConversationKernelConflict(f"worker history {field} failed content verification")
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ConversationKernelConflict(f"worker history {field} is not UTF-8") from exc
-
-
-def read_terminal_worker_public_history(
-    connection: Connection, *, session_id: str, source_task_id: str,
-    through_sequence: int, binding_revision_id: str,
-) -> str:
+def validate_worker_history_source(
+    connection, *, session_id, source_task_id, through_sequence, binding_revision_id
+):
     source = connection.execute(
-        """SELECT t.objective, t.parent_context_body, t.dependency_context_body,
-                  t.terminal_material_body, t.worker_history_body,
-                  t.status,
-                  revision.base_kind, revision.source_through_sequence,
-                  revision.context_snapshot_id
-           FROM pulsara_v3.subagent_tasks AS t
-           JOIN pulsara_v3.turns AS turn
-             ON turn.session_id=t.session_id AND turn.scope_subagent_task_id=t.id
+        """SELECT task.status, turn.id AS turn_id, initial.entry_sequence,
+                  revision.base_kind, revision.source_through_sequence
+           FROM pulsara_v3.subagent_tasks AS task
+           JOIN pulsara_v3.turns AS turn ON turn.session_id=task.session_id
+            AND turn.scope_subagent_task_id=task.id
+           JOIN pulsara_v3.transcript_entries AS initial
+            ON initial.session_id=turn.session_id AND initial.id=turn.initial_entry_id
            JOIN pulsara_v3.turn_context_binding_revisions AS revision
-             ON revision.session_id=turn.session_id
-            AND revision.turn_id=turn.id
+            ON revision.session_id=turn.session_id AND revision.turn_id=turn.id
             AND revision.id=%s
-           WHERE t.session_id=%s AND t.id=%s""",
+           WHERE task.session_id=%s AND task.id=%s""",
         (binding_revision_id, session_id, source_task_id),
     ).fetchone()
-    if source is None or source["status"] not in {
-        "COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED_DEPENDENCY_FAILED"
-    }:
-        raise ConversationKernelConflict("worker history source is not terminal or readable")
-    floor = int(source["source_through_sequence"]) if source["base_kind"] == "SNAPSHOT" else 0
-    if floor > through_sequence:
-        raise ConversationKernelConflict("worker history cut precedes adopted compaction")
-    snapshot_text: str | None = None
-    retained_requests: list[dict[str, object]] = []
-    if source["base_kind"] == "SNAPSHOT":
-        snapshot = connection.execute(
-            """SELECT s.*
-               FROM pulsara_v3.context_snapshots AS s
-               WHERE s.session_id=%s AND s.id=%s""",
-            (session_id, source["context_snapshot_id"]),
-        ).fetchone()
-        if snapshot is None:
-            raise ConversationKernelConflict("worker history adopted snapshot is absent")
-        carrier = hydrate_canonical_snapshot_owner(
-            connection, row=snapshot, context_snapshot_id=str(source["context_snapshot_id"])
+    if (
+        source is None
+        or source["status"] not in {"COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"}
+        or through_sequence < int(source["entry_sequence"])
+        or through_sequence < int(source["source_through_sequence"])
+    ):
+        raise ConversationKernelConflict(
+            "worker history source/cut/binding is unavailable"
         )
-        if compaction_snapshot_image_parts(carrier):
-            raise ConversationKernelConflict("worker history contains unsupported multimodal material")
-        snapshot_text = carrier.earlier_context_summary
-        retained_requests = [
-            {"kind": request.item_kind.value, "section": section,
-             "text": "".join(part.text for part in lower_retained_request_content(request))}
-            for section, request in compaction_snapshot_sections(carrier)
-        ]
-    image = connection.execute(
-        """SELECT 1 FROM pulsara_v3.canonical_image_refs AS image
-           JOIN pulsara_v3.transcript_entries AS entry
-             ON entry.session_id=image.session_id AND entry.id=image.transcript_entry_id
-           WHERE entry.session_id=%s AND entry.scope_subagent_task_id=%s
-             AND entry.entry_sequence > %s AND entry.entry_sequence <= %s
-           LIMIT 1""",
-        (session_id, source_task_id, floor, through_sequence),
+    # A cut must be an actual entry in this source scope, never another worker's head.
+    if (
+        connection.execute(
+            "SELECT 1 FROM pulsara_v3.transcript_entries WHERE session_id=%s "
+            "AND scope_subagent_task_id=%s AND entry_sequence=%s",
+            (session_id, source_task_id, through_sequence),
+        ).fetchone()
+        is None
+    ):
+        raise ConversationKernelConflict("worker history cut is not a source frontier")
+    return str(source["turn_id"])
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerHistoryReadPlan:
+    """Disposable scope cuts and the one effective base; canonical rows own all truth."""
+
+    segments: tuple[PreparedProviderInputCut, ...]
+    snapshot_segment: PreparedProviderInputCut | None
+    source_floor: int
+
+
+def worker_history_segments(connection, cut, *, deadline_monotonic, maximum_items):
+    """Return oldest-to-newest cuts and the nearest base plus its uncovered tail.
+
+    Each uncompressed segment has at least its real objective. The existing
+    per-input item budget bounds this operation, not the lifetime/depth of a tree.
+    """
+    segments = []
+    snapshot_segment = None
+    source_floor = 0
+    seen = set()
+    current = cut
+    while True:
+        if monotonic() >= deadline_monotonic:
+            raise TimeoutError("worker history read deadline exceeded")
+        row = connection.execute(
+            """SELECT turn.scope_subagent_task_id, revision.base_kind, revision.source_through_sequence,
+                      task.history_source_task_id, task.history_cut_sequence,
+                      task.history_context_binding_revision_id
+               FROM pulsara_v3.turns AS turn
+               JOIN pulsara_v3.turn_context_binding_revisions AS revision
+                ON revision.session_id=turn.session_id AND revision.turn_id=turn.id
+                AND revision.id=%s
+               LEFT JOIN pulsara_v3.subagent_tasks AS task
+                ON task.session_id=turn.session_id AND task.id=turn.scope_subagent_task_id
+               WHERE turn.session_id=%s AND turn.id=%s""",
+            (current.context_binding_revision_id, current.session_id, current.turn_id),
+        ).fetchone()
+        if row is None:
+            raise ConversationKernelConflict("worker effective binding is absent")
+        if row["scope_subagent_task_id"] is None:
+            return None
+        task_id = str(row["scope_subagent_task_id"])
+        if task_id in seen:
+            raise ConversationKernelConflict("worker history ancestry is cyclic")
+        seen.add(task_id)
+        segments.append(current)
+        if len(segments) > maximum_items:
+            raise ConversationKernelConflict(
+                "worker history exceeds provider input item budget"
+            )
+        if snapshot_segment is None and row["base_kind"] == "SNAPSHOT":
+            snapshot_segment = current
+            source_floor = int(row["source_through_sequence"])
+        if row["history_source_task_id"] is None:
+            break
+        # A child snapshot may preserve a protected tool tail in an ancestor.
+        # Skip only covered ancestors, not every ancestor merely because a base exists.
+        if int(row["history_cut_sequence"]) <= source_floor:
+            break
+        turn_id = validate_worker_history_source(
+            connection,
+            session_id=current.session_id,
+            source_task_id=str(row["history_source_task_id"]),
+            through_sequence=int(row["history_cut_sequence"]),
+            binding_revision_id=str(row["history_context_binding_revision_id"]),
+        )
+        current = PreparedProviderInputCut(
+            session_id=current.session_id,
+            turn_id=turn_id,
+            context_binding_revision_id=str(row["history_context_binding_revision_id"]),
+            provider_input_through_sequence=int(row["history_cut_sequence"]),
+        )
+    return WorkerHistoryReadPlan(
+        tuple(reversed(segments)), snapshot_segment, source_floor
+    )
+
+
+def worker_initial_material_items(connection, *, cut, floor):
+    row = connection.execute(
+        """SELECT turn.initial_entry_id, initial.entry_sequence,
+                  task.parent_context_body, task.dependency_context_body,
+                  task.terminal_material_body
+           FROM pulsara_v3.turns AS turn
+           JOIN pulsara_v3.transcript_entries AS initial
+            ON initial.session_id=turn.session_id AND initial.id=turn.initial_entry_id
+           JOIN pulsara_v3.subagent_tasks AS task
+            ON task.session_id=turn.session_id AND task.id=turn.scope_subagent_task_id
+           WHERE turn.session_id=%s AND turn.id=%s""",
+        (cut.session_id, cut.turn_id),
     ).fetchone()
-    if image is not None:
-        raise ConversationKernelConflict("worker history contains unsupported multimodal material")
-    rows = connection.execute(
-        """SELECT e.id, e.entry_sequence, e.entry_kind, e.content_digest,
-                  e.content_size, e.content_codec,
-                  COALESCE(e.inline_content, blob.body) AS body,
-                  result.tool_call_id, result.result_state
-           FROM pulsara_v3.transcript_entries AS e
-           LEFT JOIN pulsara_v3.blobs AS blob
-             ON blob.id=e.blob_id AND blob.workspace_id=e.workspace_id
-           LEFT JOIN pulsara_v3.tool_results AS result
-             ON result.session_id=e.session_id AND result.result_entry_id=e.id
-           WHERE e.session_id=%s AND e.scope_subagent_task_id=%s
-             AND e.entry_sequence > %s AND e.entry_sequence <= %s
-           ORDER BY e.entry_sequence LIMIT %s""",
-        (session_id, source_task_id, floor, through_sequence, MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS + 1),
-    ).fetchall()
-    if len(rows) > MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS:
-        raise ConversationKernelConflict("worker history exceeds the existing provider input item budget")
-    entry_ids = [str(row["id"]) for row in rows]
-    blocks_by_entry: dict[str, list[dict[str, object]]] = {}
-    if entry_ids:
-        blocks = connection.execute(
-            """SELECT b.assistant_entry_id, b.block_kind, b.tool_call_id,
-                      b.tool_name, b.tool_arguments, b.content_digest,
-                      b.content_size, b.content_codec,
-                      COALESCE(b.inline_content, blob.body) AS body
-               FROM pulsara_v3.assistant_message_blocks AS b
-               LEFT JOIN pulsara_v3.blobs AS blob
-                 ON blob.id=b.blob_id AND blob.workspace_id=b.workspace_id
-               WHERE b.session_id=%s AND b.assistant_entry_id=ANY(%s)
-               ORDER BY b.assistant_entry_id, b.block_ordinal""",
-            (session_id, entry_ids),
-        ).fetchall()
-        for block in blocks:
-            if block["block_kind"] == "TOOL_CALL":
-                value: dict[str, object] = {
-                    "kind": "tool_request", "call_id": block["tool_call_id"],
-                    "tool_name": block["tool_name"], "arguments": block["tool_arguments"],
-                }
-            else:
-                value = {"kind": str(block["block_kind"]).lower(), "text": _public_utf8(block, field="assistant block")}
-            blocks_by_entry.setdefault(str(block["assistant_entry_id"]), []).append(value)
-    history: list[dict[str, object]] = []
-    settled_calls = {str(row["tool_call_id"]) for row in rows if row["tool_call_id"] is not None}
-    for row in rows:
-        kind = str(row["entry_kind"])
-        value: dict[str, object] = {"entry_id": row["id"], "sequence": row["entry_sequence"], "kind": kind}
-        if kind.startswith("ASSISTANT_"):
-            value["blocks"] = blocks_by_entry.get(str(row["id"]), [])
-            for block in value["blocks"]:
-                if block["kind"] == "tool_request" and str(block["call_id"]) not in settled_calls:
-                    block["historical_result"] = "UNKNOWN_OR_UNFINISHED"
-        else:
-            value["text"] = _public_utf8(row, field="entry")
-            if kind == "TOOL_RESULT":
-                value["tool_call_id"] = row["tool_call_id"]
-                value["result_state"] = row["result_state"]
-        history.append(value)
-    frames = []
-    if source["base_kind"] != "SNAPSHOT" and source["worker_history_body"] is not None:
-        frames.extend(json.loads(str(source["worker_history_body"]))["pulsara_worker_history"]["frames"])
-    frames.append({
-            "source_task_id": source_task_id,
-            "source_status": source["status"],
-            "through_sequence": through_sequence,
-            "objective": source["objective"],
-            "initial_public_sources": None if source["base_kind"] == "SNAPSHOT" else {
-                "parent_context": source["parent_context_body"],
-                "dependency_results": source["dependency_context_body"],
-                "terminal_material": source["terminal_material_body"],
+    if (
+        row is None
+        or not floor < row["entry_sequence"] <= cut.provider_input_through_sequence
+    ):
+        return ()
+    return tuple(
+        FrozenProviderInputItem(
+            item_kind=FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL,
+            source_entry_id=str(row["initial_entry_id"]),
+            source_entry_sequence=int(row["entry_sequence"]),
+            source_turn_id=cut.turn_id,
+            content=(
+                LLMTextPart(
+                    canonical_json_bytes(
+                        {
+                            "pulsara_initial_context": {
+                                "source": kind,
+                                "content_semantics": "UNTRUSTED_COLLABORATION_DATA",
+                                "body": row[column],
+                            }
+                        }
+                    ).decode("utf-8")
+                ),
+            ),
+        )
+        for kind, column in (
+            ("PARENT_CONTEXT", "parent_context_body"),
+            ("DEPENDENCY_RESULTS", "dependency_context_body"),
+            ("TERMINAL_MATERIAL", "terminal_material_body"),
+        )
+        if row[column] is not None
+    )
+
+
+def _refingerprint(value, **changes):
+    """Rebuild an existing compile DTO's existing boundary digest, not a new proof."""
+    pending = type(value).__new__(type(value))
+    for field in fields(value):
+        object.__setattr__(
+            pending, field.name, changes.get(field.name, getattr(value, field.name))
+        )
+    if isinstance(value, FrozenCanonicalCompileSnapshot):
+        changes["canonical_read_cut_fingerprint"] = (
+            canonical_compile_snapshot_fingerprint(pending)
+        )
+    else:
+        changes["fact_fingerprint"] = context_binding_compile_fact_fingerprint(pending)
+    return replace(value, **changes)
+
+
+def historicalize_snapshot(connection, item, segment):
+    from pulsara_agent.conversation_kernel.compaction.prompt import (
+        build_compaction_snapshot_carrier,
+    )
+
+    carrier = item.content
+    retained = carrier.retained_historical_requests
+    active = carrier.active_request
+    if active is not None:
+        row = connection.execute(
+            "SELECT initial.id FROM pulsara_v3.turns AS turn "
+            "JOIN pulsara_v3.transcript_entries AS initial "
+            "ON initial.session_id=turn.session_id AND initial.id=turn.initial_entry_id "
+            "WHERE turn.session_id=%s AND turn.id=%s AND initial.id=%s "
+            "AND initial.entry_sequence=%s",
+            (
+                segment.session_id,
+                segment.turn_id,
+                active.entry_id,
+                active.entry_sequence,
+            ),
+        ).fetchone()
+        if (
+            row is None
+            or active.item_kind is not FrozenProviderInputItemKind.USER
+            or active.input_origin is not CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
+        ):
+            raise ConversationKernelConflict(
+                "worker snapshot active objective attribution is invalid"
+            )
+        if active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT:
+            retained += (
+                FrozenRetainedHistoricalRequest(
+                    active.item_kind, active.input_origin, active.content
+                ),
+            )
+    historical = build_compaction_snapshot_carrier(
+        summary=FrozenCompactionSummary(
+            body=carrier.earlier_context_summary,
+            body_utf8_bytes=len(carrier.earlier_context_summary.encode("utf-8")),
+            body_digest=context_fingerprint(
+                "pulsara.frozen-compaction-summary.v2-guided-freeform",
+                carrier.earlier_context_summary,
+            ),
+        ),
+        recent_human_requests=carrier.recent_human_requests,
+        continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
+        active_request=None,
+        retained_historical_requests=retained,
+    )
+    return replace(item, content=historical)
+
+
+def read_effective_worker_dispatch(
+    reader, connection, cut, segments, deadline_monotonic, *, historical_scope=False
+):
+    """Compose bounded typed reads using the same canonical lowering for each scope."""
+    plan = segments
+    items, closures, late, manifests = [], [], [], []
+    base = None
+    base_dispatch = None
+    canonical_bytes = 0
+    if plan.snapshot_segment is not None:
+        base_dispatch = reader.read_frozen_dispatch(
+            plan.snapshot_segment,
+            deadline_monotonic=deadline_monotonic,
+            _connection=connection,
+            _single_scope=True,
+            _historical_scope=historical_scope or plan.snapshot_segment != cut,
+        )
+        base = base_dispatch.compile_snapshot.context_binding_fact
+        snapshot_item = base_dispatch.compile_snapshot.canonical_input.items[0]
+        if snapshot_item.item_kind is not FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
+            raise ConversationKernelConflict("effective worker snapshot item is absent")
+        if plan.snapshot_segment != cut:
+            snapshot_item = historicalize_snapshot(
+                connection, snapshot_item, plan.snapshot_segment
+            )
+        items.append(snapshot_item)
+        canonical_bytes = snapshot_item.content.canonical_expanded_bytes
+    for segment in plan.segments:
+        dispatch = (
+            base_dispatch
+            if segment == plan.snapshot_segment
+            else reader.read_frozen_dispatch(
+                segment,
+                deadline_monotonic=deadline_monotonic,
+                _connection=connection,
+                _single_scope=True,
+                _historical_scope=historical_scope or segment != cut,
+                _canonical_byte_budget=reader._maximum_canonical_bytes
+                - canonical_bytes,
+                _effective_source_floor=plan.source_floor,
+                _include_snapshot=False,
+            )
+        )
+        facts = dispatch.compile_snapshot
+        if base is None:
+            base = facts.context_binding_fact
+        segment_items = tuple(
+            item
+            for item in facts.canonical_input.items
+            if item.item_kind is not FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+        )
+        items.extend(segment_items)
+        canonical_bytes += sum(
+            provider_input_item_canonical_expanded_bytes(item) for item in segment_items
+        )
+        closures.extend(facts.canonical_input.closures)
+        late.extend(facts.canonical_input.late_outcomes)
+        manifests.extend(dispatch.replay_manifest_cut.manifests)
+        if (
+            len(items) > reader._maximum_items
+            or canonical_bytes > reader._maximum_canonical_bytes
+        ):
+            raise ConversationKernelConflict(
+                "effective worker history exceeds provider input bounds"
+            )
+    # Last segment owns current identity/permissions; the nearest adopted base owns the snapshot.
+    old = facts.canonical_input
+    joined_items, joined_closures, joined_late = (
+        tuple(items),
+        tuple(closures),
+        tuple(late),
+    )
+    canonical = CanonicalModelInputSnapshot(
+        identity=old.identity,
+        items=joined_items,
+        canonical_expanded_bytes=canonical_bytes,
+        closures=joined_closures,
+        late_outcomes=joined_late,
+        snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
+            identity=old.identity,
+            items=joined_items,
+            canonical_expanded_bytes=canonical_bytes,
+            closures=joined_closures,
+            late_outcomes=joined_late,
+        ),
+    )
+    binding = _refingerprint(
+        facts.context_binding_fact,
+        base_kind=base.base_kind,
+        context_snapshot_id=base.context_snapshot_id,
+        source_through_sequence=base.source_through_sequence
+        if base.base_kind is ContextBindingBaseKind.SNAPSHOT
+        else 0,
+        context_base_semantic_identity=base.context_base_semantic_identity,
+    )
+    joined = _refingerprint(
+        facts, canonical_input=canonical, context_binding_fact=binding
+    )
+    manifest_cut = freeze_provider_replay_manifest_cut(
+        session_id=cut.session_id,
+        scope=dispatch.replay_manifest_cut.scope,
+        context_binding_revision_id=cut.context_binding_revision_id,
+        provider_input_through_sequence=cut.provider_input_through_sequence,
+        manifests=tuple(manifests),
+    )
+    if manifest_cut.aggregate_manifest_utf8_bytes > reader._maximum_canonical_bytes:
+        raise ConversationKernelConflict(
+            "effective worker replay metadata exceeds input bound"
+        )
+    return FrozenCanonicalProviderDispatchRead(
+        compile_snapshot=joined,
+        replay_manifest_cut=manifest_cut,
+        composite_fingerprint=context_fingerprint(
+            "pulsara.canonical-provider-dispatch-read:v1",
+            {
+                "compile": joined.canonical_read_cut_fingerprint,
+                "replay_manifest_cut": manifest_cut.cut_fingerprint,
             },
-            "adopted_summary": snapshot_text,
-            "retained_requests": retained_requests,
-            "adopted_summary_through_sequence": floor if snapshot_text is not None else None,
-            "committed_public_entries": history,
-    })
-    package = {"pulsara_worker_history": {
-        "frames": frames,
-        "content_semantics": "ADVISORY_HISTORY_NOT_EXECUTABLE",
-    }}
-    rendered = canonical_json_bytes(package)
-    if len(rendered) > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
-        raise ConversationKernelConflict("worker history exceeds the existing provider input byte budget")
-    return rendered.decode("utf-8")
+        ),
+    )

@@ -242,7 +242,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
           </div>
         </details>
         {!packageDefinition && <><label className="capability-check capability-field--wide"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />启用此服务</label>
-        <label className="capability-check capability-field--wide"><input type="checkbox" checked={subagents} onChange={(event) => setSubagents(event.target.checked)} />也向子任务提供</label></>}
+        <label className="capability-check capability-field--wide"><input type="checkbox" checked={subagents} onChange={(event) => setSubagents(event.target.checked)} />也向委派 Agent 提供</label></>}
         {destinationChanged && retainsCredential && <label className="capability-check capability-field--wide"><input type="checkbox" checked={retainConfirmed} onChange={(event) => setRetainConfirmed(event.target.checked)} />我确认将保留的凭据用于新的连接目标。</label>}
         {error && <p role="alert" className="capability-field--wide">{error}</p>}
         {previousAuth.type === 'oauth' && onAuthorization && <div className="capability-field--wide"><small>以下操作使用已保存的连接，不使用当前未保存的修改。</small><div className="capability-detail-actions">

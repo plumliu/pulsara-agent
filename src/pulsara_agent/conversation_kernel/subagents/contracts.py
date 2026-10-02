@@ -649,7 +649,6 @@ class PreparedSubagentTaskStart:
         repr=False
     )
     terminal_material_body: str | None = dataclass_field(repr=False)
-    worker_history_body: str | None = dataclass_field(repr=False)
     occurred_at: datetime
     actor_id: str
     event_id: str
@@ -674,9 +673,11 @@ class PreparedSubagentTaskStart:
         ):
             raise ValueError("subagent task start dependency context is foreign")
         if self.terminal_material_body is not None:
-            _text(self.terminal_material_body, "terminal_material_body", MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES)
-        if self.worker_history_body is not None:
-            _text(self.worker_history_body, "worker_history_body", MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES)
+            _text(
+                self.terminal_material_body,
+                "terminal_material_body",
+                MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
+            )
         expected_event = _stable_id(
             "subagent-start-event",
             self.session_id,
@@ -725,7 +726,6 @@ def build_subagent_task_start(
     parent_context: FrozenSubagentParentContextSelection,
     dependency_context: FrozenDependencyResultContext | None,
     terminal_material_body: str | None = None,
-    worker_history_body: str | None = None,
     occurred_at: datetime,
     actor_id: str,
 ) -> PreparedSubagentTaskStart:
@@ -743,7 +743,6 @@ def build_subagent_task_start(
         parent_context,
         dependency_context,
         terminal_material_body,
-        worker_history_body,
         occurred_at,
         actor_id,
         event_id,
@@ -1009,7 +1008,7 @@ class PreparedSubagentTaskDraft:
         if not isinstance(self.initial_status, SubagentTaskStatus):
             raise TypeError("subagent task status must be closed")
         if self.task_key is not None:
-            if re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", self.task_key) is None:
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,63}", self.task_key) is None:
                 raise ValueError("task_key is invalid")
         for field, value in (
             ("label", self.label),

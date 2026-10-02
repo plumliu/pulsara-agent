@@ -19,6 +19,7 @@ import type { AgentTask, SkillCapability, SubagentActivity, TaskStatus } from '.
 import { MarkdownBody, type MarkdownNotify } from './markdown-body';
 import type {
   AgentTaskActivityRecord,
+  AgentTaskActivityPage,
   AgentTaskGroup,
   BackgroundProcess,
   BackgroundProcessPage,
@@ -52,7 +53,7 @@ function TaskCapacitySummary({ readCapacity }: {
     return () => { current = false; window.clearInterval(timer); };
   }, [readCapacity]);
   return <div className="task-capacity-summary">
-    <span className="section-label">子任务并发数</span>
+    <span className="section-label">任务并发数</span>
     <small className={occupied ? 'is-running' : undefined}>{error ? '暂不可用' : occupied === undefined ? '读取中' : `${occupied} 运行`}</small>
     {error && <p role="alert">{error}</p>}
   </div>;
@@ -62,21 +63,21 @@ function taskReasoningLabel(value: unknown): string | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const selection = value as Record<string, unknown>;
   if (selection.kind === 'effort') {
-    if (selection.value === null || selection.value === 'none') return '推理关闭';
-    if (typeof selection.value === 'string') return `推理 ${selection.value}`;
+    if (selection.value === null || selection.value === 'none') return '关闭';
+    if (typeof selection.value === 'string') return selection.value;
   }
-  if (selection.kind === 'toggle' && typeof selection.enabled === 'boolean') return selection.enabled ? '推理开启' : '推理关闭';
-  if (selection.kind === 'budget_tokens' && typeof selection.tokens === 'number') return `推理 ${selection.tokens.toLocaleString('zh-CN')} tokens`;
+  if (selection.kind === 'toggle' && typeof selection.enabled === 'boolean') return selection.enabled ? '开启' : '关闭';
+  if (selection.kind === 'budget_tokens' && typeof selection.tokens === 'number') return `${selection.tokens.toLocaleString('zh-CN')} tokens`;
   return undefined;
 }
 
 function groupTitle(tasks: AgentTask[]): string {
-  if (tasks.length === 1) return tasks[0]?.label || tasks[0]?.taskKey || '子任务';
+  if (tasks.length === 1) return tasks[0]?.label || tasks[0]?.taskKey || '任务';
   const date = tasks[0]?.acceptedAt ? new Date(tasks[0].acceptedAt) : undefined;
   const time = date && !Number.isNaN(date.getTime())
     ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(date)
     : undefined;
-  return time ? `子任务组 · ${time}` : '子任务组';
+  return time ? `任务组 · ${time}` : '任务组';
 }
 
 function statusIcon(status: TaskStatus) {
@@ -268,7 +269,7 @@ function TaskGraphDialog({
   onCancel: (task: AgentTask) => Promise<void>;
   onNotify: MarkdownNotify;
   activities: ReadonlyMap<string, SubagentActivity[]>;
-  loadActivities: (taskId: string, cursor?: string) => Promise<{ activities: AgentTaskActivityRecord[]; nextCursor?: string }>;
+  loadActivities: (taskId: string, cursor?: string) => Promise<AgentTaskActivityPage>;
   loadBackgroundProcesses: (cursor?: string) => Promise<BackgroundProcessPage>;
   skills: SkillCapability[];
   artifactOwnerKey: string;
@@ -300,6 +301,7 @@ function TaskGraphDialog({
   const [activityRead, setActivityRead] = useState<{
     taskId: string;
     activities: AgentTaskActivityRecord[];
+    inheritedContext?: AgentTaskActivityPage['inheritedContext'];
     nextCursor?: string;
     error?: string;
   }>();
@@ -323,12 +325,19 @@ function TaskGraphDialog({
   const canonicalActivities = activityRead?.taskId === selected?.id
     ? (activityRead?.activities ?? [])
     : [];
+  const inheritedContext = activityRead?.taskId === selected?.id ? activityRead?.inheritedContext : undefined;
+  const inheritedGroups: Array<{ turnId: string; label: string; records: AgentTaskActivityRecord[] }> = [];
+  for (const record of canonicalActivities.filter(record => record.inherited)) {
+    const last = inheritedGroups.at(-1);
+    if (last?.turnId === record.turnId) last.records.push(record);
+    else inheritedGroups.push({ turnId: record.turnId, label: record.sourceTaskLabel || '先前任务', records: [record] });
+  }
   const activityError = activityRead?.taskId === selected?.id
     ? activityRead?.error
     : undefined;
   const projectedTaskActivities = selected ? projectTaskActivities(selected, activities.get(selected.id) ?? []) : [];
   const conversationMessages = projectAgentTaskConversation(
-    canonicalActivities,
+    canonicalActivities.filter(record => !record.inherited),
     projectedTaskActivities,
   );
   if (
@@ -424,7 +433,7 @@ function TaskGraphDialog({
       try {
         const page = await loadActivities(taskId);
         if (requestRevision !== activityRevision.current) return;
-        setActivityRead({ taskId, activities: page.activities, nextCursor: page.nextCursor });
+        setActivityRead({ taskId, activities: page.activities, inheritedContext: page.inheritedContext, nextCursor: page.nextCursor });
       } catch (caught) {
         if (requestRevision === activityRevision.current) setActivityRead({
           taskId,
@@ -471,7 +480,7 @@ function TaskGraphDialog({
       const page = await loadActivities(taskId, cursor);
       if (revision !== activityRevision.current) return;
       setActivityRead((current) => current?.taskId === taskId && current.nextCursor === cursor
-        ? { taskId, activities: [...current.activities, ...page.activities], nextCursor: page.nextCursor }
+        ? { taskId, activities: [...current.activities, ...page.activities], inheritedContext: page.inheritedContext, nextCursor: page.nextCursor }
         : current);
     } catch (caught) {
       if (revision === activityRevision.current) setActivityRead((current) => current?.taskId === taskId
@@ -600,7 +609,9 @@ function TaskGraphDialog({
           </aside>}
           {selected && (
             <aside className="task-node-detail" aria-label={`${selected.label} 详情`}>
-              <header><span className="task-node-detail__identity"><Bot size={13} /><strong>{selected.label}</strong></span>
+              <header><span className="task-node-detail__identity"><Bot size={13} /><strong>{selected.label}</strong>
+                {modelName && <span className="task-node-detail__model"><span>{modelName}</span>{reasoningLabel && <small>{reasoningLabel}</small>}</span>}
+              </span>
                 <small>{labels[selected.status]}</small>
               {canControl && active(selected.status) && <span className="task-node-detail__actions">
                 <button className="task-node-detail__cancel" type="button" onClick={() => {
@@ -622,8 +633,23 @@ function TaskGraphDialog({
               </span>}
               </header>
               {selected.dependencies?.length ? <section><h4>依赖</h4><ul>{selected.dependencies.map((dependency) => <li key={dependency.id}><span>{dependency.label || dependency.taskKey || dependency.id}</span><small>{labels[dependency.status]}</small></li>)}</ul></section> : null}
-              {modelName && <section className="task-node-detail__model"><h4>模型</h4><p><span>{modelName}</span>{reasoningLabel && <small>{reasoningLabel}</small>}</p></section>}
               {selected.progress && <section><h4>最新进展</h4><p>{selected.progress}</p></section>}
+              {inheritedContext && <section className="task-node-detail__activities task-inherited-context">
+                <details>
+                  <summary>上下文继承自：{inheritedContext.sourceLabel}</summary>
+                  {inheritedContext.materials.map((material, index) => <div key={index} className="task-inherited-context__material">
+                    <h4>{material.label}</h4><MarkdownBody body={material.body} onNotify={onNotify} />
+                  </div>)}
+                  {inheritedGroups.map(group => <div className="task-conversation" key={group.turnId}>
+                    <ConversationMessages messages={projectAgentTaskConversation(group.records)} isRunning={false}
+                      taskFinalAnswerId={[...group.records].reverse().find(record => record.entryKind === 'ASSISTANT_MESSAGE' && record.turnStatus === 'COMPLETED')?.entryId}
+                      skills={skills} artifactOwnerKey={`${artifactOwnerKey}:${selected.id}`}
+                      onReadToolArtifact={onReadToolArtifact} onNotify={onNotify}
+                      userLabel="主 Agent" assistantLabel={group.label} />
+                  </div>)}
+                  {!inheritedGroups.length && !inheritedContext.materials.length && <p>继承的上下文没有可显示的对话。</p>}
+                </details>
+              </section>}
               <section className="task-node-detail__activities">
                 <h4>任务对话</h4>
                 {activityError && <p className="is-attention">{activityError}</p>}
@@ -639,7 +665,7 @@ function TaskGraphDialog({
                       artifactOwnerKey={`${artifactOwnerKey}:${selected.id}`}
                       onReadToolArtifact={onReadToolArtifact}
                       onNotify={onNotify}
-                      userLabel="主任务"
+                      userLabel="主 Agent"
                       assistantLabel={selected.label || selected.role}
                     />
                   </div>
@@ -706,7 +732,7 @@ export function TaskWorkspace({
   onCancel: (task: AgentTask) => Promise<void>;
   onNotify: MarkdownNotify;
   activities: ReadonlyMap<string, SubagentActivity[]>;
-  loadActivities: (taskId: string, cursor?: string) => Promise<{ activities: AgentTaskActivityRecord[]; nextCursor?: string }>;
+  loadActivities: (taskId: string, cursor?: string) => Promise<AgentTaskActivityPage>;
   loadBackgroundProcesses: (cursor?: string) => Promise<BackgroundProcessPage>;
   skills?: SkillCapability[];
   artifactOwnerKey?: string;
@@ -749,7 +775,7 @@ export function TaskWorkspace({
   if (error) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>任务没有读完整</strong><small>{error}</small></span><button onClick={onRetry}>重试</button></div>;
   if (incomplete.length) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>任务批次数据不完整</strong><small>TASK_BATCH_DATA_INCOMPLETE：{incomplete.map((task) => task.id).join('、')}</small></span><button onClick={onRetry}>重试</button></div>;
   if (loading && groups.length === 0) return <div className="task-inventory-notice"><LoaderCircle className="is-spinning" size={15} /><span><strong>正在读取任务组</strong><small>恢复任务和依赖关系…</small></span></div>;
-  if (!groups.length) return <div className="task-workspace">{readCapacity && <TaskCapacitySummary readCapacity={readCapacity} />}<div className="inspector-empty"><Bot size={18} /><span>这个会话还没有子任务</span></div></div>;
+  if (!groups.length) return <div className="task-workspace">{readCapacity && <TaskCapacitySummary readCapacity={readCapacity} />}<div className="inspector-empty"><Bot size={18} /><span>这个会话还没有任务</span></div></div>;
 
   return <div className="task-workspace">
     {readCapacity && <TaskCapacitySummary readCapacity={readCapacity} />}
@@ -758,8 +784,8 @@ export function TaskWorkspace({
       const attention = group.statusCounts.failed + group.statusCounts.blocked + group.statusCounts.interrupted;
       const completed = group.statusCounts.completed;
       const title = group.singleTaskLabel || (group.firstAcceptedAt
-        ? `子任务组 · ${new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(group.firstAcceptedAt))}`
-        : '子任务组');
+        ? `任务组 · ${new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(group.firstAcceptedAt))}`
+        : '任务组');
       return <button key={group.id} type="button" className="task-group-card" onClick={(event) => {
         setOpener(event.currentTarget);
         setOpenGroup(group.id);

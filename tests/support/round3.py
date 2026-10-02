@@ -71,7 +71,6 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
     FrozenNonTriggerContextSources,
-    build_subagent_context_source,
 )
 from pulsara_agent.conversation_kernel.cold_epoch import (
     SubagentInitialSeed,
@@ -86,9 +85,6 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_parent_context_selection,
     build_subagent_result_public_fact,
     build_subagent_task_start,
-    parent_context_call_subject_identity_digest,
-    parent_context_selection_identity_digest,
-    parent_context_source_identity_digest,
 )
 from pulsara_agent.conversation_kernel.subagents.runtime_port import (
     PreparedExplicitSubagentCompletion,
@@ -745,7 +741,6 @@ class StaticContextSourceCollector:
                 ContextSourceAbsenceKind.NOT_APPLICABLE
             ),
             ContextSourceKind.TERMINAL_MATERIAL: ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceKind.WORKER_HISTORY: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.HOOK_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         }
         absent = tuple(
@@ -1581,42 +1576,12 @@ class Round10TestSubagentRuntime:
         self._require_task(task_id)
         return self._profile_kind
 
-    def initial_context_sources(
-        self, *, task_id: str
-    ) -> tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...]:
-        self._require_task(task_id)
-        return (
-            build_subagent_context_source(
-                kind=ContextSourceKind.PARENT_CONTEXT,
-                text=self._selection.rendered_body,
-                domain_identity={
-                    "subject": parent_context_call_subject_identity_digest(
-                        self._subject
-                    ),
-                    "selection": parent_context_selection_identity_digest(
-                        self._subject, self._selection
-                    ),
-                    "source": parent_context_source_identity_digest(
-                        self._subject, self._selection
-                    ),
-                },
-            ),
-            build_subagent_context_source(
-                kind=ContextSourceKind.DEPENDENCY_RESULTS,
-                text=None,
-                domain_identity=None,
-            ),
-            build_subagent_context_source(
-                kind=ContextSourceKind.TERMINAL_MATERIAL,
-                text=None,
-                domain_identity=None,
-            ),
-            build_subagent_context_source(
-                kind=ContextSourceKind.WORKER_HISTORY,
-                text=None,
-                domain_identity=None,
-            ),
+    def initial_context_sources(self, *, task_id: str):
+        from pulsara_agent.conversation_kernel.cold_epoch import (
+            subagent_initial_material_absences,
         )
+
+        return subagent_initial_material_absences()
 
     def build_initial_seed(
         self,
@@ -1631,9 +1596,6 @@ class Round10TestSubagentRuntime:
             parent_turn_id=self._parent_turn_id,
             profile_kind=self._profile_kind,
             objective=self._objective,
-            parent_call_subject=self._subject,
-            parent_context_selection=self._selection,
-            dependency_context=None,
         )
 
     async def consume_mailbox_safe_point(self, task_id: str) -> bool:

@@ -879,7 +879,7 @@ function SubagentRunCard({
               ) : null}
               {activity.body && (activity.kind === 'guidance' ? (
                 <div className="subagent-guidance">
-                  <span><CornerDownRight size={11} /> 主任务补充</span>
+                  <span><CornerDownRight size={11} /> 主 Agent 补充</span>
                   <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} /></div>
                 </div>
               ) : <div className="assistant-markdown"><MarkdownBody body={activity.body} onNotify={onNotify} streaming={activity.status === 'running'} /></div>)}
@@ -920,9 +920,9 @@ function SubagentGroup({
 }) {
   const settled = runs.filter((run) => !['pending', 'running', 'waiting'].includes(run.status)).length;
   return (
-    <section className="subagent-group" aria-label="子任务执行">
+    <section className="subagent-group" aria-label="任务执行">
       <header className="subagent-group__header">
-        <span><GitFork size={13} /><strong>子任务执行</strong></span>
+        <span><GitFork size={13} /><strong>任务执行</strong></span>
         <small>{settled} / {runs.length} 已结束</small>
       </header>
       <div className="subagent-group__runs">{runs.map((run) => (
@@ -956,7 +956,7 @@ function SubagentCompletionEvent({ message, visible }: { message: Message; visib
   const { trigger, details, position, show, hide, keep, dismiss } = usePromptHover<HTMLElement>(310);
   useEffect(() => { if (!visible) dismiss(); }, [visible, dismiss]);
   const helpId = `${message.id}-subagent-completion-help`;
-  const sourceResult = message.sourceSubagentLabel ? `${message.sourceSubagentLabel} 的结果` : '子任务结果';
+  const sourceResult = message.sourceSubagentLabel ? `${message.sourceSubagentLabel} 的结果` : '任务结果';
   const title = message.sourceSubagentRelation === 'previous'
     ? `上一轮 ${sourceResult}已加入本轮对话`
     : message.sourceSubagentRelation === 'earlier'
@@ -974,7 +974,7 @@ function SubagentCompletionEvent({ message, visible }: { message: Message; visib
       className="subagent-completion-event__tooltip" role="tooltip" data-above={position.above}
       style={{ left: position.left, top: position.top, translate: position.above ? '0 calc(-100% - 7px)' : '0 7px' }}
       onMouseEnter={keep} onMouseLeave={hide}>
-      该结果已记录到当前对话，不会重新运行子任务。
+      该结果已记录到当前对话，不会重新运行任务。
     </span>, document.body)}
   </>;
 }
@@ -2194,7 +2194,8 @@ export function WorkbenchView({
           </div>
           {canControl && (
             <button
-              className={`ghost-button${compacting ? ' is-compacting' : ''}`}
+              className={`ghost-button context-compact-button${compacting ? ' is-compacting' : ''}`}
+              aria-label={compacting ? '正在整理上下文' : '压缩上下文'}
               disabled={compacting || !hasCompactionContext || runtimeStatus !== 'online'}
               title={!hasCompactionContext ? '开始对话后即可压缩上下文' : undefined}
               onClick={() => {
@@ -2203,7 +2204,7 @@ export function WorkbenchView({
               }}
             >
               {compacting ? <LoaderCircle size={12} /> : <RotateCcw size={12} />}
-              {compacting ? '正在整理上下文' : '压缩上下文'}
+              <span>{compacting ? '正在整理上下文' : '压缩上下文'}</span>
             </button>
           )}
           <button className={`icon-button${inspectorOpen ? ' is-active' : ''}`} onClick={onToggleInspector} aria-label="切换检查器"><PanelRight size={15} /></button>
@@ -2470,7 +2471,7 @@ export function WorkbenchView({
                     className="send-button is-stop"
                     onClick={onStop}
                     aria-label="停止本轮运行"
-                    title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，子任务、排队输入和后台命令不会自动取消。"
+                    title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，任务、排队输入和后台命令不会自动取消。"
                   ><Square size={14} fill="currentColor" strokeWidth={0} aria-hidden="true" /></button>
                 ) : (
                   <button className="send-button" onClick={() => void submit()} disabled={!draft.hasContent || draft.pendingFiles > 0 || draft.failedFiles > 0 || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning ? '排队发送' : '发送'}>

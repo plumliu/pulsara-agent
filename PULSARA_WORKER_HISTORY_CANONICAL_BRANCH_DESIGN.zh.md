@@ -1,8 +1,8 @@
 # Pulsara worker_history：基于 canonical 历史的上下文分支设计
 
-状态：**设计已冻结，待实施；GPT-6 Astra high 两轮独立设计审阅完成，无设计阻塞项**。冻结日期：2026-10-02。
+状态：**已完成 hard-cut 实施、437 项相关测试、同一 GPT-6 Astra high critic 代码复审及真实 GUI dogfood，无剩余阻塞项**。冻结及验收日期：2026-10-02。
 
-本文定义替代当前 `worker_history` JSON 历史材料链路的单一设计。实施后，覆盖 [Subagent Workflow 增强设计](PULSARA_SUBAGENT_WORKFLOW_ENHANCEMENT_DESIGN.zh.md) 第 7 节中有关历史包装、构建和保存的旧合同；独立模型、成功依赖、终态材料、调度、结果交付等合同继续保留。设计冻结不表示生产代码已经切换。
+本文定义已落地的 `worker_history` canonical 上下文分支单一路径，替代原 JSON 历史材料链路，并覆盖 [Subagent Workflow 增强设计](PULSARA_SUBAGENT_WORKFLOW_ENHANCEMENT_DESIGN.zh.md) 第 7 节中有关历史包装、构建和保存的旧合同；独立模型、成功依赖、终态材料、调度、结果交付等合同继续保留。生产代码和 clean-v0 基线已切换；验收范围见第 12 节。
 
 设计遵循 [AGENTS.md](AGENTS.md)。前缀约束与减法讨论见 [前缀一致性再思考](PULSARA_PREFIX_CONTINUITY_SIMPLIFICATION_REVIEW.zh.md)。
 
@@ -31,11 +31,11 @@ flowchart TD
 
 这是**上下文祖先关系**。ROOT 仍是唯一编排者，worker 不能因此创建自己的 worker；成功依赖图的调度规则不变。分支也不隔离工作目录：B 修改的文件可能被 C 读取，历史隔离不等于文件系统快照。
 
-## 3. 当前实现与本次替换范围
+## 3. 替换前的路径与本次实施范围
 
-当前 [history.py](src/pulsara_agent/conversation_kernel/subagents/history.py) 的 `read_terminal_worker_public_history` 读取任务、有效 snapshot、公开 transcript 和工具块，最终返回 `pulsara_worker_history.frames` JSON，标记为 `ADVISORY_HISTORY_NOT_EXECUTABLE`。[任务 repository](src/pulsara_agent/conversation_kernel/_repository/subagents.py) 在启动时保存 `worker_history_body`，[subagent.py](src/pulsara_agent/conversation_kernel/subagent.py) 再将它作为 WORKER_HISTORY 上下文来源注入 compiler。
+替换前，[history.py](src/pulsara_agent/conversation_kernel/subagents/history.py) 的 `read_terminal_worker_public_history` 读取任务、有效 snapshot、公开 transcript 和工具块，最终返回 `pulsara_worker_history.frames` JSON，标记为 `ADVISORY_HISTORY_NOT_EXECUTABLE`。[任务 repository](src/pulsara_agent/conversation_kernel/_repository/subagents.py) 在启动时保存 `worker_history_body`，[subagent.py](src/pulsara_agent/conversation_kernel/subagent.py) 再将它作为 WORKER_HISTORY 上下文来源注入 compiler。
 
-这条路径提供的是带角色标记的历史说明材料。即使其中包含旧工具请求，它也没有成为正常历史投影中的 assistant tool call／tool result 对。
+已删除的路径提供的是带角色标记的历史说明材料。即使其中包含旧工具请求，它也没有成为正常历史投影中的 assistant tool call／tool result 对。
 
 本设计改为：
 
@@ -109,7 +109,7 @@ planner 选择本任务当前请求时，使用 initial entry 归属加 typed ob
 
 ### 6.2 已采用 snapshot 的来源
 
-有效历史为“已采用摘要 + 保留材料 + 该基准之后、截止点以内的 canonical 后缀”。snapshot 已覆盖的祖先不再递归展开，不能同时带回压缩前全文。摘要明确是摘要，不宣称原文恢复。
+有效历史为“已采用摘要 + 保留材料 + 该基准之后、截止点以内的 canonical 后缀”。snapshot 已覆盖的祖先不再递归展开，不能同时带回压缩前全文。已保留但未覆盖的祖先工具尾部继续按固定来源读取，只使用这一份有效 snapshot，不重新插入祖先旧摘要。摘要明确是摘要，不宣称原文恢复。
 
 分支自己发生 compaction 后，未来从该分支创建的任务采用其当前有效 snapshot，而不是绕回最早祖先。这既保留现有压缩语义，也避免树越深、输入就重复展开越多。
 
@@ -137,7 +137,7 @@ canonical transcript、task 初始公开材料、context binding、snapshot、bl
 
 - **scope 读取**：分支的 effective reader 同时看见固定来源基准与自己的后缀；不能把 session 全局 sequence 区间当作一个 worker 的全部历史。
 - **引用可达性**：分支及仍可作为来源的终态任务引用纳入现有内容／snapshot 可达性和删除约束，避免源任务结束清理后丢失材料；不得依赖 manager cache 或 provider epoch 存活。复用当前 transcript、snapshot、image／artifact 等 canonical 引用及 blob GC，不建立新的可达性图。任务终态不等于删除历史；整会话删除继续按现有级联规则处理。
-- **压缩**：compaction 的输入读取及被采用的结果使用同一有效历史定义；新的 snapshot 覆盖哪些祖先材料必须明确，回收仍遵循实际引用。
+- **压缩**：compaction 的输入读取及被采用的结果使用同一有效历史定义；新的 snapshot 覆盖哪些祖先材料必须明确，未覆盖祖先尾部仍按原引用可达；回收遵循实际引用。
 
 ### 7.1 唯一 effective view 与有效 base
 
@@ -145,7 +145,7 @@ canonical transcript、task 初始公开材料、context binding、snapshot、bl
 
 新 B 的 durable context binding 起初仍是本任务的 genesis；不为“继承历史”新增 durable base kind。effective reader 从不可变来源引用解析有效 base：
 
-1. B 已有自己的 adopted snapshot：采用它作为唯一有效 snapshot，读取 B 的覆盖点之后的后缀；停止展开祖先与已经覆盖的初始材料。
+1. B 已有自己的 adopted snapshot：采用它作为唯一有效 snapshot，停止读取已经覆盖的祖先与初始材料。若压缩保留的工具尾部仍位于祖先段，继续沿既有冻结引用读取覆盖点之后、各段固定 cut 以内的祖先后缀，再接 B 自己的后缀；不得因 adopted 就丢掉未覆盖材料。
 2. B 尚无自己的 adopted snapshot：沿来源链找到第一个适用的 adopted snapshot，采用其摘要与历史化 retained 材料，接上其后的各段固定祖先后缀及 B 当前后缀。
 3. 整条链都没有 snapshot：采用有效全文基准，按祖先到后代的固定顺序组成各段公开历史。
 
@@ -158,6 +158,8 @@ canonical transcript、task 初始公开材料、context binding、snapshot、bl
 同 epoch frontier 继续使用现有 process-local owner、完整有序项及前缀比较。有效基准与来源引用在本 epoch 内不变；源任务晚到结果不能通过重新读取祖先改变 ordered items。无需另存 lineage fingerprint／前缀 checkpoint，也无需复制祖先 rows 来获得顺序。B 自己采用新 snapshot 的变化只发生在明确的 compaction successor 边界。
 
 采用按需、迭代的祖先读取与已有有界物化，不设置总祖先数、总任务数或分支深度上限。已有单次输入条目、字节及 provider 预算仍适用；超预算通过既有压缩或明确资源结果处理，不静默截断。不得先无界展开全部祖先再依赖最终报错控制内存。
+
+任务详情的继承上下文为上述固定有效历史的只读投影，标明直接来源的任务名，并与本任务对话分开展示。复用同一个 canonical reader 选择祖先消息、有效摘要及初始材料；分页沿已有任务活动入口读取，不重新选择来源最新前沿、不建立 UI 历史真源，也不改动模型前缀。
 
 不持久化已安装 SYSTEM／tools／wire 请求来实现分支。现有来源字段不足以表达某个必需语义时，先修订本文，说明唯一 owner、事务与失败路径；不能临时增加证明链、checkpoint 或执行恢复机制。
 
@@ -173,9 +175,9 @@ canonical transcript、task 初始公开材料、context binding、snapshot、bl
 
 Host 重启沿现有规则中断旧执行，不恢复其私有进程状态。可读终态历史仍可用于创建新分支；会话 fork 不顺带复制 worker 任务图或授予跨会话 task 引用权。
 
-## 9. 实施时必须删除的旧路径
+## 9. 已完成的旧路径 hard cut
 
-这是一次 hard cut，实施时同时更新代码、clean-v0、说明、测试和样例：
+本次 hard cut 同时更新了代码、clean-v0、说明、测试和样例：
 
 1. 删除 JSON `pulsara_worker_history.frames` 包装及 `ADVISORY_HISTORY_NOT_EXECUTABLE` 历史包生成路径。
 2. 删除复制该包的 `worker_history_body` 存储与启动注入链路，移除专用 WORKER_HISTORY 巨型文本 observation 及其 compiler 接线。
@@ -186,12 +188,12 @@ Host 重启沿现有规则中断旧执行，不恢复其私有进程状态。可
 
 ## 10. 实施验收要求
 
-以下是未来实施的验证要求，本次文档工作没有执行这些测试。
+以下是本设计的验收要求；本次实施结果和真实验证范围见第 12 节。
 
 - A→B、A→C、B→D：目标各出现一次；C 不含 B 后缀；D 保留 B 的有效上下文；A 的状态和结果不变。
 - 实际 provider 输入包含正常的公共历史消息与工具请求／结果，而不是一条 JSON 历史包；历史工具没有被重新执行。
 - 初始 LAST_N／依赖／材料、源失败与取消、未知结果、图像／artifact、来源已压缩及分支再压缩；覆盖材料损坏和不支持目标的明确失败。
-- 来源 snapshot 含 RESUME_ACTIVE_TURN／active_request，分支仍以自己的 objective 为唯一当前请求；祖先 snapshot 与 child genesis 的有效 base 在 normal read、报价、compaction dry／post-adoption 中一致，初始材料压缩后不重复。
+- B 的压缩边界位于祖先工具段时，dry／post-adoption 与后续分支保持未覆盖祖先尾部；来源 snapshot 含 RESUME_ACTIVE_TURN／active_request，分支仍以自己的 objective 为唯一当前请求；祖先 snapshot 与 child genesis 的有效 base 在 normal read、报价、compaction dry／post-adoption 中一致，初始材料压缩后不重复。
 - 先接纳 B 并冻结 A 的来源 cut，再提交 A 末尾工具调用的迟到结果，最后启动／追加 B 的对话；B 的祖先 closure 不变，不跨 segment 使用 next assistant cut，当前消息与结果报价不遗漏祖先载荷。
 - 接纳到启动之间的排队、配置变化、内容回收和 Host 重载；固定来源 cut，接受目标不被替换，无隐式历史降级。
 - 分支启动时不同模型、MCP 子代理权限变化、直接／元工具曝光变化；安装后同 epoch SYSTEM／tools／最终 wire 前缀严格不变，messages 只追加。
@@ -202,4 +204,15 @@ Host 重启沿现有规则中断旧执行，不恢复其私有进程状态。可
 
 2026-10-02，GPT-6 Astra high 对照当前生产读取、compaction、工具结果结算、fork 和内容回收链路完成两轮只读审阅。第一轮提出的三项冻结阻塞——统一 effective base 与消费入口、来源 active request 历史化、祖先 segment 的固定 cut——已在第 5–7 节及验收中闭合。第二轮结论为可冻结、无新的独立阻塞；typed objective 主项定位和晚到结果验收顺序也已明确。
 
-该结论只确认设计的可行性与合同完整性。尚未实施、未运行本设计的测试或真实 provider dogfood；后续实施必须完成第 9–10 节的 hard cut 和验收，不能把设计审阅当作运行时正确性证据。
+上述两轮结论发生在设计冻结阶段，只确认设计可行性与合同完整性；实现验收另见第 12 节，不能把设计审阅当作运行时正确性证据。
+
+
+## 12. 实施与验收收口
+
+2026-10-02，删除旧 JSON 历史 owner、`worker_history_body` 列和 WORKER_HISTORY 文本来源；来源 task/cut/revision 由 canonical effective reader 消费。初始公开材料使用真实 initial 锚点的 typed 项；来源 snapshot 中的当前请求历史化。ordinary read、报价和 compaction 共用唯一有效基准与祖先未覆盖尾部，child durable predecessor 单独用于现有 CAS。未增加持久表、事件、job 或任务深度上限。
+
+- 430 项相关测试通过，包括真实 child runner 冷启动、兄弟及多代分支、图像、固定迟到结果 cut、GC 后读取、前缀连续性、原生 replay、ROOT fork、压缩及架构检查；另有 7 项 long-horizon 子代理 PostgreSQL 测试通过。Ruff 与 diff 检查通过。
+- 同一个 Worker history design critic 完成代码复审。首轮两项 P1——共享 initial 锚点误判当前请求、分支压缩后丢失未覆盖祖先工具尾部——已修复并补回归；复审无剩余 P1/P2 阻塞。第 6.2／7.1 节同时澄清只停止已覆盖祖先，保留既有 protected-tail 行为。
+- 真实 GUI dogfood 使用会话 `9f4e8413`、`/Users/plumliu/Desktop/test1`、原有 GPT-6 Luna high。A、B、C、D 全部完成；B/C 固定引用同一个 A，D 引用 B，没有另传结果材料或 JSON 历史包。实际 canonical 读取验证 A 前缀完全相同、C 不含 B 后缀、D 不含 C 后缀。A 的 5 组读取／查找调用与结果原生保留；B 仅新增 1 次 terminal，C/D 无新增工具执行，继承历史未被重新执行。
+
+真实实验中，模型首次使用了非法 task_name，明确失败后改名成功；A 最终回答漏报文件首行，B/C/D 仍从继承的真实文件读取结果找回首行。这两点属于模型参数／回答行为，不作为历史被完整继承的替代证据；继承结论来自实际 rows、typed 输入及工具执行事实。真实实验验证未压缩分支链；祖先内压缩、dry/post-adoption 等价与再次分支由上述 PostgreSQL 回归覆盖，不声称真实实验触发了自动压缩或保证供应商缓存命中。

@@ -2148,45 +2148,6 @@ class _ConversationOperations:
         deadline_monotonic: float,
     ) -> None:
         predecessor = candidate.predecessor
-        if predecessor.base_kind == "FULL_HISTORY":
-            lineage = CompactionSourceLineageBase(
-                kind=CompactionLineageBaseKind.FULL_HISTORY_GENESIS,
-                scope=candidate.scope,
-                binding_revision_id=predecessor.binding_revision_id,
-                binding_revision_ordinal=predecessor.revision_ordinal,
-                persisted_revision_genesis_marker=(predecessor.source_through_sequence),
-                effective_materialization_lineage_floor=0,
-            )
-        else:
-            snapshot = connection.execute(
-                """
-                SELECT source_through_sequence, source_digest
-                FROM pulsara_v3.context_snapshots
-                WHERE session_id = %s AND id = %s
-                """,
-                (
-                    candidate.scope.session_id,
-                    predecessor.context_snapshot_id,
-                ),
-            ).fetchone()
-            if snapshot is None or int(snapshot["source_through_sequence"]) != (
-                predecessor.source_through_sequence
-            ):
-                raise ConversationKernelConflict(
-                    "compaction predecessor snapshot drifted"
-                )
-            lineage = CompactionSourceLineageBase(
-                kind=CompactionLineageBaseKind.CURRENT_SNAPSHOT,
-                scope=candidate.scope,
-                binding_revision_id=predecessor.binding_revision_id,
-                binding_revision_ordinal=predecessor.revision_ordinal,
-                persisted_revision_genesis_marker=(predecessor.source_through_sequence),
-                effective_materialization_lineage_floor=(
-                    predecessor.source_through_sequence
-                ),
-                snapshot_id=predecessor.context_snapshot_id,
-                prior_source_digest=str(snapshot["source_digest"]),
-            )
 
         class _TransactionBlobReader:
             """Read immutable blobs on this exact writer transaction."""
@@ -2236,6 +2197,49 @@ class _ConversationOperations:
             deadline_monotonic=deadline_monotonic,
             _connection=connection,
         )
+        effective = dispatch.compile_snapshot.context_binding_fact
+        if effective.base_kind.value == "FULL_HISTORY":
+            lineage = CompactionSourceLineageBase(
+                kind=CompactionLineageBaseKind.FULL_HISTORY_GENESIS,
+                scope=candidate.scope,
+                binding_revision_id=predecessor.binding_revision_id,
+                binding_revision_ordinal=predecessor.revision_ordinal,
+                persisted_revision_genesis_marker=(predecessor.source_through_sequence),
+                effective_materialization_lineage_floor=0,
+                persisted_context_snapshot_id=predecessor.context_snapshot_id,
+            )
+        else:
+            snapshot = connection.execute(
+                """
+                SELECT source_through_sequence, source_digest
+                FROM pulsara_v3.context_snapshots
+                WHERE session_id = %s AND id = %s
+                """,
+                (
+                    candidate.scope.session_id,
+                    effective.context_snapshot_id,
+                ),
+            ).fetchone()
+            if snapshot is None or int(snapshot["source_through_sequence"]) != (
+                effective.source_through_sequence
+            ):
+                raise ConversationKernelConflict(
+                    "compaction predecessor snapshot drifted"
+                )
+            lineage = CompactionSourceLineageBase(
+                kind=CompactionLineageBaseKind.CURRENT_SNAPSHOT,
+                scope=candidate.scope,
+                binding_revision_id=predecessor.binding_revision_id,
+                binding_revision_ordinal=predecessor.revision_ordinal,
+                persisted_revision_genesis_marker=(predecessor.source_through_sequence),
+                effective_materialization_lineage_floor=(
+                    effective.source_through_sequence
+                ),
+                snapshot_id=effective.context_snapshot_id,
+                prior_source_digest=str(snapshot["source_digest"]),
+                persisted_context_snapshot_id=predecessor.context_snapshot_id,
+            )
+
         canonical = dispatch.compile_snapshot.canonical_input
         if (
             canonical.identity.provider_input_through_sequence != safe_head

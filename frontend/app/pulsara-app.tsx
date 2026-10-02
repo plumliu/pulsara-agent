@@ -469,7 +469,7 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
       if (owner !== taskReadOwner.current || attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
       setTaskInventoryError(productMessage(
         error instanceof Error ? error.message : undefined,
-        '子任务清单暂时无法读取。',
+        '任务清单暂时无法读取。',
       ));
       setTaskInventoryLoading(false);
     }

@@ -32,6 +32,8 @@
   .thread-column { width: min(670px,calc(100% - 32px)); }
   .queue-badge { display: none; }
   .topbar .ghost-button { display: inline-flex; width: 32px; padding: 0; font-size: 0; }
+  .topbar .context-compact-button { flex: none; height: 32px; gap: 0; }
+  .topbar .context-compact-button > span { display: none; }
   .overview-scroll { padding-inline: 18px; }
   .overview-hero { padding-inline: 12px; }
   .page-header { padding-inline: 24px; }

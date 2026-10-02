@@ -107,7 +107,7 @@ export function OverviewView({
         ) : <>
         <section className="metric-grid">
           <article><div className="metric-icon amber"><Radio size={15} /></div><div><strong>{sessions.filter((session) => session.status === 'running').length}</strong><span>活动会话</span></div><small>共 {sessions.length} 个会话</small></article>
-          <article><div className="metric-icon blue"><Bot size={15} /></div><div><strong>{runningTasks}</strong><span>进行中任务</span></div><small>共 {agentTasks.length} 个子任务</small></article>
+          <article><div className="metric-icon blue"><Bot size={15} /></div><div><strong>{runningTasks}</strong><span>进行中任务</span></div><small>共 {agentTasks.length} 个任务</small></article>
           <article><div className="metric-icon green"><Sparkles size={15} /></div><div><strong>{sessions.length}</strong><span>最近会话</span></div><small>可随时继续</small></article>
           <article><div className="metric-icon violet"><Database size={15} /></div><div><strong>{connected ? '正常' : '—'}</strong><span>本地数据</span></div><small>{connected ? '已经就绪' : '等待连接'}</small></article>
         </section>
