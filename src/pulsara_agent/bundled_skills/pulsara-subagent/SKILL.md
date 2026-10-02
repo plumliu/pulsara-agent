@@ -1,13 +1,22 @@
 ---
 name: pulsara-subagent
-description: Coordinate Pulsara subagents for parallel work, follow-up questions, continued review and failure recovery. Use when choosing task context, reusing a finished worker's history, or arranging dependencies.
+description: Delegate Pulsara tasks, collect results and choose between lightweight result references and inherited worker history. Use for parallel work, follow-up questions, continued review, dependencies and failure recovery.
 ---
 
 # Pulsara Subagents
 
-The main conversation assigns tasks; workers execute them and return results.
-Workers cannot delegate further. Use the tools available and authorized in your
-current scope; this guide does not grant permissions.
+## Task and subagent
+
+A task is one delegation with an objective, execution status and outcome. A
+subagent is the worker that executes that task. Pulsara shows this delegated work
+as a **task** in the UI. `task` is the instruction text; `task_id` identifies the
+delegation; optional `task_name` gives it a readable name.
+
+The main Agent assigns tasks; workers execute them and return results. Workers
+cannot delegate further. A follow-up creates a new task and worker execution,
+even when it inherits an earlier task's conversation. Use the returned task ID
+to wait, send guidance or cancel that specific execution. Use the tools available
+and authorized in your current scope; this guide does not grant permissions.
 
 ## Choose the next action
 
@@ -16,7 +25,7 @@ current scope; this guide does not grant permissions.
 | One independent piece of work | `spawn_agent`; omit `context` for a self-contained task. |
 | Correct or guide a running worker | `send_agent_message` with its exact `task_id`. Queued means accepted, not yet read. |
 | Ask a finished worker a follow-up, keeping its working background | `spawn_agent` with `context: {"mode":"worker_history","task_id":"<old task_id>"}`. |
-| Give a new task only an old result or failure diagnosis | `material_task_ids: ["<old task_id>"]`. |
+| Give a new task an old finding, structured result or failure diagnosis | `material_task_ids: ["<old task_id>"]`; omit `context` unless other history is needed. |
 | Schedule tasks together, with some requiring others to succeed | `create_agent_tasks`; add `depends_on` only for actual prerequisites. |
 
 Finished tasks stay finished. A history-based follow-up gets a new task ID;
@@ -31,6 +40,10 @@ directory, so conversation isolation does not isolate file changes.
 Write the objective, deliverable, constraints and necessary locations in `task`.
 Choose the smallest context that supports the work:
 
+- **Result reference / `material_task_ids`**: supply finished tasks' result
+  summaries, structured `data` when present, or public failure diagnoses. Use
+  this to combine findings, implement a reported fix or diagnose a failure when
+  the outcome is enough. It does not bring their conversation or tool history.
 - **Default / `none`**: only the task and any explicitly selected materials.
 - **`last_n`**: add 1–3 recent main-conversation turns using `turns`. This does
   not copy their tool calls/results; put required evidence in the task.
@@ -38,11 +51,21 @@ Choose the smallest context that supports the work:
   conversation. It must have started and have readable public history. Do not
   supply `turns`. The new branch continues the source
   conversation, including public messages and tool calls/results; compacted
-  parts may be summaries. Historical calls are records, not work to repeat. It does not copy private reasoning, old tools, permissions
-  or running processes. The new worker uses its current environment.
+  parts may be summaries. Use this when the next question needs the earlier
+  investigation, evidence or working background beyond its final result.
+  Historical calls are records, not work to repeat. It does not copy private
+  reasoning, old tools, permissions or running processes. The new worker uses
+  its current environment.
 
-`material_task_ids` accepts finished tasks, including failures and tasks that
-never started. Use it for recovery when a result or diagnosis is enough.
+For example, combining a review's findings needs a result reference; checking a
+new case against the files and tool outputs examined during that review may need
+`worker_history`. Write the new objective without repackaging the old transcript
+into `task`. Do not also reference the same task as result material when its
+history already supplies what you need.
+
+`material_task_ids` accepts finished tasks in this conversation, including
+failures and tasks that never started. Use it for recovery when a result or
+diagnosis is enough.
 `depends_on` waits for success and supplies the prerequisite's result; a failed
 prerequisite blocks the dependent task. Do not make recovery depend on a failed
 task succeeding. Material/history references do not wait for running tasks.
@@ -62,6 +85,14 @@ One independent review, using `spawn_agent`:
 
 Follow up after the parser review, using `spawn_agent`.
 Replace `<old task_id>` with the exact returned ID:
+
+If only the findings are needed:
+
+```json
+{"task":"Use the supplied review findings to prioritize fixes for src/parser.py. Explain the order; do not edit files.","material_task_ids":["<old task_id>"]}
+```
+
+If the earlier investigation and evidence are needed:
 
 ```json
 {"task":"Continue from your earlier review of src/parser.py. Check missing-field handling and compare it with your empty-input findings. Report concrete defects with locations; do not edit files.","context":{"mode":"worker_history","task_id":"<old task_id>"}}
