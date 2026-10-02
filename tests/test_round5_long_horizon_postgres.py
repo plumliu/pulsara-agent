@@ -815,24 +815,33 @@ def test_round5_user_cancel_after_twenty_four_calls_interrupts_the_turn(
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id, _workspace_id, lease = _lease(repository)
-    blocked = asyncio.Event()
+    calls_started: asyncio.Queue[int] = asyncio.Queue()
 
     async def stream(request: KernelModelExecutionRequest):
+        calls_started.put_nowait(request.model_call_index)
         if request.model_call_index <= 24:
             for item in _tool_stream(request.model_call_index):
                 yield item
             return
-        blocked.set()
         await asyncio.Event().wait()
 
     model = CallbackScriptedKernelModel(stream)
 
     async def scenario() -> None:
         task = asyncio.create_task(_runner(repository, lease, model).run_turn(frozen_test_prompt("start")))
-        await asyncio.wait_for(blocked.wait(), timeout=10)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            # Exercise cancellation after 24 completed calls, without imposing
+            # a total preparation-time cap on a slower or contended CI runner.
+            # Each next call must still make progress within the same 10 seconds.
+            for expected_call in range(1, 26):
+                assert await asyncio.wait_for(calls_started.get(), timeout=10) == expected_call
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())
 
