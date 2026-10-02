@@ -41,7 +41,7 @@ from pulsara_agent.model_input.continuity import (
     ProviderInputContinuityScope,
     ProviderInputDispatchAnchor,
     ProviderInputEpochTransition,
-    _issue_empty_scope_bootstrap_authority,
+    _issue_empty_scope_cold_start,
     _issue_adopted_compaction_successor,
     _issue_explicit_model_switch_transition,
     provider_input_logical_bytes,
@@ -892,14 +892,14 @@ class HostProviderInputContinuityOwner:
                     raise ProviderInputContinuityConflict(
                         "empty bootstrap preparation is stale"
                     )
-                authority = _issue_empty_scope_bootstrap_authority(
+                transition = _issue_empty_scope_cold_start(
                     scope=planning.scope,
-                    call_target=call_target,
-                    authority_nonce=f"empty-bootstrap-authority:{uuid4().hex}",
+                    destination=call_target,
+                    seed=seed,
                     preparation_basis=preparation_basis,
                 )
                 slot.state = _SlotState.BOUND_EMPTY
-                return EmptyScopeColdStart(authority, seed)
+                return transition
             cohort = slot.installed
             if (
                 cohort is None
@@ -1184,8 +1184,8 @@ class HostProviderInputContinuityOwner:
                     is not candidate.planning._empty_preparation_reservation
                     or candidate.expected_epoch_revision != 0
                     or candidate.planning.predecessor_view is not None
-                    or transition.bootstrap_authority.scope != candidate.scope
-                    or transition.bootstrap_authority._preparation_basis
+                    or transition.scope != candidate.scope
+                    or transition._preparation_basis
                     is not candidate._preparation_basis
                 ):
                     raise ProviderInputContinuityConflict(

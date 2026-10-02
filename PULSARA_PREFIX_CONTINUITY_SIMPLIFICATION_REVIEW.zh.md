@@ -1,6 +1,6 @@
 # Pulsara 前缀一致性再思考：保留约束，审查证明与状态管理
 
-状态：**讨论与审计草案，尚未授权删除生产机制**。记录日期：2026-10-02。
+状态：**第 8.1 节局部已授权并实施，测试及代码 diff 审阅通过；其余仍为讨论与审计草案**。2026-10-02 与 Worker history design critic（GPT-6 Astra high）完成设计核对和代码复审，无阻塞项。
 
 本文整理前缀一致性的目标与可能的减法方向，不是一次已经完成的全链路审计，也不凭类型名称判定某个状态可以删除。行为权威仍是 [AGENTS.md](AGENTS.md)；具体 worker 分支产品设计见 [worker_history canonical 分支设计](PULSARA_WORKER_HISTORY_CANONICAL_BRANCH_DESIGN.zh.md)。
 
@@ -10,7 +10,7 @@ Pulsara 应严格保证**同一个已安装 epoch 内的前缀不变性**。新 
 
 “围绕约束建立了超过实际需要的证明和状态管理机制”是值得核查的方向。它可能表现为同一份事实被多次封装、重复验证，或为了优化收益引入额外生命周期；但不能据此断言整个 continuity／资源释放链都应删除。
 
-本次阅读已经看到：现有 append 分支严格比较同 epoch 的已安装前缀；cold 与 adopted compaction 使用其他 transition 分支。**未发现要求所有 cold epoch 与前一 epoch 字节相同的统一硬门禁。**因此，不能把讨论写成“已经证实全系统为了跨 epoch 缓存而走偏”。需要分别核查每个机制保护的真实故障。
+本轮源码核对确认：现有 append 分支严格比较同 epoch 的已安装前缀；cold 与 adopted compaction 使用其他 transition 分支。**未发现要求所有 cold epoch 与前一 epoch 字节相同的统一硬门禁。**因此，不能把讨论写成“已经证实全系统为了跨 epoch 缓存而走偏”。可成立的减法是删除具体的重复载体，而不是整体撤掉 continuity 或结算。
 
 ## 2. 三层目标，三种强度
 
@@ -38,7 +38,7 @@ canonical 是语义真源；已安装 cohort 是当前 epoch 输入与目标的�
 
 上述职责与当前约束一致。worker_history 没有必要为了“像原任务一样继续”复制完整 cohort。它只需承接有效历史，再使用现有的新 scope cold 路径。
 
-另一方面，`input_continuity.py` 中还有多类 bootstrap lease、install authority、preparation reservation、no-continuation evidence／closure，以及 empty adoption／settlement 状态。它们构成下一步值得逐项追踪的复杂区域。当前阅读尚不足以把某一类型标为确定冗余。
+另一方面，`input_continuity.py` 中还有多类 bootstrap lease、install authority、preparation reservation、no-continuation evidence／closure，以及 empty adoption／settlement 状态。第 8 节记录本轮减法：已折叠一层 authority carrier，同时确认安装与释放机制有独立职责；其余类型仍需逐项追踪。
 
 ## 4. 必须保留的边界
 
@@ -51,6 +51,8 @@ canonical 是语义真源；已安装 cohort 是当前 epoch 输入与目标的�
 ### 4.2 两层前缀验证
 
 内部 typed messages 没变，不一定意味着 lowering 后的 provider wire 没变；工具投影或 adapter 可能改变 wire 结构。现有 typed input 与最终 wire 的检查分别保护不同边界，不能仅因两者看起来相似就去掉 wire 验证。
+
+这里的 wire 前缀指 `root_policy_value`、`tool_items` 不变，以及 `ordered_input_items` 的已安装历史部分不变；**不是整个 HTTP JSON 请求字节串只能追加**。compiler 的 suffix 构造与安装裁决也不是同一个职责：前者构造合法输入，后者通过 predecessor／slot 检查拒绝过期候选，其中最终 wire 校验拒绝 lowering 改写。
 
 如果未来能由唯一受控的构造路径直接保证某层不变量，可以评估删掉同层重复检查；必须先证明所有实际入口都经过该路径，并保留能发现 adapter 破坏前缀的验证。
 
@@ -70,7 +72,7 @@ canonical 是语义真源；已安装 cohort 是当前 epoch 输入与目标的�
 
 ### 5.1 同一事实经过多层证明对象
 
-优先追踪 `ProcessLocalProviderInputInstallAuthority`、`AuthorizedEmptyBootstrapLease`、`EmptyPreparationReservation` 等对象从谁创建、谁持有、谁消费，以及它们是否表达独立的一次性生命周期。
+追踪 `ProcessLocalProviderInputInstallAuthority`、`AuthorizedEmptyBootstrapLease`、`EmptyPreparationReservation` 等对象从谁创建、谁持有、谁消费，以及它们是否表达独立的一次性生命周期。已核对的对象按第 8 节结论处理，不能因为同属 bootstrap／install 就一起删除。
 
 如果某 wrapper 只是携带已有 owner 持有的 exact frozen 值，没有新授权或竞争裁决，可考虑直接传递该值。如果它防止释放后再次安装、跨 scope 使用或重复消费，就需要保留该语义，或者交回已有唯一 owner；不能直接删除检查。
 
@@ -120,20 +122,56 @@ canonical 有效历史 + 当前合法输入来源
 | 新 worker／历史分支第一次启动 | 新 scope 的普通 cold 路径 |
 | 同 epoch 新消息、工具结果、协作材料 | suffix 追加 |
 | 运行中 MCP／Skill／memory／权限／UI 变化 | 当前执行权限检查及既有追加观察，不隐式 rebase |
-| 产品已批准的模型切换、显式采用 compaction、Host 重载启动 | 各自既有批准边界；不由一般 compatibility mismatch 代替授权 |
+| 产品已批准并接纳的模型切换、Host 重载启动 | 各自既有 new cold epoch 路径；不由一般 compatibility mismatch 代替授权 |
+| 显式采用 compaction | adopted successor 边界；仅生成候选不获得 rebase 权 |
 | 编译候选过期 | 明确冲突及现有重读／重新准备，不把冲突伪装成新 epoch |
 
-这些只是现有批准边界的归类，不能把“模型切换”理解成 worker 运行中任意热切换，也不能把任意压缩候选理解成已经 adopted 的 successor。
+这些只是现有批准边界的归类。显式模型切换归入经接纳的新 cold epoch，不增加第三种任意 rebase 例外；也不能把“模型切换”理解成 worker 运行中任意热切换。
 
 ## 7. 跨 epoch 如何尽量稳定而不增加维护负担
 
-优先改进公共投影的确定性：工具和来源排序稳定，历史文本与角色结构稳定，同一内容不重新包成 JSON，不添加无语义时间戳／随机说明，不反复展开已被 snapshot 覆盖的祖先。
+优先改进公共投影的确定性：工具和来源排序稳定，历史文本与角色结构稳定，不把原生对话重新包成 JSON 历史材料，不添加无语义时间戳／随机说明，不反复展开已被 snapshot 覆盖的祖先。初始协作材料仍使用其既有 typed 不可信数据包装；这不是删除所有 JSON 编码或信任边界包装的原则。
 
 当前 SYSTEM、工具表、模型 lowering、合法环境观察确实变化时，新 epoch 接受相应变化。不为了保住旧缓存隐藏权限撤销、继续使用不合法 MCP 工具，或要求不同模型接受旧供应商的私有片段。
 
 需要评估效果时，比较具体公共前缀与实际供应商返回的缓存统计。测量用于判断优化收益；不增加持久缓存命中事件，不设“缓存率低于多少就拒绝运行”的门槛，也不把 provider 全请求内容长期保存为新的恢复真源。
 
-## 8. 下一步审计应交付什么
+## 8. 本轮减法：变更前审计依据与实施结果
+
+下表记录**变更前的消费者审计依据**，按创建、消费和失败窗口追踪对象；旧 authority 已按 8.1 删除。结论只覆盖这些路径，不是整个 continuity 子系统都已完成减法审计。
+
+| 对象 | 实际职责与消费者 | 本轮结论 |
+| --- | --- | --- |
+| `PreparedEmptyScopeBootstrapAuthority` | `issue_transition()` 创建，`EmptyScopeColdStart` 携带；candidate 构造校验 destination 的 exact identity，`register()` 核对 scope 和 exact preparation basis；没有独立消费状态或释放流程 | 内容可以并入已有 transition；单独的 `authority_nonce` 仅生成、保存和非空校验，没有身份消费者 |
+| `EmptyPreparationReservation` | 把 `AUTHORIZED_EMPTY` 占用为 `PREPARING_EMPTY`；abort／discard 恢复原授权，adoption 可接管 | 保留占用与 exact reservation 身份，不能因为 authority carrier 冗余而连带删除 |
+| `ProcessLocalProviderInputInstallAuthority` | `direct_model.preflight_execution()` 验证已注册的 exact plan；`open_once()` 消费绑定 exact candidate／execution 的一次性 permit | 保护实际 provider 执行边界，首切片保留 |
+| no-continuation／empty-adoption settlement | 先撤销旧 preparation、关闭句柄及 borrow，确认物理释放后才发布 EMPTY；释放失败留在 settling／quarantine | 有真实失败窗口，首切片保留 |
+
+源码锚点：[bootstrap 创建](src/pulsara_agent/conversation_kernel/input_continuity.py)、[authority 与 transition](src/pulsara_agent/model_input/continuity.py)、[provider preflight／open](src/pulsara_agent/conversation_kernel/direct_model.py)、[FULL 到 EMPTY 的释放顺序](src/pulsara_agent/conversation_kernel/safe_point.py)、[compaction borrow 检查](src/pulsara_agent/conversation_kernel/compaction/coordinator.py)。
+
+一个不能丢失的故障窗口是：压缩结果已提交，但旧 tool／provider borrow 关闭失败。若此时直接恢复 EMPTY，新 cold preparation 会与未释放的旧资源重叠。“不再续请求”不能替代“已经释放”。
+
+**本轮实施的首切片：把 bootstrap authority 的必要内容并入已有 `EmptyScopeColdStart`。**删除 `PreparedEmptyScopeBootstrapAuthority`、独立的 authority issuer 包装和无消费者的 `authority_nonce`；transition 直接携带 scope、destination、exact preparation basis 与原有 seed，仍由现有 owner 发放，保留发放 seal 的约束。没有新增另一种授权对象、registry 或状态机。
+
+必须保留 `BOUND_EMPTY`、exact reservation／basis、revision 为 0、无 predecessor、scope 一致性及 destination 对象身份（`is`）检查，以及既有 safe-point register／install 裁决。尤其不能把“没有 installed view”当成允许 bootstrap，也不能让公开构造 transition 绕过 owner 授权。
+
+### 8.1 本轮已授权的 hard-cut 实施合同
+
+唯一发放 owner 仍是 `HostProviderInputContinuityOwner.issue_transition()`：在原有锁内确认 exact reservation 与 `PREPARING_EMPTY` 后，由私有工厂直接构造 sealed `EmptyScopeColdStart`，再进入既有 `BOUND_EMPTY`。不再先创建 authority 再创建 transition，也不保存只供构造校验的 seal 字段。candidate 继续检查 destination 的 `is` 身份，`register()` 直接读取 transition 的 scope 和 exact basis。
+
+abort／discard 仍通过现有 reservation 恢复授权；旧 reservation 不能注册，Host 关闭和跨 scope 仍拒绝，install permit 仍一次性绑定 exact candidate／execution。结算、预算、provider 输入与数据库 schema 均无变更，不增加事件、slot、registry、持久关系或状态；删除旧类型、issuer 和导出，不保留别名或兼容分支。
+
+本轮收口要求是下述测试及同一 critic 的代码 diff 审阅。其他 bootstrap 来源 wrapper、settlement carrier 和派生 fingerprint 尚未完成足以授权删除的审计。`semantic_prefix_fingerprint` 当前参与 compiler、steer 和 compaction 的派生绑定，不能当作仅 constructor 自校验的无消费者字段顺手删除；这些消费者是否能改为 exact value 或在真实边界即时计算，需要另轮追踪。
+
+首切片的验证范围：ROOT／新 worker／worker_history cold 启动、abort 后重试、旧 preparation 被替代、跨 scope 候选、重复安装、Host 关闭、合法 suffix 及前缀改写拒绝；补跑相关 compaction NONE／FULL／CONFLICT 与释放失败回归。验证授权和资源行为，缓存统计只作附加观察。
+
+### 8.2 实施收口
+
+代码只改两个 continuity 模块；旧类型、issuer、nonce、导出及嵌套访问均已删除，未留下兼容路径。新增 8 个边界用例，包含值相等但不是同一对象的 target／basis／reservation，验证身份检查没有被替换为值比较。
+
+254 项测试通过：223 项 compiler／prefix continuity／direct model／compaction 测试，30 项使用临时 PostgreSQL 的 worker_history 与 runner 集成测试，1 项 Host 关闭失败隔离回归；身份用例完善后另重跑 8 个新增用例。Ruff 和 `git diff --check` 通过。同一 Astra high critic 审阅代码 diff 后未发现 P1／P2 或实现阻塞。本轮未运行真实供应商 dogfood，也未改 schema。
+
+## 9. 后续实施应交付什么
 
 后续若授权实施减法，应先选一个具体链路，完成下面的闭环，而不是先列一大批类型要求删除：
 
@@ -141,12 +179,12 @@ canonical 有效历史 + 当前合法输入来源
 2. 标明现有结构承担的独立职责：历史语义、epoch 前缀、授权、资源或结算；没有消费者的派生值单独列出。
 3. 提出删减后的最小状态／值传递，说明每条取消、过期、释放失败和 Host 关闭路径如何处理。
 4. 用产品合同测试证明正确性，评估代码与维护成本；不增加证明机制来证明“已经减少证明机制”。
-5. 逐项审阅后，把确切变更写为 hard-cut 实施规范，同步删除旧路径、更新 clean-v0 与测试。未经这一步，本文不授权删除当前 safety／settlement 状态。
+5. 逐项审阅后，把确切变更写为 hard-cut 实施规范，同步删除旧路径、更新测试；如涉及 schema，再更新 clean-v0。第 8 节是本轮已授权的局部实施合同，其余讨论不授权删除当前 safety／settlement 状态。
 
-验证关注同 epoch 前缀改写被拒绝、合法 suffix 可继续、cold 分支可采用新目标与能力、候选过期不会覆盖、取消与资源释放不双结算，以及长任务／排队／多次 compaction 仍可持续。真实 dogfood 应验证行为与输入；缓存统计作为附加观察。
+第 8 节列出首切片的具体验证范围；后续扩大减法时，还需确认长任务、排队和多次 compaction 仍可持续。真实 dogfood 验证行为与输入，缓存统计作为附加观察。
 
-## 9. 本轮建议
+## 10. 本轮建议
 
-先落实 worker_history 的普通 cold 分支设计，去掉 JSON 历史包装和复制旧 epoch 的潜在需求。随后独立审计 continuity 的 bootstrap／settlement 对象及重复派生字段，按具体消费者做减法。
+worker_history 的普通 cold 分支和原生 canonical 继承已实施，并完成测试、critic 代码审阅及真实 dogfood。本轮不再把它列为前置待办，也不重开 warm／cold 分支方案。
 
-保留同 epoch 的严格约束；跨 epoch 以 canonical 有效历史重新编译并追求稳定投影。实现复杂度的取舍由真实生命周期与故障决定，不由缓存目标或“证明越多越安全”决定。
+本轮仅实施第 8 节的局部合同；其余 wrapper 与派生字段分别审计。继续保留同 epoch 的严格约束，跨 epoch 以 canonical 有效历史重新编译并追求稳定投影。

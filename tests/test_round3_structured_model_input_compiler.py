@@ -204,12 +204,14 @@ from pulsara_agent.model_input.contracts import (
     model_input_compile_binding_fingerprint,
 )
 from pulsara_agent.model_input.continuity import (
+    EmptyScopeColdStart,
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
     NewTriggerAnchor,
     NoNewTriggerAnchor,
     ProcessLocalCanonicalFrontier,
     ProviderInputContinuityScope,
     SourceObservationPresence,
+    _issue_empty_scope_cold_start,
     decode_runtime_observation,
     provider_input_prefix_fingerprint,
 )
@@ -1176,7 +1178,7 @@ def _append_anchor(
     )
 
 
-def _compile_and_install_append(
+def _prepare_append_candidate(
     *,
     compiler: StructuredModelInputCompiler,
     owner: HostProviderInputContinuityOwner,
@@ -1257,9 +1259,29 @@ def _compile_and_install_append(
         tool_exposure_plan=tool_exposure_plan,
         preparation_basis=preparation_basis,
     )
+    return result, candidate
+
+
+def _compile_and_install_append(
+    *,
+    compiler: StructuredModelInputCompiler,
+    owner: HostProviderInputContinuityOwner,
+    request: StructuredModelInputCompileRequest,
+    dispatch_anchor=None,
+    replay_manifest_cut: FrozenDurableProviderReplayManifestCut | None = None,
+    replay_fragments: tuple[ProviderAssistantReplayFragment, ...] = (),
+):
+    result, candidate = _prepare_append_candidate(
+        compiler=compiler,
+        owner=owner,
+        request=request,
+        dispatch_anchor=dispatch_anchor,
+        replay_manifest_cut=replay_manifest_cut,
+        replay_fragments=replay_fragments,
+    )
     owner.register(candidate)
     owner.install(candidate=candidate, execution=object())
-    view = owner.current_view(scope)
+    view = owner.current_view(candidate.scope)
     assert view is not None
     return result, view
 
@@ -4957,6 +4979,129 @@ def test_round3_1_stateful_source_presence_matrix_is_exact(
     assert len(matching) == int(expected_append)
     head = next(item for item in after.source_heads if item.source_kind is kind)
     assert head.presence.value == current_presence
+
+
+def test_empty_cold_start_keeps_owner_issuance_and_exact_destination() -> None:
+    owner = new_test_provider_input_continuity_owner()
+    request = _prepared_request(_snapshot(_user("initial")), _sources())
+    _, candidate = _prepare_append_candidate(
+        compiler=StructuredModelInputCompiler(), owner=owner, request=request
+    )
+    transition = candidate.transition
+    assert isinstance(transition, EmptyScopeColdStart)
+    assert transition.scope == candidate.scope
+    assert transition.destination is candidate.call_target
+    assert transition._preparation_basis is candidate._preparation_basis
+    with pytest.raises(TypeError, match="continuity-issued"):
+        EmptyScopeColdStart(
+            scope=transition.scope,
+            destination=transition.destination,
+            seed=transition.seed,
+            preparation_basis=transition._preparation_basis,
+            _seal=object(),
+        )
+    equivalent_target = replace(candidate.call_target)
+    assert equivalent_target == candidate.call_target
+    with pytest.raises(ValueError, match="destination drifted"):
+        replace(candidate, call_target=equivalent_target)
+
+
+@pytest.mark.parametrize("drift", ["scope", "basis", "reservation", "revision"])
+def test_empty_cold_registration_rejects_preparation_drift(drift: str) -> None:
+    owner = new_test_provider_input_continuity_owner()
+    request = _prepared_request(_snapshot(_user("initial")), _sources())
+    _, candidate = _prepare_append_candidate(
+        compiler=StructuredModelInputCompiler(), owner=owner, request=request
+    )
+    transition = candidate.transition
+    assert isinstance(transition, EmptyScopeColdStart)
+    equivalent_basis = copy(transition._preparation_basis)
+    assert equivalent_basis == transition._preparation_basis
+    assert equivalent_basis is not transition._preparation_basis
+    if drift in {"scope", "basis"}:
+        transition = _issue_empty_scope_cold_start(
+            scope=(
+                ProviderInputContinuityScope(
+                    session_id=candidate.scope.session_id,
+                    scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+                    scope_subagent_task_id="task:other",
+                )
+                if drift == "scope"
+                else transition.scope
+            ),
+            destination=transition.destination,
+            seed=transition.seed,
+            preparation_basis=(
+                equivalent_basis if drift == "basis" else transition._preparation_basis
+            ),
+        )
+        bad_candidate = replace(candidate, transition=transition)
+    elif drift == "reservation":
+        reservation = candidate.planning._empty_preparation_reservation
+        equivalent_reservation = copy(reservation)
+        assert equivalent_reservation == reservation
+        assert equivalent_reservation is not reservation
+        bad_candidate = replace(
+            candidate,
+            planning=replace(
+                candidate.planning, _empty_preparation_reservation=equivalent_reservation
+            ),
+        )
+    else:
+        bad_candidate = replace(candidate, expected_epoch_revision=1)
+    with pytest.raises(ProviderInputContinuityConflict, match="bound authority"):
+        owner.register(bad_candidate)
+    assert owner.current_view(candidate.scope) is None
+    owner.register(candidate)
+    owner.install(candidate=candidate, execution=object())
+    assert owner.current_view(candidate.scope).epoch_revision == 1
+
+
+@pytest.mark.parametrize("release", ["abort", "discard"])
+def test_empty_cold_retry_rejects_released_candidate_and_keeps_one_shot_install(
+    release: str,
+) -> None:
+    owner = new_test_provider_input_continuity_owner()
+    compiler = StructuredModelInputCompiler()
+    request = _prepared_request(_snapshot(_user("initial")), _sources())
+    _, stale = _prepare_append_candidate(
+        compiler=compiler, owner=owner, request=request
+    )
+    if release == "abort":
+        owner.abort_planning(stale.planning)
+    else:
+        owner.register(stale)
+        owner.discard(stale)
+    _, current = _prepare_append_candidate(
+        compiler=compiler, owner=owner, request=request
+    )
+    with pytest.raises(ProviderInputContinuityConflict, match="bound authority"):
+        owner.register(stale)
+    owner.register(current)
+    execution = object()
+    permit = owner.install(candidate=current, execution=execution)
+    view = owner.current_view(current.scope)
+    assert view.epoch_revision == 1
+    with pytest.raises(ProviderInputContinuityConflict, match="exact-join"):
+        owner.install(candidate=current, execution=execution)
+    with pytest.raises(ProviderInputContinuityConflict, match="not issued"):
+        owner.install_authority.consume(permit, candidate=current, execution=object())
+    owner.install_authority.consume(permit, candidate=current, execution=execution)
+    with pytest.raises(ProviderInputContinuityConflict, match="not issued"):
+        owner.install_authority.consume(permit, candidate=current, execution=execution)
+    assert owner.current_view(current.scope) is view
+
+
+def test_empty_cold_candidate_cannot_register_after_host_close() -> None:
+    owner = new_test_provider_input_continuity_owner()
+    request = _prepared_request(_snapshot(_user("initial")), _sources())
+    _, candidate = _prepare_append_candidate(
+        compiler=StructuredModelInputCompiler(), owner=owner, request=request
+    )
+    owner.close()
+    with pytest.raises(ProviderInputContinuityConflict, match="closed"):
+        owner.register(candidate)
+    assert owner.current_view(candidate.scope) is None
 
 
 def test_round3_1_compatible_epoch_rejects_old_canonical_rewrite() -> None:

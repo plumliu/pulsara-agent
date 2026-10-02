@@ -57,7 +57,7 @@ FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     {"kind": "FULL_HISTORY", "lowering": PROVIDER_MESSAGE_LOWERING_CONTRACT},
 )
 MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = 64 << 20
-_EMPTY_BOOTSTRAP_AUTHORITY_SEAL = object()
+_EMPTY_SCOPE_COLD_START_SEAL = object()
 _EXPLICIT_MODEL_SWITCH_AUTHORITY_SEAL = object()
 _DIRECT_SWITCH_ADMISSION_SEAL = object()
 
@@ -424,36 +424,6 @@ class InstalledEpochRuntimeCohort:
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class PreparedEmptyScopeBootstrapAuthority:
-    scope: ProviderInputContinuityScope
-    call_target: FrozenEpochModelCallTarget
-    authority_nonce: str
-    _preparation_basis: object = field(repr=False, compare=False)
-    _owner_seal: object = field(repr=False, compare=False)
-
-    def __init__(
-        self,
-        *,
-        scope: ProviderInputContinuityScope,
-        call_target: FrozenEpochModelCallTarget,
-        authority_nonce: str,
-        preparation_basis: object,
-        _owner_seal: object,
-    ) -> None:
-        if (
-            _owner_seal is not _EMPTY_BOOTSTRAP_AUTHORITY_SEAL
-            or not authority_nonce
-            or preparation_basis is None
-        ):
-            raise ValueError("empty bootstrap authority nonce is empty")
-        object.__setattr__(self, "scope", scope)
-        object.__setattr__(self, "call_target", call_target)
-        object.__setattr__(self, "authority_nonce", authority_nonce)
-        object.__setattr__(self, "_preparation_basis", preparation_basis)
-        object.__setattr__(self, "_owner_seal", _owner_seal)
-
-
-@dataclass(frozen=True, slots=True, init=False)
 class FrozenDirectSwitchAdmission:
     destination: FrozenEpochModelCallTarget
     semantic_projection: FrozenModelInputSemanticProjection = field(repr=False)
@@ -509,20 +479,36 @@ class InstalledEpochAppend:
     predecessor: InstalledEpochRuntimeCohort
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class EmptyScopeColdStart:
-    bootstrap_authority: PreparedEmptyScopeBootstrapAuthority
+    """Continuity-issued transition carrying the exact empty preparation."""
+
+    scope: ProviderInputContinuityScope
+    destination: FrozenEpochModelCallTarget
     seed: "CanonicalColdContinuationSeed | SubagentInitialSeed" = field(  # noqa: F821
         repr=False
     )
+    _preparation_basis: object = field(repr=False, compare=False)
 
-    @property
-    def destination(self) -> FrozenEpochModelCallTarget:
-        return self.bootstrap_authority.call_target
-
-    def __post_init__(self) -> None:
-        if self.bootstrap_authority.scope.session_id != self.destination.session_id:
+    def __init__(
+        self,
+        *,
+        scope: ProviderInputContinuityScope,
+        destination: FrozenEpochModelCallTarget,
+        seed: "CanonicalColdContinuationSeed | SubagentInitialSeed",  # noqa: F821
+        preparation_basis: object,
+        _seal: object,
+    ) -> None:
+        if _seal is not _EMPTY_SCOPE_COLD_START_SEAL:
+            raise TypeError("empty cold start is continuity-issued")
+        if preparation_basis is None:
+            raise ValueError("empty cold start lacks its preparation basis")
+        if scope.session_id != destination.session_id:
             raise ValueError("empty bootstrap transition scope drifted")
+        object.__setattr__(self, "scope", scope)
+        object.__setattr__(self, "destination", destination)
+        object.__setattr__(self, "seed", seed)
+        object.__setattr__(self, "_preparation_basis", preparation_basis)
 
 
 @dataclass(frozen=True, slots=True)
@@ -590,19 +576,19 @@ ProviderInputEpochTransition = (
 )
 
 
-def _issue_empty_scope_bootstrap_authority(
+def _issue_empty_scope_cold_start(
     *,
     scope: ProviderInputContinuityScope,
-    call_target: FrozenEpochModelCallTarget,
-    authority_nonce: str,
+    destination: FrozenEpochModelCallTarget,
+    seed: "CanonicalColdContinuationSeed | SubagentInitialSeed",  # noqa: F821
     preparation_basis: object,
-) -> PreparedEmptyScopeBootstrapAuthority:
-    return PreparedEmptyScopeBootstrapAuthority(
+) -> EmptyScopeColdStart:
+    return EmptyScopeColdStart(
         scope=scope,
-        call_target=call_target,
-        authority_nonce=authority_nonce,
+        destination=destination,
+        seed=seed,
         preparation_basis=preparation_basis,
-        _owner_seal=_EMPTY_BOOTSTRAP_AUTHORITY_SEAL,
+        _seal=_EMPTY_SCOPE_COLD_START_SEAL,
     )
 
 
@@ -815,7 +801,6 @@ __all__ = [
     "PROVIDER_MESSAGE_LOWERING_CONTRACT",
     "ProviderRuntimeObservation",
     "PreparedProviderInputAppendCandidate",
-    "PreparedEmptyScopeBootstrapAuthority",
     "ProcessLocalCanonicalFrontier",
     "ProcessLocalProviderInputInstallPermit",
     "ProcessLocalSourceHead",
