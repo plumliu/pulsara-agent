@@ -92,6 +92,8 @@
 .settings-form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; padding: 15px; }
 .settings-form-grid label, .database-form label { display: grid; gap: 6px; }
 .settings-form-grid label > span, .database-form label > span { color: var(--muted); font-size: var(--type-caption); font-weight: 700; }
+.settings-form-grid .model-reasoning-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+.model-reasoning-warning { color: var(--amber); font-size: var(--type-caption); font-weight: 400; line-height: 1.5; }
 .settings-form-grid input, .settings-form-grid select, .credential-actions input, .database-form input { min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; outline: none; background: var(--paper); color: var(--ink); font: inherit; font-size: var(--type-small); }
 .settings-form-grid input:focus, .settings-form-grid select:focus, .credential-actions input:focus, .database-form input:focus { border-color: color-mix(in srgb,var(--blue) 55%,var(--line)); box-shadow: 0 0 0 3px color-mix(in srgb,var(--blue) 10%,transparent); }
 .settings-form-grid .model-boolean-field { grid-column: 1 / -1; display: flex; flex-direction: row; align-items: center; gap: 8px; min-height: 36px; color: var(--muted); font-size: var(--type-caption); font-weight: 700; }

@@ -244,16 +244,6 @@ function numberValue(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
-function mcpStatusLabel(value: unknown): string {
-  const status = stringValue(value).toUpperCase();
-  if (status === 'READY') return '已就绪';
-  if (status === 'CONNECTING' || status === 'DISCOVERING' || status === 'UPDATING') return '连接中';
-  if (status === 'DISABLED') return '已关闭';
-  if (status === 'FAILED_RETRYABLE') return '等待重试';
-  if (status === 'FAILED_TERMINAL') return '连接失败';
-  return status ? status.toLowerCase() : '状态未知';
-}
-
 function collectMessageTraces(messages: Message[]): ToolTrace[] {
   const traces: ToolTrace[] = [];
   for (const message of messages) {
