@@ -1,0 +1,2883 @@
+import { createHash } from 'node:crypto';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  createUserControlCommandRef,
+  LocalHttpRuntimeAdapter,
+  mergeRuntimeTaskInventory,
+  type RuntimeProjection,
+} from '../../frontend/lib/runtime-adapter';
+import type { AgentTask } from '../../frontend/lib/pulsara-types';
+
+afterEach(() => vi.unstubAllGlobals());
+
+it('bootstraps the app without assigning a working directory', async () => {
+  const payload = {
+    application: { name: 'Pulsara', version: '0.1.0', transport: 'localhost-http+terminal-v3' },
+    protocol: { major: 3, minor: 0 },
+    runtime: { status: 'ready', origin: 'http://127.0.0.1:8765', database_state: 'ready' },
+    local_settings: {}, model_configurations: [],
+  };
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const bootstrap = await new LocalHttpRuntimeAdapter().bootstrap();
+  expect(bootstrap).toEqual(payload);
+  expect(bootstrap).not.toHaveProperty('workspace');
+  expect(fetchMock).toHaveBeenCalledWith('/api/app/bootstrap', expect.any(Object));
+});
+
+it('requests a native directory selection and distinguishes cancellation', async () => {
+  const fetchMock = vi.fn()
+    .mockResolvedValueOnce(new Response(JSON.stringify({ path: '/tmp/项目 ' }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ path: null }), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const adapter = new LocalHttpRuntimeAdapter();
+  const controller = new AbortController();
+  expect(await adapter.pickWorkspaceDirectory('/tmp/current', controller.signal)).toBe('/tmp/项目 ');
+  expect(fetchMock).toHaveBeenCalledWith('/api/workspace-directory/pick', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ initial_path: '/tmp/current' }),
+    signal: controller.signal, credentials: 'same-origin',
+  }));
+  expect(await adapter.pickWorkspaceDirectory('/tmp/项目 ')).toBeNull();
+});
+
+const SOURCE_FIDELITY_TEXT = [
+  '',
+  '中文与 `read_file`、edit_file、ROOT、Kernel、HostSession 保持原样。',
+  'path=/tmp/ROOT/edit_file.py url=https://example.test/Kernel?q=read-only',
+  '```python',
+  'from api import read_file, edit_file',
+  'ROOT = "read-only"',
+  'mode = "bypass-permissions"',
+  'exit_code = 0',
+  '```',
+  '{"tool":"edit_file","owner":"HostSession","status":"read-only"}',
+  '',
+].join('\n');
+
+function inventoryTask(id: string, label: string, status: AgentTask['status'], parentId: string, objective = ''): AgentTask {
+  return {
+    id, label, role: '通用协作', objective, status, parentId,
+    dependencyIds: [], completionAccepted: status === 'completed', color: 'blue',
+  };
+}
+
+function inlineContent(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  return inlineBytes(bytes);
+}
+
+function promptBody(...texts: string[]): string {
+  return JSON.stringify({ schema: 'pulsara.prompt/v1', parts: texts.map((text) => ({ type: 'text', text })) });
+}
+
+function inlinePrompt(...texts: string[]) {
+  return { ...inlineContent(promptBody(...texts)), media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8' };
+}
+
+function textPromptContent(text: string) {
+  return { parts: [{ type: 'text', text }] };
+}
+
+function blobPrompt(text: string) {
+  return { ...blobContent(promptBody(text)), media_type: 'application/vnd.pulsara.prompt+json' };
+}
+
+function inlineBytes(bytes: Uint8Array) {
+  const pieces: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    pieces.push(String.fromCharCode(...bytes.subarray(offset, offset + 0x8000)));
+  }
+  return {
+    kind: 'INLINE',
+    inline_content: btoa(pieces.join('')),
+  };
+}
+
+function sha256Digest(bytes: Uint8Array): string {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function blobBytes(bytes: Uint8Array) {
+  return {
+    kind: 'CANONICAL_BLOB',
+    digest: sha256Digest(bytes),
+    size: String(bytes.length),
+    media_type: 'text/plain',
+    codec: 'utf-8',
+  };
+}
+
+function blobContent(value: string) {
+  return blobBytes(new TextEncoder().encode(value));
+}
+
+function contentBytes(bytes: Uint8Array, digest = sha256Digest(bytes)) {
+  return {
+    content: {
+      digest,
+      complete_size: String(bytes.length),
+      offset_bytes: '0',
+      content: inlineBytes(bytes).inline_content,
+      complete: true,
+    },
+  };
+}
+
+function contentChunk(value: string) {
+  return contentBytes(new TextEncoder().encode(value));
+}
+
+function connectPayload(
+  entries: Record<string, unknown>[] = [],
+  control: Record<string, unknown> = {},
+  liveEvents: Record<string, unknown>[] = [],
+  liveControl: Record<string, unknown> = {},
+) {
+  return {
+    connection_id: 'connection-fidelity', connection_generation: 1,
+    session_id: 'session-1', role: 'controller',
+    live_hello: {
+      live_owner_epoch: '1', live_revision: String(liveEvents.length),
+      live_snapshot: { events: liveEvents },
+    },
+    snapshot: { snapshot: {
+      session_id: 'session-1', writer_generation: '1', event_sequence_cut: String(entries.length),
+      entries, control,
+    } },
+    live_control_snapshot: { snapshot: liveControl },
+  };
+}
+
+it('preserves PR03 exact control/query identities and typed query retirement states', async () => {
+  vi.stubGlobal('crypto', {
+    ...globalThis.crypto,
+    randomUUID: () => '66666666-6666-4666-8666-666666666666',
+  });
+  const responses = [
+    connectPayload([], {}, [], {
+      host_session_id: 'host:one',
+      active_root_turn_id: 'turn:A',
+      control_admission_deadline_ms: '9000',
+    }),
+    { command_outcome: {
+      command_id: 'command:control:9000:66666666-6666-4666-8666-666666666666',
+      status: 'PENDING',
+      target_id: 'turn:A',
+      public_code: 'CONTROL_ACCEPTED',
+      user_control: {
+        accepted: true,
+        execution: 'USER_CONTROL_RUNNING',
+        target: { kind: 'USER_CONTROL_ROOT_TURN', target_id: 'turn:A' },
+      },
+    } },
+    { query_command: {
+      found: false,
+      control_query_status: 'CONTROL_QUERY_RESULT_UNAVAILABLE',
+    } },
+    { query_command: {
+      found: false,
+      control_query_status: 'CONTROL_QUERY_OWNER_UNAVAILABLE',
+    } },
+    { query_command: {
+      found: true,
+      control_query_status: 'CONTROL_QUERY_FOUND',
+      outcome: {
+        command_id: 'command:control:9000:66666666-6666-4666-8666-666666666666',
+        status: 'SUCCEEDED',
+        target_id: 'turn:A',
+        user_control: {
+          accepted: true,
+          execution: 'USER_CONTROL_FINISHED',
+        },
+      },
+    } },
+  ];
+  const requests: Array<{ operation: string; body: Record<string, unknown> }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const operation = String(input).split('/').at(-1) ?? '';
+    if (operation !== 'connections') {
+      requests.push({
+        operation,
+        body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>,
+      });
+    }
+    return new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }));
+
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const projection = connection.current();
+  const reference = createUserControlCommandRef(
+    projection, 'session-1', 'STOP_ACTIVE_TURN', 'ROOT_TURN', 'turn:A',
+  );
+  const accepted = await connection.stopActiveTurn(reference);
+  expect(accepted).toMatchObject({
+    status: 'pending',
+    targetId: 'turn:A',
+    userControl: { accepted: true, execution: 'RUNNING' },
+  });
+  expect(await connection.queryControlCommand(reference)).toEqual({
+    status: 'RESULT_UNAVAILABLE',
+  });
+  expect(await connection.queryControlCommand(reference)).toEqual({
+    status: 'OWNER_UNAVAILABLE',
+  });
+  expect(await connection.queryControlCommand(reference)).toMatchObject({
+    status: 'FOUND',
+    receipt: { status: 'succeeded', userControl: { execution: 'FINISHED' } },
+  });
+  expect(requests[0]).toEqual({
+    operation: 'command',
+    body: {
+      command_id: reference.commandId,
+      command_kind: 'STOP_ACTIVE_TURN',
+      client_submission_id: '',
+      expected_session_id: 'session-1',
+      expected_host_session_id: 'host:one',
+      target_turn_id: 'turn:A',
+    },
+  });
+  expect(requests.slice(1).every((request) => (
+    request.operation === 'query-command'
+    && (request.body.expected_control as Record<string, unknown>).target_id === 'turn:A'
+  ))).toBe(true);
+});
+
+it('binds PR03 background list and log reads to the exact Host and process', async () => {
+  const responses = [
+    connectPayload([], {}, [], { host_session_id: 'host:one' }),
+    { background_processes: {
+      session_id: 'session-1',
+      host_session_id: 'host:one',
+      processes: [{
+        process_id: 'process:one', command: 'printf exact', cwd: '/tmp',
+        status: 'running', physical_state: 'RUNNING', output_cursor: 'cursor:1',
+        retained_from_cursor: 'cursor:0', origin: { turn_id: 'turn:A' },
+      }],
+      next_cursor: 'page:next',
+    } },
+    { background_process_log: {
+      session_id: 'session-1', host_session_id: 'host:one',
+      process: {
+        process_id: 'process:one', command: 'printf exact', cwd: '/tmp',
+        status: 'running', physical_state: 'RUNNING', output_cursor: 'cursor:2',
+        retained_from_cursor: 'cursor:0', origin: { turn_id: 'turn:A' },
+      },
+      output: '逐字输出🙂', output_cursor: 'cursor:2', retained_from_cursor: 'cursor:0',
+      gap_before_output: false, truncated_by_response_bound: false,
+      source_coverage: 'COMPLETE',
+    } },
+  ];
+  const calls: Array<{ operation: string; body: Record<string, unknown> }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const operation = String(input).split('/').at(-1) ?? '';
+    if (operation !== 'connections') calls.push({
+      operation,
+      body: JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>,
+    });
+    return new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    });
+  }));
+
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(await connection.listBackgroundProcesses('page:old')).toMatchObject({
+    processes: [{ processId: 'process:one', command: 'printf exact' }],
+    nextCursor: 'page:next',
+  });
+  expect(await connection.readBackgroundProcessLog('process:one', 'cursor:1'))
+    .toMatchObject({ output: '逐字输出🙂', outputCursor: 'cursor:2' });
+  expect(calls).toEqual([
+    {
+      operation: 'list-background-processes',
+      body: {
+        expected_session_id: 'session-1', expected_host_session_id: 'host:one',
+        cursor: 'page:old', maximum_items: 50,
+      },
+    },
+    {
+      operation: 'read-background-process-log',
+      body: {
+        expected_session_id: 'session-1', expected_host_session_id: 'host:one',
+        process_id: 'process:one', output_cursor: 'cursor:1', max_output_chars: 32000,
+      },
+    },
+  ]);
+});
+
+it('requests Plugin discovery using only the source directory', async () => {
+  const result = {candidates: []};
+  const fetcher = vi.fn(async () => new Response(JSON.stringify(result), {status: 200}));
+  vi.stubGlobal('fetch', fetcher);
+  expect(await new LocalHttpRuntimeAdapter().previewPluginImport('/source')).toEqual(result);
+  expect(fetcher).toHaveBeenCalledWith('/api/capabilities/plugins/preview-import', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({source_path: '/source'}),
+  }));
+});
+
+it('preserves pending safe-point adoption from a user capability mutation', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+    operation: { status: 'CREATED', success: true },
+    adoption: { updated_sessions: 0, pending_sessions: 2, attention_sessions: 0 },
+    capabilities: { skills: {}, mcp: {}, plugins: {} },
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+  const result = await new LocalHttpRuntimeAdapter().createUserMcp({
+    serverId: 'example', config: { transport: { type: 'streamable_http', endpoint: 'https://example.com/mcp' } },
+    secretChanges: [],
+  });
+  expect(result.operation.success).toBe(true);
+  expect(result.capabilities.adoption).toEqual({
+    updatedSessions: 0, pendingSessions: 2, attentionSessions: 0,
+  });
+});
+
+describe('exact prompt projection', () => {
+  it('sends one ordered typed prompt body without a text or attachment side channel', async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      connectPayload(),
+      { command_outcome: {
+        command_id: 'command:typed', status: 'PENDING', public_code: 'PROMPT_QUEUED',
+        prompt_delivery: {
+          queue_item_id: 'queue:typed', queue_status: 'PENDING', delivery_mode: 'NEW_TURN',
+        },
+      } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    await connection.submitPrompt('command:typed', { parts: [
+      { type: 'text', text: 'before\\n' },
+      { type: 'image', source: 'local', bytes: Uint8Array.from([0, 255]), declaredMediaType: 'image/png' },
+      { type: 'text', text: 'after' },
+    ] }, 'read-only');
+
+    expect(requests.at(-1)).toEqual({
+      command_id: 'command:typed',
+      command_kind: 'SUBMIT_PROMPT',
+      client_submission_id: 'command:typed',
+      prompt_content: { parts: [
+        { type: 'text', text: 'before\\n' },
+        { type: 'image', content_base64: 'AP8=', declared_media_type: 'image/png' },
+        { type: 'text', text: 'after' },
+      ] },
+      requested_permission_mode: 'PERMISSION_MODE_READ_ONLY',
+    });
+    expect(requests.at(-1)).not.toHaveProperty('text');
+    expect(requests.at(-1)).not.toHaveProperty('attachments');
+  });
+
+  it('reads one image by exact canonical owner and occurrence and verifies its bytes', async () => {
+    const bytes = Uint8Array.from([0xff, 0x00, 0x89, 0x50, 0x4e, 0x47]);
+    const digest = sha256Digest(bytes);
+    const body = {
+      ...inlineContent(JSON.stringify({ schema: 'pulsara.prompt/v1', parts: [{
+        type: 'image', digest, encoded_bytes: bytes.length,
+        media_type: 'image/png', width: 3, height: 2,
+      }] })),
+      media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8',
+    };
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      connectPayload([{
+        entry_id: 'entry:image', turn_id: 'turn:image', entry_sequence: '1',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: body,
+      }]),
+      contentBytes(bytes),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/read-content')) {
+        requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      }
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const image = connection.current().messages[0]?.promptContent?.parts[0];
+    if (!image || image.type !== 'image') throw new Error('image projection missing');
+
+    expect([...await connection.readPromptImage(image)]).toEqual([...bytes]);
+    expect(requests).toEqual([{
+      entry_id: 'entry:image', image_ref_ordinal: 0,
+      offset_bytes: 0, limit_bytes: 1 << 20,
+    }]);
+  });
+
+  it('preserves canonical ROOT order through inventory merges when an observation-only ROOT has no message', async () => {
+    const entry = (id: string, turn: string, sequence: number, kind: string) => ({
+      entry_id: id, turn_id: turn, entry_sequence: String(sequence), entry_kind: kind,
+      scope_kind: 'ROOT', content: kind === 'USER_MESSAGE'
+        ? inlinePrompt('text')
+        : inlineContent('text'),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', event_sequence_cut: '8', entries: [
+        entry('prompt-a', 'A', 1, 'USER_MESSAGE'),
+        entry('answer-a', 'A', 2, 'ASSISTANT_MESSAGE'),
+        // B was started by a monitor, then interrupted before assistant output.
+        entry('monitor-b', 'B', 3, 'TERMINAL_OBSERVATION'),
+        entry('prompt-c', 'C', 4, 'USER_MESSAGE'),
+        { ...entry('completion', 'C', 5, 'INTER_AGENT_MESSAGE'), source_subagent_task_id: 'reader' },
+      ], control: { subagent_tasks: [{ task_id: 'reader', parent_turn_id: 'A', label: 'reader',
+        status: 'COMPLETED', completion_accepted: true }] } } },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200 })));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const projection = connection.current();
+    expect(projection.messages.find(message => message.id === 'completion')?.sourceSubagentTaskId).toBe('reader');
+    const merged = mergeRuntimeTaskInventory(projection, [inventoryTask('reader', 'reader', 'completed', 'A')]);
+    expect(merged.messages.find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
+    expect(mergeRuntimeTaskInventory(merged, merged.agentTasks).messages
+      .find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
+  });
+
+  it('joins tool results exactly across interrupted history, reordered results, and paging', async () => {
+    const content = (text: string) => ({ kind: 'INLINE', inline_content: btoa(text) });
+    const request = (id: string, sequence: number, call: string) => ({
+      entry_id: id, turn_id: id === 'old' ? 'turn-old' : 'turn-new', entry_sequence: String(sequence),
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{ block_id: `${id}-block`, block_kind: 'TOOL_CALL', tool_call_id: call, tool_name: 'remember' }],
+    });
+    const result = (id: string, sequence: number, assistant: string, call: string, state: string) => ({
+      entry_id: id, turn_id: 'turn-new', entry_sequence: String(sequence),
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: content('plain text is not a success verdict'),
+      tool_result: { assistant_entry_id: assistant, tool_call_id: call, result_state: state },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1, session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: { snapshot: {
+        session_id: 'session-1', writer_generation: '1', event_sequence_cut: '7',
+        entries: [
+          request('old', 1, 'old-call'), request('a', 2, 'call-a'), request('b', 3, 'call-b'),
+          result('result-b', 4, 'b', 'call-b', 'APPLICATION_ERROR'),
+          result('result-a', 5, 'a', 'call-a', 'SUCCESS'),
+          result('detached', 6, 'request-outside-page', 'other-call', 'APPLICATION_ERROR'),
+        ], control: {},
+      } }, live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const messages = connection.current().messages;
+    expect(messages.find(m => m.id === 'old')?.traces?.[0]).toMatchObject({ status: 'cancelled' });
+    expect(messages.find(m => m.id === 'old')?.traces?.[0].resultText).toBeUndefined();
+    expect(messages.find(m => m.id === 'a')?.traces?.[0]).toMatchObject({ status: 'completed' });
+    expect(messages.find(m => m.id === 'b')?.traces?.[0]).toMatchObject({ status: 'failed' });
+    expect(messages.find(m => m.id === 'b')?.traces).toHaveLength(1);
+    expect(messages.find(m => m.id === 'detached')?.traces?.[0]).toMatchObject({ status: 'failed' });
+  });
+
+  it('hydrates canonical view_image content into its exact tool trace owner', async () => {
+    const imageBody = JSON.stringify({
+      schema: 'pulsara.prompt/v1',
+      parts: [
+        { type: 'text', text: 'Image loaded.' },
+        {
+          type: 'image', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 3,
+          media_type: 'image/png', width: 2, height: 1,
+        },
+      ],
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload([
+      {
+        entry_id: 'request', turn_id: 'turn', entry_sequence: '1',
+        entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+        blocks: [{ block_id: 'block', block_kind: 'TOOL_CALL', tool_call_id: 'call', tool_name: 'view_image' }],
+      },
+      {
+        entry_id: 'result', turn_id: 'turn', entry_sequence: '2',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: { ...inlineContent(imageBody), media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8' },
+        tool_result: { assistant_entry_id: 'request', tool_call_id: 'call', result_state: 'SUCCESS' },
+      },
+    ])), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const trace = connection.current().messages.find((message) => message.id === 'request')?.traces?.[0];
+    expect(trace?.resultText).toBe('Image loaded.');
+    expect(trace?.resultContent?.parts[1]).toMatchObject({
+      type: 'image', source: 'canonical', refOrdinal: 0,
+      owner: { kind: 'entry', entryId: 'result' },
+    });
+  });
+
+  it('keeps an in-flight user steer distinct from an ordinary user turn', async () => {
+    const content = (value: string) => ({
+      kind: 'INLINE',
+      inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))),
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [{
+            entry_id: 'prompt-1', turn_id: 'turn-1', entry_sequence: '1',
+            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: inlinePrompt('完成这项工作'),
+          }, {
+            entry_id: 'steer-1', turn_id: 'turn-1', entry_sequence: '2',
+            entry_kind: 'USER_STEER', scope_kind: 'ROOT', content: inlinePrompt('先检查真实页面'),
+          }, {
+            entry_id: 'accepted-result-1', turn_id: 'turn-2', entry_sequence: '3',
+            entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'ROOT',
+            source_subagent_task_id: 'task-1',
+            content: content('{"status":"accepted"}'),
+          }],
+          control: { subagent_tasks: [{
+            task_id: 'task-1', parent_turn_id: 'turn-1', label: 'reader',
+            objective: '读取文件', status: 'COMPLETED', completion_accepted: true,
+          }] },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages.map((message) => ({
+      body: message.body,
+      userKind: message.userKind,
+    }))).toEqual([
+      { body: '完成这项工作', userKind: 'prompt' },
+      { body: '先检查真实页面', userKind: 'steer' },
+      { body: '', userKind: 'subagent-completion' },
+    ]);
+    expect(connection.current().messages[2]?.sourceSubagentTaskId).toBe('task-1');
+    const withTask = mergeRuntimeTaskInventory(connection.current(), [inventoryTask('task-1', 'reader', 'completed', 'turn-1')]);
+    expect(withTask.messages[2]).toMatchObject({
+      sourceSubagentLabel: 'reader',
+      sourceSubagentRelation: 'previous',
+    });
+  });
+
+  it('loads every older history page before exposing a resumed connection', async () => {
+    const historyBodies: Array<Record<string, unknown>> = [];
+    const entry = (sequence: number, body: string) => ({
+      entry_id: `entry-${sequence}`,
+      turn_id: `turn-${sequence}`,
+      entry_sequence: String(sequence),
+      entry_kind: 'USER_MESSAGE',
+      content: inlinePrompt(body),
+    });
+    const responses = [
+      {
+        connection_id: 'connection-1',
+        connection_generation: 1,
+        session_id: 'session-1',
+        role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1',
+            writer_generation: '1',
+            event_sequence_cut: '0',
+            entries: [entry(3, 'latest')],
+            older_history_cursor: {
+              session_id: 'session-1',
+              cut_sequence: '3',
+              entry_sequence: '3',
+            },
+            control: {},
+          },
+        },
+        live_control_snapshot: { snapshot: {} },
+      },
+      {
+        history_page: {
+          entries: [entry(2, 'middle')],
+          has_more: true,
+          older_history_cursor: {
+            session_id: 'session-1',
+            cut_sequence: '3',
+            entry_sequence: '2',
+          },
+        },
+      },
+      { history_page: { entries: [entry(1, 'oldest')], has_more: false } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/history') && init?.body) {
+        historyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      }
+      const payload = responses.shift();
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages.map((message) => message.body)).toEqual([
+      'oldest',
+      'middle',
+      'latest',
+    ]);
+    expect(historyBodies).toHaveLength(2);
+    expect(historyBodies[0]).toMatchObject({
+      maximum_entries: 256,
+      maximum_serialized_bytes: 2 << 20,
+      cursor: { entry_sequence: '3' },
+    });
+    expect(historyBodies[1]).toMatchObject({ cursor: { entry_sequence: '2' } });
+  });
+
+  it('treats the manual context action as an explicit forced request', async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const responses = [
+      {
+        connection_id: 'connection-1', connection_generation: 1,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+            entries: [], control: {},
+          },
+        },
+        live_control_snapshot: { snapshot: {} },
+      },
+      {
+        command_outcome: {
+          command_id: 'command:web:test', status: 'SUCCEEDED',
+          target_id: 'turn-1', public_code: 'COMPACTED',
+        },
+      },
+    ];
+    vi.stubGlobal('crypto', { randomUUID: () => 'test' });
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await connection.compactContext('turn-1');
+
+    expect(bodies.at(-1)).toMatchObject({
+      command_kind: 'COMPACT_CONTEXT', target_turn_id: 'turn-1', force: true,
+    });
+  });
+
+  it('projects an adopted context boundary from canonical control after observation', async () => {
+    const responses = [{
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '2',
+          entries: [{
+            entry_id: 'entry-1', turn_id: 'turn-1', entry_sequence: '1',
+            entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: inlinePrompt('压缩前'),
+          }],
+          control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }, {
+      observation: {
+        through_event_sequence: '3',
+        committed: [{
+          projection_kind: 'CURRENT_CONTROL',
+          current_control: {
+            latest_context_compaction: {
+              turn_id: 'turn-1',
+              context_binding_revision_id: 'revision-1',
+              source_through_sequence: '1',
+              adopted_after_entry_sequence: '1',
+              accepted_at_utc: '2026-09-01T10:00:00Z',
+            },
+          },
+        }],
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().contextCompaction).toBeUndefined();
+    expect(connection.current().messages[0]?.entrySequence).toBe(1);
+
+    const observed = await connection.observe();
+
+    expect(observed.contextCompaction).toEqual({
+      contextBindingRevisionId: 'revision-1',
+      turnId: 'turn-1',
+      sourceThroughSequence: 1,
+      adoptedAfterEntrySequence: 1,
+      acceptedAt: '2026-09-01T10:00:00Z',
+    });
+  });
+
+  it('projects process-local presentation notices from only the current observation', async () => {
+    const responses = [{
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }, {
+      observation: {
+        through_event_sequence: '0',
+        presentation_notices: [
+          '模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。',
+        ],
+      },
+    }, {
+      observation: { through_event_sequence: '0' },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect((await connection.observe()).presentationNotices).toEqual([
+      '模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。',
+    ]);
+    expect((await connection.observe()).presentationNotices).toEqual([]);
+  });
+
+  it('projects provider reasoning and distinguishes full text from a summary', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [{
+            entry_id: 'assistant-1', turn_id: 'turn-1', entry_sequence: '1',
+            entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
+            blocks: [{
+              block_id: 'text-1', block_kind: 'TEXT',
+              content: { kind: 'INLINE', inline_content: btoa('final answer') },
+            }],
+            reasoning_blocks: [
+              {
+                block_id: 'reasoning-1', ordinal: '0',
+                presentation_kind: 'REASONING_PRESENTATION_SUMMARY',
+                content: { kind: 'INLINE', inline_content: btoa('short provider summary') },
+              },
+              {
+                block_id: 'reasoning-2', ordinal: '1',
+                presentation_kind: 'REASONING_PRESENTATION_FULL',
+                content: { kind: 'INLINE', inline_content: btoa('full provider reasoning') },
+              },
+            ],
+          }],
+          control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages[0].assistantKind).toBe('terminal');
+    expect(connection.current().messages[0].reasoning).toEqual([
+      { id: 'reasoning-1', kind: 'summary', body: 'short provider summary' },
+      { id: 'reasoning-2', kind: 'full', body: 'full provider reasoning' },
+    ]);
+  });
+
+  it('keeps the provider presentation kind on a live reasoning stream', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: {
+        live_owner_epoch: '1', live_revision: '2',
+        live_snapshot: {
+          events: [
+            {
+              live_revision: '1', event_type: 'THINKING_START', draft_identity: 'draft-1',
+              turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'reasoning-1',
+              payload: { thinking_start: {
+                block_identity: 'reasoning-1',
+                presentation_kind: 'REASONING_PRESENTATION_SUMMARY',
+              } },
+            },
+            {
+              live_revision: '2', event_type: 'THINKING_DELTA', draft_identity: 'draft-1',
+              turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'reasoning-1',
+              payload: { thinking_delta: { block_identity: 'reasoning-1', delta: 'live summary' } },
+            },
+          ],
+        },
+      },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: { active_turns: [{ turn_id: 'turn-1', status: 'RUNNING' }] },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages[0].assistantKind).toBe('live');
+    expect(connection.current().messages[0].reasoning).toEqual([
+      { id: 'reasoning-1', kind: 'summary', body: 'live summary', active: true },
+    ]);
+  });
+
+  it('projects the exact live tool name and terminal command when arguments close', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: {
+        live_owner_epoch: '1', live_revision: '2',
+        live_snapshot: {
+          events: [
+            {
+              live_revision: '1', event_type: 'TOOL_CALL_START', draft_identity: 'draft-1',
+              turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'tool-1',
+              payload: { tool_call_start: {
+                block_identity: 'tool-1', tool_call_id: 'call-1', tool_name: 'terminal',
+              } },
+            },
+            {
+              live_revision: '2', event_type: 'TOOL_CALL_END', draft_identity: 'draft-1',
+              turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'tool-1',
+              payload: { tool_call_end: {
+                block_identity: 'tool-1', tool_call_id: 'call-1', tool_name: 'terminal',
+                arguments_json: JSON.stringify({ command: 'sleep 30' }),
+              } },
+            },
+          ],
+        },
+      },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: { active_turns: [{ turn_id: 'turn-1', status: 'RUNNING' }] },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages[0].traces?.[0]).toMatchObject({
+      toolName: 'terminal', title: '运行命令', subtitle: '等待执行结果', command: 'sleep 30',
+    });
+  });
+
+  it('projects the root TODO and applies live updates without attaching it to a message', async () => {
+    const responses = [
+      {
+        connection_id: 'connection-1', connection_generation: 1,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+            entries: [], control: { active_turns: [{ turn_id: 'turn-1', scope_kind: 'ROOT', status: 'RUNNING' }] },
+          },
+        },
+        live_control_snapshot: {
+          snapshot: {
+            owner_epoch: '1', live_revision: '0',
+            current_todos: [{
+              todo_run_id: 'todo-child', scope_kind: 'SUBAGENT_TASK',
+              scope_subagent_task_id: 'task-1', disposition: 'ACTIVE',
+              ordered_items: [{ ordinal: 0, text: '任务步骤', status: 'in_progress' }],
+            }, {
+              todo_run_id: 'todo-root', scope_kind: 'ROOT', disposition: 'ACTIVE',
+              ordered_items: [
+                { ordinal: 0, text: '检查契约', status: 'completed' },
+                { ordinal: 1, text: '目视验证', status: 'pending' },
+              ],
+            }],
+          },
+        },
+      },
+      {
+        observation: {
+          through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '1',
+          live: [{
+            live_revision: '1', event_type: 'TODO_SNAPSHOT_UPDATED', turn_id: 'turn-1',
+            scope_kind: 'ROOT', payload: { todo_snapshot_updated: {
+              todo_run_id: 'todo-root', todo_revision: '2', disposition: 'ACTIVE',
+              ordered_items: [
+                { ordinal: 0, text: '检查契约', status: 'completed' },
+                { ordinal: 1, text: '目视验证', status: 'in_progress' },
+              ],
+              pending_count: 0, in_progress_count: 1, completed_count: 1,
+            } },
+          }],
+        },
+      },
+      {
+        observation: {
+          through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '2',
+          live: [{
+            live_revision: '2', event_type: 'TODO_SNAPSHOT_UPDATED', turn_id: 'turn-1',
+            scope_kind: 'ROOT', payload: { todo_snapshot_updated: {
+              todo_run_id: 'todo-root', todo_revision: '3', disposition: 'CLOSED',
+              ordered_items: [], pending_count: 0, in_progress_count: 0, completed_count: 0,
+            } },
+          }],
+        },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().todo).toEqual({
+      id: 'todo-root',
+      items: [
+        { id: 'todo-root:0', label: '检查契约', status: 'completed' },
+        { id: 'todo-root:1', label: '目视验证', status: 'pending' },
+      ],
+    });
+    expect(connection.current().messages).toEqual([]);
+
+    const updated = await connection.observe();
+    expect(updated.todo?.items.map((item) => item.status)).toEqual(['completed', 'in-progress']);
+    expect(updated.messages).toEqual([]);
+
+    const closed = await connection.observe();
+    expect(closed.todo).toBeUndefined();
+  });
+
+  it('hydrates a large historical reasoning block through the content reader', async () => {
+    const reasoning = 'large provider reasoning';
+    const digest = blobContent(reasoning).digest;
+    const requests: Array<Record<string, unknown>> = [];
+    const responses = [
+      {
+        connection_id: 'connection-1', connection_generation: 1,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+            entries: [{
+              entry_id: 'assistant-1', turn_id: 'turn-1', entry_sequence: '1',
+              entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
+              reasoning_blocks: [{
+                block_id: 'assistant-1:provider-reasoning:0', ordinal: '0',
+                presentation_kind: 'REASONING_PRESENTATION_FULL',
+                content: {
+                  kind: 'CANONICAL_BLOB', digest, size: String(reasoning.length),
+                  media_type: 'text/plain', codec: 'utf-8',
+                },
+              }],
+            }],
+            control: {},
+          },
+        },
+        live_control_snapshot: { snapshot: {} },
+      },
+      {
+        content: {
+          digest, complete_size: String(reasoning.length), offset_bytes: '0',
+          content: btoa(reasoning), complete: true,
+        },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages[0].reasoning?.[0].body).toBe(reasoning);
+    expect(requests.at(-1)).toMatchObject({
+      entry_id: 'assistant-1', block_id: 'assistant-1:provider-reasoning:0', offset_bytes: 0,
+    });
+  });
+
+  it('hydrates canonical blob entry, assistant block, and tool result bodies after reload', async () => {
+    const queuedBody = '消费后的大正文🙂\n'.repeat(6_000);
+    const assistantBody = '模型保真正文';
+    const toolBody = JSON.stringify({ status: 'ok', content: '工具保真正文' });
+    expect(new TextEncoder().encode(queuedBody).length).toBeGreaterThan(65_536);
+    const entries = [{
+      entry_id: 'consumed-prompt', turn_id: 'turn-blob', entry_sequence: '1',
+      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: blobPrompt(queuedBody),
+      input_source: {
+        queue_item_id: 'queue-blob', command_id: 'command-blob', delivery_mode: 'NEW_TURN',
+      },
+    }, {
+      entry_id: 'assistant-blob', turn_id: 'turn-blob', entry_sequence: '2',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'assistant-text', block_kind: 'TEXT', content: blobContent(assistantBody),
+      }, {
+        block_id: 'assistant-call', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-blob', tool_name: 'read_file',
+      }],
+    }, {
+      entry_id: 'result-blob', turn_id: 'turn-blob', entry_sequence: '3',
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: blobContent(toolBody),
+      tool_result: {
+        assistant_entry_id: 'assistant-blob', tool_call_id: 'call-blob', result_state: 'SUCCESS',
+      },
+    }];
+    const responses = [
+      connectPayload(entries),
+      contentChunk(promptBody(queuedBody)),
+      contentChunk(assistantBody),
+      contentChunk(toolBody),
+    ];
+    const reads: Array<Record<string, unknown>> = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/read-content')) {
+        reads.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      }
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+
+    expect(projection.messages.find((message) => message.id === 'consumed-prompt')?.body).toBe(queuedBody);
+    expect(projection.messages.find((message) => message.id === 'assistant-blob')?.body).toBe(assistantBody);
+    expect(projection.messages.find((message) => message.id === 'assistant-blob')?.traces?.[0].resultText)
+      .toBe(toolBody);
+    expect(reads).toEqual([
+      expect.objectContaining({ entry_id: 'consumed-prompt' }),
+      expect.objectContaining({ entry_id: 'assistant-blob', block_id: 'assistant-text' }),
+      expect.objectContaining({ entry_id: 'result-blob' }),
+    ]);
+  });
+
+  it('refreshes an exact consumed entry when a blob queue item is consumed during hydration', async () => {
+    const body = '读取中被消费🙂\n'.repeat(6_000);
+    const pending = {
+      prompt_queue_total_count: '1',
+      prompt_queue: [{
+        queue_item_id: 'queue-race', command_id: 'command-race', queue_sequence: '1',
+        status: 'PENDING', delivery_mode: 'NEW_TURN', content: blobPrompt(body),
+      }],
+    };
+    const consumed = {
+      entry_id: 'entry-race', turn_id: 'turn-race', entry_sequence: '1',
+      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: blobPrompt(body),
+      input_source: {
+        queue_item_id: 'queue-race', command_id: 'command-race', delivery_mode: 'NEW_TURN',
+      },
+    };
+    const responses = [
+      connectPayload([], pending),
+      { error: { stable_code: 'CONTENT_QUEUE_NOT_PENDING', public_message: 'Queue item is no longer pending.' } },
+      { snapshot: { snapshot: {
+        session_id: 'session-1', writer_generation: '1', event_sequence_cut: '1',
+        entries: [consumed], control: { prompt_queue_total_count: '0', prompt_queue: [] },
+      } } },
+      contentChunk(promptBody(body)),
+    ];
+    const operations: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      operations.push(String(input).split('/').at(-1) ?? '');
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+
+    expect(projection.queuedPrompts).toEqual([]);
+    expect(projection.messages).toEqual([
+      expect.objectContaining({
+        id: 'entry-race', body,
+        inputSource: expect.objectContaining({ queueItemId: 'queue-race', commandId: 'command-race' }),
+      }),
+    ]);
+    expect(operations.slice(1)).toEqual(['read-content', 'snapshot', 'read-content']);
+  });
+
+  it.each([
+    ['CANCELLED', 'cancelled', 'USER_CANCELLED'],
+    ['REJECTED', 'rejected', 'PROMPT_REJECTED'],
+  ] as const)(
+    'preserves an exact %s queue terminal when initial blob hydration loses pending authorization',
+    async (queueStatus, expectedStatus, publicCode) => {
+      const body = '尚未完成读取的大队列正文🙂\n'.repeat(6_000);
+      const pending = {
+        prompt_queue_total_count: '1',
+        prompt_queue: [{
+          queue_item_id: 'queue-terminal-race', command_id: 'command-terminal-race',
+          queue_sequence: '7', status: 'PENDING', delivery_mode: 'STEER_ACTIVE_TURN',
+          target_turn_id: 'turn-target',
+          permission: { effective_mode: 'PERMISSION_MODE_READ_ONLY' },
+          content: blobContent(body),
+        }],
+      };
+      const detail = `Queue became ${queueStatus.toLowerCase()} before hydration completed.`;
+      const responses = [
+        connectPayload([], pending),
+        { error: { stable_code: 'CONTENT_QUEUE_NOT_PENDING', public_message: 'Queue item is no longer pending.' } },
+        { snapshot: { snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: { prompt_queue_total_count: '0', prompt_queue: [] },
+        } } },
+        { query_command: { found: true, outcome: {
+          command_id: 'command-terminal-race', status: 'REJECTED',
+          public_code: publicCode, public_message: detail,
+          prompt_delivery: {
+            queue_item_id: 'queue-terminal-race', queue_status: queueStatus,
+            delivery_mode: 'STEER_ACTIVE_TURN',
+          },
+        } } },
+      ];
+      const operations: string[] = [];
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+        operations.push(String(input).split('/').at(-1) ?? '');
+        return new Response(JSON.stringify(responses.shift()), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }));
+
+      const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+      expect(projection.queuedPrompts).toEqual([]);
+      expect(projection.promptTransitions).toEqual([expect.objectContaining({
+        sessionId: 'session-1', connectionGeneration: 1,
+        queueItemId: 'queue-terminal-race', commandId: 'command-terminal-race',
+        deliveryMode: 'steer', targetTurnId: 'turn-target', permission: 'read-only',
+        content: undefined, contentUnavailable: true, status: expectedStatus,
+        outcomeCode: publicCode, detail,
+      })]);
+      expect(operations.slice(1)).toEqual(['read-content', 'snapshot', 'query-command']);
+    },
+  );
+
+  it('rejects same-length canonical blob corruption even when the server echoes the descriptor digest', async () => {
+    const expected = new TextEncoder().encode('trusted bytes');
+    const tampered = new TextEncoder().encode('altered bytes');
+    expect(tampered.length).toBe(expected.length);
+    const reference = blobBytes(expected);
+    const responses = [
+      connectPayload([{
+        entry_id: 'entry-corrupt', turn_id: 'turn-corrupt', entry_sequence: '1',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: reference,
+      }]),
+      contentBytes(tampered, reference.digest),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    await expect(new LocalHttpRuntimeAdapter().connect('session-1')).rejects.toMatchObject({
+      code: 'CONTENT_INTEGRITY_INVALID',
+    });
+  });
+
+  it('rejects canonical blob bytes that are not valid UTF-8', async () => {
+    const invalidUtf8 = new Uint8Array([0xc3, 0x28]);
+    const reference = blobBytes(invalidUtf8);
+    const responses = [
+      connectPayload([{
+        entry_id: 'entry-invalid-utf8', turn_id: 'turn-invalid-utf8', entry_sequence: '1',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: reference,
+      }]),
+      contentBytes(invalidUtf8),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    await expect(new LocalHttpRuntimeAdapter().connect('session-1')).rejects.toMatchObject({
+      code: 'CONTENT_INTEGRITY_INVALID',
+    });
+  });
+
+  it('joins retained worker activities only after an exact task page and settles only canonical terminal facts', async () => {
+    const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
+    const payload = connectPayload([
+      {entry_id:'create',turn_id:'root',entry_sequence:'1',entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'ROOT',blocks:[{block_id:'spawn',block_kind:'TOOL_CALL',tool_call_id:'spawn',tool_name:'create_agent_tasks'}]},
+      {entry_id:'created',turn_id:'root',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',tool_result:{assistant_entry_id:'create',tool_call_id:'spawn',result_state:'SUCCESS'},content:inlineContent(JSON.stringify({tasks:ids.map(task_id=>({task_id}))}))},
+      ...ids.map((id,i)=>({entry_id:`entry-${id}`,turn_id:`turn-${id}`,entry_sequence:String(i+3),entry_kind:'ASSISTANT_MESSAGE',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:id,blocks:[{block_id:`text-${id}`,block_kind:'TEXT',content:inlineContent('intermediate commentary')},{block_id:`call-${id}`,block_kind:'TOOL_CALL',tool_call_id:`call-${id}`,tool_name:'terminal'}]})),
+    ], {active_turns:[{turn_id:'root',scope_kind:'ROOT',status:'RUNNING'}]}, [{
+      live_revision:'1', event_type:'TEXT_DELTA', draft_identity:'worker-live', turn_id:'turn-worker-143', scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:'worker-143',payload:{text_delta:{delta:'still working'}},
+    }]);
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
+    const raw = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    expect(raw.subagentRuns).toHaveLength(144);
+    expect(raw.subagentRuns?.[0].status).toBe('unknown');
+    expect(raw.subagentRuns?.[0].activities[0].traces?.[0].status).toBe('running');
+    const task = inventoryTask('worker-143','visible worker','running','root','work');
+    const loaded = mergeRuntimeTaskInventory(raw,[task]);
+    const runs = loaded.messages.find(m=>m.id==='create')?.subagentRuns;
+    expect(runs).toHaveLength(1);
+    expect(runs?.[0].activities.some(a=>a.body==='still working')).toBe(true);
+    expect(runs?.[0].activities[0].traces?.[0].status).toBe('running');
+    const terminal = mergeRuntimeTaskInventory(raw,[{...task,status:'completed'}]);
+    const done = terminal.messages.find(m=>m.id==='create')?.subagentRuns?.[0];
+    expect(done?.activities.some(a=>a.id.startsWith('live:'))).toBe(false);
+    expect(done?.activities[0].traces?.[0].status).toBe('cancelled');
+    expect(raw.subagentRuns?.[143].activities[0].traces?.[0].status).toBe('running');
+    expect(mergeRuntimeTaskInventory(raw,[]).messages.find(m=>m.id==='create')?.subagentRuns).toBeUndefined();
+  });
+
+  it.each(['start', 'delta', 'end'])('keeps the 144th worker result %s and progress outside bounded control', async phase => {
+    const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
+    const target = ids[143];
+    const event = {turn_id: `turn-${target}`, scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: target,
+      channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-143', channel_tool_call_id: 'same-call-id'};
+    const events = [
+      {...event, live_revision:'1', event_type:'TOOL_RESULT_START', payload:{tool_result_start:{assistant_entry_id:'entry-worker-143',tool_call_id:'same-call-id',attempt_id:'attempt-143'}}},
+      {...event, live_revision:'2', event_type:'TOOL_RESULT_DELTA', payload:{tool_result_delta:{text:'partial result'}}},
+      {...event, live_revision:'3', event_type:'TOOL_RESULT_END', payload:{tool_result_end:{result_state:'SUCCESS',final_text:'complete result'}}},
+    ].slice(0, phase === 'start' ? 1 : phase === 'delta' ? 2 : 3);
+    const payload = connectPayload([
+      {entry_id:'create',turn_id:'root',entry_sequence:'1',entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'ROOT',blocks:[{block_id:'spawn',block_kind:'TOOL_CALL',tool_call_id:'spawn',tool_name:'create_agent_tasks'}]},
+      ...ids.map((id,i)=>({entry_id:`entry-${id}`,turn_id:`turn-${id}`,entry_sequence:String(i+2),entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:id,blocks:[{block_id:`call-${id}`,block_kind:'TOOL_CALL',tool_call_id:'same-call-id',tool_name:'terminal'}]})),
+    ], {
+      active_turns: ids.slice(0,128).map(id=>({turn_id:`turn-${id}`,scope_kind:'SUBAGENT_TASK',status:'RUNNING'})),
+      tool_attempts: ids.slice(0,128).map((id,i)=>({attempt_id:`attempt-${i}`,assistant_entry_id:`entry-${id}`,tool_call_id:'same-call-id'})),
+    }, [...events, {live_revision:'4',event_type:'SUBAGENT_PROGRESS',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:target,payload:{subagent_progress:{task_id:target,status:'ACTIVE',public_summary:'examining last worker'}}}]);
+    vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
+    const raw = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    const task = inventoryTask(target,'last worker','running','root');
+    const merged = mergeRuntimeTaskInventory(raw,[task]);
+    const trace = merged.messages[0].subagentRuns?.[0].activities[0].traces?.[0];
+    expect(trace).toMatchObject({id:'same-call-id',status:phase === 'end' ? 'completed' : 'running'});
+    expect(trace?.resultText).toBe(phase === 'start' ? undefined : phase === 'delta' ? 'partial result' : 'complete result');
+    expect(raw.subagentRuns?.[0].activities[0].traces?.[0].resultText).toBeUndefined();
+    expect(merged.agentTasks[0].progress).toBe('examining last worker');
+    expect(mergeRuntimeTaskInventory(raw,[{...task,status:'completed'}]).agentTasks[0].progress).toBeUndefined();
+    expect(mergeRuntimeTaskInventory(raw,[]).agentTasks).toEqual([]);
+  });
+
+  it('projects successful orchestration results and exposes child execution', async () => {
+    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))) });
+    const toolRequest = (
+      sequence: number,
+      entryId: string,
+      toolName: string,
+      callId: string,
+      scope = 'ROOT',
+      taskId = '',
+      argumentsJson = '{}',
+    ) => ({
+      entry_id: entryId,
+      turn_id: scope === 'ROOT' ? 'turn-root' : `turn-${taskId}`,
+      entry_sequence: String(sequence),
+      entry_kind: 'ASSISTANT_TOOL_REQUEST',
+      scope_kind: scope,
+      scope_subagent_task_id: taskId,
+      blocks: [{
+        block_id: `block-${sequence}`,
+        block_kind: 'TOOL_CALL',
+        tool_call_id: callId,
+        tool_name: toolName,
+        tool_arguments_preview: btoa(argumentsJson),
+      }],
+    });
+    const entries = [
+      toolRequest(1, 'root-create', 'create_agent_tasks', 'call-create'),
+      {
+        entry_id: 'task-objective', turn_id: 'turn-task-1', entry_sequence: '2',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-1', content: content('Read README.md.'),
+      },
+      {
+        entry_id: 'task-guidance', turn_id: 'turn-task-1', entry_sequence: '3',
+        entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-1', content: content('Also verify the visible heading.'),
+      },
+      {
+        entry_id: 'create-result', turn_id: 'turn-root', entry_sequence: '4',
+        tool_result: { assistant_entry_id: 'root-create', tool_call_id: 'call-create', result_state: 'SUCCESS' },
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content(JSON.stringify({ tasks: [
+          { task_id: 'task-1', status: 'active' },
+          { task_id: 'task-2', status: 'pending_start' },
+        ] })),
+      },
+      toolRequest(5, 'task-read', 'read_file', 'call-read', 'SUBAGENT_TASK', 'task-1'),
+      {
+        entry_id: 'read-result', turn_id: 'turn-task-1', entry_sequence: '6',
+        tool_result: { assistant_entry_id: 'task-read', tool_call_id: 'call-read', result_state: 'SUCCESS' },
+        entry_kind: 'TOOL_RESULT', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-1',
+        content: content(JSON.stringify({ status: 'ok', path: 'README.md', total_lines: 1 })),
+      },
+      {
+        entry_id: 'task-answer', turn_id: 'turn-task-1', entry_sequence: '7',
+        entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-1',
+        blocks: [{ block_id: 'task-text', block_kind: 'TEXT', content: content('# Pulsara') }],
+      },
+      toolRequest(8, 'root-wait', 'wait_agent', 'call-wait'),
+      {
+        entry_id: 'wait-result', turn_id: 'turn-root', entry_sequence: '9',
+        tool_result: { assistant_entry_id: 'root-wait', tool_call_id: 'call-wait', result_state: 'SUCCESS' },
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content(JSON.stringify({ pending_task_ids: [], settled: [{ status: 'completed' }] })),
+      },
+      toolRequest(10, 'root-denied', 'create_agent_tasks', 'call-denied'),
+      {
+        entry_id: 'denied-result', turn_id: 'turn-root', entry_sequence: '11',
+        tool_result: { assistant_entry_id: 'root-denied', tool_call_id: 'call-denied', result_state: 'PERMISSION_DENIED' },
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content('ROOT subagent orchestration requires bypass-permissions mode'),
+      },
+      toolRequest(
+        12,
+        'root-user-denied',
+        'terminal',
+        'call-user-denied',
+        'ROOT',
+        '',
+        JSON.stringify({ command: 'printf "visible command"' }),
+      ),
+      {
+        entry_id: 'user-denied-result', turn_id: 'turn-root', entry_sequence: '13',
+        tool_result: { assistant_entry_id: 'root-user-denied', tool_call_id: 'call-user-denied', result_state: 'PERMISSION_DENIED' },
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content('tool execution denied by user'),
+      },
+      toolRequest(14, 'root-artifact-read', 'artifact_read', 'call-artifact-read'),
+      {
+        entry_id: 'artifact-read-result', turn_id: 'turn-root', entry_sequence: '15',
+        tool_result: { assistant_entry_id: 'root-artifact-read', tool_call_id: 'call-artifact-read', result_state: 'SUCCESS' },
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+        content: content(JSON.stringify({ status: 'ok', content: 'retained page' })),
+      },
+      {
+        entry_id: 'orphan-objective', turn_id: 'turn-orphan', entry_sequence: '16',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+        scope_subagent_task_id: 'task-orphan', content: content('Interrupted before a final reply.'),
+      },
+      toolRequest(17, 'root-orphan-tool', 'wait_agent', 'call-orphan'),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1',
+      connection_generation: 1,
+      session_id: 'session-1',
+      role: 'controller',
+      live_hello: {
+        live_owner_epoch: '1', live_revision: '1',
+        live_snapshot: {
+          events: [{
+            live_revision: '1', event_type: 'TEXT_DELTA', draft_identity: 'stale-task-draft',
+            turn_id: 'turn-task-1', scope_kind: 'SUBAGENT_TASK',
+            scope_subagent_task_id: 'task-1', payload: { text_delta: { delta: 'stale live text' } },
+          }],
+        },
+      },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries,
+          control: {
+            subagent_tasks: [{
+              task_id: 'task-1', parent_turn_id: 'turn-root', status: 'COMPLETED',
+              label: '读取标题', display_role: '研究', objective: 'Read README.md.',
+              result_summary: '# Pulsara',
+            }, {
+              task_id: 'task-2', parent_turn_id: 'turn-root', status: 'PENDING_START',
+              label: '等待槽位', display_role: '研究', objective: 'Wait for capacity.',
+            }],
+          },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    const projected = mergeRuntimeTaskInventory(connection.current(), [
+      { ...inventoryTask('task-1', '读取标题', 'completed', 'turn-root', 'Read README.md.'), summary: '# Pulsara' },
+      inventoryTask('task-2', '等待槽位', 'pending', 'turn-root', 'Wait for capacity.'),
+    ]);
+    const create = projected.messages.find((message) => message.id === 'root-create');
+    const wait = projected.messages.find((message) => message.id === 'root-wait');
+    const denied = projected.messages.find((message) => message.id === 'root-denied');
+    const userDenied = projected.messages.find((message) => message.id === 'root-user-denied');
+    const artifactRead = projected.messages.find((message) => message.id === 'root-artifact-read');
+    const orphanTool = projected.messages.find((message) => message.id === 'root-orphan-tool');
+
+    expect(create?.assistantKind).toBe('tool-request');
+    expect(create?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
+    expect(create?.traces?.[0].toolName).toBe('create_agent_tasks');
+    expect(wait?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
+    expect(denied?.traces?.[0]).toMatchObject({ status: 'failed', subtitle: '已拒绝' });
+    expect(userDenied?.traces?.[0]).toMatchObject({
+      toolName: 'terminal', command: 'printf "visible command"',
+      argumentsJson: JSON.stringify({ command: 'printf "visible command"' }),
+      resultText: 'tool execution denied by user',
+      status: 'failed', subtitle: '已拒绝', meta: '操作未完成',
+    });
+    expect(artifactRead?.traces?.[0]).toMatchObject({
+      title: '读取保留内容', status: 'completed', meta: '操作完成',
+    });
+    expect(create?.subagentRuns?.find((run) => run.id === 'task-orphan')).toBeUndefined();
+    expect(orphanTool?.traces?.[0]).toMatchObject({
+      status: 'cancelled', subtitle: '已结束', meta: '结果待核实',
+      resultSummary: '原运行已结束，操作结果尚未记录；需要核实实际状态。',
+    });
+    expect(orphanTool?.traces?.[0].resultText).toBeUndefined();
+    expect(orphanTool?.subagentRuns).toBeUndefined();
+    expect(create?.subagentRuns?.[0]).toMatchObject({
+      id: 'task-1', label: '读取标题', status: 'completed', objective: 'Read README.md.',
+    });
+    expect(create?.subagentRuns?.[0].activities.some(activity => activity.id === 'task-read')).toBe(true);
+    expect(create?.subagentRuns?.find((run) => run.id === 'task-2')).toMatchObject({
+      label: '等待槽位', status: 'pending', activities: [],
+    });
+    expect(projected.agentTasks).toHaveLength(2);
+    expect(projected.agentTasks[1].status).toBe('pending');
+    expect(JSON.stringify(create?.subagentRuns)).not.toContain('stale live text');
+  });
+
+  it('attaches child execution to the successful creator instead of an earlier failed call', async () => {
+    const entries = [{
+      entry_id: 'create-invalid', turn_id: 'turn-root', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'invalid-block', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-invalid', tool_name: 'create_agent_tasks',
+        tool_arguments_preview: btoa('{}'),
+      }],
+    }, {
+      entry_id: 'result-invalid', turn_id: 'turn-root', entry_sequence: '2',
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+      tool_result: {
+        assistant_entry_id: 'create-invalid', tool_call_id: 'call-invalid',
+        result_state: 'INVALID_ARGUMENTS',
+      },
+      content: inlineContent(JSON.stringify({ error: 'dependency reference is unknown' })),
+    }, {
+      entry_id: 'create-success', turn_id: 'turn-root', entry_sequence: '3',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'success-block', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-success', tool_name: 'create_agent_tasks',
+        tool_arguments_preview: btoa('{}'),
+      }],
+    }, {
+      entry_id: 'result-success', turn_id: 'turn-root', entry_sequence: '4',
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+      tool_result: {
+        assistant_entry_id: 'create-success', tool_call_id: 'call-success',
+        result_state: 'SUCCESS',
+      },
+      content: inlineContent(JSON.stringify({
+        batch_id: 'batch-success',
+        tasks: [{ task_id: 'task-success', status: 'active' }],
+      })),
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(
+      entries,
+      { subagent_tasks: [{
+        task_id: 'task-success', parent_turn_id: 'turn-root', batch_id: 'batch-success',
+        status: 'COMPLETED', label: 'reader', display_role: '通用协作',
+        objective: 'Read the target file.', result_summary: 'done',
+      }] },
+    )), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const projection = mergeRuntimeTaskInventory((await new LocalHttpRuntimeAdapter().connect('session-1')).current(), [
+      { ...inventoryTask('task-success', 'reader', 'completed', 'turn-root', 'Read the target file.'), batchId: 'batch-success' },
+    ]);
+    const invalid = projection.messages.find((message) => message.id === 'create-invalid');
+    const success = projection.messages.find((message) => message.id === 'create-success');
+
+    expect(invalid?.traces?.[0]).toMatchObject({
+      resultState: 'INVALID_ARGUMENTS', status: 'failed',
+    });
+    expect(invalid?.subagentRuns).toBeUndefined();
+    expect(success?.traces?.[0]).toMatchObject({ resultState: 'SUCCESS', status: 'completed' });
+    expect(success?.subagentRuns).toEqual([
+      expect.objectContaining({ id: 'task-success', label: 'reader', status: 'completed' }),
+    ]);
+  });
+
+  it('keeps exact MCP meta-tool arguments and results for structured UI projection', async () => {
+    const argumentsJson = JSON.stringify({ kind: 'MCP_TOOL', parent: { kind: 'MCP_SERVER', runtime_server_id: 'firecrawl' } });
+    const resultText = JSON.stringify({
+      total_count: 1, completeness: 'COMPLETE',
+      items: [{ kind: 'MCP_SERVER', name: 'firecrawl', target: { kind: 'MCP_SERVER', runtime_server_id: 'firecrawl' }, source: null, status: '连接已就绪。' }],
+    });
+    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))) });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '2',
+          entries: [{
+            entry_id: 'assistant-mcp-list', turn_id: 'turn-1', entry_sequence: '1',
+            entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+            blocks: [{
+              block_id: 'block-mcp-list', block_kind: 'TOOL_CALL',
+              tool_call_id: 'call-mcp-list', tool_name: 'list_capabilities',
+              tool_arguments_preview: btoa(argumentsJson),
+            }],
+          }, {
+            entry_id: 'result-mcp-list', turn_id: 'turn-1', entry_sequence: '2',
+            tool_result: { assistant_entry_id: 'assistant-mcp-list', tool_call_id: 'call-mcp-list', result_state: 'SUCCESS' },
+            entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: content(resultText),
+          }],
+          control: {
+            tool_attempts: [{
+              assistant_entry_id: 'assistant-mcp-list', tool_call_id: 'call-mcp-list',
+              result_entry_id: 'result-mcp-list', result_state: 'SUCCESS',
+            }],
+          },
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages[0]?.traces?.[0]).toMatchObject({
+      toolName: 'list_capabilities',
+      title: '查看能力',
+      argumentsJson,
+      resultText,
+      status: 'completed',
+    });
+  });
+
+  it('keeps detached child result data without inferring active membership or showing unloaded tasks', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      connection_id: 'connection-1', connection_generation: 1,
+      session_id: 'session-1', role: 'controller',
+      live_hello: {
+        live_owner_epoch: '1', live_revision: '1',
+        live_snapshot: {
+          events: [{
+            live_revision: '1', event_type: 'TOOL_RESULT_START',
+            draft_identity: 'stale-child-tool-result',
+            turn_id: 'turn-task-1', scope_kind: 'SUBAGENT_TASK',
+            scope_subagent_task_id: 'task-1',
+            payload: { tool_result_start: { tool_call_id: 'call-1' } },
+          }],
+        },
+      },
+      snapshot: {
+        snapshot: {
+          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+          entries: [], control: {},
+        },
+      },
+      live_control_snapshot: { snapshot: {} },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().isRunning).toBe(false);
+    expect(connection.current().messages).toEqual([]);
+  });
+
+  it('associates interleaved live tool results by exact attempt and preserves an empty final result', async () => {
+    const entries = [{
+      entry_id: 'assistant-live', turn_id: 'turn-live', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [
+        { block_id: 'block-a', block_kind: 'TOOL_CALL', tool_call_id: 'call-a', tool_name: 'read_file' },
+        { block_id: 'block-b', block_kind: 'TOOL_CALL', tool_call_id: 'call-b', tool_name: 'search_content' },
+      ],
+    }];
+    const control = {
+      active_turns: [{ turn_id: 'turn-live', status: 'RUNNING', scope_kind: 'ROOT' }],
+      tool_attempts: [
+        { attempt_id: 'attempt-a', assistant_entry_id: 'assistant-live', tool_call_id: 'call-a' },
+        { attempt_id: 'attempt-b', assistant_entry_id: 'assistant-live', tool_call_id: 'call-b' },
+      ],
+    };
+    const liveEvents = [
+      {
+        live_revision: '1', event_type: 'TOOL_RESULT_START', turn_id: 'turn-live', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-a', channel_tool_call_id: 'call-a',
+        payload: { tool_result_start: { tool_call_id: 'call-a' } },
+      },
+      {
+        live_revision: '2', event_type: 'TOOL_RESULT_START', turn_id: 'turn-live', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-b', channel_tool_call_id: 'call-b',
+        payload: { tool_result_start: { tool_call_id: 'call-b' } },
+      },
+      {
+        live_revision: '3', event_type: 'TOOL_RESULT_END', turn_id: 'turn-live', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-a', channel_tool_call_id: 'call-a',
+        payload: { tool_result_end: { tool_call_id: 'call-a', result_state: 'SUCCESS', final_text: '' } },
+      },
+      {
+        live_revision: '4', event_type: 'TOOL_RESULT_END', turn_id: 'turn-live', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-b', channel_tool_call_id: 'call-b',
+        payload: { tool_result_end: { tool_call_id: 'call-b', result_state: 'APPLICATION_ERROR', final_text: 'b failed' } },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(
+      connectPayload(entries, control, liveEvents),
+    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const traces = (await new LocalHttpRuntimeAdapter().connect('session-1'))
+      .current().messages.find((message) => message.id === 'assistant-live')?.traces;
+    expect(traces?.find((trace) => trace.id === 'call-a')).toMatchObject({
+      status: 'completed', resultText: '',
+    });
+    expect(traces?.find((trace) => trace.id === 'call-b')).toMatchObject({
+      status: 'failed', resultText: 'b failed',
+    });
+  });
+
+  it('reconciles one pending live result when its exact attempt mapping arrives later', async () => {
+    const request = {
+      entry_id: 'assistant-late', turn_id: 'turn-late', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'block-late', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-late', tool_name: 'read_file',
+      }],
+    };
+    const live = [{
+      live_revision: '1', event_type: 'TOOL_RESULT_START', turn_id: 'turn-late', scope_kind: 'ROOT',
+      channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-late',
+      payload: { tool_result_start: { attempt_id: 'attempt-late' } },
+    }, {
+      live_revision: '2', event_type: 'TOOL_RESULT_END', turn_id: 'turn-late', scope_kind: 'ROOT',
+      channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-late',
+      payload: { tool_result_end: { result_state: 'SUCCESS', final_text: 'late exact result' } },
+    }];
+    const responses = [
+      connectPayload([request], {
+        active_turns: [{ turn_id: 'turn-late', status: 'RUNNING', scope_kind: 'ROOT' }],
+      }, live),
+      { observation: {
+        through_event_sequence: '2', live_owner_epoch: '1', through_live_revision: '2',
+        committed: [{
+          projection_kind: 'CURRENT_CONTROL',
+          current_control: {
+            active_turns: [{ turn_id: 'turn-late', status: 'RUNNING', scope_kind: 'ROOT' }],
+            tool_attempts: [{
+              attempt_id: 'attempt-late', assistant_entry_id: 'assistant-late', tool_call_id: 'call-late',
+            }],
+          },
+        }],
+      } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages).toHaveLength(2);
+
+    const projection = await connection.observe();
+    expect(projection.messages).toHaveLength(1);
+    expect(projection.messages[0]).toMatchObject({ id: 'assistant-late' });
+    expect(projection.messages[0].traces).toEqual([
+      expect.objectContaining({ id: 'call-late', resultText: 'late exact result', status: 'completed' }),
+    ]);
+  });
+
+  it('settles the pending live-result identity after an attempt mapping arrives in the same observation', async () => {
+    const request = {
+      entry_id: 'assistant-settle', turn_id: 'turn-settle', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'block-settle', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-settle', tool_name: 'read_file',
+      }],
+    };
+    const responses = [
+      connectPayload([request], {
+        active_turns: [{ turn_id: 'turn-settle', status: 'RUNNING', scope_kind: 'ROOT' }],
+      }, [{
+        live_revision: '1', event_type: 'TOOL_RESULT_END', turn_id: 'turn-settle', scope_kind: 'ROOT',
+        channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-settle',
+        payload: { tool_result_end: { result_state: 'SUCCESS', final_text: 'settled preview' } },
+      }]),
+      { observation: {
+        through_event_sequence: '2', live_owner_epoch: '1', through_live_revision: '2',
+        committed: [{
+          projection_kind: 'CURRENT_CONTROL',
+          current_control: {
+            active_turns: [{ turn_id: 'turn-settle', status: 'RUNNING', scope_kind: 'ROOT' }],
+            tool_attempts: [{
+              attempt_id: 'attempt-settle', assistant_entry_id: 'assistant-settle', tool_call_id: 'call-settle',
+            }],
+          },
+        }],
+        settlements: [{
+          kind: 'COMMITTED', channel_kind: 'TOOL_RESULT',
+          channel_attempt_id: 'attempt-settle', channel_tool_call_id: 'call-settle',
+        }],
+      } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages).toHaveLength(2);
+
+    const projection = await connection.observe();
+    expect(projection.messages).toHaveLength(1);
+    expect(projection.messages[0].traces?.[0]).not.toHaveProperty('resultText');
+  });
+
+  it('settles one interleaved result before mappings arrive and later binds only its sibling', async () => {
+    const request = {
+      entry_id: 'assistant-interleaved', turn_id: 'turn-interleaved', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'block-a', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-a', tool_name: 'read_file',
+      }, {
+        block_id: 'block-b', block_kind: 'TOOL_CALL',
+        tool_call_id: 'call-b', tool_name: 'read_file',
+      }],
+    };
+    const live = ['a', 'b'].map((suffix, index) => ({
+      live_revision: String(index + 1), event_type: 'TOOL_RESULT_END',
+      turn_id: 'turn-interleaved', scope_kind: 'ROOT', channel_kind: 'TOOL_RESULT',
+      channel_attempt_id: `attempt-${suffix}`, channel_tool_call_id: `call-${suffix}`,
+      proposed_entry_id: `result-${suffix}`, draft_identity: `result-${suffix}`,
+      generation_id: `generation-${suffix}`, block_id: `result-block-${suffix}`,
+      payload: { tool_result_end: { result_state: 'SUCCESS', final_text: `result ${suffix}` } },
+    }));
+    const responses = [
+      connectPayload([request], {
+        active_turns: [{ turn_id: 'turn-interleaved', status: 'RUNNING', scope_kind: 'ROOT' }],
+      }, live),
+      { observation: {
+        through_event_sequence: '1', live_owner_epoch: '1', through_live_revision: '3',
+        settlements: [{
+          kind: 'COMMITTED', channel_kind: 'TOOL_RESULT',
+          channel_attempt_id: 'attempt-a', channel_tool_call_id: 'call-a',
+          proposed_entry_id: 'result-a', draft_identity: 'result-a',
+          generation_id: 'generation-a',
+        }],
+      } },
+      { observation: {
+        through_event_sequence: '2', live_owner_epoch: '1', through_live_revision: '3',
+        committed: [{
+          projection_kind: 'CURRENT_CONTROL',
+          current_control: {
+            active_turns: [{ turn_id: 'turn-interleaved', status: 'RUNNING', scope_kind: 'ROOT' }],
+            tool_attempts: [{
+              attempt_id: 'attempt-a', assistant_entry_id: 'assistant-interleaved', tool_call_id: 'call-a',
+            }, {
+              attempt_id: 'attempt-b', assistant_entry_id: 'assistant-interleaved', tool_call_id: 'call-b',
+            }],
+          },
+        }],
+      } },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(connection.current().messages).toHaveLength(3);
+    expect((await connection.observe()).messages).toHaveLength(2);
+
+    const projection = await connection.observe();
+    expect(projection.messages).toHaveLength(1);
+    expect(projection.messages[0].traces?.find((trace) => trace.id === 'call-a'))
+      .not.toHaveProperty('resultText');
+    expect(projection.messages[0].traces?.find((trace) => trace.id === 'call-b'))
+      .toMatchObject({ resultText: 'result b', status: 'completed' });
+  });
+
+  it('projects identical queued prompt bodies by queue and command identity in queue order', async () => {
+    const control = {
+      prompt_queue_total_count: '2',
+      prompt_queue: [
+        {
+          queue_item_id: 'queue-2', command_id: 'command-2', queue_sequence: '2',
+          status: 'PENDING', delivery_mode: 'NEW_TURN', content: inlinePrompt('相同正文'),
+        },
+        {
+          queue_item_id: 'queue-1', command_id: 'command-1', queue_sequence: '1',
+          status: 'PENDING', delivery_mode: 'STEER_ACTIVE_TURN', target_turn_id: 'turn-1',
+          content: inlinePrompt('相同正文'),
+        },
+      ],
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(
+      connectPayload([], control),
+    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    expect((await new LocalHttpRuntimeAdapter().connect('session-1')).current().queuedPrompts)
+      .toEqual([
+        expect.objectContaining({
+          queueItemId: 'queue-1', commandId: 'command-1', content: textPromptContent('相同正文'),
+          deliveryMode: 'steer', targetTurnId: 'turn-1',
+        }),
+        expect.objectContaining({
+          queueItemId: 'queue-2', commandId: 'command-2', content: textPromptContent('相同正文'),
+          deliveryMode: 'new-turn',
+        }),
+      ]);
+  });
+});
+
+describe('LocalHttpRuntimeAdapter connection ownership', () => {
+  it('sends the stable page identity with an explicit takeover request', async () => {
+    let requestBody: unknown;
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = init?.body ? JSON.parse(String(init.body)) : undefined;
+      return new Response(JSON.stringify({
+        connection_id: 'connection-takeover', connection_generation: 2,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: {
+          snapshot: {
+            session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
+            entries: [], control: {},
+          },
+        },
+        live_control_snapshot: { snapshot: {} },
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter(
+      '00000000-0000-4000-8000-000000000001',
+    ).connect('session-1', true);
+
+    expect(requestBody).toEqual({
+      browser_instance_id: '00000000-0000-4000-8000-000000000001',
+      takeover: true,
+    });
+    expect(connection.role).toBe('controller');
+  });
+});
+
+describe('subagent completion continuation', () => {
+  it('carries the selected permission into the new root turn command', async () => {
+    let commandBody: Record<string, unknown> | undefined;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/command')) {
+        commandBody = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({
+          command_outcome: {
+            command_id: commandBody?.command_id,
+            status: 'SUCCEEDED',
+            public_code: 'SUBAGENT_COMPLETION_DELIVERED',
+          },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        connection_id: 'connection-result', connection_generation: 3,
+        session_id: 'session-1', role: 'controller',
+        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
+        snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', entries: [], control: {} } },
+        live_control_snapshot: { snapshot: {} },
+      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    await connection.acceptSubagentCompletion('task-1', 'read-only');
+
+    expect(commandBody).toMatchObject({
+      command_kind: 'ACCEPT_SUBAGENT_COMPLETION',
+      subagent_task_id: 'task-1',
+      requested_permission_mode: 'PERMISSION_MODE_READ_ONLY',
+    });
+  });
+});
+
+describe('session summaries', () => {
+  it('keeps process-loaded state structured for the sidebar', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      sessions: [{
+        id: 'session-loaded',
+        title: '会话 loaded',
+        subtitle: '13 条记录',
+        lifecycle: 'OPEN',
+        updated_at: '2026-08-30T11:00:00Z',
+        live: true,
+        task_counts: { total: 5, active: 1, waiting: 2, attention: 1 },
+      }, {
+        id: 'session-resumable',
+        title: '会话 resumable',
+        subtitle: '8 条记录',
+        lifecycle: 'OPEN',
+        updated_at: '2026-08-30T10:00:00Z',
+        live: false,
+      }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const sessions = await new LocalHttpRuntimeAdapter().listSessions();
+
+    expect(sessions.map((session) => ({
+      id: session.id,
+      subtitle: session.subtitle,
+      live: session.live,
+      taskCounts: session.taskCounts,
+    }))).toEqual([
+      {
+        id: 'session-loaded', subtitle: '13 条记录', live: true,
+        taskCounts: { total: 5, active: 1, waiting: 2, attention: 1 },
+      },
+      { id: 'session-resumable', subtitle: '8 条记录', live: false, taskCounts: undefined },
+    ]);
+  });
+});
+
+describe('session task inventory', () => {
+  it('projects the durable page with every state, result field, and dependency', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => {
+      void _input;
+      return new Response(JSON.stringify({
+      session_id: 'session-1',
+      tasks: [{
+        id: 'task-blocked', parent_turn_id: 'turn-1', batch_id: 'batch-1',
+        task_key: 'verify', label: '验证结果', profile: 'verification_worker',
+        display_role: '验证', context: { mode: 'LAST_N', last_n_turns: 4 },
+        objective: '确认结果可以使用。', status: 'BLOCKED_DEPENDENCY_FAILED',
+        terminal_public_detail: '前置任务未能完成。', completion_accepted: true,
+        accepted_at: '2026-08-30T12:00:00Z', terminal_at: '2026-08-30T12:01:00Z',
+        dependencies: [{
+          task_id: 'task-failed', task_key: 'build', label: '生成结果',
+          status: 'FAILED', result_summary: null,
+        }],
+        result: {
+          id: 'result-1', entry_id: 'entry-1', source: 'EXPLICIT',
+          summary: '保留的总结', output_preview: '输出摘录',
+          diagnostics: [{ message: '前置检查失败' }],
+        },
+      }],
+      total_count: 51, remaining_count: 50, next_cursor: 'page-2',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const page = await new LocalHttpRuntimeAdapter().listSessionTasks('session-1');
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/sessions/session-1/tasks?limit=50');
+    expect(page).toMatchObject({ totalCount: 51, remainingCount: 50, nextCursor: 'page-2' });
+    expect(page.tasks[0]).toMatchObject({
+      id: 'task-blocked', status: 'blocked', role: '验证',
+      terminalPublicDetail: '前置任务未能完成。', completionAccepted: true,
+      context: { mode: 'last-n', lastNTurns: 4 },
+      dependencyIds: ['task-failed'],
+      dependencies: [{ id: 'task-failed', status: 'failed', label: '生成结果' }],
+      result: {
+        id: 'result-1', entryId: 'entry-1', summary: '保留的总结',
+        outputPreview: '输出摘录',
+      },
+    });
+  });
+
+  it('uses durable terminal truth over stale live progress while preserving live active progress', () => {
+    const durable: AgentTask[] = [{
+      id: 'task-1', label: '持久任务', role: '研究', objective: '完成检查',
+      status: 'interrupted', dependencyIds: [], color: 'blue',
+      completionAccepted: false,
+      summary: '中断前的最后结果',
+    }];
+    const projection: RuntimeProjection = {
+      messages: [], isRunning: true, queuedCount: 0, queuedPrompts: [], promptTransitions: [], planMode: false,
+      control: {}, liveControl: {}, todo: undefined,
+      agentTasks: [{
+        ...durable[0], status: 'running', progress: '仍在运行', summary: undefined,
+      }],
+      eventSequence: 1, liveOwnerEpoch: 1, liveRevision: 1,
+      liveControlOwnerEpoch: 1, liveControlRevision: 1,
+    };
+
+    const merged = mergeRuntimeTaskInventory(projection, durable);
+
+    expect(merged.agentTasks[0]).toMatchObject({
+      status: 'interrupted', progress: undefined, summary: '中断前的最后结果',
+    });
+    expect(merged.messages).toEqual([]);
+  });
+
+  it('classifies completion sources by exact canonical ROOT order', () => {
+    const baseTask = {
+      role: '研究', objective: '检查结果', status: 'completed' as const,
+      completionAccepted: true, dependencyIds: [], color: 'blue' as const,
+    };
+    const projection: RuntimeProjection = {
+      canonicalRootTurnIds: ['turn-1', 'turn-2', 'turn-3'],
+      messages: [
+        { id: 'root-1', turnId: 'turn-1', entrySequence: 1, role: 'user', time: '1', body: '一' },
+        { id: 'root-2', turnId: 'turn-2', entrySequence: 2, role: 'user', time: '2', body: '二' },
+        { id: 'root-3', turnId: 'turn-3', entrySequence: 3, role: 'user', time: '3', body: '三' },
+        { id: 'accepted-old', turnId: 'turn-3', entrySequence: 4, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-old' },
+        { id: 'accepted-previous', turnId: 'turn-3', entrySequence: 5, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-previous' },
+        { id: 'accepted-current', turnId: 'turn-3', entrySequence: 6, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-current' },
+      ],
+      isRunning: false, queuedCount: 0, queuedPrompts: [], promptTransitions: [], planMode: false,
+      control: {}, liveControl: {}, agentTasks: [], eventSequence: 6,
+      liveOwnerEpoch: 1, liveRevision: 1, liveControlOwnerEpoch: 1, liveControlRevision: 1,
+    };
+    const merged = mergeRuntimeTaskInventory(projection, [
+      { ...baseTask, id: 'task-old', label: '旧任务', parentId: 'turn-1' },
+      { ...baseTask, id: 'task-previous', label: '上一任务', parentId: 'turn-2' },
+      { ...baseTask, id: 'task-current', label: '当前任务', parentId: 'turn-3' },
+    ]);
+
+    expect(merged.messages.slice(-3).map((message) => ({
+      label: message.sourceSubagentLabel,
+      relation: message.sourceSubagentRelation,
+    }))).toEqual([
+      { label: '旧任务', relation: 'earlier' },
+      { label: '上一任务', relation: 'previous' },
+      { label: '当前任务', relation: 'current' },
+    ]);
+    const withoutOrder = mergeRuntimeTaskInventory({ ...merged, canonicalRootTurnIds: undefined }, merged.agentTasks);
+    expect(withoutOrder.messages.slice(-3).map(message => message.sourceSubagentRelation))
+      .toEqual([undefined, undefined, 'current']);
+  });
+});
+
+describe('capability catalog adapter', () => {
+  it('projects Skill activation facts and the complete ready MCP tool detail', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      session_id: 'session-1',
+      workspace_path: '/tmp/project',
+      skills: {
+        status: 'ready',
+        items: [{
+          name: 'pdf', description: '处理 PDF', location: 'bundled_skills/pdf',
+          source: 'bundled', configured: false, authoring_notes: [],
+        }],
+        issues: [], details: [], roots: [],
+      },
+      mcp: {
+        servers: [{
+          id: 'docs', name: '文档', status: 'READY', required: false,
+          available_to_subagents: true, tool_count: 1, discovered_tool_count: 1,
+          resource_count: 2, resource_template_count: 3, prompt_count: 4,
+          instructions: '优先读取目录', has_failure: false,
+          tools: [{
+            name: 'docs_search', remote_name: 'search', description: '搜索文档',
+            effect: 'READ_ONLY', available_to_subagents: true, parallel_safe: true,
+          }],
+        }],
+        collisions: [],
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const capabilities = await new LocalHttpRuntimeAdapter().inspectCapabilities('session-1');
+
+    expect(capabilities.skills.items[0]).toMatchObject({ name: 'pdf', source: 'bundled' });
+    expect(capabilities.mcp.servers[0]).toMatchObject({
+      id: 'docs', status: 'ready', availableToSubagents: true,
+      resourceCount: 2, resourceTemplateCount: 3, promptCount: 4,
+    });
+    expect(capabilities.mcp.servers[0].tools[0]).toMatchObject({
+      name: 'docs_search', remoteName: 'search', effect: 'read-only',
+      availableToSubagents: true, parallelSafe: true,
+    });
+  });
+
+  it('writes a path-based user Skill switch and projects its effective state', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return new Response(JSON.stringify({
+        operation: { status: 'DISABLED', success: true, message: '技能已关闭。' },
+        capabilities: {
+          roots: [
+            { kind: 'agents', path: '/Users/test/.agents' },
+            { kind: 'pulsara', path: '/Users/test/.pulsara' },
+          ],
+          skills: {
+            status: 'ready',
+            config_path: '/Users/test/.pulsara/skills.yaml',
+            items: [{
+              name: 'review', description: '审阅实现', location: '~/.agents/skills/review/SKILL.md',
+              path: '/Users/test/.agents/skills/review/SKILL.md', enabled: false,
+              root: 'agents', authoring_notes: [],
+            }],
+            issues: [], details: [], roots: [],
+          },
+          mcp: { config_path: '/Users/test/.pulsara/mcp.yaml', servers: [] },
+          plugins: { status: 'ready', items: [], details: [] },
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await new LocalHttpRuntimeAdapter().setUserSkillEnabled(
+      '/Users/test/.agents/skills/review/SKILL.md',
+      false,
+      'session-1',
+    );
+
+    expect(result.capabilities.skills).toMatchObject({
+      configPath: '/Users/test/.pulsara/skills.yaml',
+      items: [{ name: 'review', enabled: false }],
+    });
+    const [, init] = fetchMock.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body))).toEqual({
+      path: '/Users/test/.agents/skills/review/SKILL.md',
+      enabled: false,
+      active_session_id: 'session-1',
+    });
+  });
+});
+
+describe('source text fidelity hard cut', () => {
+  it('projects ordered canonical Text parts without exposing their storage JSON', async () => {
+    const texts = ['', '第一段\n原换行', '', '最后一段🙂'];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload([{
+      entry_id: 'multipart-text', turn_id: 'turn-1', entry_sequence: '1',
+      entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content: inlinePrompt(...texts),
+    }])), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    expect(projection.messages[0].body).toBe(texts.join('\n'));
+  });
+
+  it.each(['history', 'queue'])('projects %s images as typed owner-scoped content', async (location) => {
+    const content = {
+      ...inlineContent(JSON.stringify({
+        schema: 'pulsara.prompt/v1',
+        parts: [{ type: 'text', text: '看图' }, {
+          type: 'image', digest: `sha256:${'a'.repeat(64)}`, encoded_bytes: 4,
+          media_type: 'image/png', width: 7, height: 5,
+        }],
+      })),
+      media_type: 'application/vnd.pulsara.prompt+json', codec: 'utf-8',
+    };
+    const payload = location === 'history'
+      ? connectPayload([{
+        entry_id: 'image', turn_id: 'turn-1', entry_sequence: '1',
+        entry_kind: 'USER_MESSAGE', scope_kind: 'ROOT', content,
+      }])
+      : connectPayload([], { prompt_queue: [{
+        queue_item_id: 'queue-image', command_id: 'command-image', queue_sequence: '1',
+        status: 'PENDING', delivery_mode: 'NEW_TURN', content,
+      }] });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(payload), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+    const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+    const projected = location === 'history'
+      ? projection.messages[0]?.promptContent
+      : projection.queuedPrompts[0]?.content;
+    expect(projected).toEqual({ parts: [{ type: 'text', text: '看图' }, {
+      type: 'image', source: 'canonical',
+      digest: `sha256:${'a'.repeat(64)}`, encodedBytes: 4,
+      mediaType: 'image/png', width: 7, height: 5, refOrdinal: 0,
+      owner: location === 'history'
+        ? { kind: 'entry', entryId: 'image' }
+        : { kind: 'queue', queueItemId: 'queue-image' },
+    }] });
+    expect(location === 'history' ? projection.messages[0]?.body : undefined)
+      .toBe(location === 'history' ? '看图' : undefined);
+  });
+
+  it('preserves accepted user prompts and steers byte-for-byte before rendering', async () => {
+    const entries = ['USER_MESSAGE', 'USER_STEER'].map((entryKind, index) => ({
+      entry_id: `user-${index}`, turn_id: 'turn-user', entry_sequence: String(index + 1),
+      entry_kind: entryKind, scope_kind: 'ROOT', content: inlinePrompt(SOURCE_FIDELITY_TEXT),
+    }));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages.map((message) => ({
+      body: message.body,
+      userKind: message.userKind,
+    }))).toEqual([
+      { body: SOURCE_FIDELITY_TEXT, userKind: 'prompt' },
+      { body: SOURCE_FIDELITY_TEXT, userKind: 'steer' },
+    ]);
+  });
+
+  it('preserves canonical and imported assistant bodies byte-for-byte', async () => {
+    const entries = ['CANONICAL', 'IMPORTED_HISTORY'].map((owner, index) => ({
+      entry_id: `assistant-${index}`, turn_id: `turn-${index}`, entry_sequence: String(index + 1),
+      entry_kind: 'ASSISTANT_MESSAGE', entry_owner_kind: owner, scope_kind: 'ROOT',
+      root_final: true, fork_eligible: index === 0,
+      blocks: [{
+        block_id: `text-${index}`, block_kind: 'TEXT', content: inlineContent(SOURCE_FIDELITY_TEXT),
+      }],
+    }));
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(connection.current().messages.map((message) => message.body)).toEqual([
+      SOURCE_FIDELITY_TEXT,
+      SOURCE_FIDELITY_TEXT,
+    ]);
+    expect(connection.current().messages.map((message) => [message.rootFinal, message.forkEligible])).toEqual([
+      [true, true],
+      [true, false],
+    ]);
+  });
+
+  it('preserves split live deltas, final text, canonical snapshot, and reconnect content', async () => {
+    const first = '\n中文 read_';
+    const second = 'file /tmp/ROOT Kernel HostSession read-only bypass-permissions exit_code = 0\n';
+    const source = first + second;
+    const canonicalEntry = {
+      entry_id: 'assistant-final', turn_id: 'turn-1', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
+      blocks: [{ block_id: 'text-final', block_kind: 'TEXT', content: inlineContent(source) }],
+    };
+    const responses = [
+      connectPayload([], { active_turns: [{ turn_id: 'turn-1', status: 'RUNNING' }] }, [{
+        live_revision: '1', event_type: 'TEXT_DELTA', draft_identity: 'draft-1',
+        turn_id: 'turn-1', scope_kind: 'ROOT', payload: { text_delta: { delta: first } },
+      }]),
+      { observation: {
+        through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '2',
+        live: [{
+          live_revision: '2', event_type: 'TEXT_DELTA', draft_identity: 'draft-1',
+          turn_id: 'turn-1', scope_kind: 'ROOT', payload: { text_delta: { delta: second } },
+        }],
+      } },
+      { observation: {
+        through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '3',
+        live: [{
+          live_revision: '3', event_type: 'TEXT_END', draft_identity: 'draft-1',
+          turn_id: 'turn-1', scope_kind: 'ROOT', payload: { text_end: { final_text: source } },
+        }],
+      } },
+      { snapshot: { snapshot: {
+        session_id: 'session-1', writer_generation: '1', event_sequence_cut: '1',
+        entries: [canonicalEntry], control: {},
+      } } },
+      connectPayload([canonicalEntry]),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const adapter = new LocalHttpRuntimeAdapter();
+    const connection = await adapter.connect('session-1');
+    expect(connection.current().messages[0]?.body).toBe(first);
+    expect((await connection.observe()).messages[0]?.body).toBe(source);
+    expect((await connection.observe()).messages[0]?.body).toBe(source);
+    expect((await connection.snapshot()).messages[0]?.body).toBe(source);
+    expect((await adapter.connect('session-1')).current().messages[0]?.body).toBe(source);
+  });
+
+  it('preserves canonical and live reasoning while retaining presentation kinds', async () => {
+    const entries = [{
+      entry_id: 'assistant-canonical', turn_id: 'turn-canonical', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
+      blocks: [{ block_id: 'text', block_kind: 'TEXT', content: inlineContent('final') }],
+      reasoning_blocks: [{
+        block_id: 'reasoning-canonical', ordinal: '0',
+        presentation_kind: 'REASONING_PRESENTATION_FULL',
+        content: inlineContent(SOURCE_FIDELITY_TEXT),
+      }],
+    }];
+    const liveEvents = [{
+      live_revision: '1', event_type: 'THINKING_START', draft_identity: 'draft-live',
+      turn_id: 'turn-live', scope_kind: 'ROOT', block_id: 'reasoning-live',
+      payload: { thinking_start: {
+        block_identity: 'reasoning-live',
+        presentation_kind: 'REASONING_PRESENTATION_SUMMARY',
+      } },
+    }, {
+      live_revision: '2', event_type: 'THINKING_DELTA', draft_identity: 'draft-live',
+      turn_id: 'turn-live', scope_kind: 'ROOT', block_id: 'reasoning-live',
+      payload: { thinking_delta: { block_identity: 'reasoning-live', delta: SOURCE_FIDELITY_TEXT } },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(
+      entries,
+      { active_turns: [{ turn_id: 'turn-live', status: 'RUNNING' }] },
+      liveEvents,
+    )), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
+
+    expect(messages.find((message) => message.id === 'assistant-canonical')?.reasoning).toEqual([
+      { id: 'reasoning-canonical', kind: 'full', body: SOURCE_FIDELITY_TEXT },
+    ]);
+    expect(messages.find((message) => message.id === 'live:draft-live')?.reasoning).toEqual([
+      { id: 'reasoning-live', kind: 'summary', body: SOURCE_FIDELITY_TEXT, active: true },
+    ]);
+  });
+
+  it('preserves plan questions and option text without changing option ordinals', async () => {
+    const interaction = {
+      id: 'plan-question-1', kind: 'plan-question' as const,
+      workflowId: 'workflow-1', workflowRevision: 7,
+    };
+    const responses = [connectPayload([], {
+      active_plan_workflow: { workflow_id: 'workflow-1', workflow_revision: '7' },
+      open_plan_interaction: { interaction_id: interaction.id, workflow_id: 'workflow-1', kind: 'QUESTION' },
+    }), {
+      plan_question: {
+        interaction_id: interaction.id,
+        question: SOURCE_FIDELITY_TEXT,
+        options: [{
+          ordinal: '9', label: SOURCE_FIDELITY_TEXT,
+          description: SOURCE_FIDELITY_TEXT, recommended: true,
+        }],
+        allow_free_text: true,
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(await connection.readInteraction(interaction)).toEqual({
+      kind: 'plan-question',
+      question: SOURCE_FIDELITY_TEXT,
+      options: [{
+        ordinal: 9, label: SOURCE_FIDELITY_TEXT,
+        description: SOURCE_FIDELITY_TEXT, recommended: true,
+      }],
+      allowFreeText: true,
+    });
+  });
+
+  it('joins a multi-chunk UTF-8 plan draft exactly while retaining digest and offset checks', async () => {
+    const interaction = {
+      id: 'plan-draft-1', kind: 'plan-draft' as const,
+      workflowId: 'workflow-1', workflowRevision: 7,
+    };
+    const split = SOURCE_FIDELITY_TEXT.indexOf('中文') + 1;
+    const first = SOURCE_FIDELITY_TEXT.slice(0, split);
+    const second = SOURCE_FIDELITY_TEXT.slice(split);
+    const firstBytes = new TextEncoder().encode(first).length;
+    const requests: Record<string, unknown>[] = [];
+    const responses = [connectPayload([], {
+      active_plan_workflow: { workflow_id: 'workflow-1', workflow_revision: '7' },
+      open_plan_interaction: { interaction_id: interaction.id, workflow_id: 'workflow-1', kind: 'DRAFT_REVIEW' },
+    }), {
+      plan_draft: {
+        interaction_id: interaction.id, plan_utf8_digest: 'sha256:plan',
+        offset_utf8_bytes: 0, body: first, next_offset_utf8_bytes: firstBytes, eof: false,
+      },
+    }, {
+      plan_draft: {
+        interaction_id: interaction.id, plan_utf8_digest: 'sha256:plan',
+        offset_utf8_bytes: firstBytes, body: second,
+        next_offset_utf8_bytes: new TextEncoder().encode(SOURCE_FIDELITY_TEXT).length, eof: true,
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.body) requests.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(responses.shift()), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }));
+
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    expect(await connection.readInteraction(interaction)).toEqual({
+      kind: 'plan-draft', body: SOURCE_FIDELITY_TEXT,
+    });
+    expect(requests.at(-1)).toMatchObject({
+      interaction_id: interaction.id,
+      offset_utf8_bytes: firstBytes,
+      expected_plan_utf8_digest: 'sha256:plan',
+    });
+  });
+
+  it('still rejects a non-advancing plan draft chunk', async () => {
+    const interaction = {
+      id: 'plan-draft-invalid', kind: 'plan-draft' as const,
+      workflowId: 'workflow-1', workflowRevision: 1,
+    };
+    const responses = [connectPayload(), {
+      plan_draft: {
+        interaction_id: interaction.id, plan_utf8_digest: 'sha256:plan',
+        offset_utf8_bytes: 0, body: 'partial', next_offset_utf8_bytes: 0, eof: false,
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+
+    await expect(connection.readInteraction(interaction)).rejects.toMatchObject({
+      code: 'PLAN_DRAFT_INVALID',
+    });
+  });
+
+  it('preserves task inventory, dependencies, progress, TODOs, results, and child activities', async () => {
+    const task = {
+      id: 'task-1', parent_turn_id: 'turn-root', batch_id: 'batch-1', task_key: 'source-task',
+      label: SOURCE_FIDELITY_TEXT, profile: 'research_worker', display_role: SOURCE_FIDELITY_TEXT,
+      context: { mode: 'LAST_N', last_n_turns: 3 }, objective: SOURCE_FIDELITY_TEXT,
+      status: 'ACTIVE', terminal_public_detail: SOURCE_FIDELITY_TEXT, completion_accepted: false,
+      dependencies: [{
+        task_id: 'task-dependency', task_key: 'dependency', label: SOURCE_FIDELITY_TEXT,
+        status: 'COMPLETED', result_summary: SOURCE_FIDELITY_TEXT,
+      }],
+      result: {
+        id: 'result-1', entry_id: 'entry-result', summary: SOURCE_FIDELITY_TEXT,
+        output_preview: SOURCE_FIDELITY_TEXT, diagnostics: [],
+      },
+    };
+    const rootToolRequest = {
+      entry_id: 'root-create', turn_id: 'turn-root', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'create-block', block_kind: 'TOOL_CALL', tool_call_id: 'create-call',
+        tool_name: 'spawn_agent', tool_arguments_preview: btoa('{}'),
+      }],
+    };
+    const childEntries = [{
+      entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2',
+      entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+      scope_subagent_task_id: 'task-1', content: inlineContent(SOURCE_FIDELITY_TEXT),
+    }, {
+      entry_id: 'child-answer', turn_id: 'turn-child', entry_sequence: '3',
+      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
+      scope_subagent_task_id: 'task-1',
+      blocks: [{ block_id: 'child-text', block_kind: 'TEXT', content: inlineContent(SOURCE_FIDELITY_TEXT) }],
+      reasoning_blocks: [{
+        block_id: 'child-reasoning', ordinal: '0',
+        presentation_kind: 'REASONING_PRESENTATION_SUMMARY', content: inlineContent(SOURCE_FIDELITY_TEXT),
+      }],
+    }];
+    const connect = connectPayload(
+      [rootToolRequest, ...childEntries],
+      { subagent_tasks: [{
+        task_id: 'task-1', parent_turn_id: 'turn-root', status: 'ACTIVE',
+        label: SOURCE_FIDELITY_TEXT, display_role: SOURCE_FIDELITY_TEXT,
+        profile: 'research_worker', objective: SOURCE_FIDELITY_TEXT,
+        terminal_public_detail: SOURCE_FIDELITY_TEXT, result_summary: SOURCE_FIDELITY_TEXT,
+      }, {
+        task_id: 'task-default-role', parent_turn_id: 'turn-root', status: 'PENDING_START',
+        label: 'default', profile: 'research_worker', objective: 'default',
+      }] },
+      [{
+        live_revision: '1', event_type: 'SUBAGENT_PROGRESS', turn_id: 'turn-child',
+        scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: 'task-1',
+        payload: { subagent_progress: {
+          task_id: 'task-1', status: 'ACTIVE', public_summary: SOURCE_FIDELITY_TEXT,
+        } },
+      }],
+      { current_todos: [{
+        todo_run_id: 'todo-root', scope_kind: 'ROOT', disposition: 'ACTIVE',
+        ordered_items: [{ ordinal: 0, text: SOURCE_FIDELITY_TEXT, status: 'IN_PROGRESS' }],
+      }] },
+    );
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
+      String(input).includes('/activities?')
+        ? { activities: [{ entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2', entry_kind: 'INTER_AGENT_MESSAGE', accepted_at: '2026-09-01T00:00:00Z', objective: SOURCE_FIDELITY_TEXT, content: inlineContent(SOURCE_FIDELITY_TEXT) }] }
+        : String(input).includes('/tasks?')
+          ? { session_id: 'session-1', tasks: [task], total_count: 1, remaining_count: 0 }
+          : connect,
+    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+
+    const adapter = new LocalHttpRuntimeAdapter();
+    const inventory = (await adapter.listSessionTasks('session-1')).tasks[0];
+    const projection = mergeRuntimeTaskInventory((await adapter.connect('session-1')).current(), [inventory]);
+    const liveTask = projection.agentTasks.find((item) => item.id === 'task-1');
+    const activityPage = await adapter.listSessionTaskActivities('session-1', 'task-1');
+    const run = projection.messages.find((message) => message.id === 'root-create')?.subagentRuns
+      ?.find((item) => item.id === 'task-1');
+
+    expect(inventory).toMatchObject({
+      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT, objective: SOURCE_FIDELITY_TEXT,
+      terminalPublicDetail: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
+      dependencies: [{ label: SOURCE_FIDELITY_TEXT, resultSummary: SOURCE_FIDELITY_TEXT }],
+      result: { summary: SOURCE_FIDELITY_TEXT, outputPreview: SOURCE_FIDELITY_TEXT },
+    });
+    expect(liveTask).toMatchObject({
+      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT, objective: SOURCE_FIDELITY_TEXT,
+      terminalPublicDetail: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
+    });
+    expect(activityPage.activities[0]).toMatchObject({ body: SOURCE_FIDELITY_TEXT, entryKind: 'INTER_AGENT_MESSAGE' });
+    expect(projection.todo?.items).toEqual([{
+      id: 'todo-root:0', label: SOURCE_FIDELITY_TEXT, status: 'in-progress',
+    }]);
+    expect(run).toMatchObject({
+      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT,
+      objective: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
+    });
+    expect(liveTask?.progress).toBe(SOURCE_FIDELITY_TEXT);
+    expect(run?.activities).toMatchObject([
+      {id: 'child-guidance', body: SOURCE_FIDELITY_TEXT},
+      {id: 'child-answer', body: SOURCE_FIDELITY_TEXT, reasoning: [{body: SOURCE_FIDELITY_TEXT}]},
+    ]);
+  });
+
+  it('preserves plain and JSON message tool text while keeping typed tool labels', async () => {
+    const request = (id: string, sequence: number, call: string, toolName = 'read_file') => ({
+      entry_id: id, turn_id: 'turn-1', entry_sequence: String(sequence),
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: `${id}-block`, block_kind: 'TOOL_CALL', tool_call_id: call,
+        tool_name: toolName, tool_arguments_preview: btoa('{}'),
+      }],
+    });
+    const jsonMessage = JSON.stringify({ message: SOURCE_FIDELITY_TEXT });
+    const editDiff = '@@ -1,2 +1,2 @@\n-old-001\n+new-001\n unchanged';
+    const editResult = JSON.stringify({ status: 'success', diff: editDiff });
+    const entries = [
+      request('plain-request', 1, 'plain-call'),
+      {
+        entry_id: 'plain-result', turn_id: 'turn-1', entry_sequence: '2',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(SOURCE_FIDELITY_TEXT),
+        tool_result: { assistant_entry_id: 'plain-request', tool_call_id: 'plain-call', result_state: 'SUCCESS' },
+      },
+      request('json-request', 3, 'json-call'),
+      {
+        entry_id: 'json-result', turn_id: 'turn-1', entry_sequence: '4',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(jsonMessage),
+        tool_result: { assistant_entry_id: 'json-request', tool_call_id: 'json-call', result_state: 'SUCCESS' },
+      },
+      request('edit-request', 5, 'edit-call', 'edit_file'),
+      {
+        entry_id: 'edit-result', turn_id: 'turn-1', entry_sequence: '6',
+        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(editResult),
+        tool_result: { assistant_entry_id: 'edit-request', tool_call_id: 'edit-call', result_state: 'SUCCESS' },
+      },
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
+    const plain = messages.find((message) => message.id === 'plain-request')?.traces?.[0];
+    const json = messages.find((message) => message.id === 'json-request')?.traces?.[0];
+    const edit = messages.find((message) => message.id === 'edit-request')?.traces?.[0];
+
+    expect(plain).toMatchObject({ title: '读取文件', resultText: SOURCE_FIDELITY_TEXT });
+    expect(json).toMatchObject({ title: '读取文件', resultText: jsonMessage });
+    expect(edit).toMatchObject({ title: '更新文件', resultText: editResult, resultSummary: editDiff });
+    expect(plain).not.toHaveProperty('output');
+    expect(json).not.toHaveProperty('output');
+  });
+
+  it('does not project terminal_process pending-exit placeholders as real exit codes', async () => {
+    const entries = [{
+      entry_id: 'process-request', turn_id: 'turn-process', entry_sequence: '1',
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: 'process-block', block_kind: 'TOOL_CALL', tool_call_id: 'process-call',
+        tool_name: 'terminal_process',
+        tool_arguments_preview: btoa(JSON.stringify({ action: 'poll', process_id: 'process-a' })),
+      }],
+    }, {
+      entry_id: 'process-result', turn_id: 'turn-process', entry_sequence: '2',
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
+      content: inlineContent(JSON.stringify({ status: 'running', output: '', exit_code: -1 })),
+      tool_result: {
+        assistant_entry_id: 'process-request', tool_call_id: 'process-call', result_state: 'SUCCESS',
+      },
+    }];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
+    const summary = messages.find((message) => message.id === 'process-request')?.traces?.[0].resultSummary;
+    expect(summary).toBe('命令仍在运行。');
+    expect(summary).not.toContain('-1');
+  });
+
+  it('applies filesystem result summaries only to exact builtin tool names', async () => {
+    const request = (id: string, sequence: number, call: string, toolName: string) => ({
+      entry_id: id, turn_id: 'turn-tools', entry_sequence: String(sequence),
+      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
+      blocks: [{
+        block_id: `${id}-block`, block_kind: 'TOOL_CALL', tool_call_id: call,
+        tool_name: toolName, tool_arguments_preview: btoa('{}'),
+      }],
+    });
+    const result = (
+      id: string,
+      sequence: number,
+      assistantEntryId: string,
+      toolCallId: string,
+      value: Record<string, unknown>,
+    ) => ({
+      entry_id: id, turn_id: 'turn-tools', entry_sequence: String(sequence),
+      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT', content: inlineContent(JSON.stringify(value)),
+      tool_result: {
+        assistant_entry_id: assistantEntryId, tool_call_id: toolCallId, result_state: 'SUCCESS',
+      },
+    });
+    const entries = [
+      request('read-request', 1, 'read-call', 'read_file'),
+      result('read-result', 2, 'read-request', 'read-call', {
+        status: 'ok', path: 'notes.txt', offset: 20, limit: 2, total_lines: 100,
+        truncated: true, content: '20|甲\n21|乙',
+      }),
+      request('write-request', 3, 'write-call', 'write_file'),
+      result('write-result', 4, 'write-request', 'write-call', {
+        status: 'ok', path: 'created.txt', bytes_written: 9,
+      }),
+      request('mcp-request', 5, 'mcp-call', 'mcp__external__report'),
+      result('mcp-result', 6, 'mcp-request', 'mcp-call', {
+        status: 'success', path: 'remote.txt', bytes_written: 99,
+        total_lines: 800, diff: '@@ remote data, not a filesystem edit @@',
+      }),
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(connectPayload(entries)), {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const messages = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages;
+    expect(messages.find((message) => message.id === 'read-request')?.traces?.[0].resultSummary)
+      .toBe('notes.txt · 返回第 20–21 行 · 文件共 100 行 · 还有后续内容');
+    expect(messages.find((message) => message.id === 'write-request')?.traces?.[0].resultSummary)
+      .toBe('已创建 created.txt · 9 字节');
+    expect(messages.find((message) => message.id === 'mcp-request')?.traces?.[0].resultSummary)
+      .toBeUndefined();
+  });
+});
+
+it('PR05 projects the original deadline/busy view and sends only the app command', async () => {
+  const deadline = '2099-01-01T00:00:00+00:00';
+  const responses = [connectPayload([], {}, [], {
+    owner_epoch: '7', live_revision: '12', current_interaction: {
+      interaction_id: 'interaction:original', interaction_kind: 'TOOL_CONFIRMATION',
+      public_prompt: 'Allow terminal?', public_options: ['ALLOW', 'DENY'],
+      expires_at_utc: deadline, decision_in_progress: true,
+    },
+  }), { command_outcome: { command_id: 'command:original', status: 'SUCCEEDED', public_code: 'INTERACTION_ALLOW' } }];
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 }));
+  vi.stubGlobal('fetch', fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const interaction = connection.current().interaction!;
+  expect(interaction).toEqual({ id: 'interaction:original', kind: 'tool-confirmation',
+    prompt: 'Allow terminal?', options: ['ALLOW', 'DENY'], expiresAtUtc: deadline, decisionInProgress: true });
+  await connection.resolveInteraction(interaction, { kind: 'tool', decision: 'allow', commandId: 'command:original' });
+  const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
+  expect(body.command_id).toBe('command:original');
+  expect(body.interaction_id).toBe('interaction:original');
+  expect(body.expected_live_revision).toBe(12);
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it('PR05 preserves explicit confirmed non-acceptance from the protocol', async () => {
+  const responses = [connectPayload([], {}, [], {
+    owner_epoch: '7', live_revision: '12', current_interaction: {
+      interaction_id: 'interaction:original', interaction_kind: 'TOOL_CONFIRMATION',
+      public_prompt: 'Allow terminal?', public_options: ['ALLOW', 'DENY'],
+      expires_at_utc: '2099-01-01T00:00:00Z', decision_in_progress: false,
+    },
+  }), {error: {stable_code: 'INTERACTION_NOT_ACCEPTED', public_message: 'confirmed not accepted'}}];
+  const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), {status: 200}));
+  vi.stubGlobal('fetch', fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  await expect(connection.resolveInteraction(connection.current().interaction!, {
+    kind: 'tool', decision: 'allow', commandId: 'command:original',
+  })).rejects.toMatchObject({code: 'INTERACTION_NOT_ACCEPTED', retryable: false});
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it.each([undefined, 'interaction:expired', 'unrecognized-reason'])('PR05 removes the old slot and explains only the observed close reason: %s', async (reason) => {
+  const responses = [connectPayload([], {}, [], {
+    current_interaction: {
+      interaction_id: 'interaction:original', interaction_kind: 'TOOL_CONFIRMATION',
+      public_prompt: 'Allow terminal?', expires_at_utc: '2000-01-01T00:00:00Z',
+    },
+  }), { observation: {
+    live: reason ? [{ event_type: 'INTERACTION_CLOSED', payload: {
+      interaction_closed: { interaction_id: 'interaction:original', reason },
+    } }] : [],
+    live_control: [{ kind: 'LIVE_INTERACTION_CLOSED' }],
+  } }, { observation: {} }];
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().interaction?.id).toBe('interaction:original');
+  const closed = await connection.observe();
+  expect(closed.interaction).toBeUndefined();
+  expect(closed.presentationNotices).toEqual([reason === 'interaction:expired'
+    ? '确认已过期，本次操作未获授权。' : '这项确认已结束；原因暂不可确认。']);
+  expect((await connection.observe()).presentationNotices).toEqual([]);
+});
+
+it.each([
+  ['SUBMITTED', []],
+  ['CANCELLED', ['已取消这次配置。']],
+  ['unknown-form-reason', ['这项确认已结束；原因暂不可确认。']],
+])('closes a capability form using its observed outcome: %s', async (reason, notices) => {
+  const responses = [connectPayload([], {}, [], {
+    current_interaction: {
+      interaction_id: 'interaction:form', interaction_kind: 'CAPABILITY_FORM',
+      public_prompt: 'Review Hook definitions', public_options: ['SUBMIT', 'CANCEL'],
+    },
+  }), { observation: {
+    live: [{ event_type: 'INTERACTION_CLOSED', payload: {
+      interaction_closed: { interaction_id: 'interaction:form', reason },
+    } }],
+    live_control: [{ kind: 'LIVE_INTERACTION_CLOSED' }],
+  } }];
+  vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(JSON.stringify(responses.shift()), { status: 200 })));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().interaction?.kind).toBe('capability-form');
+  const closed = await connection.observe();
+  expect(closed.interaction).toBeUndefined();
+  expect(closed.presentationNotices).toEqual(notices);
+  expect(closed.messages).toEqual([]);
+});
+
+it('imports raw file bytes and multipart directories outside JSON commands using current controller generation', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  vi.stubGlobal('fetch', vi.fn(async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify(String(url).endsWith('/connections') ? connectPayload()
+      : { path: '/tmp/imported/测试.pdf', name: '测试.pdf', bytes: 3, file_count: 1 }), { status: 200 });
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const file = new File(['pdf'], '测试.pdf', { type: 'application/pdf' });
+  const signal = new AbortController().signal;
+  await connection.importFiles([file], false, signal);
+  const single = calls.at(-1)!;
+  expect(single.url).toContain('/api/connections/connection-fidelity/import-file');
+  expect(single.init?.body).toBe(file);
+  expect(single.init?.signal).toBe(signal);
+  const headers = single.init?.headers as Record<string, string>;
+  expect(headers['Content-Type']).toBe('application/octet-stream');
+  expect(headers['X-Pulsara-Connection-Generation']).toBe('1');
+  expect(JSON.parse(headers['X-Pulsara-Filename'])).toBe('测试.pdf');
+  expect(headers['X-Pulsara-Filename']).toMatch(/^[\x20-\x7e]+$/);
+  Object.defineProperty(file, 'webkitRelativePath', { value: '目录/nested/测试.pdf' });
+  await connection.importFiles([file], true, signal);
+  const directory = calls.at(-1)!;
+  expect(directory.init?.body).toBeInstanceOf(FormData);
+  expect((directory.init?.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+  const entries = [...(directory.init?.body as FormData).entries()];
+  expect(entries[0]).toEqual(['path', JSON.stringify(file.webkitRelativePath)]);
+  expect(entries[1][0]).toBe('file');
+});
+
+it('lists cwd path candidates for the selected session with paging and cancellation', async () => {
+  const result = { directory: '/workspace/文档', items: [], next_cursor: 'report.pdf' };
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(result), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const controller = new AbortController();
+  expect(await new LocalHttpRuntimeAdapter().completeWorkspacePaths('session/selected', '文档/', 'prev.pdf', controller.signal)).toEqual(result);
+  expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session%2Fselected/path-candidates', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ prefix: '文档/', cursor: 'prev.pdf' }), signal: controller.signal, credentials: 'same-origin',
+  }));
+});
+
+describe('annotation source history ownership', () => {
+  const cursor = (sequence: number) => ({ session_id: 'session-1', cut_sequence: '3', entry_sequence: String(sequence) });
+  const source = (id: string, body = 'source') => ({
+    entry_id: id, entry_sequence: '2', entry_kind: 'ASSISTANT_MESSAGE', turn_id: 'turn-source',
+    blocks: [{ block_id: `block-${id}`, block_kind: 'TEXT', block_ordinal: 0, content: inlineContent(body) }],
+  });
+  async function windowedConnection() {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(connectPayload()))));
+    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+    // Seed an existing owner window without changing ordinary full-backfill startup.
+    (connection as unknown as { replaceSnapshot(value: unknown): void }).replaceSnapshot({
+      session_id: 'session-1', entries: [], older_history_cursor: cursor(3), control: {},
+    });
+    return connection;
+  }
+  it('stops at the source page, reuses loaded content, and reports exhaustion', async () => {
+    const connection = await windowedConnection();
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ history_page: {
+      entries: [source('wanted')], has_more: true, older_history_cursor: cursor(2),
+    } }))).mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [], has_more: false } })));
+    vi.stubGlobal('fetch', fetchMock);
+    const signal = new AbortController().signal;
+    expect((await connection.locateAnnotationSource!('wanted', signal)).messages.some(message => message.body === 'source')).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await connection.locateAnnotationSource!('wanted', signal);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await expect(connection.locateAnnotationSource!('missing', signal)).rejects.toThrow('找不到来源回复');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it('allows a replacement lookup to continue after its predecessor was canceled', async () => {
+    const connection = await windowedConnection();
+    const a = new AbortController(); const b = new AbortController();
+    const fetchMock = vi.fn().mockImplementationOnce((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    })).mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [source('b')], has_more: false } })));
+    vi.stubGlobal('fetch', fetchMock);
+    const canceled = connection.locateAnnotationSource!('a', a.signal).catch(error => error.name);
+    a.abort();
+    const replacement = connection.locateAnnotationSource!('b', b.signal);
+    expect(await canceled).toBe('AbortError');
+    expect((await replacement).messages.some(message => message.body === 'source')).toBe(true);
+    expect(b.signal.aborted).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it('cancels multi-chunk hydration without installing a partial body and permits retry', async () => {
+    const connection = await windowedConnection(); const controller = new AbortController();
+    const entry = source('wanted'); const bytes = new TextEncoder().encode('完整来源');
+    const blobEntry = { ...entry, blocks: [{ ...entry.blocks[0], content: blobBytes(bytes) }] };
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ history_page: { entries: [blobEntry], has_more: false } })))
+      .mockImplementationOnce(async (_url: string, init: RequestInit) => {
+        expect(init.signal).toBe(controller.signal);
+        controller.abort();
+        return new Response(JSON.stringify({ content: { digest: sha256Digest(bytes), complete_size: bytes.length, offset_bytes: 0, content: btoa('a'), complete: false } }));
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(connection.locateAnnotationSource!('wanted', controller.signal)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(contentBytes(bytes))));
+    const result = await connection.locateAnnotationSource!('wanted', new AbortController().signal);
+    expect(result.messages.some(message => message.body === '完整来源')).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
+it('does not let a pre-rename session list response overwrite a confirmed title', async () => {
+  let deliverOld!: (response: Response) => void;
+  const fetchMock = vi.fn()
+    .mockImplementationOnce(() => new Promise<Response>(resolve => { deliverOld = resolve; }))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ session_id: 'session:one', title: 'new title' })))
+    .mockResolvedValueOnce(new Response(JSON.stringify({ sessions: [{ id: 'session:one', title: 'new title' }] })));
+  vi.stubGlobal('fetch', fetchMock);
+  const adapter = new LocalHttpRuntimeAdapter();
+  const pending = adapter.listSessions();
+  await adapter.renameSession('session:one', 'new title');
+  deliverOld(new Response(JSON.stringify({ sessions: [{ id: 'session:one', title: 'old title' }] })));
+  expect((await pending)[0].title).toBe('new title');
+  expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/sessions/session%3Aone/title', expect.objectContaining({
+    method: 'PUT', body: JSON.stringify({ title: 'new title' }),
+  }));
+});
+
+it('searches sessions through the scoped paginated endpoint with cancellation', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [{
+    session: { id: 'session:one', title: '自定义标题', lifecycle: 'ARCHIVED', workspace_id: 'workspace:one' },
+    match_kind: 'assistant', snippet: '中间 commentary 命中',
+  }], next_cursor: 'page-two' })));
+  vi.stubGlobal('fetch', fetchMock);
+  const signal = new AbortController().signal;
+  const result = await new LocalHttpRuntimeAdapter().searchSessions('中文', 'ARCHIVED', 'page-one', signal);
+  expect(fetchMock).toHaveBeenCalledWith('/api/sessions/search', expect.objectContaining({
+    method: 'POST', body: JSON.stringify({ query: '中文', lifecycle: 'ARCHIVED', cursor: 'page-one' }), signal,
+  }));
+  expect(result.nextCursor).toBe('page-two');
+  expect(result.items[0]).toMatchObject({ session: { id: 'session:one', title: '自定义标题', lifecycle: 'ARCHIVED' }, matchKind: 'assistant', snippet: '中间 commentary 命中' });
+});
+
+
+it.each(['ALL', 'OPEN', 'ARCHIVED'] as const)('requests five recent sessions within %s for an empty query', async lifecycle => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], next_cursor: null })));
+  vi.stubGlobal('fetch', fetchMock);
+  await new LocalHttpRuntimeAdapter().searchSessions('  ', lifecycle);
+  expect(fetchMock).toHaveBeenCalledWith('/api/sessions/search', expect.objectContaining({
+    body: JSON.stringify({ query: '  ', lifecycle, limit: 5 }),
+  }));
+});

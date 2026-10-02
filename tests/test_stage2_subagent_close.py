@@ -34,8 +34,8 @@ class _Repository:
             test_model_runtime(model_id="test-pro", wire_api="openai_chat_completions")
         )
 
-    def read_subagent_start_sources(self, **_kwargs):
-        return None, None
+    def read_subagent_start_sources(self, **_kwargs) -> str | None:
+        return None
 
     def accept_subagent_task_batch(self, *_args, **kwargs):
         draft = kwargs["candidate"].ordered_tasks[0]

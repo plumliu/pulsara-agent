@@ -1,499 +1,154 @@
-# 🪐 Pulsara
+<h1 align="center">
+  <img src="frontend/public/assets/pulsara-icon.png" width="36" height="36" alt="">
+  Pulsara
+</h1>
 
 <p align="center">
-  <img src="assets/banner.png" alt="Pulsara" width="100%">
+  <strong>A whole team of agents. Your models. Your machine.</strong>
 </p>
 
-Pulsara is a local-first agent runtime built around a small, relational
-conversation kernel. PostgreSQL stores accepted product facts; provider
-streaming, terminal processes, subagents, and UI drafts remain process-local.
+<p align="center">
+  <img src="assets/banner.png" alt="Pulsara — persistent sessions, auditable events, semantic memory" width="100%">
+</p>
 
-Pulsara is under active development. Interfaces can change and the database
-uses a reset-only migration universe while the product is still young.
+<p align="center">
+  <a href="#open-the-workbench">Open the workbench</a> ·
+  <a href="#built-for-the-whole-job">Explore</a> ·
+  <a href="#put-a-team-on-it">Agent teams</a> ·
+  <a href="#deliver-something-you-can-use">Artifacts</a> ·
+  <a href="#make-it-your-own">Ecosystem</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-[English](README.md) · [简体中文](README.zh-CN.md) ·
-[Long-term contracts](contracts/README.zh.md)
+**Pulsara puts a personal AI team to work on your code, research, and data.** Give it an assignment: investigate a bug, compare competing approaches, turn a dataset into a dashboard, or prepare a document for review. It plans the work, delegates tasks, runs tools, and builds the deliverables in a local-first visual workbench.
 
-## Architecture
+Agents can work in parallel, branch from a shared investigation, and carry knowledge into future conversations. Stable prompt prefixes give long runs a foundation for cache reuse. Follow the work in your browser, steer it as it develops, and open the code, documents, or interactive results it produces.
 
-```text
-Python KernelHostCore
-├── foreground conversation coordinator
-│   ├── exact turn admission + provider dispatch
-│   ├── compaction + Plan + Tool batch coordinators
-│   └── memory + steer dispatch support
-├── provider-neutral structured model-input compiler
-├── tool policy + Host-scoped physical tools
-├── foreground safe-point compaction + snapshot adoption
-├── advisory memory governor + retrieval
-├── process-local live event bus
-└── renderer-neutral Protocol v3 gateway
+**Bring an ambitious task. Give Pulsara room to work.**
 
-PostgreSQL
-├── pulsara_v3: 28 product relations
-├── selective agent_events occurrence journal
-├── public.vector capability
-└── public.pulsara_schema_migrations (universe metadata only)
+## Built for the whole job
+
+| Capability | What it brings to your work |
+| --- | --- |
+| **Parallel agent teams** | Put investigation, implementation, and review on separate agents, each with its own context and model. |
+| **Branchable context** | Take several approaches from the same completed investigation, carrying its conversation and tool history into each branch. |
+| **Persistent memory** | Bring your preferences, project knowledge, and earlier decisions into the next assignment. |
+| **Long-running work** | Keep moving through lengthy investigations with context compaction, background terminals, and saved conversations. |
+| **Prompt-cache reuse** | Keep exact prefixes stable so supported providers can reuse processed input, lowering input cost and response latency on cache hits. |
+| **Useful deliverables** | Get working code, interactive dashboards, Word documents, editable spreadsheets, PDFs, and diagrams. |
+| **Skills, MCP, and plugins** | Give agents the specialist workflows, external services, and project tools your assignment calls for. |
+| **A visual control room** | Inspect task conversations and tool activity, review plans, and steer the work while it runs. |
+| **Your choice of models** | Mix OpenAI-compatible providers and self-hosted endpoints, choosing a model and reasoning level for each job. |
+
+## Put a team on it
+
+Let one agent trace the implementation while another checks the assumptions and a third explores the data. Pulsara's coordinating agent delegates the assignments, gathers the findings, and turns them into the next step.
+
+Each task has its own conversation and progress. Open the task graph to see the work unfold, read a worker's findings, or inspect its inherited context. Agents can arrange tasks in stages and pass results into later assignments.
+
+### One investigation. Multiple paths forward.
+
+A good investigation is worth building on. Pulsara can continue its conversation and tool history in a new task—or use it as the common starting point for several branches.
+
+```mermaid
+flowchart LR
+    A["A · Investigate the problem"] -->|"Inherit A's context"| B["B · Build the solution"]
+    A -->|"Inherit A's context"| C["C · Challenge the approach"]
+    A -->|"Inherit A's context"| D["D · Explore an alternative"]
 ```
 
-The durable boundary is intentionally narrow:
+The implementation agent starts with the investigation in hand. The reviewer starts from the same findings and develops an independent continuation. Another agent can explore an alternative. Each branch builds its own history while working with the project files in your shared directory.
 
-- canonical relational rows own current conversation, tool, and
-  coordination truth; accepted memory rows own only the current contents of
-  the advisory dataset;
-- a closed 29-type `agent_events` journal records accepted occurrences but is
-  never replayed to reconstruct execution;
-- 24 live event types exist only in memory and may be lost at process exit;
-- no durable job handler or job relation remains;
-- tool requests are committed before dispatch and a physical attempt is
-  committed before an effect is invoked;
-- a crash interrupts the active turn; reopening rehydrates accepted
-  conversation facts rather than resuming a coroutine or provider stream;
-- derived UI, audit, search, and notification state cannot veto a canonical
-  commit or Host close.
+Use a fast model for a focused check and a stronger model for a difficult design problem. Give a reviewer a second look at the result. You can inspect every task's conversation as the team works.
 
-Pulsara does not use a universal EventLog, execution replay, durable model
-segments, projection-job framework, Oxigraph, SPARQL, or a generic
-runtime-write admission epoch.
+## Keep the work moving
 
-## Product surface
+Take on the refactor that needs several passes, the investigation that keeps uncovering new questions, or the project you'll return to tomorrow.
 
-The current Kernel supports:
+Pulsara searches files, edits code, runs commands, and checks their output. Leave a long-running command in a background terminal while the agent takes another step. Context compaction makes room as the conversation grows, and saved history keeps the work available when you return.
 
-- session search from the sidebar or ⌘K / Ctrl+K across project titles, user text,
-  and assistant replies/commentary, with one result per conversation, snippets,
-  pagination and archive filters; replaces the command palette;
-- persistent session renaming from the sidebar and conversation header menus;
-  titles survive archive/restore without changing activity or archive timestamps;
+Send a correction while the agent works, queue the next instruction, or stop to reconsider. Plan mode lets it investigate and propose an approach for your review before implementation begins.
 
-- [Conversation Fork](PULSARA_CONVERSATION_FORK_EFFECTIVE_CONTEXT_COPY_SPEC.zh.md)
-  from settled final replies: copy the anchor's effective snapshot and retained
-  history into an independent, idle conversation without replaying execution.
-  Fork preserves historical model selection; files and current advisory memory
-  remain shared through the same workspace/domain;
-- OpenAI-compatible Responses and Chat Completions transports;
-- explicit provider-neutral `COMPLETED | OUTPUT_INCOMPLETE | PROVIDER_ERROR`
-  model terminals, whole-response atomic assistant acceptance, and exact
-  Chat/Responses native replay for accepted responses across Host and process
-  restart without provider-held response state or remote response IDs;
-- a provider-neutral structured input compiler over the exact canonical cut,
-  with closed typed first-party sources, scope-frozen tool schemas, exact target
-  token estimation, deterministic source/tool-result degradation, and one
-  frozen semantic-plus-actual-wire continuity proof;
-- bounded, redacted previous-turn outcome guidance plus append-only tool
-  freshness frontiers; each accepted tool result carries an immutable observed
-  time, monotonic duration disposition, execution origin, and optional trusted
-  duration that the tool body cannot forge;
-- revision-anchored filesystem tools: `read_file` returns an exact raw-byte
-  SHA-256 revision and records process-local seen lines, `edit_file` applies
-  deterministic operations only to that observed revision, and `write_file`
-  atomically creates without clobbering; plus `terminal`, `terminal_process`,
-  `terminal_monitor`, and scoped `artifact_read` / `artifact_export` tools;
-- an exact-run, process-local `todo(items=[...])` tool that atomically replaces
-  one bounded pending/in-progress/completed snapshot; an empty list clears it,
-  ROOT and child runs remain isolated, and Host replacement intentionally starts
-  without recovered TODO state;
-- real PIPE/PTY terminal output streaming, exact process-local cursors and
-  typed GAP, same-Host future monitor observations, and autonomous
-  continuation at a provider-safe point; each Host currently supports up to
-  8 execution slots (including startup and process-group/output settlement).
-  Capacity rejection reports `PROCESS_CAPACITY_EXHAUSTED` without starting the
-  command; no named cwd sessions or queue are allocated;
-- run-bound permission selection with an immutable admission snapshot, plus a
-  canonical Plan workflow with Runtime-enforced read-only planning,
-  structured questions, draft approve/revise/cancel, and Host-owned automatic
-  continuation;
-- default-deny subprocess environments with a bounded login-shell snapshot,
-  nearest `.venv/bin`, explicit per-command `workdir` (defaulting to the workspace
-  root), and physical process-group drain on Host close. `terminal_process.poll`
-  reads retained output, `wait` waits for process completion, and `write`/`submit`
-  observe for up to 1000 ms after input by default; this window does not promise
-  a complete interactive reply. Follow-up success is separate from process exit
-  status. Hook working directories remain the workspace root;
-- complete sanitized tool output retention through the shared blob store:
-  a provider-neutral ToolResult logical message up to 40,000 UTF-8 bytes may
-  remain FULL (independent of adapter wire bytes), while larger output uses a
-  UTF-8-safe 8,000-character head/tail preview and bounded on-demand reads;
-- ROOT-orchestrated Host-scoped worker graphs with batch DAG admission,
-  dependency scheduling, partial multi-wait, exact task stop, boundary-safe
-  ROOT-to-worker messages, explicit/inferred canonical results, and bounded
-  `NONE | LAST_N` parent context; workers remain non-recursive leaves;
-- Agent Skills-standard bundled and local skills across the exact workspace/user
-  `.pulsara/skills` and `.agents/skills` roots, projected through one aggregate,
-  append-only `SKILL_CATALOG` source without execution or permission authority;
-  catalog routing metadata is complete-or-unavailable, explicit/configured
-  activation carries the exact parsed Markdown body, and model-driven
-  progressive disclosure uses ordinary `read_file` with a 2,000-line window;
-- bundled [pulsara-docs](src/pulsara_agent/bundled_skills/pulsara-docs/SKILL.md)
-  for Word reading, creation, templates, editing, comments, revisions, and layout
-  checks; its optional scripts use task-selected environments and dependencies;
-- bundled [pulsara-sheets](src/pulsara_agent/bundled_skills/pulsara-sheets/SKILL.md)
-  for spreadsheet reading, editing, formulas, formatting, native charts, format
-  conversion, and verification; analysis methods remain a separate Skill scope,
-  and optional helpers use task-selected environments and dependencies;
-- bundled [pulsara-pdf](src/pulsara_agent/bundled_skills/pulsara-pdf/SKILL.md)
-  for PDF reading, text/table/image extraction, creation, and visual verification;
-  OCR methods and dependencies are selected per task;
-- bundled [pulsara-data-analysis](src/pulsara_agent/bundled_skills/pulsara-data-analysis/SKILL.md)
-  for EDA, ETL, comparisons, statistical methods, and interactive HTML findings
-  through `visualization_render`; dependencies are prepared per task, and deeper
-  methods are loaded as needed;
-- unified, process-local capability discovery: execution-backed Builtins,
-  per-server MCP snapshots, and the aggregate Skill catalog enter one pure
-  frozen registry while their original owners retain physical authority;
-- Host-scoped MCP over stdio and Streamable HTTP, with bounded discovery,
-  cold direct tools, late/native-incompatible meta inspection and invocation,
-  typed unavailable gates, catalog/resource/prompt reads, local authorization,
-  and CLI lifecycle management;
-- advisory PostgreSQL memory with one-candidate `remember`, four closed item
-  kinds, global and exact workspace applicability, best-effort
-  governance, multilingual sparse recall, optional 1024-dimensional dense
-  recall and explicit rerank, direct/reverse relation reads, and at most
-  two-hop traversal;
-- foreground safe-point context compaction with manual, proactive, and
-  mid-turn entry points; summary adoption preserves the canonical transcript,
-  keeps a pairing-safe protected tail, and continues in a standard cold
-  capability epoch without a durable compaction job;
-- canonical inspection and Protocol v3 terminal observation.
+## Built for prompt-cache reuse
 
-## Frontend
+**Long context is an investment. Pulsara keeps it ready for reuse.**
 
-The repository now includes the Pulsara local workbench under
-[`frontend/`](frontend/). It connects directly to the local Host and renders only
-surfaces backed by an existing Kernel contract: overview, durable sessions,
-execution traces, Plan interactions, per-turn permissions, queued prompts,
-stop, context compaction, subagent tasks, and local configuration. Child work is
-visible inline where it was delegated, with its objective, live tool activity,
-current status, and Markdown-rendered result. The current-session inspector
-keeps the complete task history beside the conversation; there is no separate
-task destination to manage. The workbench no longer
-uses a demo projection or reserves placeholder navigation for unsupported
-features. Session creation has exactly two workspace choices: Quick Start asks
-Pulsara to create a durable managed directory, while Specified Directory uses
-an existing absolute path. Plan and permission choices live beside the composer
-and apply to one turn. The bare loopback URL opens directly without a token,
-cookie, OpenAI login, or other website account. See
-[`PULSARA_FRONTEND_APPLICATION_SPEC.zh.md`](PULSARA_FRONTEND_APPLICATION_SPEC.zh.md).
+As agents work through successive steps in the same context, system instructions and tool definitions stay byte-identical. New messages, tool results, and user guidance append to the history, preserving the exact prefix established by earlier calls. After compaction, the fresh context follows the same discipline.
 
-Round 6 intentionally does not add durable MCP connection or request recovery.
-Host replacement reconnects from configuration. Form/private-URL elicitation,
-OAuth, MCP-backed skill activation, server-initiated Sampling/Roots, Apps/Tasks,
-and a bundled terminal UI remain explicit non-goals. A future Web or desktop
-client may consume Protocol v3 without becoming a second canonical authority.
-Workspace-owned MCP entries remain disabled during ordinary Host startup unless
-the user explicitly passes `--trust-workspace-mcp`; merely opening a repository
-can never execute its stdio command or resolve its HTTP secret references.
+That continuity gives [provider prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) a stable foundation for repeated hits. Cached prefixes can reduce input-processing cost and speed up response starts. The more steps share a growing history, the more previously processed context remains available for reuse.
 
-### File and folder references
+## Knowledge that carries forward
 
-The composer’s **+** menu groups files, folders, skills and planning. Files appear inline as a type icon and name. Hover, focus or click to inspect and copy their full path. Picker selections append to the draft; directly added images use inline image-icon + Figure cards in drafts, queues and sent messages. Hover a Figure card for a thumbnail preview, or click it to open the image viewer. User messages also show thumbnails above and outside the text bubble, aligned to the right; multimodal input is preserved.
+Start the next assignment with your preferences, project decisions, and recurring constraints already available.
 
-Non-image files and selected folders are copied into `imports/` under the effective Pulsara home. The model receives path text and uses file or terminal tools to read it. Images inside folders remain files in that directory. Existing local paths can also be typed directly; PDF and Office contents are not automatically extracted or inlined.
+Pulsara can remember your writing style, retain the reasoning behind a project decision, and retrieve knowledge from earlier conversations. Keyword and semantic search help the agent find what matters for the current task. Related memories connect the pieces, and newer decisions can supersede older ones.
 
-Type `$name-prefix` to choose a skill, or `@path-prefix` to browse files and folders one directory at a time from the current session workspace (for example, `@src/`). Use Up/Down to select, Enter/Tab to confirm, and Escape to dismiss. The folder arrow or Right key enters a directory. Selections become inline icon cards; `@` references the original path without uploading a copy or reading its contents.
+Open the memory workspace to inspect what's stored, check available sources, edit a preference, or remove something that no longer applies. Your working relationship with the agent gains a history you can see and shape.
 
-Drop local files or images anywhere in the conversation header, message area or blank space to append them to the draft. Drops inside the editor use the drop position. A hint highlights the conversation area; the two sidebars do not accept these drops. Dropping never sends the message automatically.
+## Deliver something you can use
 
-Folder drops are rejected with a toast; a drop containing any folder adds nothing. Use `@` to select a directory reference or paste its full path instead.
+Open an interactive dashboard and explore the findings. Hand an editable workbook to a colleague. Review a Word document with comments and tracked changes. Run the fix against your project.
 
-Removing a reference, clearing a draft or deleting a session does not delete imported copies. Clean them up through the filesystem when needed. Paths require the same host and filesystem view; folder selection does not preserve empty subdirectories or source filesystem metadata.
+Pulsara brings those results into the workbench with inline interactive HTML, diagrams, mathematical notation, images, and file previews. Open a referenced file, inspect the full tool output, or export an artifact to take it into your next workflow.
 
-## Requirements
+Built-in Skills give agents practical workflows for substantial deliverables:
 
-- Python 3.12+
-- [`uv`](https://docs.astral.sh/uv/)
-- PostgreSQL with `public.vector >= 0.5.0`
+| Work | Built-in Skill |
+| --- | --- |
+| **Documents** | [pulsara-docs](src/pulsara_agent/bundled_skills/pulsara-docs/SKILL.md) — Create and edit Word documents, work with templates, comments, and tracked changes. |
+| **Spreadsheets** | [pulsara-sheets](src/pulsara_agent/bundled_skills/pulsara-sheets/SKILL.md) — Transform data, build formulas, format workbooks, and produce editable charts. |
+| **PDFs** | [pulsara-pdf](src/pulsara_agent/bundled_skills/pulsara-pdf/SKILL.md) — Read, extract, and create PDF documents. |
+| **Data analysis** | [pulsara-data-analysis](src/pulsara_agent/bundled_skills/pulsara-data-analysis/SKILL.md) — Explore datasets, run Python and SQL analysis, and build interactive HTML reports. |
 
-## Setup
+### Give it a real assignment
 
-```sh
-uv sync
-```
+> **Engineering:** “Trace this bug, compare two fixes, have another agent review the chosen approach, and run the relevant tests.”
 
-Pulsara no longer reads product configuration from `.env` or product-specific
-environment variables. Start the local app and use **Settings** to:
+> **Research:** “Use the connected research tools to compare these approaches. Follow the sources, challenge the assumptions, and build a visual briefing.”
 
-- save the local PostgreSQL runtime DSN and optional admin DSN;
-- explicitly check the runtime database or initialize/migrate it with the
-  admin DSN;
-- choose a provider and a models.dev-backed model, select Chat Completions or
-  Responses, and add the API key;
-- optionally add the two independent DashScope keys for embedding and rerank.
+> **Analysis:** “Investigate these spreadsheets, explain what changed, and give me an interactive dashboard plus an editable workbook.”
 
-Task calls use the model's catalog or user-declared maximum output, reduced only
-by the shared context space occupied by the actual input. Pulsara adds no fixed
-8K/16K output ceiling. See the [output budget contract](PULSARA_PROVIDER_OUTPUT_BUDGET_SPEC.zh.md).
+> **Documents:** “Read these materials, draft a proposal in Word, and revise it around my comments.”
 
-PostgreSQL DSNs, model configurations, and all API keys are stored together in
-the closed `${PULSARA_HOME}/local-settings.yaml` document (or the default
-Pulsara home), protected by `0700` directory and `0600` file permissions. API
-keys are write-only through the UI and are never returned by the local API. The
-app and Settings shell start with zero configuration; sparse memory recall
-continues when either DashScope key is absent.
+## Make it your own
 
-```sh
-uv run pulsara app
-uv run pulsara config-check
-uv run pulsara db verify --deep
-```
+Bring your research services, specialist workflows, and project tools into the same workbench.
 
-Use the capability page or ask the model to manage capabilities through `manage_capability`. Terminal prepares sources; the Host resolves installation targets, private inputs, Hook/Plugin review and live-session adoption. Advanced administrative CLI commands remain available. Project writes require explicit `--workspace`; lists and diagnostics without it observe USER sources only. Relative source paths still use command cwd. MCP invocation visibility uses `mcp add --tool-visibility ROOT_ONLY|ROOT_AND_SUBAGENTS`; standalone `mcp reconnect` is removed. USER `mcp doctor` uses the effective Pulsara home as its physical test cwd and reports `test_cwd`; it may start stdio processes. See the [application and management boundary](PULSARA_APP_AND_CAPABILITY_MANAGEMENT_BOUNDARY_DESIGN.zh.md).
+- **Skills** teach agents a repeatable way to handle specialist work. Install one for a new domain or ask the agent to create one for a recurring assignment.
+- **MCP** puts external tools, data sources, resources, and prompts within the agent's reach. Configure connections and authentication in the workbench.
+- **Plugins** bring related Skills, MCP services, and hooks together in a package.
+- **Hooks** attach configured actions to supported moments in the agent lifecycle.
 
-The first command starts the loopback-only Web application and opens it in a
-browser. Pass `--no-open` to start the service without opening a page. Durable
-sessions resume with their exact workspace after the page or service restarts.
+Keep capabilities available across your work or scope them to a project. Manage them in the interface, or ask the agent to inspect and configure them. Built-in installer Skills guide the agent through adding Skills, MCP servers, and plugins.
 
-The only active migration universe is
-`pulsara.conversation-kernel.v1`, generation 1, beginning at version 0.
-Rounds 1 and 2 keep the schema at exactly 24 product relations while extending
-the version-0 `tool_results` and canonical Terminal-observation contracts.
-Their baseline/catalog identities and verification results are recorded in
-[`round1_tool_output_artifact_activation.json`](benchmarks/suites/core/v1/round1_tool_output_artifact_activation.json)
-and
-[`round2_terminal_runtime_activation.json`](benchmarks/suites/core/v1/round2_terminal_runtime_activation.json).
-Round 3 does not change the database universe; its process-local compiler and
-multi-provider verification are recorded in
-[`round3_structured_model_input_compiler_activation.json`](benchmarks/suites/core/v1/round3_structured_model_input_compiler_activation.json).
-Round 3.1 adds a Host-scoped, process-local provider-input continuity epoch:
-within one exact ROOT or child scope, the system prompt and tool surface remain
-stable while canonical conversation facts and typed runtime observations are
-appended as a strict message suffix. Busy `Enter` steers the exact active ROOT
-turn; `Tab` queues a future new turn. A replacement Host cold-starts from
-canonical rows. Round 5A.2 persists only an accepted assistant entry's bounded,
-private Chat/Responses native replay carrier; it does not persist a compiled
-provider conversation, remote response identity, or in-flight stream. Steer-prefix planning shares the installed prefix
-estimate, observes one absolute cooperative deadline, and is capped by a
-process-local unique-work quote that never recharges the same immutable base
-for each nested-prefix trial. Provider open additionally requires the exact
-one-shot permit object sealed by the Host continuity owner, and the compiler
-enforces exactly one value-or-absence branch for every first-party source.
-Plan handoff display text is
-separate from its exact canonical transition identity. Verification is recorded in
-[`round3_1_provider_input_prefix_continuity_activation.json`](benchmarks/suites/core/v1/round3_1_provider_input_prefix_continuity_activation.json).
-Cross-process replay verification is recorded in
-[`round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json`](benchmarks/suites/core/v1/round5a2_durable_provider_replay_and_cross_restart_thread_continuation_activation.json).
-Round 4 extends clean-v0 to 26 product relations and 34 selective occurrences;
-its Plan workflow, run-bound permission, Protocol v3, and real-provider
-verification are recorded in
-[`round4_plan_workflow_and_run_permission_activation.json`](benchmarks/suites/core/v1/round4_plan_workflow_and_run_permission_activation.json).
-Round 5A removes fixed model/tool-call counts and the turn-wide wall-clock
-deadline from ROOT and child turns. Each provider-dispatch plan, canonical
-operation, provider transport, physical tool call, writer renewal, Terminal
-decision, and close owner instead has its own closed watchdog. Foreground
-provider streams have connect/write/pool/read-idle bounds but no total response
-timeout. At that checkpoint finite durable jobs retained their bounded attempt
-totals. Verification is recorded in
-[`round5_long_horizon_execution_envelope_activation.json`](benchmarks/suites/core/v1/round5_long_horizon_execution_envelope_activation.json).
-Round 5B now adds manual, proactive, and mid-turn safe-point compaction. The
-current primary model summarizes the old exact prefix with tools disabled;
-active adoption then continues the same run in a new standard cold epoch built
-from the snapshot, recent human input, a pairing-safe protected tail, current
-Runtime observations, and bounded retained Skill context. Canonical history is
-never rewritten, provider-error reactive retry remains unsupported, and the
-last durable job machinery has been removed. The Round 5B activation oracle was
-28 committed events, 24 live events, 11 subject slots, one append guard, 24
-product relations, and zero durable jobs. Verification is recorded in
-[`round5b_long_horizon_context_compaction_activation.json`](benchmarks/suites/core/v1/round5b_long_horizon_context_compaction_activation.json).
-Round 7 extends the existing `tool_results` relation with immutable observation
-timing/origin facts and adds two provider-neutral compiler sources for the
-immediate predecessor outcome and per-turn freshness frontier. Within one
-compatible Host/scope epoch, old provider messages are never rewritten: late
-results and changed freshness only appear as a newly appended suffix. Pulsara-
-owned provider carriers now expose product semantics and lifecycle only;
-internal contract versions, fingerprints, generations, schema markers, and
-delimiter-based Plan carriers are removed from model input. Verification is
-recorded in
-[`round7_model_visible_failure_and_tool_observation_activation.json`](benchmarks/suites/core/v1/round7_model_visible_failure_and_tool_observation_activation.json).
-Round 7.1 gives every tool origin one provider-visible projection ladder. The
-40,000-byte cap applies only to the provider-neutral logical ToolResult;
-Chat/Responses physical request bytes remain owned by the exact wire plan.
-Compiler variants may begin at COMPACT/REF_ONLY/OMITTED when FULL is
-ineligible, while successful `artifact_read` pages require exact FULL delivery
-or stop before provider open. Artifact guidance is conditional, canonical
-results are never rewritten for budget, and installed same-epoch messages
-remain append-only. Verification is recorded in
-[`round7_1_provider_visible_tool_result_projection_activation.json`](benchmarks/suites/core/v1/round7_1_provider_visible_tool_result_projection_activation.json).
-Prefer `artifact_read` pagination for saved output, stopping when sufficient.
-When repeated paging would be cumbersome or complex extraction, aggregation or
-scripts are needed, `artifact_export(artifact_id, path)` creates a
-new UTF-8 file containing the exact retained body, without overwriting any existing
-path. Its successful location and source-coverage response also requires FULL
-delivery. The file can then be processed with existing file or terminal tools;
-terminal artifacts contain command output itself, not the terminal JSON wrapper.
-`COMPLETE` covers the original observation (which can be an incremental range);
-`RETAINED_SNAPSHOT` cannot recover earlier lost output. Export requires ordinary
-file-write permission and produces an ordinary host-local copy: it remains until
-explicitly deleted, including after conversation deletion, and does not retain
-artifact session isolation. Read-only mode retains paged reading. See
-[`PULSARA_ARTIFACT_EXPORT_IMPLEMENTATION_SPEC.zh.md`](PULSARA_ARTIFACT_EXPORT_IMPLEMENTATION_SPEC.zh.md).
+## Choose the right model for the job
 
-Round 9 replaces the old parallel tool/Skill exposure structures with one pure,
-provider-neutral capability registry assembled only from owner-issued Builtin,
-MCP, and aggregate-Skill snapshots. Exact target-aware native preflight occurs
-before the parent dispatch cut; Tool planning and Skill projection consume
-sibling views from that same cut. A cold MCP cohort is either wholly admitted
-within both canonical and actual-wire bounds or kept meta-only. Late-ready and
-native-wire-incompatible tools use `inspect_capability` with an exact MCP_TOOL target, then
-`use_new_mcp_tool`; a policy/route-bound ref becomes callable only after the
-inspection result is installed FULL. Same-epoch SYSTEM and tools remain
-byte-stable, and catalog/route changes append messages only. No capability
-relation, event, job, receipt, generation, or recovery graph was added.
-Verification is recorded in
-[`round9_unified_capability_semantics_activation.json`](benchmarks/suites/core/v1/round9_unified_capability_semantics_activation.json).
-Round 9.1 replaces the legacy Pulsara Skill frontmatter contract with the
-portable Agent Skills core. The Skill owner scans the exact four roots through
-one scope-bound policy, resolves global precedence, and contributes one
-aggregate `LOCAL_SKILL_CATALOG` snapshot to the existing Round 9 registry.
-Invalid individual manifests are omitted with bounded diagnostics; an
-unprovable or overbound complete scan publishes one UNAVAILABLE successor and
-never a partial catalog. Catalog and active-body changes append messages only;
-SYSTEM and tools remain stable. Host-specific fields including `allowed-tools`
-are inert data, and Skill text cannot grant tools, permissions, MCP routes, or
-execution authority. Ordinary `read_file` is the only progressive-disclosure
-path: it has no Skill intent or loaded-state and repeated reads return current
-bounded bytes. Verification is recorded in
-[`round9_1_agent_skills_standard_activation.json`](benchmarks/suites/core/v1/round9_1_agent_skills_standard_activation.json).
-Round 10 upgrades flat children to one ROOT-owned worker task graph. Seven
-ROOT-only orchestration tools remain provider-visible in every ROOT permission
-mode but execute only under `BYPASS_PERMISSIONS`; workers receive only
-`report_agent_result` and cannot create descendants. Stable task/dependency rows
-own the logical board, while scheduling, capacity, mailbox delivery, and waits
-remain process-local. The four-child limit is physical concurrency rather than
-a task-graph lifetime cap: additional admitted work stays `PENDING_START` and
-starts when capacity frees. Direct dependency results propagate one edge only;
-the main agent keeps doing useful work while children run, and completed work is
-automatically folded into the conversation at a safe response boundary. Waiting
-is only a synchronization choice, not the result-delivery path: targeted `first`
-and `all` use strict predicates, only exact-turn steer interrupts them, and a
-successful join hands every exact terminal source to the existing completion
-inbox before the tool closes. Work that finishes
-after an answer remains available for one explicit continuation without rerunning
-the child; success, failure, cancellation, and dependency failure share the same
-delivery path. Round 5B now hands off the same task board during compaction without
-adding a durable inbox, run, receipt, or recovery graph. The current oracle is 29 committed events, 24
-live events, 11 subject slots, one append guard, 28 product relations, and zero
-durable jobs. Verification is recorded in
-[`round10_hierarchical_subagent_orchestration_activation.json`](benchmarks/suites/core/v1/round10_hierarchical_subagent_orchestration_activation.json).
-The asynchronous-completion hard cut and real-provider browser evidence are recorded in
-[`PULSARA_SUBAGENT_ASYNC_COMPLETION_HARD_CUT_RESEARCH_AND_IMPLEMENTATION_SPEC.zh.md`](PULSARA_SUBAGENT_ASYNC_COMPLETION_HARD_CUT_RESEARCH_AND_IMPLEMENTATION_SPEC.zh.md)
-and its current semantic refinement
-[`PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md`](PULSARA_SUBAGENT_WAIT_AND_COMPLETION_SEMANTICS_REFINEMENT.zh.md)
-and [`dogfood_evidence/async_completion/README.zh.md`](dogfood_evidence/async_completion/README.zh.md).
-The fingerprint-subtraction hard cut removes same-process self hashes,
-duplicate child/parent proof fields, fingerprint-based continuity/settlement
-lookups, and per-file activation SHA inventories in one incompatible internal
-cut. Exact frozen objects, owner slots, nonce/revision checks, and database
-constraints now carry process-local authority. Content integrity, durable
-confirmation, provider prefix/replay compatibility, stable canonical identity,
-and keyed opaque-token digests remain unchanged; provider wire, Protocol v3,
-canonical rows, and the architecture oracle do not change. Verification is
-recorded in
-[`fingerprint_subtraction_hard_cut_activation.json`](benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json).
-The production-code cleanup hard cut keeps the same foreground state machine
-while moving turn admission, provider dispatch, compaction, Plan control, tool
-execution, memory, and steer settlement behind narrow owners. The runner now
-decides the next phase without reimplementing those authorities; no legacy
-facade, compatibility import, new fingerprint, or durable recovery mechanism
-remains. Verification is recorded in
-[`production_code_cleanup_and_runner_decomposition_activation.json`](benchmarks/suites/core/v1/production_code_cleanup_and_runner_decomposition_activation.json).
-Round 8 replaces the old memory durability/recovery graph with an advisory
-dataset. `remember` atomically accepts one candidate with its ToolResult, while
-governance, cheap-hint prompting, embedding, and reranking remain lossy
-process-local work. Accepted items use the closed FACT, USER_PROFILE,
-RESPONSE_PREFERENCE, and DECISION taxonomy. Sparse recall is
-always local; automatic dense recall and explicit rerank are optional remote
-data egress. Memory enters model input only through bounded append-only
-`MEMORY_RECALL` and `MEMORY_RESPONSE_PREFERENCE_HEAD` observations, never by
-rewriting an installed prefix or granting permission authority. Verification
-uses the same tokenizer-v2 sparse terms for indexing and queries, preserving
-negation, ordering words, code/path tokens, and lexical contractions. A
-command that forbids saving the current entry disables `remember` for that
-ROOT run while leaving recall visible; an explicit “do not use saved memory
-for this answer” clears both memory observations and denies all four memory
-tools without changing the advertised tool surface. Short-input recall
-skipping remains independent and does not disable explicit memory tools.
-Verification
-is recorded in
-[`round8_advisory_memory_subsystem_activation.json`](benchmarks/suites/core/v1/round8_advisory_memory_subsystem_activation.json).
-The lightweight TODO refinement replaces the old Host-global action protocol
-with one bounded full-snapshot call and an exact ROOT/child process-local owner.
-Canonical ToolResult success is settled before the snapshot is installed;
-clients receive one atomic live projection and resynchronize from the current
-Host owner after a live gap. TODO is advisory, never durable, and Round 5B may
-only consume its read-only actionable handoff. Verification is recorded in
-[`lightweight_todo_tool_refinement_activation.json`](benchmarks/suites/core/v1/lightweight_todo_tool_refinement_activation.json).
-An old v13 database is rejected with
-`schema_migration_universe_reset_required`; Pulsara never imports, translates,
-or upgrades it in place. Follow
-[the clean-baseline runbook](archived_docs/STAGE_5_CLEAN_BASELINE_RUNBOOK.zh.md) and never
-reset a real endpoint without explicit operator authorization.
+Choose a model for a quick lookup, another for a complex implementation, and a third for independent review. Each delegated task can use its own model and reasoning settings.
 
-## Run
+Connect OpenAI-compatible services and self-hosted endpoints through Chat Completions or Responses. Model selection and supported reasoning controls are available in the workbench, so you can shape the team's mix around the assignment.
 
-The local Web app is the configuration and conversation surface:
+Your workbench, conversation history, and memory live on your machine. You choose the model connections that power the work.
 
-```sh
-uv run pulsara app
-```
+## Stay close to the work
 
-Choose each conversation's working directory in the GUI, or use Quick Start.
-The app does not adopt its launch directory as a workspace.
+Your control room brings conversations, agents, capabilities, memory, and terminals into view. Find a conversation by directory or search its history. Expand tool activity, open a worker's conversation, and watch background commands progress.
 
-Create, resume, and continue conversations in the GUI. The CLI provides app
-launching, capability administration, and diagnostics.
+Select part of a response to give precise feedback. Fork a conversation to explore a different direction. Review a plan or answer the agent's questions before it takes the next step. When the goal changes, steer the run or stop it.
 
-## Client boundary
+**Delegate the work. Stay involved where it matters.**
 
-The bundled Go TUI has been removed. Protocol v3 remains the renderer-neutral
-transport boundary for a future Web or desktop client. Python continues to own
-canonical state, commands, policy, secrets, and recovery; a client may only
-render snapshots, consume live events, and submit the typed commands admitted
-by the gateway. Protocol v2 and Presentation Foundation are not retained.
+## Open the workbench
 
-## Development
-
-```sh
-uv run ruff check .
-uv run pytest -q
-uv run python -m compileall -q src tests
-uv run python tools/generate_terminal_protocol_contract.py --check
-git diff --check
-```
-
-PostgreSQL integration tests are marked `postgres`:
-
-```sh
-uv run pytest -q -m postgres
-```
-
-## Durability contract
-
-The active long-term contracts are indexed in
-[contracts/README.zh.md](contracts/README.zh.md). Root-level research and
-hard-cut documents explain design history; they are not runtime registries or
-compatibility specifications.
-
-### Private search dependency
-
-`search_content` searches text; `find_files` matches names and relative-path globs.
-Pulsara includes ripgrep 15.2.0 in platform wheels. Its terminal subprocesses
-receive the private executable directory first in PATH; external terminals are
-unchanged. Built-in searches always use the private executable with no rg config.
-
-For a new clone or extracted sdist, bootstrap explicitly:
+With Pulsara installed:
 
 ```bash
-uv venv
-.venv/bin/python tools/prepare_ripgrep.py
-uv sync --locked
+pulsara app
 ```
 
-Preparation uses only the standard library. Repeat it explicitly before offline
-wheel/sdist builds when the target resource is absent.
-macOS source builds use Apple Command Line Tools (`lipo`/`otool`) to validate
-the actual resource architecture and minimum OS before assigning the wheel tag. Build and
-runtime never download it. The sdist excludes native resources and requires the
-same preparation after extraction. Currently only macOS arm64 wheels are enabled,
-with the official binary's minimum OS 11.0; other asset mappings await real target
-installation verification. Missing resources fail clearly, without system/Python
-search fallback.
+Pulsara starts the local service and opens the browser workbench. Choose a working directory and configure your models in the interface.
+
+---
+
+Built with a typed Python runtime, a React workbench, PostgreSQL-backed history and memory, and ripgrep-powered file search.
+
+[Share an idea or report an issue](https://github.com/plumliu/pulsara-agent/issues) · [Contribute](https://github.com/plumliu/pulsara-agent/pulls)

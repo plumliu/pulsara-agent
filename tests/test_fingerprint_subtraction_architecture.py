@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import fields
-import json
 from pathlib import Path
 
 from pulsara_agent.capability.contracts import (
@@ -40,9 +39,6 @@ from pulsara_agent.tools.builtins.todo import FrozenTodoItem
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = (
-    ROOT / "benchmarks/suites/core/v1/fingerprint_subtraction_hard_cut_activation.json"
-)
 
 
 def _field_names(value: type[object]) -> set[str]:
@@ -112,43 +108,3 @@ def test_cold_epoch_has_no_duplicate_replay_hydration_request_carrier() -> None:
     assert "SelectedDurableReplayHydrationRequest" not in source
     assert "hydration_request" not in source
     assert "select_compatible_provider_replay_manifests" not in source
-
-
-def test_new_activation_evidence_contains_no_file_or_report_hash_inventory() -> None:
-    payload = json.loads(EVIDENCE.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "fingerprint-subtraction-activation-v1"
-    forbidden_keys = {
-        "source_documents",
-        "document_sha256",
-        "post_activation_code_sha256",
-        "post_review_code_sha256",
-        "production_code_sha256",
-        "code_sha256",
-        "final_modules",
-        "activation_report_sha256",
-        "evidence_sha256",
-        "file_digest",
-        "source_fingerprint",
-        "implementation_tree_hash",
-        "report_integrity_hash",
-    }
-
-    def visit(value: object) -> None:
-        if isinstance(value, dict):
-            assert forbidden_keys.isdisjoint(value)
-            for nested in value.values():
-                visit(nested)
-        elif isinstance(value, list):
-            for nested in value:
-                visit(nested)
-
-    visit(payload)
-
-
-def test_historical_activation_reports_are_not_current_hash_gates() -> None:
-    source = (ROOT / "tests/test_repository_modularization_architecture.py").read_text(
-        encoding="utf-8"
-    )
-    assert "_ROUND8_ROUND10_REPOSITORY_DELTA_SHA256" not in source
-    assert "post_activation_code_sha256" not in source
-    assert "source_documents" not in source

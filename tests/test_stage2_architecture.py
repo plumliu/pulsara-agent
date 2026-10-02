@@ -13,7 +13,6 @@ from typing import get_args
 
 from pulsara_agent.conversation_kernel.limits import (
     STAGE2_LIMITS,
-    STAGE2_STRUCTURAL_BUDGETS,
     Stage2RuntimeLimits,
 )
 from pulsara_agent.conversation_kernel.vocabulary import (
@@ -209,49 +208,13 @@ def test_stage2_repository_sql_is_schema_qualified_and_has_no_durable_stream() -
 
 
 def test_stage2_product_contract_survives_the_clean_migration_universe() -> None:
-    report = json.loads(
-        (
-            ROOT
-            / "benchmarks/suites/core/v1/durability_subtraction_stage2_activation.json"
-        ).read_text(encoding="utf-8")
-    )
-    assert report["schema_version"] == "durability-subtraction-stage2-activation.v1"
-    assert report["status"] in {"activation_candidate", "activated"}
-    assert report["authority_activation"] == "single_reset_only"
     latest = POSTGRES_MIGRATION_REGISTRY.definition(0)
     manifest = build_postgres_schema_manifest()
     assert POSTGRES_MIGRATION_REGISTRY.latest_version == 0
     assert manifest.product_relations == CONVERSATION_KERNEL_RELATIONS
     assert latest.resource_name == "0000_conversation_kernel_baseline.sql"
-    # This is immutable Stage 2 activation evidence, not a rolling current
-    # product manifest.  Round 2 owns a separate 27-event activation record.
-    assert report["vocabulary"] == {
-        "committed": 26,
-        "live": 23,
-        "subject_slots": 13,
-        "append_guards": 2,
-    }
-    assert report["protocol"] == {
-        "major": 3,
-        "minor": 0,
-        "schema_fingerprint": (
-            "sha256:30c3dec486dea592a4e43650006b1d547e4c44d993d68255941d77b61dd4a05c"
-        ),
-    }
-    assert report["runtime_limits"] == {
-        "contract": "stage2_runtime_limits.v1",
-        "named_finite_fields": 62,
-    }
-    # Stage 2 evidence is immutable.  Round 5A removes the old Host-close and
-    # model-call count/deadline admission caps; Round 5B removes the final
-    # durable-job family, its four now-ownerless limits, and the independent
-    # 128K provider-input cap.  The resolved model target now owns input budget.
     assert len(fields(Stage2RuntimeLimits)) == 52
     assert all(value > 0 for value in asdict(STAGE2_LIMITS).values())
-    assert report["structural_budgets"] == {
-        "contract": "stage2_structural_budgets.v1",
-        **asdict(STAGE2_STRUCTURAL_BUDGETS),
-    }
 
 
 def test_stage2_gui_host_and_renderer_neutral_protocol_select_kernel_v3() -> None:

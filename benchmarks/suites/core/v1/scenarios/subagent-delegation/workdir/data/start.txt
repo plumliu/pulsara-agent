@@ -1,3 +1,0 @@
-START_NODE
-VALUE=13
-NEXT=node-quartz.txt

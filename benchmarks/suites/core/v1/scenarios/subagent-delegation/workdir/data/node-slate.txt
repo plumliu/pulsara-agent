@@ -1,2 +1,0 @@
-VALUE=89
-NEXT=node-harbor.txt

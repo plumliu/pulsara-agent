@@ -35,6 +35,7 @@ ENV/
 .env.*.local
 
 # Local IDE/editor files
+.claude/
 .idea/
 .vscode/
 AGENTS.md
@@ -59,6 +60,14 @@ logs/
 
 # Local experiment and generated output
 /output/
+/.benchmarks/
+/dogfood_evidence/
+/.playwright-cli/
+
+# Browser test reports and traces
+test-results/
+playwright-report/
+blob-report/
 
 # Explicitly prepared platform-native dependency
 src/pulsara_agent/_vendor/ripgrep/
