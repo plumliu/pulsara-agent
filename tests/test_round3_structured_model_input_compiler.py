@@ -237,6 +237,7 @@ from pulsara_agent.ports.artifact import (
     ToolOutputArtifactUnavailabilityReason,
     ToolResultDisplayKind,
 )
+from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
 from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
@@ -1958,6 +1959,47 @@ def test_round3_system_placement_is_independent_of_input_order() -> None:
         ContextSourceKind.ACTIVE_SKILL,
         ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
     )
+
+
+def test_effective_root_system_contains_collector_and_delegated_guidance(
+    tmp_path: Path,
+) -> None:
+    collector = KernelContextSourceCollector(
+        workspace_kind="project",
+        workspace_root=tmp_path,
+        capability_composer=_Capability(),  # type: ignore[arg-type]
+        base_system_prompt=DEFAULT_SYSTEM_PROMPT,
+        display_timezone=timezone.utc,
+    )
+    surface = (
+        StructuredToolPort(object(), tool_names=())
+        .snapshot_tool_surface(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            scope_subagent_task_id=None,
+        )
+        .model_surface
+    )
+    canonical_facts = _canonical_facts()
+    sources = _collect_context_sources(
+        collector,
+        activation_subject=CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT,
+        activation_text="inspect the project",
+        tool_surface=surface,
+        canonical_facts=canonical_facts,
+    )
+    compiled = StructuredModelInputCompiler().compile(
+        _prepared_request(
+            canonical_facts.canonical_input,
+            sources,
+            canonical_facts=canonical_facts,
+        )
+    )
+
+    assert compiled.system_prompt.startswith(DEFAULT_SYSTEM_PROMPT)
+    assert compiled.system_prompt != DEFAULT_SYSTEM_PROMPT
+    assert "Provider role is transport" in compiled.system_prompt
+    assert "SKILL_CATALOG routes tasks" in compiled.system_prompt
+    assert "Delegated work:" in compiled.system_prompt
 
 
 def test_round3_optional_clock_degrades_before_required_sources() -> None:

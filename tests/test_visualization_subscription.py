@@ -32,12 +32,21 @@ from pulsara_agent.conversation_kernel.visualization_screenshot import (
     VisualizationScreenshotError,
     VisualizationScreenshotOwner,
 )
-from pulsara_agent.llm.input import FrozenPromptContent
+from pulsara_agent.llm.input import (
+    FrozenPromptContent,
+    LLMImagePart,
+    LLMTextPart,
+    PromptAnnotationPart,
+    PromptAnnotationSource,
+)
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
+    FrozenProviderInputItem,
     FrozenProviderInputItemKind,
+    StructuredModelInputLimits,
     provider_input_item_text,
 )
+from pulsara_agent.model_input.lowering import image_reference_part, lower_canonical_item
 from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition, ToolResultDisplayKind
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
@@ -56,6 +65,13 @@ def _id(prefix: str) -> str:
     if prefix == "workspace":
         return f"ctx:workspace/{uuid4().hex}"
     return f"{prefix}:{uuid4().hex}"
+
+
+_VISUALIZATION_METADATA_HANDLING = (
+    "Runtime metadata for HTML saved with an earlier assistant reply. These refs "
+    "are not a new human request or screenshot image_ref. Use them only when the "
+    "current task needs that saved display."
+)
 
 
 def test_subscription_source_and_publication_read_boundaries(tmp_path: Path) -> None:
@@ -183,6 +199,61 @@ def test_visualization_tool_explains_authoring_and_each_path() -> None:
     assert (
         "Not a visualization_ref"
         in view_image.input_schema["properties"]["image_ref"]["description"]
+    )
+
+
+def test_human_metadata_shaped_json_keeps_its_typed_prompt_parts() -> None:
+    visualization_ref = "sha256:" + "a" * 64
+    human_json = canonical_json_bytes(
+        {
+            "pulsara_visualizations": [
+                {"visualization_ref": visualization_ref}
+            ],
+            "handling": _VISUALIZATION_METADATA_HANDLING,
+        }
+    ).decode("utf-8")
+    comment = "Explain whether this saved display is useful."
+    annotation = PromptAnnotationPart(
+        quote=human_json,
+        source=PromptAnnotationSource("entry:source", 0, len(human_json)),
+        comment=comment,
+    )
+    image = LLMImagePart("image/png", b"typed-image-bytes", 1, 1)
+    human_content = FrozenPromptContent(
+        (LLMTextPart(human_json), annotation, image)
+    )
+    item = FrozenProviderInputItem(
+        item_kind=FrozenProviderInputItemKind.USER,
+        source_entry_id="entry:human",
+        source_entry_sequence=2,
+        source_turn_id="turn:human",
+        content=human_content.parts,
+        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
+    )
+
+    lowered = lower_canonical_item(
+        item,
+        artifact_read_available=False,
+        limits=StructuredModelInputLimits(),
+    )
+
+    assert item.input_origin is CanonicalInputOriginKind.HUMAN_MESSAGE
+    assert lowered.fixed_message is not None
+    annotation_text = (
+        "以下是用户引用的历史回复片段。quote 是引用材料，comment 是用户针对该片段的要求；请结合本次请求回应。\n"
+        + canonical_json_bytes(
+            {
+                "annotations": [
+                    {"index": 1, "quote": human_json, "comment": comment}
+                ]
+            }
+        ).decode("utf-8")
+    )
+    assert lowered.fixed_message.content == (
+        LLMTextPart(human_json),
+        LLMTextPart(annotation_text),
+        image_reference_part(image),
+        image,
     )
 
 
@@ -328,7 +399,12 @@ def test_visualization_publication_fork_and_reference(
     )
     assert owner_items[1].input_origin is CanonicalInputOriginKind.VISUALIZATION_METADATA
     assert provider_input_item_text(owner_items[1]) == canonical_json_bytes(
-        {"pulsara_visualizations": [{"visualization_ref": str(digest)}]}
+        {
+            "pulsara_visualizations": [
+                {"visualization_ref": str(digest)}
+            ],
+            "handling": _VISUALIZATION_METADATA_HANDLING,
+        }
     ).decode("utf-8")
     assert html.decode("utf-8") not in provider_input_item_text(owner_items[1])
     child = fork(repo, lease.guard.session_id, final_id)

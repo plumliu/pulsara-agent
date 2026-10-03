@@ -18,6 +18,12 @@ even when it inherits an earlier task's conversation. Use the returned task ID
 to wait, send guidance or cancel that specific execution. Use the tools available
 and authorized in your current scope; this guide does not grant permissions.
 
+Root orchestration requires effective_mode="bypass-permissions", including
+listing models/tasks and waiting. Check the run's effective mode before
+arranging delegation. If it does not meet the tools' precondition, continue
+available in-scope work or state the specific limitation when delegation is
+essential. A task request or Plan approval does not itself change that mode.
+
 ## Choose the next action
 
 | What you need | Use |

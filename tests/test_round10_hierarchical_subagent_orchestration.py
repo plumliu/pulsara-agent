@@ -214,6 +214,12 @@ def test_round10_subagent_guidance_is_complete_and_product_facing() -> None:
     skill = Path(
         "src/pulsara_agent/bundled_skills/pulsara-subagent/SKILL.md"
     ).read_text()
+    root_precondition = (
+        "Requires root scope and the current run's RUN_PERMISSION "
+        'effective_mode="bypass-permissions".'
+    )
+    for name in ROOT_ORCHESTRATION_TOOL_NAMES:
+        assert descriptions[name].startswith(root_precondition + " ")
     assert "pulsara-subagent Skill" in descriptions["spawn_agent"]
     assert "separate conversation messages" in descriptions["wait_agent"]
     assert "predicate_satisfied does not mean success" in descriptions["wait_agent"]
@@ -225,6 +231,10 @@ def test_round10_subagent_guidance_is_complete_and_product_facing() -> None:
     assert "do not promise an automatic" in delegated_prompt
     assert "Finished tasks stay finished" in skill
     assert "worker_history" in skill and "material_task_ids" in skill
+    assert (
+        'Root orchestration requires effective_mode="bypass-permissions"'
+        in skill
+    )
 
     for internal_term in (
         "ROOT",
@@ -1092,10 +1102,10 @@ def test_round10_subagent_initial_seed_exact_joins_child_cut_and_none_sources(
 
 @pytest.mark.parametrize(
     "permission_mode",
-    (
-        PermissionMode.READ_ONLY,
-        PermissionMode.ASK_PERMISSIONS,
-        PermissionMode.ACCEPT_EDITS,
+    tuple(
+        mode
+        for mode in PermissionMode
+        if mode is not PermissionMode.BYPASS_PERMISSIONS
     ),
 )
 def test_round10_all_root_orchestration_tools_are_bypass_only_before_owner_io(

@@ -2079,7 +2079,7 @@ def test_round9_meta_tool_descriptors_define_inspect_then_use_few_shot() -> None
     assert "target" in inspect.description
     assert "input_schema" in use.description
     assert (
-        '{"tool_ref":"mcpref_RETURNED_VALUE","arguments":{"text":"round9"}}'
+        '{"tool_ref":"mcpref_RETURNED_VALUE","arguments":{"text":"Hello"}}'
     ) in use.description
 
 

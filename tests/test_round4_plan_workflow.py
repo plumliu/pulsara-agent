@@ -575,6 +575,21 @@ def test_round4_root_plan_tools_are_absent_from_subagent_surface(tmp_path: Path)
     asyncio.run(scenario())
 
 
+def test_round4_enter_plan_descriptor_requires_review_of_approach() -> None:
+    description = builtin_tool_catalog_entry("enter_plan").descriptor.description
+
+    assert "the user asks to review an approach before implementation" in description
+    assert (
+        "a consequential choice of implementation approach requires the user's "
+        "review and cannot be resolved from available context"
+    ) in description
+    assert (
+        "Task size, missing facts, and routine choices do not by themselves require Plan."
+        in description
+    )
+    assert "Do not use it merely to announce your next steps." in description
+
+
 def test_round4_protocol_uses_true_question_oneof_and_feedback_presence() -> None:
     option = wire.PlanQuestionAnswer(option_ordinal=0)
     assert option.WhichOneof("answer") == "option_ordinal"

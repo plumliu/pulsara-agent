@@ -53,6 +53,10 @@ MAX_READ_LINES = 2_000
 DEFAULT_SEARCH_LIMIT = 50
 MAX_SEARCH_LIMIT = 1_000
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
+_ROOT_ORCHESTRATION_PRECONDITION = (
+    "Requires root scope and the current run's RUN_PERMISSION "
+    "effective_mode=\"bypass-permissions\". "
+)
 _SOURCE_AUTHORITIES = [
     "explicit_user_instruction",
     "tool_result",
@@ -602,7 +606,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "the tool again. If the MCP tool already appears as its own callable tool, "
             "call it directly instead. For example, if input_schema requires a string "
             "field named text, call "
-            '{"tool_ref":"mcpref_RETURNED_VALUE","arguments":{"text":"round9"}}.'
+            '{"tool_ref":"mcpref_RETURNED_VALUE","arguments":{"text":"Hello"}}.'
         ),
         input_schema=object_schema(
             properties={
@@ -1150,7 +1154,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "list_agent_models": _descriptor(
         name="list_agent_models",
         description=(
-            "List saved model connections available for delegated tasks, including "
+            _ROOT_ORCHESTRATION_PRECONDITION
+            + "List saved model connections available for delegated tasks, including "
             "their exact connection IDs and reasoning choices. Read this before "
             "selecting a different model; the result contains no credentials."
         ),
@@ -1162,7 +1167,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "spawn_agent": _descriptor(
         name="spawn_agent",
         description=(
-            "Delegate one task asynchronously; returns task_id and status, and may queue for capacity. "
+            _ROOT_ORCHESTRATION_PRECONDITION
+            + "Delegate one task asynchronously; returns task_id and status, and may queue for capacity. "
             "Provide a self-contained objective. Omit context for no history; use worker_history + the old "
             "task_id to follow up on a finished worker. This creates a new task; it does not revive the old one. "
             "Use create_agent_tasks for batches or success dependencies. Read the cataloged pulsara-subagent "
@@ -1241,7 +1247,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "wait_agent": _descriptor(
         name="wait_agent",
         description=(
-            "Wait for delegated results needed by the current answer. Results arrive as separate "
+            _ROOT_ORCHESTRATION_PRECONDITION
+            + "Wait for delegated results needed by the current answer. Results arrive as separate "
             "conversation messages after this call, not in its return body. With task_ids, settle=first "
             "waits for any target to finish; all waits for every target. Finished includes failure and cancellation; "
             "predicate_satisfied does not mean success. Partial/unrelated completions do not satisfy all. "
@@ -1290,7 +1297,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "stop_agent": _descriptor(
         name="stop_agent",
         description=(
-            "Cancel one queued, dependency-waiting or running task by exact task_id. "
+            _ROOT_ORCHESTRATION_PRECONDITION
+            + "Cancel one queued, dependency-waiting or running task by exact task_id. "
             "A finished task returns its final state unchanged. Cancelling a prerequisite blocks its dependents; "
             "unrelated tasks and background commands continue. Cancellation does not undo side effects."
         ),
@@ -1322,7 +1330,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "list_agents": _descriptor(
         name="list_agents",
         description=(
-            "List this conversation's tasks to recover exact IDs or inspect status, objectives, "
+            _ROOT_ORCHESTRATION_PRECONDITION
+            + "List this conversation's tasks to recover exact IDs or inspect status, objectives, "
             "dependencies, pending messages and result summaries; excludes full worker transcripts. "
             "Use wait_agent for synchronization, not repeated list polling. Status is a snapshot. "
             "Page with next_cursor and unchanged max_items/include_dependencies; restart paging if a cursor is rejected."
@@ -1363,7 +1372,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "create_agent_tasks": _descriptor(
         name="create_agent_tasks",
         description=(
-            "Schedule a batch asynchronously; returns task IDs and initial statuses. "
+            _ROOT_ORCHESTRATION_PRECONDITION
+            + "Schedule a batch asynchronously; returns task IDs and initial statuses. "
             "Use spawn_agent for one task. Independent items can run in parallel. depends_on waits for "
             "prerequisite success and supplies its result; any unsuccessful prerequisite blocks the dependent. "
             "Use material_task_ids for finished results/failures, or worker_history for a finished worker's "
@@ -1489,7 +1499,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "send_agent_message": _descriptor(
         name="send_agent_message",
         description=(
-            "Send relevant guidance to an ACTIVE worker using its exact task_id. "
+            _ROOT_ORCHESTRATION_PRECONDITION
+            + "Send relevant guidance to an ACTIVE worker using its exact task_id. "
             "Queued means accepted for later delivery, not read or acted on; do not resend merely because it is queued. "
             "Cannot message queued or finished tasks. For a finished worker's follow-up, use spawn_agent with "
             "context.mode=worker_history and context.task_id set to its old ID; this creates a new task."
@@ -1565,11 +1576,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "enter_plan": _descriptor(
         name="enter_plan",
         description=(
-            "Start a dedicated planning phase before making changes. Use this when the "
-            "user wants a plan for review, or when a consequential task genuinely needs "
-            "an agreed approach before implementation. Do not use it merely to announce "
-            "your next steps or when the user asked you to execute and you can proceed "
-            "safely. After it succeeds, investigate and reason without making changes; "
+            "Start a dedicated planning phase before making changes. Use this when "
+            "the user asks to review an approach before implementation, or a "
+            "consequential choice of implementation approach requires the user's "
+            "review and cannot be resolved from available context. Task size, "
+            "missing facts, and routine choices do not by themselves require Plan. "
+            "Do not use it merely to announce your next steps. After it succeeds, "
+            "investigate and reason without making changes; "
             "ask only genuinely blocking questions with ask_plan_question, then submit "
             "one complete plan with exit_plan. If planning is already active, continue "
             "planning instead of calling this again. Call this tool by itself: if you "

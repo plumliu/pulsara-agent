@@ -1402,7 +1402,13 @@ class CanonicalProviderInputReader:
                             "pulsara_visualizations": [
                                 {"visualization_ref": reference}
                                 for reference in references
-                            ]
+                            ],
+                            "handling": (
+                                "Runtime metadata for HTML saved with an earlier "
+                                "assistant reply. These refs are not a new human "
+                                "request or screenshot image_ref. Use them only when "
+                                "the current task needs that saved display."
+                            ),
                         }
                     ).decode("utf-8")
                     encoded_size = len(metadata_text.encode("utf-8"))
