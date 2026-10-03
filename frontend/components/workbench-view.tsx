@@ -60,7 +60,9 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
+import { ContextUsageIndicator } from './context-usage-indicator';
 import type {
+  ContextUsagePreview,
   ContextCompactionBoundary,
   ProtocolCanonicalControl,
   ModelCallBindingPayload,
@@ -116,6 +118,8 @@ interface WorkbenchViewProps {
   runtimeError?: string;
   modelConfigurations: ModelConfigurationSummary[];
   modelCallBinding?: ModelCallBindingPayload | null;
+  onReadContextUsage?: (signal: AbortSignal) => Promise<ContextUsagePreview>;
+  contextUsageRevision?: number | string;
   interaction?: RuntimeInteractionSummary;
   toolDecisionPending?: boolean;
   canControl: boolean;
@@ -1571,6 +1575,8 @@ export function WorkbenchView({
   runtimeError,
   modelConfigurations,
   modelCallBinding,
+  onReadContextUsage,
+  contextUsageRevision = 0,
   interaction,
   toolDecisionPending = false,
   canControl,
@@ -2422,6 +2428,9 @@ export function WorkbenchView({
               </div>
             </div>
             <div className="composer-controls">
+              {modelReady && onReadContextUsage && <ContextUsageIndicator
+                sessionId={session.id} binding={modelCallBinding!} revision={contextUsageRevision}
+                isRunning={isRunning} readUsage={onReadContextUsage} />}
               <div className="popover-anchor model-picker">
                 <button className={`mode-chip model-chip${modelOpen ? ' is-active' : ''}${welcome && !modelReady && !modelOpen ? ' needs-selection' : ''}`} title={modelBindingMissing ? '模型配置已删除' : modelConnectionLabel(selectedModel)} onClick={() => { setModelOpen((value) => !value); setAddOpen(false); setReasoningOpen(false); setSkillOpen(false); setPermissionOpen(false); }} aria-expanded={modelOpen} disabled={modelBindingBusy}>
                   <span className="model-chip__label">{modelBindingMissing ? '模型配置已删除' : selectedModel?.display_name ?? selectedModel?.model_id ?? '选择模型'}</span><ChevronDown size={10} />

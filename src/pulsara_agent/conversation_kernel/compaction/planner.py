@@ -1730,7 +1730,7 @@ def should_trigger_compaction(
     if force:
         return True
     budget = source_view.normal_compile_binding.effective_input_budget_tokens
-    estimate = source_view.provider_wire_quote.final_wire_estimated_input_tokens
+    estimate = source_view.provider_wire_quote.budget_input_tokens
     token_trigger = estimate >= int(budget * policy.auto_trigger_ratio)
     working = source_view.physical_working_set
     headroom_trigger = crosses_compaction_resource_headroom(

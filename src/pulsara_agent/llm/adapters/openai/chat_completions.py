@@ -24,6 +24,7 @@ from pulsara_agent.llm.adapters.openai.events import (
     chat_completion_reported_model,
     sdk_event_to_dict,
     transport_usage_report_from_mapping,
+    merge_response_usage_reports,
 )
 from pulsara_agent.llm.adapters.openai.function_tools import (
     openai_chat_function_tool,
@@ -328,7 +329,7 @@ def build_chat_completions_payload(
             raise TypeError("Chat context projection must be an object")
         if context_fields.get("tool_choice") != context.tool_choice:
             raise ValueError("Chat context tool choice changed after wire planning")
-        wire_input_tokens = plan.quote.final_wire_estimated_input_tokens
+        wire_input_tokens = plan.quote.budget_input_tokens
     else:
         items_with_sources = _chat_message_items_with_sources(context.messages)
         ordered_items = tuple(item for item, _source in items_with_sources)
@@ -524,6 +525,7 @@ class ChatCompletionAccumulator:
     route_wire_profile: RouteWireProfile
     tool_calls: "ChatToolCallAccumulator" = field(init=False)
     usage_report: TransportUsageReport | None = None
+    _usage_field_values: dict[str, Any] = field(default_factory=dict)
     terminal: ProviderAdapterTerminal | None = None
     _terminal_finish_reason: str | None = None
     _text_parts: list[str] = field(default_factory=list)
@@ -703,9 +705,40 @@ class ChatCompletionAccumulator:
     def _adopt_final_usage(self, raw_usage: Any) -> None:
         # Only a terminal chunk (or a later usage-only carrier) can settle
         # cumulative Chat usage. Earlier snapshots are deliberately discarded.
-        report = transport_usage_report_from_mapping(raw_usage)
-        if report.usage_status == "reported":
-            self.usage_report = report
+        report = transport_usage_report_from_mapping(raw_usage, wire_api=OPENAI_CHAT_COMPLETIONS_API)
+        if report.usage_status == "missing" and self.usage_report is None:
+            return
+        # Retain field-valid counts until all cumulative response carriers have
+        # arrived. A later parent correction can make an earlier breakdown valid.
+        raw = raw_usage.model_dump(mode="python", exclude_unset=True) if hasattr(raw_usage, "model_dump") else raw_usage
+        def valid_count(value: object) -> bool:
+            return type(value) is int and 0 <= value <= 2**63 - 1
+
+        if isinstance(raw, dict):
+            for primary, alias in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens")):
+                value = raw.get(primary) if primary in raw else raw.get(alias)
+                if valid_count(value):
+                    self._usage_field_values[primary] = value
+            total = raw.get("total_tokens")
+            if valid_count(total):
+                self._usage_field_values["total_tokens"] = total
+            for primary, alias, detail in (
+                ("prompt_tokens_details", "input_tokens_details", "cached_tokens"),
+                ("completion_tokens_details", "output_tokens_details", "reasoning_tokens"),
+            ):
+                details = raw.get(primary)
+                if details is None:
+                    details = raw.get(alias)
+                value = details.get(detail) if isinstance(details, dict) else None
+                if detail == "cached_tokens" and not valid_count(value):
+                    value = raw.get("prompt_cache_hit_tokens")
+                if valid_count(value):
+                    self._usage_field_values.setdefault(primary, {})[detail] = value
+        cumulative = transport_usage_report_from_mapping(self._usage_field_values, wire_api=OPENAI_CHAT_COMPLETIONS_API)
+        combined = merge_response_usage_reports(self.usage_report, report)
+        if cumulative.usage is not None:
+            combined = replace(cumulative, provider_diagnostics=tuple(dict.fromkeys((*combined.provider_diagnostics, *cumulative.provider_diagnostics))))
+        self.usage_report = combined
 
     def _project_live_reasoning(
         self, value: dict[str, Any]

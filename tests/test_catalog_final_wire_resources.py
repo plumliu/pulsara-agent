@@ -315,6 +315,7 @@ def _prepare_case(
         memory_context=FrozenModelCallMemoryContext(),
     )
     coordinator = object.__new__(ProviderDispatchCoordinator)
+    coordinator._continuity = owner
     coordinator._model = model
     coordinator._compiler = compiler
     coordinator._io = _InlineIO()
@@ -377,7 +378,7 @@ def test_actual_wire_degrades_large_skill_catalog_and_preserves_mandatory_input(
         replay_hydration=None,
     )
     assert original.final_estimate.total_input_tokens < 100_000
-    assert raw.quote.final_wire_estimated_input_tokens > 100_000
+    assert raw.quote.raw_final_wire_estimated_input_tokens > 100_000
     raw.discard_materialization_to_quote()
 
     decision = _measure(coordinator, candidate)
@@ -391,7 +392,7 @@ def test_actual_wire_degrades_large_skill_catalog_and_preserves_mandatory_input(
     assert selected.sources is candidate.sources
     assert selected.canonical_read is candidate.canonical_read
     assert selected.planning is candidate.planning
-    assert decision.quote.final_wire_estimated_input_tokens <= 100_000
+    assert decision.quote.raw_final_wire_estimated_input_tokens <= 100_000
     if view is not None:
         assert selected.semantic_input.system_prompt == view.system_prompt
         assert selected.semantic_input.tools == view.tools
@@ -458,7 +459,7 @@ def test_mcp_catalog_follows_existing_full_compact_reference_variants(
 
     assert decision.wire_input_plan is not None
     assert _mode(decision.candidate, ContextSourceKind.MCP_CATALOG) is expected
-    assert decision.quote.final_wire_estimated_input_tokens <= budget
+    assert decision.quote.raw_final_wire_estimated_input_tokens <= budget
 
 
 @pytest.mark.parametrize("api", _WIRE_APIS)
@@ -474,7 +475,7 @@ def test_smallest_catalog_cannot_hide_mandatory_final_wire_exhaustion(api):
     decision = _measure(coordinator, candidate)
 
     assert decision.wire_input_plan is None
-    assert decision.quote.final_wire_estimated_input_tokens > 100_000
+    assert decision.quote.raw_final_wire_estimated_input_tokens > 100_000
     _assert_typed_budget_rejection(coordinator, decision)
     assert (
         _mode(decision.candidate, ContextSourceKind.SKILL_CATALOG)
@@ -483,7 +484,7 @@ def test_smallest_catalog_cannot_hide_mandatory_final_wire_exhaustion(api):
 
 
 @pytest.mark.parametrize("api", _WIRE_APIS)
-@pytest.mark.parametrize("user_bytes,admitted", ((24_000, True), (30_000, False)))
+@pytest.mark.parametrize("user_bytes,admitted", ((24_000, True), (40_000, False)))
 def test_mcp_remeasures_each_legal_variant_and_rejects_if_reference_cannot_fit(
     api, user_bytes, admitted
 ):
@@ -511,7 +512,7 @@ def test_mcp_remeasures_each_legal_variant_and_rejects_if_reference_cannot_fit(
     decision = _measure(coordinator, candidate)
 
     assert (decision.wire_input_plan is not None) is admitted
-    assert observed_modes[-1] is ContextRenderMode.REF_ONLY
+    assert observed_modes[-1] is (ContextRenderMode.REF_ONLY if admitted else None)
     if admitted:
         assert observed_modes == [
             ContextRenderMode.FULL,
@@ -519,7 +520,7 @@ def test_mcp_remeasures_each_legal_variant_and_rejects_if_reference_cannot_fit(
             ContextRenderMode.REF_ONLY,
         ]
     else:
-        assert decision.quote.final_wire_estimated_input_tokens > 16_000
+        assert decision.quote.raw_final_wire_estimated_input_tokens > 16_000
         _assert_typed_budget_rejection(coordinator, decision)
 
 
@@ -564,7 +565,7 @@ def test_pending_root_hook_binds_the_measured_catalog_winner():
 
 @pytest.mark.parametrize("api", _WIRE_APIS)
 @pytest.mark.parametrize("cold", (False, True))
-def test_catalog_wire_retry_preserves_already_omitted_optional_source(api, cold):
+def test_catalog_wire_retry_omits_optional_source_only_after_wire_feedback(api, cold):
     kind = ContextSourceKind.MEMORY_WRITE_HINT
     coordinator, candidate, _, _ = _prepare_case(
         api,
@@ -578,8 +579,8 @@ def test_catalog_wire_retry_preserves_already_omitted_optional_source(api, cold)
         for item in candidate.semantic_input.source_decisions
         if item.source_kind is kind
     )
-    assert not original.included
-    assert original.selected_mode is None
+    assert original.included
+    assert original.selected_mode is ContextRenderMode.FULL
     assert _mode(candidate, ContextSourceKind.SKILL_CATALOG) is ContextRenderMode.FULL
 
     decision = _measure(coordinator, candidate)

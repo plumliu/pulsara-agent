@@ -29,6 +29,30 @@ from pulsara_agent.capability.user_skill_config import (
 from tests.support.model_config import test_model_runtime
 
 
+def test_context_usage_http_reads_the_selected_session_without_a_command(tmp_path, monkeypatch):
+    async def exercise():
+        (tmp_path / 'index.html').write_text('Pulsara', encoding='utf-8')
+        sessions = _Sessions()
+        payload = {'state': 'ready', 'connection_id': 'selected', 'input_tokens': 1000,
+                   'input_budget_tokens': 2000, 'compaction_expected': False}
+        read = AsyncMock(return_value=payload)
+        monkeypatch.setattr(sessions, 'read_context_usage', read, raising=False)
+        server = LocalHttpServer(sessions=cast(LocalSessionController, sessions),
+            bridge=cast(LocalBrowserBridge, _Bridge()), static_root=tmp_path, requested_port=0,
+            is_ready=lambda: True, is_draining=lambda: False, **_model_server_dependencies())
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                async with client.get(f'{server.origin}/api/sessions/session:preview/context-usage') as response:
+                    assert response.status == 200
+                    assert await response.json() == payload
+                read.assert_awaited_once_with('session:preview')
+        finally:
+            await server.aclose()
+
+    asyncio.run(exercise())
+
+
 def test_native_workspace_picker_http_security_selection_cancel_and_failure(tmp_path, monkeypatch):
     async def exercise():
         (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")

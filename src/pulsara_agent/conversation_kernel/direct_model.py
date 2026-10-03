@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import asyncio
+import logging
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import json
 from threading import Lock
-from typing import AsyncIterator, Callable
+from typing import AsyncIterator, Awaitable, Callable
 from uuid import uuid4
 
 from pulsara_agent.conversation_kernel.tool_surface import (
@@ -62,6 +64,7 @@ from pulsara_agent.llm.provider_replay import (
     build_provider_replay_target_compatibility,
 )
 from pulsara_agent.llm.request import (
+    ProviderInputUsageAnchor,
     FrozenProviderWireInputPlan,
     FrozenProviderWireInputQuote,
     FrozenProviderWireMaterialization,
@@ -395,13 +398,14 @@ class ProviderFollowupWireResourceQuote:
     """Exact installed prefix plus conservative process-local follow-up suffix."""
 
     final_wire_utf8_bytes: int
-    final_wire_estimated_input_tokens: int
+    raw_final_wire_estimated_input_tokens: int
+    budget_input_tokens: int
     appended_wire_item_count: int
 
     def __post_init__(self) -> None:
         if min(
             self.final_wire_utf8_bytes,
-            self.final_wire_estimated_input_tokens,
+            self.raw_final_wire_estimated_input_tokens,
             self.appended_wire_item_count,
         ) < 0:
             raise ValueError("provider follow-up wire quote is invalid")
@@ -421,7 +425,7 @@ class PreparedKernelModelExecution:
         transport_timeout_policy: OpenAITransportTimeoutPolicy,
         install_authority: ProcessLocalProviderInputInstallAuthority,
         usage_observer: Callable[
-            [KernelModelExecutionRequest, TransportUsageReport], None
+            [KernelModelExecutionRequest, TransportUsageReport, ProcessLocalProviderInputInstallPermit, ProviderNormalizedTerminalKind | None, bool], Awaitable[None]
         ]
         | None,
         transport_invocation_observer: (
@@ -525,17 +529,16 @@ class PreparedKernelModelExecution:
         with self._lock:
             self._state = _PreparedExecutionState.STREAMING
         semantic_error: BaseException | None = None
+        observed_terminal: ProviderStreamTerminal | None = None
+        operation_error: BaseException | None = None
+        physically_closed = False
         try:
             while True:
                 item = await execution.read_next()
                 if item is None:
                     break
                 if isinstance(item, ProviderStreamTerminal):
-                    if self._usage_observer is not None:
-                        try:
-                            self._usage_observer(request, item.usage)
-                        except Exception:
-                            pass
+                    observed_terminal = item
                     if item.terminal_kind is ProviderNormalizedTerminalKind.COMPLETED:
                         profile = borrowed.call.target.model_profile.route_wire_profile
                         if (
@@ -576,6 +579,8 @@ class PreparedKernelModelExecution:
                         semantic_error = ProviderModelExecutionFailed(item.error)
                     break
                 yield item
+        except BaseException as exc:
+            operation_error = exc
         finally:
             try:
                 await execution.aclose()
@@ -584,8 +589,35 @@ class PreparedKernelModelExecution:
                     self._state = _PreparedExecutionState.PHYSICALLY_CLOSED
                 if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
                     raise RuntimeError("provider physical operation did not exit")
+                physically_closed = True
+            except BaseException as exc:
+                if operation_error is None:
+                    operation_error = exc
             finally:
-                borrowed.close()
+                try:
+                    borrowed.close()
+                except BaseException as exc:
+                    physically_closed = False
+                    if operation_error is None:
+                        operation_error = exc
+            if self._usage_observer is not None:
+                try:
+                    await self._usage_observer(
+                        request,
+                        (getattr(execution, "observed_usage", None) or TransportUsageReport(usage_status="missing", usage=None)) if observed_terminal is None else observed_terminal.usage,
+                        permit,
+                        None if observed_terminal is None else observed_terminal.terminal_kind,
+                        physically_closed and operation_error is None and (
+                            self._completed is not None or isinstance(semantic_error, ProviderModelOutputIncomplete)
+                        ),
+                    )
+                except asyncio.CancelledError:
+                    if operation_error is None and semantic_error is None:
+                        raise
+                except Exception:
+                    logging.getLogger(__name__).warning("provider_usage_observation_failed")
+        if operation_error is not None:
+            raise operation_error
         if semantic_error is not None:
             raise semantic_error
         if self._completed is None:
@@ -600,7 +632,7 @@ class DirectKernelModelPort:
         *,
         model_runtime: ModelRuntime,
         usage_observer: Callable[
-            [KernelModelExecutionRequest, TransportUsageReport], None
+            [KernelModelExecutionRequest, TransportUsageReport, ProcessLocalProviderInputInstallPermit, ProviderNormalizedTerminalKind | None, bool], Awaitable[None]
         ]
         | None = None,
         timeout_policy: OpenAITransportTimeoutPolicy | None = None,
@@ -961,8 +993,6 @@ class DirectKernelModelPort:
             or compiled.tools != prepared.tool_surface.model_surface.tool_specs
             or compiled.budget_report.tool_surface_fingerprint
             != prepared.tool_surface.model_surface.surface_fingerprint
-            or compiled.final_estimate.total_input_tokens
-            > prepared.compile_binding.effective_input_budget_tokens
             or prepared.transport_timeout_policy_fingerprint
             != self._transport_timeout_policy_fingerprint
             or plan.compiled_semantic_fingerprint
@@ -1071,6 +1101,7 @@ class DirectKernelModelPort:
         semantic_input: ProviderWireSemanticInput,
         replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
         tool_choice: str | None = None,
+        usage_anchor: ProviderInputUsageAnchor | None = None,
     ) -> "ProviderWireMeasurement":
         return freeze_provider_wire_measurement(
             call=call,
@@ -1079,6 +1110,7 @@ class DirectKernelModelPort:
             semantic_input=semantic_input,
             replay_hydration=replay_hydration,
             tool_choice=tool_choice,
+            usage_anchor=usage_anchor,
         )
 
     @staticmethod
@@ -1399,6 +1431,7 @@ def freeze_provider_wire_measurement(
     semantic_input: ProviderWireSemanticInput,
     replay_hydration: FrozenSelectedDurableProviderReplayHydration | None,
     tool_choice: str | None = None,
+    usage_anchor: ProviderInputUsageAnchor | None = None,
 ) -> ProviderWireMeasurement:
     if (
         semantic_input.compile_binding_fingerprint != binding.binding_fingerprint
@@ -1617,12 +1650,32 @@ def freeze_provider_wire_measurement(
         ),
         replaced_generic_wire_estimated_tokens=(replaced_generic_wire_tokens),
         replay_wire_estimated_tokens=replay_wire_tokens,
-        final_wire_estimated_input_tokens=final_wire_total_tokens,
+        raw_final_wire_estimated_input_tokens=final_wire_total_tokens,
+        budget_input_tokens=final_wire_total_tokens,
         final_wire_visual_image_tokens=(
             direct_final_wire_tokens.visual_image_tokens
         ),
         final_wire_utf8_bytes=final_wire_bytes,
     )
+    materialization_for_budget = FrozenProviderWireMaterialization(
+        root_policy_value=freeze_json(root_plain),
+        tool_items=tuple(freeze_json(item) for item in tools_plain),
+        ordered_input_items=tuple(freeze_json(item) for item in inputs_plain),
+        context_bearing_projection=freeze_json(final_projection),
+    )
+    if usage_anchor is not None:
+        calibrated = usage_anchor.budget_for(
+            connection_id=call.binding.connection_id.value, target=call.target.fact,
+            route_wire_profile_fingerprint=profile_fingerprint,
+            materialization=materialization_for_budget, raw_input_tokens=final_wire_total_tokens,
+        )
+        if calibrated is not None:
+            quote = replace(
+                quote, budget_input_tokens=calibrated[0], budget_source="reported_input_anchor",
+                anchor_model_call_id=usage_anchor.model_call_id,
+                anchor_reported_input_tokens=usage_anchor.reported_input_tokens,
+                estimated_suffix_tokens=calibrated[1],
+            )
     wire_system = context_fingerprint("pulsara.provider-wire-system:v1", root_plain)
     wire_tools_fingerprint = context_fingerprint(
         "pulsara.provider-wire-tools:v1", tools_plain
@@ -1737,6 +1790,7 @@ def quote_provider_followup_wire_resources(
     actual_assistant_message: LLMMessage,
     provider_replay: PreparedDurableProviderAssistantReplay | None,
     bounded_suffix_messages: tuple[LLMMessage, ...],
+    usage_anchor: ProviderInputUsageAnchor | None = None,
 ) -> ProviderFollowupWireResourceQuote:
     """Quote one direct successor from the installed exact wire prefix.
 
@@ -1827,10 +1881,26 @@ def quote_provider_followup_wire_resources(
         ordered_input_items=tuple(appended_items),
         ordered_input_sources=tuple(appended_sources),
     )
+    raw_tokens = plan.quote.raw_final_wire_estimated_input_tokens + suffix_quote.total_input_tokens
+    budget_tokens = raw_tokens
+    if usage_anchor is not None:
+        calibrated = usage_anchor.budget_for(
+            connection_id=call.binding.connection_id.value, target=call.target.fact,
+            route_wire_profile_fingerprint=plan.route_wire_profile_fingerprint,
+            materialization=FrozenProviderWireMaterialization(
+                root_policy_value=plan.materialization.root_policy_value,
+                tool_items=plan.materialization.tool_items,
+                ordered_input_items=tuple(freeze_json(item) for item in (*existing_items, *appended_items)),
+                context_bearing_projection=freeze_json(final_projection),
+            ), raw_input_tokens=raw_tokens,
+        )
+        if calibrated is not None:
+            budget_tokens = calibrated[0]
     return ProviderFollowupWireResourceQuote(
+        budget_input_tokens=budget_tokens,
         final_wire_utf8_bytes=len(canonical_json_bytes(final_projection)),
-        final_wire_estimated_input_tokens=(
-            plan.quote.final_wire_estimated_input_tokens
+        raw_final_wire_estimated_input_tokens=(
+            plan.quote.raw_final_wire_estimated_input_tokens
             + suffix_quote.total_input_tokens
         ),
         appended_wire_item_count=len(appended_items),

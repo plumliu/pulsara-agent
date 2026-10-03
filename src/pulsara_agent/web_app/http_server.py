@@ -556,6 +556,9 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/sessions/{session_id}/fork", self._fork_conversation
         )
+        self._app.router.add_get(
+            "/api/sessions/{session_id}/context-usage", self._read_context_usage,
+        )
         self._app.router.add_put(
             "/api/sessions/{session_id}/model-call-binding",
             self._update_model_call_binding,
@@ -1275,6 +1278,9 @@ class LocalHttpServer:
         kind = _dashscope_credential_kind(request.match_info["kind"])
         await self.settings.delete_dashscope_api_key(kind)
         return web.json_response({"configured": False})
+
+    async def _read_context_usage(self, request: web.Request) -> web.Response:
+        return web.json_response(await self.sessions.read_context_usage(request.match_info["session_id"]))
 
     async def _update_model_call_binding(self, request: web.Request) -> web.Response:
         body = await self._json_body(request)

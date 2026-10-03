@@ -51,6 +51,43 @@ class CanonicalConversationPage:
 
 
 @dataclass(frozen=True, slots=True)
+class CanonicalProviderCallUsagePage:
+    session_id: str
+    conversation_scope_kind: str | None
+    scope_subagent_task_id: str | None
+    after_observed_at: datetime | None
+    after_resolved_model_call_id: str | None
+    usages: tuple[Mapping[str, object], ...]
+    has_more: bool
+
+    @property
+    def next_observed_at(self) -> datetime | None:
+        if not self.usages or not self.has_more:
+            return None
+        value = self.usages[-1]["observed_at"]
+        return value if isinstance(value, datetime) else None
+
+    @property
+    def next_resolved_model_call_id(self) -> str | None:
+        if not self.usages or not self.has_more:
+            return None
+        return str(self.usages[-1]["resolved_model_call_id"])
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "session_id": self.session_id,
+            "conversation_scope_kind": self.conversation_scope_kind,
+            "scope_subagent_task_id": self.scope_subagent_task_id,
+            "after_observed_at": _public_value(self.after_observed_at),
+            "after_resolved_model_call_id": self.after_resolved_model_call_id,
+            "usages": [_public_row(item) for item in self.usages],
+            "has_more": self.has_more,
+            "next_observed_at": _public_value(self.next_observed_at),
+            "next_resolved_model_call_id": self.next_resolved_model_call_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CanonicalInspectorView:
     conversation: CanonicalConversationPage
     turns: tuple[Mapping[str, object], ...]
@@ -103,6 +140,96 @@ class CanonicalConversationQuery:
                 after_entry_sequence=after_entry_sequence,
                 maximum_entries=maximum_entries,
             )
+
+    def page_provider_call_usage(
+        self,
+        *,
+        session_id: str,
+        conversation_scope_kind: str | None = None,
+        scope_subagent_task_id: str | None = None,
+        after_observed_at: datetime | None = None,
+        after_resolved_model_call_id: str | None = None,
+        maximum_rows: int = 256,
+        deadline_monotonic: float,
+    ) -> CanonicalProviderCallUsagePage:
+        if type(maximum_rows) is not int or not 1 <= maximum_rows <= 1024:
+            raise ValueError("provider usage page request is out of bounds")
+        if (after_observed_at is None) != (after_resolved_model_call_id is None):
+            raise ValueError("provider usage cursor must contain both key fields")
+        if after_observed_at is not None and (
+            after_observed_at.tzinfo is None
+            or after_observed_at.utcoffset() is None
+        ):
+            raise ValueError("provider usage cursor timestamp must be aware")
+        if conversation_scope_kind not in {None, "ROOT", "SUBAGENT_TASK"}:
+            raise ValueError("provider usage scope kind is invalid")
+        if scope_subagent_task_id is not None:
+            if not scope_subagent_task_id or scope_subagent_task_id != scope_subagent_task_id.strip():
+                raise ValueError("subagent task scope id is invalid")
+            if conversation_scope_kind == "ROOT":
+                raise ValueError("ROOT scope cannot name a subagent task")
+            conversation_scope_kind = "SUBAGENT_TASK"
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            session = connection.execute(
+                "SELECT id FROM pulsara_v3.sessions WHERE id = %s",
+                (session_id,),
+            ).fetchone()
+            if session is None:
+                raise KeyError(session_id)
+            clauses = ["u.session_id = %s"]
+            parameters: list[object] = [session_id]
+            if conversation_scope_kind is not None:
+                clauses.append("t.conversation_scope_kind = %s")
+                parameters.append(conversation_scope_kind)
+            if scope_subagent_task_id is not None:
+                clauses.append("t.scope_subagent_task_id = %s")
+                parameters.append(scope_subagent_task_id)
+            if after_observed_at is not None:
+                clauses.append(
+                    "(u.observed_at, u.resolved_model_call_id) > (%s, %s)"
+                )
+                parameters.extend(
+                    (after_observed_at, after_resolved_model_call_id)
+                )
+            parameters.append(maximum_rows + 1)
+            rows = connection.execute(
+                f"""SELECT u.*, t.conversation_scope_kind,
+                           t.scope_subagent_task_id
+                    FROM pulsara_v3.provider_call_usage AS u
+                    JOIN pulsara_v3.turns AS t
+                      ON t.session_id = u.session_id AND t.id = u.turn_id
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY u.observed_at, u.resolved_model_call_id
+                    LIMIT %s""",
+                parameters,
+            ).fetchall()
+        has_more = len(rows) > maximum_rows
+        items: list[Mapping[str, object]] = []
+        for raw in rows[:maximum_rows]:
+            row = dict(raw)
+            input_tokens = row["input_tokens"]
+            output_tokens = row["output_tokens"]
+            row["computed_total_tokens"] = (
+                int(input_tokens) + int(output_tokens)
+                if input_tokens is not None and output_tokens is not None
+                else None
+            )
+            row["diagnostic_codes"] = tuple(row["diagnostic_codes"])
+            items.append(row)
+        return CanonicalProviderCallUsagePage(
+            session_id=session_id,
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            after_observed_at=after_observed_at,
+            after_resolved_model_call_id=after_resolved_model_call_id,
+            usages=tuple(items),
+            has_more=has_more,
+        )
 
     @staticmethod
     def _page_entries_on_connection(
@@ -345,4 +472,5 @@ __all__ = [
     "CanonicalConversationPage",
     "CanonicalConversationQuery",
     "CanonicalInspectorView",
+    "CanonicalProviderCallUsagePage",
 ]

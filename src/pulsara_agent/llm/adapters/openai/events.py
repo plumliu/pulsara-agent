@@ -544,96 +544,114 @@ def arguments_to_json_string(raw_arguments: Any) -> str:
     )
 
 
-def transport_usage_report_from_mapping(raw_usage: Any) -> TransportUsageReport:
-    usage = sdk_event_to_dict(raw_usage) if raw_usage is not None else {}
-    if not usage:
+def transport_usage_report_from_mapping(
+    raw_usage: Any, *, wire_api: str | None = None,
+) -> TransportUsageReport:
+    if raw_usage is None:
         return TransportUsageReport(usage_status="missing", usage=None)
-    input_raw = usage.get("input_tokens", usage.get("prompt_tokens"))
-    output_raw = usage.get("output_tokens", usage.get("completion_tokens"))
-    if input_raw is None or output_raw is None:
+    if hasattr(raw_usage, "model_dump"):
+        raw_usage = raw_usage.model_dump(mode="python", exclude_unset=True)
+    if not isinstance(raw_usage, dict):
         return TransportUsageReport(
-            usage_status="missing",
-            usage=None,
-            provider_diagnostics=(
-                ModelCallDiagnosticFact(code="provider_usage_incomplete"),
-            ),
+            usage_status="invalid", usage=None,
+            provider_diagnostics=(ModelCallDiagnosticFact(code="provider_usage_invalid"),),
         )
-    input_tokens = int(input_raw)
-    output_tokens = int(output_raw)
-    normalized_total = input_tokens + output_tokens
+    if not raw_usage:
+        return TransportUsageReport(usage_status="missing", usage=None)
+    usage = raw_usage
     diagnostics: list[ModelCallDiagnosticFact] = []
-    provider_total = usage.get("total_tokens")
-    if provider_total is not None and int(provider_total) != normalized_total:
-        diagnostics.append(
-            ModelCallDiagnosticFact(
-                code="provider_usage_total_mismatch",
-                attributes=(
-                    ("normalized_total", normalized_total),
-                    ("provider_total", int(provider_total)),
-                ),
-            )
-        )
-    input_details = usage.get(
-        "input_tokens_details", usage.get("prompt_tokens_details")
-    )
-    output_details = usage.get(
-        "output_tokens_details", usage.get("completion_tokens_details")
-    )
-    standard_cached = (
-        input_details.get("cached_tokens")
-        if isinstance(input_details, dict)
-        and input_details.get("cached_tokens") is not None
-        else None
-    )
-    deepseek_cached = usage.get("prompt_cache_hit_tokens")
-    deepseek_miss = usage.get("prompt_cache_miss_tokens")
-    if (
-        standard_cached is not None
-        and deepseek_cached is not None
-        and int(standard_cached) != int(deepseek_cached)
-    ):
-        diagnostics.append(
-            ModelCallDiagnosticFact(
-                code="provider_cached_input_tokens_mismatch",
-                attributes=(
-                    ("input_details_cached_tokens", int(standard_cached)),
-                    ("prompt_cache_hit_tokens", int(deepseek_cached)),
-                ),
-            )
-        )
-    cached = standard_cached if standard_cached is not None else deepseek_cached
-    if (
-        deepseek_cached is not None
-        and deepseek_miss is not None
-        and (int(deepseek_cached) + int(deepseek_miss) != input_tokens)
-    ):
-        diagnostics.append(
-            ModelCallDiagnosticFact(
-                code="provider_prompt_cache_partition_mismatch",
-                attributes=(
-                    ("input_tokens", input_tokens),
-                    ("prompt_cache_hit_tokens", int(deepseek_cached)),
-                    ("prompt_cache_miss_tokens", int(deepseek_miss)),
-                ),
-            )
-        )
-    reasoning = (
-        output_details.get("reasoning_tokens")
-        if isinstance(output_details, dict)
-        and output_details.get("reasoning_tokens") is not None
-        else None
-    )
+
+    def count(value: Any, name: str) -> int | None:
+        # PostgreSQL bigint is the single-response storage representation.
+        if value is None:
+            return None
+        if type(value) is not int or not 0 <= value <= 2**63 - 1:
+            diagnostics.append(ModelCallDiagnosticFact(
+                code="provider_usage_field_invalid", attributes=(("field", name),),
+            ))
+            return None
+        return value
+
+    def aliased(primary: str, alias: str) -> int | None:
+        first = count(usage.get(primary), primary)
+        second = count(usage.get(alias), alias)
+        if first is not None and second is not None and first != second:
+            diagnostics.append(ModelCallDiagnosticFact(
+                code="provider_usage_alias_mismatch", attributes=(("field", primary),),
+            ))
+        return first if primary in usage else second
+
+    chat = wire_api == "openai_chat_completions"
+    input_tokens = aliased("prompt_tokens", "input_tokens") if chat else aliased("input_tokens", "prompt_tokens")
+    output_tokens = aliased("completion_tokens", "output_tokens") if chat else aliased("output_tokens", "completion_tokens")
+    total = count(usage.get("total_tokens"), "total_tokens")
+    input_details = usage.get("prompt_tokens_details" if chat else "input_tokens_details")
+    if input_details is None:
+        input_details = usage.get("input_tokens_details" if chat else "prompt_tokens_details")
+    output_details = usage.get("completion_tokens_details" if chat else "output_tokens_details")
+    if output_details is None:
+        output_details = usage.get("output_tokens_details" if chat else "completion_tokens_details")
+    cached = count(input_details.get("cached_tokens") if isinstance(input_details, dict) else None, "cached_tokens")
+    hit = count(usage.get("prompt_cache_hit_tokens"), "prompt_cache_hit_tokens")
+    miss = count(usage.get("prompt_cache_miss_tokens"), "prompt_cache_miss_tokens")
+    if cached is not None and hit is not None and cached != hit:
+        diagnostics.append(ModelCallDiagnosticFact(code="provider_cached_input_tokens_mismatch"))
+    cached = cached if cached is not None else hit
+    if input_tokens is not None and hit is not None and miss is not None and hit + miss != input_tokens:
+        diagnostics.append(ModelCallDiagnosticFact(code="provider_prompt_cache_partition_mismatch"))
+    reasoning = count(output_details.get("reasoning_tokens") if isinstance(output_details, dict) else None, "reasoning_tokens")
+    if cached is not None and input_tokens is not None and cached > input_tokens:
+        diagnostics.append(ModelCallDiagnosticFact(code="provider_cached_input_tokens_invalid"))
+        cached = None
+    if reasoning is not None and output_tokens is not None and reasoning > output_tokens:
+        diagnostics.append(ModelCallDiagnosticFact(code="provider_reasoning_output_tokens_invalid"))
+        reasoning = None
+    if total is not None and input_tokens is not None and output_tokens is not None and total != input_tokens + output_tokens:
+        diagnostics.append(ModelCallDiagnosticFact(
+            code="provider_usage_total_mismatch",
+            attributes=(("computed_total", input_tokens + output_tokens), ("provider_total", total)),
+        ))
+    if all(v is None for v in (input_tokens, output_tokens, total, cached, reasoning)):
+        return TransportUsageReport(usage_status="invalid", usage=None, provider_diagnostics=tuple(diagnostics))
     fact = ModelTokenUsageFact(
-        input_tokens=input_tokens,
-        cached_input_tokens=int(cached) if cached is not None else None,
-        output_tokens=output_tokens,
-        reasoning_output_tokens=int(reasoning) if reasoning is not None else None,
-        total_tokens=normalized_total,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cached_input_tokens=cached, reasoning_output_tokens=reasoning,
+        reported_total_tokens=total,
     )
+    status = "reported" if input_tokens is not None and output_tokens is not None else "partial"
+    return TransportUsageReport(usage_status=status, usage=fact, provider_diagnostics=tuple(diagnostics))
+
+
+def merge_response_usage_reports(
+    previous: TransportUsageReport | None, current: TransportUsageReport,
+) -> TransportUsageReport:
+    """Merge cumulative carriers of one response, never retry attempts/deltas."""
+    if previous is None:
+        return current
+    diagnostics = list(dict.fromkeys((*previous.provider_diagnostics, *current.provider_diagnostics)))
+    if previous.usage is None:
+        return TransportUsageReport(
+            usage_status=current.usage_status, usage=current.usage,
+            provider_diagnostics=tuple(diagnostics), reported_model_id=current.reported_model_id or previous.reported_model_id,
+        )
+    values = previous.usage.model_dump()
+    if current.usage is not None:
+        for name, value in current.usage.model_dump().items():
+            if value is not None:
+                if values[name] is not None and values[name] != value:
+                    diagnostics.append(ModelCallDiagnosticFact(code="provider_usage_carrier_changed", attributes=(("field", name),)))
+                values[name] = value
+    for detail, parent in (("cached_input_tokens", "input_tokens"), ("reasoning_output_tokens", "output_tokens")):
+        if values[detail] is not None and values[parent] is not None and values[detail] > values[parent]:
+            values[detail] = None
+            diagnostics.append(ModelCallDiagnosticFact(code="provider_usage_breakdown_invalid", attributes=(("field", detail),)))
+    fact = ModelTokenUsageFact(**values)
+    if fact.reported_total_tokens is not None and fact.computed_total_tokens is not None and fact.reported_total_tokens != fact.computed_total_tokens:
+        diagnostics.append(ModelCallDiagnosticFact(code="provider_usage_total_mismatch"))
     return TransportUsageReport(
-        usage_status="reported",
-        usage=fact,
-        provider_diagnostics=tuple(diagnostics),
+        usage_status="reported" if fact.input_tokens is not None and fact.output_tokens is not None else "partial",
+        usage=fact, provider_diagnostics=tuple(dict.fromkeys(diagnostics)),
+        reported_model_id=current.reported_model_id or previous.reported_model_id,
     )
 
 

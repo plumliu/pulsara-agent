@@ -38,7 +38,7 @@ def validate_model_context_for_call(
     fact = call.fact
     target_fact = call.target.fact
     estimate = estimate_model_context_for_call(call=call, context=context)
-    if estimate.total_input_tokens > target_fact.context_budget.input_budget_tokens:
+    if context.provider_wire_input_plan is None and estimate.total_input_tokens > target_fact.context_budget.input_budget_tokens:
         exc = ModelInputBudgetExceeded(
             f"model input estimate {estimate.total_input_tokens} exceeds budget "
             f"{target_fact.context_budget.input_budget_tokens}"

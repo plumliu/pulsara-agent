@@ -46,6 +46,7 @@ DIRECT = {
     "agent_events",
 }
 INDIRECT = {
+    "provider_call_usage": ("turns", "turn_id"),
     "turn_context_binding_revisions": ("turns", "turn_id"),
     "tool_execution_attempts": ("assistant_message_blocks", "tool_call_id"),
     "imported_tool_call_closures": ("assistant_message_blocks", "tool_call_id"),
@@ -70,7 +71,7 @@ def exists(repo, sid, domain="u_local"):
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     fks = rows(
         repo,
         """SELECT c.conrelid::regclass::text AS child,

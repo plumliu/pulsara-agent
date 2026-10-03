@@ -50,7 +50,7 @@ from pulsara_agent.model_input.continuity import (
 from pulsara_agent.llm.frozen_target import FrozenEpochModelCallTarget
 from pulsara_agent.model_input.contracts import FrozenModelInputSemanticProjection
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
-from pulsara_agent.llm.request import FrozenProviderWireInputPlan
+from pulsara_agent.llm.request import FrozenProviderWireInputPlan, ProviderInputUsageAnchor
 from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     PreparedProviderInputCut,
@@ -720,6 +720,7 @@ class _SlotState(StrEnum):
 @dataclass(slots=True)
 class _Slot:
     state: _SlotState
+    usage_anchor: ProviderInputUsageAnchor | None = None
     bootstrap_lease: AuthorizedEmptyBootstrapLease | None = None
     empty_reservation: EmptyPreparationReservation | None = None
     installed: InstalledEpochRuntimeCohort | None = None
@@ -1358,6 +1359,8 @@ class HostProviderInputContinuityOwner:
                 ),
                 tool_result_decisions=compiled.tool_result_decisions,
             )
+            if slot.installed is None or slot.installed.view.epoch_nonce != view.epoch_nonce:
+                slot.usage_anchor = None
             slot.installed = InstalledEpochRuntimeCohort(
                 view=view,
                 target_bundle=candidate.call_target.target_bundle,
@@ -1617,6 +1620,38 @@ class HostProviderInputContinuityOwner:
             else:
                 slot.state = _SlotState.INSTALLED
 
+    def current_usage_anchor(self, scope: ProviderInputContinuityScope) -> ProviderInputUsageAnchor | None:
+        self._require_scope(scope)
+        with self._lock:
+            slot = self._slots.get(scope)
+            if slot is None or slot.installed is None:
+                return None
+            anchor = slot.usage_anchor
+            return anchor if anchor is not None and anchor.epoch_nonce == slot.installed.view.epoch_nonce else None
+
+    def observe_usage_anchor(
+        self, scope: ProviderInputContinuityScope, *, epoch_nonce: str,
+        epoch_revision: int, reported_model_id: str | None,
+        anchor: ProviderInputUsageAnchor | None,
+    ) -> None:
+        self._require_scope(scope)
+        with self._lock:
+            slot = self._slots.get(scope)
+            if slot is None or slot.installed is None or slot.installed.view.epoch_nonce != epoch_nonce:
+                return
+            if epoch_revision > slot.installed.view.epoch_revision:
+                raise ProviderInputContinuityConflict("usage belongs to an uninstalled revision")
+            previous = slot.usage_anchor
+            if previous is not None and (
+                epoch_revision < previous.epoch_revision
+                or anchor is not None and len(anchor.materialization.ordered_input_items) < len(previous.materialization.ordered_input_items)
+            ):
+                return
+            if previous is not None and reported_model_id is not None and previous.reported_model_id is not None and reported_model_id != previous.reported_model_id:
+                slot.usage_anchor = None
+            if anchor is not None:
+                slot.usage_anchor = anchor
+
     def current_view(
         self, scope: ProviderInputContinuityScope
     ) -> FrozenProviderInputEpochView | None:
@@ -1669,6 +1704,7 @@ class HostProviderInputContinuityOwner:
                 raise ProviderInputContinuityConflict(
                     "terminal child continuity scope is absent"
                 )
+            slot.usage_anchor = None
             slot.installed = None
             slot.bootstrap_lease = None
             slot.empty_reservation = None
@@ -2118,6 +2154,7 @@ class HostProviderInputContinuityOwner:
                 raise ProviderInputContinuityConflict(
                     "no-continuation final publication is stale"
                 )
+            slot.usage_anchor = None
             slot.installed = None
             slot.empty_reservation = None
             slot.bootstrap_lease = AuthorizedEmptyBootstrapLease(
@@ -2141,6 +2178,7 @@ class HostProviderInputContinuityOwner:
         with self._lock:
             self._closed = True
             for slot in self._slots.values():
+                slot.usage_anchor = None
                 slot.installed = None
                 slot.bootstrap_lease = None
                 slot.empty_reservation = None

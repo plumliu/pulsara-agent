@@ -2002,66 +2002,47 @@ def test_effective_root_system_contains_collector_and_delegated_guidance(
     assert "Delegated work:" in compiled.system_prompt
 
 
-def test_round3_optional_clock_degrades_before_required_sources() -> None:
+def test_round3_optional_clock_advances_only_after_wire_render_feedback() -> None:
     sources = _sources(
         _candidate(ContextSourceKind.BASE_SYSTEM, ("BASE",)),
-        _candidate(
-            ContextSourceKind.RUNTIME_ENVIRONMENT,
-            ("runtime " * 20, "runtime"),
-        ),
+        _candidate(ContextSourceKind.RUNTIME_ENVIRONMENT, ("runtime " * 20, "runtime")),
         _candidate(ContextSourceKind.RUNTIME_CLOCK, ("clock " * 100, "clock")),
     )
-    snapshot = _snapshot(_user("hello"))
-    full_request = _prepared_request(snapshot, sources)
-    full = StructuredModelInputCompiler().compile(full_request)
-    constrained = _prepared_request(
-        snapshot, sources, budget=full.final_estimate.total_input_tokens - 1
-    )
-    compiled = StructuredModelInputCompiler().compile(constrained)
-    decisions = {item.source_kind: item for item in compiled.source_decisions}
-    assert decisions[ContextSourceKind.RUNTIME_CLOCK].selected_mode in {
-        ContextRenderMode.COMPACT,
-        None,
-    }
-    assert decisions[ContextSourceKind.RUNTIME_ENVIRONMENT].selected_mode is (
-        ContextRenderMode.FULL
-    )
+    compiler = StructuredModelInputCompiler()
+    request = _prepared_request(_snapshot(_user("hello")), sources, budget=4)
+    full = compiler.compile(request)
+    assert full.final_estimate.total_input_tokens > request.compile_binding.effective_input_budget_tokens
+    assert all(item.selected_mode is ContextRenderMode.FULL for item in full.source_decisions if item.included)
+    floors = compiler.next_wire_render_floors(request=request, compiled=full)
+    assert floors[0] == ((ContextSourceKind.RUNTIME_CLOCK, ContextRenderMode.COMPACT),)
+    selected = compiler.compile(request, source_render_floors=floors[0], tool_render_floors=floors[1], wire_selection=full)
+    decisions = {item.source_kind: item for item in selected.source_decisions}
+    assert decisions[ContextSourceKind.RUNTIME_CLOCK].selected_mode is ContextRenderMode.COMPACT
+    assert decisions[ContextSourceKind.RUNTIME_ENVIRONMENT].selected_mode is ContextRenderMode.FULL
 
 
-def test_round3_must_keep_source_never_omits_and_fails_before_provider() -> None:
-    request = _prepared_request(
-        _snapshot(),
-        _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("required " * 100,))),
-        budget=4,
-    )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        StructuredModelInputCompiler().compile(request)
-    assert (
-        failure.value.kind
-        is ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-    )
+def test_round3_must_keep_source_stays_complete_in_unadmitted_candidate() -> None:
+    request = _prepared_request(_snapshot(), _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("required " * 100,))), budget=4)
+    compiler = StructuredModelInputCompiler()
+    compiled = compiler.compile(request)
+    assert compiled.final_estimate.total_input_tokens > request.compile_binding.effective_input_budget_tokens
+    base = next(item for item in compiled.source_decisions if item.source_kind is ContextSourceKind.BASE_SYSTEM)
+    assert base.included and base.selected_mode is ContextRenderMode.FULL
+    with pytest.raises(ValueError, match="required source"):
+        compiler.compile(request, source_render_floors=((ContextSourceKind.BASE_SYSTEM, None),))
 
 
-def test_round3_active_skill_and_tool_schema_fail_with_closed_budget_kind() -> None:
+def test_round3_active_skill_and_tool_schema_are_preserved_before_wire_admission() -> None:
+    compiler = StructuredModelInputCompiler()
     active = _candidate(ContextSourceKind.ACTIVE_SKILL, ("active " * 100, ""))
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        StructuredModelInputCompiler().compile(
-            _prepared_request(_snapshot(), _sources(active), budget=4)
-        )
-    assert failure.value.kind is (
-        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-    )
-
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        StructuredModelInputCompiler().compile(
-            _prepared_request(
-                _snapshot(),
-                _sources(),
-                budget=4,
-                tool_names=("artifact_read",),
-            )
-        )
-    assert failure.value.kind is ModelInputCompileFailureKind.TOOL_SCHEMA_EXCEEDS_BUDGET
+    active_request = _prepared_request(_snapshot(), _sources(active), budget=4)
+    active_candidate = compiler.compile(active_request)
+    assert active_candidate.final_estimate.total_input_tokens > 4
+    assert next(item for item in active_candidate.source_decisions if item.source_kind is ContextSourceKind.ACTIVE_SKILL).selected_mode is ContextRenderMode.FULL
+    schema_request = _prepared_request(_snapshot(), _sources(), budget=4, tool_names=("artifact_read",))
+    schema_candidate = compiler.compile(schema_request)
+    assert schema_candidate.final_estimate.total_input_tokens > 4
+    assert schema_candidate.tools == schema_request.compile_binding.tool_surface.tool_specs
 
 
 def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
@@ -2470,31 +2451,19 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
     }
 
 
-def test_round3_prior_turn_tool_result_degrades_before_current_turn() -> None:
-    snapshot = _snapshot(
-        _tool_result("old " * 2_000, sequence=1, turn_id="turn:old"),
-        _tool_result("new " * 2_000, sequence=2, turn_id="turn:test"),
-    )
-    sources = _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("BASE",)))
-    full = StructuredModelInputCompiler().compile(
-        _prepared_request(snapshot, sources, tool_names=("artifact_read",))
-    )
-    compiled = StructuredModelInputCompiler().compile(
-        _prepared_request(
-            snapshot,
-            sources,
-            budget=full.final_estimate.total_input_tokens - 1,
-            tool_names=("artifact_read",),
-        )
-    )
-    assert compiled.tool_result_decisions[0].current_turn is False
-    assert compiled.tool_result_decisions[0].selected_mode is not (
-        ToolResultProviderRenderMode.FULL
-    )
-    assert compiled.tool_result_decisions[1].current_turn is True
-    assert compiled.tool_result_decisions[1].selected_mode is (
-        ToolResultProviderRenderMode.FULL
-    )
+def test_round3_wire_floor_degrades_prior_turn_result_before_current_turn() -> None:
+    snapshot = _snapshot(_tool_result("old " * 2_000, sequence=1, turn_id="turn:old"), _tool_result("new " * 2_000, sequence=2, turn_id="turn:test"))
+    request = _prepared_request(snapshot, _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("BASE",))), budget=4, tool_names=("artifact_read",))
+    compiler = StructuredModelInputCompiler()
+    full = compiler.compile(request)
+    assert all(item.selected_mode is ToolResultProviderRenderMode.FULL for item in full.tool_result_decisions)
+    floors = compiler.next_wire_render_floors(request=request, compiled=full)
+    assert floors[1][0][0] == full.tool_result_decisions[0].source_entry_fingerprint
+    selected = compiler.compile(request, source_render_floors=floors[0], tool_render_floors=floors[1], wire_selection=full)
+    assert selected.tool_result_decisions[0].current_turn is False
+    assert selected.tool_result_decisions[0].selected_mode is not ToolResultProviderRenderMode.FULL
+    assert selected.tool_result_decisions[1].current_turn is True
+    assert selected.tool_result_decisions[1].selected_mode is ToolResultProviderRenderMode.FULL
 
 
 def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> None:
@@ -2597,58 +2566,32 @@ def test_snapshot_display_expansion_participates_in_compiler_working_set() -> No
     assert failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
 
 
-def test_round3_nonprogress_variant_is_bounded_and_then_omitted() -> None:
-    clock = _candidate(ContextSourceKind.RUNTIME_CLOCK, ("aaaa", "bbbb"))
-    full_request = _prepared_request(_snapshot(), _sources(clock))
-    full = StructuredModelInputCompiler().compile(full_request)
-    compiled = StructuredModelInputCompiler().compile(
-        _prepared_request(
-            _snapshot(),
-            _sources(clock),
-            budget=full.final_estimate.total_input_tokens - 1,
-        )
-    )
-    decision = next(
-        item
-        for item in compiled.source_decisions
-        if item.source_kind is ContextSourceKind.RUNTIME_CLOCK
-    )
-    assert decision.included is False
-    assert ContextPublicDiagnosticCode.SOURCE_VARIANT_NON_PROGRESS in (
-        compiled.diagnostic_codes
-    )
+def test_round3_equal_cost_source_floors_progress_to_legal_omission() -> None:
+    request = _prepared_request(_snapshot(), _sources(_candidate(ContextSourceKind.RUNTIME_CLOCK, ("aaaa", "bbbb"))), budget=4)
+    compiler = StructuredModelInputCompiler()
+    full = compiler.compile(request)
+    floors = compiler.next_wire_render_floors(request=request, compiled=full)
+    assert floors[0] == ((ContextSourceKind.RUNTIME_CLOCK, ContextRenderMode.COMPACT),)
+    compact = compiler.compile(request, source_render_floors=floors[0], wire_selection=full)
+    second = compiler.next_wire_render_floors(request=request, compiled=compact, source_floors=floors[0])
+    assert second[0] == ((ContextSourceKind.RUNTIME_CLOCK, None),)
+    omitted = compiler.compile(request, source_render_floors=second[0], wire_selection=compact)
+    decision = next(item for item in omitted.source_decisions if item.source_kind is ContextSourceKind.RUNTIME_CLOCK)
+    assert not decision.included and decision.selected_mode is None
+    assert ContextPublicDiagnosticCode.SOURCE_OMITTED in omitted.diagnostic_codes
 
 
-def test_round3_catalog_walks_full_compact_reference_then_omitted() -> None:
-    catalog = _candidate(
-        ContextSourceKind.SKILL_CATALOG,
-        ("FULL " * 800, ""),
-    )
-
-    def compile_at(budget: int):
-        return StructuredModelInputCompiler().compile(
-            _prepared_request(
-                _snapshot(_user("hello")), _sources(catalog), budget=budget
-            )
-        )
-
-    full = compile_at(100_000)
-    decisions = []
-    current = full
-    for _ in range(2):
-        decision = next(
-            item
-            for item in current.source_decisions
-            if item.source_kind is ContextSourceKind.SKILL_CATALOG
-        )
-        decisions.append(decision.selected_mode)
-        if decision.selected_mode is None:
-            break
-        current = compile_at(current.final_estimate.total_input_tokens - 1)
-    assert decisions == [
-        ContextRenderMode.FULL,
-        ContextRenderMode.UNAVAILABLE_MINIMAL,
-    ]
+def test_round3_catalog_wire_floor_stops_at_unavailable_minimum() -> None:
+    request = _prepared_request(_snapshot(_user("hello")), _sources(_candidate(ContextSourceKind.SKILL_CATALOG, ("FULL " * 800, ""))), budget=4)
+    compiler = StructuredModelInputCompiler()
+    full = compiler.compile(request)
+    floors = compiler.next_wire_render_floors(request=request, compiled=full)
+    assert floors[0] == ((ContextSourceKind.SKILL_CATALOG, ContextRenderMode.UNAVAILABLE_MINIMAL),)
+    minimum = compiler.compile(request, source_render_floors=floors[0], wire_selection=full)
+    decision = next(item for item in minimum.source_decisions if item.source_kind is ContextSourceKind.SKILL_CATALOG)
+    assert decision.included and decision.selected_mode is ContextRenderMode.UNAVAILABLE_MINIMAL
+    with pytest.raises(ValueError, match="required source"):
+        compiler.compile(request, source_render_floors=((ContextSourceKind.SKILL_CATALOG, None),), wire_selection=minimum)
 
 
 def test_round3_aggregate_source_variant_exact_boundaries() -> None:
@@ -2869,14 +2812,9 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
         canonical_frontier=_append_frontier(request),
         dispatch_anchor=_append_anchor(request),
     )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        compiler.compile_installed_append(
-            request,
-            planning=planning,
-        )
-    assert failure.value.kind is (
-        ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET
-    )
+    candidate = compiler.compile_installed_append(request, planning=planning)
+    assert candidate.compiled_input.final_estimate.total_input_tokens > 800
+    assert candidate.compiled_input.messages[:len(installed.messages)] == installed.messages
 
     projection = compiler.project_installed_append(
         request,
@@ -2942,7 +2880,7 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
     assert prefix.source_through_sequence < source_view.exact_safe_canonical_head
 
 
-def test_round3_4096_tool_result_degradation_uses_bounded_heap_work() -> None:
+def test_round3_4096_tool_results_produce_complete_candidate_with_bounded_work() -> None:
     items = tuple(
         _tool_result("x" * 1_024, sequence=index + 1, turn_id="turn:old")
         for index in range(4_096)
@@ -2958,11 +2896,10 @@ def test_round3_4096_tool_result_degradation_uses_bounded_heap_work() -> None:
         request,
         compile_binding=replace(request.compile_binding, estimator=counting),
     )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        StructuredModelInputCompiler().compile(request)
-    assert failure.value.kind is (
-        ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
-    )
+    candidate = StructuredModelInputCompiler().compile(request)
+    assert len(candidate.tool_result_decisions) == 4_096
+    assert all(item.selected_mode is ToolResultProviderRenderMode.FULL for item in candidate.tool_result_decisions)
+    assert candidate.final_estimate.total_input_tokens > 128
     assert counting.full_calls <= 8
     assert counting.message_calls < 50_000
 
@@ -4199,7 +4136,7 @@ def _assert_replay_final_wire_projection(*, result, view, prepared_call) -> None
     assert quote.replay_wire_estimated_tokens == sum(
         item.replay_wire_estimated_tokens for item in plan.replacements
     )
-    assert quote.final_wire_estimated_input_tokens == (
+    assert quote.raw_final_wire_estimated_input_tokens == (
         quote.generic_wire_estimated_input_tokens
         - quote.replaced_generic_wire_estimated_tokens
         + quote.replay_wire_estimated_tokens

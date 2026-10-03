@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:98f1e5611aaa7cb0f5546899e96c2f749c9d36eb2b3be621ca52f6ee7e2b1c3f",
+  "observed_catalog_fingerprint": "sha256:dbdac7b06d782c45c95a9f2fb67a2d538e1f1079e4bb6f12890115d894bcfd50",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -16,6 +16,7 @@
     "sessions",
     "session_commands",
     "turns",
+    "provider_call_usage",
     "turn_context_binding_revisions",
     "context_snapshots",
     "imported_history_groups",

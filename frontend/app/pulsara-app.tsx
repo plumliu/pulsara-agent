@@ -1345,6 +1345,10 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
     else notify('分叉已创建，暂未连接', '可以从会话列表重新打开。', 'warning');
   };
 
+  const readContextUsage = useCallback((signal: AbortSignal) => (
+    adapter.contextUsage(activeSessionId, signal)
+  ), [adapter, activeSessionId]);
+
   const updateModelCallBinding = async (binding: ModelCallBindingPayload): Promise<void> => {
     const active = connectionRef.current;
     const sessionId = activeSessionIdRef.current;
@@ -2454,6 +2458,8 @@ export default function PulsaraApp({ adapter = defaultAdapter }: PulsaraAppProps
           runtimeError={runtimeError}
           modelConfigurations={bootstrap?.model_configurations ?? []}
           modelCallBinding={activeSession.modelCallBinding}
+          onReadContextUsage={readContextUsage}
+          contextUsageRevision={`${projection.hostSessionId ?? ''}:${projection.eventSequence}:${Boolean(projection.liveControl.compaction_in_progress)}:${JSON.stringify(bootstrap?.model_configurations)}`}
           interaction={projection.interaction}
           toolDecisionPending={toolDecisions.some(item => item.sessionId === connection?.sessionId
             && item.hostSessionId === projection.hostSessionId && item.interactionId === projection.interaction?.id

@@ -500,6 +500,22 @@ def _provider_candidate_meets_input_resource_headroom(
     )
 
 
+def _wire_budget_failure_kind(candidate: ProviderWireMeasurementCandidate) -> ModelInputCompileFailureKind:
+    """Explain an already over-budget wire quote without another admission gate."""
+    from pulsara_agent.llm.input import content_has_image
+    from pulsara_agent.primitives.tool_result_projection import ToolResultDeliveryRequirement
+    semantic = candidate.semantic_input
+    if any(item.delivery_requirement is ToolResultDeliveryRequirement.FULL_REQUIRED for item in semantic.tool_result_decisions):
+        return ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
+    if any(content_has_image(message.content) for message in semantic.messages):
+        return ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
+    protected = tuple(message for message, placement in zip(semantic.messages, semantic.message_placements, strict=True) if placement.origin_entry_id is not None)
+    diagnostic_estimate = candidate.compile_binding.estimator.estimate_frozen_input(system_prompt="", messages=protected, tools=semantic.tools)
+    if diagnostic_estimate.total_input_tokens > candidate.compile_binding.effective_input_budget_tokens:
+        return ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
+    return ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedWireMeasurementDecision:
     """Closed quote and, only after hard admission, its same-pass plan."""
@@ -513,7 +529,7 @@ class PreparedWireMeasurementDecision:
     def __post_init__(self) -> None:
         candidate = self.candidate
         admitted = (
-            self.quote.final_wire_estimated_input_tokens
+            self.quote.budget_input_tokens
             <= self.quote.effective_input_budget_tokens
             and self.quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
             and _provider_candidate_meets_input_resource_headroom(candidate)
@@ -1988,6 +2004,7 @@ class ProviderDispatchCoordinator:
         canonical_read_override: FrozenCanonicalProviderDispatchRead | None = None,
         expected_source_read: FrozenCanonicalProviderDispatchRead | None = None,
         destination_projection_source: bool = False,
+        read_only_context_preview: bool = False,
     ) -> PreparedCompactionSourceDispatch:
         result = await self.prepare(
             turn_id=turn_id,
@@ -2004,6 +2021,7 @@ class ProviderDispatchCoordinator:
             semantic_only=True,
             _compaction_source_projection=True,
             _destination_projection_source=destination_projection_source,
+            _read_only_context_preview=read_only_context_preview,
         )
         assert isinstance(result, PreparedCompactionSourceDispatch)
         return result
@@ -2179,8 +2197,8 @@ class ProviderDispatchCoordinator:
                 result.select_wire_candidate(wire.candidate)
                 if wire.wire_input_plan is None:
                     kind = (
-                        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-                        if wire.quote.final_wire_estimated_input_tokens
+                        _wire_budget_failure_kind(wire.candidate)
+                        if wire.quote.budget_input_tokens
                         > wire.quote.effective_input_budget_tokens
                         else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
                     )
@@ -2456,6 +2474,7 @@ class ProviderDispatchCoordinator:
         ) = None,
         _noninstallable_preparation: bool = False,
         _destination_projection_source: bool = False,
+        _read_only_context_preview: bool = False,
         _prospective_compaction_seed: (
             AdoptedCompactionContinuationSeed | CompactionDryProjectionSeed | None
         ) = None,
@@ -2474,6 +2493,8 @@ class ProviderDispatchCoordinator:
             raise ValueError(
                 "compaction source projection must be semantic and steer-free"
             )
+        if _read_only_context_preview and not _compaction_source_projection:
+            raise ValueError("context preview requires a non-executable projection")
         if _destination_projection_source and not _compaction_source_projection:
             raise ValueError(
                 "destination projection source requires compaction projection"
@@ -2550,7 +2571,7 @@ class ProviderDispatchCoordinator:
                 "compaction continuation must use its frozen candidate family"
             )
         prepare_surface = getattr(self._tools, "prepare_tool_surface_safe_point", None)
-        if prepare_surface is not None:
+        if prepare_surface is not None and not _read_only_context_preview:
             prepare_surface()
         freeze_operation = (
             self._safe_point.freeze_compaction_input
@@ -3125,7 +3146,7 @@ class ProviderDispatchCoordinator:
             # before the first provider dispatch.  The ordered steer prefix
             # below may only strengthen this base policy.
             steer_base_memory_use_policy = inherited_memory_use_policy
-            if self._memory_support.available:
+            if not _read_only_context_preview and self._memory_support.available:
                 base_activation_subject, base_activation_text = (
                     _activation_subject_for_anchor(base_input, base_anchor)
                 )
@@ -3387,13 +3408,7 @@ class ProviderDispatchCoordinator:
                         if item is not None
                     )
                     if (
-                        append.compiled_input.final_estimate.total_input_tokens
-                        + sum(
-                            item.invalidation_input_token_ceiling
-                            for item in reservations
-                        )
-                        > prepared_call.compile_binding.effective_input_budget_tokens
-                        or provider_input_logical_bytes(
+                        provider_input_logical_bytes(
                             system_prompt=append.compiled_input.system_prompt,
                             tools=append.compiled_input.tools,
                             messages=append.compiled_input.messages,
@@ -3557,8 +3572,16 @@ class ProviderDispatchCoordinator:
                     trial_wire = await self.measure_prepared_wire_candidate(
                         trial_candidate,
                         deadline=deadline,
+                        invalidation_input_token_ceiling=sum(
+                            item.invalidation_input_token_ceiling for item in reservations
+                        ),
                     )
-                    if trial_wire.wire_input_plan is None:
+                    if (
+                        trial_wire.wire_input_plan is None
+                        or trial_wire.quote.budget_input_tokens
+                        + sum(item.invalidation_input_token_ceiling for item in reservations)
+                        > trial_wire.quote.effective_input_budget_tokens
+                    ):
                         self._continuity.abort_planning(planning)
                         continue
                     selected_plan = trial_plan
@@ -3734,7 +3757,8 @@ class ProviderDispatchCoordinator:
             write_hint = False
             memory_use_policy = inherited_memory_use_policy
             if (
-                self._memory_support.available
+                not _read_only_context_preview
+                and self._memory_support.available
                 and activation_subject
                 is CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
             ):
@@ -3788,7 +3812,8 @@ class ProviderDispatchCoordinator:
                     ),
                 )
             elif (
-                self._memory_support.available
+                not _read_only_context_preview
+                and self._memory_support.available
                 and activation_subject is None
                 and scope.scope_kind is ModelInputScopeKind.ROOT
             ):
@@ -3916,9 +3941,17 @@ class ProviderDispatchCoordinator:
                     prepared_call=prepared_call,
                     native_projection_set=prepared_call.native_projection_set,
                 )
+                source_anchor = None
+                if (
+                    not _destination_projection_source
+                    and planning.predecessor_view is not None
+                    and not context_base_changed
+                ):
+                    source_anchor = self._continuity.current_usage_anchor(planning.scope)
                 wire_measurement = await self._freeze_candidate_wire_measurement(
                     wire_candidate,
                     deadline=deadline,
+                    usage_anchor=source_anchor,
                 )
                 try:
                     return PreparedCompactionSourceDispatch(
@@ -4118,10 +4151,11 @@ class ProviderDispatchCoordinator:
                 )
                 append = completion_wire.candidate.append_result
                 cold_semantic = completion_wire.candidate.cold_semantic
+                final_sources = completion_wire.candidate.sources
                 if completion_wire.wire_input_plan is None:
                     kind = (
-                        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-                        if completion_wire.quote.final_wire_estimated_input_tokens
+                        _wire_budget_failure_kind(completion_wire.candidate)
+                        if completion_wire.quote.budget_input_tokens
                         > completion_wire.quote.effective_input_budget_tokens
                         else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
                     )
@@ -4420,10 +4454,11 @@ class ProviderDispatchCoordinator:
         )
         append = wire_decision.candidate.append_result
         cold_semantic = wire_decision.candidate.cold_semantic
+        final_sources = wire_decision.candidate.sources
         if wire_decision.wire_input_plan is None:
             kind = (
-                ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-                if wire_decision.quote.final_wire_estimated_input_tokens
+                _wire_budget_failure_kind(wire_decision.candidate)
+                if wire_decision.quote.budget_input_tokens
                 > wire_decision.quote.effective_input_budget_tokens
                 else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
             )
@@ -5053,6 +5088,7 @@ class ProviderDispatchCoordinator:
         candidate: ProviderWireMeasurementCandidate,
         *,
         deadline: float,
+        usage_anchor=None,
     ) -> ProviderWireMeasurement:
         replay_target = self._model.replay_target_for_resolved_call(candidate.call)
         try:
@@ -5082,6 +5118,7 @@ class ProviderDispatchCoordinator:
             semantic_input=candidate.semantic_input,
             replay_hydration=replay_hydration,
             tool_choice=candidate.tool_choice,
+            usage_anchor=usage_anchor,
         )
 
     async def measure_prepared_wire_candidate(
@@ -5090,23 +5127,33 @@ class ProviderDispatchCoordinator:
         *,
         deadline: float,
         reusable_observation: HandleFreeProviderWireObservation | None = None,
+        invalidation_input_token_ceiling: int = 0,
     ) -> PreparedWireMeasurementDecision:
+        usage_anchor = None
+        if isinstance(candidate, PreparedProviderWireCandidate) and candidate.planning is not None:
+            usage_anchor = self._continuity.current_usage_anchor(candidate.planning.scope)
+            # Cold successors never borrow their predecessor's input calibration.
+            if candidate.cold_semantic is not None:
+                usage_anchor = None
         measurement = None
-        if reusable_observation is not None:
+        if reusable_observation is not None and usage_anchor is None:
             measurement = reusable_observation.take_for(candidate)
         if measurement is None:
             measurement = await self._freeze_candidate_wire_measurement(
                 candidate,
                 deadline=deadline,
+                usage_anchor=usage_anchor,
             )
             measurement = HandleFreeProviderWireObservation(
                 candidate=candidate,
                 measurement=measurement,
             ).take_for(candidate)
         try:
-            catalog_floors, tool_floors = (), ()
+            source_floors, tool_floors = (), ()
+            memory_fallbacks = None
+            fallback_basis = candidate
             while (
-                measurement.quote.final_wire_estimated_input_tokens
+                measurement.quote.budget_input_tokens + invalidation_input_token_ceiling
                 > measurement.quote.effective_input_budget_tokens
                 or measurement.quote.final_wire_utf8_bytes
                 > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
@@ -5124,24 +5171,70 @@ class ProviderDispatchCoordinator:
                     deadline_monotonic=deadline,
                     request=candidate.compile_request,
                     compiled=candidate.append_result.compiled_input,
-                    catalog_floors=catalog_floors,
+                    planning=(candidate.planning if candidate.cold_semantic is None else None),
+                    source_floors=source_floors,
                     tool_floors=tool_floors,
                 )
+                request = candidate.compile_request
+                wire_selection = candidate.append_result.compiled_input
                 if next_floors is None:
-                    break
+                    if memory_fallbacks is None:
+                        memory_fallbacks = iter(())
+                        if (
+                            isinstance(fallback_basis, PreparedProviderWireCandidate)
+                            and fallback_basis.planning is not None
+                            and fallback_basis.sources is not None
+                            and fallback_basis.append_result is not None
+                            and any(item.source_kind in {
+                                ContextSourceKind.MEMORY_RECALL,
+                                ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+                            } for item in fallback_basis.sources.candidates)
+                        ):
+                            memory_sources = {item.source_kind: item for item in (
+                                *fallback_basis.sources.candidates, *fallback_basis.sources.absent_facts
+                            )}
+                            preference = memory_sources.get(ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD)
+                            recall = memory_sources.get(ContextSourceKind.MEMORY_RECALL)
+                            if preference is not None and recall is not None:
+                                recall_reservation, preference_reservation = self._memory_support.planning_reservations(
+                                    planning=fallback_basis.planning,
+                                    prepared_preference=preference,
+                                    recall_desired=recall,
+                                    compiled=fallback_basis.append_result.compiled_input,
+                                    prepared_call=fallback_basis.prepared_call,
+                                )
+                                memory_fallbacks = iter(self._memory_support.optional_value_fallbacks(
+                                    sources=fallback_basis.sources,
+                                    preference_source=preference,
+                                    recall_reservation=recall_reservation,
+                                    preference_reservation=preference_reservation,
+                                ))
+                    fallback = next(memory_fallbacks, None)
+                    while fallback is not None and fallback == candidate.sources:
+                        fallback = next(memory_fallbacks, None)
+                    if fallback is None:
+                        break
+                    request = replace(request, sources=fallback)
+                    # The source collection changed. Preserve other sacrifices via
+                    # their floors, without reusing an incompatible wire selection.
+                    value_kinds = {item.source_kind for item in fallback.candidates}
+                    next_floors = (
+                        tuple((kind, mode) for kind, mode in source_floors if kind in value_kinds),
+                        tool_floors,
+                    )
+                    wire_selection = None
                 consumed, measurement = measurement, None
                 consumed.discard_materialization_to_quote()
                 _require_dispatch_planning_deadline(deadline)
-                request = candidate.compile_request
                 if candidate.cold_semantic is None:
                     append = await self._io.run(
                         self._compiler.compile_installed_append,
                         request,
                         planning=candidate.planning,
                         deadline_monotonic=deadline,
-                        catalog_render_floors=next_floors[0],
+                        source_render_floors=next_floors[0],
                         tool_render_floors=next_floors[1],
-                        wire_selection=candidate.append_result.compiled_input,
+                        wire_selection=wire_selection,
                     )
                     cold = None
                 else:
@@ -5152,25 +5245,27 @@ class ProviderDispatchCoordinator:
                         request,
                         planning=candidate.planning,
                         deadline_monotonic=deadline,
-                        catalog_render_floors=next_floors[0],
+                        source_render_floors=next_floors[0],
                         tool_render_floors=next_floors[1],
-                        wire_selection=candidate.append_result.compiled_input,
+                        wire_selection=wire_selection,
                     )
-                    cold = replace(candidate.cold_semantic, compiled_result=append)
+                    cold = replace(candidate.cold_semantic, compile_request=request, compiled_result=append)
                 candidate = replace(
                     candidate,
+                    compile_request=request,
+                    sources=request.sources,
                     semantic_input=append.compiled_input,
                     append_result=append,
                     cold_semantic=cold,
                 )
-                catalog_floors, tool_floors = next_floors
+                source_floors, tool_floors = next_floors
                 measurement = await self._freeze_candidate_wire_measurement(
-                    candidate, deadline=deadline
+                    candidate, deadline=deadline, usage_anchor=usage_anchor
                 )
             _require_dispatch_planning_deadline(deadline)
             quote = measurement.quote
             admitted = (
-                quote.final_wire_estimated_input_tokens
+                quote.budget_input_tokens
                 <= quote.effective_input_budget_tokens
                 and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
                 and _provider_candidate_meets_input_resource_headroom(candidate)
@@ -5263,8 +5358,8 @@ class ProviderDispatchCoordinator:
         direct_switch_admission = direct_switch_admission or owned_direct_admission
         if decision.wire_input_plan is None:
             kind = (
-                ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-                if decision.quote.final_wire_estimated_input_tokens
+                _wire_budget_failure_kind(decision.candidate)
+                if decision.quote.budget_input_tokens
                 > decision.quote.effective_input_budget_tokens
                 else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
             )

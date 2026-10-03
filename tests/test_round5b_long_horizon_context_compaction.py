@@ -186,7 +186,8 @@ def _wire_quote(
         generic_wire_visual_image_tokens=0,
         replaced_generic_wire_estimated_tokens=0,
         replay_wire_estimated_tokens=0,
-        final_wire_estimated_input_tokens=final_tokens,
+        raw_final_wire_estimated_input_tokens=final_tokens,
+        budget_input_tokens=final_tokens,
         final_wire_visual_image_tokens=0,
         final_wire_utf8_bytes=wire_bytes or max(1, final_tokens * 2),
     )
@@ -1173,7 +1174,7 @@ def test_round5b_trigger_uses_exact_prepared_target_budget_without_262k_cap() ->
             effective_input_budget_tokens=400_000,
         ),
         provider_wire_quote=SimpleNamespace(
-            final_wire_estimated_input_tokens=250_000,
+            budget_input_tokens=250_000,
         ),
         physical_working_set=SimpleNamespace(
             selected_item_count=1,
@@ -1493,7 +1494,7 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
         policy=ResolvedCompactionPolicy(auto_trigger_ratio=0.85),
         phase="PRE_FULL",
     )
-    assert transition.successor_quote.final_wire_estimated_input_tokens == 849
+    assert transition.successor_quote.raw_final_wire_estimated_input_tokens == 849
     assert transition.reclaim_tokens == 0
 
     source_semantic.system_prompt = "drifted source system"
@@ -2682,7 +2683,7 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert "canonical_image_refs" in CONVERSATION_KERNEL_RELATIONS
     assert not {
         "durable_jobs",

@@ -77,6 +77,10 @@ As agents work through successive steps in the same context, system instructions
 
 That continuity gives [provider prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) a stable foundation for repeated hits. Cached prefixes can reduce input-processing cost and speed up response starts. The more steps share a growing history, the more previously processed context remains available for reuse.
 
+Input budgets use the latest compatible provider-reported input count plus an estimate of the appended request content. Missing usage keeps the previous compatible anchor; without an anchor, the existing heuristic applies. Response usage remains queryable after reopening a conversation, while a fresh context starts with a fresh estimate. See the [usage and input-budget contract](PULSARA_PROVIDER_USAGE_ANCHORED_INPUT_BUDGET_HARD_CUT_IMPLEMENTATION_SPEC.zh.md).
+
+The ring beside the model selector shows estimated context use; hover to inspect the count and available input budget. Switching models recalculates the estimate. At the compaction threshold, the ring turns red. Unsent content is excluded. See the [context indicator contract](PULSARA_CONTEXT_USAGE_INDICATOR_IMPLEMENTATION_SPEC.zh.md).
+
 ## Knowledge that carries forward
 
 Start the next assignment with your preferences, project decisions, and recurring constraints already available.

@@ -104,6 +104,11 @@ from ._repository.tools import _ToolOperations
 from ._repository.fork import _ForkOperations
 from ._repository.deletion import _SessionDeletionOperations
 from ._repository.archive import _SessionArchiveOperations
+from ._repository.provider_usage import (
+    ProviderCallUsageObservation,
+    ProviderCallUsageWriteDisposition,
+)
+from ._repository.provider_usage_storage import _ProviderUsageOperations
 
 
 class ConversationKernelRepository(
@@ -119,6 +124,7 @@ class ConversationKernelRepository(
     _SubagentOperations,
     _SubagentCompletionOperations,
     _MemoryOperations,
+    _ProviderUsageOperations,
     _RepositoryKernel,
 ):
     """Single storage owner for canonical conversation-kernel facts."""
@@ -126,6 +132,8 @@ class ConversationKernelRepository(
 
 _FACADE_OWNED_SYMBOLS = (
     "AcceptedCapabilityDecision",
+    "ProviderCallUsageObservation",
+    "ProviderCallUsageWriteDisposition",
     "AcceptedEntry",
     "AcceptedSubagentCompletion",
     "AcceptedInteractionDecision",
@@ -177,6 +185,8 @@ del _symbol, _symbol_name
 
 __all__ = [
     "AcceptedCapabilityDecision",
+    "ProviderCallUsageObservation",
+    "ProviderCallUsageWriteDisposition",
     "AcceptedEntry",
     "AcceptedInteractionDecision",
     "AcceptedSubagentCompletion",

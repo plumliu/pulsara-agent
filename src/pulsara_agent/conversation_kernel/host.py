@@ -98,6 +98,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
+    ProcessLocalProviderInputInstallPermit,
     HostProviderInputContinuityOwner,
     _issue_root_bootstrap_lease_source,
 )
@@ -127,7 +128,10 @@ from pulsara_agent.conversation_kernel.memory.embedding_maintainer import (
     MemoryEmbeddingMaintainer,
 )
 from pulsara_agent.memory.scope import freeze_memory_read_context_binding
-from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
+from pulsara_agent.conversation_kernel.query import (
+    CanonicalConversationQuery,
+    CanonicalProviderCallUsagePage,
+)
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedPlanResolution,
     AcceptedPlanToolBatch,
@@ -237,6 +241,7 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.llm.runtime import ModelRuntime, ModelRuntimeUnavailable
+from pulsara_agent.llm.normalized_transport import ProviderNormalizedTerminalKind
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.contracts import (
     ModelInputCompileFailureKind,
@@ -1513,6 +1518,133 @@ class KernelHostSession:
             binding=accepted,
             deadline_monotonic=self._canonical_deadline(),
         )
+
+    async def read_context_usage(self) -> dict[str, object]:
+        """Advisory ROOT input preview; never installs or opens a provider call.
+
+        Reuse the normal wire projection for idle history, including assistant
+        replay. During execution only inspect the installed request. New-turn
+        memory/hook sources and the unsent draft are not part of this preview.
+        """
+        from pulsara_agent.conversation_kernel.direct_model import (
+            KernelModelTargetPreparationRequest,
+        )
+        from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
+        from pulsara_agent.primitives.model_call import ModelCallPurpose
+
+        async with self._lock:
+            self._require_open()
+            binding = await self.model_call_binding()
+            if binding is None:
+                return {"state": "unavailable", "connection_id": None}
+            scope = ProviderInputContinuityScope(
+                self.session_id, ModelInputScopeKind.ROOT, None
+            )
+            cohort = self._input_continuity.current_cohort(scope)
+            turn_id = self._active_turn_id
+            compacting = self._compaction.is_fenced(
+                scope_kind=ModelInputScopeKind.ROOT,
+                scope_subagent_task_id=None,
+            )
+            busy = self._active_task is not None or compacting
+            if not busy:
+                turn_id = await self._io.run(
+                    self.repository.read_latest_terminal_scope_turn_id,
+                    self._lease.guard,
+                    scope_kind=ConversationScopeKind.ROOT,
+                    scope_subagent_task_id=None,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+            target = self._model.prepare_target(
+                KernelModelTargetPreparationRequest(
+                    session_id=self.session_id,
+                    turn_id=turn_id or "context-preview:empty",
+                    model_call_index=1,
+                    purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+                    maximum_input_tokens=self._runner._provider_dispatch._maximum_input_tokens_per_call,
+                    binding=binding,
+                )
+            )
+            target_fact = target.epoch_call_target.target_bundle.target_fact
+            switched = (
+                cohort is not None
+                and cohort.target_bundle != target.epoch_call_target.target_bundle
+            )
+            policy = self._compaction.policy
+            automatic = policy.enabled and (
+                switched
+                or (
+                    policy.automatic_enabled
+                    and self._compaction.automatic_allowed(
+                        scope_kind=ModelInputScopeKind.ROOT,
+                        scope_subagent_task_id=None,
+                    )
+                )
+            )
+            payload: dict[str, object] = {
+                "state": "compacting" if compacting else "updating" if busy else "empty",
+                "connection_id": binding.connection_id.value,
+                "model_id": target_fact.model_id,
+                "input_tokens": None,
+                "input_budget_tokens": target_fact.context_budget.input_budget_tokens,
+                "budget_source": None,
+                "model_switch_pending": switched,
+                "automatic_compaction_available": automatic,
+                "compaction_expected": False,
+                "compaction_trigger_tokens": int(
+                    target_fact.context_budget.input_budget_tokens
+                    * policy.auto_trigger_ratio
+                ),
+            }
+            if busy:
+                if cohort is None or switched or compacting:
+                    return payload
+                plan = cohort.view.wire_input_plan
+                quote = plan.quote
+                tokens, source = quote.budget_input_tokens, quote.budget_source
+                anchor = self._input_continuity.current_usage_anchor(scope)
+                if anchor is not None:
+                    calibrated = anchor.budget_for(
+                        connection_id=binding.connection_id.value,
+                        target=target_fact,
+                        route_wire_profile_fingerprint=plan.route_wire_profile_fingerprint,
+                        materialization=plan.materialization,
+                        raw_input_tokens=quote.raw_final_wire_estimated_input_tokens,
+                    )
+                    if calibrated is not None:
+                        tokens, source = calibrated[0], "reported_input_anchor"
+                payload.update(state="ready", input_tokens=tokens, budget_source=source)
+            elif turn_id is not None:
+                projection = (
+                    await self._runner._provider_dispatch.prepare_compaction_source(
+                        turn_id=turn_id,
+                        model_call_index=1,
+                        inherited_memory_use_policy=self._runner._root_memory_use_policy,
+                        deadline=self._canonical_deadline(),
+                        allow_terminal_compaction=True,
+                        prepared_target_override=target,
+                        destination_projection_source=(switched or cohort is None),
+                        read_only_context_preview=True,
+                    )
+                )
+                try:
+                    quote = projection.wire_quote
+                    payload.update(
+                        state="ready",
+                        input_tokens=quote.budget_input_tokens,
+                        input_budget_tokens=quote.effective_input_budget_tokens,
+                        budget_source=quote.budget_source,
+                        compaction_trigger_tokens=int(
+                            quote.effective_input_budget_tokens * policy.auto_trigger_ratio
+                        ),
+                    )
+                finally:
+                    projection.close()
+            tokens = payload["input_tokens"]
+            payload["compaction_expected"] = (
+                tokens is not None and tokens >= payload["compaction_trigger_tokens"]
+            )
+            return payload
 
     def _model_identity(self, binding: ModelCallBinding) -> str:
         return self._model_runtime.connection(binding).target.model_id
@@ -6963,12 +7095,67 @@ class KernelHostSession:
             hook_scope=hook_scope,
         )
 
-    def _observe_provider_usage(
+    async def _observe_provider_usage(
         self,
         request: KernelModelExecutionRequest,
         report: TransportUsageReport,
+        permit: ProcessLocalProviderInputInstallPermit,
+        terminal_kind: ProviderNormalizedTerminalKind | None,
+        anchor_allowed: bool,
     ) -> None:
+        from pulsara_agent.llm.request import ProviderInputUsageAnchor
+        from pulsara_agent.conversation_kernel.repository import ProviderCallUsageObservation, ProviderCallUsageWriteDisposition
         usage = report.usage
+        call = request.prepared_call.call
+        plan = request.wire_input_plan
+        diagnostic_codes = tuple(item.code for item in report.provider_diagnostics)
+        if terminal_kind is None:
+            diagnostic_codes += ("provider_terminal_not_observed",)
+        if usage is not None and usage.input_tokens == 0:
+            diagnostic_codes += ("provider_input_zero_nonempty",)
+        anchor = None
+        if anchor_allowed and usage is not None and usage.input_tokens is not None and usage.input_tokens > 0:
+            anchor = ProviderInputUsageAnchor(
+                model_call_id=call.resolved_model_call_id,
+                epoch_nonce=permit.epoch_nonce, epoch_revision=permit.epoch_revision,
+                connection_id=call.binding.connection_id.value, target=call.target.fact,
+                route_wire_profile_fingerprint=plan.route_wire_profile_fingerprint,
+                reported_model_id=report.reported_model_id,
+                reported_input_tokens=usage.input_tokens,
+                raw_input_tokens=plan.quote.raw_final_wire_estimated_input_tokens,
+                materialization=plan.materialization,
+            )
+        self._input_continuity.observe_usage_anchor(
+            permit.scope, epoch_nonce=permit.epoch_nonce, epoch_revision=permit.epoch_revision,
+            reported_model_id=report.reported_model_id, anchor=anchor,
+        )
+        observation = ProviderCallUsageObservation(
+            session_id=request.session_id, turn_id=request.turn_id,
+            resolved_model_call_id=call.resolved_model_call_id,
+            model_call_index=request.model_call_index,
+            connection_id=call.binding.connection_id.value, route_id=call.target.fact.route_id,
+            wire_api=plan.wire_api, requested_model_id=call.target.fact.model_id,
+            reported_model_id=report.reported_model_id,
+            normalized_terminal_kind=None if terminal_kind is None else terminal_kind.value,
+            usage_status=report.usage_status,
+            input_tokens=None if usage is None else usage.input_tokens,
+            output_tokens=None if usage is None else usage.output_tokens,
+            cached_input_tokens=None if usage is None else usage.cached_input_tokens,
+            reasoning_output_tokens=None if usage is None else usage.reasoning_output_tokens,
+            reported_total_tokens=None if usage is None else usage.reported_total_tokens,
+            diagnostic_codes=diagnostic_codes,
+        )
+        try:
+            disposition = await self._io.run(
+                self.repository.record_provider_call_usage, observation,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            if disposition is ProviderCallUsageWriteDisposition.CONFLICT:
+                diagnostic_codes += ("provider_usage_storage_conflict",)
+                logging.getLogger(__name__).warning("provider_usage_storage_conflict")
+        except Exception:
+            diagnostic_codes += ("provider_usage_storage_failed",)
+            logging.getLogger(__name__).warning("provider_usage_storage_failed")
         self.extensions.offer_operational_nowait(
             OperationalHookOffer(
                 event_type=OperationalHookType.PROVIDER_USAGE_OBSERVED,
@@ -6986,11 +7173,10 @@ class KernelHostSession:
                     "reasoning_output_tokens": (
                         None if usage is None else usage.reasoning_output_tokens
                     ),
-                    "total_tokens": None if usage is None else usage.total_tokens,
+                    "reported_total_tokens": None if usage is None else usage.reported_total_tokens,
+                    "computed_total_tokens": None if usage is None else usage.computed_total_tokens,
                     "reported_model_id": report.reported_model_id,
-                    "diagnostic_codes": tuple(
-                        item.code for item in report.provider_diagnostics
-                    ),
+                    "diagnostic_codes": diagnostic_codes,
                 },
             )
         )
@@ -7932,6 +8118,36 @@ class KernelHostCore:
             self._canonical_deadline(),
         )
         return None if row is None else _kernel_session_summary(row)
+
+    async def read_provider_call_usage_page(
+        self,
+        *,
+        session_id: str,
+        conversation_scope_kind: str | None = None,
+        scope_subagent_task_id: str | None = None,
+        after_observed_at: datetime | None = None,
+        after_resolved_model_call_id: str | None = None,
+        maximum_rows: int = 256,
+    ) -> CanonicalProviderCallUsagePage:
+        """Cold-read one keyset page of persisted provider usage observations."""
+
+        if not session_id:
+            raise ValueError("session_id is required")
+        repository = await self._ensure_resources()
+        query = CanonicalConversationQuery(
+            repository.connection_provider,
+            watchdog_policy=self._deadlines.policy,
+        )
+        return await asyncio.to_thread(
+            query.page_provider_call_usage,
+            session_id=session_id,
+            conversation_scope_kind=conversation_scope_kind,
+            scope_subagent_task_id=scope_subagent_task_id,
+            after_observed_at=after_observed_at,
+            after_resolved_model_call_id=after_resolved_model_call_id,
+            maximum_rows=maximum_rows,
+            deadline_monotonic=self._canonical_deadline(),
+        )
 
     async def read_subagent_task_page(
         self,

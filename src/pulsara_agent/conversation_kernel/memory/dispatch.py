@@ -514,7 +514,31 @@ class MemoryDispatchSupport:
         except StructuredModelInputCompileError as exc:
             if exc.kind not in budget_failures:
                 raise
+            last_error = exc
 
+        for fallback in self.optional_value_fallbacks(
+            sources=sources,
+            preference_source=preference_source,
+            recall_reservation=recall_reservation,
+            preference_reservation=preference_reservation,
+        ):
+            try:
+                return await compile_one(fallback), fallback
+            except StructuredModelInputCompileError as exc:
+                if exc.kind not in budget_failures:
+                    raise
+                last_error = exc
+        raise last_error
+
+    @staticmethod
+    def optional_value_fallbacks(
+        *,
+        sources: CollectedContextSources,
+        preference_source: ContextSourceCandidate | ContextSourceAbsentFact | None,
+        recall_reservation: MemorySourceInvalidationReservation | None,
+        preference_reservation: MemorySourceInvalidationReservation | None,
+    ) -> tuple[CollectedContextSources, CollectedContextSources]:
+        """Reuse the reserved stale-state carriers, recall before preference."""
         def fallback_source(
             kind: ContextSourceKind,
             reservation: MemorySourceInvalidationReservation | None,
@@ -545,32 +569,26 @@ class MemoryDispatchSupport:
             ),
             None,
         )
-        without_recall = replace_memory_context_sources(
-            sources,
-            (
-                fallback_source(
+        without_recall = sources
+        if isinstance(recall_desired, ContextSourceCandidate):
+            without_recall = replace_memory_context_sources(
+                sources,
+                (fallback_source(
                     ContextSourceKind.MEMORY_RECALL,
                     recall_reservation,
                     recall_desired,
-                ),
-            ),
-        )
-        try:
-            return await compile_one(without_recall), without_recall
-        except StructuredModelInputCompileError as exc:
-            if exc.kind not in budget_failures:
-                raise
-
-        without_optional_values = replace_memory_context_sources(
-            without_recall,
-            (
-                fallback_source(
+                ),),
+            )
+        without_optional_values = without_recall
+        if isinstance(preference_source, ContextSourceCandidate):
+            without_optional_values = replace_memory_context_sources(
+                without_recall,
+                (fallback_source(
                     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
                     preference_reservation,
                     preference_source,
-                ),
-            ),
-        )
-        return await compile_one(without_optional_values), without_optional_values
+                ),),
+            )
+        return without_recall, without_optional_values
 
 __all__ = ["MemoryContextProjectionPort", "MemoryDispatchSupport"]

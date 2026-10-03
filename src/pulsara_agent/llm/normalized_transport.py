@@ -72,6 +72,11 @@ class NormalizedProviderTransportExecution:
         self._physical_completed = False
         self._physical_blocked = False
 
+    @property
+    def observed_usage(self) -> TransportUsageReport | None:
+        """Current logical response observation, also inspectable after cancellation."""
+        return self._usage
+
     async def read_next(self) -> ProviderStreamPayload | ProviderStreamTerminal | None:
         if self._terminal_delivered:
             return None

@@ -1539,7 +1539,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
             assert result.final_text == f"RESUME_HISTORY_{index}"
         prior = model.requests[-1]
         prior_tokens = (
-            prior.wire_input_plan.quote.final_wire_estimated_input_tokens
+            prior.wire_input_plan.quote.raw_final_wire_estimated_input_tokens
         )
         budget = prior.prepared_call.compile_binding.effective_input_budget_tokens
         prior_ratio = prior_tokens / budget

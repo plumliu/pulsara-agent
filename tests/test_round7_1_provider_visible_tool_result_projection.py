@@ -330,13 +330,12 @@ def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result(
     full = StructuredModelInputCompiler().compile(
         _prepared_request(snapshot, _sources())
     )
-    constrained = StructuredModelInputCompiler().compile(
-        _prepared_request(
-            snapshot,
-            _sources(),
-            budget=full.final_estimate.total_input_tokens - 1,
-        )
-    )
+    request = _prepared_request(snapshot, _sources(), budget=full.final_estimate.total_input_tokens - 1)
+    compiler = StructuredModelInputCompiler()
+    initial = compiler.compile(request)
+    assert all(item.selected_mode is ToolResultProviderRenderMode.FULL for item in initial.tool_result_decisions)
+    floors = compiler.next_wire_render_floors(request=request, compiled=initial)
+    constrained = compiler.compile(request, source_render_floors=floors[0], tool_render_floors=floors[1], wire_selection=initial)
     decisions = constrained.tool_result_decisions
     assert decisions[0].delivery_requirement is (
         ToolResultDeliveryRequirement.FULL_REQUIRED
@@ -385,17 +384,14 @@ def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(
         inlineable,
         tool_result_delivery=full_required_tool_result_delivery(reason),
     )
-    with pytest.raises(StructuredModelInputCompileError) as aggregate:
-        StructuredModelInputCompiler().compile(
-            _prepared_request(
-                _snapshot(_user("question"), inlineable),
-                _sources(),
-                budget=100,
-            )
-        )
-    assert aggregate.value.kind is (
-        ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
-    )
+    request = _prepared_request(_snapshot(_user("question"), inlineable), _sources(), budget=100)
+    candidate = StructuredModelInputCompiler().compile(request)
+    assert candidate.final_estimate.total_input_tokens > 100
+    decision = candidate.tool_result_decisions[0]
+    assert decision.delivery_requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
+    assert decision.selected_mode is ToolResultProviderRenderMode.FULL
+    # Final-wire rejection is covered by the real dispatch/runner integration;
+    # the semantic compiler must preserve this required body until that boundary.
 
 
 def test_round7_1_full_delivery_classifier_is_request_and_result_derived() -> None:
@@ -497,7 +493,7 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(LIVE_EVENT_TYPES) == 24
     assert len(SUBJECT_SLOTS) == 11
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 28
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT.endswith(".v3")
 
     production = ROOT / "src/pulsara_agent"

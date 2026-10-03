@@ -1972,6 +1972,25 @@ class LocalSessionController:
             raise KeyError(host_session_id)
         return handle.session
 
+    async def read_context_usage(self, session_id: str) -> dict[str, object]:
+        # This advisory GET must not own session activation or join a lifecycle
+        # operation. Opening the conversation owns hooks, MCP and Host startup.
+        async with self._lock:
+            if self._closing:
+                return {"state": "unavailable", "connection_id": None}
+            if session_id in self._operations:
+                return {"state": "updating", "connection_id": None}
+            handle = self._by_session.get(session_id)
+            if handle is None:
+                return {"state": "unavailable", "connection_id": None}
+        value = await handle.session.read_context_usage()
+        async with self._lock:
+            if self._closing or self._by_session.get(session_id) is not handle:
+                return {"state": "unavailable", "connection_id": None}
+            if session_id in self._operations:
+                return {"state": "updating", "connection_id": None}
+        return value
+
     async def update_model_call_binding(
         self, session_id: str, binding: ModelCallBinding
     ) -> dict[str, object]:

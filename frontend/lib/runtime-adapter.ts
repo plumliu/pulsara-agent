@@ -79,6 +79,20 @@ export interface ModelCallBindingPayload {
   reasoning: ReasoningSelectionPayload | null;
 }
 
+/** Disposable preview of the selected next-turn model, not admission authority. */
+export interface ContextUsagePreview {
+  state: 'ready' | 'empty' | 'updating' | 'compacting' | 'unavailable';
+  connection_id: string | null;
+  model_id?: string;
+  input_tokens?: number | null;
+  input_budget_tokens?: number;
+  budget_source?: 'heuristic' | 'reported_input_anchor' | null;
+  model_switch_pending?: boolean;
+  automatic_compaction_available?: boolean;
+  compaction_expected?: boolean;
+  compaction_trigger_tokens?: number;
+}
+
 export interface ModelCallBindingUpdate {
   modelCallBinding: ModelCallBindingPayload;
   reasoningPreferenceReset: boolean;
@@ -506,6 +520,7 @@ export interface RuntimeAdapter {
   resetPostgres(target: NonNullable<LocalSettingsSummary['postgres']>): Promise<{ database_name: string; restart_required: boolean }>;
   putDashScopeCredential(kind: 'embedding' | 'rerank', apiKey: string): Promise<boolean>;
   deleteDashScopeCredential(kind: 'embedding' | 'rerank'): Promise<boolean>;
+  contextUsage(sessionId: string, signal?: AbortSignal): Promise<ContextUsagePreview>;
   updateModelCallBinding(sessionId: string, binding: ModelCallBindingPayload): Promise<ModelCallBindingUpdate>;
   reopenRuntime(sessionId: string): Promise<{
     status: 'reopened' | 'deferred';
@@ -1384,6 +1399,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       { method: 'DELETE' },
     );
     return value.configured;
+  }
+
+  async contextUsage(sessionId: string, signal?: AbortSignal): Promise<ContextUsagePreview> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/context-usage`, { signal });
   }
 
   async updateModelCallBinding(

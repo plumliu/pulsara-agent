@@ -301,6 +301,72 @@ CREATE TABLE pulsara_v3.turns (
         conversation_scope_kind = 'ROOT'
     )
 );
+
+CREATE TABLE pulsara_v3.provider_call_usage (
+    resolved_model_call_id text PRIMARY KEY CHECK (
+        resolved_model_call_id ~ '^model_call:[0-9a-f]{32}$'
+    ),
+    session_id text NOT NULL,
+    turn_id text NOT NULL,
+    model_call_index integer NOT NULL CHECK (model_call_index >= 0),
+    connection_id text NOT NULL,
+    route_id text NOT NULL,
+    wire_api text NOT NULL CHECK (
+        wire_api IN ('openai_chat_completions', 'openai_responses')
+    ),
+    requested_model_id text NOT NULL,
+    reported_model_id text,
+    observed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    normalized_terminal_kind text CHECK (
+        normalized_terminal_kind IS NULL OR normalized_terminal_kind IN (
+            'COMPLETED', 'OUTPUT_INCOMPLETE', 'PROVIDER_ERROR'
+        )
+    ),
+    usage_status text NOT NULL CHECK (
+        usage_status IN ('reported', 'partial', 'missing', 'invalid')
+    ),
+    input_tokens bigint CHECK (input_tokens IS NULL OR input_tokens >= 0),
+    output_tokens bigint CHECK (output_tokens IS NULL OR output_tokens >= 0),
+    cached_input_tokens bigint CHECK (
+        cached_input_tokens IS NULL OR cached_input_tokens >= 0
+    ),
+    reasoning_output_tokens bigint CHECK (
+        reasoning_output_tokens IS NULL OR reasoning_output_tokens >= 0
+    ),
+    reported_total_tokens bigint CHECK (
+        reported_total_tokens IS NULL OR reported_total_tokens >= 0
+    ),
+    diagnostic_codes text[] NOT NULL DEFAULT '{}'::text[],
+    FOREIGN KEY (session_id, turn_id)
+        REFERENCES pulsara_v3.turns (session_id, id) ON DELETE CASCADE,
+    CHECK (
+        cached_input_tokens IS NULL OR input_tokens IS NULL
+        OR cached_input_tokens <= input_tokens
+    ),
+    CHECK (
+        reasoning_output_tokens IS NULL OR output_tokens IS NULL
+        OR reasoning_output_tokens <= output_tokens
+    ),
+    CHECK (
+        (usage_status = 'reported'
+            AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL) OR
+        (usage_status = 'partial'
+            AND NOT (input_tokens IS NOT NULL AND output_tokens IS NOT NULL)
+            AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL
+                OR cached_input_tokens IS NOT NULL
+                OR reasoning_output_tokens IS NOT NULL
+                OR reported_total_tokens IS NOT NULL)) OR
+        (usage_status IN ('missing', 'invalid')
+            AND input_tokens IS NULL AND output_tokens IS NULL
+            AND cached_input_tokens IS NULL AND reasoning_output_tokens IS NULL
+            AND reported_total_tokens IS NULL)
+    )
+);
+CREATE INDEX ix_pulsara_v3_provider_call_usage_session_observed
+    ON pulsara_v3.provider_call_usage (
+        session_id, observed_at, resolved_model_call_id
+    );
+
 CREATE UNIQUE INDEX uq_pulsara_v3_running_root_turn
     ON pulsara_v3.turns (session_id) WHERE status = 'RUNNING' AND conversation_scope_kind = 'ROOT';
 CREATE UNIQUE INDEX uq_pulsara_v3_running_task_turn

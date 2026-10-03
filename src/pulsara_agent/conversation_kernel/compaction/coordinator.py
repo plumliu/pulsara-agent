@@ -354,7 +354,7 @@ def validate_compaction_wire_transition(
         )
     if successor_wire.wire_input_plan is None:
         if (
-            successor_quote.final_wire_estimated_input_tokens
+            successor_quote.budget_input_tokens
             > successor_quote.effective_input_budget_tokens
         ):
             raise CompactionPlanningError(
@@ -372,8 +372,8 @@ def validate_compaction_wire_transition(
             "compaction successor does not shrink exact final-wire bytes"
         )
     reclaim = validate_compaction_reclaim(
-        source_tokens=source_quote.final_wire_estimated_input_tokens,
-        successor_tokens=successor_quote.final_wire_estimated_input_tokens,
+        source_tokens=source_quote.budget_input_tokens,
+        successor_tokens=successor_quote.budget_input_tokens,
         hard_input_budget_tokens=successor_quote.effective_input_budget_tokens,
         policy=policy,
         force=force,
@@ -475,7 +475,7 @@ def validate_model_switch_wire_transition(
     trigger = int(quote.effective_input_budget_tokens * policy.auto_trigger_ratio)
     if (
         successor_wire.wire_input_plan is None
-        or quote.final_wire_estimated_input_tokens >= trigger
+        or quote.budget_input_tokens >= trigger
         or quote.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
     ):
         raise CompactionReclaimUnavailable(
@@ -1109,7 +1109,7 @@ class CompactionCoordinator:
         admission = prepared.admission
         compiled = prepared.append_result.compiled_input
         quote = admission.wire_quote
-        if quote.final_wire_estimated_input_tokens >= int(
+        if quote.budget_input_tokens >= int(
             quote.effective_input_budget_tokens
             * self._compaction_owner.policy.auto_trigger_ratio
         ):
@@ -1692,7 +1692,7 @@ class CompactionCoordinator:
                     * owner.policy.auto_trigger_ratio
                 )
                 if (
-                    quote.final_wire_estimated_input_tokens < destination_trigger
+                    quote.budget_input_tokens < destination_trigger
                     and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
                 ):
                     wire_candidate = dispatch.wire_candidate
@@ -2010,7 +2010,7 @@ class CompactionCoordinator:
         compiled = dispatch.append_result.compiled_input
         quote = decision.quote
         budget = quote.effective_input_budget_tokens
-        if quote.final_wire_estimated_input_tokens >= int(
+        if quote.budget_input_tokens >= int(
             budget * owner.policy.auto_trigger_ratio
         ):
             return True
@@ -2297,7 +2297,7 @@ class CompactionCoordinator:
             semantic, decision = await measure(projection)
             if (
                 decision.wire_input_plan is not None
-                and decision.quote.final_wire_estimated_input_tokens < trigger_tokens
+                and decision.quote.budget_input_tokens < trigger_tokens
             ):
                 selected_projection = projection
                 selected_semantic = semantic
@@ -2332,15 +2332,15 @@ class CompactionCoordinator:
                 semantic, decision = await measure(projection)
                 if (
                     decision.wire_input_plan is None
-                    or decision.quote.final_wire_estimated_input_tokens
+                    or decision.quote.budget_input_tokens
                     >= trigger_tokens
                 ):
                     continue
                 challengers.append(
                     (
                         (
-                            decision.quote.final_wire_estimated_input_tokens
-                            - selected_decision.quote.final_wire_estimated_input_tokens,
+                            decision.quote.budget_input_tokens
+                            - selected_decision.quote.budget_input_tokens,
                             decision.quote.final_wire_utf8_bytes
                             - selected_decision.quote.final_wire_utf8_bytes,
                             -(evidence.result_entry_sequence or -1),

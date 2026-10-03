@@ -10,6 +10,15 @@ import type { AgentTask } from '../../frontend/lib/pulsara-types';
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('reads a disposable context preview with cancellation and an encoded session identity', async () => {
+  const payload = { state: 'ready', connection_id: 'selected-model', input_tokens: 1000, input_budget_tokens: 2000 };
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const controller = new AbortController();
+  expect(await new LocalHttpRuntimeAdapter().contextUsage('session:usage/a', controller.signal)).toEqual(payload);
+  expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session%3Ausage%2Fa/context-usage', expect.objectContaining({ signal: controller.signal }));
+});
+
 it('bootstraps the app without assigning a working directory', async () => {
   const payload = {
     application: { name: 'Pulsara', version: '0.1.0', transport: 'localhost-http+terminal-v3' },

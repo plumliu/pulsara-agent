@@ -97,6 +97,7 @@ from pulsara_agent.model_input.lowering import (
 )
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.llm.request import (
+    ProviderInputUsageAnchor,
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     provider_assistant_public_projection_fingerprint,
 )
@@ -417,6 +418,7 @@ class _ImageToolResourceQuoteOwner:
     )
     base_suffix_messages: tuple[LLMMessage, ...] = dataclass_field(repr=False)
     base_wire: ProviderFollowupWireResourceQuote = dataclass_field(repr=False)
+    usage_anchor: ProviderInputUsageAnchor | None = dataclass_field(default=None, repr=False)
 
     def quote(
         self,
@@ -434,6 +436,7 @@ class _ImageToolResourceQuoteOwner:
             actual_assistant_message=self.assistant,
             provider_replay=self.provider_replay,
             bounded_suffix_messages=(*self.base_suffix_messages, carrier),
+            usage_anchor=self.usage_anchor,
         )
         return FrozenImageToolResourceIncrement(
             canonical_bytes=freeze_canonical_prompt(
@@ -444,8 +447,8 @@ class _ImageToolResourceQuoteOwner:
                 quoted.final_wire_utf8_bytes - self.base_wire.final_wire_utf8_bytes
             ),
             input_tokens=(
-                quoted.final_wire_estimated_input_tokens
-                - self.base_wire.final_wire_estimated_input_tokens
+                quoted.budget_input_tokens
+                - self.base_wire.budget_input_tokens
             ),
         )
 
@@ -3457,12 +3460,14 @@ class ConversationKernelRunner:
         suffix_messages.extend(
             message for message in source_messages if message not in catalog_messages
         )
+        usage_anchor = self._continuity.current_usage_anchor(permit.scope)
         wire = (
             quote_provider_followup_wire_resources(
                 request=request,
                 actual_assistant_message=assistant,
                 provider_replay=collected.provider_replay,
                 bounded_suffix_messages=tuple(suffix_messages),
+                usage_anchor=usage_anchor,
             )
             if needs_followup
             else None
@@ -3482,7 +3487,7 @@ class ConversationKernelRunner:
                 - (epoch.logical_bytes + assistant_logical + logical_followup),
                 MAXIMUM_PROVIDER_WIRE_INPUT_BYTES - wire.final_wire_utf8_bytes,
                 request.wire_input_plan.quote.effective_input_budget_tokens
-                - wire.final_wire_estimated_input_tokens,
+                - wire.budget_input_tokens,
             )
             if min(remaining) < 0:
                 remaining = tuple(max(0, value) for value in remaining)
@@ -3493,6 +3498,7 @@ class ConversationKernelRunner:
                 provider_replay=collected.provider_replay,
                 base_suffix_messages=tuple(suffix_messages),
                 base_wire=wire,
+                usage_anchor=usage_anchor,
             )
 
             def share(total: int, index: int) -> int:
@@ -3553,7 +3559,7 @@ class ConversationKernelRunner:
             return
         if wire.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
             raise OutputResourceInterruption("FOLLOWUP_WIRE_BYTES", quote)
-        if wire.final_wire_estimated_input_tokens > effective_input_budget_tokens:
+        if wire.budget_input_tokens > effective_input_budget_tokens:
             raise OutputResourceInterruption("FOLLOWUP_INPUT_TOKENS", quote)
 
     async def _canonical_blocks(

@@ -277,7 +277,7 @@ class PreparedRootProviderInputAdmission:
             or self.wire_quote.semantic_estimated_input_tokens
             != self.semantic_input.final_estimate.total_input_tokens
             or self.wire_quote.final_wire_utf8_bytes > (64 << 20)
-            or self.wire_quote.final_wire_estimated_input_tokens
+            or self.wire_quote.budget_input_tokens
             > self.wire_quote.effective_input_budget_tokens
         ):
             raise ValueError("prospective ROOT provider admission does not exact-join")
@@ -367,7 +367,7 @@ class PreparedActiveRootInputAdmission:
             or self.wire_quote.semantic_estimated_input_tokens
             != self.semantic_input.final_estimate.total_input_tokens
             or self.wire_quote.final_wire_utf8_bytes > (64 << 20)
-            or self.wire_quote.final_wire_estimated_input_tokens
+            or self.wire_quote.budget_input_tokens
             > self.wire_quote.effective_input_budget_tokens
         ):
             raise ValueError("prospective active ROOT admission does not exact-join")
@@ -1083,9 +1083,6 @@ class SteerSuffixAdmissionQuote:
         )
         if (
             self.effective_target_budget < 1
-            or self.resulting_target_estimate.total_input_tokens
-            + sum(item.invalidation_input_token_ceiling for item in reservations)
-            > self.effective_target_budget
         ):
             raise ValueError("steer quote target budget is invalid")
         if self.resulting_epoch_logical_bytes + sum(

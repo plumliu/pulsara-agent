@@ -289,7 +289,7 @@ def test_actual_wire_feedback_degrades_only_uninstalled_ordinary_results(
         tool_choice=None,
     )
     assert (
-        measurement.quote.final_wire_estimated_input_tokens
+        measurement.quote.raw_final_wire_estimated_input_tokens
         > measurement.quote.effective_input_budget_tokens
     )
     measurement.discard_materialization_to_quote()
@@ -354,6 +354,7 @@ def _runner_quote(monkeypatch, calls, api):
     canonical = SimpleNamespace(identity=identity, canonical_expanded_bytes=0, items=())
     runner = object.__new__(ConversationKernelRunner)
     runner._continuity = SimpleNamespace(
+        current_usage_anchor=lambda _scope: None,
         current_view=lambda scope: SimpleNamespace(
             epoch_nonce="epoch",
             epoch_revision=1,
@@ -371,7 +372,7 @@ def _runner_quote(monkeypatch, calls, api):
     def quote_wire(**kwargs):
         seen.extend(kwargs["bounded_suffix_messages"])
         size, tokens = _charge(kwargs["bounded_suffix_messages"], api)
-        return ProviderFollowupWireResourceQuote(size, tokens, len(seen))
+        return ProviderFollowupWireResourceQuote(size, tokens, tokens, len(seen))
 
     monkeypatch.setattr(module, "quote_provider_followup_wire_resources", quote_wire)
     completed = CompletedAssistantMessage("draft:test", tuple(calls), "")
@@ -404,8 +405,8 @@ def test_pre_effect_wire_minimum_keeps_canonical_and_epoch_maxima(monkeypatch, a
     assert quote.bounded_followup_canonical_bytes == sum(q[0] for q in physical)
     assert quote.bounded_followup_logical_bytes == sum(q[1] for q in physical)
     old_tokens = _charge(tuple(m for q in physical for m in q[3]), api)[1]
-    assert quote.followup_wire.final_wire_estimated_input_tokens < old_tokens
-    budget = quote.followup_wire.final_wire_estimated_input_tokens
+    assert quote.followup_wire.raw_final_wire_estimated_input_tokens < old_tokens
+    budget = quote.followup_wire.raw_final_wire_estimated_input_tokens
     runner._require_post_response_resources(quote, effective_input_budget_tokens=budget)
     with pytest.raises(OutputResourceInterruption, match="FOLLOWUP_INPUT_TOKENS"):
         runner._require_post_response_resources(
@@ -538,7 +539,7 @@ def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
         assert len(tools.invocations) == 3
         assert len(model.requests) == 2
         assert all(
-            r.wire_input_plan.quote.final_wire_estimated_input_tokens <= budget
+            r.wire_input_plan.quote.raw_final_wire_estimated_input_tokens <= budget
             for r in model.requests
         )
     else:
@@ -685,6 +686,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
     )
     runner = object.__new__(ConversationKernelRunner)
     runner._continuity = SimpleNamespace(
+        current_usage_anchor=lambda _scope: None,
         current_view=lambda scope: SimpleNamespace(
             epoch_nonce="epoch",
             epoch_revision=1,
@@ -746,12 +748,12 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
             bounded_suffix_messages=(*owner.base_suffix_messages, *carriers),
         )
         assert (
-            combined.final_wire_estimated_input_tokens
+            combined.raw_final_wire_estimated_input_tokens
             <= request.wire_input_plan.quote.effective_input_budget_tokens
         )
         assert (
-            combined.final_wire_estimated_input_tokens
-            == owner.base_wire.final_wire_estimated_input_tokens
+            combined.raw_final_wire_estimated_input_tokens
+            == owner.base_wire.raw_final_wire_estimated_input_tokens
             + sum(i.input_tokens for i in increments)
         )
         projection = thaw_json(
@@ -781,7 +783,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
         assert (
             sum(a.input_tokens for a in allowances)
             == request.wire_input_plan.quote.effective_input_budget_tokens
-            - owner.base_wire.final_wire_estimated_input_tokens
+            - owner.base_wire.raw_final_wire_estimated_input_tokens
         )
     finally:
         request.surface_borrow.close()

@@ -841,3 +841,22 @@
 [data-annotation-entry] .markdown-image-reference,
 [data-annotation-entry] .markdown-image-preview { -webkit-user-select: text; user-select: text; }
 [data-annotation-entry] [data-source-decoration] { -webkit-user-select: none; user-select: none; }
+
+/* Advisory context meter beside the model picker. */
+.context-usage { position: relative; display: inline-flex; flex: none; color: var(--blue); }
+.context-usage[data-tone="danger"] { color: var(--red); }
+.context-usage[data-tone="unknown"] { color: var(--faint); }
+.context-usage__button { width: 28px; height: 28px; padding: 0; display: grid; place-items: center; color: inherit; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.context-usage__button:hover, .context-usage__button:focus-visible { background: var(--paper-deep); }
+.context-usage__button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.context-usage__track, .context-usage__fill { fill: none; stroke: currentColor; stroke-width: 2; }
+.context-usage__track { opacity: .18; }
+.context-usage__fill { stroke-linecap: round; transition: stroke-dasharray .2s ease; }
+.context-usage__dot { fill: currentColor; opacity: .5; }
+.context-usage__tooltip { position: fixed; z-index: 65; width: min(280px, calc(100vw - 32px)); padding: 14px 16px; color: var(--ink-soft); background: var(--paper-solid); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: var(--shadow-lg); font-family: var(--sans); font-size: var(--type-label); line-height: 1.6; pointer-events: none; }
+.context-usage__heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.context-usage__heading strong { font-weight: 600; }
+.context-usage__heading span { color: var(--blue); font-variant-numeric: tabular-nums; }
+.context-usage__tooltip[data-tone="danger"] .context-usage__heading span { color: var(--red); }
+.context-usage__amount { display: grid; gap: 2px; margin: 7px 0 0; font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .context-usage__fill { transition: none; } }

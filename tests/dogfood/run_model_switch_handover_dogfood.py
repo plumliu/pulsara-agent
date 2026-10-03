@@ -28,6 +28,7 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
+from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     ResolvedCompactionPolicy,
 )
@@ -222,6 +223,8 @@ class _RecordingTransport:
         record: dict[str, object] = {
             "sequence": len(self._records) + 1,
             "purpose": call.fact.purpose.value,
+            "resolved_model_call_id": call.resolved_model_call_id,
+            "provider_input": thaw_json(plan.materialization.context_bearing_projection),
             "connection_id": call.binding.connection_id.value,
             "reasoning": reasoning_selection_to_dict(call.binding.reasoning),
             "route_id": call.target.fact.route_id,
@@ -229,9 +232,14 @@ class _RecordingTransport:
             "wire_api": call.target.fact.wire_api,
             "message_count": len(context.messages),
             "tool_count": len(context.tools),
-            "final_wire_estimated_input_tokens": (
-                quote.final_wire_estimated_input_tokens
+            "raw_final_wire_estimated_input_tokens": (
+                quote.raw_final_wire_estimated_input_tokens
             ),
+            "budget_input_tokens": quote.budget_input_tokens,
+            "budget_source": quote.budget_source,
+            "anchor_model_call_id": quote.anchor_model_call_id,
+            "anchor_reported_input_tokens": quote.anchor_reported_input_tokens,
+            "estimated_suffix_tokens": quote.estimated_suffix_tokens,
             "effective_input_budget_tokens": quote.effective_input_budget_tokens,
             "final_wire_utf8_bytes": quote.final_wire_utf8_bytes,
             "normalized_blocks": [],
@@ -730,7 +738,7 @@ async def _run(
                     and normal_models[-1:] == (destination_model,)
                     and len(summary_calls) == len(expected_summary_models)
                     and all(
-                        int(item["final_wire_estimated_input_tokens"])
+                        int(item["raw_final_wire_estimated_input_tokens"])
                         < int(item["effective_input_budget_tokens"])
                         for item in summary_calls
                     )

@@ -19,6 +19,7 @@
     "interaction_decisions": ["SELECT", "INSERT"],
     "plan_workflows": ["SELECT", "INSERT", "UPDATE"],
     "plan_interactions": ["SELECT", "INSERT", "UPDATE"],
+    "provider_call_usage": ["SELECT", "INSERT"],
     "memory_facts": ["SELECT", "INSERT", "UPDATE", "DELETE"],
     "memory_relations": ["SELECT", "INSERT", "DELETE"],
     "memory_embeddings": ["SELECT", "INSERT", "UPDATE", "DELETE"],

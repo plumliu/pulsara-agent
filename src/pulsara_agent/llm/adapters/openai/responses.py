@@ -336,7 +336,7 @@ def build_responses_payload(
             raise ValueError(
                 "Responses context tool choice changed after wire planning"
             )
-        wire_input_tokens = plan.quote.final_wire_estimated_input_tokens
+        wire_input_tokens = plan.quote.budget_input_tokens
     else:
         context_fields = materialize_responses_context_bearing_wire_projection(
             call=call,
@@ -958,8 +958,8 @@ class ResponsesCompletionAccumulator:
         )
 
     def _adopt_usage(self, response: dict[str, Any]) -> None:
-        report = transport_usage_report_from_mapping(response.get("usage"))
-        if report.usage_status != "reported":
+        report = transport_usage_report_from_mapping(response.get("usage"), wire_api=OPENAI_RESPONSES_API)
+        if report.usage_status == "missing":
             return
         if self.usage_report is not None:
             raise LLMTransportContractError(

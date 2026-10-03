@@ -454,7 +454,7 @@ class _CompactionSummaryTransport:
         if mode == "missing":
             usage = TransportUsageReport(usage_status="missing", usage=None)
         else:
-            input_tokens = quote.final_wire_estimated_input_tokens
+            input_tokens = quote.raw_final_wire_estimated_input_tokens
             if mode == "reported_different":
                 input_tokens += 12_345
             cached_tokens = input_tokens // 2 if mode == "reported_cached" else None
@@ -464,7 +464,7 @@ class _CompactionSummaryTransport:
                     input_tokens=input_tokens,
                     cached_input_tokens=cached_tokens,
                     output_tokens=7,
-                    total_tokens=input_tokens + 7,
+                    reported_total_tokens=input_tokens + 7,
                 ),
             )
         self.usage_reports.append(usage)
@@ -3523,10 +3523,10 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
     destination_summary = model.summary_transport.contexts[1]
     source_quote = model.summary_transport.contexts[0].provider_wire_input_plan.quote
     destination_quote = destination_summary.provider_wire_input_plan.quote
-    assert source_quote.final_wire_estimated_input_tokens > (
+    assert source_quote.raw_final_wire_estimated_input_tokens > (
         destination_quote.effective_input_budget_tokens
     )
-    assert destination_quote.final_wire_estimated_input_tokens < int(
+    assert destination_quote.raw_final_wire_estimated_input_tokens < int(
         destination_quote.effective_input_budget_tokens
         * owner.policy.auto_trigger_ratio
     )
@@ -4131,7 +4131,7 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     assert longest_quote.semantic_estimated_input_tokens <= (
         longest_quote.effective_input_budget_tokens
     )
-    assert longest_quote.final_wire_estimated_input_tokens > (
+    assert longest_quote.raw_final_wire_estimated_input_tokens > (
         longest_quote.effective_input_budget_tokens
     )
     assert longest_quote.replaced_generic_wire_estimated_tokens > 0
@@ -4139,7 +4139,7 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     admitted_count, admitted_quote = next(
         item
         for item in summary_measurements
-        if item[1].final_wire_estimated_input_tokens
+        if item[1].raw_final_wire_estimated_input_tokens
         <= item[1].effective_input_budget_tokens
     )
     assert admitted_count < longest_count
@@ -4147,7 +4147,7 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     assert admitted_quote.replay_wire_estimated_tokens > 0
     selected_plan = model.summary_transport.contexts[0].provider_wire_input_plan
     assert selected_plan.quote == admitted_quote
-    assert selected_plan.quote.final_wire_estimated_input_tokens <= (
+    assert selected_plan.quote.raw_final_wire_estimated_input_tokens <= (
         selected_plan.quote.effective_input_budget_tokens
     )
 
@@ -4287,18 +4287,18 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
     assert len(summary_measurements) >= 2
     longest_count, longest_has_image, longest_quote = summary_measurements[0]
     assert not longest_has_image
-    assert longest_quote.final_wire_estimated_input_tokens > (
+    assert longest_quote.raw_final_wire_estimated_input_tokens > (
         longest_quote.effective_input_budget_tokens
     )
     admitted_count, admitted_has_image, admitted_quote = next(
         item
         for item in summary_measurements
-        if item[2].final_wire_estimated_input_tokens
+        if item[2].raw_final_wire_estimated_input_tokens
         <= item[2].effective_input_budget_tokens
     )
     assert admitted_count < longest_count
     assert not admitted_has_image
-    assert admitted_quote.final_wire_estimated_input_tokens <= (
+    assert admitted_quote.raw_final_wire_estimated_input_tokens <= (
         admitted_quote.effective_input_budget_tokens
     )
     # The selected summary prefix ends before the visual USER.  Its immutable
@@ -4498,7 +4498,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     assert selected_plan.quote.semantic_estimated_input_tokens == (
         semantic.semantic_input.final_estimate.total_input_tokens
     )
-    assert selected_plan.quote.final_wire_estimated_input_tokens <= (
+    assert selected_plan.quote.raw_final_wire_estimated_input_tokens <= (
         selected_plan.quote.effective_input_budget_tokens
     )
     assert selected_plan.quote.replaced_generic_wire_estimated_tokens > 0
@@ -4711,7 +4711,8 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
                     + quote.replaced_generic_wire_estimated_tokens
                     - quote.replay_wire_estimated_tokens
                 ),
-                final_wire_estimated_input_tokens=over_budget,
+                raw_final_wire_estimated_input_tokens=over_budget,
+                budget_input_tokens=over_budget,
             )
             rejected_successor_quotes.append(rejected_quote)
             return PreparedWireMeasurementDecision(
@@ -4820,7 +4821,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     assert tools.release_calls
     assert all(count == 1 for count in tools.release_calls)
     assert len(rejected_successor_quotes) == 1
-    assert rejected_successor_quotes[0].final_wire_estimated_input_tokens > (
+    assert rejected_successor_quotes[0].raw_final_wire_estimated_input_tokens > (
         rejected_successor_quotes[0].effective_input_budget_tokens
     )
 
@@ -6184,7 +6185,7 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         prepared = await prepare_source(**kwargs)
         source_wire_quotes.append(
             (
-                prepared.wire_quote.final_wire_estimated_input_tokens,
+                prepared.wire_quote.raw_final_wire_estimated_input_tokens,
                 prepared.wire_quote.effective_input_budget_tokens,
             )
         )

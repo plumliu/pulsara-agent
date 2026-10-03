@@ -77,6 +77,10 @@ Pulsara 能搜索文件、编辑代码、运行命令并检查输出。耗时的
 
 这种连续性为[供应商的提示词缓存](https://developers.openai.com/api/docs/guides/prompt-caching)提供了稳定的命中基础。复用缓存前缀可以降低输入处理成本，并让响应更快开始。越多步骤沿用不断增长的历史，越多已经处理过的上下文就能继续参与复用。
 
+输入预算优先使用最近一次兼容请求中供应商报告的 input token 数，再估算其后追加的实际请求内容。本次 usage 缺失时保留旧的兼容锚点；没有锚点时使用既有启发式估算。重新打开对话后仍可查询历史 usage，新上下文则从全量估算起步。详见[usage 与输入预算契约](PULSARA_PROVIDER_USAGE_ANCHORED_INPUT_BUDGET_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。
+
+输入框旁的圆环显示当前模型的上下文占用，悬停可查看估算用量与可用输入额度。切换模型后重新估算；达到压缩阈值时标红。未发送内容不计入预览。详见[上下文圆环契约](PULSARA_CONTEXT_USAGE_INDICATOR_IMPLEMENTATION_SPEC.zh.md)。
+
 ## 让积累的知识继续发挥作用
 
 让下一次工作，从已有的偏好、项目决策和约束出发。

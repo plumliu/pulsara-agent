@@ -2237,8 +2237,6 @@ class ContextCompileBudgetReport:
             + self.envelope_tokens
         ):
             raise ValueError("compile budget report total is inconsistent")
-        if self.total_input_tokens > self.effective_input_budget_tokens:
-            raise ValueError("compile budget report exceeds its effective budget")
         for value in (
             self.estimator_fingerprint,
             self.tool_surface_fingerprint,
@@ -2402,11 +2400,6 @@ class FrozenCompiledModelInput:
             or self.final_estimate.envelope_tokens != self.budget_report.envelope_tokens
         ):
             raise ValueError("compiled model input component estimates differ")
-        if (
-            self.final_estimate.total_input_tokens
-            > self.budget_report.effective_input_budget_tokens
-        ):
-            raise ValueError("compiled model input exceeds its effective budget")
         if len(self.message_placements) != len(self.messages):
             raise ValueError("compiled message placements are not parallel")
         if tuple(item.message_ordinal for item in self.message_placements) != tuple(

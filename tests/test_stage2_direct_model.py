@@ -590,14 +590,14 @@ async def _collect_preflighted(
     return [item async for item in execution.open_once(permit)]
 
 
-def _continuity_candidate(request: KernelModelExecutionRequest):
+def _continuity_candidate(request: KernelModelExecutionRequest, owner=None):
     identity = request.compiled_input.canonical_input_identity
     scope = ProviderInputContinuityScope(
         session_id=request.session_id,
         scope_kind=identity.conversation_scope_kind,
         scope_subagent_task_id=identity.scope_subagent_task_id,
     )
-    owner = new_test_provider_input_continuity_owner(request.session_id)
+    owner = owner or new_test_provider_input_continuity_owner(request.session_id)
     if scope.scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
         owner.authorize_new_subagent_scope(
             scope,
@@ -715,7 +715,7 @@ def test_foreground_large_provider_output_survives_compilation_and_preflight(
             922_000 - 8_192
         )
         payload = builder(call=prepared.call, context=execution.final_context)
-        wire_input = request.wire_input_plan.quote.final_wire_estimated_input_tokens
+        wire_input = request.wire_input_plan.quote.raw_final_wire_estimated_input_tokens
         assert payload[output_key] == min(output_limit, 1_050_000 - wire_input - 8_192)
         assert payload[output_key] > 16_384
         assert wire_input + payload[output_key] + 8_192 <= 1_050_000
@@ -807,7 +807,7 @@ def test_final_wire_measurement_is_the_exact_adapter_payload_projection(
     assert quote.replaced_generic_wire_estimated_tokens == 0
     assert quote.replay_wire_estimated_tokens == 0
     assert (
-        quote.final_wire_estimated_input_tokens
+        quote.raw_final_wire_estimated_input_tokens
         == quote.generic_wire_estimated_input_tokens
     )
     plan = measurement.prepare_executable_plan()
@@ -987,8 +987,8 @@ def test_k3_followup_quote_uses_the_exact_installed_wire_owner(api: str) -> None
             ),
         )
     )
-    assert quote.final_wire_estimated_input_tokens == (
-        request.wire_input_plan.quote.final_wire_estimated_input_tokens
+    assert quote.raw_final_wire_estimated_input_tokens == (
+        request.wire_input_plan.quote.raw_final_wire_estimated_input_tokens
         + suffix.total_input_tokens
     )
     assert quote.appended_wire_item_count == len(appended)
@@ -1029,12 +1029,12 @@ def test_k3_followup_quote_counts_image_dimensions_and_elides_payload_tokens(
     low_large_payload = quoted(b"x" * 500_000, width=1, height=1)
     high_small_payload = quoted(b"x", width=4096, height=4096)
 
-    assert low_small.final_wire_estimated_input_tokens == (
-        low_large_payload.final_wire_estimated_input_tokens
+    assert low_small.raw_final_wire_estimated_input_tokens == (
+        low_large_payload.raw_final_wire_estimated_input_tokens
     )
     assert low_large_payload.final_wire_utf8_bytes > low_small.final_wire_utf8_bytes
-    assert high_small_payload.final_wire_estimated_input_tokens > (
-        low_large_payload.final_wire_estimated_input_tokens
+    assert high_small_payload.raw_final_wire_estimated_input_tokens > (
+        low_large_payload.raw_final_wire_estimated_input_tokens
     )
     request.surface_borrow.close()
 
@@ -1291,17 +1291,17 @@ def test_final_wire_quote_can_cross_hard_bounds_but_plan_cannot() -> None:
     request, _tool_port = _prepared_execution(port)
     plan = request.wire_input_plan
     quote = plan.quote
-    assert quote.final_wire_estimated_input_tokens > 0
+    assert quote.raw_final_wire_estimated_input_tokens > 0
 
     token_overbound = replace(
         quote,
-        effective_input_budget_tokens=quote.final_wire_estimated_input_tokens - 1,
+        effective_input_budget_tokens=quote.raw_final_wire_estimated_input_tokens - 1,
     )
     byte_overbound = replace(
         quote,
         final_wire_utf8_bytes=MAXIMUM_PROVIDER_WIRE_INPUT_BYTES + 1,
     )
-    assert token_overbound.final_wire_estimated_input_tokens > (
+    assert token_overbound.raw_final_wire_estimated_input_tokens > (
         token_overbound.effective_input_budget_tokens
     )
     assert byte_overbound.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
@@ -1608,7 +1608,10 @@ def test_round3_direct_model_rejects_final_estimate_drift_before_transport_open(
 
 def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> None:
     usage_reports = []
-    port = _port(usage_observer=lambda _request, report: usage_reports.append(report))
+
+    async def observe_usage(_request, report, _permit, _terminal, _anchor_allowed):
+        usage_reports.append(report)
+    port = _port(usage_observer=observe_usage)
     binding = port._model_runtime.transport_registry(  # noqa: SLF001
         port._transport_timeout  # noqa: SLF001
     ).get("openai_chat_completions")
@@ -1648,8 +1651,11 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
 
 def test_unknown_catalog_tool_support_sends_once_with_diagnostic() -> None:
     usage_reports = []
+
+    async def observe_usage(_request, report, _permit, _terminal, _anchor_allowed):
+        usage_reports.append(report)
     port = _port(
-        usage_observer=lambda _request, report: usage_reports.append(report),
+        usage_observer=observe_usage,
         tool_call=None,
     )
     binding = port._model_runtime.transport_registry(  # noqa: SLF001

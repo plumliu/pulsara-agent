@@ -1348,13 +1348,13 @@ def _post_response_quote(
         (_post_response_quote(current_items=4_096), 10, "CANONICAL_ITEMS"),
         (
             _post_response_quote(
-                wire=ProviderFollowupWireResourceQuote((64 << 20) + 1, 1, 1)
+                wire=ProviderFollowupWireResourceQuote((64 << 20) + 1, 1, 1, 1)
             ),
             10,
             "FOLLOWUP_WIRE_BYTES",
         ),
         (
-            _post_response_quote(wire=ProviderFollowupWireResourceQuote(1, 11, 1)),
+            _post_response_quote(wire=ProviderFollowupWireResourceQuote(1, 11, 11, 1)),
             10,
             "FOLLOWUP_INPUT_TOKENS",
         ),
@@ -1404,7 +1404,7 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
     identity = SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)
     canonical = SimpleNamespace(identity=identity, canonical_expanded_bytes=0, items=())
     runner = object.__new__(ConversationKernelRunner)
-    runner._continuity = SimpleNamespace(current_view=lambda scope: SimpleNamespace(epoch_nonce='epoch', epoch_revision=1, wire_input_plan=wire_plan, logical_bytes=0))
+    runner._continuity = SimpleNamespace(current_usage_anchor=lambda _scope: None, current_view=lambda scope: SimpleNamespace(epoch_nonce='epoch', epoch_revision=1, wire_input_plan=wire_plan, logical_bytes=0))
     runner._context_source_collector = SimpleNamespace(freeze_post_response_call_source_upper=lambda: (LLMMessage.user('clock'),))
     runner._hook_output_source_upper = lambda **kwargs: None
     runner._subagent_runtime = None
@@ -1413,7 +1413,7 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
         messages = kwargs['bounded_suffix_messages']
         seen.extend(messages)
         items = tuple(chat_semantic_wire_group(message)[0] for message in messages)
-        return ProviderFollowupWireResourceQuote(sum(len(canonical_json_bytes(item)) for item in items), sum(estimator.estimate_wire_json_component(item) for item in items), len(items))
+        return ProviderFollowupWireResourceQuote(sum(len(canonical_json_bytes(item)) for item in items), sum(estimator.estimate_wire_json_component(item) for item in items), sum(estimator.estimate_wire_json_component(item) for item in items), len(items))
     monkeypatch.setattr(module, 'quote_provider_followup_wire_resources', quote_wire)
     completed = CompletedAssistantMessage('draft:test', (CompletedToolCallBlock('block:test', 'call:test', 'manage_capability', freeze_json({'action':'SET_PLUGIN_ENABLED','scope':'USER','plugin_id':'ponytail','enabled':True})),), '')
     quote = runner._quote_post_response_resources(
@@ -1424,6 +1424,6 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
         root_completion_followup_items=0,
     )
     assert quote.bounded_followup_logical_bytes > 800_000
-    assert quote.followup_wire.final_wire_estimated_input_tokens < 200_000
+    assert quote.followup_wire.raw_final_wire_estimated_input_tokens < 200_000
     assert not any('post-response-resource-upper' in join_text_content(message.content) for message in seen)
     runner._require_post_response_resources(quote, effective_input_budget_tokens=200_000)

@@ -930,7 +930,7 @@ def promote_compaction_summary_call(
         != semantic.compile_binding.estimator_fingerprint
         or decision.quote.effective_input_budget_tokens
         != semantic.compile_binding.effective_input_budget_tokens
-        or decision.quote.final_wire_estimated_input_tokens
+        or decision.quote.budget_input_tokens
         > decision.quote.effective_input_budget_tokens
         or decision.quote.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
     ):

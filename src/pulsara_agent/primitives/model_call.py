@@ -129,26 +129,32 @@ class ModelCallDiagnosticFact(BaseModel):
 class ModelTokenUsageFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    input_tokens: int = Field(ge=0)
-    cached_input_tokens: int | None = Field(default=None, ge=0)
-    output_tokens: int = Field(ge=0)
-    reasoning_output_tokens: int | None = Field(default=None, ge=0)
-    total_tokens: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
+    cached_input_tokens: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
+    output_tokens: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
+    reasoning_output_tokens: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
+    reported_total_tokens: int | None = Field(default=None, ge=0, le=2**63 - 1, strict=True)
+
+    @property
+    def computed_total_tokens(self) -> int | None:
+        if self.input_tokens is None or self.output_tokens is None:
+            return None
+        return self.input_tokens + self.output_tokens
 
     @model_validator(mode="after")
     def _validate_usage(self) -> "ModelTokenUsageFact":
         if (
             self.cached_input_tokens is not None
+            and self.input_tokens is not None
             and self.cached_input_tokens > self.input_tokens
         ):
             raise ValueError("cached_input_tokens exceeds input_tokens")
         if (
             self.reasoning_output_tokens is not None
+            and self.output_tokens is not None
             and self.reasoning_output_tokens > self.output_tokens
         ):
             raise ValueError("reasoning_output_tokens exceeds output_tokens")
-        if self.total_tokens != self.input_tokens + self.output_tokens:
-            raise ValueError("total_tokens must equal input_tokens + output_tokens")
         return self
 
 

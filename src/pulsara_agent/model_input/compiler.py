@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import IntEnum
-import heapq
 import json
 from time import monotonic
 
@@ -692,7 +691,7 @@ class StructuredModelInputCompiler:
         self._limits = limits
 
     @staticmethod
-    def _catalog_source_state(candidate, floors, wire_selection):
+    def _source_state_with_render_floor(candidate, floors, wire_selection):
         state = _SourceState(candidate)
         if wire_selection is not None:
             decision = next(
@@ -709,15 +708,16 @@ class StructuredModelInputCompiler:
                     state.selected = tuple(item.mode for item in candidate.variants).index(
                         decision.selected_mode
                     )
-        floor = dict(floors).get(candidate.source_kind)
-        if floor is not None:
-            if candidate.source_kind not in {
-                ContextSourceKind.SKILL_CATALOG,
-                ContextSourceKind.MCP_CATALOG,
-            }:
-                raise ValueError("wire render floor is not a routing catalog")
-            index = tuple(item.mode for item in candidate.variants).index(floor)
-            state.selected = max(state.selected, index)
+        source_floors = dict(floors)
+        if candidate.source_kind in source_floors:
+            floor = source_floors[candidate.source_kind]
+            if floor is None:
+                if candidate.budget_class is ContextBudgetClass.MUST_KEEP or state.is_unavailable():
+                    raise ValueError("required source cannot be omitted by a wire floor")
+                state.omitted = True
+            else:
+                index = tuple(item.mode for item in candidate.variants).index(floor)
+                state.selected = max(state.selected, index)
         return state
 
     @staticmethod
@@ -761,11 +761,12 @@ class StructuredModelInputCompiler:
         *,
         request,
         compiled,
-        catalog_floors=(),
+        source_floors=(),
         tool_floors=(),
+        planning=None,
         deadline_monotonic: float | None = None,
     ):
-        """Advance one legal routing/result variant on the frozen compile basis.
+        """Advance one legal source/result variant on the frozen compile basis.
 
         Final wire measurement owns fit; the compiler owns legal render order.
         Append decisions cover only uninstalled delta; a cold epoch may reselect
@@ -775,27 +776,32 @@ class StructuredModelInputCompiler:
         deadline.check()
         decisions = {item.source_kind: item for item in compiled.source_decisions}
         eligible = []
+        previous_heads = (
+            {} if planning is None or planning.predecessor_view is None
+            else {item.source_kind: item for item in planning.predecessor_view.source_heads}
+        )
         for candidate in request.sources.candidates:
             deadline.check()
-            if candidate.source_kind not in {
-                ContextSourceKind.SKILL_CATALOG,
-                ContextSourceKind.MCP_CATALOG,
-            }:
-                continue
             decision = decisions.get(candidate.source_kind)
             if decision is None or not decision.included:
                 continue
-            modes = tuple(item.mode for item in candidate.variants)
-            index = modes.index(decision.selected_mode)
-            if index + 1 < len(modes):
-                eligible.append(
-                    (
-                        self._source_degradation_key(candidate),
-                        candidate.source_kind,
-                        modes[index + 1],
-                        "catalog",
-                    )
-                )
+            state = self._source_state_with_render_floor(candidate, source_floors, compiled)
+            if not self._source_can_advance(state):
+                continue
+            next_mode = (
+                candidate.variants[state.selected + 1].mode
+                if state.selected + 1 < len(candidate.variants)
+                else None
+            )
+            if next_mode is None and candidate.source_kind in previous_heads and candidate.lifecycle in {
+                ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+                ContextSourceLifecycle.TURN_APPEND,
+                ContextSourceLifecycle.TURN_SNAPSHOT,
+                ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
+            }:
+                # Installed state needs an explicit legal replacement, never silent omission.
+                continue
+            eligible.append((self._source_degradation_key(candidate), candidate.source_kind, next_mode, "source"))
         decisions_by_result = {
             item.source_entry_fingerprint: item
             for item in compiled.tool_result_decisions
@@ -839,10 +845,10 @@ class StructuredModelInputCompiler:
         if not eligible:
             return None
         _, identity, mode, category = min(eligible)
-        catalogs, tools = dict(catalog_floors), dict(tool_floors)
-        (catalogs if category == "catalog" else tools)[identity] = mode
+        sources, tools = dict(source_floors), dict(tool_floors)
+        (sources if category == "source" else tools)[identity] = mode
         return (
-            tuple(sorted(catalogs.items(), key=lambda item: item[0].value)),
+            tuple(sorted(sources.items(), key=lambda item: item[0].value)),
             tuple(sorted(tools.items())),
         )
 
@@ -851,8 +857,8 @@ class StructuredModelInputCompiler:
         request: StructuredModelInputCompileRequest,
         *,
         deadline_monotonic: float | None = None,
-        catalog_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode], ...
+        source_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode | None], ...
         ] = (),
         tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
@@ -861,7 +867,7 @@ class StructuredModelInputCompiler:
             request,
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
-            catalog_render_floors=catalog_render_floors,
+            source_render_floors=source_render_floors,
             tool_render_floors=tool_render_floors,
             wire_selection=wire_selection,
         )
@@ -890,8 +896,8 @@ class StructuredModelInputCompiler:
         *,
         deadline_monotonic: float | None,
         semantic_projection: bool,
-        catalog_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode], ...
+        source_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode | None], ...
         ] = (),
         tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
@@ -924,7 +930,7 @@ class StructuredModelInputCompiler:
         lowered = tuple(lowered_items)
         deadline.check()
         source_states = [
-            self._catalog_source_state(item, catalog_render_floors, wire_selection)
+            self._source_state_with_render_floor(item, source_render_floors, wire_selection)
             for item in request.sources.candidates
         ]
         tool_states = [
@@ -962,83 +968,18 @@ class StructuredModelInputCompiler:
             deadline=deadline,
         )
         budget = request.compile_binding.effective_input_budget_tokens
-        degraded_source_ids: set[str] = set()
-        degraded_tool_ids: set[str] = set()
-
-        current_total = layout.estimate.total_input_tokens
-        candidates: list[tuple[tuple[object, ...], int, str, object]] = []
-        serial = 0
-
-        def offer(kind: str, unit: _SourceState | _ToolState) -> None:
-            nonlocal serial
-            if kind == "source":
-                assert isinstance(unit, _SourceState)
-                key = self._source_degradation_key(unit.candidate)
-            else:
-                assert isinstance(unit, _ToolState)
-                key = self._tool_degradation_key(unit)
-            heapq.heappush(candidates, (key, serial, kind, unit))
-            serial += 1
-
-        for state in source_states:
-            if self._source_can_advance(state):
-                offer("source", state)
-        for state in tool_states:
-            if self._tool_can_advance(state):
-                offer("tool", state)
-
-        while current_total > budget:
-            deadline.check()
-            if not candidates:
-                if semantic_projection:
-                    break
-                raise StructuredModelInputCompileError(
-                    self._minimum_budget_failure(
-                        request, lowered, source_states, tool_states
-                    )
-                )
-            _key, _serial, kind, unit = heapq.heappop(candidates)
-            if kind == "source":
-                state = unit
-                assert isinstance(state, _SourceState)
-                reduction = self._advance_source_to_progress(
-                    request,
-                    state=state,
-                    all_states=source_states,
-                    diagnostics=diagnostics,
-                    deadline=deadline,
-                )
-                if reduction > 0:
-                    current_total -= reduction
-                    degraded_source_ids.add(state.candidate.source_instance_id)
-                    if self._source_can_advance(state):
-                        offer("source", state)
-            else:
-                state = unit
-                assert isinstance(state, _ToolState)
-                reduction = self._advance_tool_to_progress(
-                    request,
-                    state=state,
-                    diagnostics=diagnostics,
-                    deadline=deadline,
-                )
-                if reduction > 0:
-                    current_total -= reduction
-                    degraded_tool_ids.add(state.item.source_entry_id or "")
-                    if self._tool_can_advance(state):
-                        offer("tool", state)
-
-        layout = self._layout(
-            request,
-            lowered=lowered,
-            sources=source_states,
-            tools=tool_states,
-            deadline=deadline,
-        )
-        if layout.estimate.total_input_tokens != current_total:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.FINAL_ESTIMATE_MISMATCH
-            )
+        degraded_source_ids = {
+            state.candidate.source_instance_id
+            for state in source_states
+            if state.omitted
+            or state.mode()
+            is not state.candidate.initial_mode
+        }
+        degraded_tool_ids = {
+            state.item.source_entry_id or ""
+            for state in tool_states
+            if state.selected > 0
+        }
 
         full = self._estimate_frozen_input(
             request,
@@ -1237,8 +1178,8 @@ class StructuredModelInputCompiler:
         *,
         planning: FrozenProviderInputAppendPlanningInput,
         deadline_monotonic: float | None = None,
-        catalog_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode], ...
+        source_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode | None], ...
         ] = (),
         tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
@@ -1250,7 +1191,7 @@ class StructuredModelInputCompiler:
             planning=planning,
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
-            catalog_render_floors=catalog_render_floors,
+            source_render_floors=source_render_floors,
             tool_render_floors=tool_render_floors,
             wire_selection=wire_selection,
             new_epoch=False,
@@ -1264,8 +1205,8 @@ class StructuredModelInputCompiler:
         *,
         planning: FrozenProviderInputAppendPlanningInput,
         deadline_monotonic: float | None = None,
-        catalog_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode], ...
+        source_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode | None], ...
         ] = (),
         tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
@@ -1277,7 +1218,7 @@ class StructuredModelInputCompiler:
             planning=planning,
             deadline_monotonic=deadline_monotonic,
             semantic_projection=False,
-            catalog_render_floors=catalog_render_floors,
+            source_render_floors=source_render_floors,
             tool_render_floors=tool_render_floors,
             wire_selection=wire_selection,
             new_epoch=True,
@@ -1331,8 +1272,8 @@ class StructuredModelInputCompiler:
         deadline_monotonic: float | None,
         semantic_projection: bool,
         new_epoch: bool,
-        catalog_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode], ...
+        source_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode | None], ...
         ] = (),
         tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
@@ -1416,7 +1357,7 @@ class StructuredModelInputCompiler:
                 frontier=frontier,
                 deadline=deadline,
                 semantic_projection=semantic_projection,
-                catalog_render_floors=catalog_render_floors,
+                source_render_floors=source_render_floors,
                 tool_render_floors=tool_render_floors,
                 wire_selection=wire_selection,
             )
@@ -1429,7 +1370,7 @@ class StructuredModelInputCompiler:
             else self.compile(
                 request,
                 deadline_monotonic=deadline.value,
-                catalog_render_floors=catalog_render_floors,
+                source_render_floors=source_render_floors,
                 tool_render_floors=tool_render_floors,
                 wire_selection=wire_selection,
             )
@@ -1679,14 +1620,6 @@ class StructuredModelInputCompiler:
             tools=tools,
             deadline=deadline,
         )
-        if (
-            not semantic_projection
-            and estimate.total_input_tokens
-            > request.compile_binding.effective_input_budget_tokens
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
-            )
         if provider_input_logical_bytes(
             system_prompt=system_prompt, tools=tools, messages=messages
         ) > (64 << 20):
@@ -1794,8 +1727,8 @@ class StructuredModelInputCompiler:
         frontier: ProcessLocalCanonicalFrontier,
         deadline: _CompileDeadline,
         semantic_projection: bool,
-        catalog_render_floors: tuple[
-            tuple[ContextSourceKind, ContextRenderMode], ...
+        source_render_floors: tuple[
+            tuple[ContextSourceKind, ContextRenderMode | None], ...
         ] = (),
         tool_render_floors: tuple[tuple[str, ToolResultProviderRenderMode], ...] = (),
         wire_selection: FrozenCompiledModelInput | None = None,
@@ -1854,9 +1787,14 @@ class StructuredModelInputCompiler:
             if candidate.source_kind is ContextSourceKind.BASE_SYSTEM:
                 continue
             previous = previous_heads.get(candidate.source_kind)
-            state = self._catalog_source_state(
-                candidate, catalog_render_floors, wire_selection
+            state = self._source_state_with_render_floor(
+                candidate, source_render_floors, wire_selection
             )
+            if state.omitted and previous is not None and candidate.lifecycle in {
+                ContextSourceLifecycle.SNAPSHOT_ON_CHANGE, ContextSourceLifecycle.TURN_APPEND,
+                ContextSourceLifecycle.TURN_SNAPSHOT, ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
+            }:
+                raise StructuredModelInputCompileError(ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID)
             semantic = _source_occurrence_fingerprint(
                 candidate.domain_semantic_fingerprint,
                 lifecycle=candidate.lifecycle,
@@ -2046,129 +1984,20 @@ class StructuredModelInputCompiler:
             tools=tool_states,
             deadline=deadline,
         )
-        budget = request.compile_binding.effective_input_budget_tokens
-        current_total = layout.estimate.total_input_tokens
-        degraded_source_ids: set[str] = set()
-        degraded_tool_ids: set[str] = set()
-        heap: list[tuple[tuple[object, ...], int, str, object]] = []
-        serial = 0
-
-        def source_can_advance(state: _SourceState) -> bool:
-            emission = next(item for item in emissions if item.state is state)
-            if state.is_unavailable():
-                return False
-            if state.selected + 1 < len(state.candidate.variants):
-                return not state.exhausted
-            return (
-                not state.exhausted
-                and not state.omitted
-                and state.candidate.budget_class is not ContextBudgetClass.MUST_KEEP
-                and not emission.requires_installed_replacement
+        degraded_source_ids = {
+            item.state.candidate.source_instance_id
+            for item in emissions
+            if item.state is not None
+            and (
+                item.state.omitted
+                or item.state.mode() is not item.state.candidate.initial_mode
             )
-
-        def offer(kind: str, unit: _SourceState | _ToolState) -> None:
-            nonlocal serial
-            key = (
-                self._source_degradation_key(unit.candidate)
-                if isinstance(unit, _SourceState)
-                else self._tool_degradation_key(unit)
-            )
-            heapq.heappush(heap, (key, serial, kind, unit))
-            serial += 1
-
-        for state in typed_source_states:
-            if source_can_advance(state):
-                offer("source", state)
-        for state in tool_states:
-            if self._tool_can_advance(state):
-                offer("tool", state)
-
-        while current_total > budget:
-            deadline.check()
-            if not heap:
-                if semantic_projection:
-                    break
-                failure = (
-                    ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
-                    if any(state.requires_full() for state in tool_states)
-                    else ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET
-                    if any(item.requires_installed_replacement for item in emissions)
-                    else ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED
-                )
-                raise StructuredModelInputCompileError(failure)
-            _key, _serial, kind, unit = heapq.heappop(heap)
-            if kind == "source":
-                state = unit
-                assert isinstance(state, _SourceState)
-                before = current_total
-                original = (state.selected, state.omitted)
-                if not state.advance():
-                    state.exhausted = True
-                    continue
-                trial = self._append_layout(
-                    request,
-                    planning=planning,
-                    predecessor=predecessor,
-                    lowered_delta=lowered_delta,
-                    emissions=emissions,
-                    tools=tool_states,
-                    deadline=deadline,
-                )
-                if trial.estimate.total_input_tokens >= before:
-                    state.selected, state.omitted = original
-                    state.exhausted = True
-                    self._add_diagnostic(
-                        diagnostics,
-                        ContextPublicDiagnosticCode.SOURCE_VARIANT_NON_PROGRESS,
-                    )
-                    continue
-                current_total = trial.estimate.total_input_tokens
-                degraded_source_ids.add(state.candidate.source_instance_id)
-                if source_can_advance(state):
-                    offer("source", state)
-            else:
-                state = unit
-                assert isinstance(state, _ToolState)
-                before = current_total
-                original = state.selected
-                if not state.advance():
-                    state.exhausted = True
-                    continue
-                trial = self._append_layout(
-                    request,
-                    planning=planning,
-                    predecessor=predecessor,
-                    lowered_delta=lowered_delta,
-                    emissions=emissions,
-                    tools=tool_states,
-                    deadline=deadline,
-                )
-                if trial.estimate.total_input_tokens >= before:
-                    state.selected = original
-                    state.exhausted = True
-                    self._add_diagnostic(
-                        diagnostics,
-                        ContextPublicDiagnosticCode.SOURCE_VARIANT_NON_PROGRESS,
-                    )
-                    continue
-                current_total = trial.estimate.total_input_tokens
-                degraded_tool_ids.add(state.item.source_entry_id or "")
-                if self._tool_can_advance(state):
-                    offer("tool", state)
-
-        layout = self._append_layout(
-            request,
-            planning=planning,
-            predecessor=predecessor,
-            lowered_delta=lowered_delta,
-            emissions=emissions,
-            tools=tool_states,
-            deadline=deadline,
-        )
-        if layout.estimate.total_input_tokens != current_total:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.FINAL_ESTIMATE_MISMATCH
-            )
+        }
+        degraded_tool_ids = {
+            state.item.source_entry_id or ""
+            for state in tool_states
+            if state.selected > 0
+        }
         suffix_logical_bytes = sum(
             _message_logical_bytes(item)
             for item in layout.messages[len(previous_messages) :]
@@ -2323,7 +2152,9 @@ class StructuredModelInputCompiler:
             tool_surface_fingerprint=(
                 predecessor.tool_exposure_plan.direct_tool_surface.surface_fingerprint
             ),
-            effective_input_budget_tokens=budget,
+            effective_input_budget_tokens=(
+                request.compile_binding.effective_input_budget_tokens
+            ),
             system_tokens=layout.estimate.system_tokens,
             message_tokens=layout.estimate.message_tokens,
             tool_tokens=layout.estimate.tool_tokens,
@@ -2650,13 +2481,6 @@ class StructuredModelInputCompiler:
                 raise StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
                 )
-            if any(
-                variant.utf8_bytes > self._limits.maximum_single_source_variant_bytes
-                for variant in candidate.variants
-            ):
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
-                )
             costs = tuple(
                 self._source_variant_tokens(
                     request, candidate, variant.text, variant.mode
@@ -2674,11 +2498,18 @@ class StructuredModelInputCompiler:
                 failure = StructuredModelInputCompileError(
                     ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
                 )
-                failure.add_note(
-                    f"source={candidate.source_kind.value} "
-                    f"variant_token_costs={selectable_costs}"
-                )
+                failure.add_note(f"source={candidate.source_kind.value} variant_token_costs={selectable_costs}")
                 raise failure
+            if any(
+                variant.utf8_bytes > self._limits.maximum_single_source_variant_bytes
+                for variant in candidate.variants
+            ):
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+                )
+            # Raw semantic estimates are diagnostic. The frozen source and
+            # physical contracts validate each variant; final-wire measurement
+            # decides whether dispatch should advance to another render floor.
         for fact in sources.absent_facts:
             expected = _SOURCE_POLICY.get(fact.source_kind)
             if expected is None:
@@ -2905,77 +2736,6 @@ class StructuredModelInputCompiler:
         )
         return tuple(items), added
 
-    def _advance_source_to_progress(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        state: _SourceState,
-        all_states: list[_SourceState],
-        diagnostics: list[ContextPublicDiagnosticCode],
-        deadline: _CompileDeadline,
-    ) -> int:
-        original = (state.selected, state.omitted)
-        before = self._source_component_tokens(request, state, all_states)
-        while state.advance():
-            deadline.check()
-            after = self._source_component_tokens(request, state, all_states)
-            if after < before:
-                return before - after
-            self._add_diagnostic(
-                diagnostics,
-                ContextPublicDiagnosticCode.SOURCE_VARIANT_NON_PROGRESS,
-            )
-        state.selected, state.omitted = original
-        state.exhausted = True
-        return 0
-
-    def _advance_tool_to_progress(
-        self,
-        request: StructuredModelInputCompileRequest,
-        *,
-        state: _ToolState,
-        diagnostics: list[ContextPublicDiagnosticCode],
-        deadline: _CompileDeadline,
-    ) -> int:
-        original = state.selected
-        estimator = request.compile_binding.estimator
-        before = estimator.estimate_message(state.message())
-        while state.advance():
-            deadline.check()
-            after = estimator.estimate_message(state.message())
-            if after < before:
-                return before - after
-            self._add_diagnostic(
-                diagnostics,
-                ContextPublicDiagnosticCode.SOURCE_VARIANT_NON_PROGRESS,
-            )
-        state.selected = original
-        state.exhausted = True
-        return 0
-
-    def _source_component_tokens(
-        self,
-        request: StructuredModelInputCompileRequest,
-        state: _SourceState,
-        all_states: list[_SourceState],
-    ) -> int:
-        estimator = request.compile_binding.estimator
-        if state.candidate.channel is not ContextChannel.SYSTEM:
-            return 0 if state.omitted else estimator.estimate_message(state.message())
-        prompt = "\n\n".join(
-            text
-            for item in sorted(
-                all_states, key=lambda item: self._placement_key(item.candidate)
-            )
-            if item.candidate.channel is ContextChannel.SYSTEM
-            and (text := item.text()) is not None
-        )
-        return estimator.estimate_frozen_input(
-            system_prompt=prompt,
-            messages=(),
-            tools=(),
-        ).system_tokens
-
     @staticmethod
     def _source_variant_tokens(
         request: StructuredModelInputCompileRequest,
@@ -3192,56 +2952,6 @@ class StructuredModelInputCompiler:
             f"{sequence:020d}",
             state.item.source_entry_id or "",
         )
-
-    def _minimum_budget_failure(
-        self,
-        request: StructuredModelInputCompileRequest,
-        lowered: tuple[LoweredCanonicalItem, ...],
-        sources: list[_SourceState],
-        tools: list[_ToolState],
-    ) -> ModelInputCompileFailureKind:
-        estimator = request.compile_binding.estimator
-        schema_only = estimator.estimate_frozen_input(
-            system_prompt="",
-            messages=(),
-            tools=request.compile_binding.tool_surface.tool_specs,
-        )
-        if (
-            schema_only.total_input_tokens
-            > request.compile_binding.effective_input_budget_tokens
-        ):
-            return ModelInputCompileFailureKind.TOOL_SCHEMA_EXCEEDS_BUDGET
-        if any(state.requires_full() for state in tools):
-            return ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
-        tool_by_identity = {id(state.lowered): state for state in tools}
-        protected = tuple(
-            item.fixed_message
-            if item.fixed_message is not None
-            else tool_by_identity[id(item)].message()
-            for item in lowered
-        )
-        protected_estimate = estimator.estimate_frozen_input(
-            system_prompt="",
-            messages=protected,
-            tools=request.compile_binding.tool_surface.tool_specs,
-        )
-        if (
-            protected_estimate.total_input_tokens
-            > request.compile_binding.effective_input_budget_tokens
-        ):
-            return ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
-        minimum = self._layout(
-            request,
-            lowered=lowered,
-            sources=sources,
-            tools=tools,
-        )
-        if (
-            minimum.estimate.total_input_tokens
-            > request.compile_binding.effective_input_budget_tokens
-        ):
-            return ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-        return ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
 
     def _selected_source_tokens(
         self,

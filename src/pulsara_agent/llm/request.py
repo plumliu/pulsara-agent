@@ -103,6 +103,47 @@ class FrozenProviderWireMaterialization:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderInputUsageAnchor:
+    model_call_id: str
+    epoch_nonce: str
+    epoch_revision: int
+    connection_id: str
+    target: ResolvedModelTargetFact
+    route_wire_profile_fingerprint: str
+    reported_model_id: str | None
+    reported_input_tokens: int
+    raw_input_tokens: int
+    materialization: FrozenProviderWireMaterialization = field(repr=False)
+
+    def budget_for(
+        self, *, connection_id: str, target: ResolvedModelTargetFact,
+        route_wire_profile_fingerprint: str,
+        materialization: FrozenProviderWireMaterialization, raw_input_tokens: int,
+    ) -> tuple[int, int] | None:
+        if (
+            connection_id != self.connection_id
+            or target.model_dump(exclude={"limits", "context_budget"})
+            != self.target.model_dump(exclude={"limits", "context_budget"})
+            or route_wire_profile_fingerprint != self.route_wire_profile_fingerprint
+            or materialization.root_policy_value != self.materialization.root_policy_value
+            or materialization.tool_items != self.materialization.tool_items
+        ):
+            return None
+        def fixed(value: FrozenProviderWireMaterialization) -> dict:
+            projection = thaw_json(value.context_bearing_projection)
+            return {key: item for key, item in projection.items() if key not in {"input", "messages"}}
+        if fixed(materialization) != fixed(self.materialization):
+            return None
+        prefix = self.materialization.ordered_input_items
+        if materialization.ordered_input_items[:len(prefix)] != prefix:
+            return None
+        suffix = raw_input_tokens - self.raw_input_tokens
+        if suffix < 0:
+            raise ValueError("compatible provider input has a negative suffix quote")
+        return self.reported_input_tokens + suffix, suffix
+
+
+@dataclass(frozen=True, slots=True)
 class FrozenProviderWireInputQuote:
     wire_api: str
     estimator_fingerprint: str
@@ -113,12 +154,18 @@ class FrozenProviderWireInputQuote:
     generic_wire_visual_image_tokens: int
     replaced_generic_wire_estimated_tokens: int
     replay_wire_estimated_tokens: int
-    final_wire_estimated_input_tokens: int
+    raw_final_wire_estimated_input_tokens: int
     final_wire_visual_image_tokens: int
     final_wire_utf8_bytes: int
+    budget_input_tokens: int
+    budget_source: Literal["heuristic", "reported_input_anchor"] = "heuristic"
+    anchor_model_call_id: str | None = None
+    anchor_reported_input_tokens: int | None = None
+    estimated_suffix_tokens: int | None = None
 
     def __post_init__(self) -> None:
         values = (
+            self.budget_input_tokens,
             self.effective_input_budget_tokens,
             self.semantic_estimated_input_tokens,
             self.semantic_visual_image_tokens,
@@ -126,7 +173,7 @@ class FrozenProviderWireInputQuote:
             self.generic_wire_visual_image_tokens,
             self.replaced_generic_wire_estimated_tokens,
             self.replay_wire_estimated_tokens,
-            self.final_wire_estimated_input_tokens,
+            self.raw_final_wire_estimated_input_tokens,
             self.final_wire_visual_image_tokens,
             self.final_wire_utf8_bytes,
         )
@@ -144,12 +191,30 @@ class FrozenProviderWireInputQuote:
             or self.generic_wire_visual_image_tokens
             > self.generic_wire_estimated_input_tokens
             or self.final_wire_visual_image_tokens
-            > self.final_wire_estimated_input_tokens
+            > self.raw_final_wire_estimated_input_tokens
             or self.generic_wire_visual_image_tokens
             != self.final_wire_visual_image_tokens
         ):
             raise ValueError("provider wire image token quote is invalid")
-        if self.final_wire_estimated_input_tokens != (
+        if self.budget_source == "heuristic":
+            if self.budget_input_tokens != self.raw_final_wire_estimated_input_tokens or any(
+                value is not None for value in (
+                    self.anchor_model_call_id, self.anchor_reported_input_tokens,
+                    self.estimated_suffix_tokens,
+                )
+            ):
+                raise ValueError("heuristic budget provenance is inconsistent")
+        elif self.budget_source == "reported_input_anchor":
+            if (
+                not self.anchor_model_call_id or self.anchor_reported_input_tokens is None
+                or self.estimated_suffix_tokens is None
+                or min(self.anchor_reported_input_tokens, self.estimated_suffix_tokens) < 0
+                or self.budget_input_tokens != self.anchor_reported_input_tokens + self.estimated_suffix_tokens
+            ):
+                raise ValueError("anchored budget provenance is inconsistent")
+        else:
+            raise ValueError("unknown budget source")
+        if self.raw_final_wire_estimated_input_tokens != (
             self.generic_wire_estimated_input_tokens
             - self.replaced_generic_wire_estimated_tokens
             + self.replay_wire_estimated_tokens
@@ -202,7 +267,7 @@ class FrozenProviderWireInputPlan:
         if self.quote.wire_api != self.wire_api:
             raise ValueError("provider wire plan API differs from its quote")
         if (
-            self.quote.final_wire_estimated_input_tokens
+            self.quote.budget_input_tokens
             > self.quote.effective_input_budget_tokens
         ):
             raise ValueError("provider wire plan exceeds the input budget")
@@ -324,7 +389,9 @@ def provider_wire_input_plan_identity_fingerprint(
                     plan.quote.replaced_generic_wire_estimated_tokens
                 ),
                 "replay_wire_estimated": (plan.quote.replay_wire_estimated_tokens),
-                "final_wire_estimated": (plan.quote.final_wire_estimated_input_tokens),
+                "raw_final_wire_estimated": plan.quote.raw_final_wire_estimated_input_tokens,
+                "budget_input_tokens": plan.quote.budget_input_tokens,
+                "budget_source": plan.quote.budget_source,
                 "final_wire_visual": plan.quote.final_wire_visual_image_tokens,
                 "final_wire_bytes": plan.quote.final_wire_utf8_bytes,
             },
