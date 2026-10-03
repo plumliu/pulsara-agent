@@ -118,6 +118,7 @@ export interface ModelConfigurationSummary {
   route_name?: string;
   display_name?: string;
   context_tokens?: number;
+  context_window_tokens?: number | null;
   max_output_tokens?: number;
   tool_call?: boolean | null;
   input_modalities?: string[] | null;
@@ -146,6 +147,7 @@ export type ModelConfigurationInput =
     wire_api: 'openai_chat_completions' | 'openai_responses';
     reasoning_wire_profile: ReasoningWireProfile;
     api_key: string | null;
+    context_window_tokens: number | null;
   }
   | {
     source: 'user_declared';

@@ -126,7 +126,7 @@ it('requires a fresh key for a changed endpoint, preserves failed drafts and can
 it('edits a catalog profile using the saved selection and matching catalog choices', async () => {
   const detail: ModelConfigurationDetail = {
     base_url: 'https://catalog.example/v1', credential_configured: true,
-    configuration: { source: 'models_dev', route_id: 'test', model_id: 'catalog-model', wire_api: 'openai_chat_completions', reasoning_wire_profile: 'thinking_type', api_key: null },
+    configuration: { source: 'models_dev', context_window_tokens: null, route_id: 'test', model_id: 'catalog-model', wire_api: 'openai_chat_completions', reasoning_wire_profile: 'thinking_type', api_key: null },
   };
   const catalog: ModelCatalogReadModel = { status: 'ready', routes: [{ route_id: 'test', display_name: 'Catalog Test', models: [{
     model_id: 'catalog-model', display_name: 'Catalog Model', wire_dialect: 'openai_compatible', context_tokens: 256_000, input_tokens: 256_000, output_tokens: 8192, tool_call: true, input_modalities: ['text'], output_modalities: ['text'], wire_shape_hint: null,
@@ -144,6 +144,35 @@ it('edits a catalog profile using the saved selection and matching catalog choic
   fireEvent.click(within(dialog).getByRole('button', { name: '保存修改' }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(updateModel).toHaveBeenCalledExactlyOnceWith('connection-1', { ...detail.configuration, reasoning_wire_profile: 'catalog_standard' });
+});
+
+it('edits a catalog context allowance within its limits while output remains read-only', async () => {
+  const detail: ModelConfigurationDetail = {
+    base_url: 'https://catalog.example/v1', credential_configured: true,
+    configuration: { source: 'models_dev', context_window_tokens: 512_000, route_id: 'test', model_id: 'catalog-model', wire_api: 'openai_chat_completions', reasoning_wire_profile: 'catalog_standard', api_key: null },
+  };
+  const catalog: ModelCatalogReadModel = { status: 'ready', routes: [{ route_id: 'test', display_name: 'Test', models: [{
+    model_id: 'catalog-model', display_name: 'Catalog Model', wire_dialect: 'openai_compatible', context_tokens: 1_000_000, input_tokens: 1_000_000, output_tokens: 384_000, tool_call: true, input_modalities: ['text'], output_modalities: ['text'], wire_shape_hint: null,
+    wire_apis: [{ wire_api: 'openai_chat_completions', executable: true, reason: null, endpoint: detail.base_url, reasoning: { kind: 'provider_default' }, reasoning_wire_profiles: ['catalog_standard'] }],
+  }] }] };
+  const { updateModel } = setup([{ ...modelConfiguration(1), source: 'models_dev' }], detail, catalog);
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  fireEvent.click(await screen.findByRole('button', { name: '修改模型配置 Test · Model 1' }));
+  const dialog = await screen.findByRole('dialog', { name: '修改模型配置' });
+  const allowance = within(dialog).getByLabelText('上下文额度（tokens）');
+  expect(allowance).toHaveProperty('value', '512000');
+  expect(allowance.getAttribute('min')).toBe('256000');
+  expect(allowance.getAttribute('max')).toBe('1000000');
+  expect(within(dialog).getByLabelText('最大输出长度')).toHaveProperty('readOnly', true);
+  expect(within(dialog).getByLabelText('最大输出长度')).toHaveProperty('value', '384000');
+  for (const invalid of ['255999', '1000001', '256000.5']) {
+    fireEvent.change(allowance, { target: { value: invalid } });
+    expect(within(dialog).getByRole('button', { name: '保存修改' })).toHaveProperty('disabled', true);
+  }
+  fireEvent.change(allowance, { target: { value: '256000' } });
+  fireEvent.click(within(dialog).getByRole('button', { name: '保存修改' }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(updateModel).toHaveBeenCalledExactlyOnceWith('connection-1', { ...detail.configuration, context_window_tokens: 256000 });
 });
 
 it('paginates all saved models in compact summaries and clears pending deletion when changing pages', async () => {

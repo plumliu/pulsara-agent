@@ -554,6 +554,9 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
                 limits=limits,
             ),
         )
+        # The scripted model and its preparer share the same physical target.
+        # Frozen-source reborrows must validate the limits actually dispatched.
+        self._model_runtime = self._preparer.model_runtime
 
 
 def _context_snapshot_payload(request) -> dict[str, object]:
@@ -10377,7 +10380,10 @@ def test_subagent_default_target_is_inherited_from_the_dispatched_parent_epoch(
             assert fact == FrozenSubagentModelTarget.freeze(bundle.target_fact, bundle.reasoning_contract)
             assert fact.model_id == 'test-pro'
             assert rows[0]['status'] == 'FAILED'
-            assert 'target changed' in str(rows[0]['terminal_public_detail'])
+            assert (
+                'ModelRuntimeUnavailable: current runtime cannot reproduce the frozen model target'
+                if drift == 'model' else 'target changed'
+            ) in str(rows[0]['terminal_public_detail'])
             explicit_binding, explicit_fact = launch.freeze_target(binding, use_default=False)
             assert explicit_binding == binding
             assert explicit_fact.model_id == ('changed-after-dispatch' if drift == 'model' else 'test-pro')

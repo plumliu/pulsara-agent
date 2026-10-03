@@ -221,13 +221,11 @@ from pulsara_agent.model_input.provider_replay import (
 )
 
 from pulsara_agent.model_input.continuity import (
-    FrozenDirectSwitchAdmission,
     ProviderInputContinuityScope,
     provider_input_logical_bytes,
 )
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
-    FrozenProviderWireInputPlan,
     FrozenProviderWireInputQuote,
 )
 from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
@@ -236,7 +234,10 @@ from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
 )
-from pulsara_agent.conversation_kernel.direct_model import PreparedKernelModelTarget
+from pulsara_agent.conversation_kernel.direct_model import (
+    KernelModelTargetPreparationRequest,
+    PreparedKernelModelTarget,
+)
 from pulsara_agent.llm.frozen_target import (
     FrozenEpochModelCallTarget,
     FrozenEpochModelTargetBundle,
@@ -945,11 +946,10 @@ class OrdinaryPrecompileDecision:
 
 @dataclass(frozen=True, slots=True)
 class ModelSwitchDirectPrecompileDecision:
-    """Tier-1 B candidate after consuming its exact precheck observation."""
+    """Attempt Tier 1; admission still measures the complete final dispatch."""
 
     ordinary_admission: PreparedProviderHeadroomAdmission = dataclass_field(repr=False)
-    direct_admission: FrozenDirectSwitchAdmission = dataclass_field(repr=False)
-    wire_input_plan: FrozenProviderWireInputPlan = dataclass_field(repr=False)
+    switch_candidate: ModelSwitchCompactionTriggerCandidate = dataclass_field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1094,6 +1094,34 @@ class CompactionCoordinator:
         # The first call must inspect canonical history even when no installed A
         # survives (cold restart/fork).  A known text-only B may need Tier 3 P.
         return True
+
+    def context_allowance_change_pending(
+        self,
+        *,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        destination: PreparedKernelModelTarget,
+    ) -> bool:
+        source = self._provider_dispatch.installed_source_target(
+            scope=ProviderInputContinuityScope(
+                session_id=self._writer_lease.guard.session_id,
+                scope_kind=scope_kind,
+                scope_subagent_task_id=scope_subagent_task_id,
+            ),
+            destination=destination,
+        )
+        if source is None:
+            return False
+        target_fact = destination.epoch_call_target.target_bundle.target_fact
+        # Only the user allowance can grant a later-call handover. Physical
+        # limits, identity, reasoning, projection and estimator must still match.
+        return replace(
+            source,
+            target_fact=source.target_fact.model_copy(update={
+                "context_window_tokens": target_fact.context_window_tokens,
+                "context_budget": target_fact.context_budget,
+            }),
+        ) == destination.epoch_call_target.target_bundle
 
     def prospective_root_crosses_automatic_threshold(
         self,
@@ -1675,18 +1703,8 @@ class CompactionCoordinator:
                 raise CompactionPlanningError(
                     "compaction headroom quote differs from its frozen source"
                 )
-            source_view = freeze_compaction_source_view(
-                canonical_read=canonical_read,
-                compile_binding=dispatch.prepared_call.compile_binding,
-                semantic_projection=dispatch.projection,
-                predecessor_epoch_view=dispatch.planning.predecessor_view,
-                provider_wire_quote=dispatch.wire_quote,
-                producer_wire_api=(
-                    dispatch.prepared_call.call.target.model_profile.route_wire_profile.wire_api
-                ),
-            )
             if source_target is not None:
-                quote = source_view.provider_wire_quote
+                quote = dispatch.wire_quote
                 destination_trigger = int(
                     quote.effective_input_budget_tokens
                     * owner.policy.auto_trigger_ratio
@@ -1695,45 +1713,17 @@ class CompactionCoordinator:
                     quote.budget_input_tokens < destination_trigger
                     and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
                 ):
-                    wire_candidate = dispatch.wire_candidate
                     handle, measurement = dispatch.take_below_trigger_ownership()
                     dispatch = None
-                    ordinary = PreparedProviderHeadroomAdmission(
-                        handle, preflight, prepared_target
-                    )
-                    observation = HandleFreeProviderWireObservation(
-                        candidate=wire_candidate,
-                        measurement=measurement,
-                    )
-                    try:
-                        wire_decision = await self._provider_dispatch.measure_prepared_wire_candidate(
-                            wire_candidate,
-                            deadline=deadline,
-                            reusable_observation=observation,
-                        )
-                        if wire_decision.wire_input_plan is not None:
-                            direct_admission, wire_input_plan = (
-                                self._provider_dispatch.freeze_direct_switch_admission(
-                                    candidate=wire_candidate,
-                                    decision=wire_decision,
-                                )
-                            )
-                            return ModelSwitchDirectPrecompileDecision(
-                                ordinary_admission=ordinary,
-                                direct_admission=direct_admission,
-                                wire_input_plan=wire_input_plan,
-                            )
-                    except BaseException:
-                        ordinary.close()
-                        raise
-                    ordinary.close()
-                    if not owner.policy.enabled:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
-                        )
-                    return ModelSwitchCompactionTriggerCandidate(
-                        source_target=source_target,
-                        destination_target=prepared_target,
+                    measurement.discard_materialization_to_quote()
+                    return ModelSwitchDirectPrecompileDecision(
+                        ordinary_admission=PreparedProviderHeadroomAdmission(
+                            handle, preflight, prepared_target
+                        ),
+                        switch_candidate=ModelSwitchCompactionTriggerCandidate(
+                            source_target=source_target,
+                            destination_target=prepared_target,
+                        ),
                     )
                 dispatch.discard_wire_materialization_to_quote()
                 dispatch.close()
@@ -1746,6 +1736,16 @@ class CompactionCoordinator:
                     source_target=source_target,
                     destination_target=prepared_target,
                 )
+            source_view = freeze_compaction_source_view(
+                canonical_read=canonical_read,
+                compile_binding=dispatch.prepared_call.compile_binding,
+                semantic_projection=dispatch.projection,
+                predecessor_epoch_view=dispatch.planning.predecessor_view,
+                provider_wire_quote=dispatch.wire_quote,
+                producer_wire_api=(
+                    dispatch.prepared_call.call.target.model_profile.route_wire_profile.wire_api
+                ),
+            )
             if not owner.policy.enabled or not owner.policy.automatic_enabled:
                 wire_candidate = dispatch.wire_candidate
                 handle, measurement = dispatch.take_below_trigger_ownership()
@@ -1990,6 +1990,18 @@ class CompactionCoordinator:
         )
         dispatch.select_wire_candidate(decision.candidate)
         return decision
+
+    def direct_switch_wire_admitted(
+        self, decision: PreparedWireMeasurementDecision
+    ) -> bool:
+        """Tier 1 admits the final complete candidate below the handover trigger."""
+        owner = self._compaction_owner
+        return (
+            owner is not None
+            and decision.wire_input_plan is not None
+            and decision.quote.budget_input_tokens
+            < int(decision.quote.effective_input_budget_tokens * owner.policy.auto_trigger_ratio)
+        )
 
     def wire_decision_crosses_automatic_threshold(
         self,
@@ -2566,6 +2578,27 @@ class CompactionCoordinator:
                     return _ModelSwitchTier3Fallback(
                         pre_compact_dispatched=pre_compact_dispatched
                     )
+            else:
+                scope = ProviderInputContinuityScope(
+                    session_id=expected_scope.session_id,
+                    scope_kind=expected_scope.scope_kind,
+                    scope_subagent_task_id=expected_scope.scope_subagent_task_id,
+                )
+                cohort = self._continuity.current_cohort(scope)
+                if cohort is not None:
+                    binding = await self._io.run(
+                        self._repository.read_turn_model_call_binding,
+                        self._writer_lease.guard,
+                        turn_id=turn_id,
+                        deadline_monotonic=deadline,
+                    )
+                    source_target_override = self._provider_dispatch.prepare_installed_source_target(
+                        scope=scope,
+                        source=cohort.target_bundle,
+                        turn_id=turn_id,
+                        model_call_index=model_call_index,
+                        binding_override=binding,
+                    )
             try:
                 dispatch = await self._provider_dispatch.prepare_compaction_source(
                     turn_id=turn_id,
@@ -2598,6 +2631,21 @@ class CompactionCoordinator:
                 dispatch.close()
                 raise
         try:
+            # Ordinary compaction keeps the exact source target throughout dry
+            # successor validation and adoption. Settings edits are handled by
+            # the next ordinary safe-point's three-tier handover.
+            ordinary_destination_target = self._model.prepare_resolved_target(
+                KernelModelTargetPreparationRequest(
+                    session_id=expected_scope.session_id,
+                    turn_id=turn_id,
+                    model_call_index=model_call_index,
+                    purpose=dispatch.prepared_call.call.fact.purpose,
+                    maximum_input_tokens=dispatch.prepared_call.compile_binding.effective_input_budget_tokens,
+                    binding=dispatch.prepared_call.call.binding,
+                ),
+                target=dispatch.prepared_call.call.target,
+                binding=dispatch.prepared_call.call.binding,
+            )
             source_quote = dispatch.discard_wire_materialization_to_quote()
             source_view = freeze_compaction_source_view(
                 canonical_read=projected_read,
@@ -3064,7 +3112,7 @@ class CompactionCoordinator:
                             source_replacements=(runtime_source,),
                             retained_skill_read=compaction_read,
                             prepared_target_override=(
-                                None
+                                ordinary_destination_target
                                 if model_switch_candidate is None
                                 else model_switch_candidate.destination_target
                             ),
@@ -3323,6 +3371,7 @@ class CompactionCoordinator:
                 model_switch_candidate=model_switch_candidate,
                 model_switch_tier=model_switch_tier,
                 prospective_root_dispatch=prospective_root_dispatch,
+                ordinary_destination_target=ordinary_destination_target,
                 pending_active_candidate=pending_active_candidate,
                 pending_empty_adoption=pending_empty_adoption,
             )
@@ -3390,6 +3439,7 @@ class CompactionCoordinator:
         model_switch_candidate: ModelSwitchCompactionTriggerCandidate | None,
         model_switch_tier: Literal[2, 3] | None,
         prospective_root_dispatch: PreparedProspectiveRootDispatch | None,
+        ordinary_destination_target: PreparedKernelModelTarget,
         pending_active_candidate: PreparedActiveRootInputCandidate | None,
         pending_empty_adoption: object | None,
     ) -> CompactionExecutionResult:
@@ -3785,7 +3835,7 @@ class CompactionCoordinator:
                             source_replacements=(current_runtime_source,),
                             retained_skill_read=compaction_read,
                             prepared_target_override=(
-                                None
+                                ordinary_destination_target
                                 if model_switch_candidate is None
                                 else model_switch_candidate.destination_target
                             ),

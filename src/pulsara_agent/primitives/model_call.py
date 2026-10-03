@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pulsara_agent.llm.model_catalog import MINIMUM_SELECTABLE_CONTEXT_TOKENS
 from pulsara_agent.llm.model_connections import ModelCallBinding
 
 
@@ -161,7 +162,7 @@ class ModelTokenUsageFact(BaseModel):
 class ResolvedModelTargetFact(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    contract_version: Literal["resolved-model-target:v8"] = "resolved-model-target:v8"
+    contract_version: Literal["resolved-model-target:v9"] = "resolved-model-target:v9"
     route_id: str = Field(min_length=1)
     wire_api: Literal["openai_chat_completions", "openai_responses"]
     model_id: str = Field(min_length=1)
@@ -183,13 +184,19 @@ class ResolvedModelTargetFact(BaseModel):
     tool_call_capability: bool
     limits: ModelContextLimits
     context_budget: ResolvedModelContextBudgetFact
+    context_window_tokens: int | None = Field(
+        default=None, ge=MINIMUM_SELECTABLE_CONTEXT_TOKENS, strict=True
+    )
     token_estimator: TokenEstimatorFact
 
     @model_validator(mode="after")
     def _validate_target(self) -> "ResolvedModelTargetFact":
+        if self.context_window_tokens is not None and self.context_window_tokens > self.limits.total_context_tokens:
+            raise ValueError("context allowance exceeds provider context limit")
         expected_pre_margin = min(
             self.limits.max_input_tokens,
             self.limits.total_context_tokens - 1,
+            (self.context_window_tokens or self.limits.total_context_tokens) - 1,
         )
         if self.context_budget.effective_output_tokens > self.limits.max_output_tokens:
             raise ValueError("effective output exceeds model maximum")

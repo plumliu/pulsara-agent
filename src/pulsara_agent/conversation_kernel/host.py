@@ -1586,13 +1586,13 @@ class KernelHostSession:
                 "connection_id": binding.connection_id.value,
                 "model_id": target_fact.model_id,
                 "input_tokens": None,
-                "input_budget_tokens": target_fact.context_budget.input_budget_tokens,
+                "input_budget_tokens": target.effective_input_budget_tokens,
                 "budget_source": None,
                 "model_switch_pending": switched,
                 "automatic_compaction_available": automatic,
                 "compaction_expected": False,
                 "compaction_trigger_tokens": int(
-                    target_fact.context_budget.input_budget_tokens
+                    target.effective_input_budget_tokens
                     * policy.auto_trigger_ratio
                 ),
             }
@@ -1613,7 +1613,13 @@ class KernelHostSession:
                     )
                     if calibrated is not None:
                         tokens, source = calibrated[0], "reported_input_anchor"
-                payload.update(state="ready", input_tokens=tokens, budget_source=source)
+                payload.update(
+                    state="ready", input_tokens=tokens, budget_source=source,
+                    input_budget_tokens=quote.effective_input_budget_tokens,
+                    compaction_trigger_tokens=int(
+                        quote.effective_input_budget_tokens * policy.auto_trigger_ratio
+                    ),
+                )
             elif turn_id is not None:
                 projection = (
                     await self._runner._provider_dispatch.prepare_compaction_source(

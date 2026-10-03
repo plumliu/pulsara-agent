@@ -2807,6 +2807,7 @@ describe('PulsaraApp', () => {
       wire_api: 'openai_responses',
       reasoning_wire_profile: 'provider_default',
       api_key: secret,
+      context_window_tokens: null,
     }));
     await waitFor(() => expect(screen.queryByLabelText('API key')).toBeNull());
     expect(container.textContent).not.toContain(secret);

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import Lock
 from typing import Callable
 
@@ -46,7 +46,7 @@ from pulsara_agent.llm.provider_open import (
 )
 from pulsara_agent.llm.retry import LLMRetryConfig
 from pulsara_agent.llm.route_wires import production_route_wire_registry
-from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.model_call import ModelCallPurpose, ResolvedModelTargetFact
 from pulsara_agent.settings import LocalSettingsStore
 
 
@@ -171,15 +171,24 @@ class ModelRuntime:
         binding: ModelCallBinding,
         *,
         timeout_policy: OpenAITransportTimeoutPolicy,
+        frozen_target_fact: ResolvedModelTargetFact | None = None,
     ) -> ResolvedModelTarget:
         registry = self.transport_registry(timeout_policy)
-        return resolve_model_target(
-            connection=self.connection(binding),
+        connection = self.connection(binding)
+        if frozen_target_fact is not None:
+            connection = replace(
+                connection, context_window_tokens=frozen_target_fact.context_window_tokens
+            )
+        target = resolve_model_target(
+            connection=connection,
             binding=binding,
             catalog=self.catalog.selectable(),
             route_wires=self.route_wires,
             registry=registry,
         )
+        if frozen_target_fact is not None and target.fact != frozen_target_fact:
+            raise ModelRuntimeUnavailable("current runtime cannot reproduce the frozen model target")
+        return target
 
     def resolve_frozen_target_bundle(
         self,
@@ -190,22 +199,21 @@ class ModelRuntime:
     ) -> ResolvedModelTarget:
         """Borrow current physical resolution only when all frozen facts match."""
 
-        connection = self.connection(binding)
+        # The installed epoch owns its old allowance. Reproduce that complete
+        # frozen policy while checking all current provider facts as before.
+        # A saved edit cannot change an in-flight call or its Tier 2 summary.
+        target = self.resolve_target(
+            binding,
+            timeout_policy=timeout_policy,
+            frozen_target_fact=bundle.target_fact,
+        )
         if (
-            connection.id != bundle.connection.connection_id
-            or connection.authentication
-            is not bundle.connection.authentication_mode
+            target.connection.id != bundle.connection.connection_id
+            or target.connection.authentication is not bundle.connection.authentication_mode
         ):
             raise ModelRuntimeUnavailable(
                 "current model connection differs from the installed epoch contract"
             )
-        target = resolve_model_target(
-            connection=connection,
-            binding=binding,
-            catalog=self.catalog.selectable(),
-            route_wires=self.route_wires,
-            registry=self.transport_registry(timeout_policy),
-        )
         if (
             target.fact != bundle.target_fact
             or target.contract.reasoning != bundle.reasoning_contract

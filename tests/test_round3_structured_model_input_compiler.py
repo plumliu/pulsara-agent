@@ -3846,9 +3846,9 @@ def test_round3_source_decision_and_compiled_fingerprints_are_golden() -> None:
         "sha256:caee1ae23a161f2c862947ef5b7b2b9a4ae3093bce6117e00bc13a3a19058fbd"
     )
     assert compiled.compiled_semantic_fingerprint == (
-        # Compiler v17 removes the worker-history source slot and adds native branch
-        # items. This unchanged input keeps its budget decision.
-        "sha256:109aee3c1f3170d0b224ede42887f0db819a3ecc053668e278f63cfb76965aaf"
+        # Frozen target v9 includes the canonical context allowance in the binding.
+        # Source content, budget decision, and token estimate remain unchanged.
+        "sha256:00c9cf10ff6ac09ddc8f45dbbd2ad71c7802eabbf6f7fe361f354743380b2437"
     )
     assert compiled.final_estimate.total_input_tokens == 268
 

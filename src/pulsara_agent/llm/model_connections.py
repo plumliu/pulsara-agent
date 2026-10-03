@@ -121,6 +121,7 @@ class ModelConnectionConfig:
     base_url: str
     reasoning_wire_profile: ReasoningWireProfile
     user_declared: UserDeclaredModelTarget | None = None
+    context_window_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if not self.base_url or self.base_url != self.base_url.strip():
@@ -135,6 +136,15 @@ class ModelConnectionConfig:
                 self.reasoning_wire_profile,
                 self.user_declared.reasoning,
             )
+        if self.context_window_tokens is not None:
+            if self.user_declared is not None:
+                raise ValueError("context allowance requires a catalog model")
+            if (
+                isinstance(self.context_window_tokens, bool)
+                or not isinstance(self.context_window_tokens, int)
+                or self.context_window_tokens < MINIMUM_SELECTABLE_CONTEXT_TOKENS
+            ):
+                raise ValueError("context allowance is below the product minimum or not an integer")
 
     @property
     def authentication(self) -> ModelConnectionAuthentication:
@@ -228,6 +238,8 @@ def model_connection_to_dict(value: ModelConnectionConfig) -> dict[str, object]:
         )
     elif value.reasoning_wire_profile is not ReasoningWireProfile.CATALOG_STANDARD:
         payload["reasoning_wire_profile"] = value.reasoning_wire_profile.value
+    if value.context_window_tokens is not None:
+        payload["context_window_tokens"] = value.context_window_tokens
     return payload
 
 
@@ -241,7 +253,7 @@ def model_connection_from_dict(value: object) -> ModelConnectionConfig:
     }
     if not isinstance(value, dict):
         raise ValueError("model connection metadata has an invalid closed shape")
-    keys = frozenset(value)
+    keys = frozenset(value) - {"context_window_tokens"}
     if keys not in {
         frozenset(common),
         frozenset((*common, "reasoning_wire_profile")),
@@ -271,6 +283,7 @@ def model_connection_from_dict(value: object) -> ModelConnectionConfig:
         base_url=value["base_url"],
         reasoning_wire_profile=profile,
         user_declared=declared,
+        context_window_tokens=value.get("context_window_tokens"),
     )
 
 

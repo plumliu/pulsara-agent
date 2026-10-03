@@ -81,6 +81,8 @@ Pulsara 能搜索文件、编辑代码、运行命令并检查输出。耗时的
 
 输入框旁的圆环显示当前模型的上下文占用，悬停可查看估算用量与可用输入额度。切换模型后重新估算；达到压缩阈值时标红。未发送内容不计入预览。详见[上下文圆环契约](PULSARA_CONTEXT_USAGE_INDICATOR_IMPLEMENTATION_SPEC.zh.md)。
 
+目录模型可在设置中调整上下文额度，范围为 256,000 tokens 至 models.dev 上限，默认采用最大值。额度影响输入与压缩阈值，输出仍使用供应商最大值。详见[上下文额度契约](PULSARA_MODEL_CONTEXT_ALLOWANCE_IMPLEMENTATION_SPEC.zh.md)。
+
 ## 让积累的知识继续发挥作用
 
 让下一次工作，从已有的偏好、项目决策和约束出发。

@@ -265,6 +265,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const [baseUrl, setBaseUrl] = useState('');
   const [authentication, setAuthentication] = useState<'bearer_api_key' | 'none'>('bearer_api_key');
   const [contextTokens, setContextTokens] = useState('256000');
+  const [catalogContextTokens, setCatalogContextTokens] = useState<string>();
   const [maxOutputTokens, setMaxOutputTokens] = useState('8192');
   const [toolCall, setToolCall] = useState(true);
   const [inputModalities, setInputModalities] = useState<string[] | null>(['text']);
@@ -326,6 +327,11 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     alphabeticalCollator.compare(left.model_id, right.model_id)
   )), [selectedRoute]);
   const selectedModel = selectableModels.find((model) => model.model_id === modelId);
+  const catalogAllowanceReady = Boolean(selectedModel?.context_tokens != null && (
+    !catalogContextTokens || (Number.isSafeInteger(Number(catalogContextTokens))
+      && Number(catalogContextTokens) >= minimumContextTokens
+      && Number(catalogContextTokens) <= selectedModel.context_tokens)
+  ));
   const selectedWire = selectedModel?.wire_apis.find((wire) => wire.wire_api === wireApi);
   const hasExecutableWire = selectedModel?.wire_apis.some((wire) => wire.executable) ?? false;
   const modelConfigurations = settings?.model_configurations ?? [];
@@ -350,6 +356,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     setConfigurationName(''); setBaseUrl('');
     setAuthentication('bearer_api_key');
     setContextTokens('256000'); setMaxOutputTokens('8192');
+    setCatalogContextTokens(undefined);
     setToolCall(true); setCatalogReasoningProfile('catalog_standard');
     setCustomReasoning('provider_default');
     setInputModalities(['text']);
@@ -372,6 +379,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
       setConfigurationSource(value.source); setModelId(value.model_id); setWireApi(value.wire_api);
       if (value.source === 'models_dev') {
         setRouteId(value.route_id); setCatalogReasoningProfile(value.reasoning_wire_profile);
+        setCatalogContextTokens(value.context_window_tokens == null ? undefined : String(value.context_window_tokens));
       } else {
         setConfigurationName(value.configuration_name); setBaseUrl(value.base_url);
         setAuthentication(value.authentication); setContextTokens(String(value.context_tokens));
@@ -388,11 +396,12 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
   const modelDraft = (): ModelConfigurationInput | undefined => {
     const apiKey = modelKey.current?.value || null;
     if (configurationSource === 'models_dev') {
-      if (!routeId || !modelId || !wireApi || (!apiKey && !canKeepModelKey) || !selectedWire?.executable
+      if (!routeId || !modelId || !wireApi || !catalogAllowanceReady || (!apiKey && !canKeepModelKey) || !selectedWire?.executable
         || !selectedWire.reasoning_wire_profiles?.includes(catalogReasoningProfile)) return undefined;
       return {
         source: 'models_dev', route_id: routeId, model_id: modelId, wire_api: wireApi,
         reasoning_wire_profile: catalogReasoningProfile, api_key: apiKey,
+        context_window_tokens: catalogContextTokens ? Number(catalogContextTokens) : null,
       };
     }
     const context = Number(contextTokens);
@@ -576,7 +585,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
     && (!effortReasoningProfiles.has(customReasoning) || parseEffortValues(effortValues).length),
   );
   const draftReady = configurationSource === 'models_dev'
-    ? Boolean(routeId && modelId && wireApi && selectedWire?.executable && (keyPresent || canKeepModelKey)
+    ? Boolean(routeId && modelId && wireApi && catalogAllowanceReady && selectedWire?.executable && (keyPresent || canKeepModelKey)
       && selectedWire.reasoning_wire_profiles?.includes(catalogReasoningProfile))
     : customDeclarationReady && !incompatibleCustomProfile && (authentication === 'none' || keyPresent || canKeepModelKey);
 
@@ -604,7 +613,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
             {modelConfigurations.length ? <>
               <div className="model-card-list">{visibleModelConfigurations.map((connection) => <article className="model-config-card" key={connection.id}>
                 <span className="model-config-card__icon"><Bot size={15} /></span>
-                <span><strong title={connectionTitle(connection)}>{connectionTitle(connection)}</strong><small>{wireLabel(connection.wire_api)} · {formatTokens(connection.context_tokens)} 上下文</small><code title={connection.model_id}>{connection.model_id}</code></span>
+                <span><strong title={connectionTitle(connection)}>{connectionTitle(connection)}</strong><small>{wireLabel(connection.wire_api)} · {formatTokens(connection.context_window_tokens ?? connection.context_tokens)} 上下文</small><code title={connection.model_id}>{connection.model_id}</code></span>
                 <div className="model-config-card__actions">
                   <span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : '配置不可用'}</span>
                   {deleteCandidateId === connection.id ? <div className="model-delete-confirmation"><button disabled={deletingModelId === connection.id} onClick={() => setDeleteCandidateId(undefined)}>取消</button><button className="subtle-danger" disabled={deletingModelId === connection.id} onClick={() => void deleteModel(connection)}>{deletingModelId === connection.id ? <LoaderCircle size={13} /> : <Trash2 size={13} />}确认删除</button></div> : <div className="model-config-card__buttons"><button className="model-edit-trigger" aria-label={`修改模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId || loadingModelId) || savingModel || testingModel} onClick={() => void editModel(connection)}>{loadingModelId === connection.id ? <LoaderCircle size={13} /> : <Pencil size={13} />}修改</button><button className="model-delete-trigger subtle-danger" aria-label={`删除模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId || loadingModelId) || savingModel || testingModel} onClick={() => setDeleteCandidateId(connection.id)}><Trash2 size={13} />删除</button></div>}
@@ -622,10 +631,12 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
             {modelFormError && <p role="alert" className="settings-alert settings-alert--inside">{modelFormError}</p>}
             {configurationSource === 'models_dev' ? <>
               <div className="settings-form-grid">
-                <label><span>提供方</span><select value={routeId} onChange={(event) => { setRouteId(event.target.value); setModelId(''); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Provider</option>{routeId && !selectedRoute && <option value={routeId}>{routeId} · 当前目录不可用</option>}{selectableRoutes.map((route) => <option key={route.route_id} value={route.route_id}>{route.display_name}</option>)}</select></label>
-                <label><span>模型</span><select value={modelId} disabled={!selectedRoute} onChange={(event) => { setModelId(event.target.value); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Model ID</option>{modelId && !selectedModel && <option value={modelId}>{modelId} · 当前目录不可用</option>}{selectableModels.map((model) => <option key={model.model_id} value={model.model_id}>{model.display_name} · {model.model_id}</option>)}</select></label>
+                <label><span>提供方</span><select value={routeId} onChange={(event) => { setCatalogContextTokens(undefined); setRouteId(event.target.value); setModelId(''); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Provider</option>{routeId && !selectedRoute && <option value={routeId}>{routeId} · 当前目录不可用</option>}{selectableRoutes.map((route) => <option key={route.route_id} value={route.route_id}>{route.display_name}</option>)}</select></label>
+                <label><span>模型</span><select value={modelId} disabled={!selectedRoute} onChange={(event) => { setCatalogContextTokens(undefined); setModelId(event.target.value); setWireApi(''); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Model ID</option>{modelId && !selectedModel && <option value={modelId}>{modelId} · 当前目录不可用</option>}{selectableModels.map((model) => <option key={model.model_id} value={model.model_id}>{model.display_name} · {model.model_id}</option>)}</select></label>
                 <label><span>API 协议</span><select value={wireApi} disabled={!selectedModel || !hasExecutableWire} onChange={(event) => { setWireApi(event.target.value as typeof wireApi); setCatalogReasoningProfile('catalog_standard'); }}><option value="">选择 Chat 或 Responses</option>{selectedModel?.wire_apis.map((wire) => <option key={wire.wire_api} value={wire.wire_api} disabled={!wire.executable}>{wireLabel(wire.wire_api)}{wire.recommended ? ' · models.dev 建议' : ''}{wire.executable ? '' : ' · 暂不支持'}</option>)}</select></label>
                 <label><span className="model-reasoning-heading"><span>Reasoning 请求形状</span>{catalogReasoningProfile !== 'catalog_standard' && <small className="model-reasoning-warning">其他映射可能导致调用失败，风险自负。</small>}</span><select aria-label="Reasoning 请求形状" value={catalogReasoningProfile} disabled={!selectedWire} onChange={(event) => setCatalogReasoningProfile(event.target.value as ReasoningWireProfile)}>{!selectedWire?.reasoning_wire_profiles?.includes(catalogReasoningProfile) && <option value={catalogReasoningProfile}>{reasoningProfileLabel(catalogReasoningProfile)} · 当前不可用</option>}{selectedWire?.reasoning_wire_profiles?.map((profile) => <option key={profile} value={profile}>{reasoningProfileLabel(profile)}</option>)}</select><small>{catalogReasoningProfileDescription(catalogReasoningProfile, selectedWire?.reasoning?.kind)}</small></label>
+                <label><span>上下文额度（tokens）</span><input aria-label="上下文额度（tokens）" type="number" min={minimumContextTokens} max={selectedModel?.context_tokens ?? undefined} step="1" disabled={!selectedModel} value={catalogContextTokens ?? (selectedModel?.context_tokens == null ? '' : String(selectedModel.context_tokens))} placeholder={String(selectedModel?.context_tokens ?? '')} onChange={(event) => setCatalogContextTokens(event.target.value)} /><small>256,000–{selectedModel?.context_tokens?.toLocaleString('zh-CN') ?? '目录上限'}；留空使用最大值。</small></label>
+                <label><span>最大输出长度</span><input aria-label="最大输出长度" type="number" readOnly value={selectedModel?.output_tokens ?? ''} /><small>由模型目录提供。</small></label>
                 <label><span>API key</span><input ref={modelKey} aria-label="API key" type="password" autoComplete="new-password" placeholder={canKeepModelKey ? '留空保留现有密钥' : '保存到本机配置'} onChange={(event) => setKeyPresent(Boolean(event.target.value))} />{editingConfiguration && <small>{canKeepModelKey ? '留空保留现有密钥，填写则替换。' : '服务地址已改变或没有现有密钥，请重新填写。'}</small>}</label>
               </div>
               {selectedModel && !hasExecutableWire && <p className="inline-warning"><CircleAlert size={13} />该提供方没有声明 OpenAI-compatible 接口，无法使用通用 Chat / Responses adapter。</p>}

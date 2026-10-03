@@ -2125,6 +2125,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             model_switch_candidate=None,
             model_switch_tier=None,
             prospective_root_dispatch=None,
+            ordinary_destination_target=SimpleNamespace(),
             pending_active_candidate=None,
             protected_tail_selection_fingerprint="tail:1",
             compaction_read=SimpleNamespace(

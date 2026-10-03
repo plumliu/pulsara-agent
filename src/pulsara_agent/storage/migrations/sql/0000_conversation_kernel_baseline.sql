@@ -160,7 +160,7 @@ CREATE TABLE pulsara_v3.subagent_tasks (
         AND model_call_binding - ARRAY['connection_id', 'reasoning']::text[] = '{}'::jsonb
         AND jsonb_typeof(model_call_binding->'connection_id') = 'string'),
     CHECK (jsonb_typeof(model_target_fact) = 'object'
-        AND model_target_fact->>'contract_version' = 'resolved-model-target:v8'),
+        AND model_target_fact->>'contract_version' = 'resolved-model-target:v9'),
     CHECK (
         (context_mode = 'NONE' AND context_last_n_turns IS NULL AND history_source_task_id IS NULL AND history_cut_sequence IS NULL AND history_context_binding_revision_id IS NULL) OR
         (context_mode = 'LAST_N' AND context_last_n_turns BETWEEN 1 AND 3 AND history_source_task_id IS NULL AND history_cut_sequence IS NULL AND history_context_binding_revision_id IS NULL) OR

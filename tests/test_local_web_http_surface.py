@@ -597,6 +597,7 @@ async def _exercise_zero_config_settings_and_database(tmp_path: Path) -> None:
                 f"{server.origin}/api/model-configurations",
                 json={
                     "source": "models_dev",
+                    "context_window_tokens": None,
                     "route_id": "test",
                         "model_id": "test-model",
                         "wire_api": "openai_responses",
@@ -752,7 +753,7 @@ async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest
             for source in ("models_dev", "user_declared"):
                 if source == "models_dev":
                     draft = {
-                        "source": source, "route_id": "test", "model_id": "test-model",
+                        "source": source, "context_window_tokens": None, "route_id": "test", "model_id": "test-model",
                         "wire_api": "openai_chat_completions", "reasoning_wire_profile": "catalog_standard",
                         "api_key": "edit-secret",
                     }
@@ -778,6 +779,7 @@ async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest
                     edited = detail["configuration"]
                 if source == "models_dev":
                     edited["reasoning_wire_profile"] = "effort"
+                    edited["context_window_tokens"] = 256_000
                 else:
                     edited["configuration_name"] = "Renamed Private"
                     edited["reasoning"] = {"kind": "broad_compat", "values": ["none", "high"]}
@@ -792,6 +794,9 @@ async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest
                     assert summary["id"] == connection_id
                     assert summary["reasoning_wire_profile"] == ("effort" if source == "models_dev" else "broad_compat")
                     assert "edit-secret" not in str(summary)
+                    if source == "models_dev":
+                        assert summary["context_window_tokens"] == 256_000
+                        assert summary["max_output_tokens"] == 8_192
                 assert store.read().model_api_key(ModelConnectionId(connection_id)) == "edit-secret"
                 async with client.get(url) as response:
                     assert (await response.json())["configuration"] == edited
@@ -800,6 +805,13 @@ async def _exercise_model_configuration_edit(tmp_path: Path, monkeypatch: pytest
                     async with client.post(f"{server.origin}/api/model-configurations{suffix}", json=edited, headers=headers) as response:
                         assert response.status == 400
                 before_invalid = store.read()
+                if source == "models_dev":
+                    for amount in (True, 255_999, 256_000.5, 256_001):
+                        async with client.put(url, json={**edited, "context_window_tokens": amount}, headers=headers) as response:
+                            assert response.status == 400
+                    async with client.put(url, json={**edited, "max_output_tokens": 16_384}, headers=headers) as response:
+                        assert response.status == 400
+                    assert store.read() == before_invalid
                 invalid = {**edited, "wire_api": "openai_responses"}
                 if source == "models_dev":
                     invalid["reasoning_wire_profile"] = "thinking_effort"

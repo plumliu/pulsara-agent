@@ -81,6 +81,8 @@ Input budgets use the latest compatible provider-reported input count plus an es
 
 The ring beside the model selector shows estimated context use; hover to inspect the count and available input budget. Switching models recalculates the estimate. At the compaction threshold, the ring turns red. Unsent content is excluded. See the [context indicator contract](PULSARA_CONTEXT_USAGE_INDICATOR_IMPLEMENTATION_SPEC.zh.md).
 
+Catalog models let you set a context allowance from 256,000 tokens to the models.dev maximum. The default uses that maximum. This adjusts input admission and compaction thresholds while preserving provider output ceilings. See the [context allowance contract](PULSARA_MODEL_CONTEXT_ALLOWANCE_IMPLEMENTATION_SPEC.zh.md).
+
 ## Knowledge that carries forward
 
 Start the next assignment with your preferences, project decisions, and recurring constraints already available.

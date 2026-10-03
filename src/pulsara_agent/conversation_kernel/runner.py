@@ -1791,26 +1791,32 @@ class ConversationKernelRunner:
                 automatic_compaction_decided = dispatch is not None
                 reusable_wire_observation = None
                 direct_switch_admission = None
-                direct_switch_wire_plan = None
+                direct_switch_candidate = None
                 wire_decision = successor_wire_decision
                 successor_wire_decision = None
                 if dispatch is None:
-                    headroom_admission = None
-                    allow_model_switch = (
-                        model_call_count == 1 and not completed_tool_batch
+                    headroom_admission = await self.compaction.prepare_precompile_admission(
+                        turn_id=turn_id,
+                        model_call_index=model_call_count,
+                        deadline=planning_deadline,
                     )
-                    if self.compaction.precompile_needed(
-                        scope_kind=intent.scope_kind,
-                        scope_subagent_task_id=intent.scope_subagent_task_id,
-                        allow_model_switch=allow_model_switch,
-                    ):
-                        headroom_admission = (
-                            await self.compaction.prepare_precompile_admission(
-                                turn_id=turn_id,
-                                model_call_index=model_call_count,
-                                deadline=planning_deadline,
-                            )
+                    try:
+                        allow_model_switch = (
+                            model_call_count == 1 and not completed_tool_batch
+                        ) or self.compaction.context_allowance_change_pending(
+                            scope_kind=intent.scope_kind,
+                            scope_subagent_task_id=intent.scope_subagent_task_id,
+                            destination=headroom_admission.prepared_target,
                         )
+                        precompile_needed = self.compaction.precompile_needed(
+                            scope_kind=intent.scope_kind,
+                            scope_subagent_task_id=intent.scope_subagent_task_id,
+                            allow_model_switch=allow_model_switch,
+                        )
+                    except BaseException:
+                        headroom_admission.close()
+                        raise
+                    if precompile_needed:
                         auto_trigger = (
                             CompactionTrigger.MID_TURN_FOLLOWUP
                             if completed_tool_batch
@@ -1838,8 +1844,7 @@ class ConversationKernelRunner:
                             if isinstance(
                                 precompile, ModelSwitchDirectPrecompileDecision
                             ):
-                                direct_switch_admission = precompile.direct_admission
-                                direct_switch_wire_plan = precompile.wire_input_plan
+                                direct_switch_candidate = precompile.switch_candidate
                                 automatic_compaction_decided = True
                             else:
                                 reusable_wire_observation = (
@@ -1988,7 +1993,7 @@ class ConversationKernelRunner:
                             break
                         except (PreparedSteerPlanStale, PreparedCompletionSuffixStale):
                             headroom_admission = None
-                            if direct_switch_admission is not None:
+                            if direct_switch_candidate is not None:
                                 raise ConversationKernelConflict(
                                     "direct-switch admission became stale"
                                 )
@@ -2039,27 +2044,47 @@ class ConversationKernelRunner:
                         dispatch.installed_provider_open is None
                         and wire_decision is None
                     ):
-                        if direct_switch_admission is not None:
-                            if direct_switch_wire_plan is None:
-                                raise RuntimeError(
-                                    "direct-switch admission lost its wire plan"
+                        wire_decision = await self.compaction.measure_dispatch_wire(
+                            dispatch,
+                            deadline=planning_deadline,
+                            reusable_observation=reusable_wire_observation,
+                        )
+                        reusable_wire_observation = None
+                    if direct_switch_candidate is not None:
+                        if wire_decision is None:
+                            raise RuntimeError("direct switch lost its final wire decision")
+                        if self.compaction.direct_switch_wire_admitted(wire_decision):
+                            direct_switch_admission, _ = (
+                                self._provider_dispatch.freeze_direct_switch_admission(
+                                    candidate=wire_decision.candidate,
+                                    decision=wire_decision,
                                 )
-                            wire_decision = self._provider_dispatch.bind_direct_switch_admission(
-                                candidate=(
-                                    self._provider_dispatch.wire_candidate_for_dispatch(
-                                        dispatch
-                                    )
-                                ),
-                                admission=direct_switch_admission,
-                                wire_input_plan=direct_switch_wire_plan,
                             )
                         else:
-                            wire_decision = await self.compaction.measure_dispatch_wire(
-                                dispatch,
-                                deadline=planning_deadline,
-                                reusable_observation=reusable_wire_observation,
+                            dispatch.close_for_canonical_replan()
+                            compaction = await self.compaction.execute_model_switch_active(
+                                turn_id=turn_id,
+                                model_call_index=model_call_count,
+                                inherited_memory_use_policy=current_memory_use_policy,
+                                candidate=direct_switch_candidate,
+                                scope_kind=intent.scope_kind,
+                                scope_subagent_task_id=intent.scope_subagent_task_id,
+                                hook_scope=self._hook_scope,
+                                session_start_compact_port=self._compact_session_start_port(intent),
+                                session_start_boundary_port=self._compact_session_start_boundary_port(intent),
                             )
-                        reusable_wire_observation = None
+                            self._require_active_compaction_continuation(compaction)
+                            if compaction.successor_dispatch is None:
+                                raise RuntimeError("model switch did not prepare its successor")
+                            if (
+                                compaction.model_switch_tier == 3
+                                and self._presentation_notice_sink is not None
+                            ):
+                                self._presentation_notice_sink(_MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE)
+                            model_call_count -= 1
+                            successor_dispatch = compaction.successor_dispatch
+                            completed_tool_batch = False
+                            continue
                     if (
                         not automatic_compaction_decided
                         and self.compaction.automatic_allowed(

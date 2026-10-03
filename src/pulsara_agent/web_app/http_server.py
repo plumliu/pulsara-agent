@@ -985,6 +985,7 @@ class LocalHttpServer:
                 source="models_dev",
                 route_id=connection.target.route_id,
                 reasoning_wire_profile=connection.reasoning_wire_profile.value,
+                context_window_tokens=connection.context_window_tokens,
             )
         else:
             raw = cast(dict[str, object], model_connection_to_dict(connection)["user_declared"])
@@ -1063,9 +1064,10 @@ class LocalHttpServer:
                 "wire_api",
                 "reasoning_wire_profile",
                 "api_key",
+                "context_window_tokens",
             }
             if set(body) != expected or not all(
-                isinstance(body[key], str) and body[key] for key in expected - {"api_key"}
+                isinstance(body[key], str) and body[key] for key in expected - {"api_key", "context_window_tokens"}
             ):
                 raise ValueError("catalog model configuration has an invalid shape")
             api_key = body["api_key"]
@@ -1081,6 +1083,7 @@ class LocalHttpServer:
             return (
                 create_model_connection(
                     connection_id=connection_id,
+                    context_window_tokens=body["context_window_tokens"],
                     catalog=self.model_runtime.selectable_catalog(),
                     target=target,
                     route_wires=self.model_runtime.route_wires,
@@ -1377,6 +1380,7 @@ class LocalHttpServer:
                 "route_name": contract.target_facts.route_name,
                 "display_name": contract.target_facts.display_name,
                 "context_tokens": contract.target_facts.limits.total_context_tokens,
+                "context_window_tokens": connection.context_window_tokens,
                 "max_output_tokens": contract.target_facts.limits.max_output_tokens,
                 "tool_call": contract.target_facts.tool_call,
                 "input_modalities": contract.target_facts.input_modalities,

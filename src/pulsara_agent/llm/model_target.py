@@ -342,6 +342,11 @@ def resolve_model_target_contract(
     except KeyError as exc:
         raise ModelTargetNotExecutable(str(exc)) from exc
     limits = derive_model_context_limits(entry)
+    if (
+        connection.context_window_tokens is not None
+        and connection.context_window_tokens > limits.total_context_tokens
+    ):
+        raise ModelTargetNotExecutable("context allowance exceeds catalog context limit")
     canonical_endpoint = canonicalize_endpoint(connection.base_url)
     requested_profile = connection.reasoning_wire_profile
     try:
@@ -418,6 +423,7 @@ def create_model_connection(
     route_wires: RouteWireRegistry,
     reasoning_wire_profile: ReasoningWireProfile = ReasoningWireProfile.CATALOG_STANDARD,
     connection_id: ModelConnectionId | None = None,
+    context_window_tokens: int | None = None,
 ) -> ResolvedModelConnection:
     try:
         entry = catalog.require(ModelCatalogEntryKey(target.route_id, target.model_id))
@@ -431,6 +437,7 @@ def create_model_connection(
         target,
         endpoint,
         reasoning_wire_profile,
+        context_window_tokens=context_window_tokens,
     )
     return ResolvedModelConnection(
         config=config,

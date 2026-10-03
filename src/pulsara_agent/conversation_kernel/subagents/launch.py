@@ -16,6 +16,7 @@ from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.llm.model_connections import ModelCallBinding
 from pulsara_agent.llm.model_catalog import ReasoningSelectableControls
 from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
+from pulsara_agent.primitives.model_call import ResolvedModelTargetFact
 from pulsara_agent.conversation_kernel.subagents.contracts import (
     PreparedSubagentLaunch,
     PreparedSubagentTaskStart,
@@ -96,7 +97,10 @@ class CanonicalSubagentLaunchPreparationPort:
             deadline_monotonic=deadline,
         )
         target = self._model_runtime.resolve_target(
-            binding, timeout_policy=self._deadlines.policy.foreground_transport
+            binding, timeout_policy=self._deadlines.policy.foreground_transport,
+            frozen_target_fact=ResolvedModelTargetFact.model_validate(
+                accepted_fact.model_dump(exclude={"reasoning_contract"})
+            ),
         )
         if FrozenSubagentModelTarget.freeze(target.fact, target.contract.reasoning) != accepted_fact:
             raise ValueError("accepted subagent model target changed before launch")

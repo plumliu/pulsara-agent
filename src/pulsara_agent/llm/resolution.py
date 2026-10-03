@@ -98,6 +98,7 @@ def resolve_model_target(
     pre_margin = min(
         limits.max_input_tokens,
         limits.total_context_tokens - 1,
+        (connection.context_window_tokens or limits.total_context_tokens) - 1,
     )
     input_budget = pre_margin - limits.input_safety_margin_tokens
     if input_budget < 1:
@@ -125,6 +126,11 @@ def resolve_model_target(
     }
     fact = ResolvedModelTargetFact(
         context_budget=budget,
+        context_window_tokens=(
+            connection.context_window_tokens
+            if pre_margin < min(limits.max_input_tokens, limits.total_context_tokens - 1)
+            else None
+        ),
         token_estimator=estimator.fact,
         **target_payload,
     )

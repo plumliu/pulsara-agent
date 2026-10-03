@@ -241,7 +241,7 @@ from pulsara_agent.model_input.provider_replay import (
     freeze_provider_replay_manifest_cut,
 )
 
-from pulsara_agent.primitives.model_call import ModelCallPurpose
+from pulsara_agent.primitives.model_call import ModelCallPurpose, ResolvedModelTargetFact
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.context import (
     context_fingerprint,
@@ -256,6 +256,7 @@ from pulsara_agent.conversation_kernel.subagents.contracts import (
     build_parent_context_call_subject,
     build_root_context_unit,
 )
+from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
 
 
 class KernelModelPort(Protocol):
@@ -1801,25 +1802,31 @@ class ProviderDispatchCoordinator:
         source: FrozenEpochModelTargetBundle,
         turn_id: str,
         model_call_index: int,
+        binding_override: ModelCallBinding | None = None,
     ) -> PreparedKernelModelTarget:
         predecessor = self._continuity.current_cohort(scope)
         if predecessor is None or predecessor.target_bundle is not source:
             raise RuntimeError("model-switch source epoch drifted")
-        binding = ModelCallBinding(
+        binding = binding_override or ModelCallBinding(
             source.connection.connection_id,
             default_reasoning_selection(source.reasoning_contract),
         )
-        return self._model.prepare_frozen_epoch_target(
-            KernelModelTargetPreparationRequest(
-                session_id=self._writer_lease.guard.session_id,
-                turn_id=turn_id,
-                model_call_index=model_call_index,
-                purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
-                maximum_input_tokens=self._maximum_input_tokens_per_call,
-                binding=binding,
-            ),
-            bundle=source,
+        request = KernelModelTargetPreparationRequest(
+            session_id=self._writer_lease.guard.session_id,
+            turn_id=turn_id,
+            model_call_index=model_call_index,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+            maximum_input_tokens=self._maximum_input_tokens_per_call,
+            binding=binding,
         )
+        if binding_override is None:
+            return self._model.prepare_frozen_epoch_target(request, bundle=source)
+        # Ordinary compaction preserves the turn's selected reasoning. Only
+        # the summary call chooses default reasoning through its existing owner.
+        target = self._model.model_runtime.resolve_frozen_target_bundle(
+            source, binding=binding, timeout_policy=self._model.transport_timeout_policy,
+        )
+        return self._model.prepare_resolved_target(request, target=target, binding=binding)
 
     async def _prepare_root_completion_suffix(
         self,
@@ -1947,6 +1954,45 @@ class ProviderDispatchCoordinator:
             )
         return handle, actual_read
 
+    async def _prepare_scope_target(
+        self,
+        *,
+        turn_id: str,
+        model_call_index: int,
+        binding: ModelCallBinding,
+        scope_kind: ModelInputScopeKind,
+        scope_subagent_task_id: str | None,
+        deadline: float,
+    ) -> PreparedKernelModelTarget:
+        request = KernelModelTargetPreparationRequest(
+            session_id=self._writer_lease.guard.session_id,
+            turn_id=turn_id,
+            model_call_index=model_call_index,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+            maximum_input_tokens=self._maximum_input_tokens_per_call,
+            binding=binding,
+        )
+        if scope_kind is not ModelInputScopeKind.SUBAGENT_TASK or model_call_index != 1:
+            return self._model.prepare_target(request)
+        accepted_binding, accepted_fact = await self._io.run(
+            self._repository.read_subagent_task_model_target,
+            self._writer_lease.guard,
+            task_id=scope_subagent_task_id,
+            deadline_monotonic=deadline,
+        )
+        if accepted_binding != binding:
+            raise ValueError("child first provider binding drifted from accepted task")
+        target = self._model.model_runtime.resolve_target(
+            binding,
+            timeout_policy=self._model.transport_timeout_policy,
+            frozen_target_fact=ResolvedModelTargetFact.model_validate(
+                accepted_fact.model_dump(exclude={"reasoning_contract"})
+            ),
+        )
+        if FrozenSubagentModelTarget.freeze(target.fact, target.contract.reasoning) != accepted_fact:
+            raise ValueError("child first provider target drifted from accepted task")
+        return self._model.prepare_resolved_target(request, target=target, binding=binding)
+
     async def prepare_headroom_admission(
         self,
         *,
@@ -1971,20 +2017,18 @@ class ProviderDispatchCoordinator:
                 turn_id=turn_id,
                 deadline_monotonic=deadline,
             )
-            prepared_target = self._model.prepare_target(
-                KernelModelTargetPreparationRequest(
-                    session_id=self._writer_lease.guard.session_id,
-                    turn_id=turn_id,
-                    model_call_index=model_call_index,
-                    purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
-                    maximum_input_tokens=self._maximum_input_tokens_per_call,
-                    binding=binding,
-                )
-            )
-            _require_dispatch_planning_deadline(deadline)
             preflight = await self.read_compaction_headroom_preflight(
                 handle.cut, deadline=deadline
             )
+            prepared_target = await self._prepare_scope_target(
+                turn_id=turn_id,
+                model_call_index=model_call_index,
+                binding=binding,
+                scope_kind=preflight.scope_kind,
+                scope_subagent_task_id=preflight.scope_subagent_task_id,
+                deadline=deadline,
+            )
+            _require_dispatch_planning_deadline(deadline)
             return PreparedProviderHeadroomAdmission(handle, preflight, prepared_target)
         except BaseException:
             handle.close()
@@ -2784,15 +2828,13 @@ class ProviderDispatchCoordinator:
             try:
                 prepared_target = prepared_target_override
                 if prepared_target is None:
-                    prepared_target = self._model.prepare_target(
-                        KernelModelTargetPreparationRequest(
-                            session_id=self._writer_lease.guard.session_id,
-                            turn_id=turn_id,
-                            model_call_index=model_call_index,
-                            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
-                            maximum_input_tokens=self._maximum_input_tokens_per_call,
-                            binding=turn_binding,
-                        )
+                    prepared_target = await self._prepare_scope_target(
+                        turn_id=turn_id,
+                        model_call_index=model_call_index,
+                        binding=turn_binding,
+                        scope_kind=identity.conversation_scope_kind,
+                        scope_subagent_task_id=identity.scope_subagent_task_id,
+                        deadline=deadline,
                     )
                 elif (
                     prepared_target.session_id != self._writer_lease.guard.session_id
@@ -3920,6 +3962,7 @@ class ProviderDispatchCoordinator:
                 projection_method = (
                     project_structured_new_epoch
                     if _destination_projection_source
+                    or model_switch_requested
                     or planning.predecessor_view is None
                     or context_base_changed
                     else project_structured_installed_append
@@ -3944,6 +3987,7 @@ class ProviderDispatchCoordinator:
                 source_anchor = None
                 if (
                     not _destination_projection_source
+                    and not model_switch_requested
                     and planning.predecessor_view is not None
                     and not context_base_changed
                 ):
@@ -5310,32 +5354,6 @@ class ProviderDispatchCoordinator:
             wire_input_plan=plan,
         )
         return admission, plan
-
-    @staticmethod
-    def bind_direct_switch_admission(
-        *,
-        candidate: PreparedProviderWireCandidate,
-        admission: FrozenDirectSwitchAdmission,
-        wire_input_plan: FrozenProviderWireInputPlan,
-    ) -> PreparedWireMeasurementDecision:
-        """Exact-bind a consumed Tier-1 admission to the final owner dispatch."""
-
-        if (
-            not isinstance(candidate.prepared_call, PreparedKernelModelCall)
-            or candidate.prepared_call.epoch_call_target != admission.destination
-            or _semantic_projection_from_compiled(candidate.semantic_input)
-            != admission.semantic_projection
-            or wire_input_plan.materialization != admission.wire_materialization
-            or wire_input_plan.quote != admission.quote
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
-            )
-        return PreparedWireMeasurementDecision(
-            candidate=candidate,
-            quote=admission.quote,
-            wire_input_plan=wire_input_plan,
-        )
 
     def bind_prepared_executable_wire_input(
         self,
